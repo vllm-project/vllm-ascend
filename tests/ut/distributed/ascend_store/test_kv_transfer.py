@@ -40,10 +40,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 
 # isort: on
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cpu_events import (
-    CPUBlockEventTracker,
-    CPUBlockStoreReport,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
@@ -870,65 +866,6 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual([event.block_hashes for event in events], [[maybe_convert_block_hash(b"h0")]])
         self.assertEqual(events[0].token_ids, list(range(16)))
         self.assertIsNone(events[0].parent_block_hash)
-
-    def test_partial_pp_put_reports_only_successful_physical_keys(self):
-        thread, store = self._make_thread([0], enable_kv_event=True, kv_role="kv_consumer")
-        required = frozenset(("A/pp0", "A/pp1"))
-        thread.required_store_keys = lambda key, group_id: required
-        thread._decode_adaptor_prefill_pp = MagicMock(return_value=(["A/pp0", "A/pp1"], [[1], [2]], [[16], [16]]))
-        store.put = MagicMock(return_value=[True, False])
-        request = ReqMeta(
-            req_id="partial-physical",
-            token_len_chunk=16,
-            block_ids=[1],
-            block_hashes=[b"h0"],
-            token_ids=list(range(16)),
-            original_block_size=16,
-        )
-        thread.add_stored_request(request)
-        self.assertFalse(thread._handle_stored_request(request))
-        reports = thread.get_kv_events()
-        self.assertEqual(len(reports), 1)
-        report = reports[0]
-        self.assertIsInstance(report, CPUBlockStoreReport)
-        self.assertEqual(report.completed_keys, frozenset(["A/pp0"]))
-        self.assertEqual(report.required_keys, required)
-        self.assertEqual(report.event.token_ids, list(range(16)))
-        tracker = CPUBlockEventTracker()
-        self.assertIsNone(tracker.add(report))
-        store.put.return_value = [False, True]
-        self.assertFalse(thread._handle_stored_request(request))
-        repaired = thread.get_kv_events()
-        self.assertEqual(len(repaired), 1)
-        self.assertEqual(repaired[0].completed_keys, frozenset(["A/pp1"]))
-        self.assertIs(tracker.add(repaired[0]), report.event)
-
-    def test_existing_partition_and_new_partition_complete_one_block(self):
-        tracker = CPUBlockEventTracker()
-        reports = []
-        for rank, exists in ((0, [1]), (1, [0])):
-            thread, _ = self._make_thread(exists, enable_kv_event=True)
-            thread.token_database.metadata[0].head_or_tp_rank = rank
-            thread.required_store_keys = lambda key, group_id, rank=rank: frozenset(
-                key.replace(f"@head_or_tp_rank:{rank}", f"@head_or_tp_rank:{other}") for other in (0, 1)
-            )
-            request = ReqMeta(
-                req_id="one-block",
-                token_len_chunk=16,
-                block_ids=[1],
-                block_hashes=[b"h0"],
-                token_ids=list(range(16)),
-                original_block_size=16,
-            )
-            thread.add_stored_request(request)
-            self.assertTrue(thread._handle_stored_request(request))
-            reports.extend(thread.get_kv_events())
-        self.assertEqual(len(reports), 2)
-        self.assertFalse(reports[0].newly_stored)
-        self.assertTrue(reports[1].newly_stored)
-        self.assertEqual(reports[0].required_keys, reports[1].required_keys)
-        self.assertIsNone(tracker.add(reports[0]))
-        self.assertIs(tracker.add(reports[1]), reports[0].event)
 
     def test_partial_pp_put_publishes_only_complete_logical_blocks(self):
         for results, expected_indices in (

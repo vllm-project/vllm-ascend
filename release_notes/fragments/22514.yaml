@@ -1,4 +1,4 @@
 pr: 22514
 entries:
   - category: bugfix
-    text: Fixed missing blockwise AscendStore CPU KV notifications for independently saved blocks and partially successful writes. Blocks split across parallel workers are announced only after all required storage partitions are confirmed complete.
+    text: Fixed missing blockwise AscendStore CPU KV events for blocks saved by individual workers and fully stored blocks in partially successful PUT batches.
