@@ -1,0 +1,4 @@
+pr: 18906
+entries:
+  - category: bugfix
+    text: Reserve scheduler headroom for prefill context parallel padding so padded batches stay within the configured token capacity.
