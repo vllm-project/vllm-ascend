@@ -387,9 +387,15 @@ public:
         return true;
     }
 
-    // Scratch layout during the union only. order[] is free here: the LRU
-    // permutation, the Hot tag row and the emit tiles are all built after this
-    // pass, so the whole buffer is available.
+    // order[] is shared by four passes, and the order below is the contract that
+    // keeps them from clobbering each other:
+    //  1. union scratch   [0, kPageBase + 2 * kVecPageColumns) (this pass)
+    //  2. int16 perm      [0, (hot + 1) / 2)
+    //  3. miss-scan tiles [24 * kTile, 27 * kTile)             (vecScan only)
+    //  4. emit tiles      [emitBase, emitBase + 2 * kTile + 8) (inline emit)
+    // A later pass may overwrite an earlier one, never the reverse, and every
+    // guard that sizes a region is derived from this layout: moving a pass or
+    // resizing a region means recomputing all four ranges.
     static constexpr int32_t kVecBase = 0;                       // 14 tiles
     static constexpr int32_t kMaskBase = 14 * kTile;             // 3 bit masks
     static constexpr int32_t kPageBase = 16 * kTile;             // 2 x 512 pages
@@ -609,10 +615,17 @@ public:
         // time and the tail is only cleared for full repeats. SFA top-k is a
         // multiple of 128, so requiring a multiple of 64 keeps the vector path
         // for every production shape and sends the rest to the scalar union.
+        // The vector path DMAs whole page rows straight from GM, so it repeats
+        // the table bounds Translate() checks before reading either table. It
+        // also compares host ids in fp32, which cannot tell adjacent ids apart
+        // once hostRows passes 2^24.
         const bool vecUnion = d.pointers[3] && d.pointers[4] && d.geometry[8] > 0 &&
             d.geometry[8] <= kVecPageColumns && d.geometry[8] == d.geometry[12] &&
             d.geometry[10] == 128 && d.geometry[14] == 128 &&
-            hot >= kPageBase + 2 * kVecPageColumns && topk % 64 == 0;
+            hot >= kPageBase + 2 * kVecPageColumns &&
+            topk >= 64 && topk % 64 == 0 &&
+            request >= 0 && request < d.geometry[7] &&
+            state >= 0 && state < d.geometry[11] && d.geometry[3] <= (1 << 24);
         if (vecUnion) LoadUnionPages();
         int32_t position = 0;
         for (int32_t row = first; row < end; ++row) {
@@ -676,7 +689,10 @@ public:
         // Count distinct misses with vector compares; only the tail below a
         // full kTile repeat stays scalar. The scratch sits above the int16
         // permutation, which is the only live part of order[] here.
-        const bool vecScan = hot >= 27 * kTile;
+        // perm is int16 over the bottom of order[], i.e. (hot + 1) / 2 int32
+        // words, and the scan scratch starts at 24 * kTile: a Hot row beyond
+        // 48 * kTile would have the scan overwrite the permutation.
+        const bool vecScan = hot >= 27 * kTile && (hot + 1) / 2 <= 24 * kTile;
         const int32_t scanned = vecScan ? hashSize / kTile * kTile : 0;
         if (vecScan) {
             auto scanFloats = order[24 * kTile].ReinterpretCast<float>();
