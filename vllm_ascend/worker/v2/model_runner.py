@@ -483,46 +483,6 @@ class NPUModelRunner(GPUModelRunner):
             for group in groups
         )
 
-    def _find_repair_fence_layer(self):
-        """Locate the first decoder layer the repair fence reads the cache of.
-
-        Core's repair executor reaches the cache through
-        ``layer.self_attn.attn.kv_cache`` and derives the block size from that
-        cache's geometry (``_repair_block_size``); it finds the layer stack as
-        ``model.model.layers``, but model zoos name the stack differently
-        (ChatGLM ``transformer.encoder.layers``, Falcon ``transformer.h``,
-        MPT ``transformer.blocks``) and multimodal wrappers nest the backbone
-        below ``language_model``. Discover the first layer that actually has
-        the fence's cache seam (``self_attn.attn``), which cannot pick up an
-        unrelated attention module (e.g. a vision encoder, whose attention
-        keeps no KV cache seam the fence reads).
-
-        Returns (layer, path) of the first candidate with the seam, or
-        (None, tried_paths); the caller refuses with an actionable error
-        instead of deriving a block size from a wrong module.
-        """
-        containers = (
-            ("model", "layers"),
-            ("transformer", "encoder", "layers"),
-            ("transformer", "h"),
-            ("transformer", "blocks"),
-            ("language_model", "model", "layers"),
-            ("language_model", "transformer", "encoder", "layers"),
-            ("layers",),
-        )
-        for path in containers:
-            node = self.model
-            for attr in path:
-                node = getattr(node, attr, None)
-                if node is None:
-                    break
-            if not node:
-                continue
-            for layer in node:
-                if getattr(getattr(layer, "self_attn", None), "attn", None) is not None:
-                    return layer, ".".join(path)
-        return None, containers
-
     def _check_repair_kv_layout_capability(self) -> None:
         """Refuse kv_load_failure_policy='repair' on fence-incompatible layouts.
 
@@ -536,7 +496,11 @@ class NPUModelRunner(GPUModelRunner):
         repair time. Fail at init instead, naming the layout switch that makes
         the cache fence-compatible ([B, H, N, C] layouts: LBHNC/HND). The
         check reuses the repair executor's own derivation so it can only be
-        stricter than the runtime fence, never more permissive.
+        stricter than the runtime fence, never more permissive. The fence
+        layer is located by the executor's own find_repair_fence_layer
+        (imported behind the same guard), so this init check and the
+        repair-time stack lookup resolve the same layer and can never
+        disagree.
 
         The repair executor only exists in vLLM builds carrying the repair
         stack; on builds without it the policy never reaches repair execution
@@ -549,11 +513,14 @@ class NPUModelRunner(GPUModelRunner):
         if policy != "repair":
             return
         try:
-            from vllm.v1.worker.gpu.repair_executor import _repair_block_size
+            from vllm.v1.worker.gpu.repair_executor import (
+                _repair_block_size,
+                find_repair_fence_layer,
+            )
         except ImportError:
             return
         block_size = self.vllm_config.cache_config.block_size
-        layer, layer_path = self._find_repair_fence_layer()
+        layer, layer_path = find_repair_fence_layer(self.model)
         if layer is None:
             raise RuntimeError(
                 "kv_load_failure_policy='repair': no decoder layer with the "

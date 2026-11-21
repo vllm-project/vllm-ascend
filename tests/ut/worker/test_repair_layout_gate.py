@@ -12,8 +12,10 @@ would fail the fence at repair time. The gate moves that refusal to engine
 init and names the [B, H, N, C] layout switch (VLLM_KV_CACHE_LAYOUT=HND /
 LBHNC).
 
-The gate locates the layer through _find_repair_fence_layer, which accepts
-the model zoo's decoder-stack names (model.layers, transformer.encoder.layers,
+The gate locates the layer through the repair executor's
+find_repair_fence_layer (imported from vllm.v1.worker.gpu.repair_executor
+behind the same ImportError guard), which accepts the model zoo's
+decoder-stack names (model.layers, transformer.encoder.layers,
 transformer.h, transformer.blocks, and the language_model multimodal
 wrappers) instead of assuming model.model.layers, and refuses clearly when
 no decoder layer with the fence's self_attn.attn seam exists.
@@ -28,6 +30,17 @@ from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 _BLOCK_SIZE = 128
 _REPAIR_EXECUTOR = "vllm.v1.worker.gpu.repair_executor"
+# The container walk mirrors vllm.v1.worker.gpu.repair_executor
+# (find_repair_fence_layer); see _mirror_find_repair_fence_layer below.
+_CONTAINERS = (
+    ("model", "layers"),
+    ("transformer", "encoder", "layers"),
+    ("transformer", "h"),
+    ("transformer", "blocks"),
+    ("language_model", "model", "layers"),
+    ("language_model", "transformer", "encoder", "layers"),
+    ("layers",),
+)
 
 
 class _FakeAttn:
@@ -58,6 +71,35 @@ def _make_runner(model=None, policy="repair", block_size=_BLOCK_SIZE) -> NPUMode
     return runner
 
 
+def _mirror_find_repair_fence_layer(model):
+    """Mirrors Core's find_repair_fence_layer for stock vLLM CI images,
+    which carry no repair executor to import: same containers in the same
+    order, same self_attn.attn seam check, same return shapes."""
+    for path in _CONTAINERS:
+        node = model
+        for attr in path:
+            node = getattr(node, attr, None)
+            if node is None:
+                break
+        if not node:
+            continue
+        for layer in node:
+            if getattr(getattr(layer, "self_attn", None), "attn", None) is not None:
+                return layer, ".".join(path)
+    return None, _CONTAINERS
+
+
+def _core_fence_resolver():
+    """The resolver the gate imports in production: the real Core function
+    when the repair stack is installed (the hm vLLM builds the gate
+    targets), and the mirror above on stock vLLM images."""
+    try:
+        from vllm.v1.worker.gpu.repair_executor import find_repair_fence_layer
+    except ImportError:
+        return _mirror_find_repair_fence_layer
+    return find_repair_fence_layer
+
+
 def _inject_repair_executor(monkeypatch, derived=None, raises=None):
     module = ModuleType("repair_executor")
     if raises is not None:
@@ -68,6 +110,7 @@ def _inject_repair_executor(monkeypatch, derived=None, raises=None):
         module._repair_block_size = _raise
     else:
         module._repair_block_size = lambda layer: derived
+    module.find_repair_fence_layer = _core_fence_resolver()
     monkeypatch.setitem(sys.modules, _REPAIR_EXECUTOR, module)
 
 
