@@ -24,14 +24,20 @@ matching the LLM full-graph pattern in :mod:`vllm_ascend.attention.attention_v1`
 
 from __future__ import annotations
 
+import threading
+from collections import Counter
+
 import einops
 import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.logger import logger
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from vllm_ascend import envs
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.encoder_acl_graph import (
     EncoderGraphKey,
@@ -45,6 +51,60 @@ MIN_PAD_SIZE: int = 64
 MAX_PAD_SIZE: int = 128
 SWA_INT_MAX: int = 2147483647
 FIA_BLOCK_SIZE: int = 128
+
+_FUSION_STATS_LOG_INTERVAL: int = 1000
+
+_FUSION_STATS_LOCK = threading.Lock()
+_FUSION_STATS: Counter[str] = Counter()
+
+
+def reset_vit_fusion_stats() -> Counter[str]:
+    """Clear and return the fused vision path counters (for tests/ops)."""
+    with _FUSION_STATS_LOCK:
+        snapshot = _FUSION_STATS.copy()
+        _FUSION_STATS.clear()
+    return snapshot
+
+
+def _record_vit_fusion_stat(reason: str | None) -> None:
+    if not envs.VLLM_ASCEND_VIT_FUSED_QKV_ROPE_PAD_STATS:
+        return
+    with _FUSION_STATS_LOCK:
+        _FUSION_STATS["calls"] += 1
+        if reason is None:
+            _FUSION_STATS["fused"] += 1
+        else:
+            _FUSION_STATS[f"fallback:{reason}"] += 1
+        total = _FUSION_STATS["calls"]
+        if total % _FUSION_STATS_LOG_INTERVAL == 0:
+            snapshot = _FUSION_STATS.copy()
+        else:
+            snapshot = None
+    if snapshot is not None:
+        detail = ", ".join(f"{key}={value}" for key, value in sorted(snapshot.items()) if key != "calls")
+        logger.info(
+            "vit fused QKV/RoPE/pad stats: calls=%d fused=%d (%.1f%%) %s",
+            snapshot["calls"],
+            snapshot["fused"],
+            100.0 * snapshot["fused"] / max(1, snapshot["calls"]),
+            detail,
+        )
+
+
+def _get_fused_fia_seq_lengths(
+    cu_seqlens: torch.Tensor,
+    token_count: int,
+) -> list[int] | None:
+    """Read the current CPU boundaries without a device synchronization."""
+    if cu_seqlens.device.type != "cpu" or cu_seqlens.dtype not in (torch.int32, torch.int64):
+        return None
+    boundaries = cu_seqlens.tolist()
+    if token_count <= 0 or len(boundaries) < 2 or boundaries[0] != 0 or boundaries[-1] != token_count:
+        return None
+    lengths = boundaries[1:]
+    if any(end < start for start, end in zip(boundaries, lengths)):
+        return None
+    return lengths
 
 
 class AscendMMEncoderAttention(MMEncoderAttention):
@@ -217,6 +277,87 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             **fia_kwargs,
         )
         return out
+
+    def _check_fused_qkv_rope_pad_fia(
+        self,
+        qkv_proj: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor | None,
+        rotary_pos_emb_sin: torch.Tensor | None,
+        cu_seqlens: torch.Tensor | None,
+    ) -> str | None:
+        """Validate the specialized Qwen vision eager preprocessing contract.
+
+        Returns ``None`` when the fused producer accepts the input, otherwise a
+        short fallback reason for the hit-rate statistics.
+        """
+        if not HAS_TRITON:
+            return "no_triton"
+        # ACL-graph capture owns the preallocated FIA buffers and remains on
+        # the established path until this producer has capture-safe buffers.
+        if get_encoder_forward_context().capturing:
+            return "capturing"
+        if self.head_size != 72 or self.num_heads != 8 or self.num_kv_heads != 8:
+            return "head_config"
+        if cu_seqlens is None or rotary_pos_emb_cos is None or rotary_pos_emb_sin is None:
+            return "missing_inputs"
+        if qkv_proj.ndim != 3 or qkv_proj.shape[1] != 1:
+            return "qkv_layout"
+        # Packed multi-sequence inputs (multi-image, multi-frame video and
+        # window attention) stay on the fused path: QKV/RoPE/padding act per
+        # token and FIA separates sequences through the host lengths derived
+        # from cu_seqlens.
+        if cu_seqlens.ndim != 1 or cu_seqlens.numel() < 2:
+            return "cu_seqlens_layout"
+        token_count = qkv_proj.shape[0]
+        if qkv_proj.shape[2] != 3 * self.num_heads * self.head_size:
+            return "qkv_layout"
+        if rotary_pos_emb_cos.shape != (token_count, self.head_size // 2):
+            return "rope_shape"
+        if rotary_pos_emb_sin.shape != rotary_pos_emb_cos.shape:
+            return "rope_shape"
+        if qkv_proj.dtype != torch.bfloat16:
+            return "dtype"
+        if rotary_pos_emb_cos.dtype != qkv_proj.dtype or rotary_pos_emb_sin.dtype != qkv_proj.dtype:
+            return "dtype"
+        if qkv_proj.device.type != "npu":
+            return "device"
+        if rotary_pos_emb_cos.device != qkv_proj.device or rotary_pos_emb_sin.device != qkv_proj.device:
+            return "device"
+        if not (qkv_proj.is_contiguous() and rotary_pos_emb_cos.is_contiguous() and rotary_pos_emb_sin.is_contiguous()):
+            return "contiguity"
+        return None
+
+    def forward_qkv_rope_pad_fia(
+        self,
+        qkv_proj: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor | None,
+        rotary_pos_emb_sin: torch.Tensor | None,
+        *,
+        cu_seqlens: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        """Return fused eager FIA output as ``[1, T, H, 72]``, or ``None``.
+
+        The Triton producer replaces QKV layout extraction, Q/K RoPE, and
+        three pad-to-128 operations. Unsupported inputs deliberately return
+        ``None`` so that the vLLM model keeps its existing implementation.
+        """
+        reason = self._check_fused_qkv_rope_pad_fia(qkv_proj, rotary_pos_emb_cos, rotary_pos_emb_sin, cu_seqlens)
+        if reason is not None:
+            _record_vit_fusion_stat(reason)
+            return None
+
+        assert cu_seqlens is not None  # guaranteed by _check_fused_qkv_rope_pad_fia
+        actual_seq_lengths = _get_fused_fia_seq_lengths(cu_seqlens, qkv_proj.shape[0])
+        if actual_seq_lengths is None:
+            _record_vit_fusion_stat("cu_seqlens_values")
+            return None
+
+        from vllm_ascend.ops.triton.vision_qkv_rope_pad import vision_qkv_rope_pad
+
+        q_pad, k_pad, v_pad = vision_qkv_rope_pad(qkv_proj[:, 0, :], rotary_pos_emb_cos, rotary_pos_emb_sin)
+        context = self._run_vit_fia(q_pad, k_pad, v_pad, actual_seq_lengths, actual_seq_lengths)
+        _record_vit_fusion_stat(None)
+        return self._maybe_unpad_output(context, self.head_size).unsqueeze(0)
 
     def _forward_eager_fia(
         self,
