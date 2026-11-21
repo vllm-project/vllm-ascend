@@ -1,0 +1,9 @@
+pr: 21502
+entries:
+  - category: performance
+    text: On A2 and A3, scaled rotary embeddings now run on the Ascend fused rotary kernel instead of the reference implementation. This covers checkpoints whose `rope_scaling.type` is `dynamic` (with either `factor` or `alpha`), `ntk`, or `llama3`. They stay on the reference implementation on 310P, which the fused kernel does not support.
+    hardware: [A2, A3]
+  - category: feature
+    text: Added InternLM2-20B-Chat support, with an end-to-end accuracy configuration, two-card serving tests, and a deployment tutorial.
+    model: internlm2-chat-20b
+    hardware: [A2, A3]
