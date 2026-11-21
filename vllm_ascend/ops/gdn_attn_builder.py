@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import torch
 from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.distributed import get_pcp_group
+from vllm.logger import logger
 from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
@@ -32,6 +33,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
@@ -40,6 +42,7 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets,
 )
 from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
+from vllm_ascend.utils import vllm_version_is
 
 _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
@@ -48,6 +51,105 @@ _GDN_CUMSUM_WORKING_SET = 2**18
 # Accepted-token counts are one-based. The zero-length query segment makes
 # graph-padding rows no-ops, while 1 keeps their count valid for GDN kernels.
 _GDN_GRAPH_DUMMY_ACCEPTED_TOKEN_COUNT = 1
+
+
+# --- decode steady-state GDN attention metadata cache ----------------------
+# ``build()`` is invoked once per GDN KV-cache group for every decode step.
+# All host inputs of a pure-decode step only change when a sequence advances
+# into a new KV block or when the set of requests changes, so the built
+# ``GDNAttentionMetadata`` can be reused and only the accepted-token counts
+# (which advance every step) are refreshed.
+_GDN_META_CACHE_HITS = 0
+_GDN_META_CACHE_MISSES = 0
+_GDN_META_CACHE_BT_CHECKS = 0
+_GDN_META_CACHE_BT_MISMATCHES = 0
+_current_batch_req_ids: tuple[object, ...] | None = None
+
+
+def set_current_batch_req_ids(req_ids) -> None:
+    """Record the request identity of the batch being prepared."""
+    global _current_batch_req_ids
+    _current_batch_req_ids = tuple(req_ids) if req_ids is not None else None
+
+
+def gdn_meta_key(m, num_actual_reqs, num_decode_draft_tokens_cpu, block_size):
+    """Signature of every host input ``build()`` reads (None => no caching).
+
+    ``seq_lens`` itself advances by the accepted-token count every step and is
+    deliberately not part of the key; only the facts derived from it are
+    consumed: zero-length graph-padding rows, "sequence has state" and the KV
+    block index each sequence currently lives in.
+    """
+    n = m.num_reqs
+    if n <= 0 or _current_batch_req_ids is None:
+        return None
+    seq_lens_ub = m.seq_lens_cpu_upper_bound
+    if seq_lens_ub is None:
+        return None
+    seq_lens = seq_lens_ub[:n].tolist()
+    is_prefilling = m.is_prefilling
+    prefilling = None if is_prefilling is None else tuple(is_prefilling[:n].tolist())
+    draft = None if num_decode_draft_tokens_cpu is None else tuple(num_decode_draft_tokens_cpu[:n].tolist())
+    return (
+        _current_batch_req_ids,
+        n,
+        int(m.num_actual_tokens),
+        num_actual_reqs,
+        int(m.max_query_len),
+        tuple(m.query_start_loc_cpu[: n + 1].tolist()),
+        tuple(v == 0 for v in seq_lens),
+        tuple(v > 1 for v in seq_lens),
+        tuple((v - 1) // block_size for v in seq_lens),
+        prefilling,
+        draft,
+    )
+
+
+def _gdn_meta_cache_switches(vllm_config) -> tuple[bool, bool]:
+    """Return (enabled, stats_enabled) from the validated AscendConfig.
+
+    ``AscendConfig`` coerces strings such as ``"false"`` to ``False``, so the
+    validated fields must be used instead of ``bool(additional_config[key])``.
+    Unit tests construct the builder without initializing the global config;
+    in that case fall back to a strict parse of the raw additional config.
+    """
+    try:
+        ascend_config = get_ascend_config()
+    except RuntimeError:
+        additional_config = getattr(vllm_config, "additional_config", None)
+        if not isinstance(additional_config, dict):
+            additional_config = {}
+        return (
+            _as_bool(additional_config.get("enable_gdn_meta_cache"), True),
+            _as_bool(additional_config.get("enable_gdn_meta_cache_stats"), False),
+        )
+    return ascend_config.enable_gdn_meta_cache, ascend_config.enable_gdn_meta_cache_stats
+
+
+def _as_bool(value, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+def _gdn_meta_cache_stat(hit: bool, stats_enabled: bool) -> None:
+    global _GDN_META_CACHE_HITS, _GDN_META_CACHE_MISSES
+    if hit:
+        _GDN_META_CACHE_HITS += 1
+    else:
+        _GDN_META_CACHE_MISSES += 1
+    total = _GDN_META_CACHE_HITS + _GDN_META_CACHE_MISSES
+    if total % 256 == 0 and stats_enabled:
+        logger.info(
+            "GDN attention metadata cache: hits=%d misses=%d hit_rate=%.3f",
+            _GDN_META_CACHE_HITS,
+            _GDN_META_CACHE_MISSES,
+            _GDN_META_CACHE_HITS / total,
+        )
 
 
 def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
@@ -396,6 +498,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        (
+            self._gdn_meta_cache_enabled,
+            self._gdn_meta_cache_stats_enabled,
+        ) = _gdn_meta_cache_switches(vllm_config)
+        self._gdn_meta_cache: tuple | None = None
         context = getattr(vllm_config.compilation_config, "static_forward_context", {}) or {}
         self._ascend_gdn_checkpoints = (
             bool(layer_names)
@@ -770,6 +877,29 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         fast_build: bool = False,
         num_actual_reqs: int | None = None,
     ) -> GDNAttentionMetadata:
+        cache_key = None
+        cache_spec_indices = None
+        if self._gdn_meta_cache_enabled:
+            cache_key = gdn_meta_key(
+                common_attn_metadata,
+                num_actual_reqs,
+                num_decode_draft_tokens_cpu,
+                getattr(self.kv_cache_spec, "block_size", 0) or 1,
+            )
+            cached = self._gdn_meta_cache_lookup(cache_key, num_accepted_tokens)
+            if cached is not None:
+                _gdn_meta_cache_stat(True, self._gdn_meta_cache_stats_enabled)
+                if self._gdn_meta_cache_stats_enabled and not self._gdn_meta_cache_block_table_matches(
+                    common_attn_metadata
+                ):
+                    # The cached state/convolution indices came from a stale
+                    # block-table mapping: drop the entry and rebuild normally
+                    # instead of serving metadata derived from the old mapping.
+                    self._gdn_meta_cache = None
+                    cached = None
+                if cached is not None:
+                    return cached
+            _gdn_meta_cache_stat(False, self._gdn_meta_cache_stats_enabled)
         runtime_batch = num_actual_reqs is not None
         # Normalize FIA's full-width dummy queries before slicing requests:
         # its common token count may still include those inactive rows.
@@ -897,6 +1027,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     spec_sequence_masks_cpu,
                     num_spec_decodes,
                 )
+                # Mixed batches reorder speculative rows; keep the exact
+                # indices so a cache hit can refresh accepted counts the same
+                # way. Pure-spec batches stay None (identity order).
+                cache_spec_indices = spec_sequence_indices
                 spec_token_masks = torch.repeat_interleave(
                     spec_sequence_masks,
                     query_lens,
@@ -1083,7 +1217,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         self._attach_spec_decode_metadata(attn_metadata)
         self._attach_non_spec_decode_metadata(attn_metadata, non_spec_conv1d_cache_indices)
-        return self._finalize_metadata(attn_metadata)
+        attn_metadata = self._finalize_metadata(attn_metadata)
+        if cache_key is not None:
+            self._gdn_meta_cache_store(cache_key, attn_metadata, block_table_tensor, cache_spec_indices)
+        return attn_metadata
 
     def _finalize_metadata(self, metadata: GDNAttentionMetadata, fused: bool = False) -> GDNAttentionMetadata:
         return metadata
@@ -1102,6 +1239,101 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 non_spec_sequence_indices,
             )
         return has_initial_state
+
+    def _gdn_meta_cache_lookup(self, key, num_accepted_tokens):
+        """Return the cached metadata with accepted counts refreshed, or None."""
+        cached = getattr(self, "_gdn_meta_cache", None)
+        if cached is None or key is None or cached[0] != key:
+            return None
+        attn_metadata, num_spec_decodes = cached[1], cached[2]
+        if attn_metadata.num_accepted_tokens is not None and num_accepted_tokens is not None:
+            spec_indices = cached[4] if len(cached) > 4 else None
+            if spec_indices is None:
+                # Pure speculative batches keep the native request order (real
+                # requests precede graph padding), so accepted counts are a
+                # plain prefix - never the shared spec_sequence_indices buffer,
+                # which the all-spec path does not refresh.
+                selected = num_accepted_tokens[:num_spec_decodes]
+            else:
+                selected = torch.index_select(num_accepted_tokens, 0, spec_indices[:num_spec_decodes])
+            attn_metadata.num_accepted_tokens = _materialize_graph_request_tensor(
+                self.num_accepted_tokens,
+                selected,
+                num_spec_decodes,
+                key[1],
+                _GDN_GRAPH_DUMMY_ACCEPTED_TOKEN_COUNT,
+            )
+            # _attach_spec_decode_metadata() published a slice of the tensor
+            # that existed when the object was built. Re-point it at the
+            # freshly materialized buffer view so the nested reference cannot
+            # outlive the accepted-token values it was created from.
+            spec_decode_metadata = getattr(attn_metadata, "spec_decode_metadata", None)
+            if spec_decode_metadata is not None:
+                spec_conv1d = spec_decode_metadata.spec_causal_conv1d
+                if spec_conv1d is not None and spec_conv1d.num_accepted_tokens is not None:
+                    spec_conv1d.num_accepted_tokens = attn_metadata.num_accepted_tokens[
+                        : spec_conv1d.num_accepted_tokens.size(0)
+                    ]
+        return attn_metadata
+
+    def _gdn_meta_cache_store(self, key, attn_metadata, block_table_tensor, spec_indices) -> None:
+        """Cache a pure-decode metadata object, dropping it on prefill steps.
+
+        The block-table tensor is kept only so the diagnostics check below can
+        verify that the mapping feeding the cached metadata did not change.
+        """
+        if attn_metadata.num_prefills:
+            self._gdn_meta_cache = None
+            return
+        if attn_metadata.num_spec_decodes:
+            count = attn_metadata.num_spec_decodes
+        elif attn_metadata.num_decode_tokens:
+            count = attn_metadata.num_decode_tokens
+        else:
+            self._gdn_meta_cache = None
+            return
+        # Diagnostics compare against an independent snapshot: with
+        # mamba_cache_mode="none" the block-table tensor is the live input
+        # buffer, so keeping a reference would always compare equal.
+        stats_enabled = getattr(self, "_gdn_meta_cache_stats_enabled", False)
+        block_table_snapshot = block_table_tensor.clone() if stats_enabled else block_table_tensor
+        self._gdn_meta_cache = (key, attn_metadata, count, block_table_snapshot, spec_indices)
+
+    def _gdn_meta_cache_block_table_matches(self, m) -> bool:
+        """Diagnostics: verify the block-table mapping behind a cache hit.
+
+        Returns ``False`` when the live mapping differs from the snapshot stored
+        with the cached metadata. The caller then drops the cached entry and
+        rebuilds, so a validation run never serves state/convolution indices
+        derived from a stale mapping.
+        """
+        global _GDN_META_CACHE_BT_CHECKS, _GDN_META_CACHE_BT_MISMATCHES
+        cached = getattr(self, "_gdn_meta_cache", None)
+        stored = cached[3] if cached is not None and len(cached) > 3 else None
+        mamba_block_table = m.block_table_tensor
+        if (
+            not vllm_version_is("0.32.0")
+            and self.vllm_config.cache_config.mamba_cache_mode != "none"
+            and mamba_block_table.shape[0] != m.seq_lens.shape[0]
+        ):
+            mamba_block_table = mamba_block_table[: m.seq_lens.shape[0]]
+        current = mamba_get_block_table_tensor(
+            mamba_block_table,
+            m.seq_lens,
+            self.kv_cache_spec,
+            self.vllm_config.cache_config.mamba_cache_mode,
+        )
+        matched = stored is not None and stored.shape == current.shape and torch.equal(stored, current)
+        _GDN_META_CACHE_BT_CHECKS += 1
+        if not matched:
+            _GDN_META_CACHE_BT_MISMATCHES += 1
+        if _GDN_META_CACHE_BT_CHECKS % 256 == 0:
+            logger.info(
+                "GDN metadata cache block-table checks=%d mismatches=%d",
+                _GDN_META_CACHE_BT_CHECKS,
+                _GDN_META_CACHE_BT_MISMATCHES,
+            )
+        return matched
 
 
 class AscendGDNAttentionBackend(GDNAttentionBackend):
