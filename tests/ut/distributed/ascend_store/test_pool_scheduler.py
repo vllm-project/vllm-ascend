@@ -349,6 +349,41 @@ class TestKVPoolScheduler(unittest.TestCase):
     def _make_config(self, kv_role="kv_producer", extra_config=None, block_size=16):
         return make_config(kv_role, extra_config, block_size)
 
+    def test_enable_lookup_role_defaults_and_overrides(self):
+        cases = (
+            ("kv_producer", {}, True),
+            ("kv_both", {}, True),
+            ("kv_consumer", {}, False),
+            ("kv_producer", {"enable_lookup": False}, False),
+            ("kv_consumer", {"enable_lookup": True}, True),
+        )
+        for role, extra_config, expected in cases:
+            with self.subTest(role=role, extra_config=extra_config):
+                scheduler = KVPoolScheduler(self._make_config(role, extra_config), use_layerwise=False)
+                self.assertEqual(scheduler.enable_lookup, expected)
+                request = MagicMock(request_id="lookup", num_tokens=64, prompt_token_ids=list(range(64)))
+                with patch.object(scheduler, "_lookup_external_hit_tokens", return_value=0) as lookup:
+                    self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (0, False))
+                if expected:
+                    lookup.assert_called_once_with(request, 0)
+                else:
+                    lookup.assert_not_called()
+
+    def test_layerwise_consumer_enable_lookup_controls_pool_probe(self):
+        request = MagicMock(request_id="lookup", num_tokens=64, prompt_token_ids=list(range(64)))
+        for enabled in (False, True):
+            with self.subTest(enable_lookup=enabled):
+                scheduler = create_kv_pool_scheduler(
+                    self._make_config("kv_consumer", {"backend": "memcache", "enable_lookup": enabled}),
+                    use_layerwise=True,
+                )
+                with patch.object(scheduler, "_lookup_external_hit_tokens", return_value=0) as lookup:
+                    self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (0, False))
+                if enabled:
+                    lookup.assert_called_once_with(request, 0)
+                else:
+                    lookup.assert_not_called()
+
     def test_pcp_cache_geometry_and_worker_count(self):
         for pcp_size, dcp_size in ((1, 1), (2, 1), (4, 1), (1, 2)):
             with self.subTest(pcp_size=pcp_size, dcp_size=dcp_size):
@@ -965,6 +1000,46 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         self.assertEqual(req_meta.token_ids, list(range(48)))
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_layerwise_consumer_skips_pd_prefill_until_decode(self, mock_client_cls):
+        config = self._make_config(
+            kv_role="kv_consumer",
+            extra_config={"backend": "memcache", "save_decode_cache": True},
+        )
+        scheduler = create_kv_pool_scheduler(config, use_layerwise=True)
+        request = MagicMock(
+            num_computed_tokens=16,
+            num_prompt_tokens=32,
+            prompt_token_ids=list(range(32)),
+            all_token_ids=list(range(48)),
+            block_hashes=[b"h0", b"h1", b"h2"],
+        )
+        scheduler._unfinished_requests["r1"] = (request, [[0, 1, 2]])
+        scheduler._request_trackers["r1"] = RequestTracker(
+            req_id="r1",
+            token_len=16,
+            allocated_block_ids=[0, 1, 2],
+            num_saved_tokens=0,
+            num_prompt_tokens=32,
+            prefill_end_tokens=32,
+        )
+
+        # The received Prefill KV is not scheduled for a Pool write.
+        prefill_output = self._make_running_chunk_output([], num_computed_tokens=16)
+        prefill_output.num_scheduled_tokens = {"r1": 16}
+        assert scheduler.build_connector_meta(prefill_output).requests == []
+        assert scheduler._request_trackers["r1"].num_saved_tokens == 0
+
+        # The first complete Decode block schedules both the new block and
+        # any missing Prefill ancestors for worker-side existence checks.
+        request.num_computed_tokens = 47
+        decode_output = self._make_running_chunk_output([], num_computed_tokens=47)
+        decode_output.num_scheduled_tokens = {"r1": 1}
+        metadata = scheduler.build_connector_meta(decode_output)
+        assert len(metadata.requests) == 1
+        assert metadata.requests[0].can_save
+        assert (metadata.requests[0].save_start_token, metadata.requests[0].save_end_token) == (0, 48)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_consumer_does_not_save_unaccepted_speculative_tokens(self, mock_client_cls):
         scheduler = KVPoolScheduler(
             self._make_config(kv_role="kv_consumer", extra_config={"save_decode_cache": True}),
@@ -1168,7 +1243,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 def test_connector_metadata_preserves_unscheduled_request_order(unfinished_ids, new_ids, cached_ids, expected_ids):
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
     scheduler.kv_role = "kv_both"
-    scheduler.consumer_is_to_put = scheduler.can_put = False
+    scheduler.can_put = False
     scheduler._request_trackers = {}
     scheduler._unfinished_requests = {req_id: (SimpleNamespace(request_id=req_id), []) for req_id in unfinished_ids}
     scheduler._preempted_req_ids = set()
@@ -1198,7 +1273,7 @@ def test_connector_metadata_without_pending_requests_does_not_scan_cached_ids(cl
 
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
     scheduler.kv_role = "kv_both"
-    scheduler.consumer_is_to_put = scheduler.can_put = False
+    scheduler.can_put = False
     scheduler._request_trackers = {}
     scheduler._unfinished_requests = {} if cleared_by == "already-empty" else {"retired": (None, [])}
     scheduler._preempted_req_ids = set()
@@ -1239,7 +1314,7 @@ def test_connector_metadata_filter_has_linear_key_lookup_work():
     pending_ids = ["pending-b", "pending-a"]
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
     scheduler.kv_role = "kv_both"
-    scheduler.consumer_is_to_put = scheduler.can_put = False
+    scheduler.can_put = False
     scheduler._request_trackers = {}
     scheduler._unfinished_requests = {req_id: (None, []) for req_id in request_ids + pending_ids}
     scheduler._preempted_req_ids = set()
@@ -2117,7 +2192,7 @@ def test_lookup_early_return_discards_stale_load_spec(early_return):
     local_tokens = 0
     if early_return == "consumer":
         scheduler.kv_role = "kv_consumer"
-        scheduler.consumer_is_to_load = False
+        scheduler.enable_lookup = False
     elif early_return == "short_prompt":
         request.prompt_token_ids = [1]
     else:
