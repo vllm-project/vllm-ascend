@@ -4,18 +4,67 @@
 """Regress deferred PP Mamba state copies with a real Qwen3.8-27B model."""
 
 import os
+import re
+from contextlib import ExitStack, contextmanager
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 import torch
+from transformers import AutoTokenizer
 from vllm import SamplingParams
 
+from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
+from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request.kv_pool_watch import (
+    POOL_SECRET,
+    build_pool_accuracy_prompt,
+    run_pool_ab,
+    run_pool_hit_sequence,
+)
 
 MODEL = os.environ.get("QWEN38_DENSE_MODEL", "Qwen/Qwen3.8-27B")
 NUM_REQUESTS = 8
-MAX_MODEL_LEN = 4096
+
+# Measured on A3: `kv cache group sizes [896, 896, 896, 896]` and
+# `kv lcm block sizes 896`; 16,388 = 18 x 896 + 260 -> 16,128 hit tokens.
+POOL_LCM_BLOCK_SIZE = 896
+POOL_PROMPT_TOKENS = 16388
+# Perf prompt: 32 lcm blocks plus a tail -> 28,672 / 31,857 = 90% hit.
+POOL_PERF_PROMPT_TOKENS = 32 * POOL_LCM_BLOCK_SIZE + 32 * POOL_LCM_BLOCK_SIZE // 9
+POOL_MAX_MODEL_LEN = max(POOL_PROMPT_TOKENS, POOL_PERF_PROMPT_TOKENS) + 128
+
+MAX_MODEL_LEN = POOL_MAX_MODEL_LEN
+
+POOL_KV_TRANSFER_CONFIG = {
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "backend": "memcache",
+        "lookup_rpc_port": "1",
+        "use_layerwise": False,
+        # TEMPORARY: experiment A keeps the non-layerwise path.
+    },
+}
+
+
+def _build_memcache_pool_config() -> MemcacheKVPoolConfig:
+    from vllm.utils.network_utils import get_open_port
+
+    return MemcacheKVPoolConfig(
+        meta_service_port=get_open_port(),
+        config_store_port=get_open_port(),
+        config={
+            "meta": {"ock.mmc.log_level": "error"},
+            "local": {
+                "ock.mmc.log_level": "error",
+                "ock.mmc.local_service.world_size": 256,
+                "ock.mmc.local_service.protocol": "device_sdma",
+                "ock.mmc.local_service.dram.size": "10GB",
+            },
+        },
+    )
 
 
 class MambaAlignWorker:
@@ -68,6 +117,102 @@ class MambaAlignWorker:
         self.align_probe.zero_()
         return result
 
+    def install_pool_probe(self) -> int:
+        """TEMPORARY: print per-group store PUT/EXISTS activity (experiment A)."""
+        from collections import Counter
+
+        from vllm.distributed.kv_transfer import get_kv_transfer_group
+
+        connector = get_kv_transfer_group()
+        children = getattr(connector, "connectors", None) or [connector]
+        installed = 0
+        for child in children:
+            worker = getattr(child, "connector_worker", None)
+            store = getattr(worker, "m_store", None) if worker is not None else None
+            if store is None or getattr(store, "_group_probe_installed", False):
+                continue
+
+            def group_of(key: str) -> str:
+                match = re.search(r"@group:(\d+)", key)
+                return match.group(1) if match else "?"
+
+            original_put = getattr(store, "put", None)
+            original_exists = getattr(store, "exists", None)
+            if original_put is None:
+                continue
+
+            def put(keys, *args, _original=original_put, **kwargs):
+                counts = Counter(group_of(key) for key in keys)
+                first = keys[0][-24:] if keys else ""
+                print(
+                    f"[pool-probe] PUT n={len(keys)} groups={dict(sorted(counts.items()))} first=...{first}",
+                    flush=True,
+                )
+                return _original(keys, *args, **kwargs)
+
+            def exists(keys, *args, _original=original_exists, **kwargs):
+                result = _original(keys, *args, **kwargs)
+                counts = Counter(group_of(key) for key in keys)
+                hits = Counter(group_of(key) for key, value in zip(keys, result) if value)
+                print(
+                    f"[pool-probe] EXISTS n={len(keys)} groups={dict(sorted(counts.items()))} "
+                    f"hits={dict(sorted(hits.items()))}",
+                    flush=True,
+                )
+                return result
+
+            try:
+                store.put = put
+                if original_exists is not None:
+                    store.exists = exists
+                store._group_probe_installed = True
+            except Exception as exc:  # pragma: no cover - probe only
+                print(f"[pool-probe] install failed: {exc}", flush=True)
+                continue
+            installed += 1
+        return installed
+
+
+CASE_NAME = "qwen38_pp2_mtp_pool_watch"
+
+
+@contextmanager
+def _leg(use_pool: bool, case_name: str):
+    """Leg A enables the memcache pool; leg B keeps everything else identical.
+
+    Hybrid keeps the local prefix cache on in both legs (align requires it);
+    the only A/B difference is ``kv_transfer_config``.
+    """
+    with ExitStack() as stack:
+        kwargs: dict[str, Any] = dict(
+            dtype="bfloat16",
+            tensor_parallel_size=2,
+            pipeline_parallel_size=2,
+            distributed_executor_backend="mp",
+            worker_extension_cls=f"{__name__}.MambaAlignWorker",
+            max_model_len=POOL_MAX_MODEL_LEN,
+            max_num_seqs=32,
+            max_num_batched_tokens=4096,
+            gpu_memory_utilization=0.9,
+            enable_prefix_caching=True,
+            mamba_cache_mode="align",
+            disable_log_stats=False,
+            enable_chunked_prefill=True,
+            async_scheduling=True,
+            seed=1024,
+            speculative_config={"method": "mtp", "num_speculative_tokens": 3, "enforce_eager": True},
+            compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+        )
+        if use_pool:
+            pool = stack.enter_context(SingleNodeMemcacheManager(_build_memcache_pool_config(), case_name))
+            stack.enter_context(patch.dict(os.environ, pool.server_envs))
+            kwargs["kv_transfer_config"] = POOL_KV_TRANSFER_CONFIG
+        runner = stack.enter_context(VllmRunner(MODEL, **kwargs))
+        if use_pool:
+            # TEMPORARY: experiment A group probe.
+            print(f"[pool-probe] installed={runner.model.collective_rpc('install_pool_probe')}", flush=True)
+        yield runner
+
 
 @pytest.mark.e2e_model("Qwen/Qwen3.8-27B")
 @pytest.mark.e2e_coverage(
@@ -82,26 +227,14 @@ class MambaAlignWorker:
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
 @wait_until_npu_memory_free()
 def test_qwen38_pp_mtp_prefix_cache():
-    with VllmRunner(
-        MODEL,
-        dtype="bfloat16",
-        tensor_parallel_size=2,
-        pipeline_parallel_size=2,
-        distributed_executor_backend="mp",
-        worker_extension_cls=f"{__name__}.MambaAlignWorker",
-        max_model_len=MAX_MODEL_LEN,
-        max_num_seqs=4,
-        max_num_batched_tokens=8192,
-        gpu_memory_utilization=0.6,
-        enable_prefix_caching=True,
-        enable_chunked_prefill=True,
-        async_scheduling=True,
-        seed=1024,
-        speculative_config={"method": "mtp", "num_speculative_tokens": 3, "enforce_eager": True},
-        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
-    ) as runner:
+    state: dict[str, int] = {}
+    tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
+    prompt_ids = build_pool_accuracy_prompt(tokenizer, POOL_PROMPT_TOKENS, POOL_MAX_MODEL_LEN)
+
+    def _accuracy(runner) -> None:
         block_sizes = runner.model.collective_rpc("install_align_probe")
         block_size = next(size for size in block_sizes if size is not None)
+        state["block_size"] = block_size
         tokenizer = runner.model.get_tokenizer()
         prompts, params = [], []
         for index in range(NUM_REQUESTS):
@@ -135,3 +268,25 @@ def test_qwen38_pp_mtp_prefix_cache():
         )
         answer = runner.model.generate([prompt], SamplingParams(temperature=0, max_tokens=32), use_tqdm=False)
         assert answer[0].outputs[0].text.strip() == "5959", answer
+
+    def _hit(runner) -> dict:
+        return run_pool_hit_sequence(
+            runner,
+            block_size=state["block_size"],
+            prompt_tokens=POOL_PROMPT_TOKENS,
+            prompt_ids=prompt_ids,
+            lcm_block_size=POOL_LCM_BLOCK_SIZE,
+            reset_local_cache=True,
+            answer_secret=POOL_SECRET,
+            tag="qwen38-pp2-mtp-memcache",
+        )
+
+    run_pool_ab(
+        case_name=CASE_NAME,
+        build_leg=_leg,
+        accuracy=_accuracy,
+        hit=_hit,
+        prompt_ids=prompt_ids,
+        perf_prompt_tokens=POOL_PERF_PROMPT_TOKENS,
+        perf_reset_local=True,  # A leg only: reset local before each sample.
+    )
