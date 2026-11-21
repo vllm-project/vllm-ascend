@@ -53,6 +53,36 @@ DONE_RECVING_MSG = b"done_recving_msg"
 ACK_MSG = b"ACK"
 PRODUCER_LEASE_CACHE_TTL_SECONDS = 600
 PRODUCER_LEASE_CACHE_MAX_SIZE = 1024
+# Minimum spacing between "finished await scheduler drain" diagnostics. Under
+# healthy load the queue also fills briefly between a DONE arriving and the
+# next scheduler step, so this is a stall report, not a per-recv-timeout
+# tick. 30s spans one full D heartbeat interval (kv_lease_duration // 6, i.e.
+# 20s at the default 120s lease), so a queue still awaiting drain after a
+# whole heartbeat cannot be transient; it also stays at a quarter of the
+# lease, so a sustained stall is reported several times before the lease
+# horizon while cutting log volume 30x versus reporting every timeout. This
+# ratio is a heuristic tuned for the default 120s lease: with a much smaller
+# kv_lease_duration the same 30s spans several heartbeats and a larger share
+# of the lease, so treat the cadence as "one heartbeat-scale stall window",
+# not a universal constant.
+DRAIN_REPORT_INTERVAL_SECONDS = 30.0
+# Upper bound on ledger entries archived per sweep tick. When a mass-expiry
+# backlog builds up (exactly the scenario this sweeper exists for: D crashed
+# with a large in-flight ledger), reaping it in one shot would hold
+# state_lock for O(backlog), delaying the DONE/heartbeat handlers that share
+# it. Measured on this path: ~0.6us per archived entry, so one capped tick
+# holds the lock for ~150us regardless of backlog size, while 256 entries/s
+# drains a realistic rate*lease backlog (a few hundred to a few thousand
+# entries) in seconds. Leftover entries are archived on subsequent 1s ticks;
+# the healthy path is O(expired) regardless of ledger size because both
+# ledgers are expiry-ordered and the scan stops at the first unexpired head.
+# This sweep call chain originates in #18957's consolidated
+# delayed_free_requests ledger; this sweeper only adds a driver for it, not
+# a second ledger. The cap is shared by both ledgers: if delayed_free alone
+# fills a tick, renewed_requests waits for the next tick. That is acceptable
+# at lease timescales (renewed entries are still tracked by a live D's
+# heartbeat), but it means the cap bounds work, not per-ledger fairness.
+SWEEP_BATCH_SIZE = 256
 
 
 class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
@@ -79,6 +109,10 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
         self.lease_extension = kv_lease_duration * 2 // 3
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.state_lock = threading.Lock()
+        # Set when the release queue is first observed non-empty and reset
+        # while it is empty, so the stall clock starts at the accumulation
+        # rather than at process start.
+        self._drain_report_at: float | None = None
 
     def add_delayed_request(self, request_id: str) -> None:
         with self.state_lock:
@@ -160,6 +194,10 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
             try:
                 frames = sock.recv_multipart()
             except zmq.Again:  # type: ignore[attr-defined]
+                # Third lease-expiry driver: the scheduler hook only runs
+                # while the engine steps and heartbeat only covers IDs D still
+                # tracks, so orphaned entries need this recv-timeout tick.
+                self._sweep_expired_requests()
                 continue
 
             identity = frames[0]
@@ -226,19 +264,82 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
                 expired_by,
             )
 
-    def _retrieve_expired_requests_locked(self) -> list[tuple[str, float]]:
+    def _retrieve_expired_requests_locked(self, max_entries: int | None = None) -> list[tuple[str, float]]:
         now = time.monotonic()
         expired: list[tuple[str, float]] = []
         # Each queue has one fixed duration. Renewals only move to the tail
         # when the deadline increases, keeping both queues expiry-ordered.
         for requests in (self.delayed_free_requests, self.renewed_requests):
             while requests:
+                if max_entries is not None and len(expired) >= max_entries:
+                    return expired
                 request_id, expiry = next(iter(requests.items()))
                 if now < expiry:
                     break
                 self._mark_finished_locked(request_id)
                 expired.append((request_id, now - expiry))
         return expired
+
+    def _sweep_expired_requests(self) -> None:
+        """Archive expired delayed-free entries into the release queue without a scheduler hook.
+
+        `get_and_clear_finished_requests` (whose call sites sit in scheduler
+        hooks) enforces the lease expiry only while the engine steps, and
+        `_handle_heartbeat` only renews or reaps the IDs D still tracks. When
+        the engine is idle and D has already dropped a request from its
+        heartbeat roster, its delayed-free entry is orphaned and its KV blocks
+        leak until restart. This runs in the sending thread on every recv
+        timeout so the lease bound is eventually enforced regardless of
+        scheduler activity.
+
+        This only archives: it moves expired entries from the lease ledgers
+        into `finished_requests`, where a later scheduler drain releases them.
+        It never frees blocks itself.
+        """
+        # Lock order: state_lock -> SimpleQueue's internal lock (qsize). There
+        # is no reverse order anywhere, so this nesting cannot deadlock; keep
+        # it that way (never sweep while holding the queue lock).
+        with self.state_lock:
+            expired = self._retrieve_expired_requests_locked(max_entries=SWEEP_BATCH_SIZE)
+            delayed = len(self.delayed_free_requests)
+            renewed = len(self.renewed_requests)
+            awaiting_drain = self.finished_requests.qsize()
+        # Log outside the lock: this path runs on every recv timeout and
+        # logging I/O under `state_lock` would stall the DONE/heartbeat
+        # handlers that share it. Deliberately no per-entry log here: a
+        # mass-expiry backlog would flood the log (and this thread) with one
+        # line per archived entry; the aggregate line carries the count.
+        # The queue depth rides on the archive line because sustained expiry
+        # (e.g. D dead while P keeps serving) keeps `expired` non-empty every
+        # tick, which would otherwise silence the awaiting-drain report below.
+        if expired:
+            logger.info(
+                "Mooncake delayed-free sweeper archived %d expired request(s) into the release queue (%d await drain).",
+                len(expired),
+                awaiting_drain,
+            )
+            if self._drain_report_at is None:
+                self._drain_report_at = time.monotonic()
+        elif awaiting_drain:
+            # Diagnostic only: `finished_requests` also fills briefly under
+            # healthy load between a DONE and the next scheduler step, so
+            # report a sustained accumulation instead of every recv timeout.
+            now = time.monotonic()
+            if self._drain_report_at is None:
+                # The clock starts at the first observation, so a transient
+                # DONE-to-step overlap is never reported.
+                self._drain_report_at = now
+            elif now - self._drain_report_at >= DRAIN_REPORT_INTERVAL_SECONDS:
+                self._drain_report_at = now
+                logger.info(
+                    "Mooncake delayed-free sweeper: no expired entries (delayed=%d renewed=%d) "
+                    "but %d finished await scheduler drain.",
+                    delayed,
+                    renewed,
+                    awaiting_drain,
+                )
+        else:
+            self._drain_report_at = None
 
 
 class MooncakeSchedulerRecvingThread(threading.Thread):
