@@ -888,8 +888,7 @@ class TestKVPPPoolWorker(unittest.TestCase):
         key = "model@pp_rank:0@group:0@"
         normal_keys = worker._expand_lookup_keys_by_rank([key], 0)
         ple_keys = worker._expand_lookup_keys_by_rank([key], 1)
-        self.assertEqual(len(normal_keys), 4)
-        self.assertEqual(len(ple_keys), 1)
+        self.assertEqual((len(normal_keys), len(ple_keys)), (4, 1))
         self.assertIn("@pp_rank:2@", ple_keys[0])
 
         worker.hf_config = SimpleNamespace(model_type="deepseek_v4")
@@ -1688,9 +1687,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.start_load_kv(meta)
 
         keys, addrs, sizes = worker.m_store.get.call_args.args
-        self.assertEqual(len(keys), 1)
-        self.assertEqual(addrs, [[1000]])
-        self.assertEqual(sizes, [[160]])
+        self.assertEqual((len(keys), addrs, sizes), (1, [[1000]], [[160]]))
 
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",

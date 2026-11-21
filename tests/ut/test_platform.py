@@ -1200,8 +1200,7 @@ class TestNPUPlatform(TestBase):
                                 dispatcher = CudagraphDispatcher(config)
                                 dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL_DECODE_ONLY)
                                 cg_mode, desc = dispatcher.dispatch(4, uniform_decode=True)
-                                self.assertEqual(cg_mode, CUDAGraphMode.FULL)
-                                self.assertEqual(desc.num_reqs, 4)
+                                assert (cg_mode, desc.num_reqs) == (CUDAGraphMode.FULL, 4)
                         self.assertEqual(compilation_config.cudagraph_mode, mode)
 
     def test_setup_compile_backend_keeps_dynamic_query_tiers_stable_on_reentry(self):
@@ -1297,8 +1296,7 @@ class TestNPUPlatform(TestBase):
             self.run_compile_backend(config)
 
             aligned_sizes = config.additional_config[MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY][6]
-            assert aligned_sizes
-            assert all(size % 8 == 0 for size in aligned_sizes)
+            assert aligned_sizes and all(size % 8 == 0 for size in aligned_sizes)
             assert config.get_varlen_decode_cudagraph_token_sizes(6) == aligned_sizes
 
             # EngineCore re-validates the config after its handshake. The

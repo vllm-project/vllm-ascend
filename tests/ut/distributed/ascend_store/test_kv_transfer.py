@@ -1166,9 +1166,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         thread._handle_request(request)
 
         keys, addrs, sizes = store.get_calls[0]
-        self.assertEqual(len(keys), 1)
-        self.assertEqual(addrs, [[1000]])
-        self.assertEqual(sizes, [[16]])
+        self.assertEqual((len(keys), addrs, sizes), (1, [[1000]], [[16]]))
 
     def test_handle_request_applies_load_mask(self):
         store = FakeStore()

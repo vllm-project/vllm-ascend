@@ -372,10 +372,8 @@ class TestUtils(TestBase):
                     decode_sizes=graph_sizes[2],
                     additional_config=additional_config,
                 )
-                self.assertEqual(
-                    utils.get_mrv2_physical_batch_capacity(config, utils.MRV2PaddingPlan(token_alignment=alignment)),
-                    expected,
-                )
+                plan = utils.MRV2PaddingPlan(token_alignment=alignment)
+                self.assertEqual(utils.get_mrv2_physical_batch_capacity(config, plan), expected)
                 self.assertEqual(config.scheduler_config.max_num_batched_tokens, max_tokens)
                 self.assertEqual(config.scheduler_config.max_num_seqs, max_reqs)
 
@@ -390,23 +388,15 @@ class TestUtils(TestBase):
         )
         scheduler_config = config.scheduler_config
 
-        capacity = utils.ensure_mrv2_physical_batch_capacity(
-            config,
-            utils.MRV2PaddingPlan(token_alignment=4),
-        )
+        plan = utils.MRV2PaddingPlan(token_alignment=4)
+        capacity = utils.ensure_mrv2_physical_batch_capacity(config, plan)
 
         self.assertEqual(capacity, (8, 4))
         self.assertEqual(scheduler_config.max_num_batched_tokens, 8)
         self.assertEqual(scheduler_config.max_num_scheduled_tokens, 5)
         self.assertEqual(scheduler_config.max_num_seqs, 4)
         self.assertEqual(scheduler_config.max_num_active_seqs, 1)
-        self.assertEqual(
-            utils.ensure_mrv2_physical_batch_capacity(
-                config,
-                utils.MRV2PaddingPlan(token_alignment=4),
-            ),
-            (8, 4),
-        )
+        self.assertEqual(utils.ensure_mrv2_physical_batch_capacity(config, plan), (8, 4))
 
     def test_enable_pcp_o_proj_weight_sharding_reads_validated_ascend_config(self):
         ascend_config = SimpleNamespace(enable_pcp_o_proj_weight_sharding=True)
