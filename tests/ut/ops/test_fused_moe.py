@@ -13,6 +13,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.activation import SituAndMul
 
 from vllm_ascend.ascend_forward_context import MoECommType
@@ -1153,6 +1154,38 @@ def test_shared_expert_mlp_path_preserves_quant_and_lora_semantics(
     monkeypatch.setattr(shared_experts_module, "has_lora", lambda _: has_active_lora)
 
     assert shared_experts._select_mlp_path() is expected_path
+
+
+def test_shared_expert_keeps_linear_wrapper_when_wrapped_for_lora(monkeypatch):
+    class _DummyLoRAProj(BaseLayerWithLoRA):
+        def __init__(self):
+            nn.Module.__init__(self)
+            self.weight_scale = torch.ones(1)
+
+    shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
+    shared_experts.multistream_overlap = True
+    shared_experts.quant_type = QuantType.W4A8
+    shared_experts.layer = SimpleNamespace(
+        gate_up_proj=_DummyLoRAProj(),
+        down_proj=_DummyLoRAProj(),
+    )
+    shared_experts.set_lora_context(None)
+    monkeypatch.setattr(shared_experts_module, "has_lora", lambda _: False)
+
+    assert shared_experts._select_mlp_path() is SharedExpertMLPPath.LINEAR_WRAPPER
+    sentinel = torch.ones(1, 2)
+    assert shared_experts._prepare_linear_input_for_overlap(shared_experts.layer.gate_up_proj, sentinel) is sentinel
+    shared_experts.quant_type = QuantType.W8A8MXFP
+    assert not shared_experts._can_fuse_w8a8_mxfp_activation(torch.ones(2, 128, dtype=torch.bfloat16))
+
+    # Unwrapped linears without LoRA continue selecting A8_INT_FUSED.
+    shared_experts.quant_type = QuantType.W4A8
+    shared_experts.layer = SimpleNamespace(
+        gate_up_proj=SimpleNamespace(weight_scale=torch.ones(1)),
+        down_proj=SimpleNamespace(weight_scale=torch.ones(1)),
+    )
+    shared_experts.set_lora_context(None)
+    assert shared_experts._select_mlp_path() is SharedExpertMLPPath.A8_INT_FUSED
 
 
 @pytest.mark.parametrize("has_expert_gate", [False, True])

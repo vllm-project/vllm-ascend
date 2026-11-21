@@ -62,6 +62,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             and not self.lora_config.fully_sharded_loras
         )
         self._single_lora_mask = None
+        self.active_lora_slots: set[int] | None = None
         self._wrapper_id = next(_LORA_WRAPPER_IDS)
         _LORA_WRAPPERS[self._wrapper_id] = self
         if self._single_lora_slot:
@@ -107,7 +108,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         )
         # PunicaWrapperBase computes this only for prefill. Decode must also
         # choose between the active-LoRA and base-only quantized MoE paths.
-        self.no_lora = not any(lora_id > 0 for lora_id in mapping.index_mapping)
+        # mapping.index_mapping holds request LoRA IDs (0 means base), not resolved slots.
+        request_ids = {lora_id for lora_id in mapping.index_mapping if lora_id > 0}
+        self.no_lora = not request_ids
+        self.active_lora_slots = {slot for slot, lora_id in enumerate(lora_index_to_id) if lora_id in request_ids}
 
     def _shrink_prefill(
         self,
@@ -529,8 +533,13 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         expert_idx = expert_ids.view(-1).to(torch.long)
         num_experts = lora_a_stacked[0].shape[1]
 
-        lora_idx_safe = token_lora_mapping.clamp(min=0)
-        enabled = (token_lora_mapping >= 0) & adapter_enabled[lora_idx_safe].bool()
+        num_slots = adapter_enabled.numel()
+        if num_slots == 0:
+            return
+        lora_idx_safe = token_lora_mapping.clamp(min=0, max=num_slots - 1)
+        valid_slot = (token_lora_mapping >= 0) & (token_lora_mapping < num_slots)
+        valid_expert = (expert_idx >= 0) & (expert_idx < num_experts)
+        enabled = valid_slot & valid_expert & adapter_enabled[lora_idx_safe].bool()
         combined_idx = torch.where(
             enabled,
             lora_idx_safe * num_experts + expert_idx,

@@ -85,12 +85,19 @@ else:
     MLAPrefillSelectorConfig = None
     AscendConfig = None
 
-# Keep Breakable CUDAGraph opt-in on Ascend. Upstream may auto-enable it
-# for selected architectures when the environment variable is absent.
-value = os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+# Keep breakable ACL graph opt-in on Ascend, but never shadow upstream's
+# per-architecture requirement. Upstream only auto-enables
+# VLLM_USE_BREAKABLE_CUDAGRAPH when the variable is absent, and only for
+# architectures that cannot be torch.compile'd
+# (vllm/config/vllm.py: DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES, e.g.
+# DeepseekV41ForCausalLM). Forcing "0" here suppressed that auto-enable, so
+# those models captured a regular ACL graph, which replays corrupted logits
+# and NaN logprobs on Ascend. Leaving the variable unset keeps the upstream
+# policy -- opt-in for every other architecture -- while an explicit
+# VLLM_USE_BREAKABLE_CUDAGRAPH=0 still forces it off.
 logger.info_once(
-    "Breakable CUDAGraph on Ascend is opt-in; using VLLM_USE_BREAKABLE_CUDAGRAPH=%s.",
-    value,
+    "Breakable CUDAGraph on Ascend follows upstream policy (VLLM_USE_BREAKABLE_CUDAGRAPH=%s).",
+    os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH", "unset"),
     scope="process",
 )
 
@@ -1542,7 +1549,11 @@ def _setup_compile_backend(
         additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
     elif compilation_config.cudagraph_mode.requires_piecewise_compilation():
         # Our is_cuda_alike is False so we cannot reuse the assertion of upstream
-        if compilation_config.mode != CompilationMode.VLLM_COMPILE and not envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH:
+        use_breakable_cg = getattr(compilation_config, "use_breakable_cudagraph", None)
+        breakable_cg_enabled = (
+            bool(use_breakable_cg) if use_breakable_cg is not None else bool(envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH)
+        )
+        if compilation_config.mode != CompilationMode.VLLM_COMPILE and not breakable_cg_enabled:
             raise AssertionError(
                 "Compilation mode should be CompilationMode.VLLM_COMPILE "
                 "when cudagraph_mode piecewise cudagraphs is used, "
