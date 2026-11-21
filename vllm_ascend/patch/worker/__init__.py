@@ -17,6 +17,7 @@
 
 from vllm.triton_utils import HAS_TRITON
 
+import vllm_ascend.patch.worker.patch_worker_extension  # noqa
 import vllm_ascend.patch.worker.patch_worker_profiler  # noqa
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import vllm_version_is

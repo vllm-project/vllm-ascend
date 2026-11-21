@@ -1716,3 +1716,19 @@
 #       Remove the verifier override once native Kimi defaults dispatch through
 #       the platform's attention/cache configuration interface.
 #
+
+# ** File: worker/patch_worker_extension.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.worker_base.WorkerWrapperBase.load_model`
+#    Why:
+#       The public worker_extension_cls mixin cannot override the worker's
+#       load_model method, and the wrapper has no model-load extension point.
+#    How:
+#       Add optional before/after hooks around the existing worker load only
+#       when the upstream wrapper has no load_model method. Default loading
+#       retains NPUWorker's no-argument signature. Inference is unchanged.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/68936
+#    Future Plan:
+#       Remove when all supported vLLM versions include the upstream hooks.
+#
