@@ -14,18 +14,18 @@ export HCCL_DETERMINISTIC=True
 export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 
-export ASCEND_RT_VISIBLE_DEVICES="$1"
+export ASCEND_RT_VISIBLE_DEVICES=$1
 
 vllm serve model_path \
     --host 0.0.0.0 \
-    --port "$2" \
-    --data-parallel-size "$3" \
-    --data-parallel-rank "$4" \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
     --data-parallel-address "$5" \
-    --data-parallel-rpc-port "$6" \
-    --tensor-parallel-size "$7" \
-    --prefill-context-parallel-size "$8" \
-    --pipeline-parallel-size "$9" \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
+    --prefill-context-parallel-size $8 \
+    --pipeline-parallel-size $9 \
     --enable-expert-parallel \
     --seed 1024 \
     --served-model-name dsv3 \
