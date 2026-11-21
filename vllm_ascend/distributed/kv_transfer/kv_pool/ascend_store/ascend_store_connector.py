@@ -34,10 +34,6 @@ from vllm.v1.request import Request
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cpu_events import (
-    CPUBlockEventTracker,
-    CPUBlockStoreReport,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     has_shared_kv_sources,
@@ -164,7 +160,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             )
 
         self._kv_cache_events: AscendStoreKVEvents | None = None
-        self._cpu_event_tracker = CPUBlockEventTracker()
         self._current_step_has_real_forward = False
         # Handle to the (V2) mamba hybrid model state while its per-layer
         # align pre-copy is deferred behind this connector's layerwise loads.
@@ -314,16 +309,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         Yields:
             New KV cache events since the last call.
         """
-        self._cpu_event_tracker.expire()
         if self._kv_cache_events is not None:
             self._kv_cache_events.aggregate()
             kv_cache_events = self._kv_cache_events.get_all_events()
-            for event in kv_cache_events:
-                if isinstance(event, CPUBlockStoreReport):
-                    if stored_event := self._cpu_event_tracker.add(event):
-                        yield stored_event
-                else:
-                    yield event
+            yield from kv_cache_events
             self._kv_cache_events.clear_events()
             self._kv_cache_events = None
 
@@ -536,7 +525,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.load_specs.clear()
         self._kv_cache_events = None
-        self._cpu_event_tracker.clear()
         return self.connector_scheduler.reset_store()
 
     def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:

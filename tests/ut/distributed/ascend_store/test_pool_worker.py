@@ -37,10 +37,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
     AscendStoreConnector,
     create_kv_pool_worker,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cpu_events import (
-    CPUBlockEventTracker,
-    CPUBlockStoreReport,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreSendingThread,
 )
@@ -224,38 +220,6 @@ def test_cache_coordinator_uses_kv_cache_config_retention_interval(retention_int
 
 
 class TestPCPPoolWorker(unittest.TestCase):
-    def test_cpu_event_required_keys_match_lookup_partitions(self):
-        key = "model@dcp:0@head_or_tp_rank:0@pp_rank:0@group:0@hash"
-        for topology, heads, dcp_ranks, pp_ranks in (
-            (dict(tp_size=4, num_kv_heads=1), 1, 1, 1),
-            (dict(tp_size=4, num_kv_heads=2), 2, 1, 1),
-            (dict(tp_size=2, dcp_size=2), 1, 2, 1),
-            (dict(pp_size=2), 1, 1, 2),
-            (dict(tp_size=2, pcp_size=2, use_kvpp=True), 4, 1, 1),
-        ):
-            with self.subTest(topology=topology):
-                worker = make_worker(self, **topology)
-                self.assertEqual(
-                    worker._required_cpu_event_keys(key, 0),
-                    frozenset(
-                        f"model@dcp:{dcp}@head_or_tp_rank:{head}@pp_rank:{pp}@group:0@hash"
-                        for dcp in range(dcp_ranks)
-                        for head in range(heads)
-                        for pp in range(pp_ranks)
-                    ),
-                )
-
-    def test_cpu_event_keys_include_peer_prefill_pp_partitions(self):
-        worker = make_worker(self, kv_role="kv_consumer", tp_size=2, num_kv_heads=2)
-        worker.token_database.partitions = [1, 1]
-        key = "model@dcp:0@head_or_tp_rank:0@pp_rank:0@group:0@hash"
-        self.assertEqual(
-            worker._required_cpu_event_keys(key, 0),
-            frozenset(
-                f"model@dcp:0@head_or_tp_rank:{head}@pp_rank:{pp}@group:0@hash" for head in (0, 1) for pp in (0, 1)
-            ),
-        )
-
     def test_pp_pcp_layer_range_uses_actual_pp_group(self):
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
         start_patch(self, f"{module}.get_tensor_model_parallel_rank", return_value=0)
@@ -3596,10 +3560,6 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                         worker.pcp_rank, worker.pcp_size = pcp_rank, pcp_size
                         worker.enable_kv_events = True
                         send_thread = MagicMock(spec=KVCacheStoreSendingThread)
-                        send_thread.required_store_keys = None
-                        send_thread.record_cpu_store_event.side_effect = (
-                            KVCacheStoreSendingThread.record_cpu_store_event.__get__(send_thread)
-                        )
                         send_thread.is_live_store_job.return_value = True
                         send_thread.get_saved_offset.return_value = saved_offset
                         send_thread.lookup.side_effect = lambda keys: [False] * len(keys)
@@ -3626,9 +3586,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                             keys = worker.m_store.put.call_args.args[0]
                             self.assertEqual(len(keys), 2 * len(expected_blocks))
                             written.extend(keys)
-                            events = [
-                                event for call in send_thread.update_kv_event.call_args_list for event in call.args[0]
-                            ]
+                            events = worker.kv_send_thread.update_kv_event.call_args.args[0]
                             self.assertEqual(len(events), len(expected_blocks))
                             for event, block_idx in zip(events, expected_blocks, strict=True):
                                 self.assertEqual(
@@ -3697,89 +3655,12 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                     self.assertEqual(len(worker.m_store.put.call_args.args[0]), 1)
                 send_thread.finish_store_job.assert_not_called()
 
-    def test_tp_mismatch_reports_effective_head_partitions_before_publishing(self):
-        tracker = CPUBlockEventTracker()
-        reports = []
-        for rank in (0, 1):
-            worker = self._make_strided_worker(tp_rank=rank)
-            worker.enable_kv_events = True
-            worker.m_store = MagicMock()
-            worker.m_store.exists.side_effect = lambda keys: [0] * len(keys)
-            worker.m_store.put.side_effect = lambda keys, addrs, sizes: [True] * len(keys)
-            worker.token_database.set_group_buffers({0: [0]}, {0: [16]}, {0: [16]})
-            thread = KVCacheStoreSendingThread(
-                worker.m_store,
-                worker.token_database,
-                block_size=4,
-                tp_rank=rank,
-                enable_kv_event=True,
-                required_store_keys=worker._required_cpu_event_keys,
-            )
-            worker.kv_send_thread = thread
-            request = ReqMeta(
-                req_id="effective-tp",
-                token_len_chunk=4,
-                block_ids=[5],
-                block_hashes=[b"h0"],
-                token_ids=list(range(4)),
-                original_block_size=4,
-            )
-            thread.add_stored_request(request)
-            self.assertTrue(worker._store_kv_tp_mismatch(request))
-            reports.extend(thread.get_kv_events())
-        self.assertEqual(len(reports), 2)
-        self.assertTrue(all(isinstance(report, CPUBlockStoreReport) for report in reports))
-        self.assertEqual(reports[0].required_keys, reports[1].required_keys)
-        self.assertEqual(len(reports[0].required_keys), 4)
-        self.assertEqual(len(reports[0].completed_keys), 2)
-        self.assertEqual(len(reports[1].completed_keys), 2)
-        self.assertIsNone(tracker.add(reports[0]))
-        self.assertIs(tracker.add(reports[1]), reports[0].event)
-
-    def test_tp_mismatch_reports_lookup_hits_without_sync_or_put(self):
-        worker = self._make_strided_worker()
-        worker.enable_kv_events = True
-        worker.m_store = MagicMock()
-        worker.m_store.exists.side_effect = lambda keys: [1] * len(keys)
-        worker.token_database.set_group_buffers({0: [0]}, {0: [16]}, {0: [16]})
-        thread = KVCacheStoreSendingThread(
-            worker.m_store,
-            worker.token_database,
-            block_size=4,
-            tp_rank=0,
-            enable_kv_event=True,
-            required_store_keys=worker._required_cpu_event_keys,
-        )
-        worker.kv_send_thread = thread
-        request = ReqMeta(
-            req_id="lookup-only",
-            token_len_chunk=4,
-            block_ids=[5],
-            block_hashes=[b"h0"],
-            token_ids=list(range(4)),
-            original_block_size=4,
-            current_event=MagicMock(),
-        )
-        thread.add_stored_request(request)
-        self.assertTrue(worker._store_kv_tp_mismatch(request))
-        request.current_event.synchronize.assert_not_called()
-        worker.m_store.put.assert_not_called()
-        reports = thread.get_kv_events()
-        self.assertEqual(len(reports), 1)
-        self.assertFalse(reports[0].newly_stored)
-        self.assertEqual(len(reports[0].completed_keys), 2)
-        self.assertIsNone(CPUBlockEventTracker().add(reports[0]))
-
     def test_store_kv_tp_mismatch_events_follow_missing_blocks(self):
         worker = self._make_strided_worker()
         worker.m_store = MagicMock()
         worker.m_store.put.return_value = [True, True]
         worker.enable_kv_events = True
         send_thread = MagicMock(spec=KVCacheStoreSendingThread)
-        send_thread.required_store_keys = None
-        send_thread.record_cpu_store_event.side_effect = KVCacheStoreSendingThread.record_cpu_store_event.__get__(
-            send_thread
-        )
         send_thread.is_live_store_job.return_value = True
         send_thread.get_saved_offset.return_value = 0
         # Two sub-keys per block: block 0 exists, block 1 is missing.
@@ -3810,10 +3691,6 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         worker.m_store.put.return_value = [True, False]
         worker.enable_kv_events = True
         send_thread = MagicMock(spec=KVCacheStoreSendingThread)
-        send_thread.required_store_keys = None
-        send_thread.record_cpu_store_event.side_effect = KVCacheStoreSendingThread.record_cpu_store_event.__get__(
-            send_thread
-        )
         send_thread.is_live_store_job.return_value = True
         send_thread.get_saved_offset.return_value = 0
         # One missing sub-key in each block; only block 0 is repaired.

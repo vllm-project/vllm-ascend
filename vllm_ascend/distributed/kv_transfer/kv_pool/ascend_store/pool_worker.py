@@ -16,7 +16,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.distributed.kv_events import BlockStored, KVCacheEvent
+from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import logger
 from vllm.model_executor.model_loader.utils import get_model_cls
@@ -1079,18 +1079,6 @@ class BaseKVPoolWorker(ABC):
             return [key]
         return self._expand_lookup_keys_by_rank([key], group_id)
 
-    def _required_cpu_event_keys(self, key: str, group_id: int) -> frozenset[str]:
-        """Use the lookup topology, including Decode writes to Prefill PP keys."""
-        keys = self._expand_lookup_keys_by_rank([key], group_id)
-        partitions = self.token_database.partitions
-        if self.kv_role == "kv_consumer" and partitions is not None and len(partitions) > 1:
-            keys = [
-                self._replace_key_field(rank_key, "pp_rank", pp_rank)
-                for rank_key in keys
-                for pp_rank in range(len(partitions))
-            ]
-        return frozenset(keys)
-
     def _lookup_with_coordinator(
         self,
         token_len: int,
@@ -1309,7 +1297,7 @@ class BaseKVPoolWorker(ABC):
                 break
         return hits
 
-    def get_kv_events(self) -> list[KVCacheEvent]:
+    def get_kv_events(self) -> list[BlockStored]:
         if self.enable_kv_events and self.kv_send_thread is not None:
             # collect store kv events form sending thread
             events = self.kv_send_thread.get_kv_events()
@@ -1386,7 +1374,6 @@ class KVPoolWorker(BaseKVPoolWorker):
                 self.enable_kv_events,
                 worker=self if self.tp_mismatch else None,
                 sharded_mamba_group_ids=self.sharded_mamba_group_ids,
-                required_store_keys=self._required_cpu_event_keys,
             )
             self.kv_send_thread.start()
             ready_event_sending.wait()
@@ -1766,12 +1753,12 @@ class KVPoolWorker(BaseKVPoolWorker):
             )
             return False
         missing_indices = [i for i, exists in enumerate(exists_states) if not exists]
-        if not missing_indices and (not self.enable_kv_events or send_thread.required_store_keys is None):
+        if not missing_indices:
             return True
         missing_keys = [keys[i] for i in missing_indices]
         missing_addrs = [addrs[i] for i in missing_indices]
         missing_sizes = [sizes[i] for i in missing_indices]
-        if missing_keys and req_meta.current_event is not None:
+        if req_meta.current_event is not None:
             req_meta.current_event.synchronize()
         logger.debug(
             "KV pool worker tp_mismatch put req=%s keys=%d sample_keys=%s",
@@ -1779,7 +1766,7 @@ class KVPoolWorker(BaseKVPoolWorker):
             len(missing_keys),
             missing_keys[:3],
         )
-        put_result = self.m_store.put(missing_keys, missing_addrs, missing_sizes) if missing_keys else []
+        put_result = self.m_store.put(missing_keys, missing_addrs, missing_sizes)
         if isinstance(put_result, list):
             if len(put_result) != len(missing_keys):
                 logger.error(
@@ -1807,6 +1794,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                     )
                 )
             }
+            stored_events: list[BlockStored] = []
             group_hashes = get_block_hashes(
                 req_meta.block_hashes,
                 self.block_size,
@@ -1825,16 +1813,7 @@ class KVPoolWorker(BaseKVPoolWorker):
             for relative_idx, (start, end, _base_key, _hash, _block_id) in enumerate(
                 chunk for chunk in store_chunks if chunk[1] > save_start_token
             ):
-                block_begin = relative_idx * physical_keys_per_block
-                block_end = min(block_begin + physical_keys_per_block, len(keys))
-                completed_keys = frozenset(
-                    keys[index]
-                    for index in range(block_begin, block_end)
-                    if exists_states[index] or index in successful_missing_indices
-                )
-                if not completed_keys:
-                    continue
-                if send_thread.required_store_keys is None and relative_idx not in completed_block_indices:
+                if relative_idx not in completed_block_indices:
                     continue
                 block_idx = start // self.block_size
                 if block_idx >= len(group_hashes):
@@ -1842,9 +1821,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 block_hash = maybe_convert_block_hash(group_hashes[block_idx])
                 parent_hash = maybe_convert_block_hash(group_hashes[block_idx - 1]) if block_idx > 0 else None
                 token_ids = send_thread.get_event_token_ids(req_meta, start, end)
-                send_thread.record_cpu_store_event(
-                    req_meta,
-                    0,
+                stored_events.append(
                     BlockStored(
                         block_hashes=[block_hash],
                         parent_block_hash=parent_hash,
@@ -1853,12 +1830,10 @@ class KVPoolWorker(BaseKVPoolWorker):
                         lora_id=None,
                         medium="cpu",
                         lora_name=None,
-                        group_idx=0,
-                    ),
-                    _base_key,
-                    completed_keys,
-                    newly_stored=any(index in successful_missing_indices for index in range(block_begin, block_end)),
+                    )
                 )
+            if stored_events:
+                send_thread.update_kv_event(stored_events)
         if put_failed:
             qualifier = "partially " if isinstance(put_result, list) else ""
             logger.error("KV store backend %sfailed to put TP-mismatch request %s", qualifier, req_id)
