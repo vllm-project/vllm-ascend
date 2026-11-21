@@ -7,6 +7,10 @@ them. Re-export new feature handlers here so the YAML reference
 ``vllm_ascend.observability.ms_metrics.handlers:function_name`` stays stable.
 """
 
+from vllm_ascend.observability.ms_metrics.handlers.acl_graph import (
+    graph_pw_replay_handler,
+    graph_replay_handler,
+)
 from vllm_ascend.observability.ms_metrics.handlers.eplb import eplb_do_update_hotness_handler
 from vllm_ascend.observability.ms_metrics.handlers.runtime_guard import (
     runtime_guard_handle_alert_handler,
@@ -15,6 +19,8 @@ from vllm_ascend.observability.ms_metrics.handlers.schedule_execute import sampl
 
 __all__ = [
     "eplb_do_update_hotness_handler",
+    "graph_pw_replay_handler",
+    "graph_replay_handler",
     "runtime_guard_handle_alert_handler",
     "sample_tokens_handler",
 ]

@@ -80,6 +80,7 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert provider.handler_module_prefixes == ("vllm_ascend.observability.ms_metrics.",)
     assert provider.config_paths == tuple(sorted(provider.config_paths))
     assert [Path(path).name for path in provider.config_paths] == [
+        "acl_graph_metrics.yaml",
         "base_metrics.yaml",
         "eplb_metrics.yaml",
         "runtime_guard_metrics.yaml",
@@ -87,7 +88,7 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     ]
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
-    assert len(config) == 13
+    assert len(config) == 15
     assert all(item["symbol"].startswith("vllm_ascend.") for item in config)
     assert all("id" not in item for item in config)
     assert all(
@@ -151,6 +152,7 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
         "vllm_ascend.observability.ms_metrics.provider",
         "vllm_ascend.observability.ms_metrics.handlers",
         "vllm_ascend.observability.ms_metrics.handlers.common",
+        "vllm_ascend.observability.ms_metrics.handlers.acl_graph",
         "vllm_ascend.observability.ms_metrics.handlers.eplb",
         "vllm_ascend.observability.ms_metrics.handlers.runtime_guard",
         "vllm_ascend.observability.ms_metrics.handlers.schedule_execute",
@@ -171,7 +173,7 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
 
 def test_provider_yaml_symbols_exist_in_current_vllm_ascend_source():
     config_paths = sorted((_PACKAGE_ROOT / "config").glob("*.yaml"))
-    assert len(config_paths) == 4
+    assert len(config_paths) == 5
     config = _load_all_provider_configs(config_paths)
 
     for item in config:
@@ -455,6 +457,31 @@ def test_symbol_hook_handlers_honor_level_and_labels(monkeypatch):
     common.set_metric_level("basic")
 
     assert handlers.sample_tokens_handler(lambda runner, grammar: "sampled", object(), None) == "sampled"
+    metrics.record_metric.assert_not_called()
+
+
+def test_graph_replay_handler_records_duration_ms(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_acl_graph_replay", "acl_graph")
+    sys.modules[_COMMON_MODULE].set_metric_level("detail")
+
+    assert handlers.graph_replay_handler(lambda manager, model: "replayed", object(), None) == "replayed"
+    assert metrics.record_metric.call_args.args[0] == "graph:replay:duration_ms"
+    assert metrics.record_metric.call_args.kwargs["labels"] == {"mode": "full"}
+    assert handlers.graph_pw_replay_handler(lambda manager, model: "replayed", object(), None) == "replayed"
+    assert metrics.record_metric.call_args.args[0] == "graph:replay:duration_ms"
+    assert metrics.record_metric.call_args.kwargs["labels"] == {"mode": "piecewise"}
+
+    metrics.reset_mock()
+    sys.modules[_COMMON_MODULE].set_metric_level("basic")
+    handlers.graph_replay_handler(lambda manager, model: "replayed", object(), None)
+    handlers.graph_pw_replay_handler(lambda manager, model: "replayed", object(), None)
     metrics.record_metric.assert_not_called()
 
 

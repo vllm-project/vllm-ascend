@@ -1,0 +1,11 @@
+# Release note fragment. See release_notes/README.md.
+pr: 22058
+entries:
+  - category: feature
+    text: >
+      Add the graph:replay:duration_ms histogram (detail level) timing V2
+      ACL graph replay per step, with a mode label distinguishing FULL
+      (ModelAclGraphManager.run_fullgraph) and PIECEWISE
+      (ModelAclGraphManager.run_pw_graph) replays, so PIECEWISE-only and
+      mixed-mode deployments are covered too. Capture-side metrics are not
+      instrumented.
