@@ -148,6 +148,13 @@ class Compressor(nn.Module):
         # The custom compressor op consumes ND weights directly.
         self.wkv.skip_weight_nz_conversion = True
         self.wgate.skip_weight_nz_conversion = True
+        compressor_lora_reason = (
+            "LoRA on DeepSeek-V4 fused Compressor projections (wkv/wgate) is not supported "
+            "because the custom compressor op reads base weights directly. "
+            "Drop compressor.wkv and compressor.wgate from the adapter."
+        )
+        self.wkv._ascend_lora_unsupported_reason = compressor_lora_reason
+        self.wgate._ascend_lora_unsupported_reason = compressor_lora_reason
 
         # The DSV4 compressor kernel only accepts FP32 norm_weight.
         self.norm = RMSNorm(self.head_dim, config.rms_norm_eps, dtype=torch.float32)
