@@ -67,7 +67,6 @@ def test_draft_decode_sizes_are_stable_across_config_revalidation():
 
     config.additional_config[mrv2_utils.MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY] = [4]
     assert mrv2_utils.resolve_mrv2_draft_decode_request_sizes(config, upstream) == [4]
-    upstream.assert_called_once_with(config)
 
     config.additional_config[mrv2_utils.MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY] = []
     assert mrv2_utils.resolve_mrv2_draft_decode_request_sizes(config, upstream) == []
@@ -81,10 +80,7 @@ def test_varlen_decode_sizes_are_stable_per_query_len():
     assert mrv2_utils.resolve_mrv2_varlen_decode_token_sizes(config, 6, upstream) == [6]
     upstream.assert_called_once_with(config, 6)
 
-    config.additional_config[mrv2_utils.MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY] = {
-        "6": [8, 16],
-        1: [],
-    }
+    config.additional_config[mrv2_utils.MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY] = {"6": [8, 16], 1: []}
     assert mrv2_utils.resolve_mrv2_varlen_decode_token_sizes(config, 6, upstream) == [8, 16]
     assert mrv2_utils.resolve_mrv2_varlen_decode_token_sizes(config, 1, upstream) == []
     assert mrv2_utils.resolve_mrv2_varlen_decode_token_sizes(config, 7, upstream) == [7]

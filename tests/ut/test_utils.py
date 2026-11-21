@@ -131,7 +131,6 @@ class TestUtils(TestBase):
         decode_sizes=(),
         additional_config=None,
     ):
-        query_len = next(iter(query_limits))
         return SimpleNamespace(
             scheduler_config=SimpleNamespace(
                 max_num_batched_tokens=max_tokens,
@@ -144,7 +143,7 @@ class TestUtils(TestBase):
                 prefill_cudagraph_capture_token_sizes=list(prefill_sizes),
                 decode_cudagraph_capture_request_sizes=list(decode_sizes),
             ),
-            uniform_decode_query_len=query_len,
+            uniform_decode_query_len=next(iter(query_limits)),
             get_decode_cudagraph_query_lens=lambda _query_len: query_limits,
             additional_config=additional_config or {},
         )
@@ -350,7 +349,6 @@ class TestUtils(TestBase):
         config = SimpleNamespace(
             uniform_decode_query_len=4,
             get_decode_cudagraph_query_lens=resolver,
-            scheduler_config=SimpleNamespace(max_num_seqs=16),
         )
 
         self.assertEqual(utils.get_mrv2_decode_query_limits(config), {3: 8, 5: 16})
