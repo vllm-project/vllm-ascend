@@ -49,9 +49,8 @@ def test_host_lookup_chunk_boundary_and_graph(width, mxfp8):
     device = torch.device("npu", torch.npu.current_device())
     owner = torch.nn.Module()
     codes = HostUvaBuffer((rows, width), method.weight_dtype, device, "codes", owner)
-    scales = None
     try:
-        scales = HostUvaBuffer((rows, width // 32), method.scale_dtype, device, "scales", owner)
+        scales = torch.empty((rows, width // 32), dtype=method.scale_dtype, device=device)
         selected = [0, 1, CHUNK_ROWS, CHUNK_ROWS + 1]
         values = torch.arange(4 * width).reshape(4, width).remainder(15).sub(7).to(method.weight_dtype)
         exponents = torch.arange(width // 32, dtype=torch.uint8).add(124).expand(4, -1).clone()
@@ -65,7 +64,7 @@ def test_host_lookup_chunk_boundary_and_graph(width, mxfp8):
             decoded[0, 0] = 0
         for index, row in enumerate(selected):
             codes.tensor[row].copy_(values[index])
-            scales.tensor[row].copy_(exponents[index] if mxfp8 else decoded[index])
+            scales[row].copy_(exponents[index] if mxfp8 else decoded[index])
         start = 37
         local_ids = torch.tensor([*selected, -1, rows])
         ids = (local_ids + start).to(device)
@@ -74,7 +73,7 @@ def test_host_lookup_chunk_boundary_and_graph(width, mxfp8):
         expected = torch.cat((expected, torch.zeros((2, width), dtype=torch.bfloat16)))
 
         def lookup():
-            lookup_quantized(codes.ptrs, scales.ptrs, ids, output, start, start + rows, CHUNK_ROWS, is_mxfp8=mxfp8)
+            lookup_quantized(codes.ptrs, scales, ids, output, start, start + rows, CHUNK_ROWS, is_mxfp8=mxfp8)
 
         lookup()
         torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0, equal_nan=True)
@@ -87,11 +86,9 @@ def test_host_lookup_chunk_boundary_and_graph(width, mxfp8):
         # Graphs retain device pointers into the host buffers.
         del graph
         empty = torch.empty((0, width), dtype=torch.bfloat16, device=device)
-        lookup_quantized(codes.ptrs, scales.ptrs, ids[:0], empty, start, start + rows, CHUNK_ROWS, is_mxfp8=mxfp8)
+        lookup_quantized(codes.ptrs, scales, ids[:0], empty, start, start + rows, CHUNK_ROWS, is_mxfp8=mxfp8)
     finally:
         torch.npu.synchronize()
-        if scales is not None:
-            scales.close()
         codes.close()
 
 
