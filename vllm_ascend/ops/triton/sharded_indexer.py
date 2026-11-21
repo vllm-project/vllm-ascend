@@ -246,6 +246,11 @@ def _merge_owner_prefix(
         peer_id = tl.load(packed + (peer_rank * ROWS + row) * K * 2, head_mask, -1).to(tl.float32)
         peer_score = tl.load(packed + (peer_rank * ROWS + row) * K * 2 + 1, head_mask, 0).to(tl.float32, bitcast=True)
         peer_valid = (peer_id >= 0) & (tl.abs(peer_score) < float("inf"))
+        if WORLD <= 24:
+            # A sorted peer with an invalid head has no valid candidates.
+            # Pack the active peers once per row, with an exact FP32 sum.
+            peer_bits = tl.where(peer_valid, 1 << ranks, 0)
+            active_peers = tl.sum(peer_bits.to(tl.float32), 0).to(tl.int32)
         before_tail = peer_valid & ((peer_score > tail_score) | ((peer_score == tail_score) & (peer_id < tail_id)))
         # If even the worst own candidate precedes every peer head, all own
         # valid entries are winners. Other rows search their exact cutoff.
@@ -264,7 +269,10 @@ def _merge_owner_prefix(
             pivot_valid = (pivot_id >= 0) & (tl.abs(pivot_score) < float("inf"))
             count = pivot.to(tl.float32)
             for rank in range(WORLD):
-                if rank != OWNER:
+                visit_peer = rank != OWNER
+                if WORLD <= 24:
+                    visit_peer = (active_peers & (1 << rank)) != 0
+                if visit_peer:
                     start = tl.full((), 0, tl.int32)
                     amount = tl.full((), TILE, tl.float32)
                     # Sorted peers cannot have a better candidate after
