@@ -42,6 +42,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for Ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
+| `mm_global_cache_config`            | dict | `{}`    | Process-shared disk cache for multimodal encoder outputs. See <a href="#mm_global_cache_config">mm_global_cache_config</a>. |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or UT/E2E test case. |
 | `runtime_config_path`               | str  | `None`  | Path to Runtime Guard JSON config. Default: `<cwd>/runtime/config/runtime_config.json`. See [Runtime Guard](../feature_guide/runtime_guard.md). |
@@ -143,6 +144,22 @@ Both warmups run on a background thread during weight loading. The worker waits 
 | ---- | ---- | ------- | ----------- |
 | `enable_early_kernel_warmup` | bool | `False` | Compile the rejection sampler, penalty, and RMS norm Triton warmup kernels while weights load, so the regular kernel warmup hits the Triton cache. |
 | `enable_early_nz_warmup` | bool | `False` | Pay the one-time lazy initialization of the first NZ format cast while weights load. Independent of the quantization scheme. |
+
+<span id="mm_global_cache_config"></span>**mm_global_cache_config**
+
+Opt-in disk cache for multimodal encoder (ViT) outputs. When `cache_dir` is set, encoded image/video embeddings are stored there keyed by the item hash and reused by later requests and by independent vLLM processes sharing the same directory. The cache is namespaced by model identity, precision, quantization, multimodal TP mode, and TP size, so one directory can be shared safely across models. Cache-hit decisions are agreed across tensor-parallel ranks: an item is skipped only when every rank finds it.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `cache_dir` | str | `None` | Absolute path of the shared cache directory. `null` (default) disables the cache. |
+| `capacity_gb` | int | `16` | Soft upper bound on the cache size in GiB. Least-recently used entries are evicted when the directory exceeds this size. |
+
+Example:
+
+```bash
+vllm serve Qwen/Qwen3-VL-8B-Instruct \
+  --additional-config '{"mm_global_cache_config": {"cache_dir": "/shared/vllm-mm-cache", "capacity_gb": 32}}'
+```
 
 **eplb_config**
 

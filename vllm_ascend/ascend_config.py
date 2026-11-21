@@ -506,6 +506,27 @@ class SharedEngramConfig:
 
 
 @config(config=ConfigDict(frozen=True))
+class MMGlobalCacheConfig:
+    """Configuration for the process-shared multimodal embedding cache."""
+
+    cache_dir: str | None = None
+    capacity_gb: int = Field(default=16, gt=0)
+
+    @field_validator("cache_dir")
+    @classmethod
+    def _normalize_cache_dir(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            return None
+        return value
+
+    @model_validator(mode="after")
+    def _validate(self):
+        if self.cache_dir is not None and not os.path.isabs(os.path.expanduser(self.cache_dir)):
+            raise ValueError("mm_global_cache_config.cache_dir must be an absolute path")
+        return self
+
+
+@config(config=ConfigDict(frozen=True))
 class ExpertOffloadConfig:
     """Configuration for exact single-worker expert offload."""
 
@@ -589,6 +610,10 @@ class AscendConfig:
             "ascend_warmup_config": {
                 "enable_early_kernel_warmup": false,
                 "enable_early_nz_warmup": false
+            },
+            "mm_global_cache_config": {
+                "cache_dir": null,
+                "capacity_gb": 16
             },
             "eplb_config": {
                 "dynamic_eplb": false,
@@ -754,6 +779,7 @@ class AscendConfig:
     ascend_fusion_config: AscendFusionConfig = dataclasses.field(default_factory=AscendFusionConfig)
     ascend_warmup_config: AscendWarmupConfig = dataclasses.field(default_factory=AscendWarmupConfig)
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
+    mm_global_cache_config: MMGlobalCacheConfig = dataclasses.field(default_factory=MMGlobalCacheConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
     quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)

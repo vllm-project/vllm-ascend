@@ -41,6 +41,7 @@ from vllm_ascend.ascend_config import (
     EplbConfig,
     FinegrainedTPConfig,
     KVPPConfig,
+    MMGlobalCacheConfig,
     QuantizedAllReduceConfig,
     RejectionSamplerConfig,
     RlConfig,
@@ -117,6 +118,25 @@ def test_config_modules_do_not_load_vllm_config():
         "assert 'vllm.config' not in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+class TestMMGlobalCacheConfig(TestBase):
+    def test_defaults_and_validation(self):
+        defaults = MMGlobalCacheConfig()
+        self.assertIsNone(defaults.cache_dir)
+        self.assertEqual(defaults.capacity_gb, 16)
+
+        configured = MMGlobalCacheConfig(cache_dir="/tmp/mm-cache", capacity_gb=4)
+        self.assertEqual(configured.cache_dir, "/tmp/mm-cache")
+        self.assertEqual(configured.capacity_gb, 4)
+
+        self.assertIsNone(MMGlobalCacheConfig(cache_dir="  ").cache_dir)
+        with self.assertRaises(ValueError):
+            MMGlobalCacheConfig(cache_dir="relative/cache")
+        with self.assertRaises(ValueError):
+            MMGlobalCacheConfig(capacity_gb=0)
+        with self.assertRaises(ValueError):
+            MMGlobalCacheConfig(unexpected=True)
 
 
 class TestRlConfig(TestBase):
