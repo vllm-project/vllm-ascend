@@ -33,6 +33,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.distributed.utils import get_distributed_timeout_or_none
 from vllm.logger import logger
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.offloader.base import set_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
@@ -701,6 +702,14 @@ class NPUModelRunner(GPUModelRunner):
         for layer_name in manager.offload_layer_names:
             layer = self.compilation_config.static_forward_context[layer_name]
             layer.impl.bind_copy_sfa_kv_cache(manager, layer_name)
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        added = super().add_lora(lora_request)
+        if added and getattr(self, "lora_manager", None) is not None:
+            from vllm_ascend.lora.utils import warn_unmatched_lora_modules
+
+            warn_unmatched_lora_modules(self.lora_manager, lora_request)
+        return added
 
     @torch.inference_mode()
     def capture_model(self, *, profile_only: bool = False) -> int:

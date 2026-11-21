@@ -23,6 +23,29 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.quantization.quant_type import QuantType
+
+
+def _empty_quant_moe_output(mlp_compute_input: MoEMlpComputeInput, quant_method) -> torch.Tensor:
+    hidden_states = mlp_compute_input.hidden_states
+    if hidden_states.is_floating_point():
+        return hidden_states
+    if mlp_compute_input.quant.quant_type == QuantType.W4A8:
+        out_dtype = torch.bfloat16
+    else:
+        out_dtype = torch.bfloat16
+        weights = None
+        if quant_method is not None and mlp_compute_input.layer is not None:
+            get_mlp_weights = getattr(quant_method, "get_mlp_weights", None)
+            if callable(get_mlp_weights):
+                weights = get_mlp_weights(mlp_compute_input.layer)
+        if weights is None:
+            weights = mlp_compute_input.weights
+        w2_scale = getattr(weights, "w2_scale", None)
+        scale_tensor = w2_scale[0] if isinstance(w2_scale, (list, tuple)) and w2_scale else w2_scale
+        if isinstance(scale_tensor, torch.Tensor) and scale_tensor.is_floating_point():
+            out_dtype = scale_tensor.dtype
+    return hidden_states.new_empty(hidden_states.shape, dtype=out_dtype)
 
 
 def maybe_record_event() -> torch.npu.Event | None:
@@ -56,18 +79,29 @@ def apply_moe_mlp(
     """
 
     # When LoRA adapter is used in quantized weight, use individual lora impl.
+    use_unfused_for_lora = False
     if mlp_compute_input.quant.is_quant and mlp_compute_input.lora_context is not None:
-        from vllm_ascend.lora.fused_moe import has_lora
+        from vllm_ascend.lora.fused_moe import (
+            has_moe_lora,
+            should_use_unfused_quant_moe_for_lora,
+        )
 
-        if has_lora(mlp_compute_input.lora_context):
+        if has_moe_lora(mlp_compute_input.lora_context):
             from vllm_ascend.lora.quant_moe import quant_apply_mlp_with_moe_lora
 
             return quant_apply_mlp_with_moe_lora(
                 mlp_compute_input=mlp_compute_input,
                 quant_method=quant_method,
             )
+        use_unfused_for_lora = should_use_unfused_quant_moe_for_lora(
+            mlp_compute_input.lora_context,
+            mlp_compute_input.quant.quant_type,
+        )
 
-    if quant_method.supports_fused_activation(mlp_compute_input.activation):
+    if use_unfused_for_lora and mlp_compute_input.hidden_states.shape[0] == 0:
+        return _empty_quant_moe_output(mlp_compute_input, quant_method), maybe_record_event()
+
+    if not use_unfused_for_lora and quant_method.supports_fused_activation(mlp_compute_input.activation):
         hidden_states, act_out_scale = quant_method.apply_gmm1_act_quant(mlp_compute_input)
     else:
         hidden_states = quant_method.apply_gmm1(mlp_compute_input)

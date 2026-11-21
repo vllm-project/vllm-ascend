@@ -429,6 +429,38 @@ def test_setup_compile_backend_keeps_static_kernel_flags_under_piecewise(mode):
     assert ascend_cfg["enable_super_kernel"] is True
 
 
+def test_setup_compile_backend_accepts_resolved_breakable_cudagraph_config(monkeypatch):
+    """Accept breakable cudagraph enabled on CompilationConfig even when the env var is unset."""
+    monkeypatch.setattr("vllm_ascend.platform.envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH", False)
+    compilation_config = SimpleNamespace(
+        mode=CompilationMode.NONE,
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        use_breakable_cudagraph=True,
+        splitting_ops=[],
+        cudagraph_capture_sizes=[8, 16],
+        set_splitting_ops_for_v1=lambda **kwargs: None,
+    )
+    config = SimpleNamespace(
+        compilation_config=compilation_config,
+        additional_config={"ascend_compilation_config": {}},
+        model_config=SimpleNamespace(enforce_eager=False),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+            all2all_backend="allgather_reducescatter",
+            use_sequence_parallel_moe=False,
+        ),
+        _set_cudagraph_sizes=lambda: None,
+    )
+
+    _setup_compile_backend(config, compile_backend="test_backend")
+    assert "vllm::dsa_forward" in compilation_config.splitting_ops
+
+    compilation_config.use_breakable_cudagraph = False
+    with pytest.raises(AssertionError, match="CompilationMode.VLLM_COMPILE"):
+        _setup_compile_backend(config, compile_backend="test_backend")
+
+
 def test_setup_compile_backend_disables_static_kernel_flags_without_cudagraph():
     """Without cudagraphs there is no capture context, so the static/super
     kernel flags must be force-disabled."""
