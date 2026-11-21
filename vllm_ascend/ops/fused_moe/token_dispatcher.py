@@ -50,7 +50,11 @@ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
 )
 from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
+from vllm_ascend.quantization.utils import (
+    DynamicMXQuantScaleAlg,
+    get_dynamic_mx_quant_scale_alg,
+    get_mc2_dynamic_mx_quant_scale_alg,
+)
 from vllm_ascend.utils import requires_lmhead_dp_sync, should_skip_allreduce_across_dp_group
 
 EXPERT_TOKEN_NUMS_TYPE_CUMSUM = 0
@@ -128,7 +132,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
         vllm_config = get_current_vllm_config()
-        self.dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
+        self.dynamic_mx_quant_scale_alg = get_mc2_dynamic_mx_quant_scale_alg(vllm_config)
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         num_tokens_per_tp_rank = mc2_tokens_capacity // tp_size
