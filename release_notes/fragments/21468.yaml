@@ -1,0 +1,4 @@
+pr: 21468
+entries:
+  - category: performance
+    text: Skipped redundant outer attention write-back when the base backend already returns the caller-provided output tensor, preserving copies for replacement and padded outputs.
