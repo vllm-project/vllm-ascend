@@ -246,6 +246,10 @@ a3:
         config_file_path: GLM-5.3-Flash-W8A8-1M-1P1D.yaml
         config_base_path: tests/SIT/cases/models/configs/GLM
         size: 2
+      - name: GLM-5.2-W8A8C8-A3-PP-Mooncake
+        config_file_path: GLM-5.2-W8A8C8-A3-PP-Mooncake.yaml
+        config_base_path: tests/SIT/cases/models/configs/GLM
+        size: 2
   single_node:
     test_config:
       # pytest-driven tests
