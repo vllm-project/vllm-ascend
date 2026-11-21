@@ -58,7 +58,7 @@ def _configured_upstream_policy(name: str, policy: AbstractEplbPolicy | None) ->
     if policy is None or name in policies:
         yield
         return
-    policies[name] = policy
+    policies[name] = (lambda: policy) if hasattr(_eplb_state.EplbState, "create_policy") else policy
     try:
         yield
     finally:
@@ -275,8 +275,8 @@ class AscendEplbState(_eplb_state.EplbState):
         device: torch.device,
         policy: AbstractEplbPolicy | None = None,
     ) -> None:
-        super().__init__(parallel_config, device)
         self._configured_policy = policy
+        super().__init__(parallel_config, device)
         if policy is not None:
             self.policy = policy
         self._has_fresh_recorded_load = False
@@ -293,6 +293,11 @@ class AscendEplbState(_eplb_state.EplbState):
         # pointing at the attribute upstream actually reads.
         if self.device_index is None:
             self.device_index = torch.accelerator.current_device_index()
+
+    def create_policy(self) -> AbstractEplbPolicy:
+        if self._configured_policy is not None:
+            return self._configured_policy
+        return super().create_policy()
 
     @property
     def uses_custom_load_stats(self) -> bool:

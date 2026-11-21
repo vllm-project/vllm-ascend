@@ -183,16 +183,15 @@
 # ** 7. File: platform/patch_eplb.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.parallel.current_platform`
-#   2. `vllm.distributed.eplb.eplb_state._move_to_workspace`
+#   2. `vllm.distributed.eplb.eplb_state` workspace move hook
 #    Why:
 #       Upstream EPLB owns the Model Runner V2 control plane, but its platform
 #       capability check excludes NPU. Its async workspace move also has no
 #       downstream callback after a per-layer map commit.
 #    How:
-#       Expose EPLB capability only inside vllm.config.parallel and refresh the
-#       Ascend lookup after an async layer commit. Router behavior and load
-#       scope are owned by downstream instances rather than patched upstream
-#       classes; upstream torch.distributed communication runs over HCCL.
+#       Use native platform configuration when available and preserve the legacy
+#       config shim for older vLLM. Refresh Ascend routing after commits through
+#       either the per-model state hook or the legacy workspace function.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/49700
 #    Related RFC:
