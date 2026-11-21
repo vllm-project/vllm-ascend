@@ -1773,3 +1773,13 @@
 #       Merged upstream: https://github.com/vllm-project/vllm/pull/63165
 #    Future Plan:
 #       Remove once the supported vLLM version includes upstream PR #63165.
+
+# ** File: platform/patch_anthropic_min_tokens.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Target: AnthropicMessagesRequest and AnthropicServingMessages._build_base_request.
+# Why: release pins silently ignore min_tokens on /v1/messages.
+# How: extend the existing request schema in place and forward min_tokens through
+# the original converter. Count-token requests retain their original behavior.
+# Related PR: https://github.com/vllm-project/vllm/pull/65459
+# Future Plan: remove when all supported vLLM pins contain #65459 (v0.34.0+).
+# Native support is left untouched; the patch adds no device work or weights.
