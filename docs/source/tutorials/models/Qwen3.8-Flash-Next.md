@@ -154,6 +154,8 @@ Select the image for your target hardware.
       -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
       -v /etc/hixlep:/etc/hixlep \
+      -v /lib/route.conf:/lib/route.conf \
+      -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
