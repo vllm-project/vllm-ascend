@@ -587,7 +587,16 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                         break
 
                     if self.policy == SchedulingPolicy.PRIORITY:
-                        self.running.remove(preempted_req)
+                        # Record the index of the preemption victim to
+                        # maintain accurate loop state.
+                        victim_index = self.running.index(preempted_req)
+                        del self.running[victim_index]
+                        # Decrement the loop cursor if the removed request
+                        # preceded the current iteration, preventing the
+                        # silent omission of the subsequent request.
+                        if victim_index < req_index:
+                            req_index -= 1
+
                         if preempted_req in scheduled_running_reqs:
                             preempted_req_id = preempted_req.request_id
                             scheduled_running_reqs.remove(preempted_req)
@@ -604,7 +613,6 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                                 encoder_compute_budget += num_embeds_to_restore
                                 if iteration_details is not None:
                                     num_scheduled_encoder_inputs -= len(preempted_encoder_inputs)
-                            req_index -= 1
                     else:
                         preempted_req = self.running.pop()
 
