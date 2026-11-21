@@ -154,6 +154,42 @@ def test_unconfirmed_batch_drains_store_before_returning_and_blocks_reuse(regist
     assert sdk.batch_get_into_multi_buffers.call_count == sdk.batch_put_from_multi_buffers.call_count == 1
 
 
+def test_forward_after_timeout_preserves_failed_receipt_without_reinitializing_store(monkeypatch):
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
+
+    monkeypatch.setattr(mooncake_staging, "_HOST_STAGING_BYTES", 16)
+    backend = MooncakeBackend.__new__(MooncakeBackend)
+    sdk = Mock()
+    sdk.close.return_value = 0
+    sdk.batch_get_into_multi_buffers.return_value = [-800]
+    backend.store = sdk
+    backend._store_initialized = True
+    setup_store = Mock(side_effect=AssertionError("a retired Store must not be reopened"))
+    monkeypatch.setattr(backend, "_setup_store", setup_store)
+    staging = mooncake_staging.MooncakeHostStaging(sdk, backend._close_store)
+    backend._host_staging = staging
+    device = ctypes.create_string_buffer(8)
+    connector = Mock()
+    connector.connector_worker.m_store = backend
+    connector.connector_worker.get_finished.return_value = (set(), set())
+    connector.connector_worker.get_failed_requests.side_effect = [{"failed"}, set()]
+    try:
+        with pytest.raises(RuntimeError, match="completion unconfirmed"):
+            staging.get(["page"], [[ctypes.addressof(device)]], [[8]], memory_location=MemoryLocation.DEVICE)
+        assert backend.store is None
+        connector.get_finished.side_effect = lambda ids: AscendStoreConnector.get_finished(connector, ids)
+        for failed in ({"failed"}, set()):
+            connector._current_step_has_real_forward = True
+            result = AscendStoreConnector.get_transfer_results(connector, set())
+            assert result.failed_recving == failed
+            assert backend.exists(["new-page"]) == [0]
+        setup_store.assert_not_called()
+        sdk.close.assert_called_once_with()
+    finally:
+        staging.close()
+
+
 def test_missing_object_does_not_disable_store(registered):
     bulk, sdk, host, _ = registered
     sdk.batch_get_into_multi_buffers.return_value = [-704]

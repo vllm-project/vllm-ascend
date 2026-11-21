@@ -165,6 +165,26 @@ class TestNPUWorker(TestBase):
                         ascend_init.assert_called_once_with(worker.parallel_config, engram_config)
                     self.assertIs(get_current_vllm_config(), config)
 
+    def test_hisparse_shared_slab_alignment_budget(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import DEVICE_BUFFER_ALIGNMENT
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.vllm_config = SimpleNamespace(
+            attention_config=SimpleNamespace(hisparse_config=object()), kv_transfer_config=None
+        )
+        budget = 3 * DEVICE_BUFFER_ALIGNMENT
+        scale = worker._scale_kv_cache_memory_for_multi_group
+        self.assertEqual(scale(budget), budget)
+        transfer = MagicMock()
+        worker.vllm_config.kv_transfer_config = transfer
+        transfer.has_connector.return_value = False
+        self.assertEqual(scale(budget), budget)
+        transfer.has_connector.return_value = True
+        self.assertEqual(scale(budget), budget - DEVICE_BUFFER_ALIGNMENT + 1)
+        self.assertEqual(scale(256), 0)
+        transfer.has_connector.assert_called_with("AscendStoreConnector")
+
     def test_deepseek_v4_shared_tuple_layout_does_not_scale_budget(self):
         from vllm_ascend.worker.worker import NPUWorker
 

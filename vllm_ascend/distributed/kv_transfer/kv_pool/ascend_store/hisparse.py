@@ -13,6 +13,7 @@ from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Any
 
 import torch
+from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import AlignedKVCacheTensor
@@ -25,7 +26,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
 
-_HISPARSE_CACHE_NAMESPACE = "hisparse-v4"
+_HISPARSE_CACHE_NAMESPACE = "hisparse-v5"
 _HF_CONFIG_METADATA = frozenset({"_name_or_path", "transformers_version"})
 
 
@@ -44,22 +45,14 @@ def is_hisparse_ascendstore_enabled(vllm_config: Any, config: KVCacheConfig | No
     return has_hisparse_cache_layout(config) and transfer is not None and transfer.has_connector("AscendStoreConnector")
 
 
-def validate_hisparse_decode_config(vllm_config: VllmConfig, *, save_decode_cache: bool) -> None:
-    """Ensure decoded KV is mirrored to Host before it can be published."""
-    if not save_decode_cache:
-        return
-    # A newly decoded row can still be Resident-only when a block is published.
-    hisparse_config = vllm_config.attention_config.hisparse_config
-    if hisparse_config is None or not hisparse_config.eager_host_mirror:
-        raise ValueError("save_decode_cache=true requires eager_host_mirror=true")
-
-
 def _checkpoint_identity(model: ModelConfig) -> tuple[str, str | None, str | None, str, str | None]:
     # Core keeps the original URI in model_weights when downloading to a temporary directory.
     source = (model.model_weights or model.model).rstrip("/")
     if not model.model_weights and not os.path.isabs(source) and os.path.exists(source):
         source = os.path.abspath(source)
-    return source, model.revision, model.code_revision, str(model.dtype), model.quantization
+    # Hub revisions are strings such as "main" carrying the pinned commit in .resolved.
+    revision = getattr(model.revision, "resolved", model.revision)
+    return source, revision, model.code_revision, str(model.dtype), model.quantization
 
 
 def _without_hf_config_metadata(value: Any) -> Any:
@@ -70,14 +63,14 @@ def _without_hf_config_metadata(value: Any) -> Any:
     return value
 
 
-def _model_cache_identity(model: ModelConfig) -> tuple[Any, ...]:
+def _model_cache_identity(model: ModelConfig, load_format: str) -> tuple[Any, ...]:
     # Read the loaded HF configs after overrides have been applied. Include the
     # text config separately because some models resolve it outside the root config.
     effective_configs = tuple(
         _without_hf_config_metadata(config.to_dict()) if config is not None else None
         for config in (getattr(model, "hf_config", None), getattr(model, "hf_text_config", None))
     )
-    return _checkpoint_identity(model), effective_configs
+    return _checkpoint_identity(model), effective_configs, load_format == "dummy"
 
 
 def build_pool_key_namespace(
@@ -91,8 +84,8 @@ def build_pool_key_namespace(
     speculative = vllm_config.speculative_config
     draft = speculative.draft_model_config if speculative is not None else None
     identity = (
-        _model_cache_identity(model),
-        _model_cache_identity(draft) if draft is not None else None,
+        _model_cache_identity(model, vllm_config.load_config.load_format),
+        _model_cache_identity(draft, get_draft_load_config(vllm_config).load_format) if draft is not None else None,
         _hisparse_page_geometry(config, dcp_size, granularity),
     )
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:24]

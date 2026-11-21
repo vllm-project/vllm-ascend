@@ -120,15 +120,18 @@ To use MemCache instead, set `backend` to `memcache` and use the
 `host_tcp` protocol in its local configuration. Keep `load_async=true` on
 either backend. This combination does not support external PD transport,
 layerwise transfer, or Mooncake FabricMem or SSD modes.
-If you enable `save_decode_cache`, keep `eager_host_mirror=true` so each
-completed Decode block reaches Host memory before AscendStore saves it.
+Use exactly one HiSparseConnector and one AscendStoreConnector, with
+`prefill_context_parallel_size=1`. Set `eager_host_mirror=true` even for
+Prefill-only saves. A single-token chunk can follow the Decode path before
+a later Prefill chunk publishes the full block from Host memory.
 With `kv_load_failure_policy=recompute`, a failed external import resumes
 from local compute and skips further external lookups for that request.
 
-Pool keys use the `hisparse-v4` namespace and include the target and draft
-checkpoint identities, revisions, effective model configurations (including
+Pool keys use the `hisparse-v5` namespace and include the target and draft
+checkpoint identities, resolved revisions, dummy-weight mode, effective model configurations (including
 RoPE settings), and page layout. Upgrading from an earlier
-namespace starts with a cold pool. For local weights, use a versioned directory
+namespace starts with a cold pool. If the Hub revision resolver is unavailable,
+pin the checkpoint commit when sharing a persistent pool. For local weights, use a versioned directory
 when replacing a checkpoint in a persistent pool. Files overwritten in place
 keep the same model path.
 

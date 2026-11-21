@@ -29,10 +29,43 @@ def _hisparse_store_multi_config(*, with_hisparse=True, nnodes=1):
             kv_role="kv_both",
             kv_connector_extra_config={"connectors": children},
         ),
-        parallel_config=SimpleNamespace(nnodes=nnodes),
+        parallel_config=SimpleNamespace(nnodes=nnodes, prefill_context_parallel_size=1),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
         speculative_config=None,
     )
+
+
+@pytest.mark.parametrize("child", ["HiSparseConnector", "AscendStoreConnector", "MooncakeConnectorStoreV1"])
+def test_hisparse_rejects_duplicate_children_and_legacy_store_alias(child):
+    config = _hisparse_store_multi_config()
+    children = config.kv_transfer_config.kv_connector_extra_config["connectors"]
+    if child == "MooncakeConnectorStoreV1":
+        children.pop()
+    children.append({"kv_connector": child, "kv_role": "kv_both"})
+    with (
+        patch.object(MultiConnector, "__init__") as initialize_children,
+        pytest.raises(ValueError, match="AscendStoreConnector"),
+    ):
+        AscendMultiConnector(config, KVConnectorRole.SCHEDULER, None)
+    initialize_children.assert_not_called()
+
+
+def test_ordinary_store_alias_still_reaches_core():
+    config = _hisparse_store_multi_config(with_hisparse=False)
+    config.kv_transfer_config.kv_connector_extra_config["connectors"][0]["kv_connector"] = "MooncakeConnectorStoreV1"
+    with patch.object(MultiConnector, "__init__", lambda self, **_: setattr(self, "_connectors", [])):
+        AscendMultiConnector(config, KVConnectorRole.SCHEDULER, None)
+
+
+def test_hisparse_rejects_prefill_context_parallelism_before_constructing_children():
+    config = _hisparse_store_multi_config()
+    config.parallel_config.prefill_context_parallel_size = 2
+    with (
+        patch.object(MultiConnector, "__init__") as initialize_children,
+        pytest.raises(ValueError, match="prefill_context_parallel_size=1"),
+    ):
+        AscendMultiConnector(config, KVConnectorRole.SCHEDULER, None)
+    initialize_children.assert_not_called()
 
 
 @pytest.mark.parametrize("target", ["outer", "hisparse", "store"])

@@ -49,9 +49,19 @@ def _checkpoint(model, revision=None, *, model_weights=""):
     )
 
 
+def _key_config(target, draft=None):
+    return SimpleNamespace(
+        model_config=target,
+        speculative_config=SimpleNamespace(draft_model_config=draft, draft_load_config=None)
+        if draft is not None
+        else None,
+        load_config=SimpleNamespace(load_format="auto"),
+    )
+
+
 def test_hisparse_pool_keys_track_checkpoint_identity():
     cache = KVCacheConfig(2, [], [], hisparse_host_num_blocks=3)
-    config = SimpleNamespace(model_config=_checkpoint("team-a/glm", "v1"), speculative_config=None)
+    config = _key_config(_checkpoint("team-a/glm", "v1"))
 
     def key():
         return build_pool_key_namespace(config, cache, 1, 128)
@@ -68,11 +78,43 @@ def test_hisparse_pool_keys_track_checkpoint_identity():
     config.model_config.model = "/tmp/worker-2"
     config.model_config.served_model_name = "new-endpoint"
     assert key() == staged
-    config.speculative_config = SimpleNamespace(draft_model_config=_checkpoint("draft/glm", "v1"))
+    config.speculative_config = SimpleNamespace(
+        draft_model_config=_checkpoint("draft/glm", "v1"), draft_load_config=None
+    )
     with_draft = key()
     assert with_draft != staged
     config.speculative_config.draft_model_config.revision = "v2"
     assert key() != with_draft
+
+
+@pytest.mark.parametrize("model_role", ["target", "draft"])
+def test_pool_keys_use_resolved_hub_commit(model_role):
+    from huggingface_hub import ResolvedRevision
+
+    cache = KVCacheConfig(2, [], [], hisparse_host_num_blocks=3)
+    target, draft = _checkpoint("target"), _checkpoint("draft")
+    config = _key_config(target, draft)
+    checkpoint = target if model_role == "target" else draft
+    checkpoint.revision = ResolvedRevision("a" * 40, initial="main")
+    first = build_pool_key_namespace(config, cache, 1, 128)
+    checkpoint.revision = "a" * 40
+    assert build_pool_key_namespace(config, cache, 1, 128) == first
+    checkpoint.revision = ResolvedRevision("b" * 40, initial="main")
+    assert build_pool_key_namespace(config, cache, 1, 128) != first
+
+
+@pytest.mark.parametrize("model_role", ["target", "draft"])
+def test_dummy_weights_cannot_reuse_checkpoint_pool(model_role):
+    cache = KVCacheConfig(2, [], [], hisparse_host_num_blocks=3)
+    config = _key_config(_checkpoint("team/glm"), _checkpoint("team/draft"))
+    loader = config.load_config
+    if model_role == "draft":
+        config.speculative_config.draft_load_config = loader = SimpleNamespace(load_format="auto")
+    original = build_pool_key_namespace(config, cache, 1, 128)
+    loader.load_format = "safetensors"
+    assert build_pool_key_namespace(config, cache, 1, 128) == original
+    loader.load_format = "dummy"
+    assert build_pool_key_namespace(config, cache, 1, 128) != original
 
 
 @pytest.mark.parametrize("model_role", ["target", "draft"])
@@ -99,7 +141,7 @@ def test_hisparse_pool_keys_track_effective_model_config(model_role, config_attr
     cache = KVCacheConfig(2, [], [], hisparse_host_num_blocks=3)
     target = _checkpoint("team/glm")
     draft = _checkpoint("draft/glm")
-    config = SimpleNamespace(model_config=target, speculative_config=SimpleNamespace(draft_model_config=draft))
+    config = _key_config(target, draft)
     model = target if model_role == "target" else draft
     config_values = {field: original}
     setattr(model, config_attr, SimpleNamespace(to_dict=lambda: config_values))
@@ -114,7 +156,7 @@ def test_hisparse_pool_keys_track_effective_model_config(model_role, config_attr
 def test_hisparse_pool_keys_ignore_hf_config_metadata_and_field_order():
     cache = KVCacheConfig(2, [], [], hisparse_host_num_blocks=3)
     model = _checkpoint("team/glm")
-    config = SimpleNamespace(model_config=model, speculative_config=None)
+    config = _key_config(model)
     first_config = {
         "_name_or_path": "/tmp/worker-1",
         "text_config": {
@@ -148,7 +190,7 @@ def test_relative_checkpoint_keys_follow_the_local_directory(tmp_path, monkeypat
         model = parent / "weights"
         model.mkdir(parents=True)
         monkeypatch.chdir(parent)
-        config = SimpleNamespace(model_config=_checkpoint("./weights"), speculative_config=None)
+        config = _key_config(_checkpoint("./weights"))
         relative = build_pool_key_namespace(config, cache, 1, 128)
         config.model_config.model = str(model)
         assert build_pool_key_namespace(config, cache, 1, 128) == relative
@@ -212,6 +254,7 @@ def test_hisparse_groups_register_with_independent_host_blocks(
             hisparse_config=SimpleNamespace(device_buffer_size=256, eager_host_mirror=True),
         ),
         model_config=SimpleNamespace(hf_config=hf_text_config, hf_text_config=hf_text_config),
+        load_config=SimpleNamespace(load_format="auto"),
         speculative_config=None,
     )
     groups = get_hisparse_kv_cache_groups(config, {source_name: source_spec, indexer_name: indexer_spec})
@@ -527,6 +570,7 @@ def test_memcache_hisparse_get_fails_when_sdk_result_count_differs(memcache_back
 def test_hisparse_rejects_unsupported_store_mode(extra_config, kv_role):
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(),
+        attention_config=SimpleNamespace(hisparse_config=SimpleNamespace(eager_host_mirror=True)),
         kv_transfer_config=SimpleNamespace(kv_role=kv_role, kv_connector_extra_config=extra_config),
     )
     cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
@@ -538,6 +582,7 @@ def test_hisparse_rejects_unsupported_store_mode(extra_config, kv_role):
 def test_hisparse_requires_async_store_load(extra_config):
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(),
+        attention_config=SimpleNamespace(hisparse_config=SimpleNamespace(eager_host_mirror=True)),
         kv_transfer_config=SimpleNamespace(kv_role="kv_both", kv_connector_extra_config=extra_config),
     )
     cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
@@ -545,8 +590,8 @@ def test_hisparse_requires_async_store_load(extra_config):
         AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
 
 
-@pytest.mark.parametrize(("save_decode", "eager"), [(True, False), (False, False), (True, True)])
-def test_decode_put_requires_current_host_rows(save_decode, eager):
+@pytest.mark.parametrize(("save_decode", "eager"), [(True, False), (False, False), (True, True), (False, True)])
+def test_whole_block_put_requires_current_host_rows(save_decode, eager):
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(),
         attention_config=SimpleNamespace(hisparse_config=SimpleNamespace(eager_host_mirror=eager)),
@@ -563,8 +608,8 @@ def test_decode_put_requires_current_host_rows(save_decode, eager):
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_scheduler"
         ) as scheduler,
     ):
-        if save_decode and not eager:
-            with pytest.raises(ValueError, match="save_decode_cache=true requires eager_host_mirror=true"):
+        if not eager:
+            with pytest.raises(ValueError, match="requires eager_host_mirror=true"):
                 AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
             scheduler.assert_not_called()
         else:
@@ -580,6 +625,7 @@ def test_hisparse_reports_all_incompatible_bulk_store_options(monkeypatch, tmp_p
     monkeypatch.setenv("MMC_LOCAL_CONFIG_PATH", str(path))
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(),
+        attention_config=SimpleNamespace(hisparse_config=SimpleNamespace(eager_host_mirror=True)),
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_consumer",
             kv_connector_extra_config={"backend": "memcache", "use_layerwise": True, "load_async": False},
@@ -619,6 +665,7 @@ def test_bulk_store_protocol_is_scoped_to_hisparse(monkeypatch, tmp_path, has_hi
         monkeypatch.setenv("MMC_LOCAL_CONFIG_PATH", str(path))
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(),
+        attention_config=SimpleNamespace(hisparse_config=SimpleNamespace(eager_host_mirror=True)),
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_both",
             kv_connector="AscendStoreConnector",

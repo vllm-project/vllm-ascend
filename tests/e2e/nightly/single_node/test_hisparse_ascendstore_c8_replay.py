@@ -16,6 +16,7 @@ from tests.e2e.nightly.single_node.hisparse_ascendstore.replay_helpers import (
     EXTERNAL_GETS,
     EXTERNAL_HITS,
     LOCAL_HITS,
+    assert_external_replay,
     make_workloads,
     require_mtp3,
     reset_local_cache,
@@ -35,6 +36,7 @@ def serving_instance():
     assert config["attention_config"]["indexer_kv_dtype"] == "fp8"
     require_mtp3(config)
     transfer = config["kv_transfer_config"]
+    assert transfer["kv_load_failure_policy"] == "fail"
     assert transfer["kv_connector"] == "MultiConnector" and transfer["kv_role"] == "kv_both"
     children = transfer["kv_connector_extra_config"]["connectors"]
     assert {child["kv_connector"] for child in children} == {"HiSparseConnector", "AscendStoreConnector"}
@@ -72,8 +74,9 @@ def test_c8_external_replay_matches_warm_prefix(serving_instance, tmp_path, prom
         "external": external,
     }
     (tmp_path / "replay.json").write_text(json.dumps(evidence), encoding="utf-8")
-    assert external_counts[LOCAL_HITS] == 0
-    assert external_counts[EXTERNAL_HITS] > 0 and external_counts[EXTERNAL_GETS] > 0
+    assert_external_replay(warm, external, external_counts, prompt_length)
+    expected_cached_tokens = (prompt_length - 1) // 128 * 128
+    assert all(choice["cached_tokens"] == expected_cached_tokens for choice in external)
     assert warm_counts[DRAFTS] > 1 and external_counts[DRAFTS] > 1
     for expected, actual in zip(warm, external, strict=True):
         assert actual["token_ids"] == expected["token_ids"]

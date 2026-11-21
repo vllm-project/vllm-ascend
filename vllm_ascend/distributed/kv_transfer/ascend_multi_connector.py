@@ -29,6 +29,8 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         children = transfer.kv_connector_extra_config.get("connectors", ())
         names = {child.get("kv_connector") for child in children}
         colocated_pair = {"HiSparseConnector", "AscendStoreConnector"}
+        if "HiSparseConnector" in names and "MooncakeConnectorStoreV1" in names:
+            raise ValueError("Use AscendStoreConnector when combining the pool with HiSparseConnector.")
         if colocated_pair <= names:
             # Both children share the local Host Source and Indexer import path.
             # Reject other transfer topologies before creating any child.
@@ -41,6 +43,12 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
                 raise ValueError(
                     "HiSparse with AscendStore supports only HiSparseConnector and AscendStoreConnector children."
                 )
+            if len(children) != len(colocated_pair):
+                raise ValueError(
+                    "HiSparse pooling requires exactly one HiSparseConnector and one AscendStoreConnector."
+                )
+            if vllm_config.parallel_config.prefill_context_parallel_size != 1:
+                raise ValueError("HiSparse with AscendStore requires prefill_context_parallel_size=1.")
             nnodes = vllm_config.parallel_config.nnodes
             if role == KVConnectorRole.WORKER and nnodes == 1:
                 from vllm.distributed.parallel_state import get_node_count
