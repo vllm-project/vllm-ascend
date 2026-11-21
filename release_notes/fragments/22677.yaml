@@ -1,0 +1,6 @@
+pr: 22677
+entries:
+  - category: bugfix
+    text: >-
+      Fixed the routed expert SwiGLU alignment error on Ascend 950DT when
+      tensor parallelism leaves an odd number of W4A8-MXFP4 scale groups per rank.
