@@ -11,6 +11,7 @@ write K/V or index K directly into their independent paged caches.
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.ops.triton.msa.msa_m3_a8c4_cache import _store_fp4
 from vllm_ascend.ops.triton.triton_utils import (
     extract_slice,
     get_vectorcore_num,
@@ -63,6 +64,10 @@ def _minimax_qknorm_rope_cache_kernel(
     key_cache,
     value_cache,
     index_cache,
+    packed_k,
+    packed_v,
+    scale_k,
+    scale_v,
     slots,
     index_slots,
     NUM_SLOTS,
@@ -88,6 +93,12 @@ def _minimax_qknorm_rope_cache_kernel(
     I_TOKEN: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     INDEX_BLOCK_SIZE: tl.constexpr,
+    A8C4: tl.constexpr,
+    QUERY_FP8: tl.constexpr,
+    PK_BLOCK: tl.constexpr,
+    PV_BLOCK: tl.constexpr,
+    SK_BLOCK: tl.constexpr,
+    SV_BLOCK: tl.constexpr,
     CACHE_FP8: tl.constexpr,
     INDEX_FP8: tl.constexpr,
     FP8_E4M3_MAX: tl.constexpr,
@@ -119,6 +130,9 @@ def _minimax_qknorm_rope_cache_kernel(
         qk = _norm_rope_with_scale(row, qk_scale, cs, Q_HEADS + KV_HEADS, HEAD_DIM, ROTARY_DIM, EPS)
         q = extract_slice(qk, (0, 0), (Q_HEADS, HEAD_DIM), (1, 1))
         offsets = token * Q_HEADS * HEAD_DIM + tl.arange(0, Q_HEADS)[:, None] * HEAD_DIM + dim[None, :]
+        if QUERY_FP8:
+            q = q.to(packed.dtype.element_ty).to(tl.float32)
+            q = tl.minimum(tl.maximum(q, -FP8_E4M3_MAX), FP8_E4M3_MAX)
         tl.store(query + offsets, q)
         slot = tl.load(slots + token, token < NUM_SLOTS, other=-1).to(tl.int64)
         if slot >= 0:
@@ -127,6 +141,9 @@ def _minimax_qknorm_rope_cache_kernel(
             v = tl.load(
                 row + (Q_HEADS + KV_HEADS) * HEAD_DIM + tl.arange(0, KV_HEADS)[:, None] * HEAD_DIM + dim[None, :]
             )
+            if A8C4:
+                _store_fp4(k, packed_k, scale_k, slot, KV_HEADS, PK_BLOCK, SK_BLOCK)
+                _store_fp4(v, packed_v, scale_v, slot, KV_HEADS, PV_BLOCK, SV_BLOCK)
             if CACHE_FP8:
                 k = tl.minimum(tl.maximum(k, -FP8_E4M3_MAX), FP8_E4M3_MAX)
                 v = tl.minimum(tl.maximum(v.to(tl.float32), -FP8_E4M3_MAX), FP8_E4M3_MAX)
@@ -167,6 +184,8 @@ def minimax_qknorm_rope_cache(
     num_index_heads: int,
     eps: float,
     index_packed: torch.Tensor | None = None,
+    a8c4_cache=None,
+    query_fp8: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return Q/index Q and insert K/V/index K, with no intermediate KV tensors.
 
@@ -205,13 +224,18 @@ def minimax_qknorm_rope_cache(
     assert slot_mapping.ndim == index_slot_mapping.ndim == 1
     assert slot_mapping.is_contiguous() and index_slot_mapping.is_contiguous()
     num_tokens = packed.shape[0]
-    query = torch.empty((num_tokens, num_q_heads * head_dim), device=packed.device, dtype=packed.dtype)
+    query = torch.empty(
+        (num_tokens, num_q_heads * head_dim),
+        device=packed.device,
+        dtype=torch.float8_e4m3fn if query_fp8 else packed.dtype,
+    )
     index_query = torch.empty((num_tokens, num_index_heads * head_dim), device=packed.device, dtype=index_cache.dtype)
     if num_tokens == 0:
         return query, index_query
     init_device_properties_triton()
     # Each program owns tokens congruent to its id modulo this grid.
     num_programs = min(num_tokens, get_vectorcore_num())
+    extras = a8c4_cache if a8c4_cache is not None else (key_cache, value_cache, key_cache, value_cache)
     _minimax_qknorm_rope_cache_kernel[(num_programs,)](
         packed,
         index_packed,
@@ -226,6 +250,7 @@ def minimax_qknorm_rope_cache(
         key_cache,
         value_cache,
         index_cache,
+        *extras,
         slot_mapping,
         index_slot_mapping,
         num_actual_tokens,
@@ -246,6 +271,9 @@ def minimax_qknorm_rope_cache(
         *index_cache.stride()[:2],
         key_cache.shape[1],
         index_cache.shape[1],
+        a8c4_cache is not None,
+        query_fp8,
+        *(tensor.stride(0) for tensor in extras),
         key_cache.dtype == torch.float8_e4m3fn,
         index_cache.dtype == torch.float8_e4m3fn,
         FP8_E4M3_MAX=FP8_E4M3_MAX,

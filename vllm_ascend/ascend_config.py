@@ -519,6 +519,37 @@ class ExpertOffloadConfig:
         return self
 
 
+@config(config=ConfigDict(frozen=True))
+class SparseAttentionQuantConfig:
+    """Opt-in sparse-attention quantization; native cache behavior is the default."""
+
+    enable_a8c4: bool = False
+
+    @classmethod
+    def from_vllm_config(cls, vllm_config: VllmConfig) -> SparseAttentionQuantConfig:
+        additional_config = getattr(vllm_config, "additional_config", None) or {}
+        return TypeAdapter(cls).validate_python(additional_config.get("sparse_attention_quant_config", {}))
+
+    def validate(self, vllm_config: VllmConfig) -> None:
+        if not self.enable_a8c4:
+            return
+        model = vllm_config.model_config
+        architectures = model.hf_config.architectures or []
+        if not is_950() or not any(name.startswith("MiniMaxM3") for name in architectures):
+            raise ValueError("A8C4 currently requires MiniMax-M3/M3.1 on Ascend 950")
+        parallel = vllm_config.parallel_config
+        if (
+            parallel.pipeline_parallel_size != 1
+            or parallel.prefill_context_parallel_size != 1
+            or parallel.decode_context_parallel_size != 1
+            or getattr(parallel, "nnodes", 1) != 1
+            or vllm_config.kv_transfer_config is not None
+        ):
+            raise ValueError("A8C4 dual-format pages currently support single-node PP1 without KV transfer or CP")
+        if vllm_config.cache_config.cache_dtype != "fp8":
+            raise ValueError("A8C4 dual-format pages require --kv-cache-dtype fp8")
+
+
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -757,6 +788,9 @@ class AscendConfig:
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
     quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
+    sparse_attention_quant_config: SparseAttentionQuantConfig = dataclasses.field(
+        default_factory=SparseAttentionQuantConfig
+    )
 
     # ---- sub-configs declared later in this module ----
     # Lambdas defer class lookup until construction, after module initialization.
@@ -827,6 +861,7 @@ class AscendConfig:
     # pydantic after-validator). Preserves the original __init__ ordering —
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        self.sparse_attention_quant_config.validate(vc)
         validate_expert_offload_config(self.expert_offload_config, vc, self)
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:

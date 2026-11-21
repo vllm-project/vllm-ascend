@@ -27,6 +27,7 @@ _MSA_INDEX_BLOCK_SIZE = 128
 _GBSA_MASK_MODE_CAUSAL = 1
 _GBSA_NO_QUANT = 0
 _GBSA_FP8_STATIC_CAST_P = 5
+_GBSA_Q_FP8_KV_FP4 = 8
 _GBSA_SOFTMAX_PRECISION = 0
 _GBSA_FP8_SOFTMAX_PRECISION = 1
 _MSA_SCORE_BLOCK_ALIGNMENT = 16
@@ -259,7 +260,9 @@ def prepare_decode_gbsa_metadata(
         head_size=head_size,
         block_size=_MSA_INDEX_BLOCK_SIZE,
         max_query_len=query_len,
-        quant_mode=_GBSA_FP8_STATIC_CAST_P if kv_cache_dtype == torch.float8_e4m3fn else _GBSA_NO_QUANT,
+        quant_mode=_GBSA_Q_FP8_KV_FP4
+        if kv_cache_dtype == torch.uint8
+        else (_GBSA_FP8_STATIC_CAST_P if kv_cache_dtype == torch.float8_e4m3fn else _GBSA_NO_QUANT),
         softmax_precision=_gbsa_softmax_precision(kv_cache_dtype),
     )
 
@@ -295,12 +298,11 @@ def _run_generic_block_sparse_attention(
     sm_scale: float,
     block_size: int,
     max_query_len: int = -1,
-    dequant_scale: torch.Tensor | None = None,
+    dequant_scale: torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None = None,
     gbsa_metadata_cache: dict[tuple[Any, ...], torch.Tensor] | None = None,
     indices_are_sorted: bool = False,
 ) -> torch.Tensor:
     """Run MiniMax-M3 sparse attention through CANN Ops GBSA."""
-    del dequant_scale
     select_num_idx = select_num_idx.to(dtype=torch.int32).contiguous()
     if indices_are_sorted:
         if topk_idx.dtype != torch.int32 or not topk_idx.is_contiguous():
@@ -314,7 +316,25 @@ def _run_generic_block_sparse_attention(
     quant_mode = _GBSA_NO_QUANT
     softmax_precision = _gbsa_softmax_precision(key.dtype)
     quant_kwargs: dict[str, Any] = {}
-    if key.dtype == torch.float8_e4m3fn:
+    if key.dtype == torch.uint8:
+        if (
+            value.dtype != key.dtype
+            or not isinstance(dequant_scale, tuple)
+            or len(dequant_scale) != 2
+            or any(scale.dtype != torch.bfloat16 for scale in dequant_scale)
+            or any(scale.shape != (*key.shape[:-1], q.shape[-1] // 16) for scale in dequant_scale)
+        ):
+            raise TypeError("A8C4 requires FP4 K/V and separate BF16 scales")
+        if q.dtype != torch.float8_e4m3fn:
+            q = _to_fp8_e4m3(q)
+        quant_mode = _GBSA_Q_FP8_KV_FP4
+        softmax_precision = 0
+        quant_kwargs = {
+            "attention_out_dtype": torch.bfloat16,
+            "k_dequant_scale": dequant_scale[0],
+            "v_dequant_scale": dequant_scale[1],
+        }
+    elif key.dtype == torch.float8_e4m3fn:
         if value.dtype != torch.float8_e4m3fn:
             raise TypeError("MiniMax-M3 FP8 sparse attention requires both K and V caches in E4M3")
         q = _to_fp8_e4m3(q)
@@ -334,13 +354,14 @@ def _run_generic_block_sparse_attention(
     reuse_metadata = (
         gbsa_metadata_cache is not None
         and (
-            torch.bfloat16 == key.dtype
+            key.dtype == torch.uint8
+            or torch.bfloat16 == key.dtype
             or (
                 torch.float8_e4m3fn == key.dtype
                 and get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
             )
         )
-        and q.dtype == key.dtype
+        and (q.dtype == key.dtype or (key.dtype == torch.uint8 and q.dtype == torch.float8_e4m3fn))
         and block_size == _MSA_INDEX_BLOCK_SIZE
         and max_query_len > 0
         and q.shape[0] == seq_lens.numel() * max_query_len
@@ -705,6 +726,9 @@ def _minimax_m3_sparse_attn_kv_gather_q(
     supports_fp8: bool,
 ) -> None:
     key, value = _split_main_kv_cache(kv_cache)
+    # Single-node validation uses padded dual-format pages; Prefill needs dense FP8.
+    if key.dtype == torch.float8_e4m3fn:
+        key, value = key.contiguous(), value.contiguous()
 
     # A3 uses FP32 scores and partial outputs. Keep A5's existing BF16
     # precision mode; its FP8 cache path overrides this below as before.
@@ -828,7 +852,7 @@ def minimax_m3_sparse_attn_decode(
     block_size: int = 128,
     *,
     select_num_idx: torch.Tensor | None = None,
-    dequant_scale: torch.Tensor | None = None,
+    dequant_scale: torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None = None,
     cu_seqlens_q: torch.Tensor | None = None,
     gbsa_metadata_cache: dict[tuple[Any, ...], torch.Tensor] | None = None,
     indices_are_sorted: bool = False,
