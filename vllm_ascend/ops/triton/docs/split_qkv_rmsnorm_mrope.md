@@ -60,12 +60,16 @@ Extends the existing shared split/norm/MRoPE operator. PR #22086 adds optional
 direct rotary lookup and in-kernel unit weight offsets, and routes eligible
 QSA model calls through it. Omitting positions preserves the legacy semantics.
 
-Legacy calls pass zero for the unused direct-cache `CACHE_STRIDE` and
-`CACHE_ROWS` compile-time parameters. In particular, gathered `[3, T, R]`
-cache strides (`T * R`) must not create direct-cache specializations as token
-counts change. Direct-position calls retain the full table's actual stride
-and row count. This removes an unnecessary specialization input; actual
-compilation counts and latency still require target-runtime measurements.
+The wrapper selects separate Triton entry points for gathered-cache and
+full-cache inputs. Both inline the same normalization and rotary body.
+The legacy entry does not accept position pointers or direct-cache metadata,
+so those unused arguments cannot affect its launch signature or specialization.
+
+In the full-cache entry, position strides and cache row count (and cache stride) are runtime
+parameters listed in `do_not_specialize`. This includes the changing axis
+stride of contiguous `[3, T]` positions. Each entry fixes its lookup mode at
+compile time; vector dimensions and other existing specialization policies
+are unchanged. Compilation counts and latency need target-runtime validation.
 
 ## Test Cases
 

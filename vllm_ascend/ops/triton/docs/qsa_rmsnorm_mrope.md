@@ -63,10 +63,16 @@ This mode also serves the decomposed compressed-key reference. It returns a new
 tensor, without mutating positions, weights or the rotary table. Graph replay
 reads current position contents, not captured Python values.
 
-Without positions, the unused direct-cache `CACHE_ROWS` compile-time parameter
-is zero, including ordinary RoPE where the gathered cache row count changes
-with tokens. Direct-position calls keep the actual full-table row count.
-Other existing shape and stride specialization policies are unchanged.
+The wrapper selects separate Triton entry points for gathered-cache and
+full-cache inputs. Both inline the same normalization and rotary body.
+The legacy entry does not accept position pointers or direct-cache metadata,
+so those unused arguments cannot affect its launch signature or specialization.
+
+In the full-cache entry, position strides and cache row count are runtime
+parameters listed in `do_not_specialize`. This includes the changing axis
+stride of contiguous `[3, T]` positions. Each entry fixes its lookup mode at
+compile time; vector dimensions and other existing specialization policies
+are unchanged. Compilation counts and latency need target-runtime validation.
 
 ## Origin and Differences
 

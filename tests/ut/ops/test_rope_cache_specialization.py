@@ -22,9 +22,12 @@ def wrapper(request):
     launches = []
 
     class RecordedKernel:
+        def __init__(self, name):
+            self.name = name
+
         def __getitem__(self, grid):
             def launch(*args, **kwargs):
-                launches.append(kwargs)
+                launches.append({"kernel": self.name, **kwargs})
 
             return launch
 
@@ -32,8 +35,10 @@ def wrapper(request):
         "torch": torch,
         "triton": SimpleNamespace(next_power_of_2=lambda n: 1 << (n - 1).bit_length()),
         "get_vectorcore_num": lambda: 48,
-        "_qsa_rmsnorm_mrope_kernel": RecordedKernel(),
-        "split_qkv_rmsnorm_mrope_kernel": RecordedKernel(),
+        "_qsa_rmsnorm_mrope_kernel": RecordedKernel("legacy"),
+        "_qsa_rmsnorm_mrope_with_positions_kernel": RecordedKernel("positions"),
+        "split_qkv_rmsnorm_mrope_kernel": RecordedKernel("legacy"),
+        "_split_qkv_rmsnorm_mrope_with_positions_kernel": RecordedKernel("positions"),
     }
     exec(compile(ast.Module(body=functions, type_ignores=[]), str(path), "exec"), namespace)
 
@@ -69,27 +74,25 @@ def wrapper(request):
     return name, invoke
 
 
-def test_legacy_direct_cache_constants_do_not_follow_tokens(wrapper):
-    _, invoke = wrapper
-    constants = []
-    for rows in (1, 32, 1, 129, 32):
-        cache = torch.empty(3, rows, 64, dtype=torch.bfloat16)
-        launch = invoke(rows, cache)
-        assert launch["positions_ptr"] is None
-        assert launch["GATHER_CACHE"] is False
-        assert launch["POSITION_STRIDE_AXIS"] == launch["POSITION_STRIDE_TOKEN"] == 0
-        constants.append((launch["CACHE_ROWS"], launch.get("CACHE_STRIDE", 0)))
-    assert constants == [(0, 0)] * 5
-
-
-def test_legacy_qsa_rope_cache_rows_do_not_follow_tokens(wrapper):
+def test_legacy_launch_has_no_direct_cache_metadata(wrapper):
     name, invoke = wrapper
-    if name != "qsa_rmsnorm_mrope":
-        pytest.skip("The shared QKV operator's legacy cache has three axes")
-    for rows in (1, 32, 129):
-        launch = invoke(rows, torch.empty(rows, 64, dtype=torch.bfloat16))
-        assert launch["CACHE_ROWS"] == 0
-        assert launch["GATHER_CACHE"] is False
+    cache_axes = (1, 3) if name == "qsa_rmsnorm_mrope" else (3,)
+    for axes in cache_axes:
+        for rows in (1, 32, 1, 129, 32):
+            shape = (rows, 64) if axes == 1 else (3, rows, 64)
+            launch = invoke(rows, torch.empty(shape, dtype=torch.bfloat16))
+            assert launch["kernel"] == "legacy"
+            assert (
+                not {
+                    "positions_ptr",
+                    "position_stride_axis",
+                    "position_stride_token",
+                    "cache_rows",
+                    "cache_stride",
+                    "GATHER_CACHE",
+                }
+                & launch.keys()
+            )
 
 
 @pytest.mark.parametrize("rows", [1, 32, 129])
@@ -102,9 +105,71 @@ def test_direct_cache_keeps_actual_table_and_position_strides(wrapper, rows, axe
         positions = positions[0]
     launch = invoke(rows, cache, positions)
     assert launch["positions_ptr"] is positions
-    assert launch["GATHER_CACHE"] is True
-    assert launch["CACHE_ROWS"] == 257
-    if "CACHE_STRIDE" in launch:
-        assert launch["CACHE_STRIDE"] == 80
-    assert launch["POSITION_STRIDE_TOKEN"] == 2
-    assert launch["POSITION_STRIDE_AXIS"] == (rows * 2 if axes == 3 else 0)
+    assert launch["kernel"] == "positions"
+    assert launch["cache_rows"] == 257
+    if "cache_stride" in launch:
+        assert launch["cache_stride"] == 80
+    assert launch["position_stride_token"] == 2
+    assert launch["position_stride_axis"] == (rows * 2 if axes == 3 else 0)
+
+
+@pytest.mark.parametrize("name", ["qsa_rmsnorm_mrope", "split_qkv_rmsnorm_mrope"])
+def test_dynamic_cache_metadata_uses_runtime_parameters_without_specialization(name):
+    path = Path(__file__).resolve().parents[3] / f"vllm_ascend/ops/triton/linearnorm/{name}.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    kernel_name = f"_{name}_with_positions_kernel"
+    kernel = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == kernel_name)
+    arguments = {arg.arg: arg for arg in kernel.args.args}
+    metadata = {"position_stride_axis", "position_stride_token", "cache_rows"}
+    if name == "split_qkv_rmsnorm_mrope":
+        metadata.add("cache_stride")
+    decorator = kernel.decorator_list[0]
+    assert isinstance(decorator, ast.Call)
+    controls = next(keyword.value for keyword in decorator.keywords if keyword.arg == "do_not_specialize")
+    assert metadata <= set(ast.literal_eval(controls))
+    for parameter in metadata:
+        assert arguments[parameter].annotation is None
+    # Each entry fixes the mode; vector widths remain compile-time parameters.
+    assert "GATHER_CACHE" not in arguments
+    assert ast.unparse(arguments["rope_dim"].annotation) == "tl.constexpr"
+
+
+@pytest.mark.parametrize("layout", ["contiguous", "fixed_capacity"])
+def test_direct_position_axis_stride_tracks_layout_at_runtime(wrapper, layout):
+    _, invoke = wrapper
+    for rows in (1, 16, 32, 129, 1):
+        capacity = rows if layout == "contiguous" else 2049
+        positions = torch.empty(3, capacity, dtype=torch.int64)[:, :rows]
+        cache = torch.empty(257, 64, dtype=torch.bfloat16)
+        launch = invoke(rows, cache, positions)
+        assert launch["position_stride_axis"] == capacity
+        assert launch["position_stride_token"] == 1
+
+
+@pytest.mark.parametrize("name", ["qsa_rmsnorm_mrope", "split_qkv_rmsnorm_mrope"])
+def test_legacy_entry_keeps_original_signature_and_shared_body(name):
+    path = Path(__file__).resolve().parents[3] / f"vllm_ascend/ops/triton/linearnorm/{name}.py"
+    functions = {
+        node.name: node
+        for node in ast.parse(path.read_text(encoding="utf-8")).body
+        if isinstance(node, ast.FunctionDef)
+    }
+    legacy_name = "_qsa_rmsnorm_mrope_kernel" if name == "qsa_rmsnorm_mrope" else "split_qkv_rmsnorm_mrope_kernel"
+    legacy = functions[legacy_name]
+    direct = functions[f"_{name}_with_positions_kernel"]
+    extra = ["positions_ptr", "position_stride_axis", "position_stride_token"]
+    if name == "split_qkv_rmsnorm_mrope":
+        extra.append("cache_stride")
+    extra.append("cache_rows")
+    legacy_args = [arg.arg for arg in legacy.args.args]
+    assert not set(extra) & set(legacy_args)
+    assert [arg.arg for arg in direct.args.args] == legacy_args + extra
+    # Both launch entries delegate to one body. Legacy metadata stays literal,
+    # so it cannot become unused runtime arguments in the device entry point.
+    for entry, gather in ((legacy, False), (direct, True)):
+        assert len(entry.body) == 1
+        call = entry.body[0].value
+        assert call.func.id == f"_{name}"
+        assert ast.literal_eval(call.args[-1]) is gather
+    legacy_call = legacy.body[0].value
+    assert [ast.literal_eval(arg) for arg in legacy_call.args[len(legacy_args) : -1]] == [None] + [0] * (len(extra) - 1)
