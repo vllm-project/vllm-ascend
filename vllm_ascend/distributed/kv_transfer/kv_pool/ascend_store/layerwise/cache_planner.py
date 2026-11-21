@@ -26,7 +26,10 @@ from .layerwise_cache_layout import (
 )
 
 SPEC_REUSE_RULES = MappingProxyType(
-    {"glm5_next_text": "vllm_ascend.models.glm5next.cache_reuse.GLM5_NEXT_SPEC_REUSE_RULES"}
+    {
+        "glm5_next_text": "vllm_ascend.models.glm5next.cache_reuse.GLM5_NEXT_SPEC_REUSE_RULES",
+        "kimi_linear": "vllm_ascend.models.kimi_k3.cache_reuse.KIMI_K3_SPEC_REUSE_RULES",
+    }
 )
 
 
