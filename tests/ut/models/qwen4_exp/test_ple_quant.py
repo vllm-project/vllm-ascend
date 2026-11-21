@@ -317,6 +317,7 @@ def test_quantized_host_registers_distinct_pointer_buffers(monkeypatch, mxfp8, s
     method = AscendPLEQuantizedEmbeddingMethod(mxfp8=mxfp8)
     layer = object.__new__(ple_embedding.AscendPLEHostEmbedding)
     nn.Module.__init__(layer)
+    layer._shared = None
     layer._quantized = True
     layer._weight_dtype = method.weight_dtype
     layer._scale_dtype = method.scale_dtype

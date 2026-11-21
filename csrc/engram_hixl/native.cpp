@@ -13,6 +13,7 @@
 #include <vector>
 
 namespace {
+constexpr size_t kMaxLocalCommResBytes = 1u << 20;
 thread_local std::string last_error;
 struct Engine {
   hixl::Hixl engine;
@@ -81,13 +82,21 @@ int engram_hixl_create_v2(const char* endpoint, int device, const char* port, co
         delete state;
         return -1;
       }
-      local_comm_res.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
-      if (!input && !input.eof()) {
+      local_comm_res.resize(kMaxLocalCommResBytes + 1);
+      input.read(local_comm_res.data(), static_cast<std::streamsize>(local_comm_res.size()));
+      const auto bytes_read = static_cast<size_t>(input.gcount());
+      if (input.bad() || (input.fail() && !input.eof())) {
         last_error = "cannot read local_comm_res";
         delete state;
         return -1;
       }
-      if (local_comm_res.empty() || local_comm_res.size() > (1u << 20)) {
+      if (bytes_read > kMaxLocalCommResBytes) {
+        last_error = "local_comm_res must be 1 byte to 1 MiB";
+        delete state;
+        return -1;
+      }
+      local_comm_res.resize(bytes_read);
+      if (local_comm_res.empty()) {
         last_error = "local_comm_res must be 1 byte to 1 MiB";
         delete state;
         return -1;
