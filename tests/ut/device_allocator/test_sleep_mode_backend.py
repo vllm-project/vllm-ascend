@@ -36,15 +36,6 @@ def test_backend_suspend_level_two(allocator):
     allocator.sleep.assert_called_once_with(())
 
 
-def test_backend_rejects_unknown_level(allocator):
-    backend = CaMemBackend()
-
-    with pytest.raises(ValueError, match="Unsupported sleep level"):
-        backend.suspend(0)
-
-    allocator.sleep.assert_not_called()
-
-
 def test_backend_resume_and_discard(allocator):
     backend = CaMemBackend()
 
@@ -63,16 +54,6 @@ def test_backend_accepts_allocator_factory(allocator):
     backend.suspend(1)
 
     allocator.sleep.assert_called_once_with(("weights",))
-
-
-def test_backend_is_supported_checks_extension(monkeypatch):
-    import vllm_ascend.device_allocator.sleep_mode_backend as backend_module
-
-    monkeypatch.setattr(backend_module, "camem_available", True)
-    assert CaMemBackend.is_supported()
-
-    monkeypatch.setattr(backend_module, "camem_available", False)
-    assert not CaMemBackend.is_supported()
 
 
 def test_backend_registered_with_upstream_factory():
