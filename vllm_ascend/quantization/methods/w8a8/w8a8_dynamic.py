@@ -46,6 +46,10 @@ from ..base import (
 )
 from ..registry import register_scheme
 
+# Rows per npu_dynamic_quant call when quantizing an online LM head copy;
+# bounds temporary NPU allocations for large vocabulary shards.
+_LM_HEAD_QUANT_CHUNK_ROWS = 4096
+
 
 def scale_from_float_to_int64(scale):
     """Convert float32 scale to int64 representation."""
@@ -141,6 +145,44 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.flatten()
+
+
+class AscendW8A8DynamicLmHeadMethod(AscendW8A8DynamicLinearMethod):
+    """Quantize a floating-point LM head copy into per-channel INT8.
+
+    Instantiated only through the "int8" `draft_lm_head_quantization`
+    format on A2/A3-class devices; loads no quantized checkpoint.
+    """
+
+    def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
+        if params_dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError("Online LM head quantization requires float16 or bfloat16 weights.")
+        return {"weight": torch.empty(output_size, input_size, dtype=params_dtype)}
+
+    def get_perchannel_param(self, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
+        # npu_dynamic_quant returns FP32 scales; keep them in FP32 for quant_matmul.
+        return super().get_perchannel_param(output_size, torch.float32)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if getattr(layer, "_lm_head_quantized", False):
+            return
+        weight = layer.weight.data
+        if weight.dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError("Online LM head quantization requires float16 or bfloat16 weights.")
+        quantized_weight = torch.empty_like(weight, dtype=torch.int8)
+        weight_scale = torch.empty(weight.shape[0], device=weight.device, dtype=torch.float32)
+        # Bound temporary NPU allocations for large vocabulary shards.
+        for start in range(0, weight.shape[0], _LM_HEAD_QUANT_CHUNK_ROWS):
+            end = min(start + _LM_HEAD_QUANT_CHUNK_ROWS, weight.shape[0])
+            quantized_chunk, scale = torch_npu.npu_dynamic_quant(weight[start:end].contiguous(), dst_type=torch.int8)
+            quantized_weight[start:end].copy_(quantized_chunk)
+            weight_scale[start:end].copy_(scale)
+        layer.weight.data = quantized_weight
+        del weight, quantized_weight
+        layer.weight_scale.data = weight_scale
+        layer.weight_offset.data.zero_()
+        super().process_weights_after_loading(layer)
+        layer._lm_head_quantized = True
 
 
 @register_scheme("W8A8_DYNAMIC", "moe")
