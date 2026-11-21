@@ -3,7 +3,8 @@ entries:
   - category: feature
     text: >-
       External DP deployments can now combine `--pcp-size` and `--pp-size`,
-      with device allocation accounting for TP, PCP, and PP.
-      Custom templates must read PCP from argument 8 and PP from argument 9;
-      move PP from argument 8 if adapting an older model-specific template.
+      with device allocation accounting for TP, PCP, and PP; omitted PCP/PP
+      options default to 1 in the launcher.
+      Shell templates now receive nine arguments, with PCP at argument 8 and PP
+      at argument 9; append `1 1` to direct seven-argument template calls.
       Use `--dry-run` to inspect device allocations and startup commands.

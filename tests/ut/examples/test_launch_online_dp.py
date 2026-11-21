@@ -144,8 +144,10 @@ class LauncherTests(unittest.TestCase):
     def test_supplied_template_forwards_parallel_sizes(self):
         # Replace only the vllm executable; execute the actual template with Bash.
         wrapper = 'vllm() { printf "%s\\n" "$ASCEND_RT_VISIBLE_DEVICES" "$@"; }; source "$@"'
-        for sizes, expected in [([], ["1", "1"]), (["2", "3"], ["2", "3"])]:
+        for sizes, expected in [([], ["1", "1"]), (["--pcp-size", "2", "--pp-size", "3"], ["2", "3"])]:
             with self.subTest(sizes=sizes):
+                _, calls, _ = self.capture(*sizes)
+                command = calls[0].args[0]
                 result = subprocess.run(
                     [
                         self.bash(),
@@ -153,14 +155,7 @@ class LauncherTests(unittest.TestCase):
                         wrapper,
                         "bash",
                         (EXAMPLE_DIR / "run_dp_template.sh").as_posix(),
-                        "0,1,2,3,4,5",
-                        "9000",
-                        "2",
-                        "0",
-                        "127.0.0.1",
-                        "12345",
-                        "1",
-                        *sizes,
+                        *command[4:],
                     ],
                     capture_output=True,
                     text=True,
@@ -168,9 +163,9 @@ class LauncherTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 values = result.stdout.splitlines()
-                self.assertEqual(values[:3], ["0,1,2,3,4,5", "serve", "model_path"])
+                self.assertEqual(values[:3], [command[4], "serve", "model_path"])
                 for flag, value in [
-                    ("--tensor-parallel-size", "1"),
+                    ("--tensor-parallel-size", "2"),
                     ("--prefill-context-parallel-size", expected[0]),
                     ("--pipeline-parallel-size", expected[1]),
                 ]:

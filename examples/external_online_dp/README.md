@@ -16,8 +16,10 @@ $7 TP size               $8 PCP size          $9 PP size
 ```
 
 Custom templates must read both `$8` and `$9` to use PCP and PP together. A template
-that previously used `$8` for PP must read `$9` instead. The supplied template
-also accepts direct calls with the original seven arguments, defaulting PCP and PP to 1.
+that previously used `$8` for PP must read `$9` instead. The Python launcher
+defaults omitted `--pcp-size` and `--pp-size` options to 1 and always passes both
+values. The shell template requires all nine arguments; when calling it directly,
+append `1 1` to an old seven-argument command to keep PCP and PP disabled.
 
 ### Run `launch_online_dp.py` with CL arguments
 
