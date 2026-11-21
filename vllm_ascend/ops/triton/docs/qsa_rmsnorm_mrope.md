@@ -63,6 +63,11 @@ This mode also serves the decomposed compressed-key reference. It returns a new
 tensor, without mutating positions, weights or the rotary table. Graph replay
 reads current position contents, not captured Python values.
 
+Without positions, the unused direct-cache `CACHE_ROWS` compile-time parameter
+is zero, including ordinary RoPE where the gathered cache row count changes
+with tokens. Direct-position calls keep the actual full-table row count.
+Other existing shape and stride specialization policies are unchanged.
+
 ## Origin and Differences
 
 - **Origin**: Developed for the Qwen3.8-Next QSA projection path in `vllm_ascend/models/qwen4_exp/qsa.py`.

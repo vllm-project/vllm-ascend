@@ -425,8 +425,10 @@ def triton_split_qkv_rmsnorm_mrope(
         positions_ptr=positions,
         POSITION_STRIDE_AXIS=positions.stride(0) if positions is not None and positions.ndim == 2 else 0,
         POSITION_STRIDE_TOKEN=positions.stride(-1) if positions is not None else 0,
-        CACHE_STRIDE=cos_sin.stride(0),
-        CACHE_ROWS=cos_sin.shape[0],
+        # Gathered [3, tokens, rope_dim] strides vary with tokens. Keep unused
+        # direct-cache constexprs stable for legacy callers.
+        CACHE_STRIDE=cos_sin.stride(0) if positions is not None else 0,
+        CACHE_ROWS=cos_sin.shape[0] if positions is not None else 0,
         GATHER_CACHE=positions is not None,
     )
 

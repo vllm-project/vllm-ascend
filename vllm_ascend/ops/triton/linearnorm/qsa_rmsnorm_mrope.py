@@ -172,7 +172,8 @@ def triton_qsa_rmsnorm_mrope(
         positions_ptr=positions,
         POSITION_STRIDE_AXIS=positions.stride(0) if positions is not None and positions.ndim == 2 else 0,
         POSITION_STRIDE_TOKEN=positions.stride(-1) if positions is not None else 0,
-        CACHE_ROWS=cos_sin.shape[0],
+        # Legacy RoPE cache rows vary with tokens but are unused in this mode.
+        CACHE_ROWS=cos_sin.shape[0] if positions is not None else 0,
         GATHER_CACHE=positions is not None,
         num_warps=1,
         num_stages=1,

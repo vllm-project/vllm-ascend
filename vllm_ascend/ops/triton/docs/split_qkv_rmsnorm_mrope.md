@@ -60,6 +60,13 @@ Extends the existing shared split/norm/MRoPE operator. PR #22086 adds optional
 direct rotary lookup and in-kernel unit weight offsets, and routes eligible
 QSA model calls through it. Omitting positions preserves the legacy semantics.
 
+Legacy calls pass zero for the unused direct-cache `CACHE_STRIDE` and
+`CACHE_ROWS` compile-time parameters. In particular, gathered `[3, T, R]`
+cache strides (`T * R`) must not create direct-cache specializations as token
+counts change. Direct-position calls retain the full table's actual stride
+and row count. This removes an unnecessary specialization input; actual
+compilation counts and latency still require target-runtime measurements.
+
 ## Test Cases
 
 New QSA-mode tests compare against legacy gathered inputs and pre-offset
