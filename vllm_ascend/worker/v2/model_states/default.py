@@ -20,7 +20,7 @@
 from collections.abc import Callable, Collection
 from contextlib import contextmanager, nullcontext
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -84,6 +84,15 @@ class AscendModelState(DefaultModelState):
         """Join auxiliary metadata work even if input preparation failed."""
         if self.device_metadata is not None:
             self.device_metadata.finish()
+
+    def _get_mm_prefix_ranges(self, input_batch: AscendInputBatch) -> dict[int, list[tuple[int, int]]] | None:
+        """Return per-request PrefixLM ranges from paired core or stock vLLM cache."""
+        get_ranges = getattr(super(), "get_mm_prefix_ranges", None)
+        if callable(get_ranges):
+            return cast(dict[int, list[tuple[int, int]]] | None, get_ranges(input_batch))
+        if self.mm_prefix_ranges is None:
+            return None
+        return {i: self.mm_prefix_ranges.get(req_id, []) for i, req_id in enumerate(input_batch.req_ids)}
 
     def __init__(self, vllm_config, model, encoder_cache, device):
         super().__init__(vllm_config, model, encoder_cache, device)
@@ -597,6 +606,7 @@ class AscendModelState(DefaultModelState):
             # Same wiring as model_runner_v1
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             model_specific_attn_metadata=model_specific_attn_metadata,
+            mm_prefix_ranges=self._get_mm_prefix_ranges(input_batch),
             req_ids_tensor=offload_req_ids.gpu[:num_reqs] if offload_req_ids is not None else None,
             token_to_req=offload_token_to_req.gpu[:num_input_tokens] if offload_token_to_req is not None else None,
             offload_dummy=getattr(input_batch, "is_dummy", False),
