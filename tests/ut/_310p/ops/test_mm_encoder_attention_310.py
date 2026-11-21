@@ -23,6 +23,44 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 
 
+def test_mm_encoder_attention_310_forward_oot_without_padding():
+    layer = AscendMMEncoderAttention310.__new__(AscendMMEncoderAttention310)
+    layer.num_heads = 4
+    layer.num_kv_heads = 2
+    layer.head_size = 80
+    layer.enable_pad = False
+    layer.scale_value = layer.head_size**-0.5
+    layer.support_approximate_calculation = False
+
+    bsz, q_len, kv_len = 2, 3, 3
+    query = torch.randn(bsz, q_len, layer.num_heads, layer.head_size)
+    key = torch.randn(bsz, kv_len, layer.num_kv_heads, layer.head_size)
+    value = torch.randn(bsz, kv_len, layer.num_kv_heads, layer.head_size)
+
+    capture = {}
+
+    def fake_flash_attention_unpad(*, query, key, value, seq_len, scale_value, num_heads, num_kv_heads, out):
+        capture["query_shape"] = query.shape
+        capture["key_shape"] = key.shape
+        capture["value_shape"] = value.shape
+        out.copy_(query + 1.0)
+
+    with mock.patch(
+        "vllm_ascend._310p.ops.mm_encoder_attention.torch_npu._npu_flash_attention_unpad",
+        side_effect=fake_flash_attention_unpad,
+        create=True,
+    ):
+        out = layer.forward_oot(query, key, value)
+
+    # No external padding: q/k/v keep the original head_size instead of MAX_PAD_SIZE.
+    assert capture["query_shape"] == (bsz * q_len, layer.num_heads, layer.head_size)
+    assert capture["key_shape"] == (bsz * kv_len, layer.num_heads, layer.head_size)
+    assert capture["value_shape"] == (bsz * kv_len, layer.num_heads, layer.head_size)
+
+    assert out.shape == query.shape
+    torch.testing.assert_close(out, query + 1.0)
+
+
 def test_register_customop_overrides_mm_encoder_attention_for_310p():
     original_registered = utils._ASCEND_CUSTOMOP_IS_REIGISTERED
     try:
