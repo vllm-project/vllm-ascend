@@ -27,7 +27,7 @@ import regex as re
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CATALOG = ROOT / "rules.json"
-TOOL_VERSION = "1.0.0"
+TOOL_VERSION = "1.1.0"
 RESULT_SCHEMA_VERSION = "13.1"
 REFERENCE_DOCUMENTS = [
     {
@@ -91,6 +91,7 @@ class CheckContext:
     link_type: str = "roce"
     ssd_offload: bool = False
     ssd_path: str | None = None
+    peer_eid: str | None = None
     progress: ProgressReporter | None = None
 
 
@@ -243,7 +244,11 @@ def read_proc_meminfo() -> dict[str, str]:
     values: dict[str, str] = {}
     try:
         for line in Path("/proc/meminfo").read_text(encoding="ascii", errors="replace").splitlines():
-            match = re.match(r"^(HugePages_Total|HugePages_Free|HugePages_Rsvd|Hugepagesize):\s+(\d+)\s*(\w+)?$", line)
+            match = re.match(
+                r"^(MemTotal|MemAvailable|HugePages_Total|HugePages_Free|HugePages_Rsvd|Hugepagesize):"
+                r"\s+(\d+)\s*(\w+)?$",
+                line,
+            )
             if match:
                 values[match.group(1)] = f"{match.group(2)} {match.group(3) or ''}".strip()
     except OSError:
@@ -317,6 +322,32 @@ def probe_memory_capacity(hardware: str, managed_memory_mb: int) -> dict[str, An
     }
 
 
+def probe_a5_memory_capacity(managed_memory_mb: int) -> dict[str, Any]:
+    """Check 950PR&950DT Products host memory availability using MemAvailable."""
+    meminfo = read_proc_meminfo()
+    total_kb = parse_meminfo_number(meminfo.get("MemTotal"))
+    available_kb = parse_meminfo_number(meminfo.get("MemAvailable"))
+    total_mb = total_kb / 1024 if total_kb is not None else None
+    available_mb = available_kb / 1024 if available_kb is not None else None
+    ok = available_mb is not None and available_mb >= managed_memory_mb
+    failure_kind: str | None
+    if total_mb is None or available_mb is None:
+        error = "MemTotal and MemAvailable must both be readable from /proc/meminfo"
+        failure_kind = "capability"
+    else:
+        error = None
+        failure_kind = None if ok else "capacity"
+    return {
+        "method": "a5_host_memory",
+        "ok": ok,
+        "managed_memory_mb": managed_memory_mb,
+        "total_memory_mb": total_mb,
+        "available_memory_mb": available_mb,
+        "failure_kind": failure_kind,
+        "error": error,
+    }
+
+
 def is_docker_runtime() -> bool:
     if Path("/.dockerenv").exists() or Path("/.containerenv").exists():
         return True
@@ -325,16 +356,25 @@ def is_docker_runtime() -> bool:
 
 
 def probe_docker_prereqs() -> dict[str, Any]:
-    """Check NPU devices, driver directories, and HCCN entry points available in Docker."""
+    """Check generic and 950PR&950DT Products-specific devices, tools, and configuration paths."""
     devices = sorted(str(path) for path in Path("/dev").glob("davinci*"))
     return {
         "docker": is_docker_runtime(),
         "npu_smi": bool(shutil.which("npu-smi")),
         "hccn_tool": bool(find_hccn_tool()),
+        "urma_admin": shutil.which("urma_admin") is not None,
+        "urma_ping": shutil.which("urma_ping") is not None,
         "devices": devices,
         "davinci_device_count": len(devices),
+        "davinci_manager": Path("/dev/davinci_manager").exists(),
+        "hisi_hdc": Path("/dev/hisi_hdc").exists(),
         "driver_dir": Path("/usr/local/Ascend/driver").is_dir(),
         "hccn_conf": Path("/etc/hccn.conf").is_file(),
+        "ummu_device": Path("/dev/ummu").exists(),
+        "uburma_device": Path("/dev/uburma").exists(),
+        "hccl_rootinfo": Path("/etc/hccl_rootinfo.json").is_file(),
+        "hixlep_dir": Path("/etc/hixlep").is_dir(),
+        "route_conf": Path("/lib/route.conf").is_file(),
     }
 
 
@@ -1044,13 +1084,15 @@ def probe_ssd_storage(path_text: str, backend: str) -> dict[str, Any]:
         selected = next((item for item in devices if item.get("path") == str(path)), devices[0] if devices else {})
         mounts = selected.get("mountpoints") or []
         fstype = selected.get("fstype")
+        selected_name = Path(str(selected.get("path", ""))).name
+        partitions = [item for item in devices if item.get("type") == "part" and item.get("pkname") == selected_name]
         result["device"] = selected
-        result["ok"] = not fstype and not any(mounts)
+        result["partitions"] = partitions
+        result["partition_count"] = len(partitions)
+        result["ok"] = not fstype and not any(mounts) and not partitions
         if not result["ok"]:
-            result["error"] = (
-                "SSD device has a filesystem signature or mount point and cannot be used as a dedicated cache device"
-            )
-    except (json.JSONDecodeError, StopIteration) as exc:
+            result["error"] = "SSD device has partitions, a filesystem signature, or a mount point"
+    except json.JSONDecodeError as exc:
         result["error"] = f"Failed to parse lsblk output: {exc}"
     return result
 
@@ -1131,17 +1173,33 @@ def parse_npu_topology(output: str) -> dict[str, Any]:
     physical_ids_by_npu: dict[int, list[int]] = {}
     names_by_npu: dict[int, set[str]] = {}
     in_device_table = False
+    separate_id_name_columns = False
     current_npu: int | None = None
     for line in output.splitlines():
+        if re.search(r"\|\s*NPU\s+ID\s*\|\s*Name\s*\|", line, re.IGNORECASE):
+            separate_id_name_columns = True
+            in_device_table = True
+            continue
         if re.search(r"\|\s*NPU\s+Name\s+\|", line, re.IGNORECASE):
             in_device_table = True
             continue
-        if in_device_table and re.search(r"\|\s*NPU\s+Chip\s+\|", line, re.IGNORECASE):
+        if in_device_table and re.search(r"\|\s*NPU\s+(?:Chip|ID)\s*\|\s*(?:Process id|Chip ID)", line, re.IGNORECASE):
             break
         if not in_device_table:
             continue
         columns = line.split("|")
         if len(columns) < 3:
+            continue
+        if separate_id_name_columns:
+            id_match = re.fullmatch(r"\s*(\d+)\s*", columns[1])
+            device_name = columns[2].strip()
+            if not id_match or not device_name:
+                continue
+            npu_id = int(id_match.group(1))
+            npu_ids.add(npu_id)
+            current_npu = npu_id
+            chips_by_npu[npu_id] = chips_by_npu.get(npu_id, 0) + 1
+            names_by_npu.setdefault(npu_id, set()).add(device_name)
             continue
         match = re.match(r"^\s*(\d+)\s+(.+?)\s*$", columns[1])
         if not match:
@@ -1174,6 +1232,325 @@ def parse_npu_topology(output: str) -> dict[str, Any]:
         "device_names": device_names,
         "names_by_npu": {npu_id: sorted(names) for npu_id, names in sorted(names_by_npu.items())},
     }
+
+
+def parse_npu_mapping_ids(output: str) -> list[int]:
+    """Parse NPU IDs from ``npu-smi info -m`` mapping rows."""
+    ids = set()
+    for line in output.splitlines():
+        match = re.match(r"^\s*(\d+)\s+\d+\s+\d+\s+\d+\s+\S+", line)
+        if match:
+            ids.add(int(match.group(1)))
+    return sorted(ids)
+
+
+def parse_a5_topology(output: str, expected_relation: str) -> dict[str, Any]:
+    """Parse the 950PR&950DT Products NPU topology matrix and validate off-diagonal UB links."""
+    npu_ids: list[int] = []
+    for line in output.splitlines():
+        header_ids = [int(value) for value in re.findall(r"NPU(\d+)", line)]
+        if len(header_ids) >= 2:
+            npu_ids = header_ids
+            break
+    rows: dict[int, dict[int, str]] = {}
+    if npu_ids:
+        for line in output.splitlines():
+            fields = line.split()
+            if not fields or not re.fullmatch(r"NPU\d+", fields[0]):
+                continue
+            source = int(fields[0][3:])
+            relations = fields[1 : len(npu_ids) + 1]
+            if len(relations) != len(npu_ids):
+                continue
+            rows[source] = dict(zip(npu_ids, relations))
+    mismatches = [
+        {"source": source, "destination": destination, "relation": relation}
+        for source, row in rows.items()
+        for destination, relation in row.items()
+        if source != destination and relation.upper() != expected_relation.upper()
+    ]
+    missing_rows = sorted(set(npu_ids) - set(rows))
+    diagonal_invalid = sorted(source for source, row in rows.items() if row.get(source, "").upper() != "X")
+    ok = bool(npu_ids) and not missing_rows and not mismatches and not diagonal_invalid
+    return {
+        "ok": ok,
+        "npu_ids": npu_ids,
+        "rows": {str(source): row for source, row in sorted(rows.items())},
+        "missing_rows": missing_rows,
+        "mismatches": mismatches,
+        "diagonal_invalid": diagonal_invalid,
+        "required_relation": expected_relation,
+    }
+
+
+def parse_a5_port_table(output: str) -> dict[str, Any]:
+    """Parse 950PR&950DT Products UB port rows from ``hccn_tool -g -dev_info``."""
+    rows: list[dict[str, Any]] = []
+    for line in output.splitlines():
+        if "|" not in line:
+            continue
+        columns = [column.strip() for column in line.strip().strip("|").split("|")]
+        if len(columns) != 6 or not columns[0].isdigit() or not columns[1].isdigit():
+            continue
+        speed_match = re.match(r"(\d+)", columns[2])
+        if not speed_match:
+            continue
+        rows.append(
+            {
+                "udie_id": int(columns[0]),
+                "port_id": int(columns[1]),
+                "speed_gbps": int(speed_match.group(1)),
+                "port_type": columns[3],
+                "link_status": columns[4],
+                "media_type": columns[5],
+            }
+        )
+    return {"rows": rows, "ok": bool(rows), "error": None if rows else "No UB port rows were parsed"}
+
+
+def parse_urma_endpoints(output: str) -> list[dict[str, Any]]:
+    """Parse active and inactive URMA endpoint rows."""
+    endpoints = []
+    for line in output.splitlines():
+        match = re.match(
+            r"^\s*\d+\s+(\S+)\s+(\S+)\s+eid\d+\s+"
+            r"([0-9a-fA-F:]+)\s+(ACTIVE|INACTIVE)\s*$",
+            line,
+        )
+        if match:
+            endpoints.append(
+                {
+                    "ubep_dev": match.group(1),
+                    "tp_type": match.group(2),
+                    "eid": match.group(3),
+                    "link": match.group(4),
+                }
+            )
+    return endpoints
+
+
+def probe_a5_hugepages() -> dict[str, Any]:
+    """Read 950PR&950DT Products 1GB and 2MB huge-page allocation on every visible NUMA node."""
+    entries: list[dict[str, Any]] = []
+    errors: list[str] = []
+    node_root = Path("/sys/devices/system/node")
+    nodes = sorted(
+        (path for path in node_root.glob("node[0-9]*") if path.is_dir()),
+        key=lambda path: int(path.name[4:]),
+    )
+    if not nodes:
+        errors.append("No NUMA nodes found under /sys/devices/system/node")
+    for node in nodes:
+        for size_kb in (2048, 1048576):
+            path = node / f"hugepages/hugepages-{size_kb}kB/nr_hugepages"
+            try:
+                value = int(path.read_text(encoding="ascii").strip())
+            except (OSError, ValueError) as exc:
+                errors.append(f"{path}: {exc}")
+                continue
+            entries.append(
+                {
+                    "node": int(node.name[4:]),
+                    "page_size_kb": size_kb,
+                    "configured_pages": value,
+                    "path": str(path),
+                }
+            )
+    residual = [entry for entry in entries if entry["configured_pages"] > 0]
+    evidence_complete = not errors and len(entries) == len(nodes) * 2
+    return {
+        "method": "a5_hugepages",
+        "ok": evidence_complete and not residual,
+        "evidence_complete": evidence_complete,
+        "entries": entries,
+        "residual_entries": residual,
+        "errors": errors,
+    }
+
+
+def probe_a5_secverify() -> dict[str, Any]:
+    """Read the documented 950PR&950DT Products custom-op signature verification state."""
+    mapping_rc, mapping_output, mapping_error = run_cmd(["npu-smi", "info", "-m"], timeout=15)
+    npu_ids = parse_npu_mapping_ids(mapping_output)
+    states = []
+    errors = []
+    if mapping_rc != 0 or not npu_ids:
+        errors.append(
+            f"npu-smi info -m rc={mapping_rc}; {redact(mapping_error or mapping_output or 'no NPU mapping output')}"
+        )
+    for npu_id in npu_ids:
+        enable_rc, enable_output, enable_error = run_cmd(
+            ["npu-smi", "info", "-t", "custom-op-secverify-enable", "-i", str(npu_id)],
+            timeout=15,
+        )
+        mode_rc, mode_output, mode_error = run_cmd(
+            ["npu-smi", "info", "-t", "custom-op-secverify-mode", "-i", str(npu_id)],
+            timeout=15,
+        )
+        enable_match = re.search(r"custom-op-secverify-enable\s*:\s*(True|False)", enable_output, re.IGNORECASE)
+        mode_match = re.search(r"custom-op-secverify-mode\s*:\s*(\d+)", mode_output, re.IGNORECASE)
+        state = {
+            "npu_id": npu_id,
+            "enable": enable_match.group(1).lower() == "true" if enable_match else None,
+            "mode": int(mode_match.group(1)) if mode_match else None,
+            "command_rc": {"enable": enable_rc, "mode": mode_rc},
+        }
+        states.append(state)
+        if enable_rc != 0 or mode_rc != 0 or state["enable"] is None or state["mode"] is None:
+            errors.append(
+                f"NPU {npu_id}: {redact(enable_error or enable_output or mode_error or mode_output or 'no output')}"
+            )
+    return {
+        "npu_ids": npu_ids,
+        "states": states,
+        "errors": errors,
+        "ok": bool(states) and not errors,
+    }
+
+
+def parse_urma_ping(output: str, rc: int, maximum_packet_loss_percent: float = 0.0) -> dict[str, Any]:
+    """Parse ``urma_ping`` loss counters and command status."""
+    match = re.search(
+        r"(\d+)\s+transmitted\s*,\s*(\d+)\s+received\s*,\s*([0-9]+(?:\.[0-9]+)?)%\s+packet loss",
+        output,
+        re.IGNORECASE,
+    )
+    if match:
+        transmitted = int(match.group(1))
+        received = int(match.group(2))
+        packet_loss = float(match.group(3))
+        return {
+            "ok": rc == 0
+            and transmitted > 0
+            and received == transmitted
+            and packet_loss <= maximum_packet_loss_percent,
+            "transmitted": transmitted,
+            "received": received,
+            "packet_loss_percent": packet_loss,
+        }
+    return {
+        "ok": False,
+        "transmitted": None,
+        "received": None,
+        "packet_loss_percent": None,
+    }
+
+
+def probe_a5_ub(context: CheckContext, rules: list[dict[str, Any]]) -> dict[str, Any]:
+    """Probe 950PR&950DT Products NPU topology, UB ports, URMA endpoints, and optional peer ping."""
+    static_parameters = evaluator_parameters(rules, "a5_ub_static")
+    ping_parameters = evaluator_parameters(rules, "a5_peer_ping")
+    mapping_rc, mapping_output, mapping_error = run_cmd(["npu-smi", "info", "-m"], timeout=15)
+    npu_ids = parse_npu_mapping_ids(mapping_output)
+    topology_rc, topology_output, topology_error = run_cmd(["npu-smi", "info", "-t", "topo"], timeout=20)
+    topology = parse_a5_topology(topology_output, str(static_parameters.get("required_topology_relation", "UB")))
+    hccn_tool = find_hccn_tool()
+    port_results = []
+    if hccn_tool and npu_ids:
+        for npu_id in npu_ids:
+            rc, output, error = run_cmd([hccn_tool, "-g", "-dev_info", "-i", str(npu_id)], timeout=15)
+            ports = parse_a5_port_table(output)
+            port_results.append(
+                {
+                    "npu_id": npu_id,
+                    "rc": rc,
+                    "error": redact(error),
+                    **ports,
+                }
+            )
+    static_errors = []
+    if mapping_rc != 0 or not npu_ids:
+        static_errors.append(
+            f"npu-smi info -m rc={mapping_rc}; {redact(mapping_error or mapping_output or 'no NPU mapping output')}"
+        )
+    if topology_rc != 0:
+        static_errors.append(
+            f"npu-smi info -t topo rc={topology_rc}; "
+            f"{redact(topology_error or topology_output or 'no topology output')}"
+        )
+    if not hccn_tool:
+        static_errors.append("hccn_tool is not available")
+    for result in port_results:
+        if result["rc"] != 0 or not result["ok"]:
+            static_errors.append(
+                f"NPU {result['npu_id']} port query rc={result['rc']}; "
+                f"{redact(result['error'] or 'no parsable port rows')}"
+            )
+    for result in port_results:
+        for port in result["rows"]:
+            if (
+                port["port_type"] not in static_parameters.get("allowed_port_types", [])
+                or port["link_status"].upper() != str(static_parameters.get("required_link", "UP")).upper()
+                or (static_parameters.get("require_positive_speed", True) and port["speed_gbps"] <= 0)
+            ):
+                static_errors.append(
+                    f"NPU {result['npu_id']} UDie {port['udie_id']} port {port['port_id']} "
+                    f"is {port['port_type']}/{port['link_status']}/{port['speed_gbps']}Gbps"
+                )
+    capability_failed = (
+        mapping_rc != 0
+        or not npu_ids
+        or topology_rc != 0
+        or not hccn_tool
+        or any(result["rc"] != 0 or not result["ok"] for result in port_results)
+    )
+    static = {
+        "ok": bool(npu_ids) and topology_rc == 0 and topology["ok"] and bool(port_results) and not static_errors,
+        "npu_ids": npu_ids,
+        "topology": topology,
+        "ports": port_results,
+        "errors": static_errors,
+        "failure_kind": (None if not static_errors else ("capability" if capability_failed else "link")),
+    }
+
+    urma_admin = shutil.which("urma_admin")
+    endpoints = []
+    endpoint_rc = 127
+    endpoint_error = "urma_admin is not available"
+    if urma_admin:
+        endpoint_rc, endpoint_output, endpoint_error = run_cmd([urma_admin, "show"], timeout=15)
+        endpoints = parse_urma_endpoints(endpoint_output)
+    active_endpoints = [endpoint for endpoint in endpoints if endpoint["link"] == "ACTIVE"]
+    urma = {
+        "endpoint_rc": endpoint_rc,
+        "endpoint_error": redact(endpoint_error),
+        "endpoints": endpoints,
+        "active_endpoint_count": len(active_endpoints),
+        "ok": endpoint_rc == 0 and bool(active_endpoints),
+    }
+
+    peer_ping = {
+        "requested": bool(context.peer_eid),
+        "peer_eid": context.peer_eid,
+        "local_eid": active_endpoints[0]["eid"] if active_endpoints else None,
+        "ok": False,
+    }
+    if context.peer_eid and peer_ping["local_eid"] and shutil.which("urma_ping"):
+        ping_rc, ping_output, ping_error = run_cmd(
+            [
+                "urma_ping",
+                "-c",
+                "1",
+                "-W",
+                "1",
+                "-I",
+                peer_ping["local_eid"],
+                context.peer_eid,
+            ],
+            timeout=15,
+        )
+        peer_ping.update(
+            {
+                "rc": ping_rc,
+                "error": redact(ping_error),
+                **parse_urma_ping(
+                    ping_output,
+                    ping_rc,
+                    float(ping_parameters.get("required_packet_loss_percent", 0)),
+                ),
+            }
+        )
+    return {"static": static, "urma": urma, "peer_ping": peer_ping}
 
 
 def probe_hardware(identification: dict[str, Any]) -> dict[str, Any]:
@@ -1243,6 +1620,11 @@ PROBES: dict[str, Callable[[CheckContext, list[dict[str, Any]]], dict[str, Any]]
     "hdk": lambda context, rules: {**probe_hdk(), "hardware": context.hardware, "backend": context.backend},
     "kernel": lambda context, rules: {**probe_kernel(), "deployment_mode": context.deployment_mode},
     "memory_scan": lambda context, rules: probe_memory_capacity(context.hardware, context.managed_memory_mb),
+    "a5_memory": lambda context, rules: probe_a5_memory_capacity(context.managed_memory_mb),
+    "a5_hugepages": lambda context, rules: probe_a5_hugepages(),
+    "a5_docker_prereqs": lambda context, rules: probe_docker_prereqs(),
+    "a5_secverify": lambda context, rules: probe_a5_secverify(),
+    "a5_ub": probe_a5_ub,
     "manual_confirmation": lambda context, rules: {},
     "ssd_storage": lambda context, rules: probe_ssd_storage(context.ssd_path or "", context.backend),
     "roce_diagnostics": lambda context, rules: probe_roce_diagnostics(
@@ -1280,8 +1662,8 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
         if not isinstance(catalog.get(field), list) or not catalog[field]:
             raise CatalogError(f"{field} must be a non-empty array")
     identification = catalog.get("hardware_identification", {})
-    if set(catalog["supported_link_types"]) != {"roce", "hccs"}:
-        raise CatalogError("supported_link_types must be roce/hccs")
+    if set(catalog["supported_link_types"]) != {"roce", "hccs", "ub"}:
+        raise CatalogError("supported_link_types must be roce/hccs/ub")
     if set(catalog["supported_deployment_modes"]) != {"single-node", "multi-node"}:
         raise CatalogError("supported_deployment_modes must be single-node/multi-node")
     if not isinstance(identification, dict) or not set(identification) <= set(catalog["supported_hardware"]):
@@ -1354,9 +1736,9 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
         if link_types is not None and (
             not isinstance(link_types, list)
             or not link_types
-            or any(link_type not in ("roce", "hccs") for link_type in link_types)
+            or any(link_type not in catalog["supported_link_types"] for link_type in link_types)
         ):
-            raise CatalogError(f"Rule {rule['id']} link_types must be a non-empty roce/hccs array")
+            raise CatalogError(f"Rule {rule['id']} link_types must use values declared in supported_link_types")
         deployment_modes = rule.get("deployment_modes")
         if deployment_modes is not None and (
             not isinstance(deployment_modes, list)
@@ -1389,6 +1771,8 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
             raise CatalogError(f"Rule {rule['id']} must restrict link_types=[hccs]")
         if rule["evaluator"] in ("roce_link", "roce_local") and rule.get("link_types") != ["roce"]:
             raise CatalogError(f"Rule {rule['id']} must restrict link_types=[roce]")
+        if rule["evaluator"] in ("a5_ub_static", "a5_urma", "a5_peer_ping") and rule.get("link_types") != ["ub"]:
+            raise CatalogError(f"Rule {rule['id']} must restrict link_types=[ub]")
         if rule.get("feature") and rule.get("feature") == rule.get("exclude_feature"):
             raise CatalogError(f"Rule {rule['id']} cannot both require and exclude the same feature")
 
@@ -1410,6 +1794,8 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
             ),
             "roce_link": ("required_link", "required_health", "require_unique_ip", "require_consistent_netmask_mtu"),
             "roce_local": ("packet_size", "required_packet_loss_percent", "timeout_seconds"),
+            "a5_ub_static": ("required_topology_relation", "allowed_port_types", "required_link"),
+            "a5_urma": ("require_active_endpoint",),
         }.get(rule["evaluator"], ())
         missing_parameters = [key for key in required_parameters if key not in rule["parameters"]]
         if missing_parameters:
@@ -1445,19 +1831,20 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
                 raise CatalogError(f"Rule {rule['id']} HDK requirements do not cover every applicable combination")
         if rule["evaluator"] == "docker_prereqs":
             parameters = rule["parameters"]
-            if set(parameters) != {"required_all", "required_any"}:
-                raise CatalogError(f"Rule {rule['id']} Docker parameters may contain only required_all/required_any")
+            if set(parameters) - {"required_all", "required_any"} or "required_all" not in parameters:
+                raise CatalogError(
+                    f"Rule {rule['id']} Docker parameters must contain required_all and may contain required_any"
+                )
             required_all = parameters.get("required_all")
-            required_any = parameters.get("required_any")
+            required_any = parameters.get("required_any", [])
             if (
                 not isinstance(required_all, list)
                 or not required_all
                 or not all(isinstance(key, str) and key for key in required_all)
             ):
                 raise CatalogError(f"Rule {rule['id']} parameters.required_all must be a non-empty string array")
-            if (
+            if required_any and (
                 not isinstance(required_any, list)
-                or not required_any
                 or not all(
                     isinstance(group, list) and len(group) >= 2 and all(isinstance(key, str) and key for key in group)
                     for group in required_any
@@ -1517,6 +1904,8 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
     for probe_name, required_evaluators in {
         "roce_diagnostics": {"roce_link", "roce_local"},
         "hccs_diagnostics": {"hccs_static", "hccs_dynamic"},
+        "a5_ub": {"a5_ub_static", "a5_urma", "a5_peer_ping"},
+        "a5_docker_prereqs": {"docker_prereqs"},
     }.items():
         configured = {rule["evaluator"] for rule in catalog["rules"] if rule["probe"] == probe_name}
         if configured and configured != required_evaluators:
@@ -1570,6 +1959,10 @@ def validate_inputs(
         )
     if hardware == "A2" and link_type != "roce":
         raise InputError("A2 supports only --link-type roce")
+    if hardware == "A3" and link_type not in ("roce", "hccs"):
+        raise InputError("A3 supports --link-type roce or hccs")
+    if hardware == "A5" and link_type != "ub":
+        raise InputError("950PR&950DT Products support only --link-type ub")
     detected = probe_hardware(catalog.get("hardware_identification", {}))
     if not detected["model"]:
         detail = ", ".join(detected["candidates"]) if detected["candidates"] else "No supported model was detected"
@@ -1857,9 +2250,11 @@ def evaluate_memory_scan(rule: dict[str, Any], probes: dict[str, Any]) -> dict[s
 
 def evaluate_docker_prereqs(rule: dict[str, Any], probes: dict[str, Any]) -> dict[str, Any]:
     """Evaluate whether required Docker devices, drivers, and HCCN entry points are available."""
-    probe = probes["docker_prereqs"]
+    probe = probes[rule["probe"]]
     missing_all = [key for key in rule["parameters"]["required_all"] if not probe.get(key)]
-    failed_any = [group for group in rule["parameters"]["required_any"] if not any(probe.get(key) for key in group)]
+    failed_any = [
+        group for group in rule["parameters"].get("required_any", []) if not any(probe.get(key) for key in group)
+    ]
     status = "PASS" if not missing_all and not failed_any else "BLOCK"
     hccn_entry = "hccn_conf" if probe.get("hccn_conf") else ("hccn_tool" if probe.get("hccn_tool") else None)
     evidence = {
@@ -2074,6 +2469,159 @@ def evaluate_hccs_dynamic(rule: dict[str, Any], probes: dict[str, Any]) -> dict[
     return result
 
 
+def evaluate_a5_memory(rule: dict[str, Any], probes: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate 950PR&950DT Products host memory capacity."""
+    probe = probes["a5_memory"]
+    status = "PASS" if probe.get("ok") else "BLOCK"
+    detail = (
+        f"Method=950PR&950DT Products host memory; global target={probe.get('managed_memory_mb')}MB; "
+        f"MemTotal={probe.get('total_memory_mb') if probe.get('total_memory_mb') is not None else '-'}MB; "
+        f"MemAvailable={probe.get('available_memory_mb') if probe.get('available_memory_mb') is not None else '-'}MB"
+    )
+    if probe.get("error"):
+        detail += f"; error={probe['error']}"
+    result = make_record(rule, status, probe, detail)
+    if status == "BLOCK" and probe.get("failure_kind") == "capacity":
+        result["remediation"]["description"] = (
+            "Reduce the configured backend memory target or release host memory, then rerun the check."
+        )
+    elif status == "BLOCK":
+        result["remediation"]["description"] = (
+            "Confirm MemTotal and MemAvailable are readable from /proc/meminfo, repair the container, "
+            "and rerun the check."
+        )
+    return result
+
+
+def evaluate_a5_hugepages(rule: dict[str, Any], probes: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate 950PR&950DT Products huge-page cleanup status."""
+    probe = probes["a5_hugepages"]
+    if not probe.get("evidence_complete"):
+        status = "BLOCK"
+    elif probe.get("residual_entries"):
+        status = "WARN"
+    else:
+        status = "PASS"
+    residual = probe.get("residual_entries", [])
+    detail = (
+        f"950PR&950DT Products huge-page entries read={len(probe.get('entries', []))}; residual entries={len(residual)}"
+    )
+    if residual:
+        detail += "; residual=" + ", ".join(
+            f"node{item['node']}/{item['page_size_kb']}kB={item['configured_pages']}" for item in residual
+        )
+    if probe.get("errors"):
+        detail += "; errors=" + " | ".join(probe["errors"])
+    return make_record(rule, status, probe, detail)
+
+
+def evaluate_a5_secverify(rule: dict[str, Any], probes: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate the documented 950PR&950DT Products custom-op signature state."""
+    probe = probes["a5_secverify"]
+    required_enable = bool(rule["parameters"]["required_enable"])
+    required_mode = int(rule["parameters"]["required_mode"])
+    invalid = [
+        state
+        for state in probe.get("states", [])
+        if state.get("enable") != required_enable or state.get("mode") != required_mode
+    ]
+    if probe.get("errors"):
+        status = "MANUAL_REQUIRED"
+    elif invalid:
+        status = "BLOCK"
+    else:
+        status = "PASS"
+    detail = f"Visible NPUs={len(probe.get('npu_ids', []))}; mismatches={len(invalid)}"
+    if invalid:
+        detail += "; states=" + json.dumps(
+            [
+                {"npu_id": state.get("npu_id"), "enable": state.get("enable"), "mode": state.get("mode")}
+                for state in invalid
+            ],
+            separators=(",", ":"),
+        )
+    if probe.get("errors"):
+        detail += "; errors=" + " | ".join(probe["errors"])
+    result = make_record(rule, status, probe, detail)
+    if status == "MANUAL_REQUIRED":
+        result["remediation"]["description"] = (
+            "Run the checker in a privileged or NPU-exclusive container, or manually confirm "
+            "custom-op-secverify-enable and custom-op-secverify-mode on every visible 950PR&950DT Products NPU."
+        )
+    elif status == "BLOCK":
+        result["remediation"]["description"] = (
+            "Correct custom-op-secverify-enable or custom-op-secverify-mode to the documented value, "
+            "or confirm the 950PR&950DT Products signature state with the hardware administrator."
+        )
+    return result
+
+
+def evaluate_a5_ub_static(rule: dict[str, Any], probes: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate 950PR&950DT Products NPU topology and physical UB port state."""
+    static = probes["a5_ub"]["static"]
+    status = "PASS" if static.get("ok") else "BLOCK"
+    detail = (
+        f"Visible NPUs={len(static.get('npu_ids', []))}; "
+        f"topology={'PASS' if static.get('topology', {}).get('ok') else 'FAIL'}; "
+        f"port queries={sum(1 for item in static.get('ports', []) if item.get('ok'))}"
+    )
+    if static.get("errors"):
+        detail += "; errors=" + " | ".join(static["errors"])
+    result = make_record(rule, status, static, detail)
+    if status == "BLOCK" and static.get("failure_kind") == "capability":
+        result["remediation"]["description"] = (
+            "Run the 950PR&950DT Products check in an NPU-exclusive container with npu-smi and hccn_tool mounted, "
+            "then rerun the check."
+        )
+    elif status == "BLOCK":
+        result["remediation"]["description"] = (
+            "Inspect the failed 950PR&950DT Products UDie and port, restore the UB/UBOE physical link, "
+            "and rerun the check."
+        )
+    return result
+
+
+def evaluate_a5_urma(rule: dict[str, Any], probes: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate 950PR&950DT Products URMA endpoints."""
+    urma = probes["a5_ub"]["urma"]
+    status = "PASS" if urma.get("ok") else "BLOCK"
+    detail = f"Active endpoints={urma.get('active_endpoint_count', 0)}; urma_admin show rc={urma.get('endpoint_rc')}"
+    if urma.get("endpoint_error"):
+        detail += f"; endpoint error={urma['endpoint_error']}"
+    result = make_record(rule, status, urma, detail)
+    if status == "BLOCK":
+        result["remediation"]["description"] = (
+            "Restore at least one ACTIVE URMA endpoint and verify /etc/hixlep and /etc/hccl_rootinfo.json, "
+            "then rerun the check."
+        )
+    return result
+
+
+def evaluate_a5_peer_ping(rule: dict[str, Any], probes: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate an optional cross-node 950PR&950DT Products URMA ping."""
+    peer = probes["a5_ub"]["peer_ping"]
+    if not peer.get("requested"):
+        result = make_record(
+            rule,
+            "NOT_EXECUTED",
+            peer,
+            "No --peer-eid was provided; cross-node URMA connectivity was not tested",
+        )
+        result["blocking"] = False
+        return result
+    status = "PASS" if peer.get("ok") else "BLOCK"
+    detail = (
+        f"peer_eid={peer.get('peer_eid')}; local_eid={peer.get('local_eid')}; "
+        f"transmitted={peer.get('transmitted')}; received={peer.get('received')}; "
+        f"packet_loss={peer.get('packet_loss_percent')}%"
+    )
+    if peer.get("error"):
+        detail += f"; error={peer['error']}"
+    result = make_record(rule, status, peer, detail)
+    result["blocking"] = status == "BLOCK"
+    return result
+
+
 def package_version_key(value: str) -> tuple[int, ...] | None:
     match = re.match(r"^\s*(\d+(?:\.\d+)*)(?:(a|b|rc)(\d+))?(?:\.post(\d+))?", value, re.IGNORECASE)
     if not match:
@@ -2106,6 +2654,12 @@ EVALUATORS: dict[str, Callable[[dict[str, Any], dict[str, Any]], dict[str, Any] 
     "roce_local": evaluate_roce_local,
     "hccs_static": evaluate_hccs_static,
     "hccs_dynamic": evaluate_hccs_dynamic,
+    "a5_memory": evaluate_a5_memory,
+    "a5_hugepages": evaluate_a5_hugepages,
+    "a5_secverify": evaluate_a5_secverify,
+    "a5_ub_static": evaluate_a5_ub_static,
+    "a5_urma": evaluate_a5_urma,
+    "a5_peer_ping": evaluate_a5_peer_ping,
 }
 
 
@@ -2120,6 +2674,11 @@ def build_probe_plan(rules: list[dict[str, Any]]) -> dict[str, list[dict[str, An
 
 PROBE_LABELS = {
     "memory_scan": "managed memory check",
+    "a5_memory": "950PR&950DT Products host memory check",
+    "a5_hugepages": "950PR&950DT Products huge-page check",
+    "a5_docker_prereqs": "950PR&950DT Products device and configuration mount check",
+    "a5_secverify": "950PR&950DT Products custom-op signature state check",
+    "a5_ub": "950PR&950DT Products UB and URMA check",
     "hdk": "version check",
     "kernel": "Linux kernel version check",
     "manual_confirmation": "manual confirmation preparation",
@@ -2276,6 +2835,45 @@ def fix_memory_with_drop_caches(
     return after_record, action
 
 
+def fix_a5_hugepages(
+    rule: dict[str, Any], context: CheckContext, record: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Clear configured 950PR&950DT Products huge pages when explicitly authorized."""
+    residual = record.get("evidence", {}).get("residual_entries", [])
+    action: dict[str, Any] = {
+        "id": record["id"],
+        "type": "clear_a5_hugepages",
+        "status": "SKIPPED",
+        "message": "",
+        "before_evidence": record.get("evidence", {}),
+        "operation": {"paths": [entry["path"] for entry in residual], "value": "0"},
+        "after_evidence": None,
+    }
+    if not residual:
+        action.update(status="SUCCESS", message="No residual 950PR&950DT Products huge pages require cleanup.")
+        return record, action
+    if os.geteuid() != 0:
+        action.update(status="FAILED", message="950PR&950DT Products huge-page cleanup requires root in the container.")
+        return record, action
+
+    failures = []
+    for entry in residual:
+        try:
+            Path(entry["path"]).write_text("0\n", encoding="ascii")
+        except OSError as exc:
+            failures.append(f"{entry['path']}: {exc}")
+    after_probe = probe_a5_hugepages()
+    after_record = evaluate_a5_hugepages(rule, {"a5_hugepages": after_probe})
+    action["after_evidence"] = after_probe
+    if failures:
+        action.update(status="FAILED", message="; ".join(failures))
+    elif after_record["status"] == "PASS":
+        action.update(status="SUCCESS", message="All 950PR&950DT Products 1GB and 2MB huge pages were cleared.")
+    else:
+        action.update(status="NO_EFFECT", message="Residual 950PR&950DT Products huge pages remain after cleanup.")
+    return after_record, action
+
+
 def execute_fix(
     catalog: dict[str, Any], context: CheckContext, check_results: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -2292,6 +2890,9 @@ def execute_fix(
         with progress.stage(f"Repair {record['id']}"):
             if remediation["type"] == "drop_caches_then_rescan":
                 final_results[index], action = fix_memory_with_drop_caches(rules[record["id"]], context, record)
+                actions.append(action)
+            elif remediation["type"] == "clear_a5_hugepages":
+                final_results[index], action = fix_a5_hugepages(rules[record["id"]], context, record)
                 actions.append(action)
             else:
                 actions.append(
@@ -2586,6 +3187,10 @@ def build_parser(catalog_data: dict[str, Any]) -> argparse.ArgumentParser:
             "    python -m vllm_ascend.distributed.kv_transfer.utils.envcheck.kvpool_envcheck "
             "--hardware A3 --backend memcache --managed-memory-mb 32768 "
             "--deployment-mode multi-node --link-type hccs --output-dir ./results\n\n"
+            "  Validate a 950PR&950DT Products multi-node deployment with a remote UB EID:\n"
+            "    python -m vllm_ascend.distributed.kv_transfer.utils.envcheck.kvpool_envcheck "
+            "--hardware A5 --backend mooncake --managed-memory-mb 32768 "
+            "--deployment-mode multi-node --link-type ub --peer-eid <remote-eid>\n\n"
             "  Authorize supported local repairs:\n"
             "    python -m vllm_ascend.distributed.kv_transfer.utils.envcheck.kvpool_envcheck "
             "--hardware A3 --backend memcache --managed-memory-mb 32768 "
@@ -2626,12 +3231,17 @@ def build_parser(catalog_data: dict[str, Any]) -> argparse.ArgumentParser:
     detection.add_argument(
         "--deployment-mode",
         metavar=deployment_mode_metavar,
-        help="Deployment scale: single-node or multi-node; affects KERNEL-001 evaluation",
+        help="Deployment scale: single-node or multi-node; selects deployment-specific rules",
     )
     detection.add_argument(
         "--link-type",
         metavar=link_type_metavar,
-        help="Actual backend communication link for A3: roce or hccs; A2 supports only roce",
+        help="Backend communication link; A2 uses roce, A3 uses roce or hccs, and 950PR&950DT Products use ub",
+    )
+    detection.add_argument(
+        "--peer-eid",
+        metavar="EID",
+        help="Remote 950PR&950DT Products UB EID for optional multi-node urma_ping validation",
     )
 
     ssd = parser.add_argument_group("SSD Offload (optional)")
@@ -2735,6 +3345,12 @@ def main(argv: list[str] | None = None) -> int:
                 raise InputError("Check mode requires --managed-memory-mb to be greater than 0")
             if args.ssd_path and not args.ssd_offload:
                 raise InputError("--ssd-path can be used only with --ssd-offload")
+            if args.peer_eid and (
+                args.hardware.strip().upper() != "A5"
+                or args.link_type.strip().lower() != "ub"
+                or args.deployment_mode.strip().lower() != "multi-node"
+            ):
+                raise InputError("--peer-eid requires --hardware A5 --link-type ub --deployment-mode multi-node")
             hardware, backend, link_type, deployment_mode, _hardware_identification = validate_inputs(
                 catalog, args.hardware, args.backend, args.link_type, args.deployment_mode
             )
@@ -2748,6 +3364,7 @@ def main(argv: list[str] | None = None) -> int:
             link_type=link_type,
             ssd_offload=args.ssd_offload,
             ssd_path=args.ssd_path,
+            peer_eid=args.peer_eid,
             progress=progress,
         )
         check_results = collect_check_results(catalog, context)
@@ -2762,7 +3379,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # Build one result model containing inputs, summaries, scenarios, repairs, and references.
         exit_code = result_exit_code(check_results)
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.UTC)
         timestamp = int(now.timestamp())
         run_id = f"{now.strftime('%Y%m%dT%H%M%SZ')}_{secrets.token_hex(4)}"
         invocation = {
@@ -2774,6 +3391,7 @@ def main(argv: list[str] | None = None) -> int:
                 "link_type": link_type,
                 "ssd_offload": args.ssd_offload,
                 "ssd_path": args.ssd_path,
+                "peer_eid": args.peer_eid,
                 "fix": args.fix,
                 "output_dir": str(args.output_dir.resolve()) if args.output_dir else None,
                 "catalog": str(args.catalog.resolve()),
