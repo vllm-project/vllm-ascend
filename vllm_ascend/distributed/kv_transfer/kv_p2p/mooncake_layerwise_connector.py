@@ -55,6 +55,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, is_circular_kv_cache_spec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
@@ -98,6 +99,51 @@ class LayerMetadata:
     kv_caches_base_addr: list[int]
     block_len: list[int]
     block_size_scale: list[int]
+    block_stride_bytes: list[int] = field(default_factory=list)
+    block_shapes: list[list[int]] = field(default_factory=list)
+    block_dtypes: list[str] = field(default_factory=list)
+    compression_ratio: int = 1
+    logical_block_size: int = 0
+    cache_kind: str = ""
+    dcp_size: int = 1
+    dcp_rank: int = 0
+    interleave_size: int = 1
+    is_sender: bool = True
+    state_head_start: int = 0
+    state_total_heads: int = 0
+    state_conv_dim_first: bool = False
+    state_cache_mode: str = "none"
+
+
+def _layer_spec(spec: KVCacheSpec, layer_name: str) -> KVCacheSpec:
+    return spec.kv_cache_specs[layer_name] if isinstance(spec, UniformTypeKVCacheSpecs) else spec
+
+
+def _requires_component_transfer(kv_cache_config: KVCacheConfig) -> bool:
+    """Select explicit component addressing from cache capabilities, not model identity."""
+    for group in kv_cache_config.kv_cache_groups:
+        for name in group.layer_names:
+            spec = _layer_spec(group.kv_cache_spec, name)
+            if (
+                is_circular_kv_cache_spec(spec)
+                or getattr(spec, "indexes_kv_by_block_stride", False)
+                or (isinstance(spec, MLAAttentionSpec) and get_kv_cache_compression_ratio(spec) > 1)
+            ):
+                return True
+    return False
+
+
+def _validate_mamba_parallel_config(kv_cache_config: KVCacheConfig, tp_size: int, pcp_size: int) -> bool:
+    has_mamba = any(
+        isinstance(_layer_spec(group.kv_cache_spec, name), MambaSpec)
+        for group in kv_cache_config.kv_cache_groups
+        for name in group.layer_names
+    )
+    # Match Mooncake V2 #19518: the wire layout has PCP*TP head shards,
+    # but the backend cannot yet partition both axes simultaneously.
+    if has_mamba and tp_size > 1 and pcp_size > 1:
+        raise ValueError("Mooncake Mamba requires PCP=1 or TP=1 on both producer and consumer")
+    return has_mamba
 
 
 class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
@@ -128,6 +174,7 @@ class ReqMeta:
     local_computed_tokens: int = 0
     local_transed_tokens: int = 0
     do_virtual: bool = False
+    peers: list["ReqMeta"] = field(default_factory=list)
 
 
 @dataclass
@@ -310,12 +357,8 @@ class KVCacheSendingLayerThread(threading.Thread):
                         if not req_meta.chunk_finish:
                             continue
                         transfer_succeeded = req_id not in self.failed_reqs
-                        self.callback_func(
-                            req_id,
-                            req_meta,
-                            primary_group_idx,
-                            trans_flag=transfer_succeeded,
-                        )
+                        for peer in req_meta.peers or [req_meta]:
+                            self.callback_func(req_id, peer, primary_group_idx, trans_flag=transfer_succeeded)
                         if not transfer_succeeded:
                             self.failed_reqs.discard(req_id)
             if self.reuse_completion_callback is not None:
@@ -339,6 +382,11 @@ class KVCacheSendingLayerThread(threading.Thread):
         remote_layer_metadata = req_meta.remote_layer_metadata[layer_name]
         local_layer_metadata = self.layer_metadata[layer_name]
         local_block_ids = req_meta.local_block_ids[layer_group_idx]
+
+        if local_layer_metadata.cache_kind:
+            return self._get_component_transfer_meta(
+                req_meta, local_layer_metadata, remote_layer_metadata, layer_group_idx
+            )
 
         if isinstance(layer_kv_cache_spec, MambaSpec):
             # only support one block transfer for mamba
@@ -497,6 +545,216 @@ class KVCacheSendingLayerThread(threading.Thread):
                         length_list.append(block_len)
         return (src_list, dst_list, length_list)
 
+    @staticmethod
+    def _append_component_segment(src, dst, lengths, source: int, destination: int, size: int) -> None:
+        if not size:
+            return
+        if lengths and src[-1] + lengths[-1] == source and dst[-1] + lengths[-1] == destination:
+            lengths[-1] += size
+        else:
+            src.append(source)
+            dst.append(destination)
+            lengths.append(size)
+
+    def _get_component_transfer_meta(
+        self, req_meta: ReqMeta, local: LayerMetadata, remote: LayerMetadata, group_idx: int
+    ) -> tuple[list[int], list[int], list[int]]:
+        """Map logical token/state ownership independently of PCP compute partitioning."""
+        # A four-component D state keeps RecoverSSM verify records locally.
+        # Native P pushes only conv/recurrent state using the existing slices.
+        num_transfer_components = (
+            2 if remote.cache_kind == "mamba" and len(remote.kv_caches_base_addr) == 4 else len(remote.block_len)
+        )
+        if (
+            local.cache_kind != remote.cache_kind
+            or local.compression_ratio != remote.compression_ratio
+            or local.block_dtypes != remote.block_dtypes[:num_transfer_components]
+            or len(local.block_len) != num_transfer_components
+            or any(
+                len(values) != len(meta.block_len)
+                for meta in (local, remote)
+                for values in (
+                    meta.block_shapes,
+                    meta.block_dtypes,
+                    meta.block_stride_bytes,
+                    meta.kv_caches_base_addr,
+                    meta.block_size_scale,
+                )
+            )
+        ):
+            raise ValueError("Incompatible component P/D cache layouts")
+        if not req_meta.chunk_finish or not local.is_sender:
+            return [], [], []
+        local_ids = req_meta.local_block_ids[group_idx]
+        remote_ids = req_meta.remote_block_ids[remote.tensor_group_idx[0]]
+        if local.cache_kind == "mamba":
+            return self._get_state_transfer_meta(req_meta, local, remote, local_ids, remote_ids)
+        src, dst, lengths = [], [], []
+        if local.cache_kind == "circular":
+            if len(local_ids) != 1 or len(remote_ids) != 1 or local.block_shapes != remote.block_shapes:
+                raise ValueError("Circular cache requires one matching state page on both peers")
+            for i, payload in enumerate(local.block_len):
+                if payload != remote.block_len[i] or local.block_size_scale[i] != remote.block_size_scale[i]:
+                    raise ValueError("Circular cache physical block layouts differ")
+                for offset in range(local.block_size_scale[i]):
+                    self._append_component_segment(
+                        src,
+                        dst,
+                        lengths,
+                        local.kv_caches_base_addr[i]
+                        + (local_ids[0] * local.block_size_scale[i] + offset) * local.block_stride_bytes[i],
+                        remote.kv_caches_base_addr[i]
+                        + (remote_ids[0] * remote.block_size_scale[i] + offset) * remote.block_stride_bytes[i],
+                        payload,
+                    )
+            return src, dst, lengths
+
+        ratio = local.compression_ratio
+        if ratio <= 0 or any(
+            meta.interleave_size <= 0 or meta.dcp_size <= 0 or not 0 <= meta.dcp_rank < meta.dcp_size
+            for meta in (local, remote)
+        ):
+            raise ValueError("Invalid attention compression or DCP topology")
+        # A compressed row is published by the rank owning its final token.
+        # Require whole pools inside a DCP stripe; a split pool cannot be
+        # interpreted as a contiguous compressed local row interval.
+        for meta in (local, remote):
+            if meta.dcp_size > 1 and meta.interleave_size % ratio:
+                raise ValueError("DCP interleave must be divisible by the component compression ratio")
+        start = max(0, req_meta.remote_cache_tokens)
+        end = req_meta.local_computed_tokens
+        for i, payload in enumerate(local.block_len):
+            if not payload:
+                continue
+            if local.block_shapes[i][1:] != remote.block_shapes[i][1:]:
+                raise ValueError("Attention row layouts differ between P and D")
+            local_rows = local.block_shapes[i][0]
+            remote_rows = remote.block_shapes[i][0]
+            if local_rows <= 0 or remote_rows <= 0 or payload % local_rows:
+                raise ValueError("Invalid attention physical row geometry")
+            row_bytes = payload // local_rows
+            if remote.block_len[i] != remote_rows * row_bytes:
+                raise ValueError("Attention row byte lengths differ between P and D")
+            token = (start // ratio) * ratio
+            while token + ratio <= end:
+                source_owner = (token // local.interleave_size) % local.dcp_size
+                dest_owner = (token // remote.interleave_size) % remote.dcp_size
+                stripe_end = end
+                for meta in (local, remote):
+                    if meta.dcp_size > 1:
+                        stripe_end = min(stripe_end, (token // meta.interleave_size + 1) * meta.interleave_size)
+                if source_owner != local.dcp_rank or dest_owner != remote.dcp_rank:
+                    token = stripe_end
+                    continue
+                local_pos = (
+                    token // (local.interleave_size * local.dcp_size) * local.interleave_size
+                    + token % local.interleave_size
+                )
+                remote_pos = (
+                    token // (remote.interleave_size * remote.dcp_size) * remote.interleave_size
+                    + token % remote.interleave_size
+                )
+                lb, lo = divmod(local_pos, local.logical_block_size)
+                rb, ro = divmod(remote_pos, remote.logical_block_size)
+                lk, lr = divmod(lo // ratio, local_rows)
+                rk, rr = divmod(ro // ratio, remote_rows)
+                count = min((stripe_end - token) // ratio, local_rows - lr, remote_rows - rr)
+                if count <= 0 or lb >= len(local_ids) or rb >= len(remote_ids):
+                    raise ValueError("Attention transfer interval exceeds the allocated block tables")
+                self._append_component_segment(
+                    src,
+                    dst,
+                    lengths,
+                    local.kv_caches_base_addr[i]
+                    + (local_ids[lb] * local.block_size_scale[i] + lk) * local.block_stride_bytes[i]
+                    + lr * row_bytes,
+                    remote.kv_caches_base_addr[i]
+                    + (remote_ids[rb] * remote.block_size_scale[i] + rk) * remote.block_stride_bytes[i]
+                    + rr * row_bytes,
+                    count * row_bytes,
+                )
+                token += count * ratio
+        return src, dst, lengths
+
+    def _get_state_transfer_meta(self, req_meta, local, remote, local_ids, remote_ids):
+        """Transfer the intersection of the actual recurrent head shards (Q/K/V plus state)."""
+        if not local_ids or not remote_ids:
+            raise ValueError("Missing recurrent state at handoff")
+        li = (
+            math.ceil(req_meta.local_computed_tokens / local.logical_block_size) - 1
+            if local.state_cache_mode == "align"
+            else 0
+        )
+        ri = (
+            math.ceil(req_meta.local_computed_tokens / remote.logical_block_size) - 1
+            if remote.state_cache_mode == "align"
+            else 0
+        )
+        if not (0 <= li < len(local_ids) and 0 <= ri < len(remote_ids)):
+            raise ValueError("Recurrent handoff state is outside the allocated block tables")
+        if not local.state_total_heads or local.state_total_heads != remote.state_total_heads:
+            raise ValueError("Recurrent head ownership is missing or incompatible")
+        lh, rh = local.block_shapes[1][0], remote.block_shapes[1][0]
+        if min(lh, rh) <= 0 or max(lh, rh) % min(lh, rh):
+            raise ValueError("Mamba P/D head shard sizes must have an integer ratio")
+        begin = max(local.state_head_start, remote.state_head_start)
+        end = min(local.state_head_start + lh, remote.state_head_start + rh)
+        if end <= begin:
+            return [], [], []
+        if local.block_shapes[1][1:] != remote.block_shapes[1][1:]:
+            raise ValueError("Recurrent per-head state shapes differ")
+        src, dst, lengths = [], [], []
+        lbase = [
+            base + local_ids[li] * stride for base, stride in zip(local.kv_caches_base_addr, local.block_stride_bytes)
+        ]
+        rbase = [
+            base + remote_ids[ri] * stride
+            for base, stride in zip(remote.kv_caches_base_addr, remote.block_stride_bytes)
+        ]
+        head_bytes = local.block_len[1] // lh
+        if remote.block_len[1] // rh != head_bytes:
+            raise ValueError("Recurrent per-head payload sizes differ")
+        self._append_component_segment(
+            src,
+            dst,
+            lengths,
+            lbase[1] + (begin - local.state_head_start) * head_bytes,
+            rbase[1] + (begin - remote.state_head_start) * head_bytes,
+            (end - begin) * head_bytes,
+        )
+        if local.state_conv_dim_first != remote.state_conv_dim_first:
+            raise ValueError("Convolution state orientations differ")
+        axis = 0 if local.state_conv_dim_first else 1
+        lshape, rshape = local.block_shapes[0], remote.block_shapes[0]
+        width = lshape[1 - axis]
+        if width != rshape[1 - axis] or lshape[axis] // lh != rshape[axis] // rh:
+            raise ValueError("Convolution per-head layouts differ")
+        channels = lshape[axis] // (3 * lh)
+        element_bytes = local.block_len[0] // math.prod(lshape)
+        for plane in range(3):
+            lc = plane * lh * channels + (begin - local.state_head_start) * channels
+            rc = plane * rh * channels + (begin - remote.state_head_start) * channels
+            if axis == 0:
+                self._append_component_segment(
+                    src,
+                    dst,
+                    lengths,
+                    lbase[0] + lc * width * element_bytes,
+                    rbase[0] + rc * width * element_bytes,
+                    (end - begin) * channels * width * element_bytes,
+                )
+            else:
+                for row in range(width):
+                    self._append_component_segment(
+                        src,
+                        dst,
+                        lengths,
+                        lbase[0] + (row * lshape[1] + lc) * element_bytes,
+                        rbase[0] + (row * rshape[1] + rc) * element_bytes,
+                        (end - begin) * channels * element_bytes,
+                    )
+        return src, dst, lengths
+
     def _transfer_kv_cache(self, send_task: SendTask) -> str | None:
         key = send_task.k_cache
         value = send_task.v_cache
@@ -518,24 +776,23 @@ class KVCacheSendingLayerThread(threading.Thread):
         # Merge transmission tasks of the same session
         session_meta: dict[str, TransferMeta] = {}
         layer_names = send_task.layer_names or [send_task.layer_name]
-        layer_group_idx = self.layer_metadata[send_task.layer_name].tensor_group_idx[0]
         for req_id, req_meta in send_task.send_request.items():
-            session_id = f"{req_meta.remote_host}:{req_meta.remote_te_rpc_port}"
-            if session_id not in session_meta:
-                session_meta[session_id] = TransferMeta(src=[], dst=[], length=[], req_ids=[])
-
-            for layer_name in layer_names:
-                src_list, dst_list, length_list = self.get_transfer_meta(
-                    send_task,
-                    req_id,
-                    req_meta,
-                    layer_name,
-                    layer_group_idx,
-                )
-                session_meta[session_id].src.extend(src_list)
-                session_meta[session_id].dst.extend(dst_list)
-                session_meta[session_id].length.extend(length_list)
-            session_meta[session_id].req_ids.append(req_id)
+            for peer in req_meta.peers or [req_meta]:
+                session_id = f"{peer.remote_host}:{peer.remote_te_rpc_port}"
+                if session_id not in session_meta:
+                    session_meta[session_id] = TransferMeta(src=[], dst=[], length=[], req_ids=[])
+                for layer_name in layer_names:
+                    src_list, dst_list, length_list = self.get_transfer_meta(
+                        send_task,
+                        req_id,
+                        peer,
+                        layer_name,
+                        self.layer_metadata[layer_name].tensor_group_idx[0],
+                    )
+                    session_meta[session_id].src.extend(src_list)
+                    session_meta[session_id].dst.extend(dst_list)
+                    session_meta[session_id].length.extend(length_list)
+                session_meta[session_id].req_ids.append(req_id)
 
         if send_task.k_quant_cache is not None:
             self.resharding_stream.synchronize()
@@ -870,6 +1127,11 @@ class MooncakeLayerwiseConnectorScheduler:
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, engine_id: str):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
+        _validate_mamba_parallel_config(
+            kv_cache_config,
+            vllm_config.parallel_config.tensor_parallel_size,
+            vllm_config.parallel_config.prefill_context_parallel_size,
+        )
         self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
         self.engine_id = engine_id
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
@@ -892,8 +1154,18 @@ class MooncakeLayerwiseConnectorScheduler:
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[str, tuple[Request, list[int], list[list[int]]]] = {}
+        self._local_prefix_cache_tokens: dict[str, int] = {}
         self._reqs_need_send_layerwise: dict[str, SendReqInfo] = {}
         self.need_truncate = self._has_attn_mamba_hybrid_cache(kv_cache_config)
+        self.circular_group_ids = {
+            i
+            for i, group in enumerate(kv_cache_config.kv_cache_groups)
+            if is_circular_kv_cache_spec(group.kv_cache_spec)
+        }
+        self.need_truncate |= bool(self.circular_group_ids) or any(
+            isinstance(spec, MLAAttentionSpec) and get_kv_cache_compression_ratio(spec) > 1
+            for spec in self._iter_kv_cache_specs(kv_cache_config)
+        )
         self.executor = ThreadPoolExecutor(32)
         tls_config: dict[str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("tls_config", {})
         ssl_keyfile = tls_config.get("ssl_keyfile")
@@ -960,11 +1232,21 @@ class MooncakeLayerwiseConnectorScheduler:
             return block_ids
 
         trimmed_block_ids: list[list[int]] = []
-        for group_block_ids, block_size in zip(block_ids, self.block_size):
-            if prompt_len % block_size == 1:
-                trimmed_block_ids.append(list(group_block_ids[:-1]))
-            else:
+        for group_idx, (group_block_ids, block_size) in enumerate(zip(block_ids, self.block_size)):
+            if group_idx in self.circular_group_ids:
                 trimmed_block_ids.append(list(group_block_ids))
+            else:
+                group = self.kv_cache_config.kv_cache_groups[group_idx]
+                specs = (
+                    list(group.kv_cache_spec.kv_cache_specs.values())
+                    if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+                    else [group.kv_cache_spec]
+                )
+                if all(isinstance(spec, FullAttentionSpec) for spec in specs):
+                    block_size *= self.vllm_config.parallel_config.decode_context_parallel_size
+                trimmed_block_ids.append(
+                    list(group_block_ids[:-1]) if prompt_len % block_size == 1 else list(group_block_ids)
+                )
         return tuple(trimmed_block_ids)
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
@@ -993,6 +1275,9 @@ class MooncakeLayerwiseConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
             assert num_computed_tokens % min(self.block_size) == 0
+            # The scheduler has not updated request.num_computed_tokens yet.
+            # Refresh this on every lookup in case allocation is retried.
+            self._local_prefix_cache_tokens[request.request_id] = num_computed_tokens
             count = max(self._hybrid_prefill_token_count(len(request.prompt_token_ids)) - num_computed_tokens, 0)
             return count, count > 0
 
@@ -1014,7 +1299,7 @@ class MooncakeLayerwiseConnectorScheduler:
             do_virtual = params.get("do_virtual", False)
             local_block_ids = (blocks.get_block_ids()) if num_external_tokens > 0 else []
             remote_block_ids = self._trim_hybrid_remote_block_ids(local_block_ids, len(request.prompt_token_ids))
-            remote_cached_tokens = request.num_computed_tokens
+            remote_cached_tokens = self._local_prefix_cache_tokens.pop(request.request_id)
             # Get unhashed blocks to pull from remote.
             logger.debug(
                 "MooncakeLayerwiseConnector update_state_after_alloc: add %s to need recv queue", request.request_id
@@ -1185,6 +1470,7 @@ class MooncakeLayerwiseConnectorScheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
+        self._local_prefix_cache_tokens.pop(request.request_id, None)
         # layer_wise push, not need delay_free_blocks
         return False, None
 
@@ -1197,6 +1483,7 @@ class MooncakeLayerwiseConnectorScheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
+        self._local_prefix_cache_tokens.pop(request.request_id, None)
         # layer_wise push, not need delay_free_blocks
         return False, None
 
@@ -1214,6 +1501,12 @@ class MooncakeLayerwiseConnectorWorker:
         # Metadata.
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
+        self.has_mamba = _validate_mamba_parallel_config(
+            kv_cache_config,
+            vllm_config.parallel_config.tensor_parallel_size,
+            vllm_config.parallel_config.prefill_context_parallel_size,
+        )
+        self.use_component_transfer = _requires_component_transfer(kv_cache_config)
         self.num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
         self.kv_cache_specs: list[KVCacheSpec] = [spec.kv_cache_spec for spec in self.kv_cache_config.kv_cache_groups]
         self.local_engine_id: str = " "
@@ -1225,6 +1518,9 @@ class MooncakeLayerwiseConnectorWorker:
         self.pcp_rank: int = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size: int = vllm_config.parallel_config.decode_context_parallel_size
         self.dcp_rank: int = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
+        if self.use_component_transfer and vllm_config.kv_transfer_config.is_kv_producer:
+            if self.dcp_size not in (1, self.pcp_size):
+                raise NotImplementedError("Producer component transfer requires DCP=PCP or DCP=1")
         self.tp_group = get_tp_group()
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
@@ -1304,7 +1600,13 @@ class MooncakeLayerwiseConnectorWorker:
         for layer_idx, layer_names in self.index_to_name.items():
             slots: list[int] = []
             for layer_name in layer_names:
-                for addr in self.layer_metadata[layer_name].kv_caches_base_addr:
+                addresses = self.layer_metadata[layer_name].kv_caches_base_addr
+                if self.use_component_transfer:
+                    tensors = self.kv_caches[layer_name]
+                    if isinstance(tensors, torch.Tensor):
+                        tensors = [tensors]
+                    addresses = [tensor.untyped_storage().data_ptr() for tensor in tensors if tensor.numel()]
+                for addr in addresses:
                     slot_id = slot_by_addr.setdefault(addr, len(slot_by_addr))
                     if slot_id not in slots:
                         slots.append(slot_id)
@@ -1383,17 +1685,32 @@ class MooncakeLayerwiseConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
+        self.kv_caches = kv_caches
         layer2group_ids: dict[str, int] = {}
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
         for i, kv_cache_group_spec in enumerate(kv_cache_groups):
             for layer_name in kv_cache_group_spec.layer_names:
                 layer2group_ids[layer_name] = i
 
+        model_type = self.vllm_config.model_config.hf_text_config.model_type
+        num_attn_module = 2 if model_type in ("longcat_flash", "longcat_flash_ngram") else 1
+        physical_layer_groups: dict[int, set[int]] = defaultdict(set)
+        for layer_name, tensors in kv_caches.items():
+            if "mtp" not in layer_name:
+                physical_layer_groups[extract_layer_index(layer_name, num_attn_module)].add(layer2group_ids[layer_name])
+            if isinstance(tensors, torch.Tensor):
+                tensors = [tensors]
+            if any(tensor.numel() and tensor.stride(0) != math.prod(tensor.shape[1:]) for tensor in tensors):
+                self.use_component_transfer = True
+        self.use_component_transfer |= any(len(groups) > 1 for groups in physical_layer_groups.values())
+        if self.use_component_transfer and self.vllm_config.parallel_config.pipeline_parallel_size != 1:
+            raise NotImplementedError("Component-addressed layerwise transfer currently requires PP=1")
+
         use_mamba, use_attn = False, False
         conv_total_padding_size = 0
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
             for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
-                layer_kv_cache_spec = self.kv_cache_specs[layer2group_ids[layer_name]]
+                layer_kv_cache_spec = _layer_spec(self.kv_cache_specs[layer2group_ids[layer_name]], layer_name)
                 if isinstance(layer_kv_cache_spec, MambaSpec):
                     use_mamba = True
                     conv_shape, conv_dtype = layer_kv_cache_spec.shapes[0], layer_kv_cache_spec.dtypes[0]
@@ -1429,11 +1746,16 @@ class MooncakeLayerwiseConnectorWorker:
             if sparse_sfa_c8:
                 # Attention already packs quantized NoPE, BF16 RoPE and scales
                 # into one byte tensor on both P and D. Transfer it unchanged.
-                if len(kv_cache_tuple) != 1 or not kv_cache_tuple[0].is_contiguous():
+                # Component metadata validates each block payload and stride
+                # below. NoPE layouts may also expose an empty RoPE view.
+                if not self.use_component_transfer and (
+                    len(kv_cache_tuple) != 1 or not kv_cache_tuple[0].is_contiguous()
+                ):
                     raise NotImplementedError("SFA C8 layerwise transfer requires one contiguous packed cache tensor.")
                 self.sparse_sfa_c8_layers.add(layer_name)
             if (
-                not sparse_sfa_c8
+                not self.use_component_transfer
+                and not sparse_sfa_c8
                 and "indexer" not in layer_name.lower()
                 and (
                     (
@@ -1448,6 +1770,64 @@ class MooncakeLayerwiseConnectorWorker:
                 if kv_buffer is None:
                     kv_buffer = kv_cache_tuple
             single_layer_meta = LayerMetadata([], [], [], [])
+            if self.use_component_transfer:
+                if not sparse_sfa_c8 and (self.enable_kv_quant or self.enable_c8_quant):
+                    raise NotImplementedError(
+                        "Component-addressed transfer does not support transfer-time KV quantization"
+                    )
+                if not (
+                    is_circular_kv_cache_spec(layer_kv_cache_spec)
+                    or isinstance(layer_kv_cache_spec, (FullAttentionSpec, MambaSpec))
+                ):
+                    raise NotImplementedError(
+                        f"Component transfer does not implement {type(layer_kv_cache_spec).__name__} block semantics"
+                    )
+                single_layer_meta.cache_kind = (
+                    "circular"
+                    if is_circular_kv_cache_spec(layer_kv_cache_spec)
+                    else "mamba"
+                    if isinstance(layer_kv_cache_spec, MambaSpec)
+                    else "attention"
+                )
+                single_layer_meta.dcp_size = self.dcp_size
+                single_layer_meta.dcp_rank = self.dcp_rank
+                single_layer_meta.interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+                single_layer_meta.is_sender = self.tp_rank == 0
+                if single_layer_meta.cache_kind == "circular":
+                    single_layer_meta.is_sender = self.tp_rank == 0 and self.pcp_rank == 0
+                elif single_layer_meta.cache_kind == "mamba":
+                    layer = self.vllm_config.compilation_config.static_forward_context[layer_name]
+                    shapes = layer_kv_cache_spec.shapes
+                    if len(shapes) not in (2, 4) or len(shapes[0]) != 2 or len(shapes[1]) != 3:
+                        raise NotImplementedError(
+                            "Component state transfer requires conv and head-major recurrent state"
+                        )
+                    heads, key_dim, value_dim = shapes[1]
+                    if key_dim != value_dim or not hasattr(layer, "num_heads") or not hasattr(layer, "tp_rank"):
+                        raise NotImplementedError("Recurrent layer must expose its actual head ownership")
+                    channels = 3 * heads * key_dim
+                    if (shapes[0][0] == channels) == (shapes[0][1] == channels):
+                        raise ValueError("Cannot determine Q/K/V convolution state orientation")
+                    single_layer_meta.state_cache_mode = self.vllm_config.cache_config.mamba_cache_mode
+                    single_layer_meta.state_conv_dim_first = shapes[0][0] == channels
+                    single_layer_meta.state_total_heads = layer.num_heads
+                    # TP-major / PCP-minor worker IDs are head owners, not
+                    # replica candidates. PCP=1 or TP=1 is validated at startup.
+                    worker_rank = self.tp_rank * self.pcp_size + self.pcp_rank
+                    worker_size = self.tp_size * self.pcp_size
+                    single_layer_meta.state_head_start = worker_rank * heads
+                    if worker_size * heads != layer.num_heads or layer.tp_rank != worker_rank:
+                        raise ValueError("Recurrent state does not match the PCP*TP head partition")
+                    single_layer_meta.is_sender = True
+                elif not isinstance(layer_kv_cache_spec, MLAAttentionSpec):
+                    raise NotImplementedError("Component CP transfer currently requires replicated MLA attention heads")
+                elif self.dcp_size == 1:
+                    single_layer_meta.is_sender = self.tp_rank == 0 and self.pcp_rank == 0
+                single_layer_meta.logical_block_size = layer_kv_cache_spec.block_size
+                if isinstance(layer_kv_cache_spec, MLAAttentionSpec):
+                    single_layer_meta.compression_ratio = get_kv_cache_compression_ratio(layer_kv_cache_spec)
+                elif is_circular_kv_cache_spec(layer_kv_cache_spec):
+                    single_layer_meta.compression_ratio = getattr(layer_kv_cache_spec, "compress_ratio", 1)
             for single_kv_cache in kv_cache_tuple:
                 block_start_rank = 1
                 num_blocks = self.kv_cache_config.num_blocks
@@ -1460,7 +1840,7 @@ class MooncakeLayerwiseConnectorWorker:
                     layer_kv_group_id,
                     block_size_scale,
                 )
-                if group_block_size_scale != block_size_scale:
+                if not self.use_component_transfer and group_block_size_scale != block_size_scale:
                     raise NotImplementedError(
                         "Mooncake layerwise connector does not support KV cache components "
                         "with different block size scales in one group, including DCP replicated indexer cache."
@@ -1470,6 +1850,18 @@ class MooncakeLayerwiseConnectorWorker:
                 single_layer_meta.kv_caches_base_addr.append(single_kv_cache.data_ptr())
                 single_layer_meta.block_len.append(single_kv_cache.element_size() * math.prod(block_shape))
                 single_layer_meta.block_size_scale.append(block_size_scale)
+                if self.use_component_transfer:
+                    payload = single_layer_meta.block_len[-1]
+                    stride_bytes = single_kv_cache.stride(0) * single_kv_cache.element_size()
+                    if payload and (not single_kv_cache[0].is_contiguous() or stride_bytes < payload):
+                        raise ValueError("Component transfer requires contiguous, non-overlapping block payloads")
+                    single_layer_meta.block_stride_bytes.append(stride_bytes)
+                    single_layer_meta.block_shapes.append(list(block_shape))
+                    single_layer_meta.block_dtypes.append(str(single_kv_cache.dtype))
+                    if single_layer_meta.cache_kind == "attention" and payload:
+                        rows = single_kv_cache.shape[1] * block_size_scale
+                        if rows * single_layer_meta.compression_ratio != layer_kv_cache_spec.block_size:
+                            raise ValueError("Compressed cache rows do not match the logical block size")
                 self.kernel_block_size_scale[layer2group_ids[layer_name]] = block_size_scale
                 if single_kv_cache.data_ptr() not in ptrs and not self.use_attn_mamba_hybrid:
                     ptrs.append(single_kv_cache.data_ptr())
@@ -1479,7 +1871,7 @@ class MooncakeLayerwiseConnectorWorker:
                 logger.info("layer: %s, num_blocks: %s, block_shape: %s", layer_name, num_blocks, block_shape)
             self.layer_metadata[layer_name] = single_layer_meta
 
-        if self.use_attn_mamba_hybrid:
+        if self.use_attn_mamba_hybrid and not self.use_component_transfer:
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
                 tensor_addrs = []
                 for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
@@ -1490,7 +1882,7 @@ class MooncakeLayerwiseConnectorWorker:
                 ptrs.append(min(set(tensor_addrs)))
                 lengths.append(kv_cache_tensor.size)
 
-        if self.use_attn_mamba_hybrid:
+        if self.use_attn_mamba_hybrid and not self.use_component_transfer:
             register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
         else:
             # For normal attention / sparse-c8 KV cache, register merged memory
@@ -1503,8 +1895,6 @@ class MooncakeLayerwiseConnectorWorker:
         if kv_buffer is not None:
             self.create_kv_buffer(kv_buffer)
 
-        model_type = self.vllm_config.model_config.hf_text_config.model_type
-        num_attn_module = 2 if model_type in ("longcat_flash", "longcat_flash_ngram") else 1
         mtp_layer_name = ""
         for layer_name in kv_caches:
             if "mtp" in layer_name:
@@ -1515,9 +1905,9 @@ class MooncakeLayerwiseConnectorWorker:
         for layer_names in self.index_to_name.values():
             layer_names.sort(key=lambda name: "indexer" in name.lower())
             primary_group_idx = self.layer_metadata[layer_names[0]].tensor_group_idx[0]
-            assert all(self.layer_metadata[name].tensor_group_idx[0] == primary_group_idx for name in layer_names), (
-                f"Mooncake layerwise merged components must share one KV cache group. layer_names={layer_names}"
-            )
+            assert self.use_component_transfer or all(
+                self.layer_metadata[name].tensor_group_idx[0] == primary_group_idx for name in layer_names
+            ), f"Mooncake layerwise merged components must share one KV cache group. layer_names={layer_names}"
         if mtp_layer_name != "":
             self.index_to_name[max(self.index_to_name.keys()) + 1].append(mtp_layer_name)
         if self.index_to_name:
@@ -1787,6 +2177,42 @@ class MooncakeLayerwiseConnectorWorker:
                 self.request_map[external_req_id] = req_id
                 self._recving_metadata[req_id] = meta
 
+    def _prepare_component_request(self, req_meta: ReqMeta) -> ReqMeta:
+        if self.dcp_size not in (1, self.pcp_size):
+            raise NotImplementedError("Producer component transfer requires DCP=PCP or replicated KV (DCP=1)")
+        if req_meta.remote_pcp_size != 1:
+            raise NotImplementedError("Decoder component transfer currently requires PCP=1")
+        if (
+            not req_meta.remote_dcp_size
+            or not req_meta.remote_tp_size
+            or req_meta.remote_tp_size % req_meta.remote_dcp_size
+        ):
+            raise ValueError("Decoder DCP must divide TP")
+        if (
+            len(req_meta.local_block_ids) != self.num_kv_cache_groups
+            or len(req_meta.remote_block_ids) != self.num_kv_cache_groups
+        ):
+            raise ValueError("P/D cache group counts differ")
+        if self.has_mamba:
+            local_size = self.tp_size * self.pcp_size
+            remote_size = req_meta.remote_tp_size * req_meta.remote_pcp_size
+            if max(local_size, remote_size) % min(local_size, remote_size):
+                raise ValueError("Mamba P/D PCP*TP head shard counts must have an integer ratio")
+        result = copy.deepcopy(req_meta)
+        result.trans_count = [self.tp_size * self.pcp_size] * self.num_kv_cache_groups
+        # Only the final prefill chunk publishes the full state snapshot. Earlier
+        # chunks may keep updating circular/recurrent state and are not complete.
+        if not req_meta.chunk_finish:
+            result.local_block_ids = [[] for _ in self.kv_cache_specs]
+            result.remote_block_ids = [[] for _ in self.kv_cache_specs]
+        result.peers = []
+        for rank in range(req_meta.remote_tp_size):
+            peer = copy.copy(result)
+            peer.peers = []
+            peer.remote_port = req_meta.remote_port + rank
+            result.peers.append(peer)
+        return result
+
     def prepare_layerwise_step(self, metadata: MooncakeLayerwiseConnectorMetadata) -> None:
         """Prepare layerwise hooks once, when metadata is bound before forward."""
         self.current_layer = 0
@@ -1796,6 +2222,9 @@ class MooncakeLayerwiseConnectorWorker:
             update_metadata = {}
             for req_idx, (req_id, req_meta) in enumerate(metadata.requests.items()):
                 transfer_mappings: dict[tuple[str, int], dict[str, Any]] = {}
+                if self.use_component_transfer:
+                    update_metadata[req_id] = self._prepare_component_request(req_meta)
+                    continue
                 self._align_remote_block_ids(req_meta)
                 for i, kv_cache_spec in enumerate(self.kv_cache_specs):
                     if isinstance(kv_cache_spec, MambaSpec):
@@ -1909,7 +2338,9 @@ class MooncakeLayerwiseConnectorWorker:
                 )
             cache_write_event = self._cache_write_events[self.current_layer]
             self._cache_write_events[self.current_layer] = None
-            if cache_write_event is None:
+            # Components can belong to different groups and have separate
+            # writers. The primary component's early event is not sufficient.
+            if cache_write_event is None or self.use_component_transfer:
                 cache_write_event = torch.npu.Event()
                 cache_write_event.record()
             send_task = connector_metadata.send_task
@@ -1918,14 +2349,21 @@ class MooncakeLayerwiseConnectorWorker:
             values = None
             quant_keys = None
             quant_values = None
-            if layer_name not in self.sparse_sfa_c8_layers and (
-                (
-                    self.pd_head_ratio != 1
-                    and (isinstance(self.kv_cache_specs[layer_group_idx], (FullAttentionSpec, SlidingWindowSpec)))
-                    and send_task.group_num_blocks[layer_group_idx] > 0
+            if (
+                not self.use_component_transfer
+                and layer_name not in self.sparse_sfa_c8_layers
+                and (
+                    (
+                        self.pd_head_ratio != 1
+                        and (isinstance(self.kv_cache_specs[layer_group_idx], (FullAttentionSpec, SlidingWindowSpec)))
+                        and send_task.group_num_blocks[layer_group_idx] > 0
+                    )
+                    or (self.enable_c8_quant and self.current_layer in self.vllm_config.quant_config.c8_quant_layers)
+                    or (
+                        self.enable_kv_quant
+                        and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers
+                    )
                 )
-                or (self.enable_c8_quant and self.current_layer in self.vllm_config.quant_config.c8_quant_layers)
-                or (self.enable_kv_quant and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers)
             ):
                 assert self.resharding_stream is not None
                 with npu_stream_switch(self.resharding_stream):
@@ -2011,11 +2449,21 @@ class MooncakeLayerwiseConnectorWorker:
                 layer_names=layer_names,
                 group_rearrange_block_ids=send_task.group_rearrange_block_ids,
             )
+            layer_group_ids = {self.layer_metadata[name].tensor_group_idx[0] for name in layer_names}
             for req_id, req_meta in connector_metadata.requests.items():
-                if len(req_meta.local_block_ids) <= layer_group_idx or not req_meta.local_block_ids[layer_group_idx]:
+                has_payload = any(
+                    len(req_meta.local_block_ids) > group and bool(req_meta.local_block_ids[group])
+                    for group in layer_group_ids
+                )
+                if not has_payload and not (self.use_component_transfer and req_meta.chunk_finish):
                     continue
                 try:
-                    req_meta_update = self.update_decoder_info(req_id, req_meta)
+                    if self.use_component_transfer:
+                        for peer in req_meta.peers:
+                            self.update_decoder_info(req_id, peer)
+                        req_meta_update = req_meta
+                    else:
+                        req_meta_update = self.update_decoder_info(req_id, req_meta)
                 except Exception as e:
                     logger.warning(
                         "MooncakeLayerwiseConnector transfer fail. req_id=%s, layer_idx=%s, error=%s. ",
@@ -2029,8 +2477,9 @@ class MooncakeLayerwiseConnectorWorker:
                 layer_send_task.send_request[req_id] = req_meta_update
 
             needs_reuse_gate = any(
-                len(req_meta.local_block_ids) > layer_group_idx and bool(req_meta.local_block_ids[layer_group_idx])
+                len(req_meta.local_block_ids) > group and bool(req_meta.local_block_ids[group])
                 for req_meta in connector_metadata.requests.values()
+                for group in layer_group_ids
             )
             if needs_reuse_gate:
                 # This must happen before AscendStore publishes StoreSaveDone.
@@ -2110,7 +2559,7 @@ class MooncakeLayerwiseConnectorWorker:
                 agent_meta.layer_metadata,
                 agent_meta.te_rpc_port,
             )
-            if self.pd_head_ratio > 1:
+            if self.pd_head_ratio > 1 and not self.use_component_transfer:
                 # for tp inequal, pre-create link to prevent alltoall out of memory
                 session_id = f"{req_meta.remote_host}:{agent_meta.te_rpc_port}"
                 first_layer_name = next(iter(self.layer_metadata.keys()))
@@ -2203,9 +2652,14 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignor
 
 
 def group_concurrent_contiguous(
-    src: list[int], dst: list[int] | None = None
-) -> tuple[list[npt.NDArray[np.int64]], list[npt.NDArray[np.int64]]]:
-    """Vectorised NumPy implementation."""
+    src: list[int],
+    dst: list[int] | None = None,
+    *,
+    src_block_stride: int = 1,
+    dst_block_stride: int = 1,
+    block_len: int = 1,
+) -> tuple[list[list[int]], list[list[int]]]:
+    """Group physically contiguous payloads; defaults preserve block-ID grouping."""
     if dst is None:
         dst = []
     if not dst:
@@ -2214,7 +2668,7 @@ def group_concurrent_contiguous(
         if src_only_indices.size == 0:
             return [], []
 
-        brk = np.where(np.diff(src_only_indices) != 1)[0] + 1
+        brk = np.where(np.diff(src_only_indices) * src_block_stride != block_len)[0] + 1
         src_groups = np.split(src_only_indices, brk)
         src_groups = [g.tolist() for g in src_groups]
 
@@ -2227,7 +2681,9 @@ def group_concurrent_contiguous(
         if src_indices.size == 0:
             return [], []
 
-        brk = np.where((np.diff(src_indices) != 1) | (np.diff(dst_indices) != 1))[0] + 1
+        src_contiguous = np.diff(src_indices) * src_block_stride == block_len
+        dst_contiguous = np.diff(dst_indices) * dst_block_stride == block_len
+        brk = np.where(~(src_contiguous & dst_contiguous))[0] + 1
         src_groups = np.split(src_indices, brk)
         dst_groups = np.split(dst_indices, brk)
 
