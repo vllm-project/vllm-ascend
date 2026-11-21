@@ -634,3 +634,27 @@ def test_non_hccl_destroy_path_destroys_device_group_directly(module_env):
     ]
     assert not hasattr(group, "cpu_group")
     assert not hasattr(group, "device_group")
+
+
+def test_destroy_without_backend_attribute_releases_groups_in_order(module_env):
+    """Regression for #21966.
+
+    Upstream builds a coordinator with ``GroupCoordinator.__new__`` so
+    ``backend`` is never assigned. ``destroy()`` must not raise
+    ``AttributeError`` and must still release the communicator before the
+    process groups it depends on.
+    """
+    group = module_env.module.GroupCoordinatorPatch.__new__(module_env.module.GroupCoordinatorPatch)
+    events: list[str] = []
+
+    group.device_communicator = SimpleNamespace(destroy=lambda: events.append("communicator"))
+    group.device_group = object()
+    group.cpu_group = object()
+    group.mq_broadcaster = None
+    module_env.destroy_process_group.side_effect = lambda _group: events.append("process_group")
+
+    group.destroy()
+
+    assert events == ["communicator", "process_group", "process_group"]
+    assert not hasattr(group, "cpu_group")
+    assert not hasattr(group, "device_group")
