@@ -622,7 +622,8 @@ class AscendLargeHeadPagedAttentionBackendImpl(AscendAttentionBackendImpl):
             )
             return
 
-        _, _, block_size, _ = self.key_cache.shape  # type: ignore[union-attr]
+        assert self.key_cache is not None
+        _, _, block_size, _ = self.key_cache.shape
         qlen = _uniform_query_len(dec_q)
         if qlen is not None and qlen > 1:
             q_bsnd = query[:num_decode_tokens].contiguous().view(num_decodes, qlen, self.num_heads, self.head_size)
