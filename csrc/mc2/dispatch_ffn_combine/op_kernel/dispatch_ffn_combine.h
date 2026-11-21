@@ -55,7 +55,7 @@ class DispatchFFNCombine {
 public:
     __aicore__ inline DispatchFFNCombine() {};
     __aicore__ inline void Init(GM_ADDR xGM, GM_ADDR weight1GM, GM_ADDR weight2GM, GM_ADDR expertIdGM, GM_ADDR scale1GM, GM_ADDR scale2GM,
-                                GM_ADDR probs, GM_ADDR xActiveMaskGM, GM_ADDR outGM, GM_ADDR expertTokenNums, GM_ADDR workspaceGM, GM_ADDR tilingGM);
+                                GM_ADDR probs, GM_ADDR xActiveMaskGM, GM_ADDR contextGM, GM_ADDR outGM, GM_ADDR expertTokenNums, GM_ADDR workspaceGM, GM_ADDR tilingGM);
     __aicore__ inline void Process();
 
 
@@ -68,6 +68,8 @@ private:
     GM_ADDR scale2GM_;
     GM_ADDR probs_;
     GM_ADDR xActiveMaskGM_;
+    GM_ADDR contextGM_;
+    uint64_t cclBufferSize_{0};
     GM_ADDR outGM_;
     GM_ADDR gmExpertTokenNums_;
     GM_ADDR workspaceGM_;
@@ -115,7 +117,7 @@ private:
 
 template <TemplateMMA2AClass>
 __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Init(GM_ADDR xGM, GM_ADDR weight1GM, GM_ADDR weight2GM, GM_ADDR expertIdGM, GM_ADDR scale1GM, GM_ADDR scale2GM,
-                                                                    GM_ADDR probs, GM_ADDR xActiveMaskGM, GM_ADDR outGM, GM_ADDR expertTokenNums, GM_ADDR workspaceGM, GM_ADDR tilingGM)
+                                                                    GM_ADDR probs, GM_ADDR xActiveMaskGM, GM_ADDR contextGM, GM_ADDR outGM, GM_ADDR expertTokenNums, GM_ADDR workspaceGM, GM_ADDR tilingGM)
 {
     REGISTER_TILING_DEFAULT(DispatchFFNCombineTilingData);
     auto tiling = (__gm__ DispatchFFNCombineTilingData*)tilingGM;
@@ -129,6 +131,8 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Init(GM_ADDR xGM,
     scale2GM_ = scale2GM;
     probs_ = probs;
     xActiveMaskGM_ = xActiveMaskGM;
+    contextGM_ = contextGM;
+    cclBufferSize_ = tilingData.dispatchFFNCombineInfo.cclBufferSize;
 
     outGM_ = outGM;
     gmExpertTokenNums_ = expertTokenNums;
@@ -160,12 +164,18 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Init(GM_ADDR xGM,
     moeInitRoutingQuantV2TilingData = tilingData.cocTiling.moeInitRoutingQuantV2TilingData;
     initRoutingQuantTilingKey = tilingData.cocTiling.initRoutingQuantTilingKey;
 
-    auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
-    __gm__ HcclOpResParamCustom *WinContext_{nullptr};
-    WinContext_ = (__gm__ HcclOpResParamCustom *)contextGM0;
+    if (contextGM_ != nullptr) {
+        // A2 KFC CommContext: epRankId at offset 0.
+        rank = static_cast<int32_t>(reinterpret_cast<__gm__ uint64_t *>(contextGM_)[0]);
+        rankSize = EP;
+    } else {
+        auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
+        __gm__ HcclOpResParamCustom *WinContext_{nullptr};
+        WinContext_ = (__gm__ HcclOpResParamCustom *)contextGM0;
 
-    rank = WinContext_->localUsrRankId;
-    rankSize = WinContext_->rankSize;
+        rank = WinContext_->localUsrRankId;
+        rankSize = WinContext_->rankSize;
+    }
 }
 
 template <TemplateMMA2AClass>
@@ -281,7 +291,8 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
         outGM_, layoutD1, layoutD2,
         expertIdGM_, moeInitRoutingQuantV2Scale, moeInitRoutingQuantV2Offset,
         expertTokensBeforeCapacity, probs_,
-        workspaceGM_, gmExpertTokenNums_, ubMoveNum, xActiveMaskGM_, moeInitRoutingQuantV2TilingData, swigluLimit};
+        workspaceGM_, gmExpertTokenNums_, ubMoveNum, xActiveMaskGM_, moeInitRoutingQuantV2TilingData, swigluLimit,
+        contextGM_, cclBufferSize_};
     //Call kernel
     MatmulKernel kernel(params);
     kernel(params);

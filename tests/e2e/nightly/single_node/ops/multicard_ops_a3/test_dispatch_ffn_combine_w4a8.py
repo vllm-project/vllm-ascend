@@ -67,6 +67,9 @@ class TestDispatchFFNCombine:
         self.world_size = world_size
         self.master_ip = "127.0.0.1"
         self.port = port
+        self.kfc_context = None
+        self.ccl_buffer_size = 0
+        self.sym_buffer = None
 
     def get_hcomm(self, comm_group):
         hcomm_info = None
@@ -110,6 +113,7 @@ class TestDispatchFFNCombine:
             rank=self.rank,
             world_size=self.world_size,
             init_method=f"tcp://127.0.0.1:{self.port}",
+            device_id=torch.device("npu", DEVICE_OFFSET + self.rank),
         )
 
         ep_size = 0
@@ -129,8 +133,30 @@ class TestDispatchFFNCombine:
             hcomm_info_dist["group_tp"] = group_tp
         else:
             if dist.is_available():
-                default_pg = _get_default_group()
-            hcomm_info_dist["default_pg_info"] = self.get_hcomm(default_pg)
+                group_mc2 = dist.new_group(
+                    ranks=list(range(self.world_size)),
+                    backend="hccl",
+                    group_desc="mc2:device",
+                    device_id=torch.device("npu", DEVICE_OFFSET + self.rank),
+                )
+                warm = torch.ones(1, dtype=torch.float32).npu()
+                dist.all_reduce(warm, group=group_mc2)
+                torch.npu.synchronize()
+                hcomm_info_dist["default_pg_info"] = self.get_hcomm(group_mc2)
+
+                # A2 KFC context: symmetric CCL buffers (epHcclBuffer_).
+                from cann_ops_transformer.ops import get_symm_buffer_for_mega_moe
+
+                self.sym_buffer = get_symm_buffer_for_mega_moe(
+                    group_mc2,
+                    num_experts=8,
+                    num_max_tokens_per_rank=128,
+                    num_topk=8,
+                    hidden=1024,
+                    intermediate_hidden=512,
+                )
+                self.kfc_context = self.sym_buffer.context
+                self.ccl_buffer_size = self.sym_buffer.ccl_buffer_size
         hcomm_info = hcomm_info_dist["default_pg_info"]
         self.hcomm_info = hcomm_info
 
@@ -208,10 +234,13 @@ class TestDispatchFFNCombine:
             group=self.hcomm_info,
             max_output_size=512,
             world_size=self.world_size,
+            context=self.kfc_context,
+            ccl_buffer_size=self.ccl_buffer_size,
             out=out,
             expert_token_nums=expert_token_nums,
             x_active_mask=x_active_mask,
         )
+        torch.npu.synchronize()
         return True
 
     def run_normal(self) -> bool:
@@ -289,10 +318,13 @@ class TestDispatchFFNCombine:
             group=self.hcomm_info,
             max_output_size=512,
             world_size=self.world_size,
+            context=self.kfc_context,
+            ccl_buffer_size=self.ccl_buffer_size,
             out=out,
             expert_token_nums=expert_token_nums,
             x_active_mask=x_active_mask,
         )
+        torch.npu.synchronize()
         return True
 
     def generate_random_tensor(self, size, dtype):
@@ -309,16 +341,24 @@ class TestDispatchFFNCombine:
 def worker(rank: int, world_size: int, port: int, q: mp.SimpleQueue):
     op = TestDispatchFFNCombine(rank, world_size, port)
     op.generate_hcom()
-    out1 = op.run_tensor_list()
-    q.put(out1)
-    out2 = op.run_normal()
-    q.put(out2)
+    try:
+        out1 = op.run_tensor_list()
+    except Exception as e:  # noqa: BLE001
+        print(f"[rank {rank}] tensor_list FAILED: {type(e).__name__}: {e}", flush=True)
+        out1 = False
+    q.put(("tensor_list", out1))
+    try:
+        out2 = op.run_normal()
+    except Exception as e:  # noqa: BLE001
+        print(f"[rank {rank}] normal FAILED: {type(e).__name__}: {e}", flush=True)
+        out2 = False
+    q.put(("normal", out2))
 
 
 @torch.inference_mode()
 def test_dispatch_ffn_combine_kernel():
     world_size = 2
-    mp.set_start_method("fork", force=True)
+    mp.set_start_method("spawn", force=True)
 
     q = mp.SimpleQueue()
     p_list = []
@@ -329,9 +369,16 @@ def test_dispatch_ffn_combine_kernel():
         p.start()
         p_list.append(p)
 
-    results = [q.get() for _ in range(world_size)]
+    # Each worker contributes two results (tensor-list and normal path);
+    # retrieve them all so a failure on either path is asserted.
+    results = [q.get() for _ in range(world_size * 2)]
 
     for p in p_list:
         p.join()
 
-    assert all(results)
+    by_path: dict[str, list[bool]] = {}
+    for path, ok in results:
+        by_path.setdefault(path, []).append(ok)
+    for path in ("tensor_list", "normal"):
+        assert by_path.get(path), f"missing {path} results: {by_path}"
+        assert all(by_path[path]), f"{path} path failed on some rank: {by_path[path]}"

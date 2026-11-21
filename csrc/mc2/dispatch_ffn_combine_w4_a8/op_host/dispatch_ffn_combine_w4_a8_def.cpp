@@ -70,6 +70,13 @@ class DispatchFFNCombineW4A8 : public OpDef {
         .DataType({ge::DT_BOOL, ge::DT_BOOL, ge::DT_BOOL, ge::DT_BOOL, ge::DT_BOOL, ge::DT_BOOL, ge::DT_BOOL, ge::DT_BOOL})
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+    // A2 KFC comm context (CANN CommContext tensor). Empty/null on A3, where
+    // the HCCL symmetric window from GetHcclContext is used instead.
+    this->Input("context")
+        .ParamType(OPTIONAL)
+        .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32, ge::DT_INT32, ge::DT_INT32, ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
+        .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+        .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
 
     // 输出
     this->Output("out")
@@ -89,6 +96,7 @@ class DispatchFFNCombineW4A8 : public OpDef {
     this->Attr("weightNz").AttrType(OPTIONAL).Bool(false);
     this->Attr("swigluLimit").AttrType(OPTIONAL).Float(0.0f);
     this->Attr("worldSize").AttrType(REQUIRED).Int();
+    this->Attr("cclBufferSize").AttrType(OPTIONAL).Int(0);
 
     OpAICoreConfig aicore_config;
     aicore_config.DynamicCompileStaticFlag(true)
@@ -101,6 +109,7 @@ class DispatchFFNCombineW4A8 : public OpDef {
         .ExtendCfgInfo("jitCompile.flag", "static_false")
         .ExtendCfgInfo("multiKernelSupportDynamicGraph.value", "multi_kernel");
     this->AICore().AddConfig("ascend910_93", aicore_config);
+    this->AICore().AddConfig("ascend910b", aicore_config);
     this->MC2().HcclGroup("group");
   }
 };
