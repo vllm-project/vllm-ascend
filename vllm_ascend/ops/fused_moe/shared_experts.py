@@ -613,6 +613,29 @@ class AscendSharedExperts:
             shared_out = F.sigmoid(gate_out) * shared_out
         return shared_out
 
+    def _apply_output_gate_sp(
+        self,
+        hidden_states_sp: torch.Tensor,
+        shared_out_sp: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply the Qwen3-Next output gate on the SP shard (after fused RS).
+
+        ``expert_gate`` is a ``ReplicatedLinear(hidden_size -> 1, bias=False)``:
+        its weights are replicated across all TP ranks, so computing it on the
+        SP shard ``[T/TP, H]`` produces the same per-token gate values as
+        computing it on the full ``[T, H]`` tensor and then slicing. This
+        allows the gate to be applied *after* the fused MM+RS, which is
+        mathematically equivalent because::
+
+            RS(sigmoid(gate_full) * down_partial)
+              = sigmoid(gate_full) * RS(down_partial)   # scalar gate factors out of SUM
+              = sigmoid(gate_sp)    * shared_out_sp      # same values on the shard
+        """
+        if hasattr(self.layer, "expert_gate") and self.layer.expert_gate is not None:
+            gate_out_sp, _ = self.layer.expert_gate(hidden_states_sp)  # type: ignore
+            shared_out_sp = F.sigmoid(gate_out_sp) * shared_out_sp
+        return shared_out_sp
+
     def parallel_mode(self) -> SharedExpertParallelMode:
         """Resolve the effective activation/weight layout for this forward."""
         # EP rewrites FusedMoEParallelConfig.tp_size to 1 because each routed
@@ -768,6 +791,51 @@ class AscendSharedExperts:
         if milestones.has_fine_grained_stage_events:
             self._wait_for_milestone(event, name)
 
+    def _can_fuse_sp_mc2(self) -> bool:
+        """Whether the SP-only shared-expert path can use fused AG+MM / MM+RS.
+
+        Supports two quantization scenarios:
+
+        - **W8A8/W4A8 INT** (``A8_INT_FUSED``): uses ``npu_all_gather_base_mm``
+          and ``npu_mm_reduce_scatter_base`` with per-token float32 scales
+          (``x1_scale``/``x2_scale``).
+
+        - **W4A8MXFP / W8A8MXFP** (``A8_MXFP_FUSED``): uses the A5 dedicated
+          fused quant operators ``npu_all_gather_quant_mm`` and
+          ``npu_quant_mm_reduce_scatter`` (scene 4: E8M0 per-group scale,
+          blockSize=32).
+
+        Both paths require SP-only mode (TP-sharded weights, not replicated),
+        TP size in {2, 4, 8}, no active LoRA, and the corresponding torch_npu
+        kernel to be callable.  The expert_gate (Qwen3-Next output gating) is
+        computed on the SP shard before the fused AG and applied after the
+        fused RS — mathematically equivalent because expert_gate is a
+        ReplicatedLinear (same weights on all ranks).
+        """
+        if self.parallel_mode() is not SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
+            return False
+        path = self._select_mlp_path()
+        if path not in (SharedExpertMLPPath.A8_INT_FUSED, SharedExpertMLPPath.A8_MXFP_FUSED):
+            return False
+        tp_size = self.moe_config.tp_group.world_size
+        if tp_size not in (2, 4, 8):
+            return False
+        import torch_npu
+
+        if path is SharedExpertMLPPath.A8_INT_FUSED:
+            if not callable(getattr(torch_npu, "npu_all_gather_base_mm", None)):
+                return False
+            if not callable(getattr(torch_npu, "npu_mm_reduce_scatter_base", None)):
+                return False
+        else:  # A8_MXFP_FUSED
+            if not callable(getattr(torch_npu, "npu_all_gather_quant_mm", None)):
+                return False
+            if not callable(getattr(torch_npu, "npu_quant_mm_reduce_scatter", None)):
+                return False
+        if has_lora(self.lora_context):
+            return False
+        return True
+
     def _prepare_execution_input(
         self,
         prepared_input: PreparedSharedExpertInput,
@@ -785,14 +853,25 @@ class AscendSharedExperts:
             # run the MLP, then gather its complete output.
             hidden_states, local_dp_metadata = self._prepare_local_dp_input(hidden_states)
         elif mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY and not prepared_input.is_gathered:
-            # TP-sharded weights require full activations. Multistream starts
-            # this gather before the routed path; the serial path does it here.
-            hidden_states = self._gather_sp_input(hidden_states)
+            if self._can_fuse_sp_mc2():
+                # Fused path: keep the SP shard; the fused AG+MM op gathers
+                # inside the kernel. expert_gate is computed on the shard
+                # before the fused AG (see forward()).
+                pass
+            else:
+                # TP-sharded weights require full activations. Multistream starts
+                # this gather before the routed path; the serial path does it here.
+                hidden_states = self._gather_sp_input(hidden_states)
         elif mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
-            # An early gather keeps padding across the custom-op boundary so
-            # tracing sees the explicit gathered dependency. The MLP consumes
-            # only the original tokens.
-            hidden_states = hidden_states[: _EXTRA_CTX.num_tokens]
+            if self._can_fuse_sp_mc2():
+                # Fused path: keep the SP shard as-is (may include TP padding
+                # from an early gather; the fused op handles it).
+                pass
+            else:
+                # An early gather keeps padding across the custom-op boundary so
+                # tracing sees the explicit gathered dependency. The MLP consumes
+                # only the original tokens.
+                hidden_states = hidden_states[: _EXTRA_CTX.num_tokens]
         return hidden_states, local_dp_metadata
 
     def prepare_for_router_overlap(
@@ -834,8 +913,28 @@ class AscendSharedExperts:
         """Prepare the selected Gate-Up path without running its matmul."""
         path = self._select_mlp_path()
         if path is SharedExpertMLPPath.A8_INT_FUSED:
+            if self._can_fuse_sp_mc2():
+                # Fused AG+MM: the kernel does dynamic_quant internally on
+                # the SP shard. We still need the per-token scale for the
+                # subsequent dequant_situ_quant, so compute it on the SP
+                # shard and all-gather just the [T/TP, 1] scale (cheap).
+                _, pertoken_scale_sp = torch_npu.npu_dynamic_quant(hidden_states)
+                if pertoken_scale_sp.dim() == 2:
+                    pertoken_scale_sp = pertoken_scale_sp.squeeze(dim=1)
+                # Gather the per-token scale to full [T, 1] for dequant_situ_quant.
+                from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather
+
+                pertoken_scale = sp_all_gather(pertoken_scale_sp.unsqueeze(-1)).squeeze(-1)
+                return (hidden_states, pertoken_scale)
             return torch_npu.npu_dynamic_quant(hidden_states)
         if path is SharedExpertMLPPath.A8_MXFP_FUSED:
+            if self._can_fuse_sp_mc2():
+                # Fused AG+MM: the A5 npu_all_gather_quant_mm kernel gathers
+                # the quantized activation and its scale internally, so we
+                # quantize the SP shard.  The gate_up GEMM output is bf16;
+                # the subsequent SwiGLU+MX quant path stays unchanged.
+                # We return the raw SP shard; the fused op quantizes inside.
+                return hidden_states
             return torch_npu.npu_dynamic_mx_quant(
                 hidden_states,
                 dst_type=torch.float8_e4m3fn,
@@ -877,26 +976,61 @@ class AscendSharedExperts:
         """
         path = self._select_mlp_path()
         gate_up_input_scale = None
+        gathered_x = None
+        gathered_scale = None
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
             self._wait_for_milestone(router_output_ready, "router_output_ready")
             if path is SharedExpertMLPPath.A8_INT_FUSED:
                 # W8A8/W4A8: INT8 activations with INT8 or INT4 weights.
-                assert isinstance(prepared_execution.gate_up_input, tuple)
-                quantized_x, gate_up_input_scale = prepared_execution.gate_up_input
-                gate_up = torch_npu.npu_quant_matmul(
-                    quantized_x,
-                    self.layer.gate_up_proj.weight,
-                    self.layer.gate_up_proj.weight_scale,
-                    pertoken_scale=None,
-                    bias=None,
-                    output_dtype=torch.int32,
-                )
+                if self._can_fuse_sp_mc2():
+                    # Fused AG+MM: the SP shard is gathered inside the kernel.
+                    # gate_up_input is (sp_shard, pertoken_scale) where
+                    # pertoken_scale is the gathered [T, 1] scale for
+                    # dequant_situ_quant.
+                    assert isinstance(prepared_execution.gate_up_input, tuple)
+                    _, gate_up_input_scale = prepared_execution.gate_up_input
+                    gate_up = torch.ops.vllm.dense_sp_all_gather_mm_quant_int8(
+                        prepared_execution.hidden_states,
+                        self.layer.gate_up_proj.weight,
+                        self.layer.gate_up_proj.weight_scale,
+                        None,  # bias
+                        self.moe_config.tp_group.world_size,
+                    )
+                else:
+                    # Unfused path: gate_up_input is (quantized_x, pertoken_scale)
+                    assert isinstance(prepared_execution.gate_up_input, tuple)
+                    quantized_x, gate_up_input_scale = prepared_execution.gate_up_input
+                    gate_up = torch_npu.npu_quant_matmul(
+                        quantized_x,
+                        self.layer.gate_up_proj.weight,
+                        self.layer.gate_up_proj.weight_scale,
+                        pertoken_scale=None,
+                        bias=None,
+                        output_dtype=torch.int32,
+                    )
             elif path is SharedExpertMLPPath.A8_MXFP_FUSED:
-                # W4A8MXFP only: MXFP8 activations with MXFP4 weights.
-                # W8A8MXFP remains on the registered linear-wrapper path.
-                assert isinstance(prepared_execution.gate_up_input, tuple)
-                quantized_x, pertoken_scale = prepared_execution.gate_up_input
-                gate_up = self.layer.gate_up_proj((quantized_x, pertoken_scale))[0]
+                # W4A8MXFP / W8A8MXFP: MXFP8 activations with MXFP4 or MXFP8
+                # weights.
+                if self._can_fuse_sp_mc2():
+                    # Fused AG+MM: the A5 npu_all_gather_quant_mm kernel
+                    # quantizes the SP shard and gathers inside.  The
+                    # gate_up_input is the raw bf16 SP shard.  The op also
+                    # returns the gathered FP8 activation and we AllGather
+                    # its per-group scale, both exposed for routed-expert
+                    # reuse to skip the routed TP AllGather.
+                    gate_up, gathered_x, gathered_scale = (
+                        torch.ops.vllm.dense_sp_all_gather_mm_quant_mxfp8(
+                            prepared_execution.hidden_states,
+                            self.layer.gate_up_proj.weight,
+                            self.layer.gate_up_proj.weight_scale,
+                            None,  # bias
+                            self.moe_config.tp_group.world_size,
+                        )
+                    )
+                else:
+                    assert isinstance(prepared_execution.gate_up_input, tuple)
+                    quantized_x, pertoken_scale = prepared_execution.gate_up_input
+                    gate_up = self.layer.gate_up_proj((quantized_x, pertoken_scale))[0]
             else:
                 gate_up = self.part1(prepared_execution.gate_up_input)
 
@@ -906,6 +1040,8 @@ class AscendSharedExperts:
             gate_up_input_scale=gate_up_input_scale,
             local_dp_metadata=prepared_execution.local_dp_metadata,
             path=path,
+            gathered_x=gathered_x,
+            gathered_scale=gathered_scale,
         )
 
     def _run_a8_int_mlp(
@@ -965,6 +1101,25 @@ class AscendSharedExperts:
             milestones.routed_combine_start,
             "routed_combine_start",
         )
+        if self._can_fuse_sp_mc2():
+            # Fused MM+RS: down_proj matmul + ReduceScatter in one kernel.
+            # The fused op returns the SP shard [T/TP, H] directly.
+            shared_out = torch.ops.vllm.dense_sp_mm_reduce_scatter_quant_prequant(
+                quantized_x,
+                self.layer.down_proj.weight,
+                self.layer.down_proj.weight_scale,
+                swiglu_out_scale,
+                submitted_gate_up.hidden_states.dtype,
+                self.moe_config.tp_group.world_size,
+            )
+            # Apply output gate on the SP shard (after RS). Mathematically
+            # equivalent: expert_gate is ReplicatedLinear (same weights on
+            # all ranks), so sigmoid(gate) is rank-invariant and can be
+            # factored out of the SUM reduce.
+            shared_out = self._apply_output_gate_sp(
+                submitted_gate_up.hidden_states, shared_out
+            )
+            return shared_out
         shared_out = torch_npu.npu_quant_matmul(
             quantized_x,
             self.layer.down_proj.weight,
@@ -980,11 +1135,12 @@ class AscendSharedExperts:
         submitted_gate_up: SubmittedSharedExpertGateUp,
         milestones: RoutedMoEMilestones,
     ) -> torch.Tensor:
-        """Finish the fused W4A8MXFP shared MLP.
+        """Finish the fused MXFP shared MLP (W4A8MXFP or W8A8MXFP).
 
-        This path means MXFP4 weights with MXFP8 activations. W8A8MXFP does
-        not enter here; it keeps the registered linear wrapper so its scheme-
-        owned padding, scale algorithm, and output dtype remain intact.
+        Both quantization modes produce MXFP8 (float8_e4m3fn) activations from
+        SwiGLU+MX quant with an E8M0 per-group scale.  W4A8MXFP uses MXFP4
+        weights while W8A8MXFP uses MXFP8 weights, but the activation pipeline
+        and the fused MM+RS down-projection are identical.
         Gate-Up has already been submitted before routed TopK/dispatch.
         """
         self._wait_for_routed_stage(
@@ -1014,6 +1170,25 @@ class AscendSharedExperts:
             milestones.routed_combine_start,
             "routed_combine_start",
         )
+        if self._can_fuse_sp_mc2():
+            # Fused MM+RS: the A5 npu_quant_mm_reduce_scatter kernel fuses
+            # the down_proj GEMM with ReduceScatter.  quantized_x is
+            # float8_e4m3fn and swiglu_out_scale is the E8M0 per-group scale
+            # in the paired (T, K//64, 2) layout.  The fused op returns the
+            # SP shard [T/TP, H] directly.
+            shared_out = torch.ops.vllm.dense_sp_mm_reduce_scatter_quant_mxfp8_prequant(
+                quantized_x,
+                self.layer.down_proj.weight,
+                self.layer.down_proj.weight_scale,
+                swiglu_out_scale,
+                submitted_gate_up.hidden_states.dtype,
+                self.moe_config.tp_group.world_size,
+            )
+            # Apply output gate on the SP shard (after RS).
+            shared_out = self._apply_output_gate_sp(
+                submitted_gate_up.hidden_states, shared_out
+            )
+            return shared_out
         return self.part2(submitted_gate_up.hidden_states, (quantized_x, swiglu_out_scale))
 
     def _can_fuse_w8a8_mxfp_activation(self, gate_up: torch.Tensor) -> bool:
@@ -1097,8 +1272,8 @@ class AscendSharedExperts:
         """Select a path without changing the quantization scheme's math.
 
         Only schemes with a proven split activation-quant pipeline bypass the
-        registered linear wrappers. W8A8MXFP keeps both linears and selects
-        a path that checks activation-fusion compatibility after Gate-Up.
+        registered linear wrappers. W8A8/W4A8 INT and W4A8MXFP/W8A8MXFP MXFP
+        paths fuse their activation quantization and down-projection.
         W8A8FP, W4A4MXFP and other schemes use the generic wrapper path.
         Active LoRA always uses that generic path to preserve its adapters.
         """
@@ -1111,14 +1286,14 @@ class AscendSharedExperts:
         # the activation width and does not imply that weights are INT8.
         if has_quantized_shared_without_lora and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
             return SharedExpertMLPPath.A8_INT_FUSED
-        # This MXFP path currently represents W4A8MXFP only (MXFP4 weights
-        # with MXFP8 activations).
-        if has_quantized_shared_without_lora and self.quant_type == QuantType.W4A8MXFP:
+        # This MXFP path represents W4A8MXFP (MXFP4 weights with MXFP8
+        # activations) and W8A8MXFP (MXFP8 weights with MXFP8 activations).
+        # Both use the A5 dedicated fused quant operators.
+        if has_quantized_shared_without_lora and self.quant_type in (
+            QuantType.W4A8MXFP,
+            QuantType.W8A8MXFP,
+        ):
             return SharedExpertMLPPath.A8_MXFP_FUSED
-        # Selecting this path does not guarantee fusion: tensor metadata and
-        # the Down scheme are checked after the registered Gate-Up linear.
-        if not has_lora(self.lora_context) and self.quant_type == QuantType.W8A8MXFP:
-            return SharedExpertMLPPath.W8A8_MXFP_LINEAR
         return SharedExpertMLPPath.LINEAR_WRAPPER
 
     def wait_for_output(self) -> None:
@@ -1155,9 +1330,14 @@ class AscendSharedExperts:
             )
 
         local_dp_metadata = submitted_gate_up.local_dp_metadata
+        fused_sp_mc2 = self._can_fuse_sp_mc2()
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
             shared_out = self._finish_shared_mlp(submitted_gate_up, milestones)
-            if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
+            if (
+                not fused_sp_mc2
+                and self.multistream_overlap
+                and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
+            ):
                 self._wait_for_milestone(
                     milestones.routed_finalize_done,
                     "routed_finalize_done",
@@ -1172,6 +1352,10 @@ class AscendSharedExperts:
         if mode is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY:
             assert local_dp_metadata is not None
             shared_out = self._finalize_local_dp_output(shared_out, local_dp_metadata)
-        elif mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY and not self.multistream_overlap:
+        elif (
+            mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
+            and not self.multistream_overlap
+            and not fused_sp_mc2
+        ):
             shared_out = self._pad_and_reduce_scatter(shared_out)
         return shared_out
