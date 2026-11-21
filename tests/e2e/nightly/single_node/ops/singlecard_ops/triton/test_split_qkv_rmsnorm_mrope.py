@@ -2,12 +2,14 @@ import gc
 
 import pytest
 import torch
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.patch.worker.mrope_utils import get_fused_mrope_inputs
+from vllm_ascend.patch.worker.mrope_utils import can_use_fused_mrope, get_fused_mrope_inputs
 
 pytestmark = pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
@@ -596,6 +598,89 @@ def test_split_qkv_rmsnorm_mrope_inline_cos_sin_core_boundary(device: str):
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton is not available")
+@torch.inference_mode()
+def test_split_qkv_rmsnorm_mrope_inline_cos_sin_long_positions(device: str) -> None:
+    """Compare default inline MRoPE with model cache rows in eager and ACLGraph."""
+    torch.manual_seed(0)
+    _, num_q_heads, num_kv_heads, head_size, mrope_section, has_gate, rms_weight_offset, rope_dim = INLINE_CONFIGS[0]
+    context_length = 262_144  # Qwen3.5-35B-A3B max_position_embeddings.
+    num_tokens = 8
+    dtype = torch.bfloat16
+    with set_current_vllm_config(VllmConfig()), torch.device("cpu"):
+        rotary_emb = AscendMRotaryEmbedding(
+            head_size=head_size,
+            rotary_dim=rope_dim,
+            max_position_embeddings=context_length,
+            base=ROPE_THETA,
+            is_neox_style=True,
+            dtype=dtype,
+            mrope_section=mrope_section,
+            mrope_interleaved=True,
+        )
+    rotary_emb.to(device=device)
+
+    width = 2 * (num_q_heads + num_kv_heads) * head_size
+    qkv = torch.randn(num_tokens, width, dtype=dtype, device=device)
+    q_weight = torch.randn(head_size, dtype=dtype, device=device)
+    k_weight = torch.randn(head_size, dtype=dtype, device=device)
+    offsets = torch.arange(1, 3 * num_tokens + 1, dtype=torch.int64, device=device).reshape(3, num_tokens)
+    positions = context_length - 257 - offsets
+    assert can_use_fused_mrope(rotary_emb, num_kv_heads)
+    cache, inline_positions, inv_freq = get_fused_mrope_inputs(rotary_emb, positions, qkv)
+    assert cache is None and inline_positions is positions
+    assert inv_freq is not None and inv_freq is rotary_emb.inv_freq
+
+    common = dict(
+        qkv=qkv,
+        num_q_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        eps=EPS[0],
+        mrope_section=mrope_section,
+        is_interleaved=rotary_emb.mrope_interleaved,
+        rope_dim=rope_dim,
+        has_gate=has_gate,
+    )
+    op = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope
+
+    def run_inline():
+        return op(
+            q_weight=q_weight,
+            k_weight=k_weight,
+            positions=inline_positions,
+            inv_freq=inv_freq,
+            rms_weight_offset=rms_weight_offset,
+            **common,
+        )
+
+    def assert_matches_cache(inline_out):
+        cached_out = op(
+            q_weight=rms_weight_offset + q_weight,
+            k_weight=rms_weight_offset + k_weight,
+            cos_sin=rotary_emb.cos_sin_cache[positions].to(qkv),
+            **common,
+        )
+        for actual, expected in zip(inline_out[:2], cached_out[:2]):
+            torch.testing.assert_close(actual, expected, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+        for actual, expected in zip(inline_out[2:], cached_out[2:]):
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+    assert_matches_cache(run_inline())
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        captured = run_inline()
+    for distance in (129, 0):
+        # Keep the captured storage and update all three axes. The final replay includes position 262143.
+        positions.copy_(context_length - distance - offsets)
+        graph.replay()
+        torch.npu.synchronize()
+        assert_matches_cache(captured)
+    graph.reset()
 
 
 @pytest.mark.parametrize("device", DEVICES)
