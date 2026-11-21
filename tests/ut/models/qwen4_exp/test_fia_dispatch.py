@@ -322,35 +322,15 @@ def load_builder():
     return namespace["AscendQSAMetadataBuilder"](), plans
 
 
-def test_metadata_builder_keeps_decode_capture_on_gbsa():
+@pytest.mark.parametrize("prefilling", [True, False, None])
+def test_metadata_builder_keeps_ordinary_gbsa_for_all_phases(prefilling):
     builder, plans = load_builder()
     assert builder._cudagraph_support == "uniform"
-    common = SimpleNamespace(is_prefilling=torch.tensor([False]), seq_lens_cpu_upper_bound=None)
-    assert builder.build(0, common).qsa_request_plan is None
-    # Capture dummy inputs can look like prefills; the decode capture contract
-    # must not freeze FIA or host KV lengths into the graph.
-    common.is_prefilling = torch.tensor([True])
-    assert builder.build_for_cudagraph_capture(common).qsa_request_plan is None
+    common = SimpleNamespace(is_prefilling=prefilling)
+    for meta in (builder.build(0, common), builder.build_for_cudagraph_capture(common)):
+        assert meta.block_table == "kept"
+        assert getattr(meta, "qsa_request_plan", None) is None
     assert plans == []
-
-
-def test_metadata_builder_uses_phase_flags_and_host_lengths_for_prefill():
-    builder, plans = load_builder()
-    common = SimpleNamespace(
-        is_prefilling=torch.tensor([True]),
-        seq_lens_cpu_upper_bound=torch.tensor([32768]),
-        query_start_loc_cpu=torch.tensor([0, 4096]),
-        num_actual_tokens=4096,
-    )
-    meta = builder.build(0, common)
-    assert meta.block_table == "kept" and meta.qsa_request_plan == ("prefill-plan",)
-    assert plans[0][-1] is common.is_prefilling
-
-
-def test_metadata_builder_rejects_unknown_phase_instead_of_guessing():
-    builder, _ = load_builder()
-    with pytest.raises(ValueError, match="is_prefilling"):
-        builder.build(0, SimpleNamespace(is_prefilling=None))
 
 
 def test_fia_helper_tiles_mask_memory_for_eligible_prefill(implementation):

@@ -4,6 +4,7 @@
 import torch
 
 from vllm_ascend.ops.gbsa import (
+    GBSAQuantMode,
     generic_block_sparse_attention,
     generic_block_sparse_attention_metadata,
 )
@@ -25,6 +26,10 @@ def qsa_gbsa_attention(
     seq_lens: torch.Tensor,
     output: torch.Tensor,
     prepared_metadata: torch.Tensor | None = None,
+    *,
+    q_scale: torch.Tensor | None = None,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if key_cache.ndim != 4 or value_cache.ndim != 4:
         raise ValueError("QSA GBSA requires 4-D K/V caches")
@@ -34,7 +39,27 @@ def qsa_gbsa_attention(
     # packed gaps and therefore do not describe the sequence-length bound.
     logical_max_seqlen_kv = block_table.shape[1] * GBSA_PAGE_SIZE
     num_kv_heads = key_cache.shape[2]
-    if query.dtype not in (torch.float16, torch.bfloat16):
+    is_mxfp8 = q_scale is not None
+    if is_mxfp8:
+        if query.dtype != torch.float8_e4m3fn or query.shape[-1] not in (192, 256):
+            raise ValueError("QSA MXFP8 GBSA requires FP8 E4M3 Q/K/V and D192 or D256")
+        if k_scale is None or v_scale is None:
+            raise ValueError("QSA MXFP8 GBSA requires Q/K/V scales")
+        expected_shapes = (
+            (*query.shape[:-1], query.shape[-1] // 64, 2),
+            (*key_cache.shape[:-1], query.shape[-1] // 64, 2),
+            (key_cache.shape[0], 2, num_kv_heads, query.shape[-1], 2),
+        )
+        if output.dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError("QSA MXFP8 output must be FP16/BF16")
+        if any(scale.shape != shape for scale, shape in zip((q_scale, k_scale, v_scale), expected_shapes)):
+            raise ValueError("QSA MXFP8 scale shapes do not match the GBSA contract")
+        for scale in (q_scale, k_scale, v_scale):
+            if scale.dtype != torch.float8_e8m0fnu or not scale.is_contiguous():
+                raise ValueError("QSA MXFP8 scales must be contiguous E8M0 tensors")
+    elif k_scale is not None or v_scale is not None:
+        raise ValueError("QSA MXFP8 GBSA requires all three scales")
+    elif query.dtype not in (torch.float16, torch.bfloat16):
         raise ValueError("QSA GBSA requires FP16/BF16 query")
     if key_cache.dtype != query.dtype or value_cache.dtype != query.dtype:
         raise ValueError("QSA GBSA requires matching Q/K/V dtypes")
@@ -65,7 +90,7 @@ def qsa_gbsa_attention(
         layout_kv="PA_BBND",
         layout_sparse_pattern=4,
         mask_mode=1,
-        quant_mode=0,
+        quant_mode=GBSAQuantMode.MXFP8 if is_mxfp8 else GBSAQuantMode.NO_QUANT,
         softmax_precision=0,
         residual_block_mode=0,
         is_consistent_topk=False,
@@ -91,6 +116,10 @@ def qsa_gbsa_attention(
         sparse_count,
         [1, GBSA_COMPRESS_RATIO],
         metadata=metadata,
+        q_dequant_scale=q_scale,
+        k_dequant_scale=k_scale,
+        v_dequant_scale=v_scale,
+        attention_out_dtype=output.dtype if is_mxfp8 else None,
         block_table=row_block_table,
         softmax_scale=query.shape[-1] ** -0.5,
         **common,

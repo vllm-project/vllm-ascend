@@ -15,7 +15,7 @@ from typing import Any
 
 import torch
 
-from vllm_ascend.ops.gbsa import generic_block_sparse_attention_metadata
+from vllm_ascend.ops.gbsa import GBSAQuantMode, generic_block_sparse_attention_metadata
 
 from .gbsa import GBSA_COMPRESS_RATIO, GBSA_PAGE_SIZE
 
@@ -282,8 +282,10 @@ class Qwen4ExpPreparedInputAdapter:
         block_topk = int(layer.indexer.token_topk // layer.indexer.compress_ratio)
         if int(layer.indexer.compress_ratio) != GBSA_COMPRESS_RATIO:
             raise ValueError("QSA prepared metadata requires compression ratio 4")
+        quantized = getattr(layer.indexer.compressed_key_cache, "dtype", None) == torch.uint8
+        field = "qsa_quant_lightning_v2_metadata" if quantized else "qsa_lightning_v2_metadata"
         signature = (
-            "lightning_v2",
+            field,
             int(layer.indexer.index_n_heads),
             head_dim,
             block_topk,
@@ -294,11 +296,15 @@ class Qwen4ExpPreparedInputAdapter:
         )
         prepared = prepared_this_step.get(signature)
         if prepared is not None:
-            metadata.qsa_lightning_v2_metadata = prepared
+            setattr(metadata, field, prepared)
             return
         import cann_ops_transformer  # noqa: F401
 
-        generated = torch.ops.cann_ops_transformer.lightning_indexer_metadata(
+        ops = torch.ops.cann_ops_transformer
+        metadata_op = ops.quant_lightning_indexer_metadata if quantized else ops.lightning_indexer_metadata
+        if quantized:
+            common["quant_mode"] = 1
+        generated = metadata_op(
             layer.indexer.index_n_heads,
             1,
             head_dim,
@@ -306,11 +312,12 @@ class Qwen4ExpPreparedInputAdapter:
             batch_size=requests,
             **common,
         )
-        metadata.qsa_lightning_v2_metadata = self._persistent_metadata(
+        prepared = self._persistent_metadata(
             signature,
             generated,
         )
-        prepared_this_step[signature] = metadata.qsa_lightning_v2_metadata
+        setattr(metadata, field, prepared)
+        prepared_this_step[signature] = prepared
 
     def _prepare_gbsa(
         self,
@@ -337,8 +344,10 @@ class Qwen4ExpPreparedInputAdapter:
         max_groups = int(layer.indexer.token_topk // layer.indexer.compress_ratio)
         counts = counts.clamp_max(max_groups)
         num_kv_heads = int(layer.num_kv_heads)
+        mx = getattr(layer, "kv_cache_dtype", None) == "mxfp8"
+        field = "qsa_mxfp8_gbsa_metadata" if mx else "qsa_gbsa_metadata"
         signature = (
-            "gbsa",
+            field,
             int(layer.num_heads),
             num_kv_heads,
             int(layer.head_dim),
@@ -352,7 +361,7 @@ class Qwen4ExpPreparedInputAdapter:
         )
         prepared = prepared_this_step.get(signature)
         if prepared is not None:
-            main.qsa_gbsa_metadata = prepared
+            setattr(main, field, prepared)
             return
         sparse_count = counts.unsqueeze(0).expand(num_kv_heads, -1).contiguous()
         # Metadata generation consumes the GBSA geometry and counts.  Selected
@@ -370,7 +379,7 @@ class Qwen4ExpPreparedInputAdapter:
             layout_kv="PA_BBND",
             layout_sparse_pattern=4,
             mask_mode=1,
-            quant_mode=0,
+            quant_mode=GBSAQuantMode.MXFP8 if mx else 0,
             softmax_precision=0,
             residual_block_mode=0,
             is_consistent_topk=False,
@@ -386,11 +395,12 @@ class Qwen4ExpPreparedInputAdapter:
             max_seqlen_kv=int(main.block_table.shape[1] * GBSA_PAGE_SIZE),
             **common,
         )
-        main.qsa_gbsa_metadata = self._persistent_metadata(
+        prepared = self._persistent_metadata(
             signature,
             generated,
         )
-        prepared_this_step[signature] = main.qsa_gbsa_metadata
+        setattr(main, field, prepared)
+        prepared_this_step[signature] = prepared
 
 
 __all__ = ["Qwen4ExpPreparedInputAdapter"]

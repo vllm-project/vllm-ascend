@@ -40,6 +40,7 @@ class GBSAQuantMode(IntEnum):
     FP4_E2M1_DYNAMIC_OCP = 3
     FP4_E2M1_DYNAMIC_CX = 4
     FP8_E4M3_STATIC_CAST_P = 5
+    MXFP8 = 6
 
 
 def generic_block_sparse_attention_metadata(
