@@ -1,0 +1,8 @@
+pr: 22354
+entries:
+  - category: bugfix
+    text: >-
+      Added startup attention warmup for eager DeepSeek V4.1 on A5 with data and
+      expert parallelism to prevent first-request transitions to idle work from
+      timing out in expert collectives while another rank compiles attention.
+      No additional configuration is required.

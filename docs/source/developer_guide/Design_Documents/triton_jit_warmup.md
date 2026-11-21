@@ -24,6 +24,18 @@ Register an `AscendTritonJitKernel` instance inside the runner's active window. 
 
 `CompileKey` deduplicates warmup work; it does not replace Triton's runtime specialization and cache keys.
 
+### Eager DeepSeek V4.1 attention
+
+The packaged A5 attention operators use CANNBotDSL and are outside this Triton registry.
+For DeepSeek V4.1 with eager execution, DP greater than one and expert parallelism,
+the worker also runs prefill and one-request idle dummy passes before serving.
+Unlike memory profiling, these passes execute target and draft attention. Temporary
+CPU barriers before each MoE keep a rank compiling attention from delaying peers
+already waiting inside an expert collective. The large pass uses balanced expert
+routing; the idle pass follows the normal idle path. The hooks are removed after
+warmup, so they add no synchronization to serving. This startup work is independent
+of `kernel_config.enable_jit_warmup` and requires no additional option.
+
 ## Integration steps
 
 ### 1. Define the warmup domain
