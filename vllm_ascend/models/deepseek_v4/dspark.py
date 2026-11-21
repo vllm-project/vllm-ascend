@@ -218,9 +218,6 @@ class DeepseekV4DSparkModel(nn.Module):
             torch.empty(1, dtype=torch.float32),
             requires_grad=False,
         )
-        last_layer.hc_head_fn = self.hc_head_fn
-        last_layer.hc_head_base = self.hc_head_base
-        last_layer.hc_head_scale = self.hc_head_scale
 
         self.norm_eps = config.rms_norm_eps
         self.hc_eps = config.hc_eps
@@ -643,19 +640,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
-
-                # DSpark HC head parameters are shared by the model and last draft decoder.
-                # Layerwise reload separates them, but _remap_dspark_name() loads only the model.
-                # Also load the decoder aliases to prevent uninitialized values
-                # from overwriting the shared storage during finalization.
-                if name in ("model.hc_head_fn", "model.hc_head_base", "model.hc_head_scale"):
-                    last_layer = self.config.num_hidden_layers + self.model.num_dspark_layers - 1
-                    alias_name = f"model.layers.{last_layer}.{name.removeprefix('model.')}"
-                    alias = params_dict.get(alias_name)
-                    if alias is not None and alias is not param:
-                        alias_loader = getattr(alias, "weight_loader", default_weight_loader)
-                        alias_loader(alias, loaded_weight)
-                        loaded_params.add(alias_name)
 
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params

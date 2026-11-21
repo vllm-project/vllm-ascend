@@ -175,8 +175,8 @@ def test_attention_sink_layerwise_reload(sink_path):
 
 
 @pytest.mark.parametrize("num_dspark_layers", [1, 2])
-def test_dspark_reload_preserves_shared_hc_heads(monkeypatch, num_dspark_layers):
-    """Reload both meta owners without an unloaded alias overwriting HC storage."""
+def test_dspark_reload_preserves_model_hc_heads(monkeypatch, num_dspark_layers):
+    """Reload model-level HC heads twice without replacing captured storage."""
     monkeypatch.setattr(dspark_module, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(dspark_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(dspark_module, "process_eagle_weight", lambda *_: None)
@@ -189,10 +189,9 @@ def test_dspark_reload_preserves_shared_hc_heads(monkeypatch, num_dspark_layers)
     for name in ("hc_head_fn", "hc_head_base", "hc_head_scale"):
         parameter = nn.Parameter(torch.zeros(4), requires_grad=False)
         setattr(model.model, name, parameter)
-        setattr(layer, name, parameter)
         originals[name] = parameter
-    # The decoder must also load its own tensor: otherwise finalize merely
-    # restores untouched storage and cannot expose partially loaded aliases.
+    original_addresses = {name: parameter.data_ptr() for name, parameter in originals.items()}
+    # Reload decoder state alongside the model-level HC heads.
     layer.hc_attn_base = nn.Parameter(torch.zeros(4), requires_grad=False)
     load = dspark_module.DSparkDeepseekV4ForCausalLM.load_weights.__get__(model)
     record_metadata_for_reloading(model)
@@ -205,6 +204,6 @@ def test_dspark_reload_preserves_shared_hc_heads(monkeypatch, num_dspark_layers)
         finalize_layerwise_reload(model, None)
         for name, original in originals.items():
             assert getattr(model.model, name) is original
-            assert getattr(layer, name) is original
+            assert original.data_ptr() == original_addresses[name]
             torch.testing.assert_close(original, torch.full((4,), value), rtol=0, atol=0)
         torch.testing.assert_close(layer.hc_attn_base, torch.full((4,), value), rtol=0, atol=0)
