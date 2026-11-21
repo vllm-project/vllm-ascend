@@ -1,0 +1,925 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
+"""KV pool watch helpers for PR-level e2e tests.
+
+Counters are read as deltas; hybrid cases reset local KV between rounds.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import time
+from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass, field
+from typing import Any
+
+import regex as re
+
+HITS_METRIC = "vllm:external_prefix_cache_hits"
+QUERIES_METRIC = "vllm:external_prefix_cache_queries"
+LOAD_KEYS_METRIC = "vllm:ascend_store_load_get_keys"
+DELAYED_BLOCKS_METRIC = "vllm:ascend_store_delayed_release_blocks"
+
+
+@dataclass(frozen=True)
+class PoolSnapshot:
+    """Point-in-time pool counters; always compare deltas."""
+
+    hits: float
+    queries: float
+    load_keys: float
+    delayed_blocks: float = 0.0
+
+    def delta_queries(self, later: PoolSnapshot) -> float:
+        return later.queries - self.queries
+
+    def delta_hits(self, later: PoolSnapshot) -> float:
+        return later.hits - self.hits
+
+    def delta_ratio(self, later: PoolSnapshot) -> float:
+        dq = self.delta_queries(later)
+        if dq <= 0:
+            return 0.0
+        return self.delta_hits(later) / dq
+
+
+def _metrics_source(source: Any) -> Any:
+    """VllmRunner on some branches exposes metrics via ``runner.model``."""
+    if hasattr(source, "get_metrics"):
+        return source
+    return source.model
+
+
+def snapshot_metrics(source: Any) -> PoolSnapshot:
+    """Read counters from a runner whose ``get_metrics()`` returns a dict or a metric list."""
+    metrics = _metrics_source(source).get_metrics()
+    raw: dict[str, float] = {}
+    if isinstance(metrics, dict):
+        raw = {name: float(value) for name, value in metrics.items()}
+    else:
+        for metric in metrics:
+            # Histogram metrics expose count/sum/buckets, not ``value``.
+            value = getattr(metric, "value", None)
+            if value is None:
+                continue
+            raw[metric.name] = float(value)
+    return PoolSnapshot(
+        hits=raw.get(HITS_METRIC, 0.0),
+        queries=raw.get(QUERIES_METRIC, 0.0),
+        load_keys=raw.get(LOAD_KEYS_METRIC, 0.0),
+        delayed_blocks=raw.get(DELAYED_BLOCKS_METRIC, 0.0),
+    )
+
+
+def expected_hit_ratio(token_len: int, block_size: int) -> float:
+    """Max hit ratio for a fully cached prompt (non-spec cases)."""
+    if token_len <= 0:
+        return 0.0
+    return (token_len // block_size) * block_size / token_len
+
+
+def expected_hit_token_count(prompt_tokens: int, block_size: int, lcm_block_size: int | None = None) -> int:
+    """Exact hit tokens reported by the engine (spec/hybrid and non-spec)."""
+    if prompt_tokens <= 0:
+        return 0
+    hits = (prompt_tokens // block_size) * block_size
+    if lcm_block_size:
+        # Only whole lcm blocks are transferable; the tail never hits.
+        saveable = (prompt_tokens // lcm_block_size) * lcm_block_size
+        hits = min(hits, saveable)
+        final_block_start = ((prompt_tokens - 1) // lcm_block_size) * lcm_block_size
+        if hits > final_block_start:
+            hits -= lcm_block_size
+    if hits == prompt_tokens:
+        hits -= 1
+    return max(0, hits)
+
+
+def assert_hit_ratio(
+    before: PoolSnapshot,
+    after: PoolSnapshot,
+    *,
+    prompt_tokens: int,
+    block_size: int,
+    tolerance: float = 0.9,
+    tag: str = "",
+) -> float:
+    """H1/H2 for non-spec cases: hit exists and ratio >= expected * tolerance."""
+    ratio = before.delta_ratio(after)
+    expected = expected_hit_ratio(prompt_tokens, block_size)
+    floor = expected * tolerance
+
+    assert before.delta_hits(after) > 0, (
+        f"[{tag}] H1 failed: no external hit "
+        f"(hits Δ{before.delta_hits(after):.0f}, queries Δ{before.delta_queries(after):.0f})"
+    )
+    assert ratio >= floor, (
+        f"[{tag}] H2 failed: delta hit ratio {ratio:.4f} < {floor:.4f} "
+        f"(expected {expected:.4f}, hits Δ{before.delta_hits(after):.0f}, "
+        f"queries Δ{before.delta_queries(after):.0f})"
+    )
+    return ratio
+
+
+def assert_hit_tokens(before: PoolSnapshot, after: PoolSnapshot, *, expected: int, tag: str = "") -> float:
+    """H1 + exact hit-token assertion for spec/hybrid cases."""
+    delta = before.delta_hits(after)
+    assert delta > 0, (
+        f"[{tag}] H1 failed: no external hit "
+        f"(hits Δ{delta:.0f}, queries Δ{before.delta_queries(after):.0f}); "
+        f"expected {expected} hit tokens"
+    )
+    assert delta == expected, (
+        f"[{tag}] H2 failed: hit tokens Δ{delta:.0f} != expected {expected} "
+        f"(queries Δ{before.delta_queries(after):.0f}); "
+        "spec-decode/hybrid must assert exact tokens, not a ratio"
+    )
+    return delta
+
+
+def assert_no_hit(before: PoolSnapshot, after: PoolSnapshot, *, tag: str = "") -> None:
+    """R4: a disjoint prompt must not hit (key isolation)."""
+    dh = before.delta_hits(after)
+    assert dh == 0, (
+        f"[{tag}] isolation failed: expected 0 external hits for a disjoint prompt, "
+        f"got Δ{dh} (key collision or stale entry)"
+    )
+
+
+def assert_output_identical(cold_tokens: Sequence[int], hit_tokens: Sequence[int], *, tag: str = "") -> None:
+    """H3: pool-hit tokens must match cold-start tokens exactly."""
+    cold = list(cold_tokens)
+    hit = list(hit_tokens)
+    if cold == hit:
+        return
+    first_diff = next(
+        (i for i, (c, h) in enumerate(zip(cold, hit)) if c != h),
+        min(len(cold), len(hit)),
+    )
+    num_diff = sum(1 for c, h in zip(cold, hit) if c != h) + abs(len(cold) - len(hit))
+    raise AssertionError(
+        f"[{tag}] H3 failed: silent data corruption, pool-hit tokens differ from the cold start\n"
+        f"  len(cold)={len(cold)} len(hit)={len(hit)} num_diff={num_diff} "
+        f"first_diff={first_diff} cold_tail={cold[-8:]} hit_tail={hit[-8:]}"
+    )
+
+
+# Model-independent token ids; all PR pool vocabs exceed base + span.
+POOL_PROMPT_TOKEN_BASE = 1000
+POOL_PROMPT_TOKEN_SPAN = 7000
+POOL_MAX_TOKENS = 16
+
+
+def build_pool_prompts(
+    prompt_tokens: int, *, seed_offset: int = 0
+) -> tuple[list[int], list[int]]:
+    """Return two token-id prompts of ``prompt_tokens``; the first block differs (R4)."""
+
+    def _build(seed: int) -> list[int]:
+        return [POOL_PROMPT_TOKEN_BASE + (seed + index * 7) % POOL_PROMPT_TOKEN_SPAN for index in range(prompt_tokens)]
+
+    return _build(seed_offset), _build(
+        seed_offset + POOL_PROMPT_TOKEN_SPAN // 2
+    )
+
+
+POOL_SECRET = "7391"
+POOL_ANSWER_RE = re.compile(r"answer\s*:\s*\$?\s*(-?\d+)")
+
+
+def build_pool_accuracy_prompt(
+    tokenizer: Any,
+    target_tokens: int,
+    max_model_len: int,
+    secret: str = POOL_SECRET,
+) -> list[int]:
+    """Long natural-language prompt; the fact sits in the cached prefix."""
+    padding = "This paragraph is padding for a long context test. "
+    fact = f"The secret number is {secret}. "
+    question = "\nQuestion: What is the secret number? The secret number is"
+    unit = len(tokenizer.encode(padding, add_special_tokens=False))
+    repeats = max(1, target_tokens // (2 * unit))
+    while True:
+        text = padding * repeats + fact + padding * repeats + question
+        ids = tokenizer.encode(text, add_special_tokens=False)
+        missing = target_tokens - len(ids)
+        if missing <= 0:
+            break
+        repeats += max(1, missing // (2 * unit))
+    assert len(ids) >= target_tokens, f"prompt {len(ids)} < target {target_tokens}"
+    if len(ids) > max_model_len - 32:
+        raise AssertionError(f"prompt {len(ids)} exceeds max_model_len-32={max_model_len - 32}")
+    return ids
+
+
+def extract_pool_answer(text: str) -> str:
+    match = POOL_ANSWER_RE.search(text)
+    if match is not None:
+        return match.group(1)
+    fallback = re.search(r"-?\d+", text)
+    assert fallback is not None, f"no answer in output: {text!r}"
+    return fallback.group(0)
+
+
+def run_pool_hit_sequence(
+    runner: Any,
+    *,
+    block_size: int,
+    prompt_tokens: int,
+    prompt_ids: list[int] | None = None,
+    miss_prompt_ids: list[int] | None = None,
+    replicas: int = 1,
+    max_tokens: int = POOL_MAX_TOKENS,
+    lcm_block_size: int | None = None,
+    expected_hit_tokens: int | None = None,
+    reset_local_cache: bool = False,
+    check_output: bool = True,
+    answer_secret: str | None = None,
+    tolerance: float = 0.9,
+    tag: str = "",
+) -> dict[str, Any]:
+    """Run R1 cold write -> R2/R3 hit -> R4 disjoint miss.
+
+    ``prompt_ids`` supplies a measured long natural-language prompt;
+    ``answer_secret`` asserts the cold and hit answers. ``replicas`` scales with
+    DP size. ``lcm_block_size`` / ``expected_hit_tokens`` enable exact hit-token
+    checks. ``reset_local_cache`` is for hybrid cases. ``check_output=False``
+    skips H3 (DSpark and dummy-weight cases).
+    """
+    prompt_a = prompt_ids if prompt_ids is not None else build_pool_prompts(prompt_tokens)[0]
+    prompt_b = (
+        miss_prompt_ids
+        if miss_prompt_ids is not None
+        else build_pool_prompts(prompt_tokens)[1]
+    )
+    effective_tokens = len(prompt_a)
+    if expected_hit_tokens is None:
+        expected_hits = expected_hit_token_count(effective_tokens, block_size, lcm_block_size)
+    else:
+        # Measured override for models whose hash granularity equals lcm.
+        expected_hits = expected_hit_tokens
+
+    def _reset_local() -> None:
+        if not reset_local_cache:
+            return
+        try:
+            model = runner.model
+        except RuntimeError as exc:
+            raise AssertionError(
+                "reset_local_cache requires a runner exposing `.model` (VllmRunner); DPVllmRunner does not support it"
+            ) from exc
+        model.reset_prefix_cache(reset_connector=False)
+
+    def _generate(ids: list[int]) -> tuple[list[list[int]], list[str]]:
+        _reset_local()
+        outputs = runner.generate_greedy([ids] * replicas, max_tokens)
+        return [list(token_ids) for token_ids, _ in outputs], [text for _, text in outputs]
+
+    def _assert_outputs(cold: list[list[int]], hit: list[list[int]], round_tag: str) -> None:
+        assert len(hit) == len(cold), f"[{tag} {round_tag}] replica count changed: {len(hit)} != {len(cold)}"
+        for index, hit_tokens in enumerate(hit):
+            assert_output_identical(cold[index], hit_tokens, tag=f"{tag} {round_tag} replica{index}")
+
+    def _assert_hit(before: PoolSnapshot, after: PoolSnapshot, round_tag: str) -> float:
+        round_full_tag = f"{tag} {round_tag}"
+        if lcm_block_size:
+            # One prompt copy per DP rank, so hits scale with replicas.
+            return assert_hit_tokens(before, after, expected=expected_hits * replicas, tag=round_full_tag)
+        return assert_hit_ratio(
+            before,
+            after,
+            prompt_tokens=effective_tokens,
+            block_size=block_size,
+            tolerance=tolerance,
+            tag=round_full_tag,
+        )
+
+    round_timer = time.perf_counter()
+
+    def _round_start(round_tag: str, ids: list[int]) -> None:
+        nonlocal round_timer
+        round_timer = time.perf_counter()
+        print(
+            f"[kv_pool] {tag} {round_tag} start: prompt_tokens={len(ids)} "
+            f"replicas={replicas} max_tokens={max_tokens}",
+            flush=True,
+        )
+
+    def _round_done(round_tag: str) -> None:
+        print(
+            f"[kv_pool] {tag} {round_tag} done in {(time.perf_counter() - round_timer) * 1000:.0f} ms",
+            flush=True,
+        )
+
+    # R1: cold start writes the pool; writes are visible when generate() returns.
+    _round_start("R1", prompt_a)
+    cold, cold_texts = _generate(prompt_a)
+    _round_done("R1")
+    snap1 = snapshot_metrics(runner)
+
+    # R2: first hit
+    _round_start("R2", prompt_a)
+    hit_1, hit_1_texts = _generate(prompt_a)
+    _round_done("R2")
+    snap2 = snapshot_metrics(runner)
+    ratio_r2 = _assert_hit(snap1, snap2, "R2")
+    if check_output:
+        _assert_outputs(cold, hit_1, "R2")
+
+    # R3: repeated hit must not decay
+    _round_start("R3", prompt_a)
+    hit_2, hit_2_texts = _generate(prompt_a)
+    _round_done("R3")
+    snap3 = snapshot_metrics(runner)
+    ratio_r3 = _assert_hit(snap2, snap3, "R3")
+    if check_output:
+        _assert_outputs(cold, hit_2, "R3")
+
+    if answer_secret is not None:
+        for round_tag, texts in (("R1", cold_texts), ("R2", hit_1_texts), ("R3", hit_2_texts)):
+            answers = [extract_pool_answer(text) for text in texts]
+            assert all(answer == answer_secret for answer in answers), (
+                f"[{tag} {round_tag}] answer mismatch: {answers} != {answer_secret!r}"
+            )
+
+    # R4: disjoint prompt must not hit.
+    _round_start("R4", prompt_b)
+    _generate(prompt_b)
+    _round_done("R4")
+    snap4 = snapshot_metrics(runner)
+    assert_no_hit(snap3, snap4, tag=f"{tag} R4")
+
+    summary = {
+        "r2": ratio_r2,
+        "r3": ratio_r3,
+        "expected_hits": float(expected_hits),
+        "expected_hits_total": float(expected_hits * replicas),
+        "replicas": replicas,
+        "load_keys": snap4.load_keys,
+        # A/B comparison: R1 cold outputs and R3 hit-round outputs
+        "cold_outputs": cold,
+        "hit_outputs": hit_2,
+        "cold_texts": cold_texts,
+        "hit_texts": hit_2_texts,
+    }
+    metric_label = "hit_tokens" if lcm_block_size else "delta ratios"
+    print(
+        f"[kv_pool] {tag} {metric_label} R2={ratio_r2:.4f} R3={ratio_r3:.4f} "
+        f"expected_hits={expected_hits} replicas={replicas} "
+        f"expected_hits_total={expected_hits * replicas} "
+        f"prompt_tokens={effective_tokens} "
+        f"load_keys_total={snap4.load_keys:.0f}",
+        flush=True,
+    )
+    return summary
+
+
+# --- A/B runner -------------------------------------------------------------
+
+# Design doc sec.2.5: gate on TTFT P50/P95 <= B x 1.08 and input throughput
+# >= B x 0.92, with 10 hit-state samples per leg at concurrency 1.
+AB_TTFT_LIMIT = 1.08
+AB_THROUGHPUT_LIMIT = 0.92
+# Trial run: concurrency 1 (design doc sec.2.5), 6 warmups + 1s settle, then
+# drift + timed samples: warm-up drift decays monotonically (dsv4_cp observed
+# 568 -> 550 -> 540 ms), so the head of the timed block is recorded but
+# discarded from the stability gate and A/B stats. Callers may additionally
+# pass trim_count to drop the highest/lowest tails and gate on the middle
+# samples (four_card dsv4 perf was flaky: 10 timed samples, trim 2 + 2,
+# the middle 6 gate).
+AB_SAMPLES = 10
+AB_DRIFT_SAMPLES = 2
+AB_WARMUP = 6
+AB_CONCURRENCY = 1
+AB_PERF_SETTLE_SECONDS = 1.0
+AB_STABILITY_LIMIT = 0.05
+# Let the B leg release device memory and child processes before starting A.
+AB_LEG_GAP_SECONDS = 10
+AB_ARTIFACT = os.environ.get("KV_POOL_AB_ARTIFACT", "pool_ab_report.json")
+# B-leg default 16K workload; all six PR cases pass prompt_tokens explicitly.
+POOL_PROMPT_TOKENS = 16388
+PREFIX_HITS_METRIC = "vllm:prefix_cache_hits"
+
+
+class PerfUnstable(RuntimeError):
+    """Raised when one leg's samples are too noisy to gate on."""
+
+
+def _preflight_probe() -> str | None:
+    """Return a reason when the environment is unusable, else None."""
+    return None
+
+
+@dataclass
+class LegResult:
+    acc: bool
+    hit_tokens: float
+    outputs: list[list[int]]
+    ttft_p50: float
+    ttft_p95: float
+    throughput: float
+    env: dict[str, str] = field(default_factory=dict)
+    ttft_mean: float = 0.0
+    ttft_min: float = 0.0
+    ttft_max: float = 0.0
+    acceptance: list[float] = field(default_factory=list)
+
+
+@dataclass
+class PoolABReport:
+    case: str
+    a: LegResult
+    b: LegResult
+    verdict: str
+    label: str
+
+    @property
+    def delta_ttft(self) -> float:
+        if not self.a.ttft_p50 or not self.b.ttft_p50:
+            return 0.0
+        return self.a.ttft_p50 / self.b.ttft_p50 - 1.0
+
+    @property
+    def delta_throughput(self) -> float:
+        if not self.a.throughput or not self.b.throughput:
+            return 0.0
+        return self.a.throughput / self.b.throughput - 1.0
+
+    def emit(self) -> None:
+        for leg, result in (("A", self.a), ("B", self.b)):
+            print(
+                f"[kv_pool_ab] case={self.case} leg={leg} acc={int(result.acc)} "
+                f"hit_tokens={result.hit_tokens:.0f} ttft_p50={result.ttft_p50:.2f} "
+                f"ttft_p95={result.ttft_p95:.2f} throughput={result.throughput:.1f} "
+                f"delta_ttft={self.delta_ttft:+.4f} delta_throughput={self.delta_throughput:+.4f} "
+                f"verdict={self.verdict} label={self.label}",
+                flush=True,
+            )
+        payload = asdict(self)
+        payload["delta_ttft"] = self.delta_ttft
+        payload["delta_throughput"] = self.delta_throughput
+        with open(AB_ARTIFACT, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, default=str) + "\n")
+
+
+def _prefix_cache_hits(source: Any) -> float:
+    """Local prefix-cache hit tokens; used to prove the B leg really hits locally."""
+    metrics = _metrics_source(source).get_metrics()
+    if isinstance(metrics, dict):
+        return float(metrics.get(PREFIX_HITS_METRIC, 0.0))
+    for metric in metrics:
+        if metric.name == PREFIX_HITS_METRIC and getattr(metric, "value", None) is not None:
+            return float(metric.value)
+    return 0.0
+
+
+def _env_fingerprint() -> dict[str, str]:
+    return {
+        "ascend_rt_visible_devices": os.environ.get("ASCEND_RT_VISIBLE_DEVICES", ""),
+        "vllm_use_v2_model_runner": os.environ.get("VLLM_USE_V2_MODEL_RUNNER", ""),
+        "kv_pool_ab_mode": os.environ.get("KV_POOL_AB_MODE", "record"),
+    }
+
+
+def _percentile(values: list[float], q: float) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    return ordered[min(len(ordered) - 1, int(round(q * (len(ordered) - 1))))]
+
+
+def _collect_perf(
+    runner: Any,
+    prompt_tokens: int,
+    *,
+    prompt_ids: list[int] | None = None,
+    reset_local_cache: bool = False,
+    concurrency: int = AB_CONCURRENCY,
+    batch_requests: int = 0,
+    sample_count: int = AB_SAMPLES,
+    warmup_count: int = AB_WARMUP,
+    drift_count: int = AB_DRIFT_SAMPLES,
+    stability_policy: str = "fail",
+    trim_count: int = 0,
+) -> tuple[float, float, float, float, float, float]:
+    """Sample the 90% hit state; max_tokens=1 batch latency is the TTFT proxy.
+
+    Runs ``warmup_count`` untimed warmups plus ``drift_count + sample_count``
+    timed runs, and only the last ``sample_count`` timed runs feed the
+    stability gate and the A/B stats: warm-up drift decays monotonically
+    (dsv4_cp observed 568 -> 550 -> 540 ms), so dropping the head of the timed
+    block keeps the gate honest without weakening it.
+
+    When ``trim_count`` > 0 the kept samples are sorted and the
+    ``trim_count`` highest plus ``trim_count`` lowest values are discarded,
+    so only the middle window feeds the stats and the stability gate. This
+    damps one-off scheduler/harness outliers while keeping the throughput
+    wall clock over the full kept window. The same trimming applies to the
+    pool (A) and control (B) legs because both go through this helper.
+
+    ``batch_requests`` sets how many requests one sample issues: 0 keeps the
+    legacy one-wave behaviour (``concurrency`` requests per sample), larger
+    values issue ``batch_requests // concurrency`` sequential waves of the
+    same single prompt and time the whole batch.
+    """
+    batch_requests = batch_requests or concurrency
+    if batch_requests < concurrency or batch_requests % concurrency:
+        raise ValueError("batch_requests must be a positive multiple of concurrency")
+    waves = batch_requests // concurrency
+    prompt = prompt_ids if prompt_ids is not None else build_pool_prompts(prompt_tokens)[0]
+    timed: list[float] = []
+    kept_started = 0.0
+    if sample_count < 1 or warmup_count < 0 or drift_count < 0:
+        raise ValueError("sample_count must be positive; warmup_count and drift_count non-negative")
+    if trim_count < 0 or sample_count - 2 * trim_count < 1:
+        raise ValueError("trim_count must be non-negative and leave at least one kept sample")
+    if stability_policy not in {"fail", "record"}:
+        raise ValueError("stability_policy must be 'fail' or 'record'")
+    total_calls = warmup_count + drift_count + sample_count
+    for index in range(total_calls):
+        if index == warmup_count:
+            # Let scheduling and in-flight async writes settle before timing.
+            time.sleep(AB_PERF_SETTLE_SECONDS)
+        if reset_local_cache:
+            # DPVllmRunner does not expose `.model`.
+            with contextlib.suppress(RuntimeError):
+                runner.model.reset_prefix_cache(reset_connector=False)
+        if index < warmup_count:
+            phase = "warmup"
+        elif index < warmup_count + drift_count:
+            phase = "drift"
+        else:
+            phase = "timed"
+        begin = time.perf_counter()
+        for _ in range(waves):
+            runner.generate_greedy([prompt] * concurrency, 1)
+        elapsed = (time.perf_counter() - begin) * 1000.0
+        # Progress line per call: the next CI hang must show which call stalled.
+        print(
+            f"[kv_pool_perf] call {index + 1}/{total_calls} phase={phase} "
+            f"prompt_tokens={prompt_tokens} concurrency={concurrency} "
+            f"batch_requests={batch_requests} elapsed_ms={elapsed:.1f}",
+            flush=True,
+        )
+        if index >= warmup_count:
+            if index == warmup_count + drift_count:
+                # Throughput wall-clock starts at the first kept sample.
+                kept_started = begin
+            timed.append(elapsed)
+    kept_all = timed[drift_count:]
+    produced = prompt_tokens * batch_requests * len(kept_all)
+    wall = time.perf_counter() - kept_started
+    if trim_count:
+        ordered = sorted(kept_all)
+        ttft = ordered[trim_count : len(ordered) - trim_count]
+    else:
+        ttft = kept_all
+    mean = sum(ttft) / len(ttft) if ttft else 0.0
+    minimum = min(ttft) if ttft else 0.0
+    maximum = max(ttft) if ttft else 0.0
+    # Design doc sec.2.5: (max-min)/mean > 5% means the leg is not usable for the
+    # gate. Trimmed outliers are already excluded from the stats, so the window
+    # must match the gated samples; otherwise trim_count cannot damp one-off
+    # scheduler spikes (dsv4_dp2: gate window 1.09%, untrimmed 5.56%).
+    stability_ratio = (maximum - minimum) / mean if mean else 0.0
+    raw_mean = sum(kept_all) / len(kept_all) if kept_all else 0.0
+    raw_stability_ratio = (max(kept_all) - min(kept_all)) / raw_mean if raw_mean else 0.0
+    drift = ", ".join(f"{value:.1f}" for value in timed[:drift_count])
+    kept_samples = ", ".join(f"{value:.1f}" for value in kept_all)
+    samples = ", ".join(f"{value:.1f}" for value in ttft)
+    print(
+        f"[kv_pool_perf] timed={len(timed)} kept={len(kept_all)} trim={trim_count} gate={len(ttft)} "
+        f"concurrency={concurrency} "
+        f"mean_ms={mean:.2f} min_ms={minimum:.2f} max_ms={maximum:.2f} "
+        f"range_ratio={stability_ratio:.2%} raw_range_ratio={raw_stability_ratio:.2%} "
+        f"drift_ms=[{drift}] kept_ms=[{kept_samples}] gate_ms=[{samples}]",
+        flush=True,
+    )
+    if mean and stability_ratio > AB_STABILITY_LIMIT:
+        message = (
+            f"perf samples unstable: (max-min)/mean={stability_ratio:.2%} "
+            f"> {AB_STABILITY_LIMIT:.0%}; gate_ms=[{samples}] kept_ms=[{kept_samples}] "
+            f"drift_ms=[{drift}]"
+        )
+        if stability_policy == "fail":
+            raise PerfUnstable(message)
+        print(f"[kv_pool_perf] {message}; recording without failure", flush=True)
+    return _percentile(ttft, 0.50), _percentile(ttft, 0.95), produced / wall, mean, minimum, maximum
+
+
+def _first_diff_summary(a_outputs: Sequence[Sequence[int]], b_outputs: Sequence[Sequence[int]]) -> str:
+    """Compact A/B divergence summary for one-line failure messages."""
+    parts: list[str] = [f"outputs={len(a_outputs)}/{len(b_outputs)}"]
+    for index, (a_ids, b_ids) in enumerate(zip(a_outputs, b_outputs)):
+        if list(a_ids) == list(b_ids):
+            continue
+        first_diff = next(
+            (i for i, (x, y) in enumerate(zip(a_ids, b_ids)) if x != y),
+            min(len(a_ids), len(b_ids)),
+        )
+        num_diff = sum(1 for x, y in zip(a_ids, b_ids) if x != y) + abs(len(a_ids) - len(b_ids))
+        parts.append(
+            f"output[{index}] len={len(a_ids)}/{len(b_ids)} num_diff={num_diff} first_diff={first_diff}"
+        )
+    return ", ".join(parts)
+
+
+def _dump_ab_token_diff(a_outputs: list[list[int]], b_outputs: list[list[int]], case_name: str) -> None:
+    """Print the first A/B divergence site so CI logs show what differs."""
+    print(
+        f"[{case_name}] A/B token diagnostic: len(A)={len(a_outputs)} len(B)={len(b_outputs)}",
+        flush=True,
+    )
+    for index, (a_ids, b_ids) in enumerate(zip(a_outputs, b_outputs)):
+        if a_ids == b_ids:
+            print(f"  output[{index}]: identical ({len(a_ids)} tokens)", flush=True)
+            continue
+        first_diff = next(
+            (i for i, (x, y) in enumerate(zip(a_ids, b_ids)) if x != y),
+            min(len(a_ids), len(b_ids)),
+        )
+        num_diff = sum(1 for x, y in zip(a_ids, b_ids) if x != y) + abs(len(a_ids) - len(b_ids))
+        print(
+            f"  output[{index}]: len(A)={len(a_ids)} len(B)={len(b_ids)} "
+            f"num_diff={num_diff} first_diff={first_diff}",
+            flush=True,
+        )
+        print(f"  A[head]={a_ids[:16]}", flush=True)
+        print(f"  B[head]={b_ids[:16]}", flush=True)
+        print(f"  A[around_diff]={a_ids[max(0, first_diff - 8): first_diff + 8]}", flush=True)
+        print(f"  B[around_diff]={b_ids[max(0, first_diff - 8): first_diff + 8]}", flush=True)
+        print(f"  A[tail]={a_ids[-12:]}", flush=True)
+        print(f"  B[tail]={b_ids[-12:]}", flush=True)
+    if len(a_outputs) != len(b_outputs):
+        print("  output count differs between legs", flush=True)
+
+
+def _control_hit_outputs(
+    runner: Any,
+    prompt_tokens: int,
+    max_tokens: int,
+    prompt_ids: list[int] | None = None,
+) -> tuple[list[list[int]], list[list[int]]]:
+    """B leg: cold write + one local-hit round; no local hit is CONTROL_DEFECT.
+
+    Returns (hit_outputs, cold_outputs): the cold start is kept so run_pool_ab
+    can dump B hit-vs-cold local-cache fidelity and the cross-leg cold prefill
+    diff, which involves no pool recovery on either side.
+    """
+    prompt = prompt_ids if prompt_ids is not None else build_pool_prompts(prompt_tokens)[0]
+    print(
+        f"[kv_pool_control] B cold start: prompt_tokens={len(prompt)} max_tokens={max_tokens}",
+        flush=True,
+    )
+    cold_started = time.perf_counter()
+    cold_outputs = [list(ids) for ids, _ in runner.generate_greedy([prompt], max_tokens)]
+    print(
+        f"[kv_pool_control] B cold start done in {(time.perf_counter() - cold_started) * 1000:.0f} ms",
+        flush=True,
+    )
+    before = _prefix_cache_hits(runner)
+    print("[kv_pool_control] B local-hit round start", flush=True)
+    hit_started = time.perf_counter()
+    outputs = [list(ids) for ids, _ in runner.generate_greedy([prompt], max_tokens)]
+    print(
+        f"[kv_pool_control] B local-hit round done in {(time.perf_counter() - hit_started) * 1000:.0f} ms",
+        flush=True,
+    )
+    after = _prefix_cache_hits(runner)
+    assert after > before, (
+        f"CONTROL_DEFECT: B leg got no local prefix-cache hit (prefix_cache_hits Δ{after - before:.0f})"
+    )
+    return outputs, cold_outputs
+
+
+def _classify(
+    a_err: str | None,
+    b_err: str | None,
+    a_env: bool,
+    b_env: bool,
+    token_diff: bool,
+    perf_bad: bool,
+) -> str:
+    if a_env or b_env:
+        return "ENV_BLOCKED"
+    if a_err and b_err:
+        return "TEST_DEFECT"
+    if b_err:
+        return "CONTROL_DEFECT"
+    if a_err or token_diff or perf_bad:
+        return "POOL_DEFECT"
+    return "PASS"
+
+
+def run_pool_ab(
+    case_name: str,
+    build_leg: Callable[[bool, str], Any],
+    accuracy: Callable[[Any], Any],
+    hit: Callable[[Any], dict[str, Any]] | None = None,
+    *,
+    prompt_tokens: int = POOL_PROMPT_TOKENS,
+    prompt_ids: list[int] | None = None,
+    perf_prompt_tokens: int | None = None,
+    perf_prompt_ids: list[int] | None = None,
+    max_tokens: int = POOL_MAX_TOKENS,
+    token_identity: bool = True,
+    acceptance_tolerance: float | None = None,
+    perf_reset_local: bool = False,
+    gate: bool = True,
+    perf_gate: bool = True,
+    perf_sample_count: int = AB_SAMPLES,
+    perf_warmup_count: int = AB_WARMUP,
+    perf_drift_count: int = AB_DRIFT_SAMPLES,
+    perf_trim_count: int = 0,
+    perf_concurrency: int = AB_CONCURRENCY,
+    perf_batch_requests: int = 0,
+    perf_stability_policy: str = "fail",
+) -> PoolABReport:
+    perf_tokens = perf_prompt_tokens or prompt_tokens
+    blocked = _preflight_probe()
+    if blocked is not None:
+        empty = LegResult(False, 0.0, [], 0.0, 0.0, 0.0, _env_fingerprint())
+        report = PoolABReport(case_name, empty, empty, "FAIL", "ENV_BLOCKED")
+        report.emit()
+        raise AssertionError(f"ENV_BLOCKED: {blocked}")
+
+    cold_out = {"a": [], "b": []}
+
+    def _run(use_pool: bool, leg: str) -> tuple[LegResult | None, str | None, bool, bool]:
+        """Return (result, error, original-assertion failed, env failed)."""
+        accuracy_ok = False
+        leg_started = time.perf_counter()
+        print(
+            f"[kv_pool_ab] {case_name} leg={leg} start (use_pool={int(use_pool)})",
+            flush=True,
+        )
+        try:
+            with build_leg(use_pool, f"{case_name}_{leg}") as runner:
+                acceptance = accuracy(runner) or []
+                accuracy_ok = True
+                if use_pool:
+                    summary = hit(runner) if hit is not None else {}
+                    outputs = summary.get("hit_outputs", [])
+                    cold_out["a"] = [list(ids) for ids in summary.get("cold_outputs") or []]
+                    hits = float(summary.get("r3", 0.0))
+                else:
+                    outputs, cold_out["b"] = _control_hit_outputs(runner, prompt_tokens, max_tokens, prompt_ids)
+                    # B leg records local-hit output, not pool hits.
+                    hits = 0.0
+                p50, p95, throughput, ttft_mean, ttft_min, ttft_max = _collect_perf(
+                    runner,
+                    perf_tokens,
+                    prompt_ids=perf_prompt_ids,
+                    reset_local_cache=perf_reset_local and use_pool,
+                    concurrency=perf_concurrency,
+                    batch_requests=perf_batch_requests,
+                    sample_count=perf_sample_count,
+                    warmup_count=perf_warmup_count,
+                    drift_count=perf_drift_count,
+                    stability_policy=perf_stability_policy,
+                    trim_count=perf_trim_count,
+                )
+                result = LegResult(
+                    True,
+                    hits,
+                    outputs,
+                    p50,
+                    p95,
+                    throughput,
+                    _env_fingerprint(),
+                    ttft_mean=ttft_mean,
+                    ttft_min=ttft_min,
+                    ttft_max=ttft_max,
+                    acceptance=[float(rate) for rate in acceptance],
+                )
+                return result, None, False, False
+        except PerfUnstable as exc:
+            return None, str(exc), False, True
+        except AssertionError as exc:
+            return None, str(exc), not accuracy_ok, False
+        except Exception as exc:
+            # Engine/store failures are ENV_BLOCKED, not pool assertions; only
+            # AssertionError above is classified as a defect.
+            return None, f"{type(exc).__name__}: {exc}", False, True
+        finally:
+            print(
+                f"[kv_pool_ab] {case_name} leg={leg} end in {time.perf_counter() - leg_started:.1f}s",
+                flush=True,
+            )
+
+    b, b_err, b_fatal, b_env = _run(False, "b")
+    if b_err is None:
+        # Wait for the B leg to release workers and device memory.
+        time.sleep(AB_LEG_GAP_SECONDS)
+        a, a_err, a_fatal, a_env = _run(True, "a")
+    else:
+        # Control group failed: skip the pool leg.
+        a, a_err, a_fatal, a_env = None, None, False, False
+    empty = LegResult(False, 0.0, [], 0.0, 0.0, 0.0, _env_fingerprint())
+    a_result = a or empty
+    b_result = b or empty
+    # An empty or failed leg makes the comparison meaningless: rerun, do not blame the pool.
+    incomplete = a is None or b is None or not a_result.acc or not b_result.acc
+    acceptance_diff = False
+    token_diff = False
+    perf_bad = False
+    if incomplete:
+        # The A leg is skipped when the control leg fails, so `incomplete` alone
+        # does not mean the environment blocked us: keep the failing leg's
+        # verdict (CONTROL_DEFECT / TEST_DEFECT) and only fall back to
+        # ENV_BLOCKED when neither leg actually asserted.
+        label = _classify(a_err, b_err, a_env, b_env, False, False)
+        if label == "PASS":
+            label = "ENV_BLOCKED"
+    else:
+        token_diff = token_identity and a_result.outputs != b_result.outputs
+        perf_bad = (
+            a_result.ttft_p50 > b_result.ttft_p50 * AB_TTFT_LIMIT
+            or a_result.ttft_p95 > b_result.ttft_p95 * AB_TTFT_LIMIT
+            or a_result.throughput < b_result.throughput * AB_THROUGHPUT_LIMIT
+        )
+        if acceptance_tolerance is not None and a_result.acceptance and b_result.acceptance:
+            # Design doc sec.2.4 (acceptance class): each position must be within
+            # tolerance between the pool (A) and local-cache (B) legs.
+            acceptance_diff = len(a_result.acceptance) != len(b_result.acceptance) or any(
+                abs(a_rate - b_rate) > acceptance_tolerance
+                for a_rate, b_rate in zip(a_result.acceptance, b_result.acceptance, strict=False)
+            )
+        label = _classify(
+            a_err,
+            b_err,
+            a_env,
+            b_env,
+            token_diff,
+            perf_bad and perf_gate,
+        )
+        if acceptance_diff and label == "PASS":
+            label = "POOL_DEFECT"
+        if acceptance_tolerance is not None:
+            print(
+                f"[kv_pool_ab] case={case_name} acceptance_tolerance={acceptance_tolerance} "
+                f"A={[round(rate, 4) for rate in a_result.acceptance]} "
+                f"B={[round(rate, 4) for rate in b_result.acceptance]} "
+                f"mismatch={int(acceptance_diff)}",
+                flush=True,
+            )
+    if a_result.outputs and b_result.outputs:
+        _dump_ab_token_diff(a_result.outputs, b_result.outputs, case_name)
+    if cold_out["a"] and cold_out["b"]:
+        # Cross-leg cold prefill diff: neither side involves pool recovery, so
+        # this separates configuration-level prefill numerics from pool fidelity.
+        _dump_ab_token_diff(cold_out["a"], cold_out["b"], case_name + "_cold_prefill")
+    if cold_out["b"] and b_result.outputs:
+        # B-leg local-cache fidelity: hit round vs its own cold start, the same
+        # content check the pool leg enforces via assert_output_identical.
+        _dump_ab_token_diff(cold_out["b"], b_result.outputs, case_name + "_b_hit_vs_cold")
+    report = PoolABReport(case_name, a_result, b_result, "PASS" if label == "PASS" else "FAIL", label)
+    print(
+        f"[kv_pool_ab] perf_timed={perf_sample_count + perf_drift_count} "
+        f"perf_samples={perf_sample_count} perf_drift={perf_drift_count} "
+        f"perf_trim={perf_trim_count} "
+        f"perf_concurrency={perf_concurrency} perf_gate={int(perf_gate)} "
+        f"stability_policy={perf_stability_policy}",
+        flush=True,
+    )
+    report.emit()
+    a_msg = a_err or ("ok" if a is not None else "skipped")
+    b_msg = b_err or ("ok" if b is not None else "skipped")
+    # CI keeps only the last line of a failed step, so the verdict itself must
+    # name the failing gate with its numbers instead of a bare "A/B comparison
+    # failed".
+    reasons: list[str] = []
+    if a_err:
+        reasons.append(f"A={a_err}")
+    if b_err:
+        reasons.append(f"B={b_err}")
+    if token_diff:
+        reasons.append(f"token identity mismatch [{_first_diff_summary(a_result.outputs, b_result.outputs)}]")
+    if perf_bad:
+        def _ratio(numerator: float, denominator: float) -> float:
+            return numerator / denominator if denominator else 0.0
+
+        reasons.append(
+            f"perf A/B p50={a_result.ttft_p50:.2f}/{b_result.ttft_p50:.2f}ms "
+            f"(x{_ratio(a_result.ttft_p50, b_result.ttft_p50):.3f}, limit x{AB_TTFT_LIMIT}) "
+            f"p95={a_result.ttft_p95:.2f}/{b_result.ttft_p95:.2f}ms "
+            f"(x{_ratio(a_result.ttft_p95, b_result.ttft_p95):.3f}) "
+            f"throughput={a_result.throughput:.1f}/{b_result.throughput:.1f} "
+            f"(x{_ratio(a_result.throughput, b_result.throughput):.3f}, limit x{AB_THROUGHPUT_LIMIT})"
+        )
+    if acceptance_diff:
+        reasons.append(
+            f"acceptance A={[round(rate, 4) for rate in a_result.acceptance]} "
+            f"B={[round(rate, 4) for rate in b_result.acceptance]} tol={acceptance_tolerance}"
+        )
+    detail = "; ".join(reasons) if reasons else "no leg error recorded"
+    print(f"[kv_pool_ab] case={case_name} verdict={label} detail=[{detail}]", flush=True)
+    if a_env or b_env or (incomplete and label == "ENV_BLOCKED"):
+        raise AssertionError(f"[{case_name}] ENV_BLOCKED: A={a_msg}; B={b_msg}")
+    if a_fatal or b_fatal:
+        raise AssertionError(f"[{case_name}] {label}: original assertions failed; {detail}")
+    if gate and label != "PASS":
+        raise AssertionError(f"[{case_name}] {label}: A/B comparison failed; {detail}")
+    return report

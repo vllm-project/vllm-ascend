@@ -986,10 +986,26 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
             elif command == "score":
                 req_outputs = llm.score(request["text_1"], request["text_2"], *request["args"], **request["kwargs"])
                 result = [req_output.outputs.score for req_output in req_outputs]
+            elif command == "get_metrics":
+                # PromMetric objects are not picklable (they hold prometheus
+                # handles), so flatten to name -> value here. Vector metrics
+                # (e.g. spec_decode_num_accepted_tokens_per_pos) have no
+                # ``value``; expose each position as ``name[pos=N]`` so the
+                # aggregation below keeps per-position acceptance rates.
+                result = {}
+                for metric in llm.get_metrics():
+                    values = getattr(metric, "values", None)
+                    if values is not None:
+                        for position, value in enumerate(values):
+                            result[f"{metric.name}[pos={position}]"] = float(value)
+                    else:
+                        value = getattr(metric, "value", None)
+                        if value is not None:
+                            result[metric.name] = float(value)
             else:
                 raise ValueError(f"Unsupported data parallel command: {command}")
 
-            conn.send({"status": "ok", "rank": dp_rank, "indices": request["indices"], "result": result})
+            conn.send({"status": "ok", "rank": dp_rank, "indices": request.get("indices", []), "result": result})
     except Exception:
         with contextlib.suppress(Exception):
             conn.send({"status": "error", "rank": dp_rank, "traceback": traceback.format_exc()})
@@ -1213,6 +1229,20 @@ class VllmRunner:
     ) -> list[float]:
         req_outputs = self.model.score(text_1, text_2, *args, **kwargs)
         return [req_output.outputs.score for req_output in req_outputs]
+
+    def get_metrics(self) -> dict[str, float]:
+        """Return engine metrics flattened to ``name -> value``.
+
+        PromMetric objects are not picklable and counters/gauges are all the
+        pool watch helpers need, so metrics without a ``value`` attribute
+        (histograms) are dropped. Requires ``disable_log_stats=False``;
+        ``LLM.get_metrics()`` asserts on disabled stats.
+        """
+        return {
+            metric.name: float(metric.value)
+            for metric in self.model.get_metrics()
+            if getattr(metric, "value", None) is not None
+        }
 
     def __enter__(self):
         return self
@@ -1487,6 +1517,28 @@ class DPVllmRunner(VllmRunner):
     @property
     def model(self) -> LLM:
         raise RuntimeError("Direct access to `runner.model` is not supported by `DPVllmRunner`.")
+
+    def get_metrics(self) -> dict[str, float]:
+        """Aggregate engine metrics across DP ranks.
+
+        Returns ``name -> value`` with counters/gauges summed over ranks, which
+        is what pool-hit assertions need when a prompt is served by one rank.
+        Requires ``disable_log_stats=False``.
+        """
+        merged: dict[str, float] = {}
+        for rank, conn in enumerate(self._dp_parent_conns):
+            conn.send({"command": "get_metrics"})
+            if not conn.poll(self._dp_request_timeout):
+                raise TimeoutError(f"Timed out waiting for data parallel worker {rank} to finish `get_metrics`")
+            message = conn.recv()
+            if message["status"] != "ok":
+                raise RuntimeError(
+                    f"Data parallel worker {rank} failed during `get_metrics`:\n"
+                    f"{message.get('traceback', 'unknown error')}"
+                )
+            for name, value in message["result"].items():
+                merged[name] = merged.get(name, 0.0) + float(value)
+        return merged
 
     def _start_data_parallel_workers(self, llm_kwargs: dict[str, Any]) -> None:
         ctx = multiprocessing.get_context("spawn")
@@ -2077,7 +2129,7 @@ def pytest_collection_modifyitems(config, items):
 
         loc = item.nodeid
         detail = "; ".join(problems)
-        raise pytest.CollectError(
+        raise pytest.Collector.CollectError(
             f"\n[e2e_coverage marker invalid] {loc}\n  {detail}\n"
             "  Values must come from tests/e2e/coverage_taxonomy.py "
             "(ALLOWED_VALUES). Fix the marker or update the taxonomy."
