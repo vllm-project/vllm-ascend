@@ -47,6 +47,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
+from vllm_ascend.ops.moe_stream_events import record_capture_boundary, wait_eager_boundary
 from vllm_ascend.utils import maybe_trans_nz, vllm_version_is
 from vllm_ascend.weight_switch import WeightSwitchGatherSpec, WeightSwitchMixin
 
@@ -56,7 +57,11 @@ def unquantized_gemm(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return torch.nn.functional.linear(x, weight, bias)
+    record_capture_boundary()
+    wait_eager_boundary()
+    result = torch.nn.functional.linear(x, weight, bias)
+    wait_eager_boundary()
+    return result
 
 
 def unquantized_gemm_fake(

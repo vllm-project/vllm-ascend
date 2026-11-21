@@ -685,6 +685,7 @@ class AscendConfig:
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
+    enable_moe_stream_events: bool = False
     shared_engram: SharedEngramConfig | None = None
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
@@ -2108,6 +2109,10 @@ def clear_ascend_config():
     from vllm_ascend.utils import clear_enable_sp
 
     clear_enable_sp()
+
+
+def moe_stream_events_enabled() -> bool:
+    return _ASCEND_CONFIG is not None and _ASCEND_CONFIG.enable_moe_stream_events
 
 
 def get_ascend_config():
