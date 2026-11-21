@@ -581,13 +581,16 @@ def build_dspark_swa_indices(
     indices are physical slots resolved through block_table.
 
     The caller supplies contiguous int32 outputs on the query device:
-    indices_output is [T, 1, index_width]; lengths_output is [T, 1] for
-    logical indices and [T] for physical slots. T is the sum of query lengths
-    and equals num_decode_tokens when provided. Output storage must not
-    overlap inputs or other outputs, except for an optional buffer view
-    of the same indices storage. For graph replay, the caller retains the
-    full-capacity storage and passes active views with stable addresses.
-
+    indices_output is [T, 1, index_width]; lengths_output is
+    [T, 1] for logical indices and [T] for physical slots.
+    T is the output row count. When num_decode_tokens is provided,
+    it must equal T and be greater than or equal to the active query
+    token count (query_start_loc[-1]). Padded rows are filled with
+    -1 indices and zero lengths.
+    Output storage must not overlap inputs or other outputs,
+    except for an optional buffer view of the same indices storage.
+    For graph replay, the caller retains the full-capacity storage
+    and passes active views with stable addresses.
     When buffer is supplied, preserve the existing behavior: copy indices
     into its leading T rows and return that active view. This extra output
     destination uses the eager path. Both output arguments remain required.

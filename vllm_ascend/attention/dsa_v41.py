@@ -1289,14 +1289,14 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 ).view(req.num_reqs, blocks_per_req)
         noncausal = not bool(getattr(common, "causal", True))
         if noncausal and req.ori_sparse_indices is None:
-            assert self._dspark_swa_indices is not None
-            assert self._dspark_swa_lengths is not None
-            indices_output = self._dspark_swa_indices[
-                :req.num_actual_tokens
-            ]
-            lengths_output = self._dspark_swa_lengths[
-                :req.num_actual_tokens
-            ]
+            # Buffers are allocated in __init__ and retained for graph replay.
+            indices_output = cast(
+                torch.Tensor, self._dspark_swa_indices
+            )[: req.num_actual_tokens]
+            lengths_output = cast(
+                torch.Tensor, self._dspark_swa_lengths
+            )[: req.num_actual_tokens]
+
             req.ori_sparse_indices, req.ori_topk_length = build_dspark_swa_indices(
                 common.block_table_tensor[: req.num_reqs],
                 self.vllm_config.speculative_config.num_speculative_tokens,

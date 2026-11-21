@@ -60,7 +60,8 @@ def build_dspark_swa_indices_triton(
     indices_output has shape [num_tokens, 1, index_width], and lengths_output
     has shape [num_tokens, 1]. Inputs and outputs must not overlap. The caller
     owns capacity checks and keeps output storage stable for graph replay.
-    num_tokens must equal the sum of the per-request query lengths.
+    num_tokens is the output row count and must be greater than or equal to query_start_loc[-1].
+    Padded rows are filled with -1 indices and zero lengths.
     """
     indices = indices_output
     lengths = lengths_output

@@ -1605,9 +1605,10 @@ def test_a5_noncausal_draft_plan_keeps_actual_window_lengths(builders, monkeypat
     builder.vllm_config.model_config.hf_text_config.compress_ratios = [0, 0, 2, 1]
     calls = []
 
-    def make_indices(*args, **kwargs):
-        n = args[6]
-        return torch.zeros((n, 1, 8), dtype=torch.int32), torch.full((n, 1), 6, dtype=torch.int32)
+    def make_indices(*args, indices_output, lengths_output, **kwargs):
+        indices_output.zero_()
+        lengths_output.fill_(6)
+        return indices_output, lengths_output
 
     monkeypatch.setattr(dsa_v41, "build_dspark_swa_indices", make_indices)
 

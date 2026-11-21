@@ -132,9 +132,17 @@ def test_build_vision_bidirectional_swa_indices_rejects_oversized_span():
     [([0, 2, 3], 3), ([0, 2, 3], 8), ([0, 0, 0], 8)],
     ids=["full", "padded", "all-padding"],
 )
-def test_build_dspark_swa_indices_preserves_graph_padding(output_arg, query_start_loc, num_decode_tokens):
+def test_build_dspark_swa_indices_preserves_graph_padding(
+    output_arg, query_start_loc, num_decode_tokens
+):
     output_rows = num_decode_tokens + 2 if output_arg == "buffer" else num_decode_tokens
     output = torch.full((output_rows, 1, 5), 99, dtype=torch.int32)
+    indices_output = (
+        torch.empty((num_decode_tokens, 1, 5), dtype=torch.int32)
+        if output_arg == "buffer"
+        else output
+    )
+    lengths_output = torch.empty(num_decode_tokens, dtype=torch.int32)
     indices, lengths = build_dspark_swa_indices(
         block_table=torch.tensor([[3, 5], [7, 8]], dtype=torch.int32),
         num_speculative_tokens=3,
@@ -144,7 +152,9 @@ def test_build_dspark_swa_indices_preserves_graph_padding(output_arg, query_star
         seq_lens=torch.tensor([6, 3], dtype=torch.int32),
         num_decode_tokens=num_decode_tokens,
         index_width=5,
-        **{output_arg: output},
+        buffer=output if output_arg == "buffer" else None,
+        indices_output=indices_output,
+        lengths_output=lengths_output,
     )
 
     active_rows = query_start_loc[-1]
