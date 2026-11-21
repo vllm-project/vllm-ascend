@@ -62,9 +62,10 @@ bash format.sh ci
 
 #### Submit the commit
 
+Use `-s` to add the DCO sign-off and write the [commit message](#commit-message-content) in your editor.
+
 ```bash
-# Commit changed files using `-s`
-git commit -sm "your commit info"
+git commit -s
 ```
 
 🎉 Congratulations! You have completed the development environment setup.
@@ -92,6 +93,32 @@ in the design document.
 When contributing changes to this project, you must agree to the DCO. Commits must include a `Signed-off-by:` header which certifies agreement with the terms of the DCO (Developer Certificate of Origin).
 
 Using `-s` with `git commit` will automatically add this header.
+
+## Commit message content
+
+Use a Conventional Commits subject such as `fix(attention): preserve the KV cache block stride`.
+Cover the following in the commit body.
+
+- **Problem** — Describe when the issue occurs and how it affects users or developers.
+  For a feature, explain which capability is missing.
+- **Fix** — Describe the change in this commit and why it addresses the problem. Omit superseded designs.
+- **Validation** — Give the check and its observed result for this revision. Identify any relevant checks still pending.
+
+For changes that affect inference behavior or performance, summarize the following evidence.
+
+- **Accuracy** — Name the model, dataset, split or sample count, and metric.
+  Give the baseline and candidate scores under the same evaluation settings and report the difference.
+- **Performance** — Name the model, NPU type and card count, and whether prefill and decode are colocated
+  or disaggregated. For disaggregated serving, give the instance count and cards per instance on each side.
+  Report input and output lengths in tokens (or their distributions), request concurrency, and baseline and
+  candidate results under the same workload. Quantify the change in a relevant metric, such as output
+  tokens/s or P95 time per output token in milliseconds.
+- **Applicability** — State whether the optimization uses a shared path (for example, across A3 and A5) or
+  depends on a chip-specific implementation. Give results separately for each chip and serving mode measured.
+  Identify untested configurations within the claimed scope.
+
+If accuracy or performance testing is inapplicable, briefly explain why. A documentation-only commit, for
+example, can report the Markdown or link checks it ran.
 
 ## PR Title and Classification
 
