@@ -16,7 +16,11 @@ from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 @pytest.mark.parametrize("pcp,dcp", [(1, 1), (2, 1), (1, 2), (2, 2)])
 def test_mla_target_and_draft_accept_target_interleave(monkeypatch, is_draft, pcp, dcp):
     draft = SimpleNamespace(
-        model_config=SimpleNamespace(runner_type="draft" if is_draft else "generate", dtype=torch.bfloat16),
+        model_config=SimpleNamespace(
+            runner_type="draft" if is_draft else "generate",
+            dtype=torch.bfloat16,
+            hf_config=SimpleNamespace(model_type="deepseek_v3"),
+        ),
         parallel_config=ParallelConfig(
             tensor_parallel_size=dcp, prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp
         ),

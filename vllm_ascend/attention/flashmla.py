@@ -276,7 +276,7 @@ class FlashMLAImpl:
 class FlashMLACurrent:
     """Replicated current chunk, independent of persistent KV and prefix pages."""
 
-    adapter: FlashMLAImpl
+    adapter: Any
     query: torch.Tensor
     schedule: torch.Tensor
     cache: torch.Tensor
@@ -287,7 +287,7 @@ class FlashMLACurrent:
 
 @dataclass
 class FlashMLADecode:
-    adapter: FlashMLAImpl
+    adapter: Any
     query: torch.Tensor
     schedule: torch.Tensor
     cu: torch.Tensor
@@ -305,7 +305,16 @@ class FlashMLADecode:
 
 
 class FlashMLAMetadataBuilder:
-    def __init__(self, impl, device: torch.device, max_num_reqs: int, attn_mask: torch.Tensor):
+    def __init__(
+        self,
+        impl,
+        device: torch.device,
+        max_num_reqs: int,
+        attn_mask: torch.Tensor,
+        adapter: Any | None = None,
+        *,
+        max_query_len: int | None = None,
+    ):
         self.dcp_size = getattr(impl, "dcp_size", 1)
         self.dcp_rank = getattr(impl, "dcp_rank", 0)
         # Materialize once: an integer rank would trigger a blocking H2D copy
@@ -318,7 +327,10 @@ class FlashMLAMetadataBuilder:
         # speculative causal queries need the replicated current chunk.
         self.use_spec_decode = impl.vllm_config.speculative_config is not None
         self.cp_interleave = impl.vllm_config.parallel_config.cp_kv_cache_interleave_size if self.dcp_size > 1 else 1
-        adapter = FlashMLAImpl.load(FlashMLAConfig(impl.num_heads, impl.scale, return_softmax_lse=self.dcp_size > 1))
+        if adapter is None:
+            adapter = FlashMLAImpl.load(
+                FlashMLAConfig(impl.num_heads, impl.scale, return_softmax_lse=self.dcp_size > 1)
+            )
         self.current_adapter = adapter
         # Match DCPImplMixin's query gather. PCP ranks replicate Q heads even
         # when DSpark exposes a PCP=1 config for its global query batch.
@@ -331,10 +343,35 @@ class FlashMLAMetadataBuilder:
         self.adapters = {True: history_adapter if self.dcp_size > 1 else adapter, False: history_adapter}
         self.device = device
         self.dtype = impl.dtype
+        self.rope_dtype = getattr(getattr(impl.vllm_config, "model_config", None), "dtype", impl.dtype)
         self.use_rope = impl.use_mla_rope
         self.max_num_reqs = max_num_reqs
+        self.quant_max_cache_len = (
+            impl.vllm_config.model_config.max_model_len if getattr(impl, "use_quant_flashmla", False) else None
+        )
+        # Use the parent's stable decode/speculative capacity for every graph
+        # shape and replay. Batch/padding storage capacity is not a query length.
+        self.quant_max_query_len = max_query_len if self.quant_max_cache_len is not None else None
+        if self.quant_max_cache_len is not None and (
+            not isinstance(max_query_len, int) or isinstance(max_query_len, bool) or max_query_len < 1
+        ):
+            raise ValueError("QuantFlashMLA requires a positive per-request decode query capacity")
         self.buffers: dict[tuple, FlashMLADecode] = {}
         self.attn_mask = attn_mask
+
+    def _metadata_bounds(self, tokens: int, *, current: bool = False) -> dict[str, int]:
+        max_cache_len = self.quant_max_cache_len
+        if max_cache_len is None:
+            return {}
+        max_query_len = self.quant_max_query_len
+        assert max_query_len is not None
+        # With inferred maxima an entirely empty DCP shard produces a zero
+        # tiling extent in QuantFlashMlaMetadata. These are capacity bounds;
+        # cache_lens/used_q still carry the actual lengths, including zero.
+        return {
+            "max_seqlen_q": max_query_len,
+            "max_seqlen_kv": max_query_len if current else max_cache_len,
+        }
 
     def _allocate(self, tokens: int, rows: int, columns: int, causal: bool) -> FlashMLADecode:
         ints = {"dtype": torch.int32, "device": self.device}
@@ -346,6 +383,7 @@ class FlashMLAMetadataBuilder:
             torch.empty_like(lengths, device="meta"),
             torch.empty_like(cu, device="meta"),
             torch.empty_like(used, device="meta"),
+            **self._metadata_bounds(tokens),
         )
         rope_shape = (tokens, 1, 1, FLASHMLA_QK_DIM - FLASHMLA_V_DIM)
         flash = FlashMLADecode(
@@ -363,8 +401,8 @@ class FlashMLAMetadataBuilder:
             token_live=torch.zeros(tokens, dtype=torch.bool, device=self.device),
             live_boundaries=torch.zeros(tokens + 1, **ints),
             attn_mask=self.attn_mask if adapter.config.mask_mode == 3 else None,
-            cos=torch.empty(rope_shape, dtype=self.dtype, device=self.device) if self.use_rope else None,
-            sin=torch.empty(rope_shape, dtype=self.dtype, device=self.device) if self.use_rope else None,
+            cos=torch.empty(rope_shape, dtype=self.rope_dtype, device=self.device) if self.use_rope else None,
+            sin=torch.empty(rope_shape, dtype=self.rope_dtype, device=self.device) if self.use_rope else None,
         )
         if self.dcp_size > 1 and causal and self.use_spec_decode:
             # As in split DCP attention, each rank retains every current row.
@@ -374,6 +412,7 @@ class FlashMLAMetadataBuilder:
                 torch.empty_like(used, device="meta"),
                 torch.empty_like(cu, device="meta"),
                 torch.empty_like(used, device="meta"),
+                **self._metadata_bounds(tokens, current=True),
             )
             flash.current = FlashMLACurrent(
                 adapter=self.current_adapter,
@@ -397,6 +436,18 @@ class FlashMLAMetadataBuilder:
     def build(
         self, common, num_decodes: int, num_decode_tokens: int, has_prefill: bool, *, retain_for_graph: bool = False
     ) -> FlashMLADecode:
+        if self.quant_max_query_len is not None:
+            # Use only decode rows: a mixed batch's global max_query_len may
+            # belong to FIA prefill. CPU boundaries also exclude graph padding.
+            decode_cu = common.query_start_loc_cpu[: num_decodes + 1].clamp_max(num_decode_tokens)
+            query_lengths = decode_cu[1:] - decode_cu[:-1]
+            if query_lengths.numel() and (
+                int(query_lengths.min()) < 0 or int(query_lengths.max()) > self.quant_max_query_len
+            ):
+                raise ValueError(
+                    "QuantFlashMLA decode query length exceeds configured per-request capacity "
+                    f"{self.quant_max_query_len}: {query_lengths.tolist()}"
+                )
         # Mixed batches run outside FULL graph. Do not retain every prefill
         # shape. Retain only explicitly captured decode capacities: retaining
         # every eager token count grows total query storage quadratically.
@@ -459,7 +510,9 @@ class FlashMLAMetadataBuilder:
                 cos, sin = get_cos_and_sin_mla(flash.positions)
                 flash.cos.copy_(cos)
                 flash.sin.copy_(sin)
-            flash.schedule.copy_(flash.adapter.build_metadata(flash.cache_lens, flash.cu, flash.used_q))
+            flash.schedule.copy_(
+                flash.adapter.build_metadata(flash.cache_lens, flash.cu, flash.used_q, **self._metadata_bounds(tokens))
+            )
             if flash.current is not None:
                 current = flash.current
                 page_counts = (flash.used_q + FLASHMLA_BLOCK_SIZE - 1) // FLASHMLA_BLOCK_SIZE
@@ -471,7 +524,11 @@ class FlashMLAMetadataBuilder:
                 requests = torch.searchsorted(flash.cu[1:], indices.to(torch.int32), right=True)
                 current.slots.copy_(page_starts[requests] * FLASHMLA_BLOCK_SIZE + indices - flash.cu[requests])
                 current.slots.masked_fill_(~flash.token_live, -1)
-                current.schedule.copy_(current.adapter.build_metadata(flash.used_q, flash.cu, flash.used_q))
+                current.schedule.copy_(
+                    current.adapter.build_metadata(
+                        flash.used_q, flash.cu, flash.used_q, **self._metadata_bounds(tokens, current=True)
+                    )
+                )
 
         # Refresh on the caller's stream before return; captured buffer caching
         # preserves the addresses used by graph replay.
