@@ -82,7 +82,9 @@ def dsa_v41_forward(
     # on every call, but V4.1 runs through this boundary instead, so without the
     # same refresh the O projection keeps reading the base layer and the
     # adapter is dropped silently (``__getattr__`` still answers ``weight``).
-    attn.dsa_attn.dsa_attn.impl.sync_projection_layers(attn)
+    sync_projection_layers = getattr(attn.dsa_attn.dsa_attn.impl, "sync_projection_layers", None)
+    if sync_projection_layers is not None:
+        sync_projection_layers(attn)
     attn.v41_impl.forward(attn, None, hidden_states, output)
 
 

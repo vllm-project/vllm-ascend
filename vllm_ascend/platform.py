@@ -1549,7 +1549,11 @@ def _setup_compile_backend(
         additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
     elif compilation_config.cudagraph_mode.requires_piecewise_compilation():
         # Our is_cuda_alike is False so we cannot reuse the assertion of upstream
-        if compilation_config.mode != CompilationMode.VLLM_COMPILE and not envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH:
+        use_breakable_cg = getattr(compilation_config, "use_breakable_cudagraph", None)
+        breakable_cg_enabled = (
+            bool(use_breakable_cg) if use_breakable_cg is not None else bool(envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH)
+        )
+        if compilation_config.mode != CompilationMode.VLLM_COMPILE and not breakable_cg_enabled:
             raise AssertionError(
                 "Compilation mode should be CompilationMode.VLLM_COMPILE "
                 "when cudagraph_mode piecewise cudagraphs is used, "
