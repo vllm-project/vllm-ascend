@@ -28,6 +28,8 @@ def worker(cache_names=("model.layers.2.long", "model.layers.2.swa")):
         _layer_names_by_index={layer: ["model.layers.2.long", "model.layers.2.swa"], ("draft", 0): ["draft"]},
         kv_transfer_config=SimpleNamespace(is_kv_producer=True),
         _prefilling_request_ids=("r",),
+        _shared_layer_indices={},
+        _shared_layer_writes={},
         _last_layer_index=None,
         _process_sending_requests=Mock(),
         _send_completions=Mock(),

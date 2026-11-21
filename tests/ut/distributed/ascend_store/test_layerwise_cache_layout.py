@@ -257,6 +257,52 @@ def test_registered_glm_reuse_preserves_resident_components_and_native_views(num
     assert len(offsets) == 6
 
 
+def _glm_mamba_stage(start, end, *, mode="align", checkpoints=0):
+    names = [f"model.layers.{layer}.mixer" for layer in range(start, end)]
+    state = MambaSpec(
+        block_size=16,
+        shapes=((8, 8),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode=mode,
+        num_prefill_checkpoint_blocks=checkpoints,
+    )
+    return _native_config([KVCacheGroupSpec(names, state)]), names, state
+
+
+@pytest.mark.parametrize("start,end", [(0, 24), (24, 45)])
+def test_glm_aligned_mamba_three_buffers_wait_for_previous_saves(start, end):
+    config, names, state = _glm_mamba_stage(start, end)
+    runtime = _runtime(45, 3)
+    layout = plan_layerwise_cache_reuse(config, runtime)
+    assert layout is not None
+    assert layout.layers == tuple(range(start, end))
+    assert layout.independent_layers == ([0] if start == 0 else [])
+    rotating = names[1:] if start == 0 else names
+    assert layout.reused_cache_names == frozenset(rotating)
+    assert len(layout.kv_cache_tensors) == 3 + (start == 0)
+    worker_config = apply_layerwise_kv_cache_plan(config, runtime.kv_transfer_config, layout)
+    raw = allocate_cache_backing(
+        worker_config,
+        dict.fromkeys(names, state),
+        lambda size: torch.empty(size, dtype=torch.uint8),
+        layout.cache_view_sizes,
+    )
+    assert len({raw[name].data_ptr() for name in rotating[:3]}) == 3
+    for index, name in enumerate(rotating):
+        assert raw[name] is raw[rotating[index % 3]]
+        if index >= 3:
+            layer = layout.cache_layer_indices[name]
+            assert layout.prefetch_layer_map[layer] == (layout.cache_layer_indices[rotating[index - 3]],)
+
+
+@pytest.mark.parametrize("start,end", [(0, 24), (24, 45)])
+@pytest.mark.parametrize("mode,checkpoints", [("all", 0), ("align", 1)])
+def test_glm_three_buffers_reject_unsupported_mamba_semantics(start, end, mode, checkpoints):
+    config, _, _ = _glm_mamba_stage(start, end, mode=mode, checkpoints=checkpoints)
+    with pytest.raises(NotImplementedError, match="unsupported state semantics"):
+        plan_layerwise_cache_reuse(config, _runtime(45, 3))
+
+
 def test_layout_resolves_two_source_dependencies_on_one_target_layer():
     attention = _attention_spec()
     state = MambaSpec(block_size=2, shapes=((attention.page_size_bytes,),), dtypes=(torch.int8,))
