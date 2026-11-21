@@ -156,6 +156,15 @@ def build_qsa_union_group_row_map(query_starts: tuple[int, ...]) -> tuple[tuple[
     return tuple(groups)
 
 
+def _union_metadata_tensor(
+    values: tuple[int, ...] | tuple[tuple[int, ...], ...], *, dtype: torch.dtype, device: torch.device
+) -> torch.Tensor:
+    if device.type == "npu":
+        host = torch.tensor(values, dtype=dtype, device="cpu", pin_memory=True)
+        return host.to(device=device, non_blocking=True)
+    return torch.tensor(values, dtype=dtype, device=device)
+
+
 def prepare_qsa_union_batches(
     request_plan: QSARequestPlan,
     visible_lengths: torch.Tensor,
@@ -166,19 +175,19 @@ def prepare_qsa_union_batches(
     prepared: list[QSAUnionPreparedBatch] = []
     for batch in request_plan.union_batches:
         rows = batch.query_end - batch.query_start
-        group_row_map = torch.tensor(
+        group_row_map = _union_metadata_tensor(
             build_qsa_union_group_row_map(batch.query_starts),
             dtype=torch.int32,
             device=visible_lengths.device,
         )
-        cu_q = torch.tensor(batch.query_starts, dtype=torch.int64, device=visible_lengths.device)
+        cu_q = _union_metadata_tensor(batch.query_starts, dtype=torch.int64, device=visible_lengths.device)
         request_indices = batch.request_indices
         first = request_indices[0]
         if request_indices == tuple(range(first, first + len(request_indices))):
             selected_lengths = seq_lens[first : first + len(request_indices)]
             selected_table = block_table[first : first + len(request_indices)]
         else:
-            selected = torch.tensor(request_indices, dtype=torch.int64, device=seq_lens.device)
+            selected = _union_metadata_tensor(request_indices, dtype=torch.int64, device=seq_lens.device)
             selected_lengths = seq_lens.index_select(0, selected)
             selected_table = block_table.index_select(0, selected)
         prepared.append(
