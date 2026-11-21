@@ -291,3 +291,31 @@ def test_engram_dp_pcp_group_reuses_upstream_node_partition(monkeypatch, shared,
         assert upstream.get_engram_dp_group() is not group
     parallel_state.destroy_ascend_model_parallel()
     upstream.destroy_model_parallel()
+
+
+@pytest.mark.parametrize("size", [0, 1, 2])
+def test_finegrained_tp_groups_require_weight_sharding(mock_distributed, parallel_config, size):
+    config = SimpleNamespace(
+        kvpp_config=SimpleNamespace(size=1),
+        finegrained_tp_config=SimpleNamespace(
+            # The qkv_iproj knob is part of the same config object; keep it disabled here so this test
+            # stays scoped to the four weight-sharding components it names.
+            qkv_iproj_tensor_parallel_size=1,
+            **{f"{component}_tensor_parallel_size": size for component in ("oproj", "mlp", "lmhead", "embedding")},
+        ),
+        pd_tp_ratio=1,
+        pd_head_ratio=1,
+        eplb_config=SimpleNamespace(dynamic_eplb=False),
+    )
+    with (
+        patch.multiple(
+            parallel_state, _MC2=None, _OTP=None, _LMTP=None, _EMBED_TP=None, _MLP_TP=None, _P_TP=None, _KVPP=None
+        ),
+        patch.object(parallel_state, "init_model_parallel_group", side_effect=lambda *a, **kw: object()) as create,
+        patch.object(parallel_state, "get_ascend_config", return_value=config),
+    ):
+        init_ascend_model_parallel(parallel_config)
+        for attr in ("_OTP", "_LMTP", "_EMBED_TP", "_MLP_TP"):
+            assert (getattr(parallel_state, attr) is not None) is (size > 1)
+        names = [call.kwargs["group_name"] for call in create.call_args_list]
+        assert names == (["mc2", "otp"] if size > 1 else ["mc2"])
