@@ -28,7 +28,10 @@ from tests.ut.base import TestBase
 from vllm_ascend import ascend_forward_context, utils
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.mrv2_utils import MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY
+from vllm_ascend.mrv2_utils import (
+    MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY,
+    MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY,
+)
 from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
 
 
@@ -334,6 +337,7 @@ class TestUtils(TestBase):
             # A sub-alignment cap must select eager rather than a partial shard.
             (plan.limit_aligned_requests, (1,), {"query_len": 1, "max_tokens": 3}, 0),
             (plan.align_query_limits, ({4: 1, 6: 1},), {}, {4: 4, 6: 4}),
+            (plan.align_query_limits, ({4: 1},), {"request_alignment": 4}, {4: 4}),
         )
         for function, args, kwargs, expected in cases:
             with self.subTest(function=function.__name__, args=args, kwargs=kwargs):
@@ -360,6 +364,7 @@ class TestUtils(TestBase):
             (10, 1, {6: 1}, 8, ((), (), ()), None, (24, 4)),
             (64, 1, {4: 1, 6: 1}, 12, ((), (), ()), None, (72, 6)),
             (5, 1, {1: 1}, 4, ((), (), ()), {MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY: {1: [8, 12]}}, (12, 4)),
+            (4, 1, {4: 1}, 4, ((), (), ()), {MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY: {5: 4}}, (20, 4)),
         )
         for max_tokens, max_reqs, query_limits, alignment, graph_sizes, additional_config, expected in cases:
             with self.subTest(max_tokens=max_tokens, max_reqs=max_reqs, query_limits=query_limits):

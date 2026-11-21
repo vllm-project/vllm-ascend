@@ -58,6 +58,26 @@ def test_decode_query_limits_are_stable_across_config_revalidation():
     assert upstream.call_count == 2
 
 
+def test_standalone_draft_prefill_limits_are_separate_from_target_limits():
+    upstream = MagicMock(side_effect=lambda _config, query_len: {query_len: 1})
+    config = SimpleNamespace(
+        additional_config={
+            mrv2_utils.MRV2_DECODE_QUERY_LIMITS_KEY: {"4": 4},
+            mrv2_utils.MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY: {"5": 4},
+        },
+        uniform_decode_query_len=4,
+        num_speculative_tokens=3,
+        speculative_config=SimpleNamespace(method="draft_model"),
+    )
+
+    assert mrv2_utils.resolve_mrv2_decode_query_lens(config, 4, upstream) == {4: 4}
+    assert mrv2_utils.resolve_mrv2_decode_query_lens(config, 5, upstream) == {5: 4}
+    assert mrv2_utils.resolve_mrv2_decode_query_lens(config, 1, upstream) == {1: 1}
+    config.speculative_config.method = "dflash"
+    assert mrv2_utils.resolve_mrv2_decode_query_lens(config, 5, upstream) == {5: 1}
+    assert upstream.call_count == 2
+
+
 def test_draft_decode_sizes_are_stable_across_config_revalidation():
     upstream = MagicMock(return_value=[1, 2])
     config = SimpleNamespace(additional_config={})

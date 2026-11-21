@@ -30,6 +30,7 @@ else:
 
 MRV2_DECODE_QUERY_LIMITS_KEY = "_mrv2_padding_decode_query_limits"
 MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY = "_mrv2_padding_draft_decode_request_sizes"
+MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY = "_mrv2_padding_draft_prefill_query_limits"
 MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY = "_mrv2_padding_varlen_decode_token_sizes"
 
 
@@ -96,7 +97,72 @@ def resolve_mrv2_decode_query_lens(
         and aligned_limits
     ):
         return {int(query_len): int(max_reqs) for query_len, max_reqs in aligned_limits.items()}
+    draft_prefill_limits = additional_config.get(MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY)
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if (
+        getattr(speculative_config, "method", None) == "draft_model"
+        and decode_query_len == getattr(vllm_config, "num_speculative_tokens", 0) + 2
+        and isinstance(draft_prefill_limits, Mapping)
+        and draft_prefill_limits
+    ):
+        return {int(query_len): int(max_reqs) for query_len, max_reqs in draft_prefill_limits.items()}
     return upstream(vllm_config, decode_query_len)
+
+
+def _patch_cudagraph_size_split(cls) -> None:
+    """Include standalone draft-prefill shapes in main's split contract."""
+    upstream = getattr(cls, "_split_cudagraph_capture_sizes", None)
+    marker = "_mrv2_draft_prefill"
+    if upstream is None or getattr(upstream, marker, False):
+        return
+
+    @wraps(upstream)
+    def patched(
+        self,
+        legacy_sizes: bool,
+        target_query_lens: Mapping[int, int],
+        *args,
+        **kwargs,
+    ):
+        additional_config = getattr(self, "additional_config", None) or {}
+        speculative_config = getattr(self, "speculative_config", None)
+        draft_limits = additional_config.get(MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY)
+        if (
+            getattr(speculative_config, "method", None) != "draft_model"
+            or not isinstance(draft_limits, Mapping)
+            or not draft_limits
+        ):
+            return upstream(self, legacy_sizes, target_query_lens, *args, **kwargs)
+
+        combined_limits = {int(query_len): int(max_reqs) for query_len, max_reqs in target_query_lens.items()}
+        for query_len, max_reqs in draft_limits.items():
+            query_len = int(query_len)
+            combined_limits[query_len] = max(combined_limits.get(query_len, 0), int(max_reqs))
+        if not getattr(speculative_config, "enable_adaptive_verification", False):
+            return upstream(self, legacy_sizes, combined_limits, *args, **kwargs)
+
+        varlen_sizes = additional_config.get(MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY)
+        if not isinstance(varlen_sizes, Mapping):
+            return upstream(self, legacy_sizes, combined_limits, *args, **kwargs)
+        normalized_sizes = {int(query_len): [int(size) for size in sizes] for query_len, sizes in varlen_sizes.items()}
+        target_query_len = int(self.uniform_decode_query_len)
+        combined_target_sizes = set(normalized_sizes.get(target_query_len, ()))
+        for query_len in draft_limits:
+            combined_target_sizes.update(normalized_sizes.get(int(query_len), ()))
+        if not combined_target_sizes:
+            return upstream(self, legacy_sizes, combined_limits, *args, **kwargs)
+
+        original_varlen_sizes = additional_config[MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY]
+        normalized_sizes[target_query_len] = sorted(combined_target_sizes)
+        additional_config[MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY] = normalized_sizes
+        try:
+            return upstream(self, legacy_sizes, combined_limits, *args, **kwargs)
+        finally:
+            additional_config[MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY] = original_varlen_sizes
+
+    setattr(patched, marker, True)
+    cast(Any, patched)._vllm_ascend_upstream = upstream
+    cls._split_cudagraph_capture_sizes = patched
 
 
 def resolve_mrv2_draft_decode_request_sizes(
@@ -181,3 +247,4 @@ def apply_v2_model_runner_config_patch() -> None:
         ),
     ):
         _patch_config_resolver(VllmConfig, name, marker, resolve)
+    _patch_cudagraph_size_split(VllmConfig)

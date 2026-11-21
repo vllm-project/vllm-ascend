@@ -23,6 +23,7 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.mrv2_utils import (
     MRV2_DECODE_QUERY_LIMITS_KEY,
     MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY,
+    MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY,
     MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY,
     apply_v2_model_runner_config_patch,
 )
@@ -579,11 +580,12 @@ class TestNPUPlatform(TestBase):
     @staticmethod
     def make_cpu_graph_manager(manager_cls, config, **kwargs):
         pp_group = SimpleNamespace(is_first_rank=True, is_last_rank=True)
+        cudagraph_mode = kwargs.pop("cudagraph_mode", CUDAGraphMode.FULL_DECODE_ONLY)
         with (
             patch("vllm.v1.worker.gpu.cudagraph_utils.get_pp_group", return_value=pp_group),
             patch("vllm.v1.worker.gpu.cudagraph_utils.current_platform.get_global_graph_pool", return_value=None),
         ):
-            return manager_cls(config, torch.device("cpu"), CUDAGraphMode.FULL_DECODE_ONLY, **kwargs)
+            return manager_cls(config, torch.device("cpu"), cudagraph_mode, **kwargs)
 
     @staticmethod
     def run_compile_backend(config, *, sequence_parallel=True, shared_expert_dp=False, initialize=True):
@@ -1379,6 +1381,202 @@ class TestNPUPlatform(TestBase):
             desc = manager.dispatch(1, 1, 1, 0)
             assert desc.cg_mode == CUDAGraphMode.FULL
             assert (desc.num_reqs, desc.num_tokens) == (4, 4)
+
+    def test_setup_compile_backend_aligns_standalone_draft_prefill_grid(self):
+        from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
+
+        config = self.mock_main_graph_config(
+            tp_size=4,
+            max_num_seqs=1,
+            query_len=4,
+            mode=CUDAGraphMode.FULL,
+            max_num_tokens=4,
+            prefill_sizes=[4],
+            decode_sizes=[1],
+            speculative_config=SimpleNamespace(method="draft_model", enable_adaptive_verification=False),
+        )
+        config.num_speculative_tokens = 3
+
+        def query_limits(self, query_len):
+            logical_max_reqs = self.scheduler_config.max_num_active_seqs or self.scheduler_config.max_num_seqs
+            return {query_len: logical_max_reqs}
+
+        with self.patched_graph_resolvers(
+            config,
+            get_decode_cudagraph_query_lens=query_limits,
+            get_draft_decode_cudagraph_request_sizes=lambda _self: [1],
+        ):
+            # The helper pins the original split method. Rebind the production
+            # wrapper so this test also covers EngineCore config re-entry.
+            config._split_cudagraph_capture_sizes = MethodType(VllmConfig._split_cudagraph_capture_sizes, config)
+            self.run_compile_backend(config)
+
+            assert config.additional_config[MRV2_DECODE_QUERY_LIMITS_KEY] == {4: 4}
+            assert config.additional_config[MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY] == {5: 4}
+            assert config.additional_config[MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY] == [4]
+            assert config.compilation_config.decode_cudagraph_capture_request_sizes == [4]
+            physical_capacity = (
+                config.scheduler_config.max_num_batched_tokens,
+                config.scheduler_config.max_num_scheduled_tokens,
+            )
+            assert physical_capacity == (
+                20,
+                4,
+            )
+            assert (config.scheduler_config.max_num_seqs, config.scheduler_config.max_num_active_seqs) == (4, 1)
+            assert 20 in config.compilation_config.cudagraph_capture_sizes
+            assert 20 in config.compilation_config.prefill_cudagraph_capture_token_sizes
+            assert config.compilation_config.max_cudagraph_capture_size == 20
+
+            config._set_cudagraph_sizes()
+            config._set_cudagraph_sizes()
+            assert config.get_decode_cudagraph_query_lens(4) == {4: 4}
+            assert config.get_decode_cudagraph_query_lens(5) == {5: 4}
+            assert 20 in config.compilation_config.prefill_cudagraph_capture_token_sizes
+            assert config.compilation_config.max_cudagraph_capture_size == 20
+
+            manager = self.make_cpu_graph_manager(
+                SpeculatorCudaGraphManager,
+                config,
+                decode_query_lens=config.get_decode_cudagraph_query_lens(5),
+                cudagraph_mode=CUDAGraphMode.FULL,
+            )
+            manager._graphs_captured = True
+            # StandaloneARSpeculator dispatches the real expanded rows here;
+            # the graph manager, not the caller, chooses the physical gear.
+            desc = manager.dispatch(1, 5, 5, 0, max_query_len=5)
+            assert desc.cg_mode == CUDAGraphMode.FULL
+            assert (desc.num_reqs, desc.num_tokens) == (4, 16)
+
+    def test_setup_compile_backend_keeps_standalone_grid_without_prefill_graphs(self):
+        config = self.mock_main_graph_config(
+            tp_size=4,
+            max_num_seqs=1,
+            query_len=4,
+            max_num_tokens=4,
+            prefill_sizes=[],
+            decode_sizes=[1],
+            speculative_config=SimpleNamespace(method="draft_model", enable_adaptive_verification=False),
+        )
+        config.num_speculative_tokens = 3
+
+        def query_limits(self, query_len):
+            logical_max_reqs = self.scheduler_config.max_num_active_seqs or self.scheduler_config.max_num_seqs
+            return {query_len: logical_max_reqs}
+
+        with self.patched_graph_resolvers(
+            config,
+            get_decode_cudagraph_query_lens=query_limits,
+            get_draft_decode_cudagraph_request_sizes=lambda _self: [1],
+        ):
+            config._split_cudagraph_capture_sizes = MethodType(VllmConfig._split_cudagraph_capture_sizes, config)
+            self.run_compile_backend(config)
+
+            assert config.compilation_config.prefill_cudagraph_capture_token_sizes == []
+            assert config.additional_config[MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY] == {5: 4}
+            assert config.additional_config[MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY] == [4]
+            assert config.compilation_config.cudagraph_capture_sizes == [4, 16, 20]
+            physical_capacity = (
+                config.scheduler_config.max_num_batched_tokens,
+                config.scheduler_config.max_num_scheduled_tokens,
+            )
+            assert physical_capacity == (
+                20,
+                4,
+            )
+
+            config._set_cudagraph_sizes()
+            config._set_cudagraph_sizes()
+            assert config.get_decode_cudagraph_query_lens(5) == {5: 4}
+            assert config.compilation_config.cudagraph_capture_sizes == [4, 16, 20]
+
+    def test_setup_compile_backend_aligns_adaptive_standalone_grid(self):
+        from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
+
+        config = self.mock_main_graph_config(
+            tp_size=4,
+            max_num_seqs=1,
+            query_len=4,
+            mode=CUDAGraphMode.FULL,
+            max_num_tokens=4,
+            prefill_sizes=[4],
+            decode_sizes=[1],
+            speculative_config=SimpleNamespace(method="draft_model", enable_adaptive_verification=True),
+        )
+        config.num_speculative_tokens = 3
+
+        def query_limits(self, query_len):
+            logical_max_reqs = self.scheduler_config.max_num_active_seqs or self.scheduler_config.max_num_seqs
+            return {query_len: logical_max_reqs}
+
+        with self.patched_graph_resolvers(
+            config,
+            get_decode_cudagraph_query_lens=query_limits,
+            get_draft_decode_cudagraph_request_sizes=lambda _self: [1],
+            get_varlen_decode_cudagraph_token_sizes=_UPSTREAM_VARLEN_RESOLVER,
+        ):
+            config._split_cudagraph_capture_sizes = MethodType(VllmConfig._split_cudagraph_capture_sizes, config)
+            self.run_compile_backend(config)
+
+            aligned_sizes = config.additional_config[MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY][5]
+            assert 8 in aligned_sizes
+            assert all(size % 4 == 0 for size in aligned_sizes)
+            assert config.get_varlen_decode_cudagraph_token_sizes(5) == aligned_sizes
+            assert 8 in config.compilation_config.prefill_cudagraph_capture_token_sizes
+
+            config._set_cudagraph_sizes()
+            config._set_cudagraph_sizes()
+            assert config.get_varlen_decode_cudagraph_token_sizes(5) == aligned_sizes
+            assert 8 in config.compilation_config.prefill_cudagraph_capture_token_sizes
+
+            manager = self.make_cpu_graph_manager(
+                SpeculatorCudaGraphManager,
+                config,
+                cudagraph_mode=CUDAGraphMode.FULL,
+                decode_query_lens=config.get_decode_cudagraph_query_lens(5),
+                varlen_decode=True,
+            )
+            manager._graphs_captured = True
+            desc = manager.dispatch(1, 5, None, 0, max_query_len=5)
+            assert desc.cg_mode == CUDAGraphMode.FULL
+            assert desc.num_tokens == 8
+
+    def test_setup_compile_backend_does_not_apply_standalone_grid_to_other_drafters(self):
+        for method in ("dspark", "dflash"):
+            with self.subTest(method=method):
+                config = self.mock_main_graph_config(
+                    tp_size=4,
+                    max_num_seqs=1,
+                    query_len=4,
+                    max_num_tokens=4,
+                    prefill_sizes=[],
+                    decode_sizes=[1],
+                    speculative_config=SimpleNamespace(
+                        method=method,
+                        enable_adaptive_verification=False,
+                    ),
+                )
+                config.num_speculative_tokens = 3
+                resolved_query_lens = []
+
+                def query_limits(self, query_len, _resolved_query_lens=resolved_query_lens):
+                    _resolved_query_lens.append(query_len)
+                    return {query_len: 1}
+
+                with self.patched_graph_resolvers(
+                    config,
+                    get_decode_cudagraph_query_lens=query_limits,
+                    get_draft_decode_cudagraph_request_sizes=lambda _self: [],
+                ):
+                    self.run_compile_backend(config)
+
+                assert 5 not in resolved_query_lens
+                assert MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY not in config.additional_config
+                assert config.additional_config[MRV2_DECODE_QUERY_LIMITS_KEY] == {4: 1}
+                assert (
+                    config.scheduler_config.max_num_batched_tokens,
+                    config.scheduler_config.max_num_seqs,
+                ) == (4, 1)
 
     def test_apply_config_platform_defaults_sets_sp_threshold(self):
         for enabled_option in ("enable_sp", "fuse_gemm_comms"):

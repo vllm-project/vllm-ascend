@@ -1990,6 +1990,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     from vllm_ascend.mrv2_utils import (
         MRV2_DECODE_QUERY_LIMITS_KEY,
         MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY,
+        MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY,
         MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY,
     )
 
@@ -2004,6 +2005,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         "_mrv2_padding_graph_gears",
         MRV2_DECODE_QUERY_LIMITS_KEY,
         MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY,
+        MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY,
         MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY,
         # Upstream-injected by EngineArgs for the generic GDN/KDA prefill
         # backend selector; Ascend supports only the triton value (FLA kernels

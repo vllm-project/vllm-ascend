@@ -1173,6 +1173,7 @@ class MRV2PaddingPlan:
         self,
         query_limits: Mapping[int, int],
         max_tokens: int | None = None,
+        request_alignment: int | None = None,
     ) -> dict[int, int]:
         """Align every query tier to one request grid shared by the runner.
 
@@ -1181,7 +1182,9 @@ class MRV2PaddingPlan:
         their per-query request alignments, not merely align each tier in
         isolation.
         """
-        alignment = self.common_request_alignment(query_limits)
+        alignment = self.common_request_alignment(query_limits) if request_alignment is None else request_alignment
+        if alignment < 1:
+            raise ValueError(f"request_alignment must be positive, got {alignment}")
         aligned_limits: dict[int, int] = {}
         for query_len, max_reqs in query_limits.items():
             aligned_reqs = align_num_tokens_to_tp(max_reqs, alignment)
@@ -1309,6 +1312,7 @@ def get_mrv2_physical_batch_capacity(
     # the config so capacity sizing and both graph managers share one layout.
     from vllm_ascend.mrv2_utils import (
         MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY,
+        MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY,
         MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY,
     )
 
@@ -1318,6 +1322,13 @@ def get_mrv2_physical_batch_capacity(
         max_draft_reqs = max(int(size) for size in draft_sizes)
         max_reqs = max(max_reqs, max_draft_reqs)
         max_tokens = max(max_tokens, max_draft_reqs)
+    draft_prefill_limits = additional_config.get(MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY, {})
+    if isinstance(draft_prefill_limits, Mapping):
+        for query_len, tier_max_reqs in draft_prefill_limits.items():
+            query_len = int(query_len)
+            tier_max_reqs = int(tier_max_reqs)
+            max_reqs = max(max_reqs, tier_max_reqs)
+            max_tokens = max(max_tokens, query_len * tier_max_reqs)
     varlen_sizes_by_query = additional_config.get(MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY, {})
     if isinstance(varlen_sizes_by_query, Mapping):
         varlen_sizes = [int(size) for sizes in varlen_sizes_by_query.values() for size in sizes]
