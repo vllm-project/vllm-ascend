@@ -250,3 +250,9 @@ hashes, loaded module paths, and Git revisions when available. Use these fields
 to verify which implementations were compared. Compare results within the same
 environment and workload, including sparse cases that may have constant-factor
 tradeoffs; local metadata speedups do not establish end-to-end serving gains.
+
+## Speculative acceptance comparisons
+
+Use the [EOS and dataset cycling protocol](spec_decode_eos_and_cycling.md) to
+prepare comparable speculative acceptance and latency measurements, including
+warmup exclusion, counter snapshots and the four workload/EOS combinations.
