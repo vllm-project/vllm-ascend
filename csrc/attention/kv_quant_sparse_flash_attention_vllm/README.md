@@ -1,5 +1,18 @@
 # KvQuantSparseFlashAttentionVllm
 
+## Ascend 950（A5）的 CANN QSFA V2 移植
+
+CANN `ops-transformer` 的
+[`v9.2.0`](https://gitcode.com/cann/ops-transformer/tree/v9.2.0/attention/kv_quant_sparse_flash_attention_v2)
+已包含支持 Ascend 950 的 `KvQuantSparseFlashAttentionV2`。
+
+在 A5 上，GLM-5.3-Flash 等支持 C8 的稀疏 MLA 模型可用
+`--kv-cache-dtype fp8` 启用 FP8 KV cache。A5 自定义算子包构建
+[CANN v9.2.1 移植版 QSFA V2](../kv_quant_sparse_flash_attention_cann_v2/README.md)。
+符合移植版输入约束的 RoPE64 SFA 调用使用该算子。系统 `torch_npu` 接口
+为缺少移植版算子包的环境提供回退。RoPE0、Kimi K3.1 和需要 softmax max/sum
+的 DCP 使用本文的 vLLM 自定义算子。
+
 ## A3/A5 原生 headnum 接入
 
 A3/A5 量化 SFA 复用现有 `_C_ascend.npu_kv_quant_sparse_flash_attention_vllm`，

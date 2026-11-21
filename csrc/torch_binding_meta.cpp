@@ -513,6 +513,27 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attenti
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attention_cann_v2_meta(
+    const at::Tensor &query, const at::Tensor &kv, const at::Tensor &sparse_indices,
+    const at::Tensor &block_table, const at::Tensor &actual_seq_lengths_query,
+    const at::Tensor &actual_seq_lengths_kv, double scale_value, int64_t sparse_mode,
+    const c10::optional<at::Tensor> &sinks, bool return_softmax_lse)
+{
+    constexpr int64_t rope_head_dim = 64;
+    TORCH_CHECK(query.dim() == 3, "Expected a TND query");
+    const c10::SymDimVector output_shape = {
+        query.sym_size(0), query.sym_size(1), query.sym_size(2) - c10::SymInt(rope_head_dim)};
+    auto output = at::empty_symint(output_shape, query.options());
+    c10::SymDimVector softmax_shape = {c10::SymInt(0)};
+    if (return_softmax_lse) {
+        const auto kv_heads = kv.sym_size(2);
+        softmax_shape = {kv_heads, query.sym_size(0), query.sym_size(1) / kv_heads};
+    }
+    auto softmax_max = at::empty_symint(softmax_shape, query.options().dtype(at::kFloat));
+    auto softmax_sum = at::empty_symint(softmax_shape, query.options().dtype(at::kFloat));
+    return {output, softmax_max, softmax_sum};
+}
+
 at::Tensor npu_fused_sparse_attention_overlap_meta(
     const at::Tensor &query,
     const at::Tensor &selection_k_rope,
@@ -1875,6 +1896,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
              &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);
     ops.impl("npu_kv_quant_sparse_flash_attention_vllm",
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_vllm_meta);
+    ops.impl("npu_kv_quant_sparse_flash_attention_cann_v2",
+             &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_cann_v2_meta);
     // Fused sparse attention overlap
     ops.impl("npu_fused_sparse_attention_overlap", &vllm_ascend::meta::npu_fused_sparse_attention_overlap_meta);
     // Fused lightning indexer manage
