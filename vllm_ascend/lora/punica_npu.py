@@ -521,6 +521,12 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         del sorted_token_ids, num_tokens_post_padded, max_lora_rank
         del shrink_config, expand_config, fully_sharded
         assert top_k_num == 1, "Ascend MoE LoRA v1 expects pre-expanded rows (top_k_num=1)."
+        # No adapter is selected in this batch (every row maps to the -1
+        # sentinel), so the accumulated delta is zero. Skip the fp32 shrink
+        # buffer and the per-slice bgmv launches, mirroring the `no_lora`
+        # short-circuits used by `add_lora_linear` and `_shrink_prefill`.
+        if self.no_lora:
+            return
         if token_lora_mapping is None:
             token_lora_mapping = self.token_lora_indices
 
