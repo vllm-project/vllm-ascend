@@ -4,12 +4,13 @@
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import torch
 
 from vllm_ascend.attention.context_parallel import sharded_indexer as indexer
+from vllm_ascend.ops.triton import sharded_indexer as kernels
 
 
 @pytest.mark.parametrize("rows,expected_tiles", [(0, []), (1, [1]), (256, [256]), (257, [256, 1])])
@@ -53,3 +54,23 @@ def test_candidate_memory_budget(world, expected):
 )
 def test_shared_index_coordinate_contract(sharded, pcp, dsa_cp, turboquant, expected):
     assert indexer.use_local_topk_output(sharded, pcp, dsa_cp, turboquant=turboquant) == expected
+
+
+@pytest.mark.parametrize(
+    "world,rows,parallel,tile",
+    [(1, 41, False, 2048), (2, 1, True, 1024), (3, 41, True, 512), (8, 41, True, 256)],
+)
+def test_owner_prefix_peer_strategy(monkeypatch, world, rows, parallel, tile):
+    cores = 40
+    monkeypatch.setattr(kernels, "init_device_properties_triton", lambda: None)
+    monkeypatch.setattr(kernels, "get_vectorcore_num", lambda: cores)
+    owner_kernel = MagicMock()
+    monkeypatch.setattr(kernels, "_merge_owner_prefix", owner_kernel)
+    k = kernels.MAX_FUSED_TOPK
+    packed = torch.empty((world * rows, k, 2), device="meta", dtype=torch.int32)
+    kernels.merge_packed_candidates(packed, rows, world, k, local_rank=0, presorted=True, owner_sharded=True)
+    owner_kernel.__getitem__.assert_called_once_with((min(rows, cores),))
+    launch = owner_kernel.__getitem__.return_value
+    launch.assert_called_once()
+    assert launch.call_args.kwargs["PARALLEL_PEERS"] is parallel
+    assert launch.call_args.args[7] == tile

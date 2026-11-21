@@ -1,0 +1,5 @@
+pr: 21603
+entries:
+  - category: performance
+    text: Speed up distributed Top-K owner selection with eight ranks and 144 or 152 query rows by 1.26x-1.39x on Ascend A3 and 1.10x-1.14x on Ascend A5.
+    hardware: [A3, A5]
