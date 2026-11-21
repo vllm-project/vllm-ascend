@@ -261,17 +261,15 @@ Run docker container to start the vLLM server on single-NPU:
     # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
     --dtype float16 \
-    --max-model-len 16384 \
     --host 0.0.0.0 \
     --port $2 \
-    --dtype bfloat16 \
     --served-model-name qwen3vl \
     --no-enable-prefix-caching \
     --data-parallel-size $3 \
     --tensor-parallel-size $4 \
     --trust-remote-code \
     --max-num-seqs 128 \
-    --max-model-len 32768 \
+    --max-model-len 16384 \
     --max-num-batched-tokens 16384 \
     --gpu-memory-utilization 0.91 \
     --async-scheduling \
@@ -291,6 +289,7 @@ Run docker container to start the vLLM server on single-NPU:
 
 Key Parameter Descriptions:
 
+- The commands above use the positional placeholders `$1`, `$2`, `$3` and `$4` for the NPU device ID (`ASCEND_RT_VISIBLE_DEVICES`), the service port, `--data-parallel-size` and `--tensor-parallel-size` respectively. Replace them with the values of your own environment, for example `0 8000 1 1` for a single-NPU deployment that serves card 0 on port 8000.
 - Add the `--max-model-len` option to avoid the ValueError that occurs when the Qwen3-VL-8B-Instruct model's max-seq-len (256000) exceeds the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series based on the on-chip memory size. Please modify the value according to a suitable value for your NPU series.
 
 If your service starts successfully, you can see the info shown below:
@@ -309,7 +308,7 @@ Once your server is started, you can query the model with input prompts:
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-    "model": "Qwen/Qwen3-VL-8B-Instruct",
+    "model": "qwen3vl",
     "messages": [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": [
@@ -320,12 +319,16 @@ curl http://localhost:8000/v1/chat/completions \
     }'
 ```
 
+!!! note
+
+    The `model` field must match the `--served-model-name` passed to `vllm serve` (`qwen3vl` in the commands above), and the request URL must use the port passed to `--port` (`8000` in the example). If `--served-model-name` is not set, use the model ID or local model path instead.
+
 Expected Result:
 
 The service returns HTTP 200 OK.
 
 ```bash
-{"id":"chatcmpl-d3270d4a16cb4b98936f71ee3016451f","object":"chat.completion","created":1764924127,"model":"Qwen/Qwen3-VL-8B-Instruct","choices":[{"index":0,"message":{"role":"assistant","content":"The text in the illustration is: **TONGYI Qwen**","refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning_content":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":107,"total_tokens":123,"completion_tokens":16,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":null}
+{"id":"chatcmpl-d3270d4a16cb4b98936f71ee3016451f","object":"chat.completion","created":1764924127,"model":"qwen3vl","choices":[{"index":0,"message":{"role":"assistant","content":"The text in the illustration is: **TONGYI Qwen**","refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning_content":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":107,"total_tokens":123,"completion_tokens":16,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":null}
 ```
 
 ## 7 Accuracy Evaluation
@@ -400,10 +403,40 @@ There are three `vllm bench` subcommands:
 The performance evaluation must be conducted in an online mode. Take the `serve` as an example. Run the code as follows.
 
 ```shell
-vllm bench serve --model Qwen/Qwen3-VL-8B-Instruct --dataset-name random --random-input-len 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve \
+    --model Qwen/Qwen3-VL-8B-Instruct \
+    --dataset-name random \
+    --random-input-len 200 \
+    --random-output-len 200 \
+    --num-prompts 200 \
+    --request-rate 1 \
+    --ignore-eos \
+    --save-result --result-dir ./
 ```
 
-After several minutes, you can get the performance evaluation result.
+`--dataset-name random` synthesizes text prompts only, so the numbers it reports cover the language-model path and do **not** include image preprocessing and vision encoder cost. To benchmark a real multimodal workload, start the service as described in [Chapter 5](#5-online-service-deployment) and run the benchmark against it with the synthetic-image dataset and the OpenAI chat backend:
+
+```shell
+vllm bench serve \
+    --backend openai-chat \
+    --endpoint /v1/chat/completions \
+    --served-model-name qwen3vl \
+    --model Qwen/Qwen3-VL-8B-Instruct \
+    --dataset-name random-mm \
+    --random-mm-base-items-per-request 1 \
+    --random-mm-limit-mm-per-prompt '{"image": 1, "video": 0}' \
+    --random-mm-bucket-config '{(224, 224, 1): 1.0}' \
+    --random-input-len 200 \
+    --random-output-len 200 \
+    --num-prompts 200 \
+    --max-concurrency 1 \
+    --ignore-eos \
+    --save-result --result-dir ./
+```
+
+Keep `--max-concurrency` no larger than the `--max-num-seqs` used when starting the service, and make sure `--served-model-name` matches the value passed to `vllm serve`.
+
+After several minutes, you can get the performance evaluation result, which reports metrics such as request throughput (req/s), output token throughput (tok/s), TTFT and TPOT. The metrics are also saved to the JSON file under `--result-dir` for later comparison.
 
 ## 9 Performance Tuning
 
