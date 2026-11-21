@@ -340,7 +340,12 @@ class NPUModelRunner(GPUModelRunner):
                         from vllm_ascend.ops.fused_moe.moonep_balance import maybe_install_pf_stream
                         from vllm_ascend.ops.fused_moe.moonep_comm import ensure_runtime_initialized
 
+                        # The parent measured live Torch allocations before MoonEP built its
+                        # pools and handed expert storage to SHMEM. Count the net change
+                        # here. The worker profiles external VMM allocations separately.
+                        allocated_before = torch.npu.memory_allocated(self.device)
                         ensure_runtime_initialized()
+                        self.model_memory_usage += torch.npu.memory_allocated(self.device) - allocated_before
                         maybe_install_pf_stream(self.model)
                 except BaseException:
                     # self.model may not exist yet. Close every recorded owner

@@ -66,6 +66,7 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInp
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.moonep_home_gemm import home_gemm_apply_mlp
 from vllm_ascend.ops.fused_moe.moonep_mlp import apply_slot_mlp
+from vllm_ascend.quantization.quant_type import QuantType
 
 # prefetch kernel 的 UB 约束（ascend-moonep/kernels/prefetch.cpp:100-105）：
 # ``elements_per_row`` 就是载体的 Hp，且要求 ub_bytes / sizeof(bfloat16) / Hp >= 1
@@ -104,11 +105,6 @@ def _dump_slot_cache_stats() -> None:
 
 
 _atexit_sc.register(_dump_slot_cache_stats)
-
-
-# Published home mirrors take over supported BF16 source storage. Quantized
-# byte carriers keep their original weight tensors; see _release_sources.
-_RELEASE_CARRIER_NOTICE = [False]  # one-shot notice for the quantized (carrier) skip
 
 
 def slot_mode_enabled() -> bool:
@@ -533,16 +529,9 @@ class _LayerWeightState:
         Quantized payloads are NZ / 4-D non-contiguous views, so every mirror is
         a raw byte copy of the payload range (``_flat_bytes``).
 
-        For supported BF16 payloads, home chunks then become the layer's
-        weights (in place -- ``.data`` of the same Parameter objects, because
-        the runtime looks layer states up by ``id(w13_weight)``). The rank
-        keeps one copy of those expert weights instead of two.
-
-        Only safe because slot mode computes against the [epn+B] alias, never
-        against the vllm tensor. This static-inference path does not support
-        weights written again after init (weight reload / sleep / RL). It applies
-        to the bf16 path only: quantized payloads mirror into byte carriers that
-        are not weight-shaped, and those layers are left alone.
+        For static BF16 and supported W4A8MXFP weights, transfer the existing
+        Parameters to Home-backed views. Parameter identity is the runtime's
+        layer lookup key. Weight reload and sleep require separate ownership.
         """
         if self._published:
             return
@@ -551,19 +540,14 @@ class _LayerWeightState:
                 dst = _flat_bytes(self.homes[spec.name], spec.nbytes)
                 src = _flat_bytes(spec.ref, spec.nbytes)
                 dst.copy_(src)
-        self._published = True
         self._release_sources()
+        self._published = True
 
     def _release_sources(self) -> None:
         """Point the layer's weight Parameters at the home chunks (drop the copies)."""
-        if self._specs and self._specs[0].ref.dtype != torch.bfloat16:
-            if not _RELEASE_CARRIER_NOTICE[0]:
-                _RELEASE_CARRIER_NOTICE[0] = True
-                print(
-                    "[moonep-release] quantized payloads mirror into bf16 byte "
-                    "carriers, not weight-shaped tensors; release skipped.",
-                    flush=True,
-                )
+        if self._specs[0].ref.dtype != torch.bfloat16:
+            if getattr(self._layer, "quant_type", None) == QuantType.W4A8MXFP:
+                self._release_mxfp_sources()
             return
         released = 0
         for name, src_attr, spec_name in (("w13_weight", "_w13_src", "w13"), ("w2_weight", "_w2_src", "w2")):
@@ -595,6 +579,57 @@ class _LayerWeightState:
                 f"released, home chunks now back the layer ({released / 2**20:.0f} MB)",
                 flush=True,
             )
+
+    def _release_mxfp_sources(self) -> None:
+        """Transfer the four loaded packed-NZ / E8M0 parameters as one layer."""
+        import torch_npu
+
+        replacements = []
+        for spec in self._specs:
+            ref = spec.ref
+            field = spec.name.replace("_scale", "_weight_scale") if not spec.is_nz else spec.name + "_weight"
+            if getattr(self._layer, field) is not ref:
+                raise RuntimeError(f"MoonEP: {field} changed after Home allocation")
+            home = self.homes[spec.name]
+            ptr = home.data_ptr()
+            if spec.is_nz:
+                if ref.dtype != torch.uint8 or ref.ndim != 3:
+                    return
+                experts, packed_in, out = ref.shape
+                base_shape = (experts, out, packed_in)
+            else:
+                if ref.dtype != getattr(torch, "float8_e8m0fnu", None) or ref.ndim != 4 or ref.shape[-1] != 2:
+                    return
+                experts, pairs, out, pair = ref.shape
+                base_shape = (experts, out, pairs * pair)
+
+            # Rebuild the pre-transpose descriptor. Creating the 4-D scale
+            # directly gives it NCHW metadata on A5 even with ND requested.
+            view = _sym_tensor(ptr, base_shape, ref.dtype, ref.device, nbytes=spec.nbytes, npu_format=spec.npu_format)
+            if not spec.is_nz:
+                view = view.view(experts, out, pairs, pair)
+            view = view.transpose(1, 2)
+            if (
+                view.shape != ref.shape
+                or view.stride() != ref.stride()
+                or torch_npu.get_npu_format(view) != spec.npu_format
+                or view.data_ptr() != ptr
+            ):
+                return  # The published mirror remains usable for other layouts.
+            replacements.append((ref, view))
+
+        # _flat_bytes wraps raw pointers without retaining allocator ownership.
+        # Finish the copies before releasing the last reference to the old storage.
+        torch.npu.current_stream().synchronize()
+        originals = [ref.detach() for ref, _ in replacements]
+        try:
+            for ref, view in replacements:
+                ref.data = view
+        except Exception:
+            for (ref, _), original in zip(replacements, originals):
+                ref.data = original
+            raise
+        self._released = True
 
     def prefetch_views(self) -> list[torch.Tensor]:
         """The [E+B] projection descriptors handed to the prefetch kernel."""

@@ -531,21 +531,23 @@ class _MoonEPRuntime:
                     f"E={experts} K={topk} H={hidden} S={cap} {backends}",
                     flush=True,
                 )
+        dev = torch.npu.current_device()
+        torch.npu.synchronize(dev)
+        torch.npu.empty_cache()
+        allocated_before = torch.npu.memory_allocated(dev)
+        free_before, _ = torch.npu.mem_get_info(dev)
         for st in self._states:
             st.publish()
-        # Return cached allocator blocks before KV-cache sizing. Quantized
-        # payloads still skip source-storage handoff inside publish().
-        try:
-            dev = torch.npu.current_device()
-            torch.npu.empty_cache()
-            free_b, total_b = torch.npu.mem_get_info(dev)
-            print(
-                f"[moonep-release r{get_ep_group().rank_in_group}] weight publication complete; "
-                f"free={free_b / 2**30:.1f}GB / {total_b / 2**30:.1f}GB",
-                flush=True,
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(f"[moonep-release] empty_cache/report failed: {exc}", flush=True)
+        torch.npu.synchronize(dev)
+        torch.npu.empty_cache()
+        free_after, _ = torch.npu.mem_get_info(dev)
+        released_layers = sum(bool(getattr(st, "_released", False)) for st in self._states)
+        print(
+            f"[moonep-release r{ep_group.rank_in_group}] home_backed_layers={released_layers}/{len(self._states)} "
+            f"torch_allocated_released_bytes={allocated_before - torch.npu.memory_allocated(dev)} "
+            f"device_free_delta_bytes={free_after - free_before} device_free_bytes={free_after}",
+            flush=True,
+        )
 
 
 _MOONEP_RUNTIME = _MoonEPRuntime()
