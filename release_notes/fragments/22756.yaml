@@ -1,0 +1,6 @@
+pr: 22756
+entries:
+  - category: feature
+    text: Added a fused grouped matmul, OAI SwiGLU, and MX quantization path for eligible MiniMax M3.1 Flash MXFP4 and MXFP8 inference on Ascend A5. Existing model quantization settings select the path automatically.
+    model: minimax-m3.1-flash
+    hardware: [A5]
