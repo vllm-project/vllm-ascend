@@ -22,7 +22,8 @@ def _supports_checkpoint_boundary_policy(config) -> bool:
 
 
 def initialize_gdn_checkpoints(layer) -> None:
-    if not get_ascend_config().gdn_internal_prefill_checkpoints:
+    ascend_config = get_ascend_config()
+    if not ascend_config.gdn_internal_prefill_checkpoints:
         return
     # Do not advertise unsupported layers: the upstream all-layer capability
     # check keeps the scheduler's split fallback when any layer cannot export.
@@ -47,7 +48,13 @@ def initialize_gdn_checkpoints(layer) -> None:
 
     if "num_prefill_checkpoint_blocks" not in MambaSpec.__dataclass_fields__:
         raise ValueError("GDN internal checkpoints require vLLM with PR #60050")
+    if (ascend_config.gdn_native_checkpoint_max_tokens or ascend_config.gdn_native_preserve_physical_prefix) and not {
+        "prefill_checkpoint_max_tokens",
+        "prefer_short_physical_checkpoint",
+    }.issubset(MambaSpec.__dataclass_fields__):
+        raise ValueError("The native GDN checkpoint scheduling policy requires the companion vLLM Core changes")
     layer._ascend_internal_checkpoint_enabled = True
+    layer._ascend_native_checkpoint_enabled = ascend_config.gdn_native_prefill_checkpoints
     layer.register_buffer("_ascend_checkpoint_workspace", None, persistent=False)
     layer._checkpoint_alignment = GDN_CHECKPOINT_ALIGNMENT
     layer._max_num_batched_tokens = config.scheduler_config.max_num_batched_tokens
@@ -55,6 +62,8 @@ def initialize_gdn_checkpoints(layer) -> None:
 
 
 def ensure_gdn_checkpoint_workspace(layer, tensor):
+    if getattr(layer, "_ascend_native_checkpoint_enabled", False):
+        return
     if getattr(layer, "_exports_checkpoints", False) and layer._ascend_checkpoint_workspace is None:
         # Allocate during the profiling forward, including when its metadata is
         # None, so KV-cache sizing accounts for the persistent FP32 snapshots.
