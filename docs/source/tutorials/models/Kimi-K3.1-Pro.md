@@ -67,7 +67,6 @@ Select an image for the deployment platform and host operating system, and start
             --name kimi-k31 \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             --device /dev/davinci0 \
             --device /dev/davinci1 \
             --device /dev/davinci2 \
@@ -105,7 +104,6 @@ Select an image for the deployment platform and host operating system, and start
             --name kimi-k31 \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             --device /dev/davinci0 \
             --device /dev/davinci1 \
             --device /dev/davinci2 \
@@ -147,7 +145,6 @@ Select an image for the deployment platform and host operating system, and start
             --name kimi-k31 \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             --device /dev/davinci0 \
             --device /dev/davinci1 \
             --device /dev/davinci2 \
@@ -174,7 +171,6 @@ Select an image for the deployment platform and host operating system, and start
             --name kimi-k31 \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             --device /dev/davinci0 \
             --device /dev/davinci1 \
             --device /dev/davinci2 \

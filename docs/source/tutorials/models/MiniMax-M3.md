@@ -109,7 +109,6 @@ Select the `docker run` command for your hardware platform:
     docker run --rm \
     --name $NAME \
     --net=host \
-    --privileged=true \
     --shm-size=60g \
     --device /dev/davinci_manager \
     --device /dev/hisi_hdc \

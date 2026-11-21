@@ -59,7 +59,6 @@ You can use the official all-in-one Docker image. For the available image tags a
   --name $NAME \
   --net=host \
   --shm-size=1g \
-  --privileged=true \
   --device /dev/davinci0 \
   --device /dev/davinci_manager \
   --device /dev/devmm_svm \

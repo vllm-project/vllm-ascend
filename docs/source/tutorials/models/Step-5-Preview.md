@@ -75,7 +75,6 @@ export CONTAINER_NAME=step5
 docker run --rm \
 --name $CONTAINER_NAME \
 --net=host \
---privileged=true \
 --shm-size=60g \
 --device /dev/davinci_manager \
 --device /dev/hisi_hdc \
