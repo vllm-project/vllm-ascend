@@ -67,7 +67,7 @@ def test_hisparse_pool_keys_track_checkpoint_identity():
         return build_pool_key_namespace(config, cache, 1, 128)
 
     original = key()
-    assert original.startswith("hisparse-v1:")
+    assert original.startswith("hisparse-ascendstore-v1:")
     for model, revision in [("team-b/glm", "v1"), ("team-a/glm", "v2")]:
         config.model_config = _checkpoint(model, revision)
         assert key() != original
