@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import inspect
 from functools import lru_cache, wraps
 
 import torch
@@ -186,10 +187,154 @@ def _flatten_recurrent_state_indices(
     return state_indices[seq_ids, slot_ids].contiguous()
 
 
-# The fla_npu AscendC recurrent GDN kernel silently returns without writing
-# output when a sequence exceeds this many tokens. Wider speculative windows
-# must use the uncapped FLA Triton recurrent kernel instead.
+# Retain the existing speculative dispatch policy for legacy kernels.
+# Wider windows stay on upstream Triton until the new native implementation
+# has been validated under those workloads.
 _MAX_RECURRENT_GDN_TOKENS = 8
+
+
+@lru_cache(maxsize=1)
+def _supports_recurrent_gdn_fusion() -> bool:
+    """Inspect the published wrapper ABI once, without launching a kernel.
+
+    Older wheels retain the external preprocessing and packed-index path.
+    Do not retry a failed native call: it may already have mutated State.
+    """
+    try:
+        parameters = inspect.signature(recurrent_gated_delta_rule).parameters
+    except (TypeError, ValueError):
+        return False
+    return {
+        "use_qk_l2norm_in_kernel",
+        "use_gate_in_kernel",
+        "use_beta_sigmoid_in_kernel",
+        "allow_neg_eigval",
+        "A_log",
+        "dt_bias",
+    }.issubset(parameters)
+
+
+def _run_recurrent_gdn(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    state: torch.Tensor,
+    *,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    actual_seq_lengths: torch.Tensor | None,
+    state_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
+    use_upstream_recurrent: bool = False,
+) -> torch.Tensor:
+    """Run recurrent GDN with raw gates and request-row checkpoint indices.
+
+    Q/K/V are [1,T,H,128]; a/b are raw projection outputs [T,HV].
+    Keep all metadata request rows, including zero-length graph padding rows.
+    Fusion requires the published fla_npu fused ABI; existing upstream
+    dispatch policies and older wheels retain external preprocessing.
+    """
+    if use_upstream_recurrent or not _supports_recurrent_gdn_fusion():
+        g, beta = DeviceOperator.fused_gdn_gating(A_log, a.contiguous(), b.contiguous(), dt_bias)
+        query = l2norm_fwd(query.contiguous())
+        key = l2norm_fwd(key.contiguous())
+        if use_upstream_recurrent:
+            out, _ = fused_recurrent_gated_delta_rule(
+                q=query,
+                k=key,
+                v=value,
+                g=g,
+                beta=beta,
+                scale=key.shape[-1] ** -0.5,
+                initial_state=state,
+                inplace_final_state=True,
+                cu_seqlens=query_start_loc,
+                ssm_state_indices=state_indices,
+                num_accepted_tokens=num_accepted_tokens,
+            )
+            return out
+        return recurrent_gated_delta_rule(
+            query.squeeze(0),
+            key.squeeze(0),
+            value.squeeze(0),
+            state,
+            g=g.squeeze(0),
+            beta=beta.squeeze(0),
+            scale=key.shape[-1] ** -0.5,
+            actual_seq_lengths=actual_seq_lengths,
+            ssm_state_indices=_flatten_recurrent_state_indices(
+                state_indices,
+                query.shape[1],
+                query_start_loc,
+            ),
+            num_accepted_tokens=(num_accepted_tokens.to(torch.int32) if num_accepted_tokens is not None else None),
+        ).unsqueeze(0)
+
+    return _call_fused_recurrent_gdn(
+        query,
+        key,
+        value,
+        state,
+        a=a,
+        b=b,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        actual_seq_lengths=actual_seq_lengths,
+        state_indices=state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+    )
+
+
+def _call_fused_recurrent_gdn(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    state: torch.Tensor,
+    *,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    actual_seq_lengths: torch.Tensor | None,
+    state_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor | None,
+) -> torch.Tensor:
+    """Adapt model tensors to the fused native ABI, preserving checkpoint rows.
+
+    The scheduler owns slot allocation and accepted counts. This adapter only
+    selects the metadata rows and converts ABI dtypes; it never reads values
+    back to the CPU or changes which checkpoint is accepted.
+    """
+    assert actual_seq_lengths is not None
+    num_sequences = actual_seq_lengths.shape[0] - 1
+    if state_indices.ndim == 1:
+        state_indices = state_indices.unsqueeze(-1)
+    if state_indices.ndim != 2 or state_indices.shape[0] < num_sequences:
+        raise ValueError("GDN state indices must provide one checkpoint row per metadata request")
+    state_indices = state_indices[:num_sequences].to(torch.int32)
+    if num_accepted_tokens is not None:
+        num_accepted_tokens = num_accepted_tokens[:num_sequences].to(torch.int32)
+    return recurrent_gated_delta_rule(
+        query.squeeze(0),
+        key.squeeze(0),
+        value.squeeze(0),
+        state,
+        g=a,
+        beta=b,
+        A_log=A_log.float(),
+        dt_bias=dt_bias.float(),
+        scale=key.shape[-1] ** -0.5,
+        actual_seq_lengths=actual_seq_lengths,
+        ssm_state_indices=state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        use_beta_sigmoid_in_kernel=True,
+        allow_neg_eigval=False,
+    ).unsqueeze(0)
 
 
 def _split_head_first_conv_output(
@@ -704,24 +849,19 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
-        # 2. Recurrent attention
-        g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
+        # 2. Partition raw gate projections along their token dimension.
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
-                g_spec = g
-                beta_spec = beta
-                g_non_spec = None
-                beta_non_spec = None
+                a_spec, b_spec = a, b
+                a_non_spec, b_non_spec = None, None
             else:
-                g_spec = g.index_select(1, spec_token_indx)
-                beta_spec = beta.index_select(1, spec_token_indx)
-                g_non_spec = g.index_select(1, non_spec_token_indx)
-                beta_non_spec = beta.index_select(1, non_spec_token_indx)
+                a_spec = a.index_select(0, spec_token_indx)
+                b_spec = b.index_select(0, spec_token_indx)
+                a_non_spec = a.index_select(0, non_spec_token_indx)
+                b_non_spec = b.index_select(0, non_spec_token_indx)
         else:
-            g_spec = None
-            beta_spec = None
-            g_non_spec = g
-            beta_non_spec = beta
+            a_spec, b_spec = None, None
+            a_non_spec, b_non_spec = a, b
 
         split_non_spec = (
             spec_sequence_masks is None and attn_metadata.num_prefills > 0 and attn_metadata.num_decodes > 0
@@ -730,53 +870,31 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            query_spec = l2norm_fwd(query_spec)
-            key_spec = l2norm_fwd(key_spec)
             use_upstream_recurrent = attn_metadata.spec_decode_metadata.use_upstream_recurrent or (
                 spec_state_indices_tensor.ndim == 2 and spec_state_indices_tensor.shape[1] > _MAX_RECURRENT_GDN_TOKENS
             )
-            if use_upstream_recurrent:
-                # The native packed-index API bounds accepted_prev by the
-                # current query length. Reuse vLLM's strided state-table API
-                # for adaptive graphs and windows wider than the AscendC cap.
-                core_attn_out_spec, _ = fused_recurrent_gated_delta_rule(
-                    q=query_spec,
-                    k=key_spec,
-                    v=value_spec,
-                    g=g_spec,
-                    beta=beta_spec,
-                    scale=key_spec.shape[-1] ** -0.5,
-                    initial_state=ssm_state,
-                    inplace_final_state=True,
-                    cu_seqlens=spec_causal_conv1d_meta.query_start_loc,
-                    ssm_state_indices=spec_state_indices_tensor,
-                    num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
-                )
-            else:
-                actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
-                core_attn_out_spec = recurrent_gated_delta_rule(
-                    query_spec.squeeze(0),
-                    key_spec.squeeze(0),
-                    value_spec.squeeze(0),
-                    ssm_state,
-                    g=g_spec.squeeze(0),
-                    beta=beta_spec.squeeze(0),
-                    scale=key_spec.shape[-1] ** -0.5,
-                    actual_seq_lengths=actual_seq_lengths,
-                    ssm_state_indices=_flatten_recurrent_state_indices(
-                        spec_state_indices_tensor,
-                        query_spec.shape[1],
-                        spec_causal_conv1d_meta.query_start_loc,
-                    ),
-                    num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
-                ).unsqueeze(0)
+            core_attn_out_spec = _run_recurrent_gdn(
+                query_spec,
+                key_spec,
+                value_spec,
+                ssm_state,
+                a=a_spec,
+                b=b_spec,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                actual_seq_lengths=attn_metadata.spec_decode_metadata.actual_seq_lengths,
+                state_indices=spec_state_indices_tensor,
+                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
+                query_start_loc=spec_causal_conv1d_meta.query_start_loc,
+                use_upstream_recurrent=use_upstream_recurrent,
+            )
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
         # 2.2: Process non-spec-decode part in mixed non-spec batches
         if split_non_spec:
-            assert g_non_spec is not None
-            assert beta_non_spec is not None
+            assert a_non_spec is not None
+            assert b_non_spec is not None
             if split_conv:
                 assert decode_conv_qkv is not None
                 query_decode, key_decode, value_decode = decode_conv_qkv
@@ -785,22 +903,18 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 key_decode = key_non_spec[:, :num_decode_tokens]
                 value_decode = value_non_spec[:, :num_decode_tokens]
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            query_decode = l2norm_fwd(query_decode.contiguous())
-            key_decode = l2norm_fwd(key_decode.contiguous())
-            core_attn_out_decode = recurrent_gated_delta_rule(
-                query_decode.squeeze(0),
-                key_decode.squeeze(0),
-                value_decode.squeeze(0),
+            core_attn_out_decode = _run_recurrent_gdn(
+                query_decode,
+                key_decode,
+                value_decode,
                 ssm_state,
-                g=g_non_spec[:, :num_decode_tokens].squeeze(0),
-                beta=beta_non_spec[:, :num_decode_tokens].squeeze(0),
-                scale=key_decode.shape[-1] ** -0.5,
+                a=a_non_spec[:num_decode_tokens],
+                b=b_non_spec[:num_decode_tokens],
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
                 actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=_flatten_recurrent_state_indices(
-                    non_spec_state_indices_tensor,
-                    num_decode_tokens,
-                ),
-            ).unsqueeze(0)
+                state_indices=non_spec_state_indices_tensor,
+            )
         else:
             core_attn_out_decode = None
 
@@ -812,15 +926,20 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert prefill_query_start_loc is not None
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
-            assert g_non_spec is not None
-            assert beta_non_spec is not None
+            assert a_non_spec is not None
+            assert b_non_spec is not None
             if split_non_spec:
                 if not split_conv:
                     query_non_spec = query_non_spec[:, num_decode_tokens:]
                     key_non_spec = key_non_spec[:, num_decode_tokens:]
                     value_non_spec = value_non_spec[:, num_decode_tokens:]
-                g_non_spec = g_non_spec[:, num_decode_tokens:]
-                beta_non_spec = beta_non_spec[:, num_decode_tokens:]
+                a_non_spec = a_non_spec[num_decode_tokens:]
+                b_non_spec = b_non_spec[num_decode_tokens:]
+
+            # Chunk prefill still consumes precomputed gate and beta tensors.
+            g_non_spec, beta_non_spec = DeviceOperator.fused_gdn_gating(
+                self.A_log, a_non_spec.contiguous(), b_non_spec.contiguous(), self.dt_bias
+            )
 
             # Both fused prefill kernels (torch_npu.npu_chunk_gated_delta_rule and
             # fla_npu's chunk_gated_delta_rule_fwd) only support bfloat16 inputs.
@@ -951,22 +1070,18 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
         elif attn_metadata.num_decodes > 0:
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            query_non_spec = l2norm_fwd(query_non_spec)
-            key_non_spec = l2norm_fwd(key_non_spec)
-            core_attn_out_non_spec = recurrent_gated_delta_rule(
-                query_non_spec.squeeze(0),
-                key_non_spec.squeeze(0),
-                value_non_spec.squeeze(0),
+            core_attn_out_non_spec = _run_recurrent_gdn(
+                query_non_spec,
+                key_non_spec,
+                value_non_spec,
                 ssm_state,
-                g=g_non_spec.squeeze(0) if g_non_spec is not None else g_non_spec,
-                beta=beta_non_spec.squeeze(0) if beta_non_spec is not None else beta_non_spec,
-                scale=key_non_spec.shape[-1] ** -0.5,
+                a=a_non_spec,
+                b=b_non_spec,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
                 actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=_flatten_recurrent_state_indices(
-                    non_spec_state_indices_tensor,
-                    num_decode_tokens,
-                ),
-            ).unsqueeze(0)
+                state_indices=non_spec_state_indices_tensor,
+            )
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
