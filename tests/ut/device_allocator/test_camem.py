@@ -243,7 +243,7 @@ class TestCaMem(PytestBase):
         assert data.cpu_backup_tensor is None
 
     @patch("vllm_ascend.device_allocator.camem.unmap_and_release")
-    @patch("vllm_ascend.device_allocator.camem.memcpy")
+    @patch("vllm_ascend.device_allocator.camem.memcpy", return_value=0)
     def test_sleep_offload_and_discard(self, mock_memcpy, mock_unmap):
         allocator = CaMemAllocator.get_instance()
 
@@ -278,7 +278,7 @@ class TestCaMem(PytestBase):
         assert mock_memcpy.called
 
     @patch("vllm_ascend.device_allocator.camem.create_and_map")
-    @patch("vllm_ascend.device_allocator.camem.memcpy")
+    @patch("vllm_ascend.device_allocator.camem.memcpy", return_value=0)
     def test_wake_up_loads_and_clears_cpu_backup(self, mock_memcpy, mock_create_and_map):
         allocator = CaMemAllocator.get_instance()
 
