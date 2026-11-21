@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, cast
 
 import torch
 import torch_npu
@@ -70,6 +70,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
     sequence_parallel_chunk,
+    spec_decode_needs_target_embed,
 )
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -80,7 +81,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.utils import pad_sequence_parallel_tokens
+from vllm_ascend.utils import pad_sequence_parallel_tokens, vllm_version_is
 
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention, get_kda_parallel_size
@@ -593,6 +594,15 @@ class Glm5NextDecoderLayer(nn.Module):
         return residual, post, comb, layer_input
 
 
+def _needs_input_embedding(vllm_config: VllmConfig) -> bool:
+    """Whether this PP rank needs the target input embedding."""
+    if get_pp_group().is_first_rank:
+        return True
+    if vllm_version_is("0.33.0"):
+        return bool(cast(Any, spec_decode_needs_target_embed)(vllm_config, include_mtp=True))
+    return spec_decode_needs_target_embed(vllm_config)
+
+
 @support_torch_compile
 class Glm5NextModel(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -626,7 +636,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             # Full-MLA config (no kpool sparse indexer): no topk buffer.
             topk_indices_buffer = None
 
-        if get_pp_group().is_first_rank:
+        if _needs_input_embedding(vllm_config):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
