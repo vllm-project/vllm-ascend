@@ -14,6 +14,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.v1.metrics.utils import create_metric_per_engine
 
+LOOKUP_RPC_FAILURES_KEY = "lookup_rpc_failures"
+
 LOAD_GET_HISTOGRAM_BUCKETS = (
     1e-3,
     5e-3,
@@ -44,6 +46,13 @@ class AscendStoreKVConnectorStats(KVConnectorStats):
         return not self.data
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+        # Scheduler-side counts arrive as `other`; the worker never writes this key,
+        # so anything not carried here is dropped on the floor.
+        if lookup := other.data.get(LOOKUP_RPC_FAILURES_KEY):
+            merged = dict(self.data.get(LOOKUP_RPC_FAILURES_KEY) or {})
+            for category, count in lookup.items():
+                merged[category] = merged.get(category, 0) + count
+            self.data[LOOKUP_RPC_FAILURES_KEY] = merged
         if durations := other.data.get("load_get_duration_seconds"):
             self.data.setdefault("load_get_duration_seconds", []).extend(durations)
         if num_keys := other.data.get("load_get_keys"):
@@ -123,8 +132,21 @@ class AscendStorePromMetrics(KVConnectorPromMetrics):
             ),
             per_engine_labelvalues,
         )
+        # A Gauge set to the client's running total, like the delayed-release pair:
+        # the source is monotonic, so a Counter would need deltas and would
+        # double-count on every scrape. Not built with create_metric_per_engine()
+        # either -- that helper binds the engine labels once and returns those
+        # children, and this metric carries an extra dimension, so both label sets
+        # are bound at observe time instead.
+        self._lookup_rpc_failures = self._gauge_cls(
+            name="vllm:ascend_store_lookup_rpc_failures",
+            documentation="Cumulative AscendStore lookup RPC failures by stage and error code.",
+            labelnames=[*labelnames, "failure"],
+        )
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0) -> None:
+        for category, count in transfer_stats_data.get(LOOKUP_RPC_FAILURES_KEY, {}).items():
+            self._lookup_rpc_failures.labels(*self.per_engine_labelvalues[engine_idx], category).set(count)
         metric = self._load_get_duration.get(engine_idx)
         if metric is not None:
             for duration in transfer_stats_data.get("load_get_duration_seconds", ()):
