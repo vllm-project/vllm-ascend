@@ -45,8 +45,13 @@ const std::tuple<aclTensor *, aclTensor *> GroupedMatmulSwigluQuantV2(const aclT
     auto out = executor->AllocTensor(outShape, DataType::DT_INT8, ge::FORMAT_ND);
     auto scaleOut = executor->AllocTensor(scaleOutShape, DataType::DT_FLOAT, ge::FORMAT_ND);
     if (op::GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_3510) {
-        n = transposeWeight ? (*weightScale)[0]->GetViewShape().GetDim(1) : // 转置情况下weightScale的第1维是n
-                            (*weightScale)[0]->GetViewShape().GetDim(2); // 非转置情况下weightScale的第2维是n
+        // packed MX weightScale is 4D [E, K/64, N, 2] (n at dim2 non-transposed,
+        // dim1 transposed); per-expert list MX weightScale is 3D [K/64, N, 2]
+        // (n at dim1 non-transposed, dim0 transposed). In both layouts n sits
+        // dimNum-2 from the end for non-transposed and dimNum-3 for transposed.
+        auto wsShape = (*weightScale)[0]->GetViewShape();
+        auto wsDimNum = wsShape.GetDimNum();
+        n = transposeWeight ? wsShape.GetDim(wsDimNum - 3) : wsShape.GetDim(wsDimNum - 2);
         nAfterHalve = static_cast<int64_t>(n / 2); // outShape需要为[M, N / 2]
         gert::Shape outShapeV2({m, nAfterHalve});
         gert::Shape scaleOutShapeV2;
