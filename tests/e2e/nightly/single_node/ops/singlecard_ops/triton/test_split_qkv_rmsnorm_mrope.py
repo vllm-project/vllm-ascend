@@ -5,7 +5,14 @@ import torch
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.patch.worker.mrope_utils import get_fused_mrope_inputs
+
+pytestmark = pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 
 STRUCTURAL_CASES = [
     (1, 2, 1, 128, [24, 20, 20]),
@@ -23,7 +30,7 @@ EPS = [1e-6]
 IS_INTERLEAVED = [True, False]
 HAS_GATE = [True, False]
 DTYPES = [torch.bfloat16, torch.float16]
-DEVICES = [f"npu:{0}"]
+DEVICES = ["npu:0"]
 DEFAULT_ATOL = 1e-2
 DEFAULT_RTOL = 1e-2
 
@@ -221,10 +228,6 @@ def naive_split_qkv_rmsnorm_mrope_interleaved(
     return q, k, v
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Requires Ascend A2/A3/A5",
-)
 @pytest.mark.parametrize("num_tokens, num_q_heads, num_kv_heads, head_size, mrope_section", STRUCTURAL_CASES)
 @pytest.mark.parametrize("eps", EPS)
 @pytest.mark.parametrize("is_interleaved", IS_INTERLEAVED)
@@ -244,7 +247,6 @@ def test_split_qkv_rmsnorm_mrope(
     is_interleaved: bool,
     has_gate: bool,
 ):
-    torch.set_default_device(device)
     rope_dim = 2 * sum(mrope_section)
     q_size = num_q_heads * head_size
     kv_size = num_kv_heads * head_size
@@ -358,6 +360,40 @@ ROPE_THETA = 10000000.0
 MAX_POSITION_ID = 4096
 
 
+@pytest.mark.parametrize("scaling_factor", [None, 2.0], ids=["default", "yarn"])
+def test_inline_cos_sin_model_inputs(scaling_factor: float | None):
+    with torch.device("cpu"):
+        rotary_emb = AscendMRotaryEmbedding(
+            head_size=128,
+            rotary_dim=64,
+            max_position_embeddings=128,
+            base=ROPE_THETA,
+            is_neox_style=True,
+            dtype=torch.bfloat16,
+            mrope_section=[11, 11, 10],
+            scaling_factor=scaling_factor,
+        )
+        qkv = torch.empty(4, 128, dtype=torch.bfloat16)
+        text_positions = torch.arange(4)
+        multi_axis_positions = torch.arange(12).reshape(3, 4)
+
+    cache, positions, inv_freq = get_fused_mrope_inputs(rotary_emb, text_positions, qkv)
+    assert positions is None and inv_freq is None
+    assert cache is not None
+    expected = rotary_emb.cos_sin_cache[text_positions].to(qkv).unsqueeze(0).expand(3, -1, -1)
+    torch.testing.assert_close(cache, expected)
+
+    cache, positions, inv_freq = get_fused_mrope_inputs(rotary_emb, multi_axis_positions, qkv)
+    if scaling_factor is None:
+        assert cache is None and positions is multi_axis_positions
+        assert inv_freq is rotary_emb.inv_freq and inv_freq is not None
+        assert inv_freq.dtype == torch.float32
+    else:
+        assert positions is None and inv_freq is None
+        assert cache is not None
+        torch.testing.assert_close(cache, rotary_emb.cos_sin_cache[multi_axis_positions].to(qkv))
+
+
 def make_mrope_inv_freq(rope_dim: int, device: str) -> torch.Tensor:
     """fp32 contiguous inv_freq of length rope_dim // 2, as registered by the model."""
     return (
@@ -391,7 +427,6 @@ def _run_inline_case(
     weights carry rms_weight_offset pre-applied in the weight dtype, matching
     the cached cos/sin call sites of the old baseline.
     """
-    torch.set_default_device(device)
     torch.manual_seed(0)
     _, num_q_heads, num_kv_heads, head_size, mrope_section, has_gate, rms_weight_offset, rope_dim = cfg
     q_size = num_q_heads * head_size
@@ -460,7 +495,7 @@ def _run_inline_case(
         has_gate=has_gate,
     )
     inline_out = op(positions=positions, inv_freq=inv_freq, rms_weight_offset=rms_weight_offset, **common)
-    cache_out = op(cos_sin=cos_sin_cache, rms_weight_offset=rms_weight_offset, **common)
+    cache_out = op(cos_sin=cos_sin_cache, **(common | {"q_weight": q_weight_ref, "k_weight": k_weight_ref}))
 
     return dict(
         golden=(golden_q, golden_k, golden_v, golden_gate),
@@ -510,13 +545,12 @@ def test_split_qkv_rmsnorm_mrope_inline_cos_sin(
 
 @pytest.mark.parametrize(
     "case",
-    ["strided_tokens", "strided_planes", "int32"],
+    ["strided_tokens", "strided_planes", "expanded_planes", "int32"],
 )
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_split_qkv_rmsnorm_mrope_inline_cos_sin_positions_layout(case: str, device: str):
     """Non-contiguous and int32 positions must match the contiguous int64 path."""
-    torch.set_default_device(device)
     torch.manual_seed(0)
     cfg = INLINE_CONFIGS[0]
     num_tokens = 64
@@ -531,6 +565,8 @@ def test_split_qkv_rmsnorm_mrope_inline_cos_sin_positions_layout(case: str, devi
         planes = torch.zeros(num_tokens, 3, dtype=torch.int64, device=device)
         planes.copy_(positions_ref.t())
         positions = planes.t()
+    elif case == "expanded_planes":
+        positions = positions_ref[:1].expand(3, -1)
     else:
         positions = positions_ref.to(torch.int32)
     result = _run_inline_case(
@@ -566,7 +602,6 @@ def test_split_qkv_rmsnorm_mrope_inline_cos_sin_core_boundary(device: str):
 @torch.inference_mode()
 def test_split_qkv_rmsnorm_mrope_inline_cos_sin_empty(device: str):
     """num_tokens == 0 early-returns empty outputs on both cos/sin paths."""
-    torch.set_default_device(device)
     _, num_q_heads, num_kv_heads, head_size, mrope_section, has_gate, rms_weight_offset, rope_dim = INLINE_CONFIGS[0]
     q_size = num_q_heads * head_size
     kv_size = num_kv_heads * head_size
@@ -599,17 +634,21 @@ def test_split_qkv_rmsnorm_mrope_inline_cos_sin_empty(device: str):
     assert v_i.shape == v_c.shape == (0, kv_size)
     assert g_i.shape == g_c.shape == (0, gate_size)
 
+    with pytest.raises(ValueError, match="positions must have shape"):
+        op(positions=positions[0], inv_freq=inv_freq, **common)
+
 
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_split_qkv_rmsnorm_mrope_inline_cos_sin_invalid_args(device: str):
     """Host-side validation of the inline arguments (no kernel launch)."""
-    torch.set_default_device(device)
     _, num_q_heads, num_kv_heads, head_size, mrope_section, _, _, rope_dim = INLINE_CONFIGS[2]
     num_tokens = 4
-    qkv = torch.randn(num_tokens, num_q_heads * head_size + num_kv_heads * head_size * 2, dtype=torch.bfloat16)
-    q_weight = torch.randn(head_size, dtype=torch.bfloat16)
-    k_weight = torch.randn(head_size, dtype=torch.bfloat16)
+    qkv = torch.randn(
+        num_tokens, num_q_heads * head_size + num_kv_heads * head_size * 2, dtype=torch.bfloat16, device=device
+    )
+    q_weight = torch.randn(head_size, dtype=torch.bfloat16, device=device)
+    k_weight = torch.randn(head_size, dtype=torch.bfloat16, device=device)
     op = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope
     base = dict(
         qkv=qkv,
@@ -624,9 +663,9 @@ def test_split_qkv_rmsnorm_mrope_inline_cos_sin_invalid_args(device: str):
         rope_dim=rope_dim,
         has_gate=False,
     )
-    good_pos = torch.randint(0, 16, (3, num_tokens), dtype=torch.int64)
+    good_pos = torch.randint(0, 16, (3, num_tokens), dtype=torch.int64, device=device)
     good_inv = make_mrope_inv_freq(rope_dim, device)
-    cos_sin = torch.randn(3, num_tokens, rope_dim, dtype=torch.bfloat16)
+    cos_sin = torch.randn(3, num_tokens, rope_dim, dtype=torch.bfloat16, device=device)
     with pytest.raises(ValueError):
         op(cos_sin=cos_sin, positions=good_pos, inv_freq=good_inv, **base)
     with pytest.raises(ValueError):
@@ -640,11 +679,12 @@ def test_split_qkv_rmsnorm_mrope_inline_cos_sin_invalid_args(device: str):
     with pytest.raises(ValueError):
         op(positions=good_pos.to(torch.float32), inv_freq=good_inv, **base)
     with pytest.raises(ValueError):
-        op(positions=good_pos[:, ::-1], inv_freq=good_inv, **base)
-    with pytest.raises(ValueError):
         op(positions=good_pos, inv_freq=good_inv[:-1], **base)
-    with pytest.raises(ValueError):
-        # build on CPU: the NPU silently casts fp64 back to fp32
-        op(positions=good_pos, inv_freq=make_mrope_inv_freq(rope_dim, "cpu").to(torch.float64), **base)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="on the same device"):
+        op(positions=good_pos, inv_freq=make_mrope_inv_freq(rope_dim, "cpu"), **base)
+    with pytest.raises(ValueError, match="contiguous float32"):
+        op(positions=good_pos, inv_freq=good_inv.to(torch.bfloat16), **base)
+    with pytest.raises(ValueError, match="contiguous float32"):
         op(positions=good_pos, inv_freq=good_inv.repeat(2)[::2], **base)
+    with pytest.raises(ValueError, match="q_weight must be contiguous"):
+        op(positions=good_pos, inv_freq=good_inv, **(base | {"q_weight": q_weight.repeat(2)[::2]}))

@@ -24,9 +24,6 @@ from vllm_ascend.ops.triton.triton_utils import extract_slice, get_vectorcore_nu
 
 # Per-head-group tile sizing: target elements per (head_group, head_size) tile.
 _HEAD_TILE_ELEMS = 4096
-# Unified-buffer budget (bytes) for the v passthrough block size.
-_UB_BUDGET_BYTES = 87040
-_MAX_V_BLOCK_T = 32
 # Token block size for the position loads and inline cos/sin tiles.
 _COS_BLOCK = 8
 
@@ -38,7 +35,7 @@ def _pow2_floor(value: int, lo: int, hi: int) -> int:
     return block
 
 
-@triton.jit(do_not_specialize=["num_tokens", "positions_stride_0", "positions_stride_1", "tokens_per_core"])
+@triton.jit(do_not_specialize=["num_tokens", "positions_stride_0", "positions_stride_1", "grid_blocks"])
 def split_qkv_rmsnorm_mrope_kernel(
     in_qkv_ptr: torch.Tensor,
     q_weight_ptr: torch.Tensor,
@@ -55,7 +52,7 @@ def split_qkv_rmsnorm_mrope_kernel(
     num_tokens,
     positions_stride_0,
     positions_stride_1,
-    tokens_per_core,
+    grid_blocks,
     num_q_heads: tl.constexpr,
     num_kv_heads: tl.constexpr,
     head_size: tl.constexpr,
@@ -76,12 +73,13 @@ def split_qkv_rmsnorm_mrope_kernel(
     in_width: tl.constexpr,
     q_head_tile: tl.constexpr,
     kv_head_tile: tl.constexpr,
-    block_v: tl.constexpr,
     cos_block: tl.constexpr,
 ):
     core_idx = tl.program_id(0)
-    token_begin = core_idx * tokens_per_core
-    core_tokens = tl.maximum(0, tl.minimum(num_tokens - token_begin, tokens_per_core))
+    tokens_per_core = num_tokens // grid_blocks
+    extra_tokens = num_tokens % grid_blocks
+    token_begin = core_idx * tokens_per_core + tl.minimum(core_idx, extra_tokens)
+    core_tokens = tokens_per_core + tl.where(core_idx < extra_tokens, 1, 0)
 
     # Section masks are loop-invariant: compute them once per core.
     cos_offsets = tl.arange(0, half_rope_dim)
@@ -115,6 +113,7 @@ def split_qkv_rmsnorm_mrope_kernel(
     # share the same per-frequency section assignment.
     t_mask_full = tl.broadcast_to(t_mask.reshape(1, half_rope_dim), (2, half_rope_dim)).reshape(rope_dim)
     h_mask_full = tl.broadcast_to(h_mask.reshape(1, half_rope_dim), (2, half_rope_dim)).reshape(rope_dim)
+    w_mask_full = ~(t_mask_full | h_mask_full)
 
     if INLINE_COS_SIN:
         inv_freq_row = tl.load(inv_freq_ptr + cos_offsets).to(tl.float32)
@@ -165,10 +164,10 @@ def split_qkv_rmsnorm_mrope_kernel(
                 # Load each plane's full [cos | sin] row and select per frequency.
                 plane = num_tokens * rope_dim
                 cache_row = cos_sin_ptr + tok * rope_dim + tl.arange(0, rope_dim)
-                t_row = tl.load(cache_row)
-                h_row = tl.load(cache_row + plane)
-                w_row = tl.load(cache_row + 2 * plane)
-                combined = tl.where(t_mask_full, t_row, tl.where(h_mask_full, h_row, w_row))
+                t_row = tl.load(cache_row, mask=t_mask_full, other=0)
+                h_row = tl.load(cache_row + plane, mask=h_mask_full, other=0)
+                w_row = tl.load(cache_row + 2 * plane, mask=w_mask_full, other=0)
+                combined = t_row + h_row + w_row
                 cos_half = extract_slice(
                     combined.reshape(1, rope_dim),
                     offsets=(0, 0),
@@ -270,7 +269,7 @@ def split_qkv_rmsnorm_mrope_kernel(
                         q2 * cos_half + q1 * sin_half,
                     )
 
-            ## v copy: bf16 passthrough ##
+            ## v copy: passthrough in the input dtype ##
             in_v_tensor = tl.load(in_row + q_size + gate_size + kv_size + tl.arange(0, kv_size))
             tl.store(out_v_ptr + tok * kv_size + tl.arange(0, kv_size), in_v_tensor)
 
@@ -363,35 +362,34 @@ def triton_split_qkv_rmsnorm_mrope(
     inv_freq: torch.Tensor | None = None,
     rms_weight_offset: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    qkv = qkv.contiguous()
-    core_num = get_vectorcore_num()
-
+    if num_q_heads <= 0 or num_kv_heads <= 0 or head_size <= 0:
+        raise ValueError("num_q_heads, num_kv_heads, and head_size must be positive")
     q_size = num_q_heads * head_size
     kv_size = num_kv_heads * head_size
-
-    num_tokens = qkv.shape[0]
-
+    # The kernel uses unpadded tl.arange for head_size and the V row.
+    if head_size & (head_size - 1) or kv_size & (kv_size - 1):
+        raise ValueError("head_size and num_kv_heads must be powers of two")
     gate_size = q_size if has_gate else 0
     expected_qkv_width = q_size + gate_size + 2 * kv_size
     if qkv.ndim != 2 or qkv.shape[1] != expected_qkv_width:
         raise ValueError(f"qkv must have shape [num_tokens, {expected_qkv_width}]")
-    if q_weight.numel() != head_size or k_weight.numel() != head_size:
-        raise ValueError("q_weight and k_weight must each contain head_size elements")
+    num_tokens = qkv.shape[0]
     if (q_bias is None) != (k_bias is None):
         raise ValueError("q_bias and k_bias must be both present or both absent")
-    if q_bias is not None:
-        assert k_bias is not None
-        if q_bias.numel() != head_size or k_bias.numel() != head_size:
-            raise ValueError("q_bias and k_bias must each contain head_size elements")
+    for name, tensor in (("q_weight", q_weight), ("k_weight", k_weight), ("q_bias", q_bias), ("k_bias", k_bias)):
+        if tensor is not None and (
+            tensor.numel() != head_size or not tensor.is_contiguous() or tensor.device != qkv.device
+        ):
+            raise ValueError(f"{name} must be contiguous, contain head_size elements, and be on qkv.device")
 
     if rope_dim is None:
         rope_dim = head_size
-    if mrope_section is None or len(mrope_section) != 3:
-        raise ValueError("mrope_section must contain the T, H, and W sections")
+    if not 2 <= rope_dim <= head_size or rope_dim & (rope_dim - 1):
+        raise ValueError("rope_dim must be a power of two between 2 and head_size")
+    if mrope_section is None or len(mrope_section) != 3 or min(mrope_section) < 0:
+        raise ValueError("mrope_section must contain three non-negative T, H, and W section lengths")
     if 2 * sum(mrope_section) != rope_dim:
         raise ValueError("2 * sum(mrope_section) must equal rope_dim")
-    if rope_dim > head_size or rope_dim % 2 != 0:
-        raise ValueError("rope_dim must be even and no larger than head_size")
     IS_PARTIAL_ROPE = rope_dim != head_size
 
     has_inline_arg = positions is not None or inv_freq is not None
@@ -405,14 +403,6 @@ def triton_split_qkv_rmsnorm_mrope(
             raise ValueError("cos_sin must have shape [3, num_tokens, rope_dim]")
         if cos_sin.device != qkv.device:
             raise ValueError("cos_sin must be on the same device as qkv")
-        cos_sin = cos_sin.contiguous()
-
-    q_output = torch.empty(num_tokens, q_size, device=qkv.device, dtype=qkv.dtype)
-    k_output = torch.empty(num_tokens, kv_size, device=qkv.device, dtype=qkv.dtype)
-    v_output = torch.empty(num_tokens, kv_size, device=qkv.device, dtype=qkv.dtype)
-    gate_output = torch.empty(num_tokens, gate_size, device=qkv.device, dtype=qkv.dtype)
-    if num_tokens == 0:
-        return q_output, k_output, v_output, gate_output
 
     positions_stride_0 = 0
     positions_stride_1 = 0
@@ -425,8 +415,6 @@ def triton_split_qkv_rmsnorm_mrope(
             raise ValueError("positions and inv_freq must be on the same device as qkv")
         if positions.shape[1] != num_tokens:
             raise ValueError("positions.shape[1] must match qkv.shape[0]")
-        if positions.stride(0) <= 0 or positions.stride(1) <= 0:
-            raise ValueError("positions strides must be positive")
         if positions.dtype not in (torch.int32, torch.int64):
             raise ValueError("positions must use int32 or int64 indices")
         if inv_freq.numel() != rope_dim // 2:
@@ -436,9 +424,20 @@ def triton_split_qkv_rmsnorm_mrope(
         positions_stride_0 = positions.stride(0)
         positions_stride_1 = positions.stride(1)
 
+    q_output = qkv.new_empty((num_tokens, q_size))
+    k_output = qkv.new_empty((num_tokens, kv_size))
+    v_output = qkv.new_empty((num_tokens, kv_size))
+    gate_output = qkv.new_empty((num_tokens, gate_size))
+    if num_tokens == 0:
+        return q_output, k_output, v_output, gate_output
+
+    qkv = qkv.contiguous()
+    if cos_sin is not None:
+        cos_sin = cos_sin.contiguous()
+
     # Split tokens across vector cores; each core walks its contiguous token
     # range one token at a time, tiling heads into UB-sized groups.
-    grid_blocks = min(core_num, num_tokens)
+    grid_blocks = min(get_vectorcore_num(), num_tokens)
     tokens_per_core = (num_tokens + grid_blocks - 1) // grid_blocks
 
     q_head_tile = _pow2_floor(_HEAD_TILE_ELEMS // head_size, 1, num_q_heads)
@@ -447,7 +446,6 @@ def triton_split_qkv_rmsnorm_mrope(
     kv_head_tile = _pow2_floor(_HEAD_TILE_ELEMS // head_size, 1, num_kv_heads)
     while num_kv_heads % kv_head_tile != 0:
         kv_head_tile //= 2
-    block_v = _pow2_floor(_UB_BUDGET_BYTES // (4 * kv_size), 1, _MAX_V_BLOCK_T)
     cos_block = _pow2_floor(tokens_per_core, 1, _COS_BLOCK)
 
     has_bias = q_bias is not None
@@ -468,7 +466,7 @@ def triton_split_qkv_rmsnorm_mrope(
         num_tokens,
         positions_stride_0,
         positions_stride_1,
-        tokens_per_core,
+        grid_blocks,
         num_q_heads,
         num_kv_heads,
         head_size,
@@ -489,7 +487,6 @@ def triton_split_qkv_rmsnorm_mrope(
         expected_qkv_width,
         q_head_tile,
         kv_head_tile,
-        block_v,
         cos_block,
     )
 

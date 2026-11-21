@@ -1,0 +1,6 @@
+pr: 16335
+entries:
+  - category: performance
+    text: >-
+      Qwen3-VL and Qwen3.5 can compute compatible multimodal RoPE values inside the fused QKV and RMSNorm kernel,
+      avoiding the per-token cosine and sine cache lookup.

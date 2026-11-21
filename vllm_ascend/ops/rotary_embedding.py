@@ -650,14 +650,11 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Materialize this together with the module before ACL graph capture.
-        # The inline fused path must not copy an input from CPU on its first
-        # captured invocation.
-        self.register_buffer(
-            "inv_freq",
-            self._compute_inv_freq(self.base).to(dtype=torch.float32),
-            persistent=False,
-        )
+        # Scaled MRoPE uses the cache to preserve the cosine and sine scale.
+        # Initialize the unscaled frequencies before ACL graph capture.
+        self.inv_freq: torch.Tensor | None
+        inv_freq = None if self.scaling_factor is not None else self._compute_inv_freq(self.base)
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward_triton(
         self,
