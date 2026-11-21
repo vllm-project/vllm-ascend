@@ -78,7 +78,7 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "68000"
+      - "133120"
       - --max-num-batched-tokens
       - "8192"
       - --max-num-seqs
@@ -119,7 +119,7 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "68000"
+      - "133120"
       - --max-num-batched-tokens
       - "256"
       - --max-num-seqs
