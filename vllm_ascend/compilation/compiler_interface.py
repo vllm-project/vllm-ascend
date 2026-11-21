@@ -19,7 +19,7 @@ import copy
 import functools
 import os
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch.fx as fx
@@ -346,68 +346,16 @@ class AscendCompiler(CompilerInterface):
             return fusion_pass_compile(graph, example_inputs, compiler_config, compile_range, key)
 
     def load(self, handle, graph, example_inputs, graph_index, compile_range):
-        key, path = handle
-        # Cache file may be absent when the graph was skipped at save time (e.g. it
-        # contained Triton kernels whose kernel_side_table indices are process-local
-        # and cannot be serialized).  Fall back to a fresh compilation so the Triton
-        # kernels are properly registered in the current process.
-        if not path or not os.path.exists(path):
-            logger.info(
-                "npugraph_ex cache miss for key %s (file absent or not saved), recompiling",
-                key,
-            )
-            # Mirror the same pre-processing done in compile(): deepcopy the graph
-            # to prevent make_graph_return_tuple from mutating the caller's copy,
-            # and re-wrap FakeTensor inputs under the current fake mode to avoid
-            # "fake mode mismatch" in aot_module_simplified.
-            graph = copy.deepcopy(graph)
-            from torch._guards import detect_fake_mode
-
-            current_fake_mode = detect_fake_mode()
-            if current_fake_mode is not None:
-                example_inputs = [
-                    current_fake_mode.from_tensor(inp)
-                    if (
-                        isinstance(inp, torch.Tensor)
-                        and hasattr(inp, "fake_mode")
-                        and inp.fake_mode is not current_fake_mode
-                    )
-                    else inp
-                    for inp in example_inputs
-                ]
-            ascend_compilation_config = get_ascend_config().ascend_compilation_config
-            assert hasattr(self, "vllm_config")
-            compiled_fn, _ = npugraph_ex_compile(
-                graph,
-                example_inputs,
-                {},
-                self.vllm_config,
-                ascend_compilation_config,
-                compile_range,
-                key,
-                getattr(self, "cache_dir", None),
-            )
-            return compiled_fn
-
-        from npugraph_ex.npu_fx_compiler import _CompiledFxArtifacts, _CompiledFxGraph
-
-        with open(path) as f:
-            py_code = f.read()
-        artifacts = _CompiledFxArtifacts()
-        artifacts.py_code = py_code
-        logger.info("Loaded npugraph_ex compilation cache from %s", path)
-        compiled_fn = cast(Callable[..., Any], _CompiledFxGraph.load_artifacts(artifacts))
-
-        # The saved code was compiled from the graph after make_graph_return_tuple mutated it
-        # to return a flat tuple. If the original graph didn't return a tuple, we need to
-        # recreate the unflatten wrapper so callers receive the original output structure.
-        if not graph_returns_tuple(graph):
-            _inner_fn = compiled_fn
-
-            def compiled_fn(*args, **kwargs):
-                result = _inner_fn(*args, **kwargs)
-                if isinstance(result, (tuple, list)) and len(result) == 1:
-                    return result[0]
-                return result
-
+        # The saved Python code is an inner npugraph_ex/AOT kernel, not the
+        # backend callable. Loading it directly drops AOT runtime handling of
+        # input mutations, aliases and outputs. In particular, restarting a
+        # cached Qwen MTP service can silently change generation results.
+        # Rebuild the complete backend callable until its runtime wrapper can
+        # be serialized too. This changes startup work, not graph replay.
+        key, _ = handle
+        logger.info(
+            "Recompiling npugraph_ex graph %s to preserve its AOT runtime wrapper",
+            key,
+        )
+        compiled_fn, _ = self.compile(graph, example_inputs, {}, compile_range, key)
         return compiled_fn

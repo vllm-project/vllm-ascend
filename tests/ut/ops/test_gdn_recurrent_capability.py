@@ -38,6 +38,8 @@ def test_recurrent_gate_bias_materializes_after_meta_weight_load():
 
 @pytest.fixture
 def fusion_backend(monkeypatch):
+    monkeypatch.setattr(gdn, "_recurrent_gdn_package_is_current", lambda: True)
+    monkeypatch.setattr(gdn, "version", lambda _: "26.10.0+main.dev0058bb4")
     gdn._supports_fused_recurrent_gdn.cache_clear()
     monkeypatch.setattr(gdn, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
     backend = SimpleNamespace()
@@ -57,11 +59,11 @@ def test_fusion_probe_rejects_unsupported_resolved_ops(fusion_backend, op):
 
 
 @pytest.mark.parametrize("error", [ImportError, AttributeError, RuntimeError, TypeError, ValueError])
-def test_disabled_fusion_does_not_resolve_backend(fusion_backend, error):
+def test_fusion_probe_handles_backend_resolution_errors(fusion_backend, error):
     fusion_backend._get_direct_op = Mock(side_effect=error("backend unavailable"))
     assert not gdn._supports_fused_recurrent_gdn()
     assert not gdn._supports_fused_recurrent_gdn()
-    fusion_backend._get_direct_op.assert_not_called()
+    fusion_backend._get_direct_op.assert_called_once_with("npu_recurrent_gated_delta_rule")
 
 
 def test_fusion_probe_handles_uninspectable_callable(fusion_backend):
@@ -77,13 +79,12 @@ def test_fusion_probe_handles_uninspectable_callable(fusion_backend):
     assert not gdn._supports_fused_recurrent_gdn()
 
 
-def test_fusion_stays_disabled_with_extended_backend(fusion_backend):
+def test_fusion_probe_accepts_extended_backend(fusion_backend):
     fusion_backend._get_direct_op = Mock(return_value=_extended_op)
-    assert not gdn._supports_fused_recurrent_gdn()
-    fusion_backend._get_direct_op.assert_not_called()
+    assert gdn._supports_fused_recurrent_gdn()
 
 
-@pytest.mark.parametrize("op,expected", [(_extended_op, False), (lambda: None, False)])
+@pytest.mark.parametrize("op,expected", [(_extended_op, True), (lambda: None, False)])
 def test_fusion_probe_without_resolver(fusion_backend, monkeypatch, op, expected):
     monkeypatch.setattr(gdn, "recurrent_gated_delta_rule", op)
     assert gdn._supports_fused_recurrent_gdn() is expected
@@ -96,10 +97,10 @@ def test_fusion_probe_skips_backend_on_unsupported_hardware(fusion_backend, monk
     fusion_backend._get_direct_op.assert_not_called()
 
 
-def test_disabled_fusion_never_calls_backend(fusion_backend):
+def test_fusion_probe_does_not_hide_unexpected_errors(fusion_backend):
     fusion_backend._get_direct_op = Mock(side_effect=AssertionError("backend bug"))
-    assert not gdn._supports_fused_recurrent_gdn()
-    fusion_backend._get_direct_op.assert_not_called()
+    with pytest.raises(AssertionError, match="backend bug"):
+        gdn._supports_fused_recurrent_gdn()
 
 
 @pytest.mark.parametrize("device,expected", [("A3", True), ("A5", True), ("A2", False), ("_310P", False)])

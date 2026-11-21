@@ -4,7 +4,8 @@ entries:
     text: >-
       Added an integrated Qwen3.5-family GDN optimization path for A3, including
       per-forward MRoPE lookup reuse and fused attention output gating.
-      Corrected duplicate beta sigmoid in chunk GDN and disabled recurrent
-      preprocessing fusion pending numerical validation. Recurrent calls retain
-      external preprocessing and contiguous QKV with the installed FLA kernel.
+      Corrected duplicate beta sigmoid in chunk GDN and enabled recurrent
+      preprocessing fusion for the verified A3 FLA 0058bb4 wheel with input
+      contract checks and compatibility fallbacks. Rebuilds npugraph_ex cached
+      callables to preserve AOT runtime semantics.
     hardware: [A3]

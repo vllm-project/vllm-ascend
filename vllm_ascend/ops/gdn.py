@@ -16,8 +16,9 @@
 #
 
 from functools import lru_cache, wraps
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError, distribution, version
 from inspect import signature
+from pathlib import Path
 
 import torch
 import torch_npu
@@ -185,12 +186,32 @@ def _normalize_causal_cache_indices(cache_indices: torch.Tensor) -> torch.Tensor
     raise ValueError(f"GDN causal cache_indices must be 1D or 2D, got shape={tuple(cache_indices.shape)}")
 
 
+def _recurrent_gdn_package_is_current() -> bool:
+    """Reject source overrides that shadow the installed wheel's Python API."""
+    try:
+        import fla_npu
+
+        installed = distribution("flash-linear-attention-npu-a3").locate_file("fla_npu/__init__.py")
+        return Path(fla_npu.__file__).resolve() == Path(installed).resolve()
+    except (ImportError, PackageNotFoundError, AttributeError, TypeError, OSError):
+        return False
+
+
 @lru_cache(maxsize=1)
 def _supports_fused_recurrent_gdn() -> bool:
-    """Probe the installed FLA API once, without reading NPU tensor values."""
-    # Keep external BF16 preprocessing until fused rounding parity is validated.
-    return False
+    """Select only a version with a verified A3 launcher/state contract.
+
+    A matching Python signature alone cannot establish the native V2 ABI.
+    Unknown wheels keep the external-preprocessing compatibility path.
+    """
     if not get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_RECURRENT_FUSION):
+        return False
+    try:
+        if version("flash-linear-attention-npu-a3") != "26.10.0+main.dev0058bb4":
+            return False
+    except PackageNotFoundError:
+        return False
+    if not _recurrent_gdn_package_is_current():
         return False
     required = {"use_qk_l2norm_in_kernel", "use_gate_in_kernel", "use_beta_sigmoid_in_kernel", "A_log", "dt_bias"}
     # Hybrid wheels retain the old public wrapper signature while dispatching
@@ -214,9 +235,48 @@ def _supports_recurrent_qkv_views() -> bool:
     Expand this allowlist only after kernel and graph parity verification.
     """
     try:
-        return version("flash-linear-attention-npu-a3") == "26.10.0+main.dev2ef0735"
+        return version("flash-linear-attention-npu-a3") in {
+            "26.10.0+main.dev2ef0735",
+            "26.10.0+main.dev0058bb4",
+        }
     except PackageNotFoundError:
         return False
+
+
+def _recurrent_fusion_inputs_supported(
+    mixed_qkv: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    state: torch.Tensor,
+    num_k_heads: int,
+    num_v_heads: int,
+) -> bool:
+    """Check host-known metadata without synchronizing tensor contents."""
+    if not (num_k_heads > 0 and num_v_heads % num_k_heads == 0 and 1 <= num_v_heads // num_k_heads <= 16):
+        return False
+    if mixed_qkv.ndim != 2 or mixed_qkv.shape[1] != (2 * num_k_heads + num_v_heads) * 128:
+        return False
+    if mixed_qkv.dtype != torch.bfloat16 or state.dtype != torch.float32:
+        return False
+    if state.ndim != 4 or state.shape[1:] != (num_v_heads, 128, 128):
+        return False
+    for gate in (a, b):
+        if gate.ndim != 2 or gate.shape != (mixed_qkv.shape[0], num_v_heads):
+            return False
+        if gate.dtype not in (torch.bfloat16, torch.float32):
+            return False
+        if not gate.is_contiguous():
+            return False
+    for tensor in (mixed_qkv, a, b, state):
+        if tensor.device != mixed_qkv.device or any(s <= 0 for s in tensor.stride()):
+            return False
+    # State is a padded row-major pool. Reject overlapping/unsupported views.
+    return (
+        state.stride(-1) == 1
+        and state.stride(-2) >= 128
+        and state.stride(-3) >= 128 * state.stride(-2)
+        and state.stride(0) >= num_v_heads * state.stride(-3)
+    )
 
 
 def _flatten_recurrent_state_indices(
@@ -604,6 +664,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             and self.head_v_dim == 128
             and self.A_log.dtype == torch.float32
             and recurrent_dt_bias.dtype == torch.float32
+            and _recurrent_fusion_inputs_supported(
+                mixed_qkv, a, b, self.kv_cache[1], self.num_k_heads // self.tp_size, self.num_v_heads // self.tp_size
+            )
             and _supports_fused_recurrent_gdn()
         )
         allow_strided_qkv = fuse_recurrent and _supports_recurrent_qkv_views()
