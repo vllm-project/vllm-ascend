@@ -1,0 +1,7 @@
+pr: 21831
+entries:
+  - category: feature
+    text: >-
+      Added support for GLM-5.3-Flash with DFlash2 speculative decoding and
+      pipeline parallelism in Model Runner V2 using --pipeline-parallel-size
+      greater than 1.
