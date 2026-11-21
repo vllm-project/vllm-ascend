@@ -3,8 +3,9 @@
 
 ``vllm_ascend/ops/gdn.py`` carries a local per-sequence cap for the pre-V2
 AscendC recurrent kernel: that kernel consumed a single eight-token window and
-returned without writing output above it. ``fla_npu`` #1070 replaced it with an
-architecture-split, window-loop implementation that has no per-sequence cap.
+returned without writing output above it. ``fla_npu`` #1070 introduced a
+window-loop implementation that has no per-sequence cap, but not every wheel
+with architecture-specific headers contains that implementation.
 
 Nothing keeps the Python constant and the installed kernel in step: a fla_npu
 version bump changes the kernel silently, and the framework would keep routing
@@ -22,6 +23,7 @@ from __future__ import annotations
 import importlib.metadata
 from pathlib import Path
 
+import pytest
 import regex as re
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -83,8 +85,8 @@ gdn_fixed_spec_recurrent_fallback_min_query_len workaround.
 UNKNOWN_LAYOUT = """\
 Cannot tell which recurrent GDN kernel is installed.
 
-The operator directory {where} has neither an architecture directory (V2
-window-loop kernel) nor a header carrying MAX_MTP (legacy fixed window). A
+The operator directory {where} has no recognised kernel header, or its
+architecture headers disagree about the fixed window. A
 fla_npu layout change has silently disabled this guard: inspect the installed
 tree and update the detector rather than skipping the test.
 """
@@ -140,10 +142,19 @@ def _op_dirs(vendor: Path) -> list[Path]:
 
 
 def _window_of(op_dir: Path) -> int | None | object:
-    # Check the architecture directories first: a V2 tree that still shipped a
-    # root header would otherwise be read as the legacy fixed window.
-    if (op_dir / "arch22").is_dir() or (op_dir / "arch35").is_dir():
-        return None
+    # Architecture-specific headers override a possibly stale root header.
+    # The 26.10.0+feature A5 wheel has arch35 but still caps MAX_MTP at eight;
+    # the directory name alone does not identify a window-loop kernel.
+    arch_dirs = [op_dir / arch for arch in ("arch22", "arch35") if (op_dir / arch).is_dir()]
+    if arch_dirs:
+        windows: set[int | None] = set()
+        for arch_dir in arch_dirs:
+            header = arch_dir / f"{OP_NAME}.h"
+            if not header.is_file():
+                return UNKNOWN
+            match = _MAX_MTP.search(header.read_text(encoding="utf-8", errors="replace"))
+            windows.add(int(match.group(1)) if match is not None else None)
+        return windows.pop() if len(windows) == 1 else UNKNOWN
     header = op_dir / f"{OP_NAME}.h"
     if header.is_file():
         match = _MAX_MTP.search(header.read_text(encoding="utf-8", errors="replace"))
@@ -296,9 +307,10 @@ class TestDetector:
         (op_dir / f"{OP_NAME}.h").write_text("constexpr uint64_t MAX_MTP = 16;\n", encoding="utf-8")
         assert _window_of(op_dir) == 16
 
-    def test_architecture_directory_means_no_cap(self, tmp_path: Path) -> None:
+    def test_window_loop_header_overrides_stale_root_header(self, tmp_path: Path) -> None:
         op_dir = tmp_path / "op"
         (op_dir / "arch22").mkdir(parents=True)
+        (op_dir / "arch22" / f"{OP_NAME}.h").write_text("// window-loop kernel\n", encoding="utf-8")
         # A V2 tree that still shipped the dead header must still read as V2.
         (op_dir / f"{OP_NAME}.h").write_text("constexpr uint64_t MAX_MTP = 8;\n", encoding="utf-8")
         assert _window_of(op_dir) is None
@@ -306,7 +318,27 @@ class TestDetector:
     def test_arch35_alone_is_the_same_v2_kernel(self, tmp_path: Path) -> None:
         op_dir = tmp_path / "op"
         (op_dir / "arch35").mkdir(parents=True)
+        (op_dir / "arch35" / f"{OP_NAME}.h").write_text("// window-loop kernel\n", encoding="utf-8")
         assert _window_of(op_dir) is None
+
+    @pytest.mark.parametrize("arch", ["arch22", "arch35"])
+    def test_architecture_header_can_still_have_a_fixed_window(self, tmp_path: Path, arch: str) -> None:
+        op_dir = tmp_path / "op"
+        (op_dir / arch).mkdir(parents=True)
+        (op_dir / arch / f"{OP_NAME}.h").write_text("constexpr uint64_t MAX_MTP = 8;\n", encoding="utf-8")
+        assert _window_of(op_dir) == 8
+
+    def test_architecture_directory_without_header_is_unknown(self, tmp_path: Path) -> None:
+        op_dir = tmp_path / "op"
+        (op_dir / "arch35").mkdir(parents=True)
+        assert _window_of(op_dir) is UNKNOWN
+
+    def test_conflicting_architecture_headers_are_unknown(self, tmp_path: Path) -> None:
+        op_dir = tmp_path / "op"
+        for arch, source in (("arch22", "// window-loop kernel\n"), ("arch35", "constexpr uint64_t MAX_MTP = 8;\n")):
+            (op_dir / arch).mkdir(parents=True)
+            (op_dir / arch / f"{OP_NAME}.h").write_text(source, encoding="utf-8")
+        assert _window_of(op_dir) is UNKNOWN
 
     def test_unrecognised_layout_is_unknown(self, tmp_path: Path) -> None:
         op_dir = tmp_path / "op"
@@ -320,6 +352,7 @@ class TestDetector:
         (legacy / f"{OP_NAME}.h").write_text("constexpr uint64_t MAX_MTP = 8;\n", encoding="utf-8")
         v2 = tmp_path / "v2" / "op_impl" / "ai_core" / "tbe" / "impl" / "ascendc" / OP_NAME
         (v2 / "arch22").mkdir(parents=True)
+        (v2 / "arch22" / f"{OP_NAME}.h").write_text("// window-loop kernel\n", encoding="utf-8")
 
         assert _op_dirs(tmp_path / "legacy") == [legacy]
         assert _window_of(_op_dirs(tmp_path / "legacy")[0]) == 8
