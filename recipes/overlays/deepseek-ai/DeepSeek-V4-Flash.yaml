@@ -62,6 +62,12 @@ variants:
       - ascend_910b
     supported_frontends:
       - python
+    # The base recipe owns the spec-decoding mode allowlists, so no mode is
+    # selectable for this checkpoint yet; DSpark is fixed in the variant and
+    # the feature toggle is hidden until the core recipe lists the variant.
+    supported_features:
+      - tool_calling
+      - reasoning
     tp:
       ascend_910b: 8
     min_vllm_version: '0.32.0'
@@ -176,9 +182,9 @@ hardware_notes:
       HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME and TP_SOCKET_IFNAME per host.
       Set HCCL_BUFFSIZE=1024, HCCL_OP_EXPANSION_MODE=AIV, OMP_NUM_THREADS=10,
       TASK_QUEUE_ENABLE=1 and PYTORCH_NPU_ALLOC_CONF=expandable_segments:True.
-      DSpark k=7 is carried on the variant because the core recipe's
-      modes.dspark.variants does not list this checkpoint yet; move it back to
-      the dspark mode once the core recipe does.
+      DSpark k=7 is carried on the variant and its spec-decoding toggle is
+      hidden because the core recipe's modes.dspark.variants does not list this
+      checkpoint yet; move it back to the dspark mode once the core recipe does.
     link:
       label: vLLM Ascend DeepSeek-V4-Flash tutorial
       href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Flash.html
