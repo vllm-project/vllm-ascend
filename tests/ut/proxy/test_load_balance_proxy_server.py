@@ -190,6 +190,7 @@ def _create_mock_backend_app():
             return self._default
 
     queue = ScriptQueue()
+    received_requests: list[dict] = []
 
     def _dec_val(v):
         if isinstance(v, dict) and set(v.keys()) == {"__b64__"}:
@@ -205,7 +206,12 @@ def _create_mock_backend_app():
         data = await req.json()
         items = [_dec_val(it) for it in data.get("items", [])]
         queue.set([ScriptItem(**it) if isinstance(it, dict) else it for it in items])
+        received_requests.clear()
         return {"ok": True}
+
+    @app.get("/__requests__")
+    async def received():
+        return received_requests
 
     async def _gen_stream(item: ScriptItem):
         emitted = 0
@@ -221,7 +227,12 @@ def _create_mock_backend_app():
 
     @app.post("/v1/chat/completions")
     @app.post("/v1/completions")
+    @app.post("/v1/messages")
+    @app.post("/v1/responses")
     async def handle(req: Request):
+        received_requests.append(
+            {"path": req.url.path, "body": await req.json(), "request_id": req.headers.get("X-Request-Id")}
+        )
         item = queue.pop()
         if item.kind == "json":
             if isinstance(item.body, dict):
@@ -476,6 +487,30 @@ def test_recompute(proxy_server):
     assert b"recomputed" not in body
 
 
+@pytest.mark.parametrize("chat", [True, False])
+def test_nonstream_openai_recompute_preserves_prompt_and_budget(proxy_server, chat):
+    api = "chat/completions" if chat else "completions"
+    request = {"model": MODEL, "max_tokens": 10, "stream": False}
+    request.update({"messages": [{"role": "user", "content": "hello"}]} if chat else {"prompt": "hello"})
+    field = "message" if chat else "text"
+
+    def result(text, reason):
+        choice = {field: {"content": text} if chat else text, "stop_reason": reason}
+        return {"kind": "json", "body": {"choices": [choice], "usage": {"completion_tokens": 3}}}
+
+    _set_script(MOCK_DECODE_PORT, [result(" first", "recomputed"), result(" second", None)])
+    with httpx.Client(timeout=5) as client:
+        response = client.post(f"{proxy_server}/v1/{api}", json=request)
+        attempts = client.get(f"http://127.0.0.1:{MOCK_DECODE_PORT}/__requests__").json()
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert (choice[field]["content"] if chat else choice[field]) == " first second"
+    assert len(attempts) == 2
+    retry = attempts[1]["body"]
+    assert retry["max_tokens"] == 8
+    assert (retry["messages"][0]["content"] if chat else retry["prompt"]) == "hello first"
+
+
 def test_mid_stream_error(proxy_server):
     """Mid-stream error: proxy does not crash, partial content forwarded."""
     _set_script(
@@ -568,3 +603,105 @@ def test_usage_cached_tokens(proxy_server):
     assert st == 200
     # The proxy should have added cached_tokens to the usage chunk
     assert b"cached_tokens" in body
+
+
+@pytest.mark.parametrize("api", ["/messages", "/responses"])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_native_text_recompute_continues_over_http(proxy_server, api, streaming):
+    from tests.ut.proxy.test_load_balance_proxy_recompute import (
+        _assert_resumed_response,
+        _events,
+        _text_result,
+        _text_stream,
+        native_request,
+    )
+
+    request = native_request(api, streaming)
+    request["model"] = MODEL
+    partial = _text_result(api, "first-attempt", "prefix ", 5)
+    final = _text_result(api, "final-attempt", "suffix", 2, input_tokens=58)
+    progress = {"output_tokens": 5, "remaining_tokens": 112}
+    _set_script(
+        MOCK_PREFILL_PORT,
+        [
+            {"kind": "json", "body": {"kv_transfer_params": {"do_remote_prefill": True, "remote_block_ids": [block]}}}
+            for block in (1, 2)
+        ],
+    )
+    if streaming:
+        _set_script(
+            MOCK_DECODE_PORT,
+            [
+                {"kind": "stream", "chunks": _text_stream(api, partial, recompute=progress)},
+                {"kind": "stream", "chunks": _text_stream(api, final)},
+            ],
+        )
+    else:
+        partial["kv_transfer_params"] = {"ascend_pd_recompute": "ascend_pd_recompute_after_output", **progress}
+        _set_script(MOCK_DECODE_PORT, [{"kind": "json", "body": obj} for obj in (partial, final)])
+
+    path = f"/v1{api}"
+    with httpx.Client(timeout=5) as client:
+        result = client.post(f"{proxy_server}{path}", json=request)
+        prefill = client.get(f"http://127.0.0.1:{MOCK_PREFILL_PORT}/__requests__").json()
+        decode = client.get(f"http://127.0.0.1:{MOCK_DECODE_PORT}/__requests__").json()
+    assert result.status_code == 200
+    assert result.headers["content-type"] == ("text/event-stream; charset=utf-8" if streaming else "application/json")
+    events = _events(result.content) if streaming else None
+    _assert_resumed_response(api, events, result.content, "prefix suffix", ("prefix ", "suffix"))
+    assert len(prefill) == len(decode) == 2
+    assert all(attempt["path"] == path for attempt in prefill + decode)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_responses_review_fixes_over_http(proxy_server, streaming):
+    """Rejected requests must not consume backend scripts; the next valid request does."""
+    _set_script(
+        MOCK_PREFILL_PORT,
+        [
+            {
+                "kind": "json",
+                "body": {
+                    "kv_transfer_params": {"do_remote_decode": True},
+                    "usage": {"input_tokens_details": {"cached_tokens": 20}},
+                },
+            }
+        ],
+    )
+    result = {
+        "id": "resp_http",
+        "usage": {
+            "input_tokens": 160,
+            "output_tokens": 17,
+            "total_tokens": 177,
+            "input_tokens_details": {"cached_tokens": 114, "cached_tokens_per_turn": [100, 11, 3]},
+        },
+    }
+    raw = json.dumps({"type": "response.completed", "response": result} if streaming else result).encode()
+    if streaming:
+        raw = b"event: response.completed\ndata: " + raw + b"\n\n"
+    _set_script(MOCK_DECODE_PORT, [{"kind": "stream", "chunks": [raw[:19], raw[19:]]}])
+    with httpx.Client(timeout=15) as client:
+        for option, value in (("background", True), ("previous_response_id", "resp_other_instance")):
+            rejected = client.post(
+                f"{proxy_server}/v1/responses",
+                json={"model": MODEL, "input": "hi", "stream": streaming, option: value},
+            )
+            assert rejected.status_code == 400
+            assert rejected.json()["error"]["param"] == option
+        accepted = client.post(
+            f"{proxy_server}/v1/responses",
+            json={"model": MODEL, "input": "hi", "stream": streaming, "background": False},
+        )
+    assert accepted.status_code == 200
+    if streaming:
+        assert accepted.content.startswith(b"event: response.completed\n")
+        actual = json.loads(accepted.content.split(b"data: ", 1)[1])["response"]
+    else:
+        actual = accepted.json()
+    assert actual["id"] == "resp_http"
+    assert actual["usage"]["input_tokens_details"] == {
+        "cached_tokens": 34,
+        "cached_tokens_per_turn": [20, 11, 3],
+    }
+    assert actual["usage"]["total_tokens"] == 177

@@ -243,6 +243,14 @@
 #       a backend-neutral router configuration object or MoE factory extension
 #       hook that carries vision routing metadata into the Ascend runner.
 #
+# ** File: platform/patch_pd_recompute.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# AsyncLLM.generate carries decode recompute markers and token counts in native
+# SSE errors or partial JSON. The Responses serializer uses an SDK error event,
+# and the Messages request converter keeps the replayed assistant turn open.
+# The Messages response converter preserves recompute when partial tool JSON fails parsing.
+# Remove these hooks when upstream exposes a native preemption and retry contract.
+#
 # ** 9. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.find_longest_cache_hit_per_group`

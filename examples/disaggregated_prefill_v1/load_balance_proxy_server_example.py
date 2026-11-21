@@ -12,10 +12,22 @@
 # Features:
 # - Load balances requests to multiple prefiller and decoder servers.
 # - Supports OpenAI-compatible /v1/completions and /v1/chat/completions endpoints.
+# - Forwards native Anthropic /v1/messages and OpenAI /v1/responses APIs.
+# - Responses requests must be synchronous and supply their own conversation
+#   history; background and previous_response_id are not supported.
+# - Use Messages/Responses forwarding in this example for evaluation and
+#   testing. Responses requests can hit vLLM #64009 on backends that cannot
+#   enforce min_tokens=1 during prefill.
+# - Native recompute needs the matching Ascend decode scheduler and API server.
+#   On recompute the proxy selects P/D again with the same scheduling policy as Chat.
+#   It retries with the remaining token budget and continues plain text.
+#   After visible output, retries forward a new native event sequence with backend-local IDs and indices.
+#   Only visible text is fed back to the model.
 # - Streams responses from backend servers to clients.
 #
 # Prerequisites:
 # - Python 3.10+
+# - Both backends must expose any Messages/Responses API used through the proxy.
 # - Install dependencies:
 #     pip install fastapi<0.124.0 httpx uvicorn vllm
 #
@@ -127,7 +139,8 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from multiprocessing.managers import BaseManager
@@ -135,10 +148,19 @@ from pathlib import Path
 from typing import Any, cast
 
 import httpx
+from anyio import CancelScope
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.types import Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
+
+PD_RECOMPUTE_ARG = "ascend_pd_recompute"
+PD_RECOMPUTE_VERSION = "v1"
+PD_CONTINUE_MESSAGE = "ascend_pd_continue_message"
+PD_RECOMPUTE_RETRY = "ascend_pd_recompute_before_output"
+PD_RECOMPUTE_INTERRUPTED = "ascend_pd_recompute_after_output"
+NATIVE_STREAM_END_EVENTS = ("message_stop", "response.completed", "response.incomplete", "response.failed", "error")
 
 try:
     import uvloop  # type: ignore[import-not-found]
@@ -169,24 +191,26 @@ class InstanceInfo:
 TAINT_PRIORITY = 1e15
 
 
-def extract_cached_tokens(response_json: dict) -> int | None:
+def extract_cached_tokens(response_json: dict, *, details_key: str = "prompt_tokens_details") -> int | None:
     usage = response_json.get("usage") or {}
-    prompt_tokens_details = usage.get("prompt_tokens_details") or {}
-    cached_tokens = prompt_tokens_details.get("cached_tokens")
-    return cached_tokens if isinstance(cached_tokens, int) else 0
+    details = usage.get(details_key) or {}
+    cached = details.get("cached_tokens")
+    return cached if isinstance(cached, int) else 0
+
+
+def _write_cached_details(usage: dict, key: str, cached_tokens: int) -> dict:
+    details = usage.get(key)
+    if not isinstance(details, dict):
+        details = usage[key] = {}
+    details["cached_tokens"] = cached_tokens
+    return details
 
 
 def update_cached_tokens_in_chunk(chunk_json: dict, cached_tokens: int | None) -> bool:
-    if cached_tokens is None:
-        return False
     usage = chunk_json.get("usage")
-    if not isinstance(usage, dict):
+    if cached_tokens is None or not isinstance(usage, dict):
         return False
-    prompt_tokens_details = usage.get("prompt_tokens_details")
-    if not isinstance(prompt_tokens_details, dict):
-        prompt_tokens_details = {}
-    usage["prompt_tokens_details"] = prompt_tokens_details
-    prompt_tokens_details["cached_tokens"] = cached_tokens
+    _write_cached_details(usage, "prompt_tokens_details", cached_tokens)
     return True
 
 
@@ -871,6 +895,153 @@ def build_prefill_request(req_data: dict) -> dict:
     return payload
 
 
+def _api_kind(api: str) -> str:
+    endpoint = api.rstrip("/").rsplit("/", 1)[-1]
+    return endpoint if endpoint in ("messages", "responses") else "openai"
+
+
+def build_prefill_request_for_api(api: str, req_data: dict) -> dict:
+    payload = build_prefill_request(req_data)
+    if _api_kind(api) == "responses":
+        payload["max_output_tokens"] = 1
+        for name in ("max_tokens", "min_tokens", "max_completion_tokens"):
+            payload.pop(name, None)
+    return payload
+
+
+def extract_cached_tokens_for_api(api: str, response_json: dict) -> int | None:
+    kind = _api_kind(api)
+    if kind == "messages":
+        usage = response_json.get("usage") or {}
+        cached = usage.get("cache_read_input_tokens")
+        return cached if isinstance(cached, int) else 0
+    key = "input_tokens_details" if kind == "responses" else "prompt_tokens_details"
+    return extract_cached_tokens(response_json, details_key=key)
+
+
+def write_cached_tokens_for_api(api: str, chunk_json: dict, cached_tokens: int | None) -> bool:
+    kind = _api_kind(api)
+    if kind == "openai":
+        return update_cached_tokens_in_chunk(chunk_json, cached_tokens)
+    if cached_tokens is None:
+        return False
+    usage = chunk_json.get("usage")
+    if not isinstance(usage, dict):
+        response_obj = chunk_json.get("response" if kind == "responses" else "message")
+        usage = response_obj.get("usage") if isinstance(response_obj, dict) else None
+    if not isinstance(usage, dict):
+        return False
+    if kind == "messages":
+        input_tokens = usage.get("input_tokens")
+        previous_cached = usage.get("cache_read_input_tokens", 0)
+        if isinstance(input_tokens, int) and isinstance(previous_cached, int):
+            # Messages input_tokens excludes cache reads; preserve total input.
+            usage["input_tokens"] = input_tokens + previous_cached - cached_tokens
+        usage["cache_read_input_tokens"] = cached_tokens
+        return True
+    details = _write_cached_details(usage, "input_tokens_details", cached_tokens)
+    cached_per_turn = details.get("cached_tokens_per_turn")
+    # An empty list means per-turn accounting is unavailable; preserve it.
+    if isinstance(cached_per_turn, list) and cached_per_turn:
+        # Only the first turn is prefetched by P. Later tool turns run on D.
+        details["cached_tokens_per_turn"] = [cached_tokens, *cached_per_turn[1:]]
+        details["cached_tokens"] = sum(details["cached_tokens_per_turn"])
+    return True
+
+
+def _json_object(payload: bytes) -> dict | None:
+    try:
+        obj = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+@dataclass(frozen=True)
+class SSEFrame:
+    raw: bytes
+    lines: list[bytes]
+    data_indices: list[int]
+    data: dict | None
+    event: bytes | None
+    complete: bool = True
+
+    @classmethod
+    def parse(cls, frame: bytes, *, complete: bool = True) -> "SSEFrame":
+        lines = frame.splitlines(keepends=True)
+        data_indices = [index for index, line in enumerate(lines) if line.startswith(b"data:")]
+        payload = b"\n".join(lines[index][5:].strip() for index in data_indices)
+        event = next((line[6:].strip() for line in reversed(lines) if line.startswith(b"event:")), None)
+        return cls(frame, lines, data_indices, _json_object(payload), event, complete)
+
+    def encode(self) -> bytes:
+        first = self.data_indices[0]
+        ending = self.lines[first][len(self.lines[first].rstrip(b"\r\n")) :]
+        patched = b"data: " + json.dumps(self.data).encode("utf-8") + ending
+        return b"".join(
+            patched if index == first else line
+            for index, line in enumerate(self.lines)
+            if index == first or index not in self.data_indices
+        )
+
+
+class DecodeRecompute(Exception):
+    def __init__(self, signal: str, progress: dict | None = None, partial: dict | None = None):
+        super().__init__(signal)
+        self.signal = signal
+        self.progress = progress
+        self.partial = partial
+
+
+def _decode_recompute(obj: dict | None) -> DecodeRecompute | None:
+    if obj is None:
+        return None
+    transfer = obj.get("kv_transfer_params")
+    if isinstance(transfer, dict) and transfer.get(PD_RECOMPUTE_ARG) == PD_RECOMPUTE_INTERRUPTED:
+        return DecodeRecompute(PD_RECOMPUTE_INTERRUPTED, transfer, obj)
+    error = obj.get("error")
+    signals = (PD_RECOMPUTE_RETRY, PD_RECOMPUTE_INTERRUPTED)
+    if isinstance(error, dict):
+        message = error.get("message")
+    elif obj.get("type") == "error":
+        message = obj.get("message")
+        code = obj.get("code")
+        if code in signals and (not isinstance(message, str) or not message.startswith(f"{code}:")):
+            message = code
+    else:
+        return None
+    if isinstance(message, str):
+        signal, _, detail = message.partition(":")
+        if signal in signals:
+            progress = _json_object(detail.encode()) if detail else None
+            return DecodeRecompute(signal, progress)
+    return None
+
+
+class IncompleteBackendResponse(Exception):
+    """A P/D backend response lacks required data."""
+
+
+async def _split_sse_frames(chunks: AsyncIterator[bytes]) -> AsyncGenerator[SSEFrame, None]:
+    stream_buf = bytearray()
+    async for chunk in chunks:
+        stream_buf += chunk
+        while True:
+            boundaries = [
+                (offset, len(separator))
+                for separator in (b"\n\n", b"\r\n\r\n", b"\r\r")
+                if (offset := stream_buf.find(separator)) >= 0
+            ]
+            if not boundaries:
+                break
+            offset, size = min(boundaries)
+            frame = bytes(stream_buf[: offset + size])
+            del stream_buf[: offset + size]
+            yield SSEFrame.parse(frame)
+    if stream_buf:
+        yield SSEFrame.parse(bytes(stream_buf), complete=False)
+
+
 async def send_request_to_service(
     client: httpx.AsyncClient,
     endpoint: str,
@@ -879,7 +1050,7 @@ async def send_request_to_service(
     max_retries: int = 3,
     base_delay: float = 0.2,
 ):
-    req_data = build_prefill_request(req_data)
+    req_data = build_prefill_request_for_api(endpoint, req_data)
     headers = auth_headers(request_id)
     max_attempts = max(1, max_retries)
     for attempt in range(1, max_attempts + 1):
@@ -905,7 +1076,9 @@ async def stream_service_response(
     request_id: str,
     max_retries: int = 3,
     base_delay: float = 0.2,
-):
+    *,
+    native: bool = False,
+) -> AsyncGenerator[bytes, None]:
     headers = auth_headers(request_id)
     max_attempts = max(1, max_retries)
     req_data = req_data.copy()
@@ -927,18 +1100,15 @@ async def stream_service_response(
                     yield chunk
                 return
         except httpx.HTTPStatusError as exc:
+            if native and (recompute := _decode_recompute(_json_object(exc.response.content))):
+                raise recompute from exc
             if exc.response.status_code == 400 or attempt == max_attempts:
-                raise
-            logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
-        except httpx.RequestError as exc:
-            if first_chunk_sent:
-                logger.error("Streaming to client interrupted after response started: %s", exc)
-                return
-            if attempt == max_attempts:
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except Exception as exc:
             if first_chunk_sent:
+                if native:
+                    raise
                 logger.error("Streaming to client interrupted after response started: %s", exc)
                 return
             if attempt == max_attempts:
@@ -997,6 +1167,7 @@ async def assign_instances(
     else:
         prefiller = await runtime.schedule(pick_prefill, prefiller_score)
     prefiller_key = prefiller["key"]
+    decoder_key = None
 
     try:
         response = await send_request_to_service(
@@ -1007,26 +1178,22 @@ async def assign_instances(
             max_retries=args.max_retries,
             base_delay=args.retry_delay,
         )
-    except (Exception, asyncio.CancelledError):
-        await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
-        raise
-
-    response_json = response.json()
-    kv_transfer_params = response_json.get("kv_transfer_params", {})
-    if kv_transfer_params:
-        req_data["kv_transfer_params"] = kv_transfer_params
-    prefiller_cached_tokens = extract_cached_tokens(response_json)
-
-    decoder_key = None
-    try:
+        response_json = response.json()
+        kv_transfer_params = response_json.get("kv_transfer_params")
+        if kv_transfer_params:
+            req_data["kv_transfer_params"] = kv_transfer_params
+        prefiller_cached_tokens = extract_cached_tokens_for_api(api, response_json)
         decoder = await runtime.schedule("pick_decoder", decoder_score)
         decoder_key = decoder["key"]
         prefiller_client = await runtime.get_client(ServerRole.PREFILL, prefiller_key)
         decoder_client = await runtime.get_client(ServerRole.DECODE, decoder_key)
     except (Exception, asyncio.CancelledError):
-        await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
-        if decoder_key is not None:
-            await runtime.schedule("release_decoder", decoder_key, decoder_score)
+        with CancelScope(shield=True):
+            await _abort_prefill_selection(
+                runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request
+            )
+            if decoder_key is not None:
+                await runtime.schedule("release_decoder", decoder_key, decoder_score)
         raise
 
     logger.debug("Using %s %s", prefiller_client.base_url, decoder_client.base_url)
@@ -1057,228 +1224,451 @@ async def reassign_instances(
     return await assign_instances(api, req_data, request_length, is_initial_request=False)
 
 
-async def _replay_first_chunk(first_chunk: bytes, gen: Any):
-    """Replay a pre-read first chunk, then stream the rest of ``gen``.
+def _encode_sse_event(data: dict) -> bytes:
+    return b"event: " + data["type"].encode() + b"\n" + encode_response_chunk(data, True)
 
-    ``handle_completions_impl`` pre-reads the first chunk of the decode stream
-    before committing the ASGI response head so an initial decode error can be
-    returned with the real HTTP status; this replays that chunk so the client
-    still receives the full stream.
-    """
-    if first_chunk:
-        yield first_chunk
-    async for chunk in gen:
-        yield chunk
+
+def _native_stream_error(api: str, signal: str, sequence: int) -> bytes:
+    error = _native_decode_error(api, signal, _recompute_failure_message(signal))
+    if _api_kind(api) != "messages":
+        error = {**error["error"], "type": "error", "sequence_number": sequence}
+    return _encode_sse_event(error)
+
+
+def _delta_text(event: dict) -> str:
+    delta = event.get("delta")
+    if event.get("type") == "content_block_delta" and isinstance(delta, dict) and delta.get("type") == "text_delta":
+        delta = delta.get("text")
+    elif event.get("type") != "response.output_text.delta":
+        return ""
+    return delta if isinstance(delta, str) else ""
+
+
+def _native_decode_error(api: str, signal: str, message: str) -> dict:
+    if _api_kind(api) == "messages":
+        error_type = "overloaded_error" if signal == PD_RECOMPUTE_RETRY else "api_error"
+        return {"type": "error", "error": {"type": error_type, "message": message}}
+    return {"error": {"type": "server_error", "code": signal, "message": message, "param": None}}
+
+
+def _recompute_failure_message(signal: str) -> str:
+    if signal == PD_RECOMPUTE_INTERRUPTED:
+        return "Decode recompute interrupted generation; the proxy cannot resume the partial response."
+    return "Decode recompute could not restart this request. Retry the original request if it is safe to repeat."
+
+
+def _new_response_message(status: str, content: list[dict]) -> dict:
+    return {
+        "type": "message",
+        "id": f"msg_{uuid.uuid4().hex}",
+        "role": "assistant",
+        "status": status,
+        "content": content,
+    }
+
+
+def _visible_blocks(kind: str, obj: dict) -> Iterator[dict]:
+    if kind == "messages":
+        blocks = obj.get("content", [])
+        expected = "text"
+    else:
+        blocks = [
+            part for item in obj.get("output", []) if item.get("type") == "message" for part in item.get("content", [])
+        ]
+        expected = "output_text"
+    for block in blocks:
+        if block.get("type") == expected and isinstance(block.get("text"), str):
+            yield block
+
+
+def _continue_native_prompt(kind: str, history: Any, prefix: str) -> list | None:
+    if isinstance(history, str):
+        history = [{"role": "user", "content": history}]
+    if not isinstance(history, list):
+        return None
+    last = history[-1] if history and isinstance(history[-1], dict) else {}
+    assistant = last.get("role") == "assistant"
+    if kind == "messages":
+        if not assistant:
+            return [*history, {"role": "assistant", "content": prefix}]
+        content = last.get("content")
+        if isinstance(content, str):
+            return [*history[:-1], {**last, "content": content + prefix}]
+        if isinstance(content, list):
+            return [*history[:-1], {**last, "content": [*content, {"type": "text", "text": prefix}]}]
+        return None
+
+    part = {"type": "output_text", "text": prefix, "annotations": []}
+    if assistant and last.get("type") == "message" and last.get("status") in ("in_progress", "incomplete"):
+        content = last.get("content")
+        if isinstance(content, list) and len(content) == 1 and content[0].get("type") == "output_text":
+            block = content[0]
+            return [*history[:-1], {**last, "content": [{**block, "text": block["text"] + prefix}]}]
+    # The Responses renderer reads the first text part of a partial assistant item.
+    return [*history, _new_response_message("in_progress", [part])]
+
+
+class NativeStream:
+    """Forward backend frames and collect only visible text for the retry input."""
+
+    def __init__(self, decode: "DecodeRequest"):
+        self.decode = decode
+        self.sent = False
+        self.sequence = -1
+
+    async def frames(self, chunks: AsyncIterator[bytes]) -> AsyncGenerator[bytes, None]:
+        resumed = self.sent
+        pending: list[bytes] = []
+        pending_bytes = 0
+        committed = False
+        terminal = False
+        async with aclosing(_split_sse_frames(chunks)) as frames:
+            async for frame in frames:
+                data = frame.data or {}
+                event = data.get("type")
+                if (event == "error" or frame.event == b"error") and (exc := _decode_recompute(data)):
+                    if committed and exc.signal == PD_RECOMPUTE_RETRY:
+                        raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED)
+                    raise exc
+                if event == "content_block_start" and data.get("content_block", {}).get("type") == "text":
+                    self.decode.prefix += data["content_block"].get("text", "")
+                self.decode.prefix += _delta_text(data)
+                patched = write_cached_tokens_for_api(self.decode.api, data, self.decode.info.prefiller_cached_tokens)
+                raw = frame.encode() if patched else frame.raw
+                keepalive = event == "ping" or (
+                    frame.data is None and all(not line.strip() or line.startswith(b":") for line in frame.lines)
+                )
+                if not committed and (
+                    keepalive or event in ("message_start", "response.created", "response.in_progress")
+                ):
+                    if not keepalive or pending_bytes + len(raw) <= 64 * 1024:
+                        pending.append(raw)
+                        pending_bytes += len(raw)
+                    continue
+                for header in pending:
+                    yield header
+                pending.clear()
+                committed = True
+                self.sequence = data.get("sequence_number", self.sequence)
+                terminal |= event in NATIVE_STREAM_END_EVENTS
+                yield raw
+        if resumed and not terminal:
+            raise IncompleteBackendResponse("Decode stream ended without a terminal event.")
+        for header in pending:
+            yield header
+
+
+class DecodeStreamingResponse(StreamingResponse):
+    def __init__(self, first_frame: bytes, frames: AsyncGenerator[bytes, None], media_type: str):
+        self.frames = frames
+        self.forward = self._forward(first_frame)
+        super().__init__(self.forward, media_type=media_type)
+
+    async def _forward(self, first_frame: bytes) -> AsyncGenerator[bytes, None]:
+        async with aclosing(self.frames):
+            if first_frame:
+                yield first_frame
+            async for frame in self.frames:
+                yield frame
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with CancelScope(shield=True):
+                async with aclosing(self.frames):
+                    await self.forward.aclose()
+
+
+class ChatOutput:
+    """Decode Chat/Completions choices and prepare their continuation prompt."""
+
+    def __init__(self, req_data: dict, cached_tokens: int | None):
+        self.request = req_data
+        self.messages = req_data.get("messages")
+        self.prompt = req_data.get("prompt", self.messages[0].get("content", "") if self.messages else "")
+        self.max_tokens = req_data.get("max_tokens", 16)
+        self.cached_tokens = cached_tokens
+        self.text = ""
+        self.tokens = 0
+        self.retries = 0
+        self.started = False
+
+    async def frames(self, chunks: AsyncIterator[bytes], stream: bool) -> AsyncGenerator[bytes, None]:
+        async for chunk in chunks:
+            if not self.started:
+                # Let the HTTP handler commit the response after the first upstream read,
+                # even when that chunk is a recompute marker and produces no client text.
+                self.started = True
+                yield b""
+            try:
+                line = chunk.decode("utf-8").strip()
+                if not line:
+                    continue
+                is_sse = line.startswith("data: ")
+                obj = json.loads(line.removeprefix("data: ") if is_sse else line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                yield chunk
+                continue
+            choices = obj.get("choices", [])
+            if (not choices or not stream) and update_cached_tokens_in_chunk(obj, self.cached_tokens):
+                chunk = encode_response_chunk(obj, is_sse)
+            if not choices:
+                yield chunk
+                continue
+            choice = choices[0]
+            self.text += (
+                (choice.get("delta") or {}).get("content")
+                or (choice.get("message") or {}).get("content")
+                or choice.get("text")
+                or ""
+            )
+            self.tokens += 1 if stream else obj.get("usage", {}).get("completion_tokens", 0)
+            if choice.get("stop_reason") == "recomputed":
+                self.retries += 1
+                if self.messages is not None:
+                    self.messages[0]["content"] = (
+                        self.prompt + ([{"type": "text", "text": self.text}] if self.text else [])
+                        if isinstance(self.prompt, list)
+                        else (self.prompt or "") + self.text
+                    )
+                else:
+                    self.request["prompt"] = self.prompt + self.text
+                self.request["max_tokens"] = self.max_tokens - self.tokens + self.retries
+                raise DecodeRecompute(PD_RECOMPUTE_RETRY)
+            if self.retries and not stream:
+                if self.messages is not None:
+                    choice["message"]["content"] = self.text
+                else:
+                    choice["text"] = self.text
+                chunk = encode_response_chunk(obj, is_sse)
+            yield chunk
+
+
+class DecodeRequest:
+    """Keep one scheduled request alive across decode attempts."""
+
+    def __init__(self, api: str, req_data: dict, info: InstanceInfo):
+        self.api = api
+        self.kind = _api_kind(api)
+        self.req_data = req_data
+        self.info = info
+        self.runtime = get_runtime()
+        self.args = get_global_args()
+        self.history_key = "messages" if self.kind == "messages" else "input"
+        self.history = req_data.get(self.history_key)
+        self.prefill_released = False
+        self.prefix = ""
+
+    async def release_prefill_once(self) -> None:
+        if not self.prefill_released:
+            await self.runtime.schedule("release_prefill_kv", self.info.prefiller_key, self.info.prefiller_score)
+            self.prefill_released = True
+
+    async def chunks(self) -> AsyncGenerator[bytes, None]:
+        client = await self.runtime.get_client(ServerRole.DECODE, self.info.decoder_key)
+        payload = self.req_data
+        if self.kind != "openai":
+            payload = {
+                **payload,
+                "vllm_xargs": {**(payload.get("vllm_xargs") or {}), PD_RECOMPUTE_ARG: PD_RECOMPUTE_VERSION},
+            }
+        async with aclosing(
+            stream_service_response(
+                client,
+                self.api,
+                payload,
+                request_id=self.info.request_id,
+                max_retries=self.args.max_retries,
+                base_delay=self.args.retry_delay,
+                native=self.kind != "openai",
+            )
+        ) as upstream:
+            async for chunk in upstream:
+                if chunk:
+                    await self.release_prefill_once()
+                yield chunk
+
+    async def retry(self, recompute: DecodeRecompute) -> bool:
+        if recompute.signal == PD_RECOMPUTE_INTERRUPTED:
+            progress = recompute.progress or {}
+            remaining = progress.get("remaining_tokens")
+            if type(remaining) is not int or remaining <= 0:
+                return False
+            budget_key = "max_tokens" if self.kind == "messages" else "max_output_tokens"
+            if self.prefix:
+                history = _continue_native_prompt(self.kind, self.history, self.prefix)
+                if history is None:
+                    return False
+                self.req_data[self.history_key] = history
+                if self.kind == "messages":
+                    self.req_data["vllm_xargs"] = {
+                        **(self.req_data.get("vllm_xargs") or {}),
+                        PD_CONTINUE_MESSAGE: PD_RECOMPUTE_VERSION,
+                    }
+            self.req_data[budget_key] = remaining
+
+        await self.release_prefill_once()
+        if self.kind != "openai":
+            self.req_data.pop("kv_transfer_params", None)
+        request_length = len(json.dumps(self.req_data).encode("utf-8"))
+        self.info = await reassign_instances(
+            self.api, self.req_data, request_length, self.info, previous_prefiller_kv_released=True
+        )
+        self.prefill_released = False
+        return True
+
+    def json_body(self, body: bytes) -> bytes:
+        obj = _json_object(body)
+        if recompute := _decode_recompute(obj):
+            raise recompute
+        if obj is None:
+            raise IncompleteBackendResponse("Decode backend did not return a complete JSON response.")
+        if self.prefix:
+            if self.kind == "messages":
+                blocks = obj["content"]
+                if not blocks or blocks[0].get("type") != "text":
+                    blocks.insert(0, {"type": "text", "text": ""})
+            else:
+                output = obj["output"]
+                if not output or output[0].get("type") != "message":
+                    status = "incomplete" if obj.get("status") == "incomplete" else "completed"
+                    output.insert(0, _new_response_message(status, []))
+                blocks = output[0]["content"]
+                if not blocks or blocks[0].get("type") != "output_text":
+                    blocks.insert(0, {"type": "output_text", "text": "", "annotations": []})
+            blocks[0]["text"] = self.prefix + blocks[0]["text"]
+        if write_cached_tokens_for_api(self.api, obj, self.info.prefiller_cached_tokens) or self.prefix:
+            return encode_response_chunk(obj, False)
+        return body
+
+    async def response_chunks(self, stream: bool) -> AsyncGenerator[bytes, None]:
+        state = NativeStream(self) if stream and self.kind != "openai" else None
+        chat = None
+        try:
+            if self.kind == "openai":
+                chat = ChatOutput(self.req_data, self.info.prefiller_cached_tokens)
+            while True:
+                try:
+                    async with aclosing(self.chunks()) as chunks:
+                        if chat is not None:
+                            output = chat.frames(chunks, stream)
+                        elif state is not None:
+                            output = state.frames(chunks)
+                        else:
+                            body = b"".join([chunk async for chunk in chunks])
+                            yield self.json_body(body)
+                            return
+                        async with aclosing(output) as frames:
+                            async for frame in frames:
+                                if state is not None:
+                                    state.sent = True
+                                yield frame
+                        return
+                except DecodeRecompute as exc:
+                    if exc.partial:
+                        self.prefix += "".join(block["text"] for block in _visible_blocks(self.kind, exc.partial))
+                    if not await self.retry(exc):
+                        raise
+                    if state is not None and not state.sent:
+                        state = NativeStream(self)
+        except Exception as exc:
+            if chat is not None and chat.started:
+                logger.exception("Chat decode interrupted after response started")
+                return
+            if (
+                state is None
+                or not state.sent
+                or not isinstance(
+                    exc, (DecodeRecompute, httpx.RequestError, httpx.HTTPStatusError, IncompleteBackendResponse)
+                )
+            ):
+                raise
+            yield _native_stream_error(self.api, PD_RECOMPUTE_INTERRUPTED, state.sequence + 1)
+        finally:
+            with CancelScope(shield=True):
+                await _finish_instance(self.runtime, self.info, release_prefill_kv=not self.prefill_released)
+
+
+async def _handle_decode(api: str, req_data: dict, instance_info: InstanceInfo) -> Response:
+    decode = DecodeRequest(api, req_data, instance_info)
+    stream = bool(req_data.get("stream", False))
+    frames = decode.response_chunks(stream)
+    if not stream and decode.kind != "openai":
+        async with aclosing(frames):
+            return Response(await anext(frames), media_type="application/json")
+
+    first_frame = await anext(frames, None)
+    media_type = "text/event-stream; charset=utf-8" if stream else "application/json"
+    if first_frame is None:
+        return Response(b"", media_type=media_type)
+    return DecodeStreamingResponse(first_frame, frames, media_type)
 
 
 async def handle_completions_impl(api: str, request: Request):
-    runtime = get_runtime()
     args = get_global_args()
-    request_released = False
     try:
         req_data = await request.json()
+        if _api_kind(api) == "responses":
+            # Reject before scheduling: P must finish before D starts, and
+            # response history is local to each backend instance.
+            unsupported = None
+            if req_data.get("background"):
+                unsupported = "background"
+            elif req_data.get("previous_response_id") is not None:
+                unsupported = "previous_response_id"
+            if unsupported is not None:
+                return JSONResponse(
+                    {
+                        "error": {
+                            "message": (
+                                f"The PD proxy does not support {unsupported}. "
+                                "Use synchronous requests with explicit input history."
+                            ),
+                            "type": "invalid_request_error",
+                            "param": unsupported,
+                            "code": "unsupported_parameter",
+                        }
+                    },
+                    status_code=400,
+                )
         if args.enable_prefill_affinity and (session_id := request.headers.get("X-Session-Id")):
             req_data["user"] = session_id
         if request_id := request.headers.get("X-Request-Id"):
             req_data["request_id"] = request_id
         req_body = await request.body()
         request_length = len(req_body)
-        instance_info = await assign_instances(api, req_data, request_length, is_initial_request=True)
-        stream_flag = bool(req_data.get("stream", False))
-        chat_flag = "messages" in req_data
-
-        if "prompt" in req_data:
-            origin_prompt = req_data["prompt"]
-        elif chat_flag:
-            messages = req_data["messages"]
-            origin_prompt = messages[0].get("content", "")
-        else:
-            origin_prompt = ""
-        origin_max_tokens = req_data.get("max_tokens", 16)
-
-        # Pre-open the decode response BEFORE committing the ASGI 200 head so an
-        # initial decode 4xx/5xx/connection failure can be returned with the real
-        # HTTP status code instead of an empty 200. On success the opened stream
-        # (first chunk already read) is handed to generate_stream via these vars.
-        preopened_gen = None
-        preopened_first = b""
-        decoder_client = await runtime.get_client(ServerRole.DECODE, instance_info.decoder_key)
-        preopened_gen = stream_service_response(
-            decoder_client,
-            api,
-            req_data,
-            request_id=instance_info.request_id,
-            max_retries=args.max_retries,
-            base_delay=args.retry_delay,
-        )
+        info = await assign_instances(api, req_data, request_length, is_initial_request=True)
         try:
-            preopened_first = await preopened_gen.__anext__()
-        except asyncio.CancelledError:
-            await _finish_instance(runtime, instance_info, release_prefill_kv=True)
-            request_released = True
-            raise
-        except StopAsyncIteration:
-            preopened_first = b""
-        except httpx.HTTPStatusError as exc:
-            await _finish_instance(runtime, instance_info, release_prefill_kv=True)
-            request_released = True
-            return Response(
-                content=exc.response.content, status_code=exc.response.status_code, media_type="application/json"
-            )
-        except httpx.RequestError as exc:
-            await _finish_instance(runtime, instance_info, release_prefill_kv=True)
-            request_released = True
+            return await _handle_decode(api, req_data, info)
+        except DecodeRecompute as exc:
             return JSONResponse(
-                status_code=502,
-                content={
+                _native_decode_error(api, exc.signal, _recompute_failure_message(exc.signal)),
+                status_code=503 if exc.signal == PD_RECOMPUTE_RETRY else 502,
+            )
+        except (httpx.RequestError, IncompleteBackendResponse) as exc:
+            logger.warning("Decode failed for %s: %s", info.request_id, exc)
+            if _api_kind(api) == "openai":
+                error = {
                     "error": {
                         "message": f"Decode backend request to {api} failed: {exc}",
                         "type": "upstream_error",
                         "code": "decode_backend_unavailable",
                     }
-                },
+                }
+            else:
+                error = _native_decode_error(api, "backend_unavailable", "The backend did not complete the request.")
+            return JSONResponse(error, status_code=502)
+        except httpx.HTTPStatusError as exc:
+            return Response(
+                content=exc.response.content, status_code=exc.response.status_code, media_type="application/json"
             )
-
-        async def generate_stream():
-            nonlocal instance_info
-            nonlocal request_released
-            nonlocal preopened_gen, preopened_first
-            generated_token = ""
-            released_kv = False
-            retry_count = 0
-            retry = True
-            completion_tokens = 0
-            reported_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
-
-            async def release_prefill_kv_once() -> None:
-                nonlocal released_kv
-                if not released_kv:
-                    await runtime.schedule(
-                        "release_prefill_kv", instance_info.prefiller_key, instance_info.prefiller_score
-                    )
-                    released_kv = True
-
-            try:
-                while retry:
-                    retry = False
-                    if preopened_gen is not None:
-                        # First iteration: consume the decode stream pre-opened by the
-                        # caller so initial 4xx/5xx could be returned with the real status.
-                        gen = _replay_first_chunk(preopened_first, preopened_gen)
-                        preopened_gen = None
-                    else:
-                        decoder_client = await runtime.get_client(ServerRole.DECODE, instance_info.decoder_key)
-                        gen = stream_service_response(
-                            decoder_client,
-                            api,
-                            req_data,
-                            request_id=instance_info.request_id,
-                            max_retries=args.max_retries,
-                            base_delay=args.retry_delay,
-                        )
-                    async for chunk in gen:
-                        if not released_kv and chunk:
-                            await release_prefill_kv_once()
-                        try:
-                            chunk_str = chunk.decode("utf-8").strip()
-                        except UnicodeDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk)
-                            yield chunk
-                            continue
-                        if not chunk_str:
-                            continue
-                        is_sse = chunk_str.startswith("data: ")
-                        if is_sse:
-                            chunk_str = chunk_str[len("data: ") :]
-                        try:
-                            chunk_json = json.loads(chunk_str)
-                        except json.JSONDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk_str)
-                            yield chunk
-                            continue
-                        choices = chunk_json.get("choices", [])
-                        if not choices or not stream_flag:
-                            if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
-                                chunk = encode_response_chunk(chunk_json, is_sse)
-                                if not choices:
-                                    yield chunk
-                                    continue
-
-                        choice = choices[0]
-                        delta = choice.get("delta") or {}
-                        message = choice.get("message") or {}
-                        content = delta.get("content") or message.get("content") or choice.get("text") or ""
-                        generated_token += content
-
-                        stop_reason = choice.get("stop_reason")
-                        usage = chunk_json.get("usage", {})
-                        completion_tokens = (
-                            (completion_tokens + 1)
-                            if stream_flag
-                            else (completion_tokens + usage.get("completion_tokens", 0))
-                        )
-                        if stop_reason == "recomputed":
-                            retry = True
-                            retry_count += 1
-                            if chat_flag:
-                                messages[0]["content"] = (
-                                    origin_prompt
-                                    + ([{"type": "text", "text": generated_token}] if generated_token else [])
-                                    if isinstance(origin_prompt, list)
-                                    else (origin_prompt or "") + generated_token
-                                )
-                            else:
-                                req_data["prompt"] = origin_prompt + generated_token
-                            req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
-                            tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
-                            instance_info = await reassign_instances(
-                                api,
-                                req_data,
-                                tmp_request_length,
-                                instance_info,
-                                previous_prefiller_kv_released=released_kv,
-                            )
-                            released_kv = False
-                            break
-                        if retry_count > 0 and not stream_flag:
-                            if chat_flag:
-                                choice["message"]["content"] = generated_token
-                            else:
-                                choice["text"] = generated_token
-                            chunk = encode_response_chunk(chunk_json, is_sse)
-                        yield chunk
-            except asyncio.CancelledError:
-                logger.warning(
-                    "Streaming from decoder %s:%s was cancelled; releasing request %s resources",
-                    instance_info.decoder_host,
-                    instance_info.decoder_port,
-                    instance_info.request_id,
-                )
-                raise
-            except Exception as exc:
-                logger.error(
-                    "Error during streaming from decoder %s:%s: %s while handling request %s; releasing prefiller KV",
-                    instance_info.decoder_host,
-                    instance_info.decoder_port,
-                    exc,
-                    instance_info.request_id,
-                )
-            finally:
-                await _finish_instance(runtime, instance_info, release_prefill_kv=not released_kv)
-                released_kv = True
-                request_released = True
-
-        media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
-        return StreamingResponse(generate_stream(), media_type=media_type)
     except Exception as e:
         import traceback
 
         exc_info = sys.exc_info()
         print(f"Error occurred in disagg prefill proxy server - {api} endpoint")
         print("".join(traceback.format_exception(*exc_info)))
-        if not request_released and "instance_info" in locals():
-            await _finish_instance(runtime, instance_info, release_prefill_kv=True)
-            request_released = True
         if isinstance(e, httpx.HTTPStatusError) and e.response is not None:
             try:
                 err_body = e.response.json()
@@ -1343,6 +1733,18 @@ async def handle_completions(request: Request):
 @with_cancellation
 async def handle_chat_completions(request: Request):
     return await handle_completions_impl("/chat/completions", request)
+
+
+@app.post("/v1/messages")
+@with_cancellation
+async def handle_anthropic_messages(request: Request):
+    return await handle_completions_impl("/messages", request)
+
+
+@app.post("/v1/responses")
+@with_cancellation
+async def handle_openai_responses(request: Request):
+    return await handle_completions_impl("/responses", request)
 
 
 async def handle_models_impl():

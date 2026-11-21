@@ -47,6 +47,12 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     DyntraLBPolicyMixin,
     print_scheduler_summary,
 )
+from vllm_ascend.core.pd_recompute import (
+    PD_RECOMPUTE_ARG,
+    PD_RECOMPUTE_INTERRUPTED,
+    PD_RECOMPUTE_RETRY,
+    PD_RECOMPUTE_VERSION,
+)
 from vllm_ascend.core.scheduler_output import make_cached_request_data
 from vllm_ascend.utils import get_ascend_config, vllm_version_is
 
@@ -89,6 +95,7 @@ class RecomputeSchedulerConfig(SchedulerConfig):
 class RecomputeReqInfo:
     request_id: str
     client_index: int
+    pd_recompute: dict[str, str | int] | None = None
 
 
 @dataclass
@@ -188,10 +195,22 @@ class RecomputeScheduler(Scheduler):
         return True
 
     def _finish_recomputed_request(self, request: Request) -> None:
+        params = request.sampling_params
+        recompute: dict[str, str | int] | None = None
+        if params and (params.extra_args or {}).get(PD_RECOMPUTE_ARG) == PD_RECOMPUTE_VERSION:
+            output_tokens = request.num_output_tokens
+            recompute = {PD_RECOMPUTE_ARG: PD_RECOMPUTE_RETRY}
+            if output_tokens:
+                recompute = {
+                    PD_RECOMPUTE_ARG: PD_RECOMPUTE_INTERRUPTED,
+                    "output_tokens": output_tokens,
+                    "remaining_tokens": request.max_tokens - output_tokens,
+                }
         self._recomputed_reqs.append(
             RecomputeReqInfo(
                 request_id=request.request_id,
                 client_index=request.client_index,
+                pd_recompute=recompute,
             )
         )
         finished_reqs = self.finish_requests(
@@ -1084,8 +1103,9 @@ class RecomputeScheduler(Scheduler):
                 EngineCoreOutput(
                     request_id=req_info.request_id,
                     new_token_ids=[],
-                    finish_reason=FinishReason.STOP,
+                    finish_reason=FinishReason.ERROR if req_info.pd_recompute else FinishReason.STOP,
                     stop_reason="recomputed",
+                    kv_transfer_params=req_info.pd_recompute,
                 )
             )
         for client_index, recomputed_outputs in recomputed_by_client.items():
