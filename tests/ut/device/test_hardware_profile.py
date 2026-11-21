@@ -59,7 +59,6 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A2: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.MM_REDUCE_SCATTER_BF16,
-        HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.NPU_TOP_K_TOP_P,
         HardwareCapability.FLASH_ATTN_NPU_3,
@@ -78,7 +77,6 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.FLASH_ATTN_NPU_3,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
         HardwareCapability.NPU_TOP_K_TOP_P,
-        HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
     },
     AscendDeviceType._310P: frozenset(
         {
@@ -131,7 +129,6 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
             HardwareCapability.NPUGRAPH_EX,
             HardwareCapability.NPU_TOP_K_TOP_P,
-            HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
             HardwareCapability.RUNTIME_CUSTOM_OPS,
             HardwareCapability.STANDARD_MAMBA_PATCH,
             HardwareCapability.STANDARD_WORKER_PATCHES,
@@ -276,19 +273,6 @@ def test_hardware_profile_capability_matrix(device_type: AscendDeviceType) -> No
 def test_gdn_fixed_spec_recurrent_fallback_policy(device_type, expected_min_query_len):
     profile = get_hardware_profile(device_type)
     assert profile.gdn_fixed_spec_recurrent_fallback_min_query_len == expected_min_query_len
-
-
-@pytest.mark.parametrize(
-    "device_type,expected_min_rows",
-    [
-        (AscendDeviceType.A2, 2048),
-        (AscendDeviceType.A3, 2048),
-        (AscendDeviceType.A5, 1024),
-    ],
-)
-def test_qwen4exp_hc_gate_mix_row_block_threshold(device_type, expected_min_rows):
-    profile = get_hardware_profile(device_type)
-    assert profile.qwen4exp_hc_gate_mix_row_block_min_rows == expected_min_rows
 
 
 @pytest.mark.parametrize(
