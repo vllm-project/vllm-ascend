@@ -1,10 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
+# ruff: noqa: E402
 """Tests for the per_row wiring of vLLM's sparse indexer top-k on Ascend."""
 
 import types
 
 import pytest
+
+pytest.importorskip(
+    "vllm.model_executor.layers.indexer_topk",
+    reason="the sparse indexer top-k module does not exist in older vLLM",
+)
+
 import torch
 from vllm import _custom_ops as vllm_custom_ops
 from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
