@@ -61,6 +61,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import MoECommType, select_moe_comm_method
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
@@ -75,7 +76,9 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm_ascend.mrv2_utils import use_v2_model_runner
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
+from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRouter
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.fold_indexer_cache import fold_indexer_cache_rows
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
@@ -162,6 +165,33 @@ def _rollback_local_engram_tables(model, error):
 def _engram_enabled_for_runtime(config, vllm_config) -> bool:
     """Use the current vLLM Engram opt-in for both runtime paths."""
     return engram_enabled(config) and vllm_config.engram_config is not None
+
+
+def _can_skip_padding_tokens_in_moe(vllm_config: VllmConfig) -> bool:
+    """Filter padding in AllGather routing with disjoint expert ranges."""
+    parallel = vllm_config.parallel_config
+    ascend_config = get_ascend_config()
+    return (
+        envs.VLLM_MOE_SKIP_PADDING
+        and use_v2_model_runner(vllm_config)
+        and parallel.prefill_context_parallel_size == 1
+        # Skip the MoE GEMMs of padding tokens by assigning these tokens to a no-local expert
+        # Thus, the EP group needs more than one rank.
+        and parallel.enable_expert_parallel
+        # At layer initialization, choose fixed `padding_token_expert_id` for each rank,
+        # based on the expert placement in "linear" strategy.
+        and parallel.expert_placement_strategy == "linear"
+        and get_ep_group().world_size > 1
+        and not ascend_config.mix_placement
+        # EPLB can move experts between ranks and make the fixed `padding_token_expert_id` stale.
+        and not parallel.enable_eplb
+        # Force routing bypasses padding filtering in the expert selector.
+        and not ascend_config.enable_force_eplb
+        # Keep this optimization scoped to PP=1 and DCP=1 (aligning to DeepSeekV4.1)
+        and parallel.pipeline_parallel_size == parallel.decode_context_parallel_size == 1
+        # Check the low-token regime too: a model that switches to MC2 on decode is ineligible.
+        and select_moe_comm_method(0, vllm_config) == MoECommType.ALLGATHER
+    )
 
 
 class DeepseekV41MLP(nn.Module):
@@ -1241,8 +1271,18 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         self.make_empty_intermediate_tensors = make_pp_empty_intermediate_tensors(
             self, self._make_empty_intermediate_tensors, include_start_layer=False
         )
-        self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
+        parallel = vllm_config.parallel_config
+        self.use_sequence_parallel = parallel.use_sequence_parallel_moe
         topology = build_layer_plan(self.config)
+        self.skip_padding_tokens_in_moe = _can_skip_padding_tokens_in_moe(vllm_config)
+        if self.skip_padding_tokens_in_moe:
+            overlap_stream = torch.npu.Stream() if parallel.data_parallel_size > 1 else None
+            for layer in self.layers[self.start_layer : self.end_layer]:
+                moe = layer.mlp
+                routed = moe.experts.routed_experts
+                routed.padding_token_expert_id = moe.n_local_physical_experts if moe.ep_rank == 0 else 0
+                if isinstance(routed.router, AscendFusedTopKRouter):
+                    routed.router.routing_mask_overlap_stream = overlap_stream
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         candidate_buffer = torch.full(
             (max_tokens, 1, topology.candidate_topk_blocks),
@@ -1930,7 +1970,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         token_mask = token_mask[:full_num_tokens]
         lookups = {layer_idx: lookup[:full_num_tokens] for layer_idx, lookup in lookups.items()}
         if use_sequence_parallel:
-            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+            # AllGather routing reads the full runner mask and shards it at the consumer.
+            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available() and not self.skip_padding_tokens_in_moe:
                 forward_context = get_forward_context()
                 forward_context.is_padding = sp_padding_mask(
                     forward_context.is_padding,
