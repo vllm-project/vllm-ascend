@@ -14,9 +14,11 @@
 # limitations under the License.
 #
 
+import errno
 import json
 import socket
 import threading
+import time
 from contextlib import suppress
 from typing import Any
 
@@ -31,6 +33,31 @@ from ..executor.elastic_load import (
     register_processed_layout_transfer_items,
 )
 from ..utils import find_free_port
+
+# Deadline for reading a client's registration message. The handshake is one
+# small JSON object, so anything slower is a dead or stuck peer; the value
+# mirrors the timeout ElasticClient sets on its own socket.
+_REGISTRATION_RECV_TIMEOUT_S = 60
+
+# ``accept()`` reports some failures of the *pending* connection rather than of
+# the listening socket: a peer that aborts between the SYN and the accept gives
+# ECONNABORTED, and Linux surfaces a few per-connection network errors the same
+# way. Ending the thread on one of those would let a single bad client stop the
+# server, which is the very failure this loop exists to survive, so retry.
+_RETRYABLE_ACCEPT_ERRNOS = frozenset(
+    {errno.ECONNABORTED, errno.EPROTO, errno.ETIMEDOUT, errno.ENETDOWN, errno.ENETUNREACH, errno.EHOSTUNREACH}
+)
+
+# A resource shortage is not fatal either, but retrying at once would spin hot
+# while the process is already starved, so back off before the next accept.
+_STARVED_ACCEPT_ERRNOS = frozenset({errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM})
+_ACCEPT_BACKOFF_S = 0.1
+
+# Shutting the server down closes the listening socket, which is how this
+# thread is meant to end. Reporting that at ERROR with a traceback would put a
+# false alarm in the log on every clean shutdown, so it is logged as the
+# ordinary event it is; any other unusable-socket errno keeps the traceback.
+_CLOSED_LISTENER_ERRNOS = frozenset({errno.EBADF, errno.ENOTSOCK, errno.EINVAL})
 
 
 def _recv_json_message(sock: socket.socket, max_size: int = 64 * 1024 * 1024) -> dict:
@@ -398,9 +425,40 @@ class ElasticServer:
         Handles incoming client connections.
         """
         while True:
-            conn, addr = self.s.accept()
+            try:
+                conn, addr = self.s.accept()
+            except OSError as e:
+                if e.errno in _RETRYABLE_ACCEPT_ERRNOS:
+                    logger.warning(
+                        "[netloader_p2p] accept failed for one pending connection, still serving, details: %s", e
+                    )
+                    continue
+                if e.errno in _STARVED_ACCEPT_ERRNOS:
+                    logger.warning(
+                        "[netloader_p2p] accept hit a resource shortage, retrying in %ss, details: %s",
+                        _ACCEPT_BACKOFF_S,
+                        e,
+                    )
+                    time.sleep(_ACCEPT_BACKOFF_S)
+                    continue
+                # Either way the listening socket is unusable and continuing
+                # would spin on the same error, so end the thread instead of
+                # burning a core. Only the unexpected cause gets a traceback.
+                if e.errno in _CLOSED_LISTENER_ERRNOS:
+                    logger.info("[netloader_p2p] registration socket closed (%s); handler thread exits", e)
+                else:
+                    logger.exception("[netloader_p2p] registration socket stopped accepting; handler thread exits")
+                return
             logger.info("Accept new connection from %s:%s...", *addr)
-            self.register_handler(conn, addr)
+            try:
+                self.register_handler(conn, addr)
+            except Exception:
+                # Nothing supervises or restarts this daemon thread, so letting
+                # one dead or malformed client escape here would stop the server
+                # from registering any client for the rest of its life.
+                logger.exception("[netloader_p2p] registration from %s:%s failed", *addr)
+                with suppress(Exception):
+                    conn.close()
 
     def register_handler(self, conn, addr, buffer_size=1024):
         """
@@ -411,8 +469,20 @@ class ElasticServer:
         - addr: The address of the client.
         - buffer_size: The size of the buffer for receiving data.
         """
-        data_str = conn.recv(buffer_size).decode("utf-8")
+        try:
+            # The handler runs on the accept thread, so without a deadline one
+            # silent peer blocks every other registration. Mirrors the timeout
+            # ElasticClient sets on its own socket.
+            conn.settimeout(_REGISTRATION_RECV_TIMEOUT_S)
+            data_str = conn.recv(buffer_size).decode("utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            logger.error("Failed to read a registration message from %s, details: %s", addr, e)
+            conn.close()
+            return
         if not data_str:
+            # A peer that connects and closes without sending anything (health
+            # check, port probe) would otherwise leak this socket.
+            conn.close()
             return
         try:
             data = json.loads(data_str)
