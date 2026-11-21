@@ -181,12 +181,20 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
                 continue
             sampled_ids = sampled_token_rows[batch_idx]
 
+            draft_len_hint: int | None = None
+            if draft_lens is not None:
+                try:
+                    # Prefer per-step draft counts (adaptive / padded rows) over
+                    # inferring draft_len from the (possibly padded) sampled row.
+                    draft_len_hint = int(draft_lens[batch_idx])
+                except (TypeError, ValueError, IndexError):
+                    draft_len_hint = None
+
             if requests is not None and req_id in requests:
                 req_state = requests[req_id]
             else:
-                draft_len = int(draft_lens[batch_idx]) if draft_lens is not None else 0
                 req_state = SimpleNamespace(
-                    prev_num_draft_len=draft_len,
+                    prev_num_draft_len=draft_len_hint or 0,
                     prompt_token_ids=None,
                     output_token_ids=None,
                 )
@@ -197,6 +205,7 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
                 req_state=req_state,
                 accepted_token_num=accepted_token_num,
                 sampled_ids=sampled_ids,
+                draft_len_hint=draft_len_hint,
             )
             if alert is not None:
                 alerts.append(alert)
@@ -209,6 +218,7 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
         req_state: Any,
         accepted_token_num: int,
         sampled_ids: list[int] | torch.Tensor | None = None,
+        draft_len_hint: int | None = None,
     ) -> Incident | None:
         if not req_id:
             return None
@@ -218,12 +228,17 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
         prompt_ids = self._normalize_token_ids(prompt_raw) if prompt_raw is not None else None
         runner = self._runner
         log_leader = runner_tp_rank(runner) == 0
-        draft_len = getattr(req_state, "prev_num_draft_len", 0) or 0
         sampled_norm = self._normalize_token_ids(sampled_ids)
+        # Priority: batch num_draft_tokens_per_req → req_state.prev_num_draft_len
+        # → non-padded sampled width - 1. Never use raw padded row length as
+        # draft_len (adaptive verification pads to max draft width with -1).
+        draft_len = int(draft_len_hint) if draft_len_hint is not None else 0
         if draft_len <= 0:
-            # Fallback when prev_num_draft_len was not populated (common on
-            # non-hybrid MTP): treat last dim of sampled row as draft+bonus.
-            draft_len = max(0, len(sampled_norm) - 1)
+            draft_len = int(getattr(req_state, "prev_num_draft_len", 0) or 0)
+        if draft_len <= 0:
+            # sampled_norm is already normalized; drop async/pad placeholders only.
+            valid_sampled = [tid for tid in sampled_norm if tid != -1]
+            draft_len = max(0, len(valid_sampled) - 1)
         if draft_len <= 0:
             if log_leader:
                 logger.info_once(
