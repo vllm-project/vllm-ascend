@@ -15,6 +15,10 @@ from vllm_ascend.worker.v2.block_table import (
 )
 
 
+def _cpu_slot_ids(table: torch.Tensor, row: int, positions: torch.Tensor, block_size: int) -> torch.Tensor:
+    return table[row, positions // block_size] * block_size + positions % block_size
+
+
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
@@ -120,7 +124,7 @@ def test_compute_slot_mapping_npu_kernel_cp(
             else:
                 local = pos
                 owned = torch.ones_like(pos, dtype=torch.bool)
-            slots = table[row, local // block_size] * block_size + local % block_size
+            slots = _cpu_slot_ids(table, row, local, block_size)
             ref_slot_mappings[group, start:end] = torch.where(owned, slots, -1).to(torch.int32)
 
     torch.testing.assert_close(slot_mappings.cpu(), ref_slot_mappings)
@@ -171,3 +175,50 @@ def test_ascend_block_tables_compute_slot_mappings_out() -> None:
         torch.tensor([[120, 123, 124, 40, 44, 47, -1, -1]], dtype=torch.int32),
     )
     torch.testing.assert_close(out[:, 8:].cpu(), torch.full((1, 4), -1, dtype=torch.int32))
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+def test_compute_slot_mapping_deepseek_v4_prefill() -> None:
+    """Replay the slot-mapping input shapes captured from a DeepSeek V4 Flash prefill."""
+    device = torch.device("npu")
+    num_tokens = 79
+    block_sizes = [128, 4096, 32, 32, 2, 8]
+    block_counts = [triton.cdiv(num_tokens, size) for size in block_sizes]
+    req_row = 1
+    block_tables = AscendBlockTables(
+        block_sizes=block_sizes,
+        max_num_reqs=4,
+        max_num_batched_tokens=4096,
+        max_num_blocks_per_group=block_counts,
+        device=device,
+        cp_size=1,
+    )
+
+    # The shape and block sizes came from the runner. Use synthetic block
+    # IDs and give every group a distinct range to check group selection.
+    block_ids = []
+    next_id = 1
+    for count in block_counts:
+        block_ids.append(list(range(next_id, next_id + count)))
+        next_id += count
+    block_tables.append_block_ids(req_row, tuple(block_ids), overwrite=True)
+    block_tables.apply_staged_writes()
+
+    positions = torch.arange(num_tokens, dtype=torch.int64)
+    result = block_tables.compute_slot_mappings(
+        torch.tensor([req_row], dtype=torch.int64, device=device),
+        torch.tensor([0, num_tokens], dtype=torch.int32, device=device),
+        positions.to(device),
+        num_tokens_padded=num_tokens,
+    )
+
+    expected = torch.stack(
+        [
+            _cpu_slot_ids(torch.tensor(ids, dtype=torch.int32).unsqueeze(0), 0, positions, size)
+            for ids, size in zip(block_ids, block_sizes)
+        ]
+    )
+    torch.testing.assert_close(result.cpu(), expected.to(torch.int32), rtol=0, atol=0)

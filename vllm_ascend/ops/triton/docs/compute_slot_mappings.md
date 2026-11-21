@@ -80,8 +80,9 @@ block sizes `[128, 4096, 32, 32, 2, 8]`. The baseline passed the same
 values as its per-group kernel block sizes for this configuration
 (vLLM-Ascend main `de6351f5`, PR `98d8a92c`, vLLM `c410543d9`).
 
-The single-card NPU test compares integer slot IDs exactly against an
-independent host reference. It covers manager block sizes 128 and 256,
+The single-card NPU suite replays this input shape and the six manager
+block sizes with synthetic block IDs. It compares every slot ID against
+an independent host reference. The other cases cover block sizes 128 and 256,
 CP sizes 1, 2, and 4, sharded and replicated groups, requests crossing block
 and tile boundaries, empty requests, and padding. It also checks the
 caller's preallocated `out` buffer and its padded tail.
