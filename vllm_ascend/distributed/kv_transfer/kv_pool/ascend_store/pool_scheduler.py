@@ -25,6 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import has_hisparse_cache_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -874,13 +875,25 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         kv_cache_config: KVCacheConfig | None = None,
     ) -> None:
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
+        self._failed_external_load_req_ids: set[str] = set()
         self._in_flight_save_blocks = InFlightSaveBlockTracker(vllm_config.parallel_config.world_size)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        if connector_output.failed_recving and has_hisparse_cache_layout(self.kv_cache_config):
+            for request_id in self._async_loading_req_ids & connector_output.failed_recving:
+                request_and_blocks = self._unfinished_requests.get(request_id)
+                if request_and_blocks is not None and not request_and_blocks[0].is_finished():
+                    self._failed_external_load_req_ids.add(request_id)
         super().update_connector_output(connector_output)
         meta = connector_output.kv_connector_worker_meta
         if isinstance(meta, AscendStoreKVConnectorWorkerMetadata) and self._block_pool is not None:
             self._in_flight_save_blocks.complete(meta.completed_events, self._block_pool)
+
+    def request_finished_all_groups(
+        self, request: Request, block_ids: tuple[list[int], ...]
+    ) -> tuple[bool, dict[str, Any] | None]:
+        self._failed_external_load_req_ids.discard(request.request_id)
+        return super().request_finished_all_groups(request, block_ids)
 
     def has_pending_push_work(self) -> bool:
         return self._in_flight_save_blocks.has_pending_work()
@@ -906,123 +919,11 @@ class KVPoolScheduler(BaseKVPoolScheduler):
             self._block_pool,
         )
 
-    def _partial_tail_non_mamba_puts(self, req_meta: ReqMeta) -> list[BoundaryPut]:
-        """Locate the non-Mamba blocks a partial-tail save publishes.
-
-        A later request resumes at the prompt's Mamba checkpoint (``boundary``)
-        only if both pieces of KV are stored:
-
-        - Mamba groups: the state at ``boundary``, handed off by Core as a
-          boundary put of its own, so Mamba groups are not listed here.
-        - Other groups: the KV from the last LCM-aligned normal save up to
-          ``boundary`` plus the group's EAGLE proof margin (``proof_end``).
-          Each block is keyed by the hash at its end, clipped to ``proof_end``.
-
-        Groups whose proof is not computed yet are omitted. For example, with
-        LCM 16, blocks of 4 tokens, and a checkpoint at 44, the full-attention
-        blocks are 8-10, keyed at 36, 40 and 44.
-
-        A Mamba state handed off at any other position, i.e. a shared-prefix
-        junction (``--enable-mamba-shared-prefix-checkpoint``), adds no puts here.
-        """
-        coord = self.cache_coordinator
-        assert coord is not None
-        mamba_tails = [
-            put.num_tokens
-            for put in req_meta.boundary_puts or []
-            if put.group_id in coord.mamba_group_ids and put.num_tokens % self.grouped_block_size[put.group_id]
-        ]
-        # The tail is due on the save that first covers the prompt, or when Mamba
-        # hands off its checkpoint state.
-        if not mamba_tails and not req_meta.publish_partial_tail:
-            return []
-        prompt_tokens = req_meta.num_prompt_tokens
-        completed = req_meta.completed_token_len
-        assert prompt_tokens is not None and completed is not None
-        hash_block_size = coord.hash_block_size
-        # Core drops the Mamba checkpoint whenever EAGLE block drop is on,
-        # whichever groups carry the eagle flag.
-        boundary = get_mamba_prefill_checkpoint_position(prompt_tokens, hash_block_size, coord.use_eagle)
-        # Any other sub-block Mamba hand-off is a shared-prefix junction. Its
-        # attention KV, EAGLE proof included, ends on an attention block end no
-        # later than this checkpoint's proof, so normal and prompt-tail saves
-        # store it.
-        if not req_meta.publish_partial_tail and boundary not in mamba_tails:
-            return []
-        num_hashes = len(req_meta.block_hashes)
-        if boundary == 0 or boundary // hash_block_size > num_hashes:
-            return []
-        start = boundary // coord.lcm_block_size * coord.lcm_block_size
-        puts: list[BoundaryPut] = []
-        # Ascend keeps original group IDs; exclude non-cacheable groups here
-        # rather than renumbering the block tables as Mooncake Store does.
-        for group_id in self.cacheable_group_ids:
-            if group_id in coord.mamba_group_ids:
-                continue
-            proof_end = boundary + coord.eagle_proof_margin_by_group.get(group_id, 0)
-            if proof_end > completed or proof_end // hash_block_size > num_hashes:
-                continue
-            block_size = self.grouped_block_size[group_id]
-            group_blocks = req_meta.block_ids_by_group[group_id]
-            for block_idx in range(start // block_size, cdiv(proof_end, block_size)):
-                if block_idx >= len(group_blocks):
-                    break
-                block_id = group_blocks[block_idx]
-                if block_id == NULL_BLOCK_ID:
-                    continue
-                num_tokens = min((block_idx + 1) * block_size, proof_end)
-                puts.append(BoundaryPut(group_id, block_id, num_tokens))
-        return puts
-
-    def register_finished_partial_tail(
-        self,
-        request: Request,
-        block_ids: tuple[list[int], ...],
-        partial_tail_offloads: list[tuple[int, int, int]],
-    ) -> bool:
-        """Queue and pin a finish-time tail for the next connector step."""
-        if not self.can_put or not partial_tail_offloads:
-            return False
-        tracker = self._request_trackers.get(request.request_id)
-        if tracker is None or not any(block_ids):
-            return False
-        boundaries = {boundary for _, _, boundary in partial_tail_offloads}
-        if len(boundaries) != 1:
-            raise ValueError("Partial-tail offloads for one request must share a boundary")
-        boundary_tokens = next(iter(boundaries))
-        assert tracker.prefill_end_tokens is not None
-        if boundary_tokens > tracker.prefill_end_tokens:
-            return False
-
-        coord = self.cache_coordinator
-        assert coord is not None
-        mamba_puts: list[BoundaryPut] = []
-        for group_id, block_id, boundary in partial_tail_offloads:
-            # Ascend retains Core's group IDs instead of remapping Store groups.
-            if group_id not in coord.mamba_group_ids:
-                return False
-            if block_id == NULL_BLOCK_ID:
-                return False
-            mamba_puts.append(BoundaryPut(group_id, block_id, boundary))
-        req_meta = ReqMeta(
-            req_id=request.request_id,
-            token_len_chunk=0,
-            can_save=True,
-            block_ids_by_group=[list(group) for group in block_ids],
-            block_hashes=list(request.block_hashes),
-            num_prompt_tokens=request.num_prompt_tokens,
-            completed_token_len=request.num_computed_tokens,
-            boundary_puts=mamba_puts,
-        )
-        req_meta.boundary_puts = [*self._partial_tail_non_mamba_puts(req_meta), *mamba_puts]
-        assert request.request_id not in self._finished_partial_tail_metas
-        # This job has no normal save range. Pin only its exact boundary sources.
-        self._in_flight_save_blocks.retain(req_meta, self._block_pool)
-        self._finished_partial_tail_metas[request.request_id] = req_meta
-        # The store job owns exact block refs, so request cleanup need not wait.
-        return False
-
-    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> StoreLookupResult | None:
+    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
+        # Core may reschedule the request with zero computed tokens after an
+        # import failure. A key can still be visible to lookup while GET fails.
+        if request.request_id in self._failed_external_load_req_ids:
+            return None
         prompt_token_len = len(request.prompt_token_ids)
         if self.enable_partial_hash_hits:
             # Preserve the prompt end so the worker can reserve the final token for recomputation.

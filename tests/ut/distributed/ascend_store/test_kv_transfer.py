@@ -1540,6 +1540,9 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
 
         request = Request("r1", [0] * 16, SamplingParams(), None)
         request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+        pool.kv_cache_config = MagicMock(hisparse_host_num_blocks=16)
+        pool._unfinished_requests = {"r1": (request, [[2], [3]])}
+        pool._failed_external_load_req_ids = set()
         scheduler = Scheduler.__new__(Scheduler)
         scheduler.connector = multi
         scheduler.requests = {"r1": request}
@@ -1655,6 +1658,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         else:
             publish.assert_called_once_with("r1", 16)
         assert not pool._async_loading_req_ids
+        assert pool._failed_external_load_req_ids == ({"r1"} if any(rank_failures) and not abort else set())
         assert not coordinator._pending_imports
         if abort:
             assert not scheduler._aborted_kv_loads

@@ -1711,6 +1711,50 @@ class TestKVPoolSchedulerUpdateFinished(unittest.TestCase):
                 self.assertEqual(scheduler._async_loading_req_ids, expected)
 
 
+@pytest.mark.parametrize(
+    ("hisparse", "finished", "should_recompute"),
+    [(True, False, True), (False, False, False), (True, True, False)],
+    ids=["hisparse-recompute", "ordinary-store", "late-abort"],
+)
+def test_failed_hisparse_import_skips_repeated_get(hisparse, finished, should_recompute):
+    config = make_config()
+    config.kv_transfer_config.kv_connector_extra_config["load_async"] = True
+    scheduler = KVPoolScheduler(config, use_layerwise=False)
+    if hisparse:
+        scheduler.kv_cache_config = SimpleNamespace(hisparse_host_num_blocks=8)
+    scheduler.client = MagicMock(closed=False)
+    scheduler.client.lookup.return_value = 256
+    request = SimpleNamespace(
+        request_id="req",
+        num_tokens=512,
+        prompt_token_ids=list(range(512)),
+        block_hashes=[b"key"] * 32,
+        is_finished=MagicMock(return_value=False),
+    )
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (256, True)
+    blocks = MagicMock()
+    blocks.get_block_ids.return_value = ([1],)
+    scheduler.update_state_after_alloc(request, blocks, 256)
+    if finished:
+        request.is_finished.return_value = True
+        scheduler.request_finished_all_groups(request, ([1],))
+
+    scheduler.update_connector_output(KVConnectorOutput(finished_recving={"req"}, failed_recving={"req"}))
+    assert not scheduler._async_loading_req_ids
+    if should_recompute:
+        for _ in range(3):
+            assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+        scheduler.client.lookup.assert_called_once()
+        assert request.request_id not in scheduler.load_specs
+        peer_request = SimpleNamespace(**vars(request))
+        peer_request.request_id = "peer"
+        assert scheduler.get_num_new_matched_tokens(peer_request, 0) == (256, True)
+        scheduler.request_finished_all_groups(request, ([1],))
+    assert not scheduler._failed_external_load_req_ids
+    # The failure record is scoped to that request's lifetime.
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (256, True)
+
+
 class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
     """Test update_connector_output."""
 
