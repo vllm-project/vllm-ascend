@@ -50,6 +50,13 @@ test_cases:
       - '{"enable_cpu_binding":true}'
       - "--api-server-count"
       - "4"
+    test_content:
+      - spec_decode_acceptance
+    acceptance_rate:
+      benchmark: acc_GPQA
+      # Provisional per-position baseline; re-measure on NPU before enforcing.
+      baseline: [0.90, 0.78, 0.66]
+      tolerance: 0.05
     benchmarks:
       perf:
         case_type: performance

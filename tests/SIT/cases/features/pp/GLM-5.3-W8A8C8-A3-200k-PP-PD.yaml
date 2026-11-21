@@ -4,6 +4,14 @@ model: "Eco-Tech/GLM-5.3-w8a8c8"
 num_nodes: 4
 npu_per_node: 16
 dp_load_balancing: external
+test_content:
+  - spec_decode_acceptance
+acceptance_rate:
+  benchmark: acc_aime2025
+  # Provisional 5-position baseline (decode side sets num_speculative_tokens: 5);
+  # re-measure on NPU before enforcing.
+  baseline: [0.9058, 0.8123, 0.7317, 0.6623, 0.6040]
+  tolerance: 0.08
 
 routing:
   type: "disaggregated_prefill"

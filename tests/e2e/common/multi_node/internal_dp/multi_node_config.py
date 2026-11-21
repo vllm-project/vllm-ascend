@@ -177,12 +177,16 @@ class MultiNodeConfig:
         disaggregated_prefill: dict | None,
         benchmark_cases: list[dict],
         special_dependencies: dict,
+        test_content: list[str] | None = None,
+        acceptance_rate: dict | None = None,
     ):
         self.model = model
         self.test_name = test_name
         self.nodes = nodes
         self.npu_per_node = npu_per_node
         self.benchmark_cases = benchmark_cases
+        self.test_content = test_content or []
+        self.acceptance_rate = acceptance_rate or {}
 
         self.cur_index = self._resolve_cur_index()
         self.cur_node = self.nodes[self.cur_index]
@@ -264,6 +268,8 @@ class MultiNodeConfigLoader:
             disaggregated_prefill=config.get("disaggregated_prefill"),
             special_dependencies=config.get("special_dependencies", {}),
             benchmark_cases=list(benchmarks.values()),
+            test_content=config.get("test_content"),
+            acceptance_rate=config.get("acceptance_rate"),
         )
 
     @classmethod

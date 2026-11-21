@@ -149,6 +149,13 @@ test_cases:
       - "--speculative-config"
       - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
       - "--enable-prefix-caching"
+    test_content:
+      - spec_decode_acceptance
+    acceptance_rate:
+      benchmark: acc
+      # Provisional per-position baseline; re-measure on NPU before enforcing.
+      baseline: [0.90, 0.78, 0.66]
+      tolerance: 0.05
     benchmarks:
       <<: *benchmarks_acc
   - name: "Qwen3.6-27B-3500-50"

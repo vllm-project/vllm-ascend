@@ -42,6 +42,13 @@ test_cases:
       - "/"
       - "--mm-processor-cache-gb"
       - "0"
+    test_content:
+      - spec_decode_acceptance
+    acceptance_rate:
+      benchmark: acc_GPQA
+      # Provisional per-position baseline; re-measure on NPU before enforcing.
+      baseline: [0.90, 0.78, 0.66]
+      tolerance: 0.05
     benchmarks:
       acc_GPQA:
         case_type: accuracy
