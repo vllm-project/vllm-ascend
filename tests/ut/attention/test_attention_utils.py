@@ -35,6 +35,47 @@ CPU_SEQ_LENS = torch.tensor([10, 20, 30], dtype=torch.int32)
 NPU_SEQ_LENS = torch.tensor([99, 99, 99], dtype=torch.int32)
 
 
+@pytest.mark.parametrize("enable", [False, True])
+@pytest.mark.parametrize("internal_cpu", [False, True])
+@pytest.mark.parametrize("dcp_metadata", [False, True])
+@pytest.mark.parametrize(
+    "query_lens,seq_lens,prefilling,expected",
+    [
+        ([1, 1, 1, 1], [6, 513, 769, 0], [False, True, True], (4, 0, 4, 0)),
+        ([1, 1, 4], [6, 513, 20], [False, True, True], (2, 1, 2, 4)),
+        ([1, 1], [6, 1], [False, True], (1, 1, 1, 1)),
+        ([1, 2], [6, 514], [False, True], (1, 1, 1, 2)),
+    ],
+)
+def test_single_token_extend_decode_split(
+    monkeypatch, enable, internal_cpu, dcp_metadata, query_lens, seq_lens, prefilling, expected
+):
+    monkeypatch.setattr(attention_utils, "is_pd_decode_recompute_scheduler_enabled", lambda: False)
+    lengths = torch.tensor(query_lens, dtype=torch.int32)
+    seqs = torch.tensor(seq_lens, dtype=torch.int32)
+    phase = torch.tensor(prefilling)
+    common = SimpleNamespace(
+        context_parallel_metadata=SimpleNamespace(query_lens_cpu=lengths, max_query_len=max(query_lens))
+        if dcp_metadata
+        else None,
+        max_query_len=max(query_lens),
+        num_reqs=len(query_lens),
+        num_actual_tokens=sum(query_lens),
+        query_start_loc_cpu=torch.cat((torch.zeros(1, dtype=torch.int32), lengths.cumsum(0))),
+        is_prefilling=phase,
+        _seq_lens_cpu=seqs if internal_cpu else None,
+        seq_lens_cpu=None if internal_cpu else seqs,
+    )
+    result = attention_utils.split_decodes_and_prefills(
+        common,
+        decode_threshold=3,
+        treat_short_extends_as_decodes=False,
+        treat_single_token_extends_as_decodes=enable,
+    )
+    assert result == (expected if enable else (1, len(query_lens) - 1, 1, sum(query_lens) - 1))
+    assert phase.tolist() == prefilling
+
+
 def test_get_flashmla_ops_returns_none_without_cann_module(monkeypatch):
     monkeypatch.setattr(attention_utils, "_has_flashmla_module", lambda: False)
 
