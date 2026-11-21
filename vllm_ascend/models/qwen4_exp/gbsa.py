@@ -62,6 +62,10 @@ def qsa_gbsa_attention(
     if logical_positions.shape != (query.shape[0],):
         raise ValueError("QSA GBSA logical positions must match query rows")
 
+    # TODO: Remove this compatibility fallback once Prefill routes exclusively
+    # through Union GBSA and this normal GBSA entry point becomes Decode-only.
+    # At that point all callers must provide the three prepared row tensors,
+    # and ``prepare_qsa_gbsa_inputs`` plus this runtime branch can be deleted.
     prepared = (
         prepared_visible_lengths is not None and prepared_cu_query is not None and prepared_row_block_table is not None
     )
