@@ -23,6 +23,7 @@ pytest.importorskip(
 from vllm.model_executor.model_loader import weight_utils
 from vllm.models.deepseek_v41.common import engram as upstream_engram
 
+from vllm_ascend.distributed.weight_transfer import update_window
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
 from vllm_ascend.models.deepseek_v41.engram.common import engram_gate, load_engram_rotation_block
@@ -495,7 +496,7 @@ def test_shared_table_skips_per_step_dp_gather(monkeypatch):
 
     monkeypatch.setattr(embedding_mod, "gather_engram_hashes", gather)
     table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
-    setattr(table, "embed_gathered", lambda ids, count: ids[:count])  # noqa: B010 - instance stub
+    setattr(table, "embed_gathered", lambda ids, count: ids[:count])  # noqa: B010 - instance-level stub
     table._shared_group = object()
     ids = torch.tensor([[7, 8]])
     assert table.forward(ids).tolist() == [[7, 8]]
@@ -650,3 +651,286 @@ def test_embed_gathered_walks_strided_hashes_without_a_copy(monkeypatch, quantiz
     rows = shard[torch.where(owned, columns - table.vocab_start_idx, 0)]
     expected = torch.where(owned.unsqueeze(-1), rows, torch.zeros(1, dtype=reference.dtype))
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
+# --- weight loader: install an update's rows, stream the bound shard at startup ---
+#
+# The class needs CANN for its real constructor, so these tests build an instance and
+# attach only the attributes the loader touches.
+
+LOADER_VOCAB_START = 2
+LOADER_PART_ROWS = 3
+LOADER_WIDTH = 4
+# One block of the group quantization. The loader copies the scale parameter as
+# bytes, so a zero-width scale tensor would satisfy the assertion without ever
+# exercising the copy.
+LOADER_SCALE_WIDTH = 2
+
+
+def _loader_embedding():
+    host = torch.zeros(LOADER_PART_ROWS, LOADER_WIDTH)
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    table.weight = torch.nn.Parameter(host, requires_grad=False)
+    table.weight.engram_vocab_start = LOADER_VOCAB_START
+    table.weight_scale_inv = None
+    table._codes_uva = SimpleNamespace(tensor=host)
+    table._scales_uva = None
+    table._shared_pool_client = None
+    table._remote_reader = None
+    table._shared_group = None
+    table._checkpoint_path = "/checkpoint"
+    table._checkpoint_key = "layers.0.engram.embed.weight"
+    table.streamed = None
+
+    def load_checkpoint(*args, **kwargs):
+        table.streamed = args
+
+    setattr(table, "load_checkpoint", load_checkpoint)  # noqa: B010 - instance-level stub
+    return table
+
+
+def _loader_payload(rows: int = 6, width: int = LOADER_WIDTH, dtype: torch.dtype = torch.float32):
+    return torch.arange(rows * width, dtype=torch.float32).reshape(rows, width).to(dtype)
+
+
+def _loader_slice(payload):
+    return payload[LOADER_VOCAB_START : LOADER_VOCAB_START + LOADER_PART_ROWS]
+
+
+@pytest.fixture(autouse=True)
+def closed_update_window():
+    """Every test starts and ends with the Engram update window closed."""
+    while update_window.engram_weight_update_active():
+        update_window.end_engram_weight_update()
+    yield
+    while update_window.engram_weight_update_active():
+        update_window.end_engram_weight_update()
+
+
+def test_weight_loader_installs_the_transferred_rows():
+    table = _loader_embedding()
+    payload = _loader_payload()
+
+    update_window.begin_engram_weight_update()
+    table._weight_loader(table.weight, payload)
+
+    torch.testing.assert_close(table.weight.data, _loader_slice(payload))
+    assert table.streamed is None, "an update must not re-read the bound shard"
+
+
+def test_weight_loader_streams_the_bound_shard_at_startup():
+    table = _loader_embedding()
+    host_before = table.weight.data.clone()
+
+    table._weight_loader(table.weight, _loader_payload())
+
+    assert table.streamed == ("/checkpoint", "layers.0.engram.embed.weight")
+    torch.testing.assert_close(table.weight.data, host_before)
+
+
+def test_weight_loader_installs_into_a_reloaded_parameter_without_the_window():
+    """A layerwise reload replaces the parameter, so it no longer aliases the host range."""
+    table = _loader_embedding()
+    reloaded = torch.nn.Parameter(torch.zeros(LOADER_PART_ROWS, LOADER_WIDTH), requires_grad=False)
+    reloaded.engram_vocab_start = LOADER_VOCAB_START
+    table.weight = reloaded
+    payload = _loader_payload()
+
+    table._weight_loader(table.weight, payload)
+
+    torch.testing.assert_close(table.weight.data, _loader_slice(payload))
+    assert table.streamed is None
+
+
+def test_weight_loader_rejects_a_shard_that_does_not_fit():
+    table = _loader_embedding()
+    update_window.begin_engram_weight_update()
+
+    # Right row range, wrong width: the assertion must catch it instead of copying a
+    # partial row set into the table.
+    with pytest.raises(AssertionError, match="does not fit"):
+        table._weight_loader(table.weight, _loader_payload(width=LOADER_WIDTH + 1))
+
+
+def test_weight_loader_handles_the_scale_parameter():
+    table = _loader_embedding()
+    scales_host = torch.zeros(LOADER_PART_ROWS, LOADER_SCALE_WIDTH)
+    table.weight_scale_inv = torch.nn.Parameter(scales_host, requires_grad=False)
+    table.weight_scale_inv.engram_vocab_start = LOADER_VOCAB_START
+    table._scales_uva = SimpleNamespace(tensor=scales_host)
+    payload = _loader_payload(width=LOADER_SCALE_WIDTH)
+
+    update_window.begin_engram_weight_update()
+    table._weight_loader(table.weight_scale_inv, payload)
+
+    torch.testing.assert_close(table.weight_scale_inv.data, _loader_slice(payload))
+
+
+def test_weight_loader_copies_ue8m0_scales_as_bytes():
+    e8m0 = getattr(torch, "float8_e8m0fnu", None)
+    if e8m0 is None:
+        pytest.skip("this torch build has no float8_e8m0fnu")
+    table = _loader_embedding()
+    scales_host = torch.zeros(LOADER_PART_ROWS, LOADER_SCALE_WIDTH, dtype=torch.uint8)
+    table.weight_scale_inv = torch.nn.Parameter(scales_host, requires_grad=False)
+    table.weight_scale_inv.engram_vocab_start = LOADER_VOCAB_START
+    table._scales_uva = SimpleNamespace(tensor=scales_host)
+    # Hand the loader the checkpoint's own dtype: converting to uint8 here would
+    # take the same branch the loader is supposed to take.
+    payload = torch.arange(6 * LOADER_SCALE_WIDTH, dtype=torch.float32).reshape(6, LOADER_SCALE_WIDTH).to(e8m0)
+    assert payload.dtype == e8m0
+
+    update_window.begin_engram_weight_update()
+    table._weight_loader(table.weight_scale_inv, payload)
+
+    torch.testing.assert_close(table.weight_scale_inv.data, _loader_slice(payload.view(torch.uint8)))
+
+
+def test_weight_loader_rejects_a_payload_the_storage_cannot_take():
+    """An FP8/E8M0 checkpoint row set cannot be copied into INT8/FP32 storage.
+
+    The startup path decodes the E8M0 group scales and requantizes; the loader has
+    one tensor at a time and cannot, so it has to refuse instead of writing codes
+    that mean something else.
+    """
+    table = _loader_embedding()
+    codes_host = torch.zeros(LOADER_PART_ROWS, LOADER_WIDTH, dtype=torch.int8)
+    table.weight = torch.nn.Parameter(codes_host, requires_grad=False)
+    table.weight.engram_vocab_start = LOADER_VOCAB_START
+    table._codes_uva = SimpleNamespace(tensor=codes_host)
+    payload = torch.zeros(6, LOADER_WIDTH, dtype=torch.float8_e4m3fn)
+
+    update_window.begin_engram_weight_update()
+    with pytest.raises(ValueError, match="needs the payload quantized"):
+        table._weight_loader(table.weight, payload)
+    assert torch.equal(table.weight.data, torch.zeros_like(codes_host))
+
+
+def test_weight_loader_keeps_remote_and_shared_pool_paths_as_no_ops():
+    payload = _loader_payload()
+
+    for attribute in ("_remote_reader", "_shared_pool_client"):
+        table = _loader_embedding()
+        host_before = table.weight.data.clone()
+        setattr(table, attribute, object())
+
+        update_window.begin_engram_weight_update()
+        table._weight_loader(table.weight, payload)
+
+        assert table.streamed is None, f"{attribute} must not fall through to streaming"
+        torch.testing.assert_close(table.weight.data, host_before)
+
+
+def test_weight_loader_writes_the_shared_table_on_every_rank(monkeypatch):
+    """Every rank installs its rows, and the loader runs no collective.
+
+    vLLM's layerwise reload runs a weight loader twice: once under ``CopyCounter``
+    to decide whether the layer is complete, then again on the materialised tensors.
+    A rank that copies nothing never reaches the layer total, so it does not
+    materialise while its peers replay, and a collective inside the loader is then
+    entered at different points - a deadlock. The replicas hold the same rows for
+    the same head shard, so writing on every rank is idempotent.
+    """
+    table = _loader_embedding()
+    table._shared_group = SimpleNamespace(rank_in_group=1, world_size=2, cpu_group=object())
+    payload = _loader_payload()
+
+    def _no_collective(*args, **kwargs):
+        raise AssertionError("the Engram weight loader must not run a collective")
+
+    monkeypatch.setattr(embedding_mod.dist, "all_gather_object", _no_collective)
+
+    update_window.begin_engram_weight_update()
+    table._weight_loader(table.weight, payload)
+
+    torch.testing.assert_close(table.weight.data, _loader_slice(payload))
+
+
+def test_update_window_counter_nests_and_ignores_a_stray_end():
+    assert not update_window.engram_weight_update_active()
+
+    update_window.begin_engram_weight_update()
+    update_window.begin_engram_weight_update()
+    assert update_window.engram_weight_update_active()
+
+    update_window.end_engram_weight_update()
+    assert update_window.engram_weight_update_active(), "one transaction is still open"
+
+    update_window.end_engram_weight_update()
+    update_window.end_engram_weight_update()
+    assert not update_window.engram_weight_update_active()
+
+
+# --- update window wiring: the receiving side is the worker engine, not the trainer ---
+
+
+class _TransferEngineRecorder:
+    """Stand-in for the upstream base a mixin composes with."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def update_weights(self, update_info) -> str:
+        self.calls.append("update")
+        return "received"
+
+
+def test_the_worker_engines_open_the_engram_update_window():
+    """``update_weights`` is a worker-engine call; the trainer only sends.
+
+    Mixing the window into a trainer class leaves ``_DEPTH`` at zero in the process
+    that runs the loader, so the loader would only ever see the data_ptr fallback.
+    """
+    from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLWeightTransferEngine
+    from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import NPUIPCWeightTransferEngine
+    from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import (
+        SparseHCCLWeightTransferEngine,
+    )
+    from vllm_ascend.distributed.weight_transfer.update_window import EngramWeightUpdateWindow
+
+    for engine in (NPUIPCWeightTransferEngine, HCCLWeightTransferEngine, SparseHCCLWeightTransferEngine):
+        assert issubclass(engine, EngramWeightUpdateWindow), engine.__name__
+
+
+def test_the_window_brackets_the_receive():
+    from vllm_ascend.distributed.weight_transfer.update_window import EngramWeightUpdateWindow
+
+    engine_class = type("_Engine", (EngramWeightUpdateWindow, _TransferEngineRecorder), {})
+    engine = engine_class()
+    assert not update_window.engram_weight_update_active()
+
+    result = engine.update_weights({"ipc_handles": []})
+    assert result == "received"
+    assert not update_window.engram_weight_update_active()
+    assert engine.calls == ["update"]
+
+
+def test_the_window_is_open_during_the_receive():
+    from vllm_ascend.distributed.weight_transfer.update_window import EngramWeightUpdateWindow
+
+    seen: list[bool] = []
+
+    class _Spy(_TransferEngineRecorder):
+        def update_weights(self, update_info):
+            seen.append(update_window.engram_weight_update_active())
+            return super().update_weights(update_info)
+
+    engine_class = type("_Engine", (EngramWeightUpdateWindow, _Spy), {})
+    engine_class().update_weights({})
+
+    assert seen == [True], "the loader must see the window while the payload arrives"
+
+
+def test_the_window_closes_when_the_receive_fails():
+    from vllm_ascend.distributed.weight_transfer.update_window import EngramWeightUpdateWindow
+
+    class _Failing(_TransferEngineRecorder):
+        def update_weights(self, update_info) -> str:
+            raise RuntimeError("receive failed")
+
+    engine_class = type("_Engine", (EngramWeightUpdateWindow, _Failing), {})
+    with pytest.raises(RuntimeError, match="receive failed"):
+        engine_class().update_weights({})
+
+    assert not update_window.engram_weight_update_active(), "a failed receive must close the window"

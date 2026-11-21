@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 
+from vllm_ascend.distributed.weight_transfer.update_window import EngramWeightUpdateWindow
+
 if TYPE_CHECKING:
     from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
 
@@ -94,7 +96,7 @@ class SparseHCCLTrainerInitInfo(SparseNCCLTrainerInitInfo):
     backend: ClassVar[str] = "sparse_hccl"
 
 
-class SparseHCCLWeightTransferEngine(SparseNCCLWeightTransferEngine):
+class SparseHCCLWeightTransferEngine(EngramWeightUpdateWindow, SparseNCCLWeightTransferEngine):
     _stateless_init_process_group = staticmethod(hccl_common.stateless_init_process_group)
     init_info_cls = HCCLWeightTransferInitInfo
     update_info_cls = SparseHCCLWeightTransferUpdateInfo
