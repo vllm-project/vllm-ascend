@@ -119,6 +119,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         # when in decode phase of eagle speculator, we need some value in
         # draft model's input_batch. so we keep a reference here.
         self.input_batch: InputBatch | None = None
+        self._verified_seq_lens_cpu: torch.Tensor | None = None
         self._eplb_source_is_padding: torch.Tensor | None = None
         self._eplb_dummy_run = False
         self._sparse_kv_offload_metadata = SparseKVOffloadMetadata(
@@ -293,6 +294,19 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         """
         self.input_batch = input_batch
         self._eplb_dummy_run = dummy_run
+        self._verified_seq_lens_cpu = None
+        steps = self.num_speculative_steps if num_speculative_tokens is None else num_speculative_tokens
+        if (
+            not dummy_run
+            and steps > 1
+            and self.advance_draft_positions
+            and (self.use_dcp or self.attn_architecture in ("GQA", "MLA"))
+        ):
+            # Host FIA consumers must use the same accepted end as the device
+            # draft preparation, including rejection rollback in this step.
+            self._verified_seq_lens_cpu = (
+                input_batch.seq_lens[: input_batch.num_reqs] - num_rejected[: input_batch.num_reqs]
+            ).cpu()
         # PCP can change the draft prefill token layout and uniform decode
         # shape. Negotiate its DP agreement instead of reusing the target's.
         sync_state = None if self.pcp_manager is not None else dp_sync_state
@@ -572,7 +586,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             assert self.dcp_manager is not None
             num_reqs_padded = batch_desc.num_reqs or num_reqs
             seq_lens_cpu, is_prefilling = self.dcp_manager.prepare_draft_dcp_metadata_inputs(
-                target_seq_lens_cpu=self._get_seq_lens_cpu(num_reqs_padded),
+                target_seq_lens_cpu=self._get_seq_lens_cpu(num_reqs_padded, verified=step > 0),
                 is_prefilling=is_prefilling,
                 num_reqs=num_reqs,
                 num_reqs_padded=num_reqs_padded,
@@ -771,10 +785,9 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
         fia_params: list[dict[str, Any]] = []
+        base_lengths = self._get_seq_lens_cpu(num_reqs_padded)
         for step in range(1, self.num_speculative_steps):
-            seq_lens = [
-                min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
-            ]
+            seq_lens = [min(int(seq_len) + step, self.max_model_len) for seq_len in base_lengths[:num_reqs]]
             seq_lens.extend([0] * (num_reqs_padded - num_reqs))
             for layer_name in self.draft_attn_layer_names:
                 fia_params.append(
@@ -790,16 +803,13 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         return fia_params
 
     def _calc_next_seq_lens_cpu(self, seq_lens_cpu, num_reqs, num_reqs_padded, step):
-        # NOTE(drslark) to achieve fully alignment with vllm, `num_rejected` should be subtracted from `seq_lens`
-        # to avoid extra sync overhead, `v2` is currently aligned with NPU `v1` only
-
         # follows the logic in `prepare_eagle_decode` and `update_eagle_inputs`
         next_seqs_cpu = torch.clamp(seq_lens_cpu[:num_reqs_padded] + step, max=self.max_model_len)
         next_seqs_cpu[num_reqs:].fill_(0)
         return next_seqs_cpu
 
-    def _get_seq_lens_cpu(self, num_reqs_padded: int) -> torch.Tensor:
-        """Return the target sequence lengths for the padded graph batch.
+    def _get_seq_lens_cpu(self, num_reqs_padded: int, *, verified: bool = True) -> torch.Tensor:
+        """Return accepted draft-base lengths, or target lengths for prefill/capture.
 
         ``input_batch.seq_lens_np`` can contain only the active requests.
         During full-graph capture the draft batch can be padded to a larger
@@ -808,6 +818,12 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         sequence lengths and retains the storage required by the padded graph
         batch.
         """
+        accepted = getattr(self, "_verified_seq_lens_cpu", None)
+        if verified and accepted is not None and not self._eplb_dummy_run:
+            lengths = accepted.new_zeros(num_reqs_padded)
+            count = min(len(accepted), num_reqs_padded)
+            lengths[:count].copy_(accepted[:count])
+            return lengths
         assert isinstance(self.target_input_buffers, AscendInputBuffers)
         return self.target_input_buffers.seq_lens_cpu[:num_reqs_padded]
 

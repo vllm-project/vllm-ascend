@@ -57,6 +57,7 @@ from vllm.v1.worker.gpu.model_runner import (
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
+import vllm_ascend.observability.kv_trace.kv_trace_runner as kv_trace_runner
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
     MoECommType,
@@ -97,7 +98,6 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
 from vllm_ascend.hisparse.pcp import adapt_pcp_hisparse_connector
-from vllm_ascend.kv_trace.kv_trace_runner import install_trace
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.models.host_offload import track_host_offload_owners
@@ -324,7 +324,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 self.debugger = AclGraphDumper(dump_cfg)
         self.runtime_guard = RuntimeGuardProcessor.bind(self)
-        self._kv_trace = install_trace(self)
+        self._kv_trace = kv_trace_runner.install_trace(self)
 
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:

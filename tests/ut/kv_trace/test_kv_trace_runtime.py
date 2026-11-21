@@ -20,14 +20,51 @@ ROOT = Path(__file__).parents[3]
 @pytest.fixture(name="runtime")
 def runtime_fixture(monkeypatch):
     release = vllm_version_is("0.33.0")
-    for name in ("vllm_ascend", "vllm_ascend.kv_trace", "vllm"):
+    for name in (
+        "vllm_ascend",
+        "vllm_ascend.observability",
+        "vllm_ascend.observability.kv_trace",
+        "vllm",
+        "vllm.v1",
+        "vllm.v1.attention",
+        "vllm.v1.attention.backends",
+    ):
         package = ModuleType(name)
         package.__path__ = []
         monkeypatch.setitem(sys.modules, name, package)
 
-    utils = ModuleType("vllm_ascend.utils")
-    monkeypatch.setattr(utils, "vllm_version_is", lambda version: release and version == "0.33.0", raising=False)
-    monkeypatch.setitem(sys.modules, "vllm_ascend.utils", utils)
+    ascend_utils = ModuleType("vllm_ascend.utils")
+    monkeypatch.setattr(ascend_utils, "vllm_version_is", lambda version: release and version == "0.33.0", raising=False)
+    monkeypatch.setitem(sys.modules, "vllm_ascend.utils", ascend_utils)
+
+    class CircularBufferSpec(NS):
+        pass
+
+    class UniformTypeKVCacheSpecs(NS):
+        pass
+
+    interface = ModuleType("vllm.v1.kv_cache_interface")
+    monkeypatch.setattr(interface, "CircularBufferSpec", CircularBufferSpec, raising=False)
+    monkeypatch.setattr(interface, "UniformTypeKVCacheSpecs", UniformTypeKVCacheSpecs, raising=False)
+    monkeypatch.setattr(
+        interface,
+        "iter_layer_specs",
+        lambda spec: spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,),
+        raising=False,
+    )
+    monkeypatch.setitem(sys.modules, interface.__name__, interface)
+
+    def local_lengths(seq_lens, dcp_size=1, dcp_rank=None, cp_kv_cache_interleave_size=1):
+        # Independent token-owner oracle; the production helper uses a closed formula.
+        counts = torch.zeros((len(seq_lens), dcp_size), dtype=torch.int32)
+        for row, length in enumerate(seq_lens.tolist()):
+            owners = torch.arange(length) // cp_kv_cache_interleave_size % dcp_size
+            counts[row] = torch.bincount(owners, minlength=dcp_size)
+        return counts if dcp_rank is None else counts[:, dcp_rank]
+
+    utils = ModuleType("vllm.v1.attention.backends.utils")
+    monkeypatch.setattr(utils, "get_dcp_local_seq_lens", local_lengths, raising=False)
+    monkeypatch.setitem(sys.modules, utils.__name__, utils)
 
     def load(name, path):
         spec = importlib.util.spec_from_file_location(name, ROOT / path)
@@ -40,7 +77,10 @@ def runtime_fixture(monkeypatch):
     load("vllm_ascend.config_utils", "vllm_ascend/config_utils.py")
     modules = {}
     for name in ("config", "state", "connector", "plan", "runtime", "runner"):
-        modules[name] = load(f"vllm_ascend.kv_trace.kv_trace_{name}", f"vllm_ascend/kv_trace/kv_trace_{name}.py")
+        modules[name] = load(
+            f"vllm_ascend.observability.kv_trace.kv_trace_{name}",
+            f"vllm_ascend/observability/kv_trace/kv_trace_{name}.py",
+        )
     logger = ModuleType("vllm.logger")
     monkeypatch.setattr(logger, "logger", logging.Logger("kv-trace-test"), raising=False)
     monkeypatch.setitem(sys.modules, "vllm.logger", logger)
