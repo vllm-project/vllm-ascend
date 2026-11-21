@@ -335,6 +335,20 @@ __aicore__ inline void SparseFlashAttentionMla<SFAT>::GetSparseActualSeqLen(uint
         tempLoopInfo.curActualSeqLen = 0;
         return;
     }
+    if constexpr (TEMPLATE_MODE == V_TEMPLATE && PAGE_ATTENTION && LAYOUT_T == SFA_LAYOUT::TND) {
+        if (constInfo.returnSoftmaxLse && constInfo.sparseMode == 0 && constInfo.sparseBlockSize == 1 &&
+            tempLoopInfo.curActualSeqLenOri > 0) {
+            // DCP packs valid local indices before the -1 padding. An empty
+            // row must use the zero-output path so its softmax sum is zero.
+            // SplitBalanced assigns one query token (gSize heads) per M tile.
+            uint64_t queryOffset = (bIdx == 0 ? 0 : actualSeqLengthsQGm.GetValue(bIdx - 1)) + s1Idx;
+            uint64_t sparseOffset = (queryOffset * kvHeadNum + n2Idx) * constInfo.sparseBlockCount;
+            if (topKGm.GetValue(sparseOffset) < 0) {
+                tempLoopInfo.curActualSeqLen = 0;
+                return;
+            }
+        }
+    }
     int64_t threshold = tempLoopInfo.curActualSeqLenOri;
     if (constInfo.sparseMode == 3) {
         threshold = static_cast<int64_t>(tempLoopInfo.nextTokensPerBatch) + s1Idx + 1;
