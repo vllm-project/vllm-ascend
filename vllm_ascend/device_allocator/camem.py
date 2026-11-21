@@ -19,7 +19,7 @@
 import atexit
 import gc
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from contextlib import contextmanager
 
 import torch
@@ -53,6 +53,17 @@ def create_and_map(allocation_handle: HandleType) -> None:
 
 def unmap_and_release(allocation_handle: HandleType) -> None:
     python_unmap_and_release(*allocation_handle)
+
+
+def discardable_allocations(tensors: Collection[int]) -> set[int]:
+    """Map parameter storages to allocation addresses."""
+    if not tensors:
+        return set()
+    return {
+        allocation["address"]
+        for allocation in torch.npu.memory_snapshot()
+        if all(block["state"] == "inactive" or block["address"] in tensors for block in allocation["blocks"])
+    }
 
 
 def get_pluggable_allocator(
@@ -156,7 +167,11 @@ class CaMemAllocator(CuMemAllocator):
         )
         return data.handle
 
-    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
+    def sleep(
+        self,
+        offload_tags: tuple[str, ...] | str | None = None,
+        discardable: Collection[int] = (),
+    ) -> None:
         """
         Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be
@@ -173,10 +188,21 @@ class CaMemAllocator(CuMemAllocator):
 
         assert isinstance(offload_tags, tuple)
 
-        offload_count = sum(1 for data in self.pointer_to_data.values() if data.tag in offload_tags)
+        discarded = discardable_allocations(discardable)
+        if discardable and not discarded:
+            logger.warning_once(
+                "CaMemAllocator: no weights allocation matched the discardable "
+                "parameter storages; level-2 will back up all weights."
+            )
+        offload_count = sum(
+            1
+            for ptr, data in self.pointer_to_data.items()
+            if not data.is_asleep and data.tag in offload_tags and ptr not in discarded
+        )
         logger.info(
-            "CaMem sleep: offloading %s/%s allocations (tags=%s)",
+            "CaMem sleep: offloading %s, discarding %s, total %s (tags=%s)",
             offload_count,
+            len(discarded),
             len(self.pointer_to_data),
             offload_tags,
         )
@@ -188,14 +214,13 @@ class CaMemAllocator(CuMemAllocator):
         has_policy_conflict = False
 
         for ptr, data in self.pointer_to_data.items():
+            offload = data.tag in offload_tags and ptr not in discarded
             if data.is_asleep:
-                requests_offload = data.tag in offload_tags
-                was_offloaded = data.cpu_backup_tensor is not None
-                if requests_offload != was_offloaded:
+                if offload != (data.cpu_backup_tensor is not None):
                     has_policy_conflict = True
                 continue
             handle = data.handle
-            if data.tag in offload_tags:
+            if offload:
                 size_in_bytes = handle[1]
                 cpu_backup_tensor = torch.empty(size_in_bytes, dtype=torch.uint8, device="cpu", pin_memory=True)
                 cpu_ptr = cpu_backup_tensor.data_ptr()

@@ -241,9 +241,6 @@ class NPUWorker(GPUWorker):
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
 
         self.npugraph_memory_bytes = 0
-        # Buffers and parameters saved before sleep.
-        self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
-        self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
         self.sleep_wakeup_manager = SleepWakeupManager(vllm_config, self, lambda: getattr(self, "model_runner", None))
 
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
@@ -275,7 +272,38 @@ class NPUWorker(GPUWorker):
             signal.signal(signal.SIGINT, signal_handler)
 
     def _get_sleep_parameters(self, model: nn.Module) -> dict[str, nn.Parameter]:
-        raise NotImplementedError("GPUWorker._get_sleep_parameters is not validated on Ascend.")
+        # Draft weight updates are not validated on Ascend; leaving draft
+        # parameters out keeps their allocations out of the discardable set so
+        # the allocator backs them up instead of discarding them.
+        return dict(model.named_parameters())
+
+    def _ascend_discardable_parameters(self, model: nn.Module) -> set[int]:
+        """0.33 fallback; mirrors GPUWorker._discardable_parameters on main."""
+        storage = {
+            name: parameter.untyped_storage().data_ptr()
+            for name, parameter in self._get_sleep_parameters(model).items()
+        }
+        patterns = getattr(self.model_config, "sleep_preserve_parameter_names", [])
+        preserved: set[int] = set()
+        for pattern in patterns:
+            matches = fnmatch_filter(storage, pattern)
+            if not matches and pattern != "draft.*":
+                raise ValueError(f"No parameter matches sleep retention: {pattern}")
+            preserved.update(storage[name] for name in matches)
+        draft_names = fnmatch_filter(storage, "draft.*")
+        if draft_names and not any(fnmatch_filter(draft_names, pattern) for pattern in patterns):
+            logger.warning_once(
+                "Level 2 sleep discards draft model weights; reload_weights "
+                "restores only the target. Unless the draft is updated "
+                "separately, set --sleep-preserve-parameter-names 'draft.*' "
+                "to keep them."
+            )
+        return set(storage.values()) - preserved
+
+    def _discardable_parameters(self, model: nn.Module) -> set[int]:
+        if hasattr(GPUWorker, "_discardable_parameters"):
+            return super()._discardable_parameters(model)
+        return self._ascend_discardable_parameters(model)
 
     def discard(self, tags: tuple[str, ...]) -> None:
         raise NotImplementedError("GPUWorker.discard is not validated on Ascend.")
@@ -369,32 +397,6 @@ class NPUWorker(GPUWorker):
                 except Exception:
                     return
 
-    def _save_sleep_parameters(self, model: nn.Module) -> None:
-        # Older supported vLLM versions do not expose the retention option.
-        patterns = getattr(self.model_config, "sleep_preserve_parameter_names", [])
-        if not patterns:
-            self._sleep_saved_parameters = {}
-            return
-        parameters = dict(model.named_parameters())
-        names: set[str] = set()
-        for pattern in patterns:
-            matches = fnmatch_filter(parameters, pattern)
-            if not matches:
-                raise ValueError(f"No parameter matches sleep retention: {pattern}")
-            names.update(matches)
-        meta_names = [name for name in names if parameters[name].device.type == "meta"]
-        if meta_names:
-            raise ValueError(f"Sleep retention cannot snapshot meta parameters: {', '.join(sorted(meta_names))}")
-        self._sleep_saved_parameters = {
-            name: param.detach().to("cpu") for name, param in parameters.items() if name in names and not param.is_cpu
-        }
-
-    @torch.no_grad()
-    def _restore_sleep_parameters(self, model: nn.Module) -> None:
-        for name, value in self._sleep_saved_parameters.items():
-            model.get_parameter(name).copy_(value)
-        self._sleep_saved_parameters.clear()
-
     def set_metrics_level(self, level: str) -> str:
         """Set this worker process's MS metric level. Called by collective RPC."""
         from vllm_ascend.observability.ms_metrics.control import apply_process_metrics_level
@@ -407,17 +409,9 @@ class NPUWorker(GPUWorker):
         backend = self.sleep_mode_backend
         self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
-        # Level-1 only offloads the weights pool. Persistent metadata such as
-        # the DSA Hadamard matrix is allocated outside the kv_cache pool, so it
-        # stays resident and does not need a CPU backup.
-        if level == 1:
-            self._sleep_saved_buffers = {}
-            self._sleep_saved_parameters = {}
-        else:
-            model = self.model_runner.model
-            # Level-2 discards the weights pool; retain parameters the sender omits.
-            self._save_sleep_parameters(model)
-            self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
+        # Level 2 keeps everything the weight update does not rewrite; the
+        # allocator backs up mixed/non-parameter weights-pool allocations.
+        discardable = self._discardable_parameters(self.model_runner.model) if level == 2 else set()
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
@@ -426,7 +420,7 @@ class NPUWorker(GPUWorker):
         self.synchronize_device()
 
         global_te.unregister_buffer()
-        backend.suspend(level)
+        backend.suspend(discardable)
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -451,18 +445,6 @@ class NPUWorker(GPUWorker):
         self.sleep_mode_backend.resume(tags)
         if tags is None or "kv_cache" in tags:
             global_te.reregister_buffer()
-
-        # Do not access or consume saved weights when only the KV pool wakes.
-        wake_weights = tags is None or "weights" in tags
-        if wake_weights and self._sleep_saved_parameters:
-            self._restore_sleep_parameters(self.model_runner.model)
-        # Restore the buffers after level 2 sleep
-        if wake_weights and len(self._sleep_saved_buffers):
-            model = self.model_runner.model
-            for name, buffer in model.named_buffers():
-                if name in self._sleep_saved_buffers:
-                    buffer.data.copy_(self._sleep_saved_buffers[name].data)
-            self._sleep_saved_buffers = {}
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup

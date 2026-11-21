@@ -358,8 +358,6 @@ class TestNPUWorker(TestBase):
 
         # Verify cache_dtype setting
         self.assertEqual(worker.cache_dtype, torch.float16)
-        self.assertEqual(worker._sleep_saved_buffers, {})
-        self.assertEqual(worker._sleep_saved_parameters, {})
         # Profiler is lazily initialized - not created during __init__ (RFC #6954)
         mock_profiler_wrapper.assert_not_called()
 
@@ -453,8 +451,6 @@ class TestNPUWorker(TestBase):
 
         # Verify cache_dtype is set to custom value
         self.assertEqual(worker.cache_dtype, torch.float32)
-        self.assertEqual(worker._sleep_saved_buffers, {})
-        self.assertEqual(worker._sleep_saved_parameters, {})
 
     def test_initialize_cache(self):
         """Test initialize_cache method"""
@@ -494,7 +490,9 @@ class TestNPUWorker(TestBase):
         worker.sleep()
 
         worker.sleep_wakeup_manager.sleep.assert_called_once_with()
-        mock_allocator_class.get_instance.return_value.sleep.assert_called_once_with(("weights",))
+        mock_allocator_class.get_instance.return_value.sleep.assert_called_once_with(
+            ("weights", "runtime", "cudagraph"), set()
+        )
         self.assertEqual(mock_mem_get_info.call_count, 2)
         # sleep() brackets the transition: one barrier before the baseline memory
         # snapshot, one after the optional RL extra cleanup and before the unmap.
@@ -532,8 +530,6 @@ class TestNPUWorker(TestBase):
             worker = NPUWorker()
             worker.model_runner = mock_model_runner
             worker.vllm_config = mock_vllm_config
-            worker._sleep_saved_buffers = {}
-            worker._sleep_saved_parameters = {}
             worker.sleep_wakeup_manager = MagicMock()
             _attach_sleep_backend(worker)
             # Test wake_up method
@@ -568,8 +564,6 @@ class TestNPUWorker(TestBase):
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
         worker.model_runner = SimpleNamespace(model=MagicMock())
-        worker._sleep_saved_buffers = {}
-        worker._sleep_saved_parameters = {}
         _attach_sleep_backend(worker)
 
         worker.wake_up(tags=["kv_cache"])
@@ -656,8 +650,6 @@ class TestNPUWorker(TestBase):
             quant_config=None,
             speculative_config=SimpleNamespace(method="mtp"),
         )
-        worker._sleep_saved_buffers = {}
-        worker._sleep_saved_parameters = {}
         _attach_sleep_backend(worker)
 
         worker.wake_up(tags=["weights"])
