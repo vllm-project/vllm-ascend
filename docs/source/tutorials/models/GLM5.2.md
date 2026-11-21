@@ -262,7 +262,6 @@ variable in the selected script. Use the same checkpoint path on all nodes.
       --gpu-memory-utilization 0.9 \
       --enable-prefix-caching \
       --trust-remote-code \
-      --enforce-eager \
       --quantization ascend \
       --enable-auto-tool-choice \
       --tool-call-parser glm47 \
@@ -281,8 +280,6 @@ variable in the selected script. Use the same checkpoint path on all nodes.
       settings do not establish full-length capacity or accuracy validation.
     - `--quantization ascend` loads the W4A4C8/MXFP4 checkpoint. The example
       uses FP8 attention and indexer KV caches; retain the matching checkpoint.
-    - `--enforce-eager` disables graph execution. FlashComm1, CPU binding,
-      shared-expert overlap and DSA CP are selected by `--additional-config`.
     - `HCCL_BUFFSIZE=400` reserves the communication buffer size described in
       [Common Parameter Descriptions](#glm-common-parameters).
 
