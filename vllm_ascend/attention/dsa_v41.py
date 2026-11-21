@@ -30,7 +30,13 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.dsa_v1 import AscendDSABackend, build_dspark_swa_indices, dsv4_dsa_overlap_stream
+from vllm_ascend.attention.dsa_v1 import (
+    AscendDSABackend,
+    _aligned_dspark_index_width,
+    build_dspark_swa_indices,
+    dspark_swa_indices_use_triton,
+    dsv4_dsa_overlap_stream,
+)
 from vllm_ascend.attention.utils import (
     KVCacheRuntimeShapes,
     maybe_save_kv_layer_to_connector,
@@ -1278,32 +1284,44 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 ).view(req.num_reqs, blocks_per_req)
         noncausal = not bool(getattr(common, "causal", True))
         if noncausal and req.ori_sparse_indices is None:
+            # Full draft graphs retain these addresses from capture: the
+            # indices are rebuilt every step straight into the persistent
+            # buffers rather than through temporary tensors whose capture-time
+            # contents never advance with decoding.
+            num_spec_tokens = self.vllm_config.speculative_config.num_speculative_tokens
+            index_width = _aligned_dspark_index_width(window_size, num_spec_tokens)
+            if self._dspark_swa_indices is None:
+                self._dspark_swa_indices = torch.empty(
+                    (self._max_tokens, 1, index_width), dtype=torch.int32, device=req.seq_lens.device
+                )
+                # The triton variant emits [T, 1] lengths while the eager
+                # chain emits [T]; shape the persistent buffer after the
+                # path that fills it so each device keeps its existing
+                # graph-visible contract.
+                use_triton = dspark_swa_indices_use_triton(common.query_start_loc.device)
+                self._dspark_swa_lengths = torch.empty(
+                    (self._max_tokens, 1) if use_triton else (self._max_tokens,),
+                    dtype=torch.int32,
+                    device=req.seq_lens.device,
+                )
+            indices_view = self._dspark_swa_indices[: req.num_actual_tokens]
+            assert self._dspark_swa_lengths is not None
+            lengths_view = self._dspark_swa_lengths[: req.num_actual_tokens]
+            # The shared builder picks the triton kernel on NPU and forwards
+            # the persistent views; the eager fallback writes them in place.
             req.ori_sparse_indices, req.ori_topk_length = build_dspark_swa_indices(
                 common.block_table_tensor[: req.num_reqs],
-                self.vllm_config.speculative_config.num_speculative_tokens,
+                num_spec_tokens,
                 window_size,
                 req.storage_block_size,
                 common.query_start_loc[: req.num_reqs + 1],
                 req.seq_lens,
                 req.num_actual_tokens,
+                index_width=index_width,
+                indices_output=indices_view,
+                lengths_output=lengths_view,
                 use_logical_indices=True,
             )
-            # Full draft graphs retain these addresses from capture. Rebuild
-            # the values in persistent buffers rather than returning temporary
-            # tensors whose capture-time contents never advance with decoding.
-            if self._dspark_swa_indices is None:
-                self._dspark_swa_indices = req.ori_sparse_indices.new_empty(
-                    (self._max_tokens, *req.ori_sparse_indices.shape[1:])
-                )
-                self._dspark_swa_lengths = req.ori_topk_length.new_empty(
-                    (self._max_tokens, *req.ori_topk_length.shape[1:])
-                )
-            indices_view = self._dspark_swa_indices[: req.num_actual_tokens]
-            assert self._dspark_swa_lengths is not None
-            lengths_view = self._dspark_swa_lengths[: req.num_actual_tokens]
-            indices_view.copy_(req.ori_sparse_indices)
-            lengths_view.copy_(req.ori_topk_length)
-            req.ori_sparse_indices, req.ori_topk_length = indices_view, lengths_view
         replay_start = getattr(common, "replay_start", None)
         replay_visible_lens = None
         if replay_start is not None and req.cache_kind == "swa":
