@@ -2,9 +2,9 @@
 
 ## Description
 
-- **Function**: Prepares the metadata and fixed-capacity buffers required by DFlash speculative decoding on Ascend NPU. For each request, the operator converts the current target-model token span into draft-model context KV positions/slots, constructs the next DFlash query tokens and query slots, builds sampling mappings, copies per-request sampling state, and pads graph-visible buffers.
-- **Supported vLLM ABI**: vLLM 0.33.0 `prepare_dflash_inputs`, including
-  `cp_rank`, `cp_size`, and `cp_interleave` for rank-local DCP KV slots.
+- **Function**: Prepares context and query KV slots, draft tokens, and
+  sampling metadata for DFlash and DSpark. It fills preallocated buffers
+  and pads them for graph capture.
 - **Implementation**:
     - `vllm_ascend/ops/triton/spec_decode/prepare_dflash_inputs.py` contains
       the 2-D Triton kernel and launcher `prepare_dflash_inputs_triton`.
@@ -42,7 +42,8 @@
       `num_query_per_req = num_speculative_steps + 1`,
       and sample row `s` maps to query offset `s + 1`.
 - **Algorithm flow**:
-  1. Read `input_batch.num_reqs` and the maximum scheduled context length.
+  1. Use `num_reqs_override` if given, otherwise `input_batch.num_reqs`.
+     Find the maximum scheduled context length among those requests.
   2. Read the Ascend VectorCore count and choose `workers_per_req` as the maximum of:
      - the target VectorCore parallelism per request;
      - the minimum workers needed to keep Context work within 256 elements per worker;
@@ -58,12 +59,6 @@
   validated on Atlas A3.
 
 ## Parameters
-
-> [!NOTE]
->
-> The launcher receives `cp_rank`, `cp_size`, and `cp_interleave` directly.
-> The supplied manager `block_size` is used consistently for DCP
-> ownership, rank-local positions, and public block-table lookup.
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
@@ -125,8 +120,7 @@
 The Ascend launcher accepts the vLLM 0.33.0 positional signature. The
 worker adapter passes vLLM main's extra `block_stride` argument by keyword.
 Each draft group supplies a manager block table and its matching
-`block_size`. Multimodal positions are unsupported because the kernel
-derives KV slots from scalar position IDs.
+`block_size`.
 
 ## Origin and Differences
 
