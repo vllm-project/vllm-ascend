@@ -570,6 +570,7 @@ class AscendConfig:
             "enable_mlapo": true,
             "mlapo_keep_prefill_weights": false,
             "msmonitor_use_daemon": false,
+            "torch_npu_profiler_with_stack": false,
             "enable_transpose_kv_cache_by_block": true,
             "weight_nz_mode": 1,
             "enable_shared_expert_dp": false,
@@ -746,6 +747,10 @@ class AscendConfig:
     # existing memory-saving behavior).
     mlapo_keep_prefill_weights: bool = False
     msmonitor_use_daemon: bool = False
+    # Opt in to torch_npu.profiler's with_stack (operator-level call stacks) in
+    # addition to with_modules. Off by default because of its time overhead;
+    # only takes effect when profiler_config.torch_profiler_with_stack is true.
+    torch_npu_profiler_with_stack: bool = False
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
 

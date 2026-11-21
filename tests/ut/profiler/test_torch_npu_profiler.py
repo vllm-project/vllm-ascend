@@ -111,8 +111,58 @@ class TestTorchNPUProfilerWrapper(TestBase):
         self.assertEqual(profile_kwargs["activities"], ["CPU", "NPU"])
         self.assertTrue(profile_kwargs["profile_memory"])
         self.assertEqual(profile_kwargs["with_modules"], True)
+        self.assertIs(profile_kwargs["with_stack"], False)
         self.assertEqual(profile_kwargs["on_trace_ready"], mock_trace_handler_instance)
         self.assertEqual(result, mock_profiler_instance)
+
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler._ExperimentalConfig", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.profile", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.tensorboard_trace_handler", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.ExportType", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.ProfilerLevel", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.AiCMetrics", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.ProfilerActivity", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.get_ascend_config")
+    def test_create_profiler_op_stack_is_opt_in(
+        self,
+        mock_get_ascend_config,
+        mock_profiler_activity,
+        mock_aic_metrics,
+        mock_profiler_level,
+        mock_export_type,
+        mock_trace_handler,
+        mock_profile,
+        mock_experimental_config,
+    ):
+        """torch_npu's with_stack needs both the profiler flag and the Ascend opt-in."""
+        from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+
+        # (torch_profiler_with_stack, torch_npu_profiler_with_stack) -> (with_modules, with_stack)
+        cases = [
+            (True, False, True, False),
+            (True, True, True, True),
+            (False, True, False, False),
+            (False, False, False, False),
+        ]
+        for profiler_with_stack, ascend_opt_in, expected_modules, expected_stack in cases:
+            with self.subTest(profiler_with_stack=profiler_with_stack, ascend_opt_in=ascend_opt_in):
+                mock_profile.reset_mock()
+                mock_get_ascend_config.return_value = MagicMock(
+                    msmonitor_use_daemon=False,
+                    torch_npu_profiler_with_stack=ascend_opt_in,
+                )
+                profiler_config = ProfilerConfig(
+                    profiler="torch",
+                    torch_profiler_dir="/path/to/traces",
+                    torch_profiler_with_stack=profiler_with_stack,
+                )
+
+                TorchNPUProfilerWrapper._create_profiler(profiler_config, "test_trace")
+
+                mock_profile.assert_called_once()
+                profile_kwargs = mock_profile.call_args.kwargs
+                self.assertIs(profile_kwargs["with_modules"], expected_modules)
+                self.assertIs(profile_kwargs["with_stack"], expected_stack)
 
     def test_create_profiler_disabled(self):
         from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper

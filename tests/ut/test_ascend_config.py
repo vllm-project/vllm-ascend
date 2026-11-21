@@ -946,6 +946,25 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_torch_npu_profiler_with_stack_defaults_off(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertFalse(ascend_config.torch_npu_profiler_with_stack)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_torch_npu_profiler_with_stack_uses_additional_config(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"torch_npu_profiler_with_stack": True}
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertTrue(ascend_config.torch_npu_profiler_with_stack)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_sequence_parallel_and_shared_expert_dp_are_independent(self, mock_check_and_update_config):
         for use_sequence_parallel_moe, enable_shared_expert_dp in (
             (False, False),
