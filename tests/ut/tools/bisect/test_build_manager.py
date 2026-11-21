@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from tools.bisect import git_ops
-from tools.bisect.build_manager import BuildManager
-from tools.bisect.config import BisectOptions
+from tools.bisect.deployment import git_ops
+from tools.bisect.deployment.manager import BuildManager
+from tools.bisect.orchestration.config import BisectOptions
 
 
 def _build_manager(tmp_path: Path, *, native_check: str = "per-commit") -> BuildManager:

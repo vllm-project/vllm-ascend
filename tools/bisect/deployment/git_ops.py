@@ -21,7 +21,7 @@ from pathlib import Path
 
 import regex as re
 
-from tools.bisect.config import Candidate
+from tools.bisect.orchestration.config import Candidate
 
 logger = logging.getLogger(__name__)
 

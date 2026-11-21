@@ -22,24 +22,12 @@ reading the JSON -- we must check both signals, not just the exit code.
 
 import json
 import logging
-from dataclasses import dataclass
 from pathlib import Path
 
-from tools.bisect.config import Verdict
+from tools.bisect.orchestration.config import Verdict
+from tools.bisect.testing.outcome import RunOutcome
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class RunOutcome:
-    """Raw signals produced by a runner for one trial."""
-
-    exit_code: int
-    # Directory holding this trial's benchmark JSON(s). A whole-YAML run writes
-    # one file per case, so we scan the directory rather than a single file.
-    results_dir: Path | None = None
-    infra_error: bool = False  # set when the failure is environmental (-> SKIP)
-    skip_reason: str = ""  # human reason when infra_error is set (e.g. vllm skew)
 
 
 def _any_benchmark_failed(results_dir: Path | None) -> bool:

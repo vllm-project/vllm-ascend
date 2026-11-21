@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.bisect.coordinator import Coordinator
+from tools.bisect.execution.shared_directory import Coordinator
 
 
 def test_publish_command_and_wait_command_round_trip(tmp_path: Path):
