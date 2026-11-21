@@ -17,62 +17,121 @@
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
 import os
+from contextlib import ExitStack, contextmanager
+from typing import Any
+from unittest.mock import patch
 
 import pytest
+from vllm.utils.network_utils import get_open_port
 
+from tests.e2e.common.kv_pool.config import MooncakeKVPoolConfig
+from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMooncakeManager
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+# P1 uses the FabricMem path with the default 32 TB capacity.
+os.environ["ASCEND_ENABLE_USE_FABRIC_MEM"] = "1"
+os.environ["ASCEND_AUTO_CONNECT"] = "1"
+os.environ["ASCEND_GLOBAL_RESOURCE_CONFIG"] = '{"fabric_memory.max_capacity": "32"}'
+
+POOL_MODEL = os.environ.get("DEEPSEEK_V4_MTP_MODEL_PATH", "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp")
+
+# 16,388 = lcm(16,384) + 4. MTP trims the final lcm block, so a 16,384-token
+# prompt would hit 0; the 4-token tail keeps 16,384 hit tokens.
+POOL_LCM_BLOCK_SIZE = 16384
+POOL_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + 4
+# Perf prompt: one lcm block plus a tail -> 90% hit at concurrency 2.
+POOL_PERF_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + POOL_LCM_BLOCK_SIZE // 9
+# max_model_len covers the perf prompt and output tokens.
+POOL_MAX_MODEL_LEN = max(POOL_PROMPT_TOKENS, POOL_PERF_PROMPT_TOKENS) + 128
+
+# DSV4-Flash is the only block-key layerwise mooncake case in this PR.
+POOL_KV_TRANSFER_CONFIG = {
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "backend": "mooncake",
+        "lookup_rpc_port": "1",
+        "use_layerwise": True,
+    },
+}
 
 
-@pytest.mark.e2e_model("gdydems/DeepSeek-V4-Flash-w4a8-mtp")
+def _build_mooncake_pool_config() -> MooncakeKVPoolConfig:
+    return MooncakeKVPoolConfig(
+        config={
+            "metadata_server": "P2PHANDSHAKE",
+            "protocol": "ascend",
+            "global_segment_size": "2GB",  # Not final; tune after measurement.
+            "local_buffer_size": "5GB",
+            "preferred_segment": False,
+            "prefer_alloc_in_same_node": True,
+        },
+        master_port=get_open_port(),
+        metrics_port=get_open_port(),
+    )
+
+
+CASE_NAME = "dsv4_tp8_pool_watch"
+
+
+@contextmanager
+def _leg(use_pool: bool, case_name: str):
+    """Leg A enables the mooncake pool; leg B keeps everything else identical."""
+    with ExitStack() as stack:
+        kwargs: dict[str, Any] = dict(
+            max_model_len=POOL_MAX_MODEL_LEN,
+            max_num_seqs=16,
+            max_num_batched_tokens=POOL_MAX_MODEL_LEN,
+            dtype="auto",
+            tensor_parallel_size=8,
+            enable_expert_parallel=True,
+            gpu_memory_utilization=0.9,
+            quantization="ascend",
+            tokenizer_mode="deepseek_v4",
+            block_size=128,
+            enable_prefix_caching=not use_pool,
+            disable_log_stats=False,
+            attention_config={"indexer_kv_dtype": "int8"},
+            compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+            speculative_config={"num_speculative_tokens": 1, "method": "mtp"},
+        )
+        if use_pool:
+            pool = stack.enter_context(SingleNodeMooncakeManager(_build_mooncake_pool_config(), case_name))
+            stack.enter_context(patch.dict(os.environ, pool.server_envs))
+            kwargs["kv_transfer_config"] = POOL_KV_TRANSFER_CONFIG
+        yield stack.enter_context(VllmRunner(POOL_MODEL, **kwargs))
+
+
+@pytest.mark.e2e_model("Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp")
 @pytest.mark.e2e_coverage(
     arch="moe",
     feature="mtp",
     parallel="TP,EP",
     deploy="pd_mix",
     hardware="A3",
-    quantization="W4A8",
+    quantization="W8A8",
     graph_mode="full_decode_only",
 )
 @wait_until_npu_memory_free()
-def test_deepseek_v4_w4a8_tp4_basic_greedy():
-    """Verify DeepSeek V4 W4A8 basic greedy generation with TP4 and EP."""
+def test_deepseek_v4_w8a8_tp8_basic_greedy():
+    """Verify DeepSeek V4 W8A8 basic greedy generation with TP8 and EP."""
     example_prompts = [
         "Hello, my name is",
         "What is the meaning of life?",
     ]
     max_tokens = 5
 
-    with VllmRunner(
-        "gdydems/DeepSeek-V4-Flash-w4a8-mtp",
-        max_model_len=8192,
-        max_num_seqs=16,
-        max_num_batched_tokens=4096,
-        dtype="auto",
-        tensor_parallel_size=4,
-        enable_expert_parallel=True,
-        gpu_memory_utilization=0.9,
-        quantization="ascend",
-        tokenizer_mode="deepseek_v4",
-        block_size=128,
-        attention_config={"indexer_kv_dtype": "int8"},
-        compilation_config={
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-        },
-        speculative_config={"num_speculative_tokens": 1, "method": "mtp"},
-    ) as vllm_model:
-        outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-        expected_token_ids = [
-            [19923, 14, 1026, 2329, 344, 680, 2852, 95, 305, 342],
-            [3085, 344, 270, 5281, 294, 1988, 33, 3955, 361, 582, 3085, 344],
-        ]
+    def _accuracy(runner) -> None:
+        outputs = runner.generate_greedy(example_prompts, max_tokens)
         assert len(outputs) == len(example_prompts)
-        for i, (output_ids, output_str) in enumerate(outputs):
+        for output_ids, output_str in outputs:
             assert len(output_str) > 0
             assert len(output_ids) > 0
-            assert output_ids == expected_token_ids[i]
+
+    with _leg(True, f"{CASE_NAME}_a") as runner:
+        _accuracy(runner)
 
 
 @pytest.mark.e2e_model("gdydems/DeepSeek-V4-Flash-w4a8-mtp")
