@@ -266,7 +266,7 @@ Before starting the service:
         --gpu-memory-utilization 0.85 \
         --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
         --compilation-config '{"cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128],"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
+        --additional-config '{"enable_cpu_binding": true}'
     ```
 
     Key Parameter Descriptions:
@@ -293,7 +293,6 @@ Before starting the service:
     - `--mm-processor-cache-type` sets the cache type used by the multimodal preprocessor and mapper. `shm` uses a shared-memory FIFO cache, while the default `lru` uses a mirrored LRU cache.
     - `--additional-config` contains Ascend-specific optimization options:
         - `"enable_cpu_binding": true` enables Ascend-native CPU binding, which pins the worker process, key runtime threads, memory pages, and NPU IRQs to CPU ranges close to the driven NPU, reducing cross-NUMA traffic and thread preemption and improving latency stability. It is enabled by default starting from vllm-ascend v0.18.0rc1.
-        - `"enable_flashcomm1": true` enables the FlashComm communication optimization, which splits the tensor-parallel AllReduce into Reduce-Scatter and All-Gather to reduce communication overhead and improve prefill throughput.
 
 === "950PR Products"
 
@@ -334,7 +333,7 @@ Before starting the service:
         --gpu-memory-utilization 0.9 \
         --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
         --compilation-config '{"cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128],"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
+        --additional-config '{"enable_cpu_binding": true}'
     ```
 
     Key Parameter Descriptions:
@@ -359,7 +358,6 @@ Before starting the service:
     - `--mm-processor-cache-type` sets the cache type used by the multimodal preprocessor and mapper. `shm` uses a shared-memory FIFO cache, while the default `lru` uses a mirrored LRU cache.
     - `--additional-config` contains Ascend-specific optimization options:
         - `"enable_cpu_binding": true` enables Ascend-native CPU binding, which pins the worker process, key runtime threads, memory pages, and NPU IRQs to CPU ranges close to the driven NPU, reducing cross-NUMA traffic and thread preemption and improving latency stability. It is enabled by default starting from vllm-ascend v0.18.0rc1.
-        - `"enable_flashcomm1": true` enables the FlashComm communication optimization, which splits the tensor-parallel AllReduce into Reduce-Scatter and All-Gather to reduce communication overhead and improve prefill throughput.
 
 === "Atlas 800I A3 / Atlas 800I A2"
 
