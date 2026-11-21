@@ -163,6 +163,8 @@ class HardwareCapability(Enum):
     # Route DeepSeek-V4 vision and hash rows through the fused
     # ``moe_gating_top_k_hash`` ABI with ``bias_vl`` and image sentinels.
     MOE_GATING_TOP_K_HASH_VISION = auto()
+    # Accept INT32/INT64 hash IDs and map the -1 padding sentinel to row zero.
+    MOE_GATING_TOP_K_HASH_RAW_IDS = auto()
     # Allow the extended NPU graph backend; static-kernel mode depends on this contract.
     MM_REDUCE_SCATTER_AI_CPU_INFERENCE = auto()
     # Fuse an unquantized BF16 matmul with the TP ReduceScatter over AIV
@@ -379,6 +381,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
         HardwareCapability.MC2_HIERARCHY_COMM,
+        HardwareCapability.MOE_GATING_TOP_K_HASH_RAW_IDS,
         HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.PAGED_ATTENTION,
