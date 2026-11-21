@@ -1,0 +1,7 @@
+pr: 22540
+entries:
+  - category: feature
+    text: >-
+      Added HY4 Flash FP8 eager text inference on Ascend 950DT with tensor and
+      expert parallelism. Long-context text inference was validated through
+      33,096 tokens and requires --no-enable-prefix-caching.
