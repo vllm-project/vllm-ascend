@@ -1,0 +1,4 @@
+pr: 20491
+entries:
+  - category: config
+    text: MooncakeHybridConnector supports optional per-receiver KV read byte and descriptor limits with FIFO admission between batches. The feature is disabled by default and does not change collective communication.
