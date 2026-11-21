@@ -7,6 +7,13 @@ from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
+# Before running all the test cases in this file, the hardware attributes of NPU
+# are automatically initialized to prevent errors reported by the underlying operators.
+@pytest.fixture(autouse=True)
+def setup_device_properties_for_ut():
+    init_device_properties_triton()
 
 def fused_qkvzba_split_reshape_cat_torch_ref(
     mixed_qkvz,
