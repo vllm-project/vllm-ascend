@@ -9,17 +9,20 @@ import torch
 from vllm.config import CUDAGraphMode
 
 from vllm_ascend.models.deepseek_v41 import decoder_replay_layers as replay_mod
+from vllm_ascend.models.deepseek_v41 import model as model_mod
 from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
 
 
 @pytest.mark.parametrize(("pcp_size", "prefix_caching"), [(1, True), (2, True), (2, False)])
 @pytest.mark.parametrize("dp_size", [1, 2])
-def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_caching, dp_size):
+@pytest.mark.parametrize("pp_size", [1, 2])
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+def test_decoder_replay_with_parallel_layouts(pcp_size, prefix_caching, dp_size, pp_size, sequence_parallel):
     model = SimpleNamespace(
         config=SimpleNamespace(kv_source_layer_ids=[0], sliding_window=2, engram_layer_ids=[]),
         end_layer=3,
         decoder_replay_start=3,
-        use_sequence_parallel=False,
+        use_sequence_parallel=sequence_parallel,
         _run_replay_layers=lambda *states: states,
         topk_indices_buffer=torch.zeros(8, 2),
         candidate_indices_buffer=torch.zeros(8, 2),
@@ -29,7 +32,7 @@ def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_
     config = SimpleNamespace(
         cache_config=SimpleNamespace(swa_bounded_replay=True, enable_prefix_caching=prefix_caching),
         parallel_config=SimpleNamespace(
-            pipeline_parallel_size=1,
+            pipeline_parallel_size=pp_size,
             prefill_context_parallel_size=pcp_size,
             data_parallel_size=dp_size,
             decode_context_parallel_size=1,
@@ -40,6 +43,10 @@ def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_
         lora_config=None,
     )
     replay = replay_mod.make_decoder_replay(model, config)
+    if sequence_parallel:
+        assert replay is None
+        assert model.decoder_replay_start == model.end_layer
+        return
     assert replay is not None
     assert model.decoder_replay_start == 1
 
@@ -234,6 +241,7 @@ def test_untrimmed_replica_enters_decoder_context_without_gathering():
 )
 @pytest.mark.parametrize("compacted", [False, True])
 def test_model_replays_only_layers_after_kv_sources(monkeypatch, num_layers, replay_start, selected, compacted):
+    monkeypatch.setattr(model_mod, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True))
     seen = []
 
     class Layer:

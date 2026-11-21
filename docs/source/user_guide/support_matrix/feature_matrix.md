@@ -38,10 +38,10 @@ The symbols used have the following meanings:
 | [KVPP (Experimental)](../feature_guide/kvpp.md) | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❔ | ❔ | 🟠 | ✅ | ❔ | ✅ | 🟠 | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ✅ | ❔ | ✅ |
 | [Pipeline Parallel](../feature_guide/pipeline_parallel.md) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟠<sup>3</sup> | 🟠<sup>4</sup> | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-- <sup>1</sup> Lmhead TP is only enabled in the pure dp scenarios.
+- <sup>1</sup> Lmhead TP is only enabled in the pure DP scenarios.
 - <sup>2</sup> MLAPO is only supported on the decode stage.
 - <sup>3</sup> Pipeline Parallel is supported on the prefill node; the decode node must use `PP1`.
 - <sup>4</sup> Eagle3 with Pipeline Parallel supports MiniMax-M3 sparse models only.
 - **Mooncake backend:** KV Cache Pool with Decode Context Parallel is supported for non-layerwise complete-block transfers and for block-key layerwise pooling with `prefill_context_parallel_size=1`, subject to the cache-group constraints in the [layerwise pooling guide](../feature_guide/mooncake_layerwise_adaptation_and_optimization.md#decode-context-parallelism-dcp). Hybrid DCP support is experimental. The Memcache backend supports DCP as before.
 
-See the detailed PP feature-stacking matrix in [Pipeline Parallelism](../feature_guide/pipeline_parallel.md).
+See the detailed PP feature-stacking matrix in [Pipeline Parallel](../feature_guide/pipeline_parallel.md).

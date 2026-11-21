@@ -10,6 +10,12 @@ import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.utils import enable_sfa, model_uses_kpool_indexer
 
 
+def get_cp_max_num_reqs(vllm_config: Any) -> int:
+    """Include PCP's two prefill segments and one graph-padding request."""
+    segments = 2 if vllm_config.parallel_config.prefill_context_parallel_size > 1 else 1
+    return vllm_config.scheduler_config.max_num_seqs * segments + 1
+
+
 def use_dcp_q_replicate(vllm_config) -> bool:
     """Resolve dense MLA Q replication before creating Q projections."""
     parallel = vllm_config.parallel_config
@@ -69,7 +75,7 @@ def use_history_current_split_decode(
     is_draft_model_prefill: bool = False,
     use_spec_decode: bool = False,
 ) -> bool:
-    """Choose one split policy for MLA and GQA decode attention."""
+    """Choose the history/current split policy for MLA decode attention."""
     if not attn_metadata.causal or attn_metadata.decode is None:
         return False
     # Preserve the task layout of speculative target and draft-prefill graphs.

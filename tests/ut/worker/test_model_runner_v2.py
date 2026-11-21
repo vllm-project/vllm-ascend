@@ -80,6 +80,7 @@ def _make_runner(*args, **kwargs):
     runner.use_fia = False
     runner.sync_spec_pp_cpu_counts = False
     runner.speculative_config = None
+    runner.speculator = None
     # vLLM main suppresses EPLB even for `skip_eplb` dummy runs, so the
     # attribute must exist on every runner built here.
     runner.eplb = SimpleNamespace(suppress=nullcontext, step=Mock())  # type: ignore[assignment]
