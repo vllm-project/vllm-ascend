@@ -41,7 +41,7 @@
 /docs/source/getting_started @MrZ20
 /docs/source/user_guide/feature_guide/rfork.md @yangsonglin13
 /docs/source/user_guide/feature_guide/rl.md @Ronald1995 @Liccol
-/docs/source/user_guide/feature_guide/batch_invariance.md @Ronald1995
+/docs/source/user_guide/feature_guide/batch_invariance.md @Ronald1995 @wangx700
 /docs/source/community/contributors.md @wangxiyuan
 /.readthedocs.yaml @liqian79 @MrZ20
 /README* @liqian79
@@ -56,6 +56,7 @@
 # c++ source code
 /cmake @zzzzwwjj @ZT-AIA
 /csrc @zzzzwwjj @ZT-AIA
+/csrc/build_batch_invariant_ops.sh @wangx700
 /CMakeLists.txt @zzzzwwjj @ZT-AIA
 /vllm_ascend/_cann_ops_custom @ZT-AIA
 
@@ -107,7 +108,7 @@
 /vllm_ascend/ops/vocab_parallel_embedding.py @xuchi-0808
 /vllm_ascend/ops/triton @ShyRa1n @ZT-AIA @yiz-liu
 /vllm_ascend/ops/triton/eplb.py @freyfwt
-/vllm_ascend/ops/triton/batch_invariant @Ronald1995
+/vllm_ascend/ops/triton/batch_invariant @Ronald1995 @wangx700
 /vllm_ascend/ops/triton/dcp/ @weiguihua2 @zhenwenqi2024 @pisceskkk @zhaochuang001 @li1how @wzx0726
 /vllm_ascend/ops/triton/pcp_kv_cache.py @weiguihua2 @zhenwenqi2024 @pisceskkk @zhaochuang001 @li1how @wzx0726
 /vllm_ascend/ops/triton/msa @CXY-Katrina
@@ -144,7 +145,7 @@
 /vllm_ascend/__init__.py @wangxiyuan
 /vllm_ascend/ascend_config.py @ningjingbengxiaohai @zzzzwwjj
 /vllm_ascend/ascend_forward_context.py @zzzzwwjj @yiz-liu
-/vllm_ascend/batch_invariant.py @Ronald1995
+/vllm_ascend/batch_invariant.py @Ronald1995 @wangx700
 /vllm_ascend/config_utils.py @wxsIcey @Tflowers-0129 @Ronald1995 @zhenwenqi2024 @pisceskkk @zzzzwwjj @linfeng-yuan
 /vllm_ascend/cpu_binding.py @zouyida2052
 /vllm_ascend/envs.py @ningjingbengxiaohai @zzzzwwjj
