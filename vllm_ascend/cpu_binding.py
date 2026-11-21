@@ -98,6 +98,21 @@ class DeviceInfo:
                     logic_ids.add(int(logic_str))
         return sorted(logic_ids)
 
+    def get_physical_chip_by_logic_id(self, logic_npu_id: int) -> tuple[str, str] | None:
+        """Return physical npu_id and chip_id by logical NPU ID.
+
+        Example:
+          logic0 -> ("32768", "0")
+          logic1 -> ("32768", "1")
+          logic2 -> ("32896", "0")
+          logic3 -> ("32896", "1")
+        """
+        for physical_npu_id, chip_map in self.npu_map_info.items():
+            for chip_id, logic_str in chip_map.items():
+                if logic_str and logic_str.isdigit() and int(logic_str) == logic_npu_id:
+                    return physical_npu_id, chip_id
+        return None
+
     @staticmethod
     def get_npu_map_info() -> dict[str, dict[str, str]]:
         npu_map_info: dict[str, dict[str, str]] = {}
@@ -197,7 +212,18 @@ class DeviceInfo:
                     continue
                 last_part = parts[-1]
                 if self.is_cpu_list(last_part):
-                    affinity[int(npu_match.group(1))] = self.expand_cpu_list(last_part)
+                    row_id = npu_match.group(1)
+                    cpus = self.expand_cpu_list(last_part)
+                    # 310P can label a multi-chip board with a physical ID
+                    # outside the logical ID space (for example NPU32768).
+                    # Keep logical rows unchanged when the two spaces overlap.
+                    chip_map = self.npu_map_info.get(row_id)
+                    if chip_map and int(row_id) not in self.get_all_logic_npus():
+                        for logic_id in chip_map.values():
+                            if logic_id and logic_id.isdigit():
+                                affinity[int(logic_id)] = cpus
+                    else:
+                        affinity[int(row_id)] = cpus
         return affinity
 
 
@@ -690,6 +716,30 @@ class CpuAlloc:
         main_pid = str(psutil.Process().pid)
         self.bind(main_pid, self.assign_main[self.current_npu], True)
 
+    def _get_board_info(self, npu: int) -> str:
+        """Query board information through the physical chip mapping first."""
+        physical_chip = self.device_info.get_physical_chip_by_logic_id(npu)
+        if physical_chip is not None:
+            physical_npu_id, chip_id = physical_chip
+            info, return_code = execute_command(
+                ["npu-smi", "info", "-t", "board", "-i", physical_npu_id, "-c", chip_id]
+            )
+            if return_code == 0 and info.strip():
+                return info
+        if get_current_hardware_profile().device_addressing_mode is DeviceAddressingMode.DUAL_CHIP_CARD:
+            args = ["-i", str(npu // 2), "-c", str(npu % 2)]
+        else:
+            args = ["-i", str(npu)]
+        info, _ = execute_command(["npu-smi", "info", "-t", "board", *args])
+        return info
+
+    @staticmethod
+    def _parse_pci_addr(board_info: str) -> str:
+        for line in board_info.splitlines():
+            if "pcie bus info" in line.lower() or "pci bus info" in line.lower():
+                return line.split()[-1].lower()
+        return ""
+
     def bind_npu_irq(self) -> None:
         if not self._reserve_irq_cpus():
             logger.info("[irq] IRQ binding skipped on Ascend 950.")
@@ -731,21 +781,7 @@ class CpuAlloc:
             return
 
         sq_cpu, cq_cpu = cpus[0], cpus[1]  # Reserved for IRQ binding
-        pci_addr = ""
-
-        if get_current_hardware_profile().device_addressing_mode is DeviceAddressingMode.DUAL_CHIP_CARD:
-            # Dual-chip cards address each logical NPU by card and chip id.
-            card_id = npu // 2
-            chip_id = npu % 2
-            info, _ = execute_command(["npu-smi", "info", "-t", "board", "-i", str(card_id), "-c", str(chip_id)])
-        else:
-            # Direct addressing uses the logical NPU id as the card id.
-            info, _ = execute_command(["npu-smi", "info", "-t", "board", "-i", str(npu)])
-
-        for line in info.splitlines():
-            if "PCIe Bus Info" in line:
-                pci_addr = line.split()[-1].lower()
-                break
+        pci_addr = self._parse_pci_addr(self._get_board_info(npu))
 
         if not pci_addr:
             logger.warning("Can't find PCI address. npu=%s. ", npu)
