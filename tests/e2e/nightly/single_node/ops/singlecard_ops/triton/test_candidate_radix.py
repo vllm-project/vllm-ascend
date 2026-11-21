@@ -9,6 +9,22 @@ from tests.e2e.nightly.single_node.ops.singlecard_ops.triton.dcp_test_utils impo
 from vllm_ascend.ops.triton.sharded_indexer import pack_local_candidates
 
 
+@pytest.mark.parametrize("rows", [7, 128])
+def test_compact_words_preserve_bf16_payload_and_full_local_id(rows):
+    ids = torch.arange(2048, dtype=torch.int32).repeat(rows, 1).view(rows, 1, 2048)
+    ids[..., :5] = torch.tensor([65535, 0, -1, 1, 2])
+    scores = torch.ones(ids.shape, dtype=torch.bfloat16)
+    scores[..., :5] = torch.tensor([-0.0, 0.0, 1.0, torch.inf, torch.nan])
+    expected_order = torch.cat((torch.arange(5, 2048), torch.tensor([1, 0, 2, 3, 4])))
+    valid = (ids >= 0) & scores.isfinite()
+    words = torch.where(valid, scores.float(), -torch.inf).view(torch.int32) | torch.where(valid, ids, 0)
+    actual = pack_local_candidates(
+        ids.npu(), scores.npu(), 8, 7, 768, sort_candidates=True, fuse_sort=True, compact=True
+    )
+    assert actual.shape == (rows, 2048, 1)
+    assert torch.equal(actual.cpu().squeeze(-1), words[:, 0, expected_order])
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float64, torch.int32])
 @pytest.mark.parametrize("rows", [0, 48])
 def test_pack_rejects_unsupported_score_dtype(dtype, rows):
@@ -30,14 +46,17 @@ def test_sorted_pack_exact_order_and_payload(rows, column_stride, dtype, id_case
     scores = torch.randint(-2, 3, ids.shape, generator=generator).to(dtype)
     boundary_id = {
         "zero": 0,
-        "digit_max": (1 << 13) - 1,
-        "digit_boundary": 1 << 13,
+        "digit_max": (1 << 19) - 1,
+        "digit_boundary": 1 << 19,
         "id_max_minus_one": (1 << 20) - 2,
         "id_max": (1 << 20) - 1,
     }[id_case]
     # Same-score IDs exercise the radix digit boundary and supported ID limit.
     ids[..., -1] = boundary_id
     scores[..., -1] = 1.0
+    # Equal scores straddle the high ID bit in a deliberately unsorted order.
+    ids[..., 8:12] = torch.tensor([(1 << 19) + 1, 1, 1 << 19, (1 << 19) - 1])
+    scores[..., 8:12] = 1.0
     ids[0] = -1
     scores[..., :7] = torch.tensor([torch.nan, torch.inf, -torch.inf, 0.0, -0.0, 1.0, -1.0])
     scores[..., 7] = torch.nextafter(torch.tensor(1.0, dtype=dtype), torch.tensor(2.0, dtype=dtype))

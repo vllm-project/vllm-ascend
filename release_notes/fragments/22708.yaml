@@ -1,0 +1,7 @@
+pr: 22708
+entries:
+  - category: performance
+    text: >-
+      Kimi's BF16 sharded indexer exchanges four bytes per candidate when the configured
+      model length fits 16-bit owner-local IDs. This reduces DCP Top-K latency on Ascend 950.
+    hardware: [A5]

@@ -42,6 +42,30 @@ def test_candidate_memory_budget(world, expected):
 
 
 @pytest.mark.parametrize(
+    "max_len,interleave,dtype,local,k,expected",
+    [
+        (140000, 768, torch.bfloat16, True, 2048, True),
+        (8 * 65536, 256, torch.bfloat16, True, 2048, True),
+        (8 * 65536 + 1, 256, torch.bfloat16, True, 2048, False),
+        (8 * 65536, 768, torch.bfloat16, True, 2048, False),  # Partial cycle puts more IDs on rank zero.
+        (None, 768, torch.bfloat16, True, 2048, False),
+        (140000, 768, torch.float32, True, 2048, False),
+        (140000, 768, torch.bfloat16, False, 2048, False),
+        (140000, 768, torch.bfloat16, True, 1024, False),
+    ],
+)
+def test_collective_wire_format(monkeypatch, max_len, interleave, dtype, local, k, expected):
+    ops = Mock(MAX_FUSED_TOPK=2048)
+    ids = torch.zeros((1, 1, k), dtype=torch.int32)
+    ops.pack_local_candidates.return_value = ids
+    monkeypatch.setitem(sys.modules, "vllm_ascend.ops.triton.sharded_indexer", ops)
+    for rank in (0, 7):
+        group = SimpleNamespace(world_size=8, rank_in_group=rank, all_gather=Mock(return_value=ids))
+        indexer.distributed_topk(ids, ids.to(dtype), group, k, interleave, return_local=local, max_model_len=max_len)
+        assert ops.pack_local_candidates.call_args.kwargs["compact"] is expected
+
+
+@pytest.mark.parametrize(
     "sharded,pcp,dsa_cp,turboquant,expected",
     [
         (True, 1, False, False, True),
