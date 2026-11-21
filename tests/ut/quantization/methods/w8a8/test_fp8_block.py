@@ -24,6 +24,7 @@ import torch.nn as nn
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
+from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.methods.w8a8.fp8_block import (
     AscendFp8BlockFusedMoEMethod,
     AscendFp8BlockLinearMethod,
@@ -227,6 +228,7 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         mock_npu.npu_dynamic_mx_quant.assert_not_called()
         self.assertFalse(scheme.use_mxfp8)
         self.assertEqual(layer.weight.dtype, torch.bfloat16)
+        self.assertIsInstance(layer.quant_method, AscendUnquantizedLinearMethod)
         expected = reference_resolve(weight, scale_inv, 4, 32, torch.bfloat16)
         self.assertTrue(torch.equal(layer.weight.data, expected))
 
