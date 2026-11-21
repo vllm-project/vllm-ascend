@@ -175,7 +175,7 @@ def test_sfa_dcp_routes_native_output_merge_to_custom_op(fused_a2a) -> None:
         actual = impl._merge_dcp_outputs(output, lse)
 
     assert actual is expected
-    fused_a2a.assert_called_once_with(output, lse, 2, 1, "dcp:0", softmax_sum=None)
+    fused_a2a.assert_called_once_with(output, lse, 2, 1, "dcp:0", softmax_sum=None, valid_rows=None)
 
 
 @pytest.mark.parametrize("scatter_dim", [0, 1])
@@ -211,7 +211,16 @@ def test_sfa_custom_op_passes_optional_lse_to_combine():
         actual = kernels.dcp_a2a_fused(output, lse, 1, 1, "", return_lse=True)
     assert actual is expected
     combine.assert_called_once_with(
-        output, lse, 1, 1, scatter_group=None, pcp_group=None, return_lse=True, defer_combine=False, softmax_sum=None
+        output,
+        lse,
+        1,
+        1,
+        scatter_group=None,
+        pcp_group=None,
+        return_lse=True,
+        defer_combine=False,
+        softmax_sum=None,
+        valid_rows=None,
     )
 
 
@@ -258,7 +267,9 @@ def test_replicated_pcp_query_heads_and_output_merge(pcp_enabled, dcp_size, tota
         expected = torch.empty_like(q)
         merge.return_value = expected
         assert impl._merge_dcp_outputs(output, lse) is expected
-        merge.assert_called_once_with(output, lse, 4 if dcp_size == 16 else 1, 1, "tp:0", "pcp:0", softmax_sum=None)
+        merge.assert_called_once_with(
+            output, lse, 4 if dcp_size == 16 else 1, 1, "tp:0", "pcp:0", softmax_sum=None, valid_rows=None
+        )
 
 
 def test_dcp_query_gather_preserves_distinct_head_shards():
@@ -394,8 +405,16 @@ def test_nope_dcp_executes_single_cache_attention_with_existing_device_helper(pc
             assert kwargs["query_rope"] is None
         return kernel_output, softmax_max, softmax_sum
 
-    def merge_output(output, lse, *, softmax_sum):
+    def merge_output(output, lse, *, softmax_sum, valid_rows):
         events.append("merge")
+        if dtype == torch.int8:
+            assert valid_rows.data_ptr() == lengths.data_ptr()
+            if padded:
+                assert output[-1].isnan().all()
+                assert lse[-1].isnan().all()
+                assert softmax_sum[-1].isnan().all()
+            return expected
+        assert valid_rows is None
         torch.testing.assert_close(output, expected)
         assert torch.isfinite(lse).all()
         assert torch.isfinite(softmax_sum).all()
