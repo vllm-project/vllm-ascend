@@ -1555,8 +1555,19 @@ def allocate_kv_cache_main(
     if allocate is not None:
         raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
     vllm_config = get_current_vllm_config()
-    model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
-    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text", "kimi_linear"):
+    model_config = vllm_config.model_config
+    hf_config = getattr(model_config, "hf_config", None)
+    text_config = getattr(model_config, "hf_text_config", None)
+    model_type = getattr(text_config, "model_type", None)
+    # K3.1 also uses kimi_linear for its text config and has paired SFA caches.
+    is_kimi_k31 = (
+        getattr(hf_config, "model_type", None) == "kimi_k31"
+        or getattr(hf_config, "is_kimi_k31", False)
+        or getattr(text_config, "is_kimi_k31", False)
+    )
+    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text") or (
+        model_type == "kimi_linear" and not is_kimi_k31
+    ):
         return unified_allocate_kv_cache(kv_cache_config, device, kernel_block_sizes)
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = {

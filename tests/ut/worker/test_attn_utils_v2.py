@@ -1194,6 +1194,63 @@ def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_lay
     assert spec.is_draft is is_draft_layer
 
 
+@pytest.mark.parametrize(
+    ("hf_config", "text_config", "use_unified"),
+    [
+        pytest.param({"model_type": "kimi_k3"}, {"model_type": "kimi_linear"}, True, id="kimi-k3"),
+        pytest.param({"model_type": "kimi_k31"}, {"model_type": "kimi_linear"}, False, id="kimi-k31-outer-type"),
+        pytest.param(
+            {"model_type": "kimi_linear", "is_kimi_k31": True},
+            {"model_type": "kimi_linear"},
+            False,
+            id="kimi-k31-flattened-config",
+        ),
+        pytest.param(
+            {"model_type": "kimi_linear"},
+            {"model_type": "kimi_linear", "is_kimi_k31": True},
+            False,
+            id="kimi-k31-text-marker",
+        ),
+        pytest.param({"model_type": "deepseek_v41"}, {"model_type": "deepseek_v41_text"}, True, id="deepseek-v41"),
+    ],
+)
+def test_allocate_kv_cache_main_routes_kimi_variants(monkeypatch, hf_config, text_config, use_unified):
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(**hf_config), hf_text_config=SimpleNamespace(**text_config)),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+    )
+    config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    device = torch.device("cpu")
+    unified = MagicMock()
+    legacy_allocate = MagicMock()
+    legacy_reshape = MagicMock()
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: {})
+    monkeypatch.setattr(attn_utils, "unified_allocate_kv_cache", unified)
+    monkeypatch.setattr(attn_utils, "_allocate_kv_cache", legacy_allocate)
+    monkeypatch.setattr(attn_utils, "_reshape_kv_cache_v2", legacy_reshape)
+
+    result = attn_utils.allocate_kv_cache_main(config, device, None, [])
+
+    if use_unified:
+        unified.assert_called_once_with(config, device, [])
+        legacy_allocate.assert_not_called()
+        legacy_reshape.assert_not_called()
+        assert result is unified.return_value
+    else:
+        unified.assert_not_called()
+        legacy_allocate.assert_called_once_with(config, shared_layers={}, device=device)
+        legacy_reshape.assert_called_once_with(
+            attn_groups=[],
+            kv_cache_raw_tensors=legacy_allocate.return_value,
+            cache_dtype="auto",
+            kernel_block_sizes=[],
+            shared_kv_cache_layers={},
+            kv_cache_config=config,
+        )
+        assert result is legacy_reshape.return_value
+
+
 @pytest.mark.parametrize("use_flashmla", [False, True])
 @pytest.mark.parametrize(
     ("kernel_blocks_per_manager", "block_outer"),
