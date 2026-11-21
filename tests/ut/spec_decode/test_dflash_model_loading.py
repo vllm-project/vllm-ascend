@@ -41,6 +41,10 @@ def megamoe_target(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ascend_forward_context, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3)
     )
+    # Match the forward-time A3 mock for the init-time eligibility check too.
+    monkeypatch.setattr(
+        ascend_config, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3)
+    )
     monkeypatch.setattr(ascend_forward_context, "get_ep_group", lambda: SimpleNamespace(world_size=8))
     monkeypatch.setattr(patch_dspark, "get_pp_group", lambda: SimpleNamespace(world_size=2))
     # v0.33.0 queries PP through these imported getters; main no longer does.

@@ -61,6 +61,7 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.MM_REDUCE_SCATTER_BF16,
         HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
         HardwareCapability.RMS_NORM_CAST,
+        HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.NPU_TOP_K_TOP_P,
         HardwareCapability.FLASH_ATTN_NPU_3,
     },

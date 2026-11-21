@@ -33,7 +33,12 @@ from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
 from vllm_ascend.device.device_config import is_950
-from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import (
+    DeviceAdaptorFamily,
+    HardwareCapability,
+    MoECommPolicy,
+    get_current_hardware_profile,
+)
 from vllm_ascend.distributed.expert_transfer.expert_offload_config import validate_expert_offload_config
 from vllm_ascend.kv_trace.kv_trace_config import KVTraceConfig
 
@@ -42,6 +47,11 @@ if TYPE_CHECKING:
 
 _KVPP_SUPPORTED_CONNECTORS = ("MooncakeConnectorV2", "MooncakePushConnector", "AscendStoreConnector")
 _MEGA_MOE_SUPPORTED = None
+# CANN MegaMoe routing bounds for the A2 predicate: routed experts must split
+# evenly across EP ranks and never exceed the gating kernel's MAX_EXPERT_COUNT.
+_MEGA_MOE_MAX_EXPERTS = 2048
+# Only the Ascend W4A8 dynamic routed-expert weight layout is validated on A2.
+_A2_MEGA_MOE_MODEL_QUANT_TYPE = "W4A8_DYNAMIC"
 
 
 def is_mega_moe_supported() -> bool:
@@ -956,11 +966,23 @@ class AscendConfig:
                 "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
-        if self.enable_fused_mc2 == 1 and self._megamoe_supported and not self._is_megamoe_supported_by_config(vc):
-            self.enable_fused_mc2 = 0
-            logger.warning_once(
-                "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
+        # A2 keeps additional AscendConfig-level preconditions that cannot be
+        # expressed in the static VllmConfig eligibility predicate.
+        a2_policy = get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY
+        if self.enable_fused_mc2 == 1 and self._megamoe_supported:
+            a2_extra_ok = (
+                self.weight_nz_mode != 0
+                and not self.mix_placement
+                and not self.eplb_config.dynamic_eplb
+                and self.eplb_config.num_redundant_experts == 0
+                and self.eplb_config.expert_map_path is None
             )
+            if not (self._is_megamoe_supported_by_config(vc) and (not a2_policy or a2_extra_ok)):
+                self.enable_fused_mc2 = 0
+                logger.warning_once(
+                    "MegaMoe is not supported for this model config; "
+                    "additional_config.enable_fused_mc2 will be set to 0."
+                )
 
         # mlapo_keep_prefill_weights preconditions: the prefill weights are only
         # freed by MLAPO in the MLA attention path, so the keep switch is only
@@ -1200,13 +1222,60 @@ class AscendConfig:
                 raise ValueError("Mix placement is not supported with shared expert DP or multistream overlap.")
 
     @staticmethod
-    def _is_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
-        """Unified MegaMoe config eligibility check for A3 and A5.
+    def _is_a2_megamoe_supported_by_config(vllm_config: VllmConfig, model_architectures: list[str]) -> bool:
+        """Eligibility for the A2 (910B3) MegaMoe operator.
 
-        The A3 and A5 MegaMoe operators are converging on the same supported
-        ranges, so this check intentionally uses one set of bounds for both
-        platforms. Where the operators currently differ, the stricter bound is
-        applied and the per-platform actuals are documented inline.
+        The A2 MegaMoe kernel is validated only on the DeepSeek-V4.1-Flash W4A8
+        prefill topology. Configurations outside this envelope return False so
+        the caller downgrades ``enable_fused_mc2`` to the ordinary MoE path,
+        matching the A3/A5 eligibility handling.
+        """
+        if "DeepseekV41ForCausalLM" not in model_architectures:
+            return False
+        parallel = vllm_config.parallel_config
+        if (
+            not parallel.enable_expert_parallel
+            or (
+                parallel.data_parallel_size,
+                parallel.tensor_parallel_size,
+                parallel.prefill_context_parallel_size,
+            )
+            != (1, 1, 8)
+            or parallel.pipeline_parallel_size != 1
+            or parallel.decode_context_parallel_size != 1
+            or parallel.use_ubatching
+            or parallel.expert_placement_strategy != "linear"
+        ):
+            return False
+        if vllm_config.kv_transfer_config is None or vllm_config.kv_transfer_config.kv_role != "kv_producer":
+            return False
+        model_config = vllm_config.model_config
+        if not model_config.enforce_eager or not vllm_config.use_v2_model_runner:
+            return False
+        if str(model_config.dtype) != "torch.bfloat16":
+            return False
+        text = model_config.hf_text_config
+        if (text.hidden_size, text.moe_intermediate_size, text.num_experts_per_tok) != (5120, 2304, 6):
+            return False
+        num_experts = int(model_config.get_num_experts())
+        ep_world_size = parallel.world_size_across_dp // parallel.pipeline_parallel_size
+        if not (ep_world_size <= num_experts <= _MEGA_MOE_MAX_EXPERTS) or num_experts % ep_world_size != 0:
+            return False
+        quant_config = model_config.hf_quant_config
+        if not isinstance(quant_config, dict) or quant_config.get("model_quant_type") != _A2_MEGA_MOE_MODEL_QUANT_TYPE:
+            return False
+        return vllm_config.lora_config is None and not parallel.enable_eplb
+
+    @staticmethod
+    def _is_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
+        """Unified MegaMoe config eligibility check for A2, A3 and A5.
+
+        A3 and A5 MegaMoe operators are converging on the same supported
+        ranges, so they intentionally share one set of bounds; where the
+        operators currently differ, the stricter bound is applied and the
+        per-platform actuals are documented inline. A2 (910B3) is validated
+        only on the DeepSeek-V4.1-Flash W4A8 prefill envelope, handled by a
+        dedicated predicate.
         """
         # Guard against early-init phases where model_config is still None
         # (derive_and_validate may run before it is populated; other validators
@@ -1217,6 +1286,8 @@ class AscendConfig:
         if model_config is None:
             return False
         model_architectures = getattr(model_config, "architectures", None) or []
+        if get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY:
+            return AscendConfig._is_a2_megamoe_supported_by_config(vllm_config, model_architectures)
         # MiniMax-family configs (MiniMaxM2/M3/...) have no moe_intermediate_size
         # field; their intermediate_size IS the MoE expert FFN width (the dense
         # layers use a separate dense_intermediate_size field). For every other
