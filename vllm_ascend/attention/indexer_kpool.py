@@ -117,6 +117,7 @@ class AscendIndexerKPoolRowShard:
     seq_lens: torch.Tensor
     pool_tail: torch.Tensor
     block_table: torch.Tensor
+    project_full_head_weights: bool = False
 
 
 _ROW_SHARD_EXCHANGE_WORKSPACE: dict[torch.device, tuple[torch.Tensor, torch.Tensor]] = {}
@@ -302,6 +303,18 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         # treat that as TP1 so the sharding gate stays closed there.
         self.tp_size = get_tensor_model_parallel_world_size() if torch.distributed.is_initialized() else 1
         self._max_num_batched_tokens = scheduler_config.max_num_batched_tokens
+        self._aligned_shard_rows = None
+        if (
+            self.tp_size == 8
+            and kv_cache_spec.dtype == torch.float8_e4m3fn
+            and vllm_config.cache_config.cache_dtype == "fp8"
+        ):
+            floor = self.tp_size * MIN_GLM53_INDEXER_TP_SHARD_ROWS_PER_RANK
+            budget = self._max_num_batched_tokens
+            aligned_rows = budget - budget % self.logical_block_size
+            # A full scheduler chunk can fall one SFA tile short of the TP floor.
+            if floor - GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE <= aligned_rows < floor <= budget:
+                self._aligned_shard_rows = aligned_rows
         # FULL draft graphs can pad requests beyond max_num_seqs.
         self._max_num_metadata_reqs = max(scheduler_config.max_num_seqs, self._max_num_batched_tokens)
         self._max_num_write_tokens = self._max_num_batched_tokens * self.pcp_size
@@ -324,7 +337,10 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             and self.vllm_config.parallel_config.decode_context_parallel_size == 1
             and not graph_capture
             and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL
-            and num_rows >= MIN_GLM53_INDEXER_TP_SHARD_ROWS_PER_RANK * self.tp_size
+            and (
+                num_rows >= MIN_GLM53_INDEXER_TP_SHARD_ROWS_PER_RANK * self.tp_size
+                or num_rows == self._aligned_shard_rows
+            )
         )
 
     def _build_indexer_row_shard(
@@ -363,7 +379,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             query_lens_cpu,
             self.compress_ratio,
             self.tp_size,
-            MIN_GLM53_INDEXER_TP_SHARD_ROWS_PER_RANK,
+            min(MIN_GLM53_INDEXER_TP_SHARD_ROWS_PER_RANK, num_rows // self.tp_size),
         )
         if sizes is None:
             return None
@@ -395,6 +411,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             seq_lens=(local_visible // self.compress_ratio).to(self.device),
             pool_tail=(local_visible % self.compress_ratio).to(self.device),
             block_table=block_table,
+            project_full_head_weights=num_rows == self._aligned_shard_rows,
         )
 
     def _get_metadata_buffers(
@@ -948,7 +965,12 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             if row_shard is not None:
                 row_start, row_stop = row_shard.start, row_shard.stop
             q_values = self.wq_b(q_c[row_start:row_stop])[0].view(row_stop - row_start, self.n_head, self.head_dim)
-            weights = F.linear(hidden[row_start:row_stop].float(), self._head_weight_f32).to(q_values.dtype)
+            # Changing the FP32 weight projection's GEMM shape can break FP8 top-k ties.
+            full_weights = row_shard is not None and row_shard.project_full_head_weights
+            weight_input = hidden if full_weights else hidden[row_start:row_stop]
+            weights = F.linear(weight_input.float(), self._head_weight_f32).to(q_values.dtype)
+            if full_weights:
+                weights = weights[row_start:row_stop]
             weights = weights * (self.softmax_scale * self.n_head**-0.5)
 
         indexer_cache, *scale_caches = self._bound_caches(self.k_cache)
