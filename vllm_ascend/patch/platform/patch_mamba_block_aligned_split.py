@@ -35,16 +35,20 @@ hits one full page (or entirely) short.
 
 import functools
 import inspect
+from collections import OrderedDict
 
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position
 from vllm.v1.request import Request
 
+from vllm_ascend.core.gdn_checkpoint_policy import GDNCheckpointPolicy
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     _skips_eagle_block_drop,
 )
 from vllm_ascend.patch.platform.patch_mamba_config import (
     _get_sparse_index_kpool,
 )
+from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
 _EXPECTED_PARAMETERS = (
     "self",
@@ -55,6 +59,114 @@ _EXPECTED_PARAMETERS = (
 )
 
 _original_mamba_block_aligned_split = Scheduler._mamba_block_aligned_split
+_original_scheduler_init = Scheduler.__init__
+_original_add_request = Scheduler.add_request
+_original_reset_prefix_cache = Scheduler.reset_prefix_cache
+
+
+@functools.wraps(_original_scheduler_init)
+def _init_scheduler(self: Scheduler, *args, **kwargs) -> None:
+    _original_scheduler_init(self, *args, **kwargs)
+    self._ascend_gdn_checkpoint_policy = GDNCheckpointPolicy.from_config(self.vllm_config)
+    policy = self._ascend_gdn_checkpoint_policy
+    self._ascend_short_mamba_tails = None
+    if policy is None or not self.mamba_has_prefill_checkpoint_blocks:
+        return
+    for manager in self.kv_cache_manager.coordinator.single_type_managers:
+        if not getattr(manager, "has_prefill_checkpoint_blocks", False):
+            continue
+        if not isinstance(manager, AscendMambaManager):
+            raise RuntimeError("Native GDN checkpoint policy requires the Ascend Mamba cache manager")
+        manager.gdn_checkpoint_policy = policy
+    if policy.elide_singleton_warm_tail and self.mamba_partial_cache_hit:
+        self._ascend_short_mamba_tails = OrderedDict()
+
+
+@functools.wraps(_original_add_request)
+def _add_request(self: Scheduler, request: Request) -> None:
+    history = self._ascend_short_mamba_tails
+    if (
+        history is not None
+        and request.request_id not in self.requests
+        and not request.resumable
+        and self.cache_config.block_size < request.num_prompt_tokens <= self._ascend_gdn_checkpoint_policy.max_tokens
+    ):
+        tail = get_mamba_prefill_checkpoint_position(
+            request.num_prompt_tokens,
+            self.hash_block_size,
+            self.use_eagle_block_drop,
+            num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
+        )
+        hash_index = tail // self.hash_block_size - 1
+        if (
+            tail > self.cache_config.block_size
+            and tail % self.cache_config.block_size
+            and hash_index < len(request.block_hashes)
+        ):
+            key = request.block_hashes[hash_index]
+            request._ascend_first_observed_mamba_tail = key not in history
+            history[key] = None
+            history.move_to_end(key)
+            if len(history) > 4096:
+                history.popitem(last=False)
+    _original_add_request(self, request)
+
+
+@functools.wraps(_original_reset_prefix_cache)
+def _reset_prefix_cache(self: Scheduler, *args, **kwargs) -> bool:
+    success = _original_reset_prefix_cache(self, *args, **kwargs)
+    if success and self._ascend_short_mamba_tails is not None:
+        self._ascend_short_mamba_tails.clear()
+    return success
+
+
+def _split_with_gdn_policy(
+    self: Scheduler,
+    request: Request,
+    num_new_tokens: int,
+    num_new_local_computed_tokens: int,
+    num_external_computed_tokens: int,
+) -> int:
+    def upstream_split() -> int:
+        return _original_mamba_block_aligned_split(
+            self, request, num_new_tokens, num_new_local_computed_tokens, num_external_computed_tokens
+        )
+
+    policy = getattr(self, "_ascend_gdn_checkpoint_policy", None)
+    if policy is None or not self.mamba_has_prefill_checkpoint_blocks:
+        return upstream_split()
+    start = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
+    end = start + num_new_tokens
+    prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+    if not start < prefill_end <= end:
+        return upstream_split()
+    block_size = self.cache_config.block_size
+    partial_cache_hit = self.mamba_partial_cache_hit
+    checkpoint = get_mamba_prefill_checkpoint_position(
+        prefill_end,
+        self.hash_block_size if partial_cache_hit else block_size,
+        self.use_eagle_block_drop,
+        num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
+    )
+    skip_tail = (
+        partial_cache_hit
+        and getattr(request, "_ascend_first_observed_mamba_tail", False)
+        and start == num_new_local_computed_tokens > 0
+        and start % block_size == 0
+        and start < checkpoint < prefill_end <= start + block_size
+        and prefill_end == request.num_prompt_tokens
+    )
+    # A warm hit within one page has no separate checkpoint slot. Suppress
+    # only its partial-tail stop, leaving upstream junction and page stops.
+    self.mamba_has_prefill_checkpoint_blocks = not skip_tail and policy.allows_internal_checkpoint(
+        checkpoint, end, block_size
+    )
+    self.mamba_partial_cache_hit = partial_cache_hit and not skip_tail
+    try:
+        return upstream_split()
+    finally:
+        self.mamba_has_prefill_checkpoint_blocks = True
+        self.mamba_partial_cache_hit = partial_cache_hit
 
 
 @functools.wraps(_original_mamba_block_aligned_split)
@@ -151,7 +263,7 @@ def _mamba_block_aligned_split(
     for name in drop_attrs:
         setattr(self, name, False)
     try:
-        result = _original_mamba_block_aligned_split(
+        result = _split_with_gdn_policy(
             self,
             request,
             num_new_tokens,
@@ -190,3 +302,6 @@ if current_parameters != _EXPECTED_PARAMETERS:
     )
 
 Scheduler._mamba_block_aligned_split = _mamba_block_aligned_split
+Scheduler.__init__ = _init_scheduler
+Scheduler.add_request = _add_request
+Scheduler.reset_prefix_cache = _reset_prefix_cache

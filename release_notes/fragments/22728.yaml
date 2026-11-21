@@ -3,5 +3,5 @@ entries:
   - category: performance
     text: >-
       Added the opt-in `gdn_native_prefill_checkpoints` setting for supported
-      fused GDN backends. With compatible vLLM Core scheduling, it can save
-      selected prefill checkpoints within one forward on Ascend.
+      fused GDN backends. On Ascend, it can save selected prefill
+      checkpoints within one forward.
