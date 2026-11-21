@@ -1345,6 +1345,12 @@ async def handle_chat_completions(request: Request):
     return await handle_completions_impl("/chat/completions", request)
 
 
+@app.post("/v1/messages")
+@with_cancellation
+async def handle_messages(request: Request):
+    return await handle_completions_impl("/messages", request)
+
+
 async def handle_models_impl():
     runtime = get_runtime()
     request_id = next_req_id()
