@@ -1,0 +1,10 @@
+pr: 22498
+entries:
+  - category: feature
+    text: >-
+      Added opt-in MXFP8 dense MLP communication fusion for Qwen3.5-family
+      dense models on Ascend 950DT with TP 2, 4, or 8. Enable both
+      additional_config.enable_flashcomm1 and
+      compilation_config.pass_config.fuse_gemm_comms. Eligible MLP weights
+      remain in ND format, including when small batches use separate
+      quantized matmul and collectives.

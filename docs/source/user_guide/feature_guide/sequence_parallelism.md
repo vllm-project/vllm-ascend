@@ -105,6 +105,54 @@ reduce-scatter. The fused implementation supports BF16/FP16 with TP size 2,
 --compilation-config '{"pass_config":{"fuse_gemm_comms":true}}'
 ```
 
+#### MXFP8 dense MLP fusion on 950DT
+
+For Qwen3.5-family dense models with ModelSlim `W8A8_MXFP8` MLP weights,
+the same switch also enables quantized all-gather/matmul and
+matmul/reduce-scatter at the MLP boundaries after Norm. Both FlashComm and
+`fuse_gemm_comms` must be enabled:
+
+```bash
+vllm serve /path/to/mxfp8-dense-checkpoint \
+  --quantization ascend \
+  --dtype bfloat16 \
+  --tensor-parallel-size 2 \
+  --additional-config '{"enable_flashcomm1":true}' \
+  --compilation-config '{"pass_config":{"fuse_gemm_comms":true}}'
+```
+
+The quantized path requires 950DT, TP 2/4/8, group size 32, bias-free MLP
+projections, and aligned per-rank reduction dimensions (`K % 64 == 0`,
+`256 <= K < 65535`). It excludes LoRA, existing custom projection operators,
+and quantization schemes other than the ModelSlim MXFP8 linear scheme.
+MoE shared/routed experts and attention projections keep their existing paths.
+The checkpoint's dynamic quantization algorithm and E8M0 scale bytes are
+preserved; attention/KV-cache quantization is not changed.
+
+Eligible MLP weights remain in ND format through loading and weight reloads.
+This avoids a separate weight cache but also changes the layout used by the
+small-batch fallback. Unsupported token shapes and fewer than 128 local
+tokens use ordinary quantized matmul plus separate SP collectives. This
+threshold is conservative and is not a measured performance crossover.
+The shape decision stays inside opaque operators with shape-preserving fake
+implementations for compilation.
+
+Before deployment, validate real-checkpoint output accuracy and ACLGraph
+capture/replay on the target torch_npu/CANN versions. Compare both prefill
+and decode with `fuse_gemm_comms` disabled, keeping FlashComm, parallelism,
+workload and graph settings identical. The ND fallback can differ in
+performance from the original NZ-capable path; no throughput gain is
+guaranteed.
+
+The two-card operator test covers the token threshold, odd-token padding,
+both quantization algorithms, graph replay and an ND-versus-ND timing
+comparison. It does not replace checkpoint or serving-throughput validation:
+
+```bash
+torchrun --standalone --nproc-per-node=2 -m pytest --noconftest -s \
+  tests/e2e/pull_request/two_card/test_dense_mxfp8_sp.py
+```
+
 ### FlashComm switch (Ascend only)
 
 vLLM Ascend enables SP MoE through the FlashComm switch. The switch is still
