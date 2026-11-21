@@ -476,7 +476,7 @@ Recommended tuning order:
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
 | Shared expert overlap | `--additional-config '{"multistream_overlap_shared_expert": true}'` | Overlaps shared expert computation in MoE workloads. | Recommended for throughput scenarios. |
 | Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Monitor HBM usage for long-context workloads; keep prefix caching disabled on Atlas 300I DUO (see [Section 5.1](#51-single-node-online-deployment)). |
-| Qwen3.6 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Can improve decode throughput when stable and accepted tokens are high. | In [Section 5.1](#51-single-node-online-deployment), 950DT Products and A2/A3 Series use 3 speculative tokens; the optional Atlas 300I DUO configuration uses 1. Validate stability, TTFT, TPOT, and throughput for your workload. |
+| Qwen3.6 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'` | Can improve decode throughput when the draft-token acceptance rate is high. | In [Section 5.1](#51-single-node-online-deployment), 950DT Products and A2/A3 Series use 3 speculative tokens; the optional Atlas 300I DUO configuration uses 1. Validate stability, TTFT, TPOT, and throughput for your workload. `enforce_eager` forces the draft path into eager execution and disables its ACLGraph capture; use it only when eager execution is explicitly required. |
 
 ## 10 FAQ
 
