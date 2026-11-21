@@ -33,7 +33,11 @@ from vllm.distributed import (
 from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory, fused_moe_make_expert_params_mapping
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -236,10 +240,23 @@ class DeepseekV41MoE(nn.Module):
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
-        self.gate = ReplicatedLinear(
-            config.hidden_size, config.n_routed_experts, bias=False, quant_config=None, prefix=f"{prefix}.gate"
+        self.use_bf16_gate = torch.get_default_dtype() == torch.bfloat16 and get_current_hardware_profile().supports(
+            HardwareCapability.BF16_ROUTER_FP32_OUTPUT
         )
-        self.gate.precast_fp32_weight = True
+        if self.use_bf16_gate:
+            self.gate = GateLinear(
+                input_size=config.hidden_size,
+                output_size=self.n_routed_experts,
+                bias=False,
+                out_dtype=torch.float32,
+                prefix=f"{prefix}.gate",
+                return_bias=False,
+            )
+        else:
+            self.gate = ReplicatedLinear(
+                config.hidden_size, self.n_routed_experts, bias=False, quant_config=None, prefix=f"{prefix}.gate"
+            )
+            self.gate.precast_fp32_weight = True
 
         # Load balancing settings.
         eplb_config = parallel_config.eplb_config
@@ -352,8 +369,14 @@ class DeepseekV41MoE(nn.Module):
             )
         else:
             # router_logits: (num_tokens, n_experts)
-            router_input = hidden_states.float() if hidden_states_fp32 is None else hidden_states_fp32
-            router_logits = F.linear(router_input, self.gate.weight)
+            if self.use_bf16_gate:
+                router_logits = self.gate(hidden_states)
+            else:
+                router_input = hidden_states.float() if hidden_states_fp32 is None else hidden_states_fp32
+                weight = getattr(self.gate, "weight_fp32", None)
+                if weight is None:
+                    weight = self.gate.weight.float()
+                router_logits = F.linear(router_input, weight)
             fused_moe_out = self.experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
@@ -1062,15 +1085,15 @@ class DeepseekV41DecoderLayer(nn.Module):
         else:
             self.engram = None
 
-    def rms_norm_cast(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Normalize once and provide the exact FP32 routing input."""
+    def rms_norm_cast(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Return the fused FP32 routing input where the norm provides it."""
         outputs = DeviceOperator.rms_norm_cast(
             hidden_states, self.post_attention_layernorm.weight, self.post_attention_layernorm.variance_epsilon
         )
         if outputs is not None:
             return outputs
         normalized = self.post_attention_layernorm(hidden_states)
-        return normalized, normalized.float()
+        return normalized, None
 
     @staticmethod
     def hc_collapse(x, pre_mix):

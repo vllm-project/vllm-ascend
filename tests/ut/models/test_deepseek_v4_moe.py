@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
 )
 
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_module
+from vllm_ascend.models.deepseek_v41.model import DeepseekV41MoE
 from vllm_ascend.ops.fused_moe.router.fused_topk_router import (
     select_deepseek_v4_vision_experts,
 )
@@ -34,6 +35,33 @@ class _FakeMoERunner(nn.Module):
     def forward(self, hidden_states, router_logits, input_ids=None):
         self.input_ids = input_ids
         return hidden_states
+
+
+@pytest.mark.parametrize("moe_cls", [deepseek_v4_module.DeepseekV4MoE, DeepseekV41MoE])
+@pytest.mark.parametrize("fast_gate,has_fused_input", [(True, False), (False, False), (False, True)])
+def test_external_router_keeps_fp32_logits(moe_cls, fast_gate, has_fused_input):
+    hidden = torch.rand(3, 8, dtype=torch.bfloat16)
+    gate_weight = torch.rand(4, 8, dtype=torch.bfloat16)
+    moe = moe_cls.__new__(moe_cls)
+    nn.Module.__init__(moe)
+    moe.use_bf16_gate = fast_gate
+    moe.is_sequence_parallel = False
+    moe.tp_size = 1
+    moe.gate = MagicMock(weight=gate_weight, weight_fp32=gate_weight.float(), tid2eid=None)
+    moe.gate.side_effect = lambda x: torch.nn.functional.linear(x.float(), gate_weight.float())
+    moe.experts = MagicMock(is_internal_router=False, return_value=hidden)
+    norm_fp32 = hidden.float() + 0.001 if has_fused_input else None
+
+    moe(hidden, hidden_states_fp32=norm_fp32)
+
+    logits = moe.experts.call_args.kwargs["router_logits"]
+    torch.testing.assert_close(
+        logits, torch.nn.functional.linear(hidden.float() if norm_fp32 is None else norm_fp32, gate_weight.float())
+    )
+    if fast_gate:
+        assert moe.gate.call_args.args[0].dtype == torch.bfloat16
+    else:
+        moe.gate.assert_not_called()
 
 
 def test_deepseek_v4_hash_layer_uses_upstream_hash_router(monkeypatch):
