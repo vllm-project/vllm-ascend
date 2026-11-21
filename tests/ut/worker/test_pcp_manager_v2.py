@@ -276,7 +276,7 @@ def test_hisparse_uses_standard_decode_sharding(pcp_size):
     config.parallel_config.prefill_context_parallel_size = pcp_size
     manager = AscendPCPManager(pcp_size, 0, torch.device("cpu"), shard_decode_requests=True)
     manager.bind_config(config)
-    assert is_pcp_decode_sharding_enabled(config)
+    assert config.parallel_config.pcp_shard_decode_requests
     assert manager.shard_decode_requests
     counts = np.array([1, 4], dtype=np.int32)
     prefilling = np.array([False, False])
