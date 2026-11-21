@@ -47,7 +47,14 @@ private:
     // 后处理GMMA8W4PostProcess类
     GMMA8W4PostProcess postProcess;
     GlobalTensor<int64_t> groupListGM;
-    __aicore__ inline void InitWorkSpaceSplitConfig(WorkSpaceSplitConfig& workspaceSplitConfig);
+    __aicore__ inline int64_t GetSplitRowsLimit(int64_t liveRows);
+    __aicore__ inline bool CanUseSingleRowDecode() const;
+    __aicore__ inline void ProcessSingleRowDecode(
+#ifdef GMM_SITU_QUANT_MLP
+        bool emitPacked
+#endif
+    );
+    __aicore__ inline void InitWorkSpaceSplitConfig(WorkSpaceSplitConfig& workspaceSplitConfig, int64_t knownRows);
 
     __aicore__ inline void UpdateWorkSpaceSplitConfig(WorkSpaceSplitConfig& workspaceSplitConfig,
                                                       int32_t workspaceSplitLoopIdx);
@@ -64,7 +71,7 @@ public:
     {}
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR weightScale, GM_ADDR xScale,
                                 GM_ADDR weightAssistanceMatrix, GM_ADDR groupList, GM_ADDR y, GM_ADDR yScale,
-                                GM_ADDR workspace);
+                                GM_ADDR workspace, int64_t knownRows = -1);
     // live 行数：groupList 描述的实际计算行数（已按 x 的 M 截断，见 InitWorkSpaceSplitConfig）。
     // 入口拿它挑 Cube 分块（每专家平均行数少的时候换一套 baseM/baseN），所以要在 Init 之后、
     // Process 之前取。
@@ -72,14 +79,56 @@ public:
     {
         return workspaceSplitConfig.M;
     }
-    __aicore__ inline void Process();
+    __aicore__ inline bool FitsWideTile(int64_t defaultBaseM, int64_t wideBaseM);
+    __aicore__ inline void Process(
+#ifdef GMM_SITU_QUANT_MLP
+        bool emitPacked = false
+#endif
+    );
+    __aicore__ inline void ProcessDecode(
+#ifdef GMM_SITU_QUANT_MLP
+        bool emitPacked = false
+#endif
+    );
+#ifdef GMM_SITU_QUANT_MLP
+    __aicore__ inline void ProcessPrepackedDown();
+    __aicore__ inline void ProcessPrepackedDownBands();
+#endif
+    __aicore__ inline void ProcessSingleToken(
+#ifdef GMM_SITU_QUANT_MLP
+        bool emitPacked = false
+#endif
+    );
+    __aicore__ inline int32_t FindSmallSingleExpert() const;
+    __aicore__ inline void ProcessSmallSingleExpert(uint32_t expert
+#ifdef GMM_SITU_QUANT_MLP
+                                                   , bool emitPacked
+#endif
+    );
 };
+
+template <class mmType>
+__aicore__ inline bool GMMSituQuantPipelineSchedule<mmType>::FitsWideTile(int64_t defaultBaseM, int64_t wideBaseM)
+{
+    int64_t previous = 0;
+    for (uint32_t i = 0; i < gmmSituQuant->groupListLen; ++i) {
+        const int64_t entry = groupListGM.GetValue(i);
+        const int64_t rows = gmmSituQuantBaseParams->groupListType == 0 ? entry - previous : entry;
+        previous = entry;
+        const int64_t msdRows = DOUBLE_ROW * rows + gmmSituQuantBaseParams->assistRowsPerExpert;
+        // An extra M tile rereads that expert's weights.
+        if (rows > 0 && Ceil(msdRows, wideBaseM) > Ceil(msdRows, defaultBaseM)) {
+            return false;
+        }
+    }
+    return true;
+}
 
 template <class mmType>
 __aicore__ inline void GMMSituQuantPipelineSchedule<mmType>::Init(GM_ADDR x, GM_ADDR weight, GM_ADDR weightScale,
                                                                     GM_ADDR xScale, GM_ADDR weightAssistanceMatrix,
                                                                     GM_ADDR groupList, GM_ADDR y, GM_ADDR yScale,
-                                                                    GM_ADDR workspace)
+                                                                    GM_ADDR workspace, int64_t knownRows)
 {
     gmAddrParams.xGM = x;
     gmAddrParams.weightGM = weight;
@@ -90,53 +139,257 @@ __aicore__ inline void GMMSituQuantPipelineSchedule<mmType>::Init(GM_ADDR x, GM_
     gmAddrParams.yGM = y;
     gmAddrParams.yScaleGM = yScale;
     gmAddrParams.workSpaceGM = workspace;
-    gmAddrParams.workSpaceOffset1 = gmmSituQuantBaseParams->workSpaceOffset1 / 2;
+    const bool useTwoSlots = gmmSituQuantBaseParams->M > gmmSituQuantBaseParams->mLimit;
+    gmAddrParams.workSpaceOffset1 = useTwoSlots ? gmmSituQuantBaseParams->workSpaceOffset1 / 2 : 0;
     gmAddrParams.workSpaceOffset2 = gmmSituQuantBaseParams->workSpaceOffset1;
     gmAddrParams.workSpaceOffset3 =
-        gmmSituQuantBaseParams->workSpaceOffset1 + gmmSituQuantBaseParams->workSpaceOffset2 / 2;
+        gmAddrParams.workSpaceOffset2 + (useTwoSlots ? gmmSituQuantBaseParams->workSpaceOffset2 / 2 : 0);
     groupListGM.SetGlobalBuffer((__gm__ int64_t*)gmAddrParams.groupListGM);
-    InitWorkSpaceSplitConfig(workspaceSplitConfig);
+    InitWorkSpaceSplitConfig(workspaceSplitConfig, knownRows);
 }
 
 template <class mmType>
-__aicore__ inline void GMMSituQuantPipelineSchedule<mmType>::Process()
+__aicore__ inline bool GMMSituQuantPipelineSchedule<mmType>::CanUseSingleRowDecode() const
+{
+    constexpr int64_t MAX_DECODE_ROWS = 16;
+    return workspaceSplitConfig.loopCount == 1 && workspaceSplitConfig.M <= MAX_DECODE_ROWS &&
+           workspaceSplitConfig.M <= 2 * gmmSituQuantBaseParams->coreNum;
+}
+
+template <class mmType>
+__aicore__ inline void GMMSituQuantPipelineSchedule<mmType>::ProcessSingleRowDecode(
+#ifdef GMM_SITU_QUANT_MLP
+    bool emitPacked
+#endif
+    )
+{
+    // The one workspace band starts at zero and covers all expert weights.
+    workspaceSplitConfig.rightMatrixExpertEndIndex = gmmSituQuant->groupListLen - 1;
+    workspaceSplitConfig.notLastTaskSize = workspaceSplitConfig.M;
+    workspaceSplitConfig.isLastLoop = true;
+    preProcess.PackDecodeRow(workspaceSplitConfig.M, pipe);
+    if ASCEND_IS_AIV {
+        pipe->Reset();
+    }
+    SyncAll<false>();
+    // Compensation and token scale are independent of the Cube result.
+    VecConfig row;
+    float inputScale = 0;
+    postProcess.PrepareDecodeRow(row, inputScale, workspaceSplitConfig, pipe);
+    midProcess.Process(workspaceSplitConfig, 0);
+    SyncAll<false>();
+#ifdef GMM_SITU_QUANT_MLP
+    postProcess.FinishDecodeRow(row, inputScale, workspaceSplitConfig, emitPacked);
+#else
+    postProcess.FinishDecodeRow(row, inputScale, workspaceSplitConfig);
+#endif
+    if ASCEND_IS_AIV {
+#ifdef GMM_SITU_QUANT_MLP
+        if (emitPacked) {
+            pipe->Reset();
+        } else
+#endif
+        {
+            pipe->Destroy();
+        }
+    }
+}
+
+template <class mmType>
+__aicore__ inline void GMMSituQuantPipelineSchedule<mmType>::ProcessSingleToken(
+#ifdef GMM_SITU_QUANT_MLP
+    bool emitPacked
+#endif
+    )
+{
+    constexpr uint16_t PACK_PAIR_DONE = 5;
+    constexpr uint16_t ALL_PACK_DONE = 6;
+    constexpr uint16_t ALL_MATMUL_DONE = 7;
+    constexpr uint16_t MATMUL_PAIR_DONE = 8;
+    constexpr uint16_t LOCAL_PACK_ONLY = 0;
+
+    workspaceSplitConfig.rightMatrixExpertEndIndex = gmmSituQuant->groupListLen - 1;
+    workspaceSplitConfig.notLastTaskSize = workspaceSplitConfig.M;
+    workspaceSplitConfig.isLastLoop = true;
+    preProcess.Init(gmAddrParams, gmmSituQuantBaseParams);
+#ifdef GMM_SITU_QUANT_MLP
+    midProcess.Init(gmAddrParams, gmmSituQuantBaseParams, emitPacked);
+    postProcess.Init(gmAddrParams, gmmSituQuantBaseParams, gmmSituQuant, emitPacked);
+#else
+    midProcess.Init(gmAddrParams, gmmSituQuantBaseParams);
+    postProcess.Init(gmAddrParams, gmmSituQuantBaseParams, gmmSituQuant);
+#endif
+
+    // A private row fits in the existing workspace when each Cube group has a slot.
+    const bool useLocalPack = gmmSituQuantBaseParams->mLimit >= gmmSituQuantBaseParams->coreNum;
+    if ASCEND_IS_AIV {
+        if (useLocalPack) {
+            if (GetSubBlockIdx() == 0) {
+                preProcess.PackDecodeRow(1, pipe, GetBlockIdx() / GetSubBlockNum());
+            }
+        } else {
+            preProcess.PackDecodeRow(1, pipe);
+        }
+        CrossCoreSetFlag<2, PIPE_MTE3>(PACK_PAIR_DONE);
+        pipe->Reset();
+
+        VecConfig row;
+        float inputScale = 0;
+        postProcess.PrepareDecodeRow(row, inputScale, workspaceSplitConfig, pipe);
+        CrossCoreWaitFlag(MATMUL_PAIR_DONE);
+#ifdef GMM_SITU_QUANT_MLP
+        postProcess.FinishDecodeRow(row, inputScale, workspaceSplitConfig, emitPacked);
+#else
+        postProcess.FinishDecodeRow(row, inputScale, workspaceSplitConfig);
+#endif
+#ifdef GMM_SITU_QUANT_MLP
+        if (emitPacked) {
+            pipe->Reset();
+        } else
+#endif
+        {
+            pipe->Destroy();
+        }
+    }
+
+    if ASCEND_IS_AIC {
+        uint32_t expert = 0;
+        while (expert + 1 < gmmSituQuant->groupListLen && groupListGM.GetValue(expert) <= 0) {
+            ++expert;
+        }
+        midProcess.ProcessSingleExpertToken(expert, PACK_PAIR_DONE,
+                                      useLocalPack ? LOCAL_PACK_ONLY : ALL_PACK_DONE);
+        CrossCoreSetFlag<0, PIPE_FIX>(ALL_MATMUL_DONE);
+        CrossCoreWaitFlag(ALL_MATMUL_DONE);
+        CrossCoreSetFlag<2, PIPE_MTE3>(MATMUL_PAIR_DONE);
+    }
+}
+
+template <class mmType>
+__aicore__ inline int32_t GMMSituQuantPipelineSchedule<mmType>::FindSmallSingleExpert() const
+{
+    constexpr int64_t MAX_SINGLE_EXPERT_ROWS = 32;
+    constexpr int64_t VECTORS_PER_CUBE = 2;
+    if (workspaceSplitConfig.M <= 1 || workspaceSplitConfig.M > MAX_SINGLE_EXPERT_ROWS ||
+        workspaceSplitConfig.M > VECTORS_PER_CUBE * gmmSituQuantBaseParams->coreNum ||
+        workspaceSplitConfig.loopCount != 1) {
+        return -1;
+    }
+    // In either encoding the first positive entry is the size of the first active expert.
+    for (uint32_t expert = 0; expert < gmmSituQuant->groupListLen; ++expert) {
+        const int64_t entry = groupListGM.GetValue(expert);
+        if (entry > 0) {
+            return entry >= workspaceSplitConfig.M ? static_cast<int32_t>(expert) : -1;
+        }
+    }
+    return -1;
+}
+
+template <class mmType>
+__aicore__ inline void GMMSituQuantPipelineSchedule<mmType>::ProcessSmallSingleExpert(uint32_t expert
+#ifdef GMM_SITU_QUANT_MLP
+                                                                                    , bool emitPacked
+#endif
+)
+{
+    constexpr uint16_t PACK_PAIR_DONE = 5;
+    constexpr uint16_t ALL_PACK_DONE = 6;
+    constexpr uint16_t ALL_MATMUL_DONE = 7;
+    constexpr uint16_t MATMUL_PAIR_DONE = 8;
+    constexpr uint32_t VECTORS_PER_CUBE = 2;
+    const uint32_t rows = workspaceSplitConfig.M;
+    const uint32_t rowPairs = Ceil(rows, VECTORS_PER_CUBE);
+    workspaceSplitConfig.rightMatrixExpertEndIndex = gmmSituQuant->groupListLen - 1;
+    workspaceSplitConfig.notLastTaskSize = rows;
+    workspaceSplitConfig.isLastLoop = true;
+    preProcess.Init(gmAddrParams, gmmSituQuantBaseParams);
+#ifdef GMM_SITU_QUANT_MLP
+    midProcess.Init(gmAddrParams, gmmSituQuantBaseParams, emitPacked);
+    postProcess.Init(gmAddrParams, gmmSituQuantBaseParams, gmmSituQuant, emitPacked);
+#else
+    midProcess.Init(gmAddrParams, gmmSituQuantBaseParams);
+    postProcess.Init(gmAddrParams, gmmSituQuantBaseParams, gmmSituQuant);
+#endif
+    if ASCEND_IS_AIV {
+        preProcess.PackDecodeRow(rows, pipe);
+        CrossCoreSetFlag<2, PIPE_MTE3>(PACK_PAIR_DONE);
+        if (GetBlockIdx() < rowPairs * VECTORS_PER_CUBE) {
+            pipe->Reset();
+            VecConfig row;
+            float inputScale = 0;
+            postProcess.PrepareDecodeRow(row, inputScale, workspaceSplitConfig, pipe);
+            CrossCoreWaitFlag(MATMUL_PAIR_DONE);
+#ifdef GMM_SITU_QUANT_MLP
+            postProcess.FinishDecodeRow(row, inputScale, workspaceSplitConfig, emitPacked);
+#else
+            postProcess.FinishDecodeRow(row, inputScale, workspaceSplitConfig);
+#endif
+        }
+#ifdef GMM_SITU_QUANT_MLP
+        if (emitPacked) {
+            pipe->Reset();
+        } else
+#endif
+        {
+            pipe->Destroy();
+        }
+    }
+    if ASCEND_IS_AIC {
+        midProcess.ProcessSingleExpertToken(expert, PACK_PAIR_DONE, ALL_PACK_DONE, rows);
+        CrossCoreSetFlag<0, PIPE_FIX>(ALL_MATMUL_DONE);
+        CrossCoreWaitFlag(ALL_MATMUL_DONE);
+        if (GetBlockIdx() < rowPairs) {
+            CrossCoreSetFlag<2, PIPE_MTE3>(MATMUL_PAIR_DONE);
+        }
+    }
+}
+
+template <class mmType>
+__aicore__ inline void GMMSituQuantPipelineSchedule<mmType>::ProcessDecode(
+#ifdef GMM_SITU_QUANT_MLP
+    bool emitPacked
+#endif
+    )
+{
+    if (!CanUseSingleRowDecode()) {
+#ifdef GMM_SITU_QUANT_MLP
+        Process(emitPacked);
+#else
+        Process();
+#endif
+        return;
+    }
+    preProcess.Init(gmAddrParams, gmmSituQuantBaseParams);
+#ifdef GMM_SITU_QUANT_MLP
+    midProcess.Init(gmAddrParams, gmmSituQuantBaseParams, emitPacked);
+    postProcess.Init(gmAddrParams, gmmSituQuantBaseParams, gmmSituQuant, emitPacked);
+#else
+    midProcess.Init(gmAddrParams, gmmSituQuantBaseParams);
+    postProcess.Init(gmAddrParams, gmmSituQuantBaseParams, gmmSituQuant);
+#endif
+#ifdef GMM_SITU_QUANT_MLP
+    ProcessSingleRowDecode(emitPacked);
+#else
+    ProcessSingleRowDecode();
+#endif
+}
+
+template <class mmType>
+__aicore__ inline void GMMSituQuantPipelineSchedule<mmType>::Process(
+#ifdef GMM_SITU_QUANT_MLP
+    bool emitPacked
+#endif
+    )
 {
     // 1.对每次workspace切分做大循环。
     preProcess.Init(gmAddrParams, gmmSituQuantBaseParams);
+#ifdef GMM_SITU_QUANT_MLP
+    midProcess.Init(gmAddrParams, gmmSituQuantBaseParams, emitPacked);
+    postProcess.Init(gmAddrParams, gmmSituQuantBaseParams, gmmSituQuant, emitPacked);
+#else
     midProcess.Init(gmAddrParams, gmmSituQuantBaseParams);
     postProcess.Init(gmAddrParams, gmmSituQuantBaseParams, gmmSituQuant);
-
-    if (workspaceSplitConfig.loopCount == 0) {
-        return;
-    }
-    if (workspaceSplitConfig.loopCount == 1) {
-        // A single workspace chunk has one-way dependencies: all Vector
-        // stores precede Cube reads, then all Cube stores precede Vector
-        // reads. Do not make the producer wait for a consumer acknowledgement.
-        constexpr uint16_t PRE_ALL = 4;
-        constexpr uint16_t PRE_READY = 5;
-        constexpr uint16_t CUBE_ALL = 6;
-        constexpr uint16_t POST_READY = 7;
-        UpdateWorkSpaceSplitConfig(workspaceSplitConfig, 0);
-        if ASCEND_IS_AIV {
-            preProcess.Process(workspaceSplitConfig, 0, pipe);
-            CrossCoreSetFlag<0, PIPE_MTE3>(PRE_ALL);
-            CrossCoreWaitFlag(PRE_ALL);
-            CrossCoreSetFlag<2, PIPE_MTE3>(PRE_READY);
-            pipe->Reset();
-            CrossCoreWaitFlag(POST_READY);
-            postProcess.Process(workspaceSplitConfig, 0, pipe);
-            pipe->Destroy();
-        }
-        if ASCEND_IS_AIC {
-            CrossCoreWaitFlag(PRE_READY);
-            midProcess.Process(workspaceSplitConfig, 0);
-            CrossCoreSetFlag<0, PIPE_FIX>(CUBE_ALL);
-            CrossCoreWaitFlag(CUBE_ALL);
-            CrossCoreSetFlag<2, PIPE_FIX>(POST_READY);
-        }
-        return;
-    }
+#endif
 
     // 1.前处理提前下发一次
     preProcess.Process(workspaceSplitConfig, 0, pipe);
@@ -164,7 +417,11 @@ __aicore__ inline void GMMSituQuantPipelineSchedule<mmType>::Process()
                 SyncAll<true>();
             }
         }
+#ifdef GMM_SITU_QUANT_MLP
+        postProcess.Process(tempWorkspaceSplitConfig, workspaceSplitLoopIdx - 1, pipe, emitPacked);
+#else
         postProcess.Process(tempWorkspaceSplitConfig, workspaceSplitLoopIdx - 1, pipe);
+#endif
         // 3.第n-1次后处理需要保留第n次的切分数据
         tempWorkspaceSplitConfig = workspaceSplitConfig;
         // reset
@@ -184,17 +441,124 @@ __aicore__ inline void GMMSituQuantPipelineSchedule<mmType>::Process()
     }
     SyncAll<false>();
     // // 4.最后一次后处理
+#ifdef GMM_SITU_QUANT_MLP
+    postProcess.Process(workspaceSplitConfig, workspaceSplitConfig.loopCount - 1, pipe, emitPacked);
+#else
     postProcess.Process(workspaceSplitConfig, workspaceSplitConfig.loopCount - 1, pipe);
+#endif
+    if ASCEND_IS_AIV {
+#ifdef GMM_SITU_QUANT_MLP
+        if (emitPacked) {
+            pipe->Reset();
+        } else
+#endif
+        {
+            pipe->Destroy();
+        }
+    }
+}
+
+#ifdef GMM_SITU_QUANT_MLP
+template <class mmType>
+__aicore__ inline void GMMSituQuantPipelineSchedule<mmType>::ProcessPrepackedDown()
+{
+    if (!CanUseSingleRowDecode()) {
+        ProcessPrepackedDownBands();
+        return;
+    }
+    workspaceSplitConfig.rightMatrixExpertEndIndex = gmmSituQuant->groupListLen - 1;
+    workspaceSplitConfig.notLastTaskSize = workspaceSplitConfig.M;
+    workspaceSplitConfig.isLastLoop = true;
+    midProcess.Init(gmAddrParams, gmmSituQuantBaseParams, true);
+    midProcess.SetPrepackedInput(gmAddrParams.xGM);
+    postProcess.Init(gmAddrParams, gmmSituQuantBaseParams, gmmSituQuant, true);
+    VecConfig row;
+    float inputScale = 0;
+    postProcess.PrepareDecodeRow(row, inputScale, workspaceSplitConfig, pipe);
+    midProcess.Process(workspaceSplitConfig, 0);
+    SyncAll<false>();
+    postProcess.FinishPrepackedDownRow(row, inputScale, workspaceSplitConfig, gmAddrParams.yGM);
     if ASCEND_IS_AIV {
         pipe->Destroy();
     }
 }
 
 template <class mmType>
-__aicore__ inline void GMMSituQuantPipelineSchedule<mmType>::InitWorkSpaceSplitConfig(
-    WorkSpaceSplitConfig& workspaceSplitConfig)
+__aicore__ inline void GMMSituQuantPipelineSchedule<mmType>::ProcessPrepackedDownBands()
 {
-    if (gmmSituQuantBaseParams->groupListType == 0) {
+    midProcess.Init(gmAddrParams, gmmSituQuantBaseParams, true);
+    postProcess.Init(gmAddrParams, gmmSituQuantBaseParams, gmmSituQuant, true);
+    const auto loops = workspaceSplitConfig.loopCount;
+    for (int64_t index = 0; index < loops; ++index) {
+        UpdateWorkSpaceSplitConfig(workspaceSplitConfig, index);
+        const uint64_t row = workspaceSplitConfig.leftMatrixStartIndex;
+        midProcess.SetPrepackedInput(gmAddrParams.xGM + row * gmmSituQuantBaseParams->K, index % 2 != 0);
+        midProcess.Process(workspaceSplitConfig, index);
+        postProcess.Process(tempWorkspaceSplitConfig, index - 1, pipe, false, gmAddrParams.yGM);
+        if ASCEND_IS_AIV {
+            pipe->Reset();
+        }
+        tempWorkspaceSplitConfig = workspaceSplitConfig;
+        SyncAll<false>();
+    }
+    postProcess.Process(workspaceSplitConfig, loops - 1, pipe, false, gmAddrParams.yGM);
+    if ASCEND_IS_AIV {
+        pipe->Destroy();
+    }
+}
+
+#endif
+
+template <class mmType>
+__aicore__ inline int64_t GMMSituQuantPipelineSchedule<mmType>::GetSplitRowsLimit(int64_t liveRows)
+{
+    const int64_t slotRows = gmmSituQuantBaseParams->mLimit;
+    if constexpr (mmType::BT::format == CubeFormat::NZ) {
+        constexpr int64_t HIDDEN_SIZE = 7168;
+        constexpr uint32_t LOCAL_EXPERTS = 14;
+        constexpr int64_t MIN_PIPELINE_ROWS = 600;
+        constexpr int64_t MAX_PIPELINE_ROWS = 937;
+        if (gmmSituQuantBaseParams->K != HIDDEN_SIZE || gmmSituQuantBaseParams->N != HIDDEN_SIZE ||
+            gmmSituQuant->groupListLen != LOCAL_EXPERTS || gmmSituQuantBaseParams->quantGroupNum != 1 ||
+            gmmSituQuantBaseParams->M <= slotRows || liveRows < MIN_PIPELINE_ROWS || liveRows > MAX_PIPELINE_ROWS) {
+            return slotRows;
+        }
+
+        // Start postprocessing while Cube computes the second band. A shorter final band reduces the exposed
+        // Vector tail, and an expert boundary avoids reloading that expert's weights across the two bands.
+        const int64_t target = Ceil(liveRows * 4, 5L);
+        const int64_t minFirstRows = Ceil(liveRows * 2, 3L);
+        const int64_t minLastRows = Ceil(liveRows, 8L);
+        int64_t bestRows = slotRows;
+        int64_t bestDistance = liveRows;
+        int64_t cumulative = 0;
+        const bool prefixGroups = gmmSituQuantBaseParams->groupListType == 0;
+        for (uint32_t expert = 0; expert < gmmSituQuant->groupListLen; ++expert) {
+            const int64_t entry = groupListGM.GetValue(expert);
+            const int64_t end = prefixGroups ? entry : cumulative + entry;
+            if (end > cumulative && end >= minFirstRows && end <= slotRows && liveRows - end >= minLastRows) {
+                const int64_t distance = end > target ? end - target : target - end;
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    bestRows = end;
+                }
+            }
+            cumulative = end;
+        }
+        if (cumulative == liveRows) {
+            return bestRows;
+        }
+    }
+    return slotRows;
+}
+
+template <class mmType>
+__aicore__ inline void GMMSituQuantPipelineSchedule<mmType>::InitWorkSpaceSplitConfig(
+    WorkSpaceSplitConfig& workspaceSplitConfig, int64_t knownRows)
+{
+    if (knownRows > 0) {
+        workspaceSplitConfig.M = knownRows;
+    } else if (gmmSituQuantBaseParams->groupListType == 0) {
         workspaceSplitConfig.M = groupListGM.GetValue(gmmSituQuant->groupListLen - 1);
     } else {
         int64_t totalTmp = 0;
@@ -212,10 +576,11 @@ __aicore__ inline void GMMSituQuantPipelineSchedule<mmType>::InitWorkSpaceSplitC
     if (unlikely(workspaceSplitConfig.M > gmmSituQuantBaseParams->M)) {
         workspaceSplitConfig.M = gmmSituQuantBaseParams->M;
     }
-    workspaceSplitConfig.loopCount = Ceil(workspaceSplitConfig.M, gmmSituQuantBaseParams->mLimit);
-    workspaceSplitConfig.notLastTaskSize = gmmSituQuantBaseParams->mLimit;
+    const int64_t splitRows = GetSplitRowsLimit(workspaceSplitConfig.M);
+    workspaceSplitConfig.loopCount = Ceil(workspaceSplitConfig.M, splitRows);
+    workspaceSplitConfig.notLastTaskSize = splitRows;
     workspaceSplitConfig.lastLoopTaskSize =
-        workspaceSplitConfig.M - (workspaceSplitConfig.loopCount - 1) * gmmSituQuantBaseParams->mLimit;
+        workspaceSplitConfig.M - (workspaceSplitConfig.loopCount - 1) * splitRows;
     workspaceSplitConfig.leftMatrixStartIndex = 0;
     workspaceSplitConfig.rightMatrixExpertStartIndex = 0;
     workspaceSplitConfig.rightMatrixExpertNextStartIndex = 0;
@@ -228,7 +593,8 @@ __aicore__ inline void GMMSituQuantPipelineSchedule<mmType>::UpdateWorkSpaceSpli
 {
     if (workspaceSplitLoopIdx < 0)
         return;
-    workspaceSplitConfig.leftMatrixStartIndex = workspaceSplitLoopIdx * gmmSituQuantBaseParams->mLimit;
+    const int64_t splitRows = workspaceSplitConfig.notLastTaskSize;
+    workspaceSplitConfig.leftMatrixStartIndex = workspaceSplitLoopIdx * splitRows;
     workspaceSplitConfig.rightMatrixExpertStartIndex = workspaceSplitConfig.rightMatrixExpertNextStartIndex;
     workspaceSplitConfig.rightMatrixExpertEndIndex = workspaceSplitConfig.rightMatrixExpertStartIndex;
     // 计算右专家矩阵的终止索引(rightMatrixExpertEndIndex) 和下一次的起始索引(rightMatrixExpertNextStartIndex)
@@ -267,14 +633,13 @@ __aicore__ inline void GMMSituQuantPipelineSchedule<mmType>::UpdateWorkSpaceSpli
             }
             nextTaskNum = nextTaskNumTmp - workspaceSplitConfig.leftMatrixStartIndex;
         }
-        if (curTaskNum > gmmSituQuantBaseParams->mLimit) {
+        if (curTaskNum > splitRows) {
             workspaceSplitConfig.rightMatrixExpertNextStartIndex = workspaceSplitConfig.rightMatrixExpertEndIndex;
             break;
-        } else if (curTaskNum == gmmSituQuantBaseParams->mLimit &&
-                   nextTaskNum > gmmSituQuantBaseParams->mLimit) {
+        } else if (curTaskNum == splitRows && nextTaskNum > splitRows) {
             workspaceSplitConfig.rightMatrixExpertNextStartIndex = workspaceSplitConfig.rightMatrixExpertEndIndex + 1;
             break;
-        } else if (nextTaskNum > gmmSituQuantBaseParams->mLimit) {
+        } else if (nextTaskNum > splitRows) {
             workspaceSplitConfig.rightMatrixExpertEndIndex++;
             workspaceSplitConfig.rightMatrixExpertNextStartIndex = workspaceSplitConfig.rightMatrixExpertEndIndex;
             break;

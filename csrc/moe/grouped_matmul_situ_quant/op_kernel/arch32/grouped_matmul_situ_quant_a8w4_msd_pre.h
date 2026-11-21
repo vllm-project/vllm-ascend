@@ -36,6 +36,7 @@ public:
     __aicore__ inline void CalculateTaskInfoEachCore(uint32_t& curCoreTaskNum_, uint32_t& curCoreStartOffset_);
     __aicore__ inline void Process(WorkSpaceSplitConfig& workspaceSplitConfig, int64_t workspaceSplitLoopIdx,
                                    TPipe* pipe);
+    __aicore__ inline void PackDecodeRow(uint32_t liveRows, TPipe* pipe, int32_t replica = -1);
     __aicore__ inline void CustomInitBuffer(TPipe* pipe);
 
 private:
@@ -217,6 +218,54 @@ __aicore__ inline void GMMA8W4PreProcess::WriteAssistRows(uint32_t rangeStart, u
     if (written > 0) {
         SetFlag<HardEvent::MTE3_V>(EVENT_ID2);
         WaitFlag<HardEvent::MTE3_V>(EVENT_ID2);
+    }
+}
+
+__aicore__ inline void GMMA8W4PreProcess::PackDecodeRow(uint32_t liveRows, TPipe* pipe, int32_t replica)
+{
+    if ASCEND_IS_AIV {
+        const uint32_t row = GetBlockIdx();
+        if (replica < 0 && row >= liveRows) {
+            return;
+        }
+        pipe->InitBuffer(vecInQueueX, 1, vK);
+        pipe->InitBuffer(vecOutQueueA1, 1, vK);
+        pipe->InitBuffer(vecOutQueueA3, 1, vK * SIZE_OF_HALF_2);
+        pipe->InitBuffer(tempBuff, vK);
+        pipe->InitBuffer(vecOutQueue0F, 1, LEN_128 * sizeof(int16_t));
+        auto input = vecInQueueX.AllocTensor<int8_t>();
+        auto packed = vecOutQueueA1.AllocTensor<int4b_t>();
+        auto converted = vecOutQueueA3.AllocTensor<half>();
+        auto lowBytes = tempBuff.Get<int8_t>();
+        auto lowMask = vecOutQueue0F.AllocTensor<int16_t>();
+
+        const uint64_t sourceOffset = static_cast<uint64_t>(replica >= 0 ? 0 : row) * vK;
+        const uint64_t outputOffset = static_cast<uint64_t>(replica >= 0 ? replica : row) * vK;
+        DataCopy(input, xGM[sourceOffset], vK);
+        Duplicate(lowMask, static_cast<int16_t>(0x0F0F), LEN_128);
+        GmmsqSetWaitFlag<HardEvent::MTE2_V>();
+        Cast(converted, input, RoundMode::CAST_NONE, vK);
+        PipeBarrier<PIPE_V>();
+        constexpr half ONE_SIXTEENTH = static_cast<half>(0.0625f);
+        Muls(converted, converted, ONE_SIXTEENTH, vK);
+        PipeBarrier<PIPE_V>();
+        Cast(packed, converted, RoundMode::CAST_FLOOR, vK);
+        And(lowBytes.ReinterpretCast<int16_t>(), input.ReinterpretCast<int16_t>(), lowMask,
+            LEN_128, vK / (TWO * LEN_128), {1, 1, 1, 8, 8, 0});
+        PipeBarrier<PIPE_V>();
+        Cast(converted, lowBytes, RoundMode::CAST_NONE, vK);
+        PipeBarrier<PIPE_V>();
+        Adds(converted, converted, static_cast<half>(-EIGHT), vK);
+        PipeBarrier<PIPE_V>();
+        // A K-aligned row gives two contiguous INT4 rows in one UB buffer and one GM write.
+        Cast(packed[vK], converted, RoundMode::CAST_NONE, vK);
+        GmmsqSetWaitFlag<HardEvent::V_MTE3>();
+        DataCopy(yGm1[outputOffset], packed.ReinterpretCast<int8_t>(), vK);
+        GmmsqSetWaitFlag<HardEvent::MTE3_V>();
+        vecInQueueX.FreeTensor(input);
+        vecOutQueueA1.FreeTensor(packed);
+        vecOutQueueA3.FreeTensor(converted);
+        vecOutQueue0F.FreeTensor(lowMask);
     }
 }
 

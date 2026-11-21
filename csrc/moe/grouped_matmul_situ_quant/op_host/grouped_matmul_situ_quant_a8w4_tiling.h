@@ -89,6 +89,8 @@ TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmTilingData);
 // 备选分块（baseM/baseN 互换）的 Matmul tiling。kernel 按 live 行数在两者之间二选一，
 // 见 A8W4_BASEM_NZ_ALT 处的注释；不用备选时这里填与 mmTilingData 相同的内容。
 TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmTilingDataAlt);
+TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmTilingDataWide);
+TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmTilingDataSingleToken);
 END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(GroupedMatmulSituQuant, GMMSituQuantTilingData)
 
@@ -160,20 +162,65 @@ constexpr int64_t DOUBLE_ROW = 2;
 constexpr int64_t PERCHANNEL_WSCALE_DIM_LIMIT = 2;
 constexpr int64_t PERGROUP_WSCALE_DIM_LIMIT = 3;
 constexpr int64_t A8W4_MSD_TILING_KEY_MODE = 2;
+constexpr int64_t A8W4_MSD_DECODE_TILING_KEY = 3;
+constexpr int64_t A8W4_MSD_SINGLE_TOKEN_TILING_KEY = 4;
 constexpr int64_t COMMON_TILING_KEY_MODE = 0;
-// Keep each FP32 accumulation tile within the 128 KiB L0C budget.
-// ND uses wider N tiles for contiguous weight loads. NZ chooses between
-// two tile shapes using device-side live rows, including graph replay.
+// A8W4 的 Cube 分块。baseM * baseN 必须 <= 32768：L0C 只有 128KB，结果块按 fp32 存放，
+// 256x256 会让 MatmulApiTiling::GetTiling 直接失败。两者乘积保持不变，只在这条约束下换形状。
+//
+// 选型依据（实测，见 tests/perf；模型 shape M=2048 K=3584 N=6144）：
+//   * NZ —— 256x128。N 方向 tile 数翻倍（24 -> 48），20 个核上的负载更匀，
+//     mte1（L1->L0）压力也从 277us 降到 243us，aic_time 390 -> 369、341 -> 315，
+//     两档 EP 的 Task 各快约 5%。
+//   * ND —— 64x512。ND 权重是 [K, N/8] INT32，一个 tile 每读一个 k 行只搬 baseN/8*4
+//     字节的**连续段**，其余靠 stride 跳过去：baseN=256 是 128B，baseN=512 是 256B。
+//     实测 baseN 减半到 128（64B，不足一条 L2 line）ND 慢 1.55x，说明这条连续段的长短
+//     就是 ND 的主导因素——而 ND 的有效带宽只有 NZ 的一半（decode 档实测 ~480 vs
+//     ~950 GB/s，见 tests/perf 的 profiling 记录）。baseN 加倍要同时把 baseM 减半
+//     （上面的 L0C 约束）和 baseK 减半（baseK*baseN/2 = 32KB，双缓冲后正好占满 64KB L0B）。
 constexpr int64_t A8W4_BASEM = 64;
 constexpr int64_t A8W4_BASEK = 128;
 constexpr int64_t A8W4_BASEN = 512;
 constexpr int64_t A8W4_BASEM_NZ = 256;
 constexpr int64_t A8W4_BASEK_NZ = 256;
 constexpr int64_t A8W4_BASEN_NZ = 128;
+// NZ 的备选分块，只在「每个专家平均行数很少」时启用（见下面的 A8W4_ALT_ROWS_PER_EXPERT_LIMIT）。
+//
+// 两种分块的 baseM*baseN 都是 32768（L0C 约束见上），只是长短边互换，所以不会踩到
+// L0C/L0B 的容量上限；差别在于一个 M tile 覆盖多少行、一个 N tile 覆盖多宽的 N。
+//
+// 实测（910B，20 AIC，K=3584 N=6144，同一份 NZ dump，只改这两个常量）：
+//   档位              每专家行数   256x128      128x256
+//   decode_e28        19          321.7 µs     280.6 µs   -12.8%（0.98x -> 1.13x）
+//   ep32_e28          64          405.5 µs     429.2 µs    +5.8%
+//   cust_e2          112          76.2 µs      80.4 µs     +5.5%
+//   ep64_e14         128          343.7 µs     374.2 µs    +8.9%
+// cust_e2 的 76.2/80.4 是同一次连测的结果，但这一档的单次测量在跨时段有 ±5 µs 的漂移
+// （对照构建 9 轮中位数 76.1，另一次 82.2），所以只有「decode 那 -12.8%」和「64 行以上
+// 变慢」两条是可靠的，cust_e2 那 5.5% 不足以单独下结论。
+// 赢的是每专家行数装不满一个 M tile 的那一档（19 行 -> 38 个 int4 行，256/128 都是 1 个
+// M tile，此时并行度全看 N 方向）；行数一多，粗 baseM 的权重复用优势就压过它。
+// 分界点只测到 19（赢）到 64（输）之间，32 取在中间；真有落在 32~64 之间的线上档位，
+// 把这个常量调一调重测即可（它是 tiling 字段，不用重编 kernel）。
 constexpr int64_t A8W4_BASEM_NZ_ALT = 128;
 constexpr int64_t A8W4_BASEN_NZ_ALT = 256;
-// Zero disables the alternate shape (ND); NZ switches at this live average.
+// 每专家平均行数 <= 该值时走备选分块；0 表示不启用（ND 档恒为 0）。
 constexpr int64_t A8W4_ALT_ROWS_PER_EXPERT_LIMIT = 32;
+constexpr int64_t A8W4_WIDE_TILE_KN = 7168;
+constexpr int64_t A8W4_WIDE_TILE_EXPERTS = 14;
+constexpr int64_t A8W4_BASEM_NZ_WIDE = 160;
+constexpr int64_t A8W4_BASEN_NZ_WIDE = 192;
+constexpr int64_t A8W4_SINGLE_TOKEN_MAX_CAPACITY = 7168;
+constexpr int64_t A8W4_SINGLE_TOKEN_BASE_M = 64;
+constexpr int64_t A8W4_SINGLE_TOKEN_BASE_N = 384;
+constexpr int64_t A8W4_SINGLE_TOKEN_BASE_K = 128;
+constexpr int64_t A8W4_SINGLE_TOKEN_K_STEPS = 8;
+constexpr int64_t A8W4_KIMI_ROUTED_K = 3584;
+constexpr int64_t A8W4_KIMI_ROUTED_N = 6144;
+constexpr int64_t A8W4_KIMI_SINGLE_TOKEN_BASE_N = 320;
+constexpr int64_t A8W4_WIDE_TILE_EP32_EXPERTS = 28;
+constexpr int64_t A8W4_KIMI_EP128_EXPERTS = 7;
+constexpr int64_t A8W4_KIMI_EP128_WORKSPACE_ROWS = 640;
 constexpr int64_t SIZE_OF_HALF_2 = 2;
 
 // SiTU 属性默认值。与 dequant_situ_quant 的调用约定保持一致：

@@ -1,3 +1,5 @@
+#pragma once
+
 /*
  * gmm_situ_quant_v2 — host for the V2-aligned dual entries.
  *

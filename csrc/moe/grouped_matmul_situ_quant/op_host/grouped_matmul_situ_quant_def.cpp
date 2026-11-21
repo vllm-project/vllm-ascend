@@ -158,6 +158,7 @@ public:
             .NeedCheckSupportFlag(false)
             .PrecisionReduceFlag(true)
             .ExtendCfgInfo("opFile.value", "grouped_matmul_situ_quant_apt");
+        this->AICore().AddConfig("ascend910b", a8w4MsdCfg);
         this->AICore().AddConfig("ascend910_93", a8w4MsdCfg);
 
         this->AICore().AddConfig("ascend950", regbaseCfg);

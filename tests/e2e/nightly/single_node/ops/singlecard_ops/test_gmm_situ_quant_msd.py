@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""A3 A8W4 MSD GroupedMatmulSituQuant correctness, native NZ, and graph regressions."""
+"""A2/A3 A8W4 MSD GroupedMatmulSituQuant correctness, native NZ, and graph regressions."""
 
 from types import SimpleNamespace
 
@@ -16,13 +16,13 @@ LINEAR_BETA = 25.0
 
 
 @pytest.fixture(autouse=True)
-def require_a3():
+def require_a2a3():
     if not torch.npu.is_available():
         pytest.skip("GroupedMatmulSituQuant A8W4 MSD requires an NPU")
     soc_version = torch_npu.npu.get_soc_version()
-    if not 250 <= soc_version <= 256:
-        pytest.skip("GroupedMatmulSituQuant A8W4 MSD regression requires Ascend A3")
-    assert hasattr(torch.ops._C_ascend, "grouped_matmul_situ_quant"), "A3 extension must register the fused op"
+    if not (220 <= soc_version <= 225 or 250 <= soc_version <= 256):
+        pytest.skip("GroupedMatmulSituQuant A8W4 MSD regression requires Ascend A2/A3")
+    assert hasattr(torch.ops._C_ascend, "grouped_matmul_situ_quant"), "A2/A3 extension must register the fused op"
     assert hasattr(torch.ops._C_ascend, "grouped_matmul_situ_quant_weight_nz"), "NZ entry must be registered"
     previous = torch_npu._C._npu_getOption("ALLOW_INTERNAL_FORMAT") != b"disable"
     torch.npu.config.allow_internal_format = True
@@ -41,11 +41,17 @@ def _pack_int4(weight):
     return packed.to(torch.int32)
 
 
-def _layer(experts, k, n, nz, seed):
+def _layer(experts, k, n, nz, seed, *, reference_k=None):
     generator = torch.Generator().manual_seed(seed)
-    logical = [torch.randint(-8, 8, (k, n), generator=generator, dtype=torch.int8) for _ in range(experts)]
+    logical_k = k if reference_k is None else reference_k
+    logical = [torch.randint(-8, 8, (logical_k, n), generator=generator, dtype=torch.int8) for _ in range(experts)]
     scales = [torch.rand(n, generator=generator) * 0.001 + 0.0001 for _ in range(experts)]
     packed = torch.stack([_pack_int4(weight) for weight in logical]).npu()
+    if logical_k != k:
+        # Zero-pad the physical weights and keep the CPU reference small.
+        padded = packed.new_zeros((experts, k, n // 8))
+        padded[:, :logical_k].copy_(packed)
+        packed = padded
     if nz:
         # The loader owns INT8 NZ storage and exposes an INT32 carrier view.
         # Casting INT32 storage to NZ creates an incompatible descriptor.
@@ -384,3 +390,230 @@ def test_gmm_situ_quant_msd_rejects_invalid_metadata(invalid, match):
         kwargs[invalid] = [kwargs[invalid][0].float()]
     with pytest.raises(RuntimeError, match=match):
         torch.ops._C_ascend.grouped_matmul_situ_quant.list(**kwargs)
+
+
+@pytest.mark.parametrize("group_list_type", [0, 1], ids=["prefix", "counts"])
+@pytest.mark.parametrize(
+    "k,n,capacity,reference_k,routes,external_assist",
+    [
+        (
+            7168,
+            7168,
+            1024,
+            256,
+            [
+                [67] * 11 + [66] * 3,  # 935 rows and an eligible expert boundary.
+                [70] * 12 + [0, 97],  # 937 rows and a zero-sized expert.
+                [935] + [0] * 13,  # No eligible expert boundary.
+                [16] + [0] * 13,
+            ],
+            False,
+        ),
+        (
+            3584,
+            6144,
+            1280,
+            64,
+            [
+                [0, 43, 113, 0, 149, 160, 175],  # Exactly fills one 640-row slot.
+                [641] + [0] * 6,  # One expert spans both slots.
+                [180] * 6 + [200],  # Replay the full captured capacity.
+                [16] + [0] * 6,
+                [0] * 7,
+            ],
+            False,
+        ),
+        (
+            3584,
+            6144,
+            7168,
+            64,
+            [
+                [0, 0, 0, 1, 0, 0, 0],
+                [0] * 7,
+                [0] * 6 + [16],
+                [2, 2, 2, 2, 2, 3, 3],
+                [32] + [0] * 6,
+                [0, 33] + [0] * 5,
+                [171, 171, 170] + [0] * 4,
+                [91] * 6 + [94],
+                [0] * 6 + [641],
+                [0] * 7,
+                [1] + [0] * 6,
+            ],
+            True,
+        ),
+        (
+            3584,
+            6144,
+            16,
+            64,
+            [
+                [0] * 6 + [1],
+                [0] * 7,
+                [16] + [0] * 6,
+                [0, 3, 0, 8, 0, 5, 0],
+                [0] * 6 + [16],
+            ],
+            True,
+        ),
+        (
+            3584,
+            6144,
+            2048,
+            64,
+            [
+                [0, 3, 0, 8, 0, 5, 0],  # Sparse decode at the 16-row boundary.
+                [0, 0, 0, 0, 0, 0, 17],
+                [0] * 7,
+                [0, 0, 0, 1, 0, 0, 0],
+                [2, 2, 2, 2, 2, 3, 3],
+            ],
+            True,
+        ),
+        (
+            7168,
+            7168,
+            16,
+            64,
+            [
+                [0] * 13 + [1],
+                [0] * 14,
+                [0, 4, 0, 12] + [0] * 10,
+                [0] * 13 + [16],
+                [8] + [0] * 13,
+                [0] * 5 + [9] + [0] * 8,
+                [1] + [0] * 13,
+            ],
+            True,
+        ),
+        (
+            7168,
+            7168,
+            2048,
+            64,
+            [
+                [0, 0, 0, 1] + [0] * 10,
+                [16] + [0] * 13,
+                [0] * 13 + [15],
+                [0] * 13 + [17],
+                [0] * 13 + [32],
+                [0, 33] + [0] * 12,
+                [9] * 13 + [11],
+                [0] * 14,
+                [0] * 13 + [1],
+            ],
+            True,
+        ),
+    ],
+    ids=[
+        "e14-boundary",
+        "e7-compact-workspace",
+        "e7-wide-decode-external-assist",
+        "e7-tiny-decode-external-assist",
+        "e7-decode-external-assist",
+        "e14-single-token-shared-pack",
+        "e14-single-token-local-pack",
+    ],
+)
+def test_gmm_situ_quant_msd_graph_expert_boundaries(
+    k, n, capacity, reference_k, routes, external_assist, group_list_type
+):
+    experts = len(routes[0])
+    generator = torch.Generator().manual_seed(91)
+    x_reference = torch.randint(-32, 32, (capacity, reference_k), generator=generator, dtype=torch.int8)
+    if not external_assist:
+        x_reference[0].zero_()
+    x = torch.zeros((capacity, k), dtype=torch.int8)
+    x[:, :reference_k] = x_reference
+    x_scale = torch.rand(capacity, generator=generator) * 0.01 + 0.001
+    layer = _layer(experts, k, n, True, 401, reference_k=reference_k)
+    assist = None
+    if external_assist:
+        assist = torch.stack([8 * w.float().sum(dim=0) * scale for w, scale in zip(layer[2], layer[3])]).npu()
+    x_device, scale_device = x.npu(), x_scale.npu()
+    groups = _groups(routes[0], torch.int64, group_list_type).npu()
+    _call(x_device, scale_device, layer, groups, group_list_type, nz=True, assist=assist, stacked=True)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, capture_error_mode="global"):
+        output = _call(x_device, scale_device, layer, groups, group_list_type, nz=True, assist=assist, stacked=True)
+    for counts in routes:
+        groups.copy_(_groups(counts, torch.int64, group_list_type))
+        graph.replay()
+        torch.npu.synchronize()
+        _check(output, _reference(x_reference, x_scale, layer, counts, external_assist), capacity)
+
+
+@pytest.mark.parametrize("group_list_type", [0, 1], ids=["prefix", "counts"])
+@pytest.mark.parametrize("capacity", [16, 640, 641, 2048, 7168])
+def test_gmm_situ_mlp_graph_matches_existing_fusion(group_list_type, capacity):
+    experts, width, up_width = 7, 3584, 6144
+    up = _layer(experts, width, up_width, True, 604, reference_k=64)
+    down = _layer(experts, up_width // 2, width, True, 605, reference_k=64)
+
+    def compensation(weights):
+        return torch.stack([8 * weight.float().sum(0) * scale for weight, scale in zip(weights[2], weights[3])]).npu()
+
+    up_compensation, down_compensation = compensation(up), compensation(down)
+    rng = torch.Generator().manual_seed(606)
+    x = torch.randint(-127, 128, (capacity, width), dtype=torch.int8, generator=rng).npu()
+    x_scale = (torch.rand(capacity, generator=rng) * 0.02 + 0.001).npu()
+    routes = [[16] + [0] * 6, [0] * 7, [0] * 6 + [1], [0, 3, 0, 8, 0, 5, 0]]
+    routes.extend([[0] * 6 + [2], [0, 0, 8, 0, 0, 0, 0], [0] * 6 + [16]])
+    if capacity >= 17:
+        routes.append([0] * 6 + [17])
+    if capacity >= 128:
+        routes.extend([[0, 8, 0, 9, 0, 0, 0], [18] * 6 + [20], [0] * 6 + [128]])
+    if capacity >= 129:
+        routes.extend([[18] * 6 + [21], [93] * 6 + [83]])
+    if 640 <= capacity <= 641:
+        routes.extend([[0] * 6 + [rows] for rows in range(639, capacity + 1)])
+        routes.append([0] * 6 + [8])
+    if capacity >= 7168:
+        # Cross the reused down-projection workspace slot and prefill-tile boundaries.
+        routes.extend([[0] * 6 + [rows] for rows in (1256, 1257, 1258, 2049)])
+        routes.extend([[293] * 6 + [290], [585] * 6 + [586], [1024] * 7, [0] * 7, [1] + [0] * 6])
+    groups = _groups(routes[0], torch.int64, group_list_type).npu()
+    op = torch.ops._C_ascend.grouped_matmul_situ_quant_mlp
+
+    def fused():
+        return op(
+            x,
+            x_scale,
+            groups,
+            up[4][0],
+            up[4][1],
+            up_compensation,
+            down[4][0],
+            down[4][1].unsqueeze(1),
+            down_compensation,
+            group_list_type,
+            BETA,
+            LINEAR_BETA,
+        )
+
+    fused()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        output = fused()
+    for counts in routes:
+        groups.copy_(_groups(counts, torch.int64, group_list_type))
+        graph.replay()
+        rows = sum(counts)
+        if rows:
+            q, scale = _call(x, x_scale, up, groups, group_list_type, True, up_compensation, stacked=True)
+            reference = torch_npu.npu_grouped_matmul(
+                x=[q],
+                weight=[down[4][0]],
+                scale=[down[4][1].unsqueeze(1)],
+                bias=[down_compensation],
+                per_token_scale=[scale],
+                split_item=2,
+                group_type=0,
+                group_list=_groups(counts, torch.int64, 1).npu(),
+                group_list_type=1,
+                output_dtype=torch.bfloat16,
+            )[0]
+            torch.testing.assert_close(output[:rows].cpu(), reference[:rows].cpu(), rtol=0, atol=0)

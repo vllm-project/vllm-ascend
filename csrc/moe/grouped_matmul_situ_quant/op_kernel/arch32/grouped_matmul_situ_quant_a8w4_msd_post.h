@@ -31,12 +31,35 @@ public:
     __aicore__ inline GMMA8W4PostProcess(){};
     __aicore__ inline void Init(const GMAddrParams gmAddrParams,
                                 const GMMSituQuantBaseParams* __restrict gmmSituQuantBaseParamsIN,
-                                const GMMSituQuant* __restrict gmmSwigluIN);
+                                const GMMSituQuant* __restrict gmmSwigluIN
+#ifdef GMM_SITU_QUANT_MLP
+                                , bool raw = false
+#endif
+                                );
 
+    __aicore__ inline void PrepareDecodeRow(VecConfig& row, float& inputScale, WorkSpaceSplitConfig& config, TPipe* pipe);
+    __aicore__ inline void FinishDecodeRow(VecConfig& row, float inputScale, WorkSpaceSplitConfig& config
+#ifdef GMM_SITU_QUANT_MLP
+                                            , bool emitPacked = false
+#endif
+                                            );
+#ifdef GMM_SITU_QUANT_MLP
+    __aicore__ inline void FinishPrepackedDownRow(VecConfig& row, float inputScale,
+                                                  WorkSpaceSplitConfig& config, GM_ADDR output);
+#endif
     __aicore__ inline void Process(WorkSpaceSplitConfig& workspaceSplitConfig, int64_t workspaceSplitLoopIdx,
-                                   TPipe* pipe);
+                                   TPipe* pipe
+#ifdef GMM_SITU_QUANT_MLP
+                                   , bool packed = false, GM_ADDR bf16 = nullptr
+#endif
+                                   );
 
 private:
+#ifdef GMM_SITU_QUANT_MLP
+    __aicore__ inline void StorePackedRows(VecConfig& row, WorkSpaceSplitConfig& config);
+    __aicore__ inline void StoreDownRows(VecConfig& row, WorkSpaceSplitConfig& config, GM_ADDR output);
+
+#endif
     __aicore__ inline void UpdateVecConfig(uint32_t blockIdx, VecConfig& vecConfig,
                                            WorkSpaceSplitConfig& workspaceSplitConfig, int64_t workspaceSplitLoopIdx,
                                            TPipe* pipe);
@@ -99,7 +122,11 @@ private:
 
 __aicore__ inline void GMMA8W4PostProcess::Init(
     const GMAddrParams gmAddrParams, const GMMSituQuantBaseParams* __restrict gmmSituQuantBaseParamsIN,
-    const GMMSituQuant* __restrict gmmSwigluIN)
+    const GMMSituQuant* __restrict gmmSwigluIN
+#ifdef GMM_SITU_QUANT_MLP
+    , bool raw
+#endif
+    )
 {
     if ASCEND_IS_AIV {
         aicCoreNum = GetBlockNum();
@@ -108,7 +135,12 @@ __aicore__ inline void GMMA8W4PostProcess::Init(
         gmmSituQuantBaseParams = gmmSituQuantBaseParamsIN;
         gmmSituQuant = gmmSwigluIN;
         assistRows = gmmSituQuantBaseParams->assistRowsPerExpert;
+#ifdef GMM_SITU_QUANT_MLP
+        weightAuxiliaryMatrixGM.SetGlobalBuffer(raw ? (__gm__ float*)gmAddrParams.weightAuxiliaryMatrixGM
+                                                               : GetTensorAddr<float>(0, gmAddrParams.weightAuxiliaryMatrixGM));
+#else
         weightAuxiliaryMatrixGM.SetGlobalBuffer(GetTensorAddr<float>(0, gmAddrParams.weightAuxiliaryMatrixGM));
+#endif
         groupListGM.SetGlobalBuffer((__gm__ int64_t*)gmAddrParams.groupListGM, gmmSituQuant->groupListLen);
         mmOutGM1.SetGlobalBuffer(
             (__gm__ half*)((__gm__ int8_t*)gmAddrParams.workSpaceGM + gmAddrParams.workSpaceOffset2));
@@ -249,10 +281,9 @@ __aicore__ inline void GMMA8W4PostProcess::Quant(uint32_t loopIdx, VecConfig& ve
     float quantScale = reduceResLocal.GetValue(0) / QUANT_SCALE_INT8;
     LocalTensor<float> quantScaleLocal = quantScaleOutQueue.DeQue<float>();
     quantScaleLocal.SetValue(loopIdx, quantScale);
-    // An all-zero row has scale zero and must quantize to zero, not 0 * inf.
-    quantScale = quantScale > 0.0f ? 1.0f / quantScale : 0.0f;
+    const float inverseScale = quantScale > 0.0f ? 1.0f / quantScale : 0.0f;
     GmmsqSetWaitFlag<HardEvent::S_V>();
-    Muls(_inMMLocal[preOffset], _inMMLocal[preOffset], quantScale, halfTokenLen);
+    Muls(_inMMLocal[preOffset], _inMMLocal[preOffset], inverseScale, halfTokenLen);
     PipeBarrier<PIPE_V>();
     LocalTensor<int8_t> quantLocal = quantOutQueue.DeQue<int8_t>();
     int32_t dstTempOffset = static_cast<int32_t>(preOffset / BISECT);
@@ -506,8 +537,102 @@ __aicore__ inline void GMMA8W4PostProcess::UpdateAuxiliaryMatrix(uint32_t loopId
     }
 }
 
+__aicore__ inline void GMMA8W4PostProcess::PrepareDecodeRow(
+    VecConfig& row, float& inputScale, WorkSpaceSplitConfig& config, TPipe* pipe)
+{
+    if ASCEND_IS_AIV {
+        if (blockIdx >= config.M) {
+            return;
+        }
+        UpdateVecConfig(blockIdx, row, config, 0, pipe);
+        row.innerLoopNum = 1;
+        inputScale = perTokenScaleGM.GetValue(row.startIdx);
+        mmOutQueue.EnQue(mmOutQueue.AllocTensor<half>());
+        quantScaleOutQueue.EnQue(quantScaleOutQueue.AllocTensor<float>());
+        quantOutQueue.EnQue(quantOutQueue.AllocTensor<int8_t>());
+        weightAuxiliaryMatrixInQueue.EnQue(weightAuxiliaryMatrixInQueue.AllocTensor<float>());
+        PreLoadAuxiliaryMatrix(row);
+    }
+}
+
+__aicore__ inline void GMMA8W4PostProcess::FinishDecodeRow(
+    VecConfig& row, float inputScale, WorkSpaceSplitConfig& config
+#ifdef GMM_SITU_QUANT_MLP
+    , bool emitPacked
+#endif
+    )
+{
+    if ASCEND_IS_AIV {
+        if (blockIdx >= config.M) {
+            return;
+        }
+        customDataCopyIn(0, mmOutGM1, row, config);
+        MergeAuxiliaryMatrix(0, row);
+        LocalTensor<float> mmLocal = mmOutQueue.DeQue<float>();
+        Muls(mmLocal, mmLocal, inputScale, gmmSituQuant->tokenLen);
+        PipeBarrier<PIPE_V>();
+        Situ(0, row);
+        Quant(0, row);
+#ifdef GMM_SITU_QUANT_MLP
+        if (emitPacked) {
+            StorePackedRows(row, config);
+        } else
+#endif
+        {
+            GmmsqSetWaitFlag<HardEvent::V_MTE3>();
+            customDataCopyOut(row, config);
+        }
+
+        auto aux = weightAuxiliaryMatrixInQueue.DeQue<float>();
+        auto mm = mmOutQueue.DeQue<half>();
+        auto scale = quantScaleOutQueue.DeQue<float>();
+        auto output = quantOutQueue.DeQue<int8_t>();
+        weightAuxiliaryMatrixInQueue.FreeTensor(aux);
+        mmOutQueue.FreeTensor(mm);
+        quantScaleOutQueue.FreeTensor(scale);
+        quantOutQueue.FreeTensor(output);
+    }
+}
+
+#ifdef GMM_SITU_QUANT_MLP
+__aicore__ inline void GMMA8W4PostProcess::FinishPrepackedDownRow(
+    VecConfig& row, float inputScale, WorkSpaceSplitConfig& config, GM_ADDR output)
+{
+    if ASCEND_IS_AIV {
+        if (blockIdx >= config.M) {
+            return;
+        }
+        customDataCopyIn(0, mmOutGM1, row, config);
+        MergeAuxiliaryMatrix(0, row);
+        const uint32_t width = gmmSituQuant->tokenLen;
+        auto merged = mmOutQueue.DeQue<float>();
+        Muls(merged, merged, inputScale, width);
+        PipeBarrier<PIPE_V>();
+        auto bf16 = merged[width].ReinterpretCast<bfloat16_t>();
+        Cast(bf16, merged, RoundMode::CAST_RINT, width);
+        GmmsqSetWaitFlag<HardEvent::V_MTE3>();
+        GlobalTensor<bfloat16_t> downOutput;
+        downOutput.SetGlobalBuffer((__gm__ bfloat16_t*)output);
+        DataCopy(downOutput[static_cast<uint64_t>(row.startIdx) * width], bf16, width);
+        GmmsqSetWaitFlag<HardEvent::MTE3_V>();
+        mmOutQueue.FreeTensor(merged);
+        auto aux = weightAuxiliaryMatrixInQueue.DeQue<float>();
+        auto scale = quantScaleOutQueue.DeQue<float>();
+        auto quant = quantOutQueue.DeQue<int8_t>();
+        weightAuxiliaryMatrixInQueue.FreeTensor(aux);
+        quantScaleOutQueue.FreeTensor(scale);
+        quantOutQueue.FreeTensor(quant);
+    }
+}
+
+#endif
+
 __aicore__ inline void GMMA8W4PostProcess::Process(WorkSpaceSplitConfig& workspaceSplitConfig,
-                                                   int64_t workspaceSplitLoopIdx, TPipe* pipe)
+                                                   int64_t workspaceSplitLoopIdx, TPipe* pipe
+#ifdef GMM_SITU_QUANT_MLP
+    , bool packed, GM_ADDR bf16
+#endif
+    )
 {
     if ASCEND_IS_AIV {
         if (workspaceSplitLoopIdx >= workspaceSplitConfig.loopCount || workspaceSplitLoopIdx < 0) {
@@ -546,14 +671,43 @@ __aicore__ inline void GMMA8W4PostProcess::Process(WorkSpaceSplitConfig& workspa
 
                 for (uint32_t innerLoopIdx = 0; innerLoopIdx < vecConfig.innerLoopNum; innerLoopIdx++) {
                     // 2.如果涉及group切换，更新辅助矩阵
+#ifdef GMM_SITU_QUANT_MLP
+                    if (bf16 != nullptr && vecConfig.nextUpdateInterVal == 0) {
+                        // The previous row can still be reading the current expert's compensation.
+                        GmmsqSetWaitFlag<HardEvent::V_MTE2>();
+                    }
+#endif
                     UpdateAuxiliaryMatrix(innerLoopIdx, vecConfig);
                     // 3. 四步vector计算（辅助矩阵加回、perToken反量化、Swiglu、Quant）
-                    VectorCompute(innerLoopIdx, vecConfig, workspaceSplitConfig);
+#ifdef GMM_SITU_QUANT_MLP
+                    if (bf16 != nullptr) {
+                        MergeAuxiliaryMatrix(innerLoopIdx, vecConfig);
+                        MulPertokenScale(innerLoopIdx, vecConfig, workspaceSplitConfig);
+                        auto merged = mmOutQueue.DeQue<float>();
+                        auto out = merged[vecConfig.innerLoopNum * gmmSituQuant->tokenLen].ReinterpretCast<bfloat16_t>();
+                        const uint32_t from = innerLoopIdx * gmmSituQuant->tokenLen;
+                        Cast(out[from], merged[from], RoundMode::CAST_RINT, gmmSituQuant->tokenLen);
+                        PipeBarrier<PIPE_V>();
+                        mmOutQueue.EnQue(merged);
+                    } else
+#endif
+                    {
+                        VectorCompute(innerLoopIdx, vecConfig, workspaceSplitConfig);
+                    }
                 }
                 int32_t eventIdVToMTE3 = static_cast<int32_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
                 SetFlag<HardEvent::V_MTE3>(eventIdVToMTE3);
                 WaitFlag<HardEvent::V_MTE3>(eventIdVToMTE3);
-                customDataCopyOut(vecConfig, workspaceSplitConfig);
+#ifdef GMM_SITU_QUANT_MLP
+                if (bf16 != nullptr) {
+                    StoreDownRows(vecConfig, workspaceSplitConfig, bf16);
+                } else if (packed) {
+                    StorePackedRows(vecConfig, workspaceSplitConfig);
+                } else
+#endif
+                {
+                    customDataCopyOut(vecConfig, workspaceSplitConfig);
+                }
             }
             }
             weightAuxiliaryMatrixLocal = weightAuxiliaryMatrixInQueue.DeQue<float>();
@@ -572,6 +726,64 @@ __aicore__ inline void GMMA8W4PostProcess::Process(WorkSpaceSplitConfig& workspa
         }
     }
 }
+
+#ifdef GMM_SITU_QUANT_MLP
+__aicore__ inline void GMMA8W4PostProcess::StorePackedRows(VecConfig& row, WorkSpaceSplitConfig& config)
+{
+    const uint32_t width = gmmSituQuant->tokenLen / SWIGLU_REDUCE_FACTOR;
+    auto input = quantOutQueue.DeQue<int8_t>();
+    auto scratch = mmOutQueue.DeQue<float>();
+    auto converted = scratch.ReinterpretCast<half>();
+    auto packed = scratch.ReinterpretCast<int4b_t>()[4 * width];
+    auto lowBytes = scratch.ReinterpretCast<int8_t>()[3 * width];
+    auto mask = reduceWorkspace.Get<int16_t>(128);
+    Duplicate(mask, static_cast<int16_t>(0x0f0f), 128);
+    for (uint32_t i = 0; i < row.innerLoopNum; ++i) {
+        auto inputRow = input[i * width];
+        Cast(converted, inputRow, RoundMode::CAST_NONE, width);
+        PipeBarrier<PIPE_V>();
+        Muls(converted, converted, static_cast<half>(0.0625f), width);
+        PipeBarrier<PIPE_V>();
+        Cast(packed, converted, RoundMode::CAST_FLOOR, width);
+        And(lowBytes.ReinterpretCast<int16_t>(), inputRow.ReinterpretCast<int16_t>(), mask,
+            128, width / 256, {1, 1, 1, 8, 8, 0});
+        PipeBarrier<PIPE_V>();
+        Cast(converted, lowBytes, RoundMode::CAST_NONE, width);
+        PipeBarrier<PIPE_V>();
+        Adds(converted, converted, static_cast<half>(-8), width);
+        PipeBarrier<PIPE_V>();
+        Cast(packed[width], converted, RoundMode::CAST_NONE, width);
+        GmmsqSetWaitFlag<HardEvent::V_MTE3>();
+        const uint64_t rowOffset = config.leftMatrixStartIndex + row.startIdx + i;
+        DataCopy(quantOutputGM[rowOffset * width], packed.ReinterpretCast<int8_t>(), width);
+        GmmsqSetWaitFlag<HardEvent::MTE3_V>();
+    }
+    auto scale = quantScaleOutQueue.DeQue<float>();
+    GmmsqSetWaitFlag<HardEvent::S_MTE3>();
+    DataCopyParams scaleCopy{1, static_cast<uint16_t>(row.innerLoopNum * sizeof(float)), 0, 0};
+    DataCopyPad(quantScaleOutputGM[config.leftMatrixStartIndex + row.startIdx], scale, scaleCopy);
+    GmmsqSetWaitFlag<HardEvent::MTE3_V>();
+    row.startIdx += row.innerLoopNum;
+    quantScaleOutQueue.EnQue(scale);
+    quantOutQueue.EnQue(input);
+    mmOutQueue.EnQue(scratch);
+}
+
+__aicore__ inline void GMMA8W4PostProcess::StoreDownRows(VecConfig& row, WorkSpaceSplitConfig& config, GM_ADDR output)
+{
+    auto merged = mmOutQueue.DeQue<float>();
+    const uint64_t fullWidth = gmmSituQuant->tokenLen;
+    const uint32_t count = row.innerLoopNum * fullWidth;
+    auto bf16 = merged[count].ReinterpretCast<bfloat16_t>();
+    GlobalTensor<bfloat16_t> out;
+    out.SetGlobalBuffer((__gm__ bfloat16_t*)output);
+    DataCopy(out[(config.leftMatrixStartIndex + row.startIdx) * fullWidth], bf16, count);
+    GmmsqSetWaitFlag<HardEvent::MTE3_V>();
+    row.startIdx += row.innerLoopNum;
+    mmOutQueue.EnQue(merged);
+}
+
+#endif
 
 __aicore__ inline void GMMA8W4PostProcess::customDataCopyOut(VecConfig& vecConfig,
                                                              WorkSpaceSplitConfig& workspaceSplitConfig)

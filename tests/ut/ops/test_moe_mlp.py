@@ -298,6 +298,7 @@ class TestW4A8SituPath(unittest.TestCase):
     def test_situ_gmm1_uses_per_channel_scale_layout(self):
         method = AscendW4A8DynamicFusedMoEMethod.__new__(AscendW4A8DynamicFusedMoEMethod)
         method.use_expert_weight_list = False
+        method.is_per_channel_weight = True
         layer = SimpleNamespace(
             w13_weight=torch.randn(1, 8, 16),
             w13_weight_scale=torch.randn(1, 8),
@@ -436,12 +437,22 @@ class TestUnquantizedFusedMoEMethod(unittest.TestCase):
 class TestApplyMoeMlp(unittest.TestCase):
     def _quant_method(self, fused: bool):
         quant_method = MagicMock()
+        quant_method.try_apply_fused_mlp.return_value = None
         quant_method.supports_fused_activation.return_value = fused
         quant_method.apply_gmm1_act_quant.return_value = ("fused_out", "fused_scale")
         quant_method.apply_gmm1.return_value = "gmm1_out"
         quant_method.apply_act_quant.return_value = ("act_quant_out", "act_scale")
         quant_method.apply_gmm2.return_value = "final_out"
         return quant_method
+
+    def test_situ_fused_mlp_skips_both_projection_calls(self):
+        quant_method = self._quant_method(fused=True)
+        quant_method.try_apply_fused_mlp.return_value = "mlp_out"
+        inputs = _mlp_compute_input(activation=MoEActivation.SITU)
+        self.assertEqual(apply_moe_mlp(inputs, quant_method), ("mlp_out", None))
+        quant_method.try_apply_fused_mlp.assert_called_once_with(inputs)
+        quant_method.apply_gmm1_act_quant.assert_not_called()
+        quant_method.apply_gmm2.assert_not_called()
 
     def test_fused_path_skips_separate_activation(self):
         quant_method = self._quant_method(fused=True)

@@ -1844,6 +1844,11 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("grouped_matmul_situ_quant_weight_nz", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
     ops.impl("grouped_matmul_situ_quant_weight_nz.list",
              &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);
+    ops.impl("grouped_matmul_situ_quant_mlp",
+             +[](const at::Tensor& x, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                 const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, int64_t, double, double) {
+                 return at::empty_like(x, x.options().dtype(at::kBFloat16));
+             });
     // fused_quant_lightning_indexer_manage meta implementation
     ops.impl("npu_fused_quant_lightning_indexer_manage", &vllm_ascend::meta::npu_fused_quant_lightning_indexer_manage_meta);
     // Launch host print from device

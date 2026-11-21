@@ -21,7 +21,8 @@ DEVICE_MODULE = "vllm_ascend.device.device_op"
 @pytest.mark.parametrize("as_list", [False, True])
 @pytest.mark.parametrize("group_type", [0, 1])
 @pytest.mark.parametrize("capacity", [0, 4])
-def test_a3_device_situ_contract(as_list, group_type, capacity):
+@pytest.mark.parametrize("weight_format", [2, 29, 50])
+def test_a3_device_situ_contract(as_list, group_type, capacity, weight_format):
     x = torch.empty((capacity, 64), dtype=torch.int8)
     weight = torch.empty((2, 64, 16), dtype=torch.int32)
     scale = torch.empty((2, 128), dtype=torch.int64)
@@ -34,7 +35,13 @@ def test_a3_device_situ_contract(as_list, group_type, capacity):
     op.list.return_value = expected
     with (
         patch(f"{DEVICE_MODULE}.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3)),
-        patch.object(torch.ops._C_ascend, "grouped_matmul_situ_quant_weight_nz", op, create=True),
+        patch(f"{DEVICE_MODULE}.torch_npu.get_npu_format", return_value=weight_format, create=True),
+        patch.object(
+            torch.ops._C_ascend,
+            "grouped_matmul_situ_quant" if weight_format == 2 else "grouped_matmul_situ_quant_weight_nz",
+            op,
+            create=True,
+        ),
     ):
         result = BaseDeviceAdaptor.npu_grouped_matmul_situ_quant(
             x=x,
@@ -60,11 +67,11 @@ def test_a3_device_situ_contract(as_list, group_type, capacity):
     assert (kwargs["beta"], kwargs["linear_beta"]) == (4.0, 25.0)
 
 
-@pytest.mark.parametrize("device", [AscendDeviceType.A2, AscendDeviceType._310P])
-def test_unsupported_device_rejects_int8_fusion(device):
+def test_unsupported_device_rejects_int8_fusion():
+    device = AscendDeviceType._310P
     with (
         patch(f"{DEVICE_MODULE}.get_current_hardware_profile", return_value=get_hardware_profile(device)),
-        pytest.raises(RuntimeError, match="requires Ascend A3"),
+        pytest.raises(RuntimeError, match="requires Ascend A2/A3"),
     ):
         BaseDeviceAdaptor.npu_grouped_matmul_situ_quant(
             x=torch.empty((1, 64), dtype=torch.int8),
@@ -151,7 +158,7 @@ def test_w4a8_uses_device_adaptor_or_split_fallback(as_list, group_type, case):
         result = method.apply_gmm1_act_quant(inputs)
     assert result[0] is expected[0] and result[1] is expected[1]
     dispose.assert_called_once_with(x)
-    if case == "a3":
+    if case in ("a2", "a3"):
         fused.assert_called_once()
         gmm.assert_not_called()
         activation.assert_not_called()
@@ -164,3 +171,75 @@ def test_w4a8_uses_device_adaptor_or_split_fallback(as_list, group_type, case):
         fused.assert_not_called()
         gmm.assert_called_once()
         activation.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "expert_list,lora,weight_format,experts,width,up_width,capacity",
+    [
+        (False, None, 29, 7, 3584, 6144, 2048),
+        (False, None, 29, 7, 3584, 6144, 7168),
+        (False, None, 29, 14, 7168, 7168, 128),
+        (True, None, 29, 7, 3584, 6144, 16),
+        (False, object(), 29, 7, 3584, 6144, 16),
+        (False, None, 2, 7, 3584, 6144, 16),
+        (False, None, 29, 7, 3584, 6144, 2049),
+        (False, None, 29, 7, 3584, 6144, 7169),
+        (False, None, 29, 7, 3584, 6144, 32768),
+        (False, None, 29, 14, 7168, 7168, 129),
+    ],
+)
+@pytest.mark.parametrize("overlap", [False, True])
+def test_fused_mlp_uses_stacked_nz_weights(
+    expert_list, lora, weight_format, experts, width, up_width, capacity, overlap
+):
+    op = Mock()
+    x = torch.empty((capacity, width), dtype=torch.int8, device="meta")
+    x_scale = torch.ones((capacity, 1))
+    up = torch.empty((experts, width, up_width // 8), dtype=torch.int32, device="meta")
+    down = torch.empty((experts, up_width // 2, width // 8), dtype=torch.int32, device="meta")
+    layer = SimpleNamespace(
+        w13_weight=up,
+        w2_weight=down,
+        w13_scale_bias=torch.ones((experts, up_width)),
+        w2_scale_bias=torch.ones((experts, width)),
+        w13_weight_scale=torch.ones((experts, up_width), dtype=torch.int64),
+        w2_weight_scale=torch.ones((experts, 1, width), dtype=torch.int64),
+    )
+    inputs = SimpleNamespace(
+        dynamic_eplb=False,
+        lora_context=lora,
+        activation=MoEActivation.SITU,
+        group_list_type=0,
+        group_list=torch.full((experts,), 16, dtype=torch.int32),
+        layer=layer,
+        hidden_states=x,
+        dynamic_scale=x_scale,
+        activation_situ_beta=4.0,
+        activation_situ_linear_beta=25.0,
+    )
+    scheme = AscendW4A8DynamicFusedMoEMethod.__new__(AscendW4A8DynamicFusedMoEMethod)
+    scheme.use_expert_weight_list = expert_list
+    scheme._quant_hidden_states = Mock(return_value=(x, x_scale))
+    with (
+        patch(f"{METHOD_MODULE}.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3)),
+        patch(
+            f"{METHOD_MODULE}.get_ascend_config",
+            return_value=SimpleNamespace(multistream_overlap_shared_expert=overlap),
+        ),
+        patch(f"{METHOD_MODULE}.torch_npu.get_npu_format", return_value=weight_format, create=True),
+        patch.object(torch.ops._C_ascend, "grouped_matmul_situ_quant_mlp", op, create=True),
+        patch(f"{METHOD_MODULE}.dispose_tensor") as dispose,
+    ):
+        result = scheme.try_apply_fused_mlp(inputs)
+    capacity_limit = 7168 if experts == 7 else 128
+    if overlap or expert_list or lora is not None or weight_format != 29 or capacity > capacity_limit:
+        assert result is None
+        op.assert_not_called()
+        dispose.assert_not_called()
+    else:
+        assert result is op.return_value
+        args = op.call_args.args
+        assert args[0] is x and args[3] is up and args[6] is down
+        assert args[1].shape == (capacity,) and args[2].dtype == torch.int64
+        assert args[9:] == (0, 4.0, 25.0)
+        dispose.assert_called_once_with(x)

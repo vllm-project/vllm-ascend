@@ -79,10 +79,38 @@ public:
         : mm(matmul)
     {}
     __aicore__ inline void Init(const GMAddrParams gmAddrParams,
-                                const GMMSituQuantBaseParams* __restrict gmmSituQuantBaseParamsIN);
+                                const GMMSituQuantBaseParams* __restrict gmmSituQuantBaseParamsIN
+#ifdef GMM_SITU_QUANT_MLP
+                                , bool raw = false
+#endif
+                                );
+#ifdef GMM_SITU_QUANT_MLP
+    __aicore__ inline void SetPrepackedInput(GM_ADDR x, bool secondSlot = false)
+    {
+        if ASCEND_IS_AIC {
+            if (secondSlot) {
+                xGM2.SetGlobalBuffer((__gm__ int4b_t*)x);
+            } else {
+                xGM1.SetGlobalBuffer((__gm__ int4b_t*)x);
+            }
+        }
+    }
+#endif
     __aicore__ inline void Process(WorkSpaceSplitConfig& workspaceSplitConfig, int64_t workspaceSplitLoopIdx);
 
+    __aicore__ inline void ProcessSingleExpertToken(uint32_t expert, uint16_t packPairDone, uint16_t allPackDone,
+                                                   uint32_t liveRows = 1);
+
 private:
+    __aicore__ inline void WaitForPackedRows(uint16_t packPairDone, uint16_t allPackDone)
+    {
+        CrossCoreWaitFlag(packPairDone);
+        if (allPackDone != 0) {
+            CrossCoreSetFlag<0, PIPE_FIX>(allPackDone);
+            CrossCoreWaitFlag(allPackDone);
+        }
+    }
+
     __aicore__ inline void MMCompute(uint32_t groupIdx, MNConfig& mnConfig, WorkSpaceSplitConfig& workspaceSplitConfig);
     __aicore__ inline void SetMNConfig(const int32_t splitValue, MNConfig& mnConfig);
     __aicore__ inline void UpdateMnConfig(MNConfig& mnConfig);
@@ -115,7 +143,11 @@ private:
 
 template <typename mmType>
 __aicore__ inline void GMMA8W4MidProcess<mmType>::Init(
-    const GMAddrParams gmAddrParams, const GMMSituQuantBaseParams* __restrict gmmSituQuantBaseParamsIN)
+    const GMAddrParams gmAddrParams, const GMMSituQuantBaseParams* __restrict gmmSituQuantBaseParamsIN
+#ifdef GMM_SITU_QUANT_MLP
+    , bool raw
+#endif
+    )
 {
     if ASCEND_IS_AIC {
         gmmSituQuantBaseParams = gmmSituQuantBaseParamsIN;
@@ -123,8 +155,15 @@ __aicore__ inline void GMMA8W4MidProcess<mmType>::Init(
         xGM1.SetGlobalBuffer((__gm__ int4b_t*)gmAddrParams.workSpaceGM); // 从前处理中获得的结果
         xGM2.SetGlobalBuffer(
             (__gm__ int4b_t*)((__gm__ int8_t*)gmAddrParams.workSpaceGM + gmAddrParams.workSpaceOffset1));
+#ifdef GMM_SITU_QUANT_MLP
+        weightGM.SetGlobalBuffer(raw ? (__gm__ int4b_t*)gmAddrParams.weightGM
+                                     : GetTensorAddr<int4b_t>(0, gmAddrParams.weightGM));
+        weightScaleGM.SetGlobalBuffer(raw ? (__gm__ uint64_t*)gmAddrParams.weightScaleGM
+                                          : GetTensorAddr<uint64_t>(0, gmAddrParams.weightScaleGM));
+#else
         weightGM.SetGlobalBuffer(GetTensorAddr<int4b_t>(0, gmAddrParams.weightGM));
         weightScaleGM.SetGlobalBuffer(GetTensorAddr<uint64_t>(0, gmAddrParams.weightScaleGM));
+#endif
         groupListGM.SetGlobalBuffer((__gm__ int64_t*)gmAddrParams.groupListGM);
         mmOutGM1.SetGlobalBuffer(
             (__gm__ half*)((__gm__ int8_t*)gmAddrParams.workSpaceGM + gmAddrParams.workSpaceOffset2));
@@ -181,7 +220,8 @@ __aicore__ inline void GMMA8W4MidProcess<mmType>::Process(WorkSpaceSplitConfig& 
         mnConfig.k = gmmSituQuantBaseParams->K; // tilingData
         mnConfig.n = gmmSituQuantBaseParams->N; // tilingData
         mnConfig.blockDimN = Ceil(mnConfig.n, mnConfig.singleN);
-        int32_t prevSplitValue = workspaceSplitLoopIdx * workspaceSplitConfig.notLastTaskSize;
+        int32_t prevSplitValue = workspaceSplitConfig.leftMatrixStartIndex;
+        const int64_t splitEnd = prevSplitValue + workspaceSplitConfig.notLastTaskSize;
         int32_t totalTmp = 0;
         if (gmmSituQuantBaseParams->groupListType == 1) {
             for (uint32_t i = 0; i < workspaceSplitConfig.rightMatrixExpertStartIndex; i++) {
@@ -198,9 +238,7 @@ __aicore__ inline void GMMA8W4MidProcess<mmType>::Process(WorkSpaceSplitConfig& 
                 totalTmp += static_cast<int32_t>(groupListGM.GetValue(groupIdx));
                 currSplitValue = totalTmp;
             }
-            currSplitValue = currSplitValue > (workspaceSplitLoopIdx + 1) * gmmSituQuantBaseParams->mLimit ?
-                                 (workspaceSplitLoopIdx + 1) * gmmSituQuantBaseParams->mLimit :
-                                 currSplitValue;
+            currSplitValue = currSplitValue > splitEnd ? splitEnd : currSplitValue;
 
             int32_t splitValue = (currSplitValue - prevSplitValue) * 2; // 2: int8 has been split in 2 int4
             // 自算补偿矩阵时，每个非空专家块在有效行之后再占一行：A 里是全 -8 的 int4 行，
@@ -226,6 +264,45 @@ __aicore__ inline void GMMA8W4MidProcess<mmType>::Process(WorkSpaceSplitConfig& 
                 curBlock += gmmSituQuantBaseParams->coreNum;
             }
             preCount = curCount % gmmSituQuantBaseParams->coreNum;
+        }
+    }
+}
+
+template <typename mmType>
+__aicore__ inline void GMMA8W4MidProcess<mmType>::ProcessSingleExpertToken(
+    uint32_t expert, uint16_t packPairDone, uint16_t allPackDone, uint32_t liveRows)
+{
+    if ASCEND_IS_AIC {
+        const uint32_t k = gmmSituQuantBaseParams->K;
+        const uint32_t n = gmmSituQuantBaseParams->N;
+        const uint32_t tileN = gmmSituQuantBaseParams->baseN;
+        const uint32_t tiles = Ceil(n, tileN);
+        if (coreIdx >= tiles) {
+            WaitForPackedRows(packPairDone, allPackDone);
+            return;
+        }
+
+        GlobalTensor<int4b_t> packedInput = xGM1;
+        if (allPackDone == 0) {
+            packedInput = xGM1[DOUBLE_ROW * static_cast<uint64_t>(coreIdx) * k];
+        }
+        const uint64_t scaleOffset = static_cast<uint64_t>(expert) * n;
+        const uint32_t packedRows = DOUBLE_ROW * liveRows;
+        mm.SetOrgShape(packedRows, n, k);
+        bool packedInputReady = false;
+        for (uint32_t tile = coreIdx; tile < tiles; tile += gmmSituQuantBaseParams->coreNum) {
+            const uint32_t column = tile * tileN;
+            const uint32_t columns = n - column < tileN ? n - column : tileN;
+            mm.SetSingleShape(packedRows, columns, k);
+            mm.SetTensorA(packedInput);
+            mm.SetTensorB(weightGM[(scaleOffset + column) * k]);
+            mm.SetQuantVector(weightScaleGM[scaleOffset + column]);
+            if (!packedInputReady) {
+                WaitForPackedRows(packPairDone, allPackDone);
+                packedInputReady = true;
+            }
+            mm.Iterate();
+            mm.GetTensorC(mmOutGM1[column], 0);
         }
     }
 }
@@ -273,7 +350,18 @@ __aicore__ inline void GMMA8W4MidProcess<mmType>::MMCompute(uint32_t groupIdx, M
                 weightSlice = weightGM[weightOffset + loopK * quantGroupSize * gmmSituQuantBaseParams->N];
             }
         }
-        if (mnConfig.blockDimM == 1) {
+        bool bypassWeightCache = mnConfig.blockDimM == 1;
+#ifdef GMM_SITU_QUANT_MLP
+        constexpr uint32_t ROUTED_EXPERTS = 7;
+        constexpr int64_t ROUTED_UP_WIDTH = 6144;
+        constexpr int64_t SINGLE_ROW_DECODE_LIMIT = 16;
+        constexpr int64_t ROUTED_CACHE_ROW_LIMIT = 128;
+        if (gmmSituQuantBaseParams->groupNum == ROUTED_EXPERTS && gmmSituQuantBaseParams->N == ROUTED_UP_WIDTH &&
+            workspaceSplitConfig.M > SINGLE_ROW_DECODE_LIMIT && workspaceSplitConfig.M <= ROUTED_CACHE_ROW_LIMIT) {
+            bypassWeightCache = false;
+        }
+#endif
+        if (bypassWeightCache) {
             weightSlice.SetL2CacheHint(CacheMode::CACHE_MODE_DISABLE);
         }
         mm.SetTensorB(weightSlice);

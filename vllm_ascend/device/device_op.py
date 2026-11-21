@@ -474,11 +474,17 @@ class BaseDeviceAdaptor:
         mxfp_quant_dtype: QuantType | None = None,
     ):
         if not get_current_hardware_profile().supports(HardwareCapability.GROUPED_MATMUL_SITU_QUANT):
-            raise RuntimeError("INT8 GMM-SiTU quant fusion requires Ascend A3.")
+            raise RuntimeError("INT8 GMM-SiTU quant fusion requires Ascend A2/A3.")
         if x.dtype != torch.int8 or mxfp_quant_dtype is not None:
-            raise ValueError("A3 GMM-SiTU quant fusion requires INT8 activations and INT4 weights.")
+            raise ValueError("A2/A3 GMM-SiTU quant fusion requires INT8 activations and INT4 weights.")
 
-        op = torch.ops._C_ascend.grouped_matmul_situ_quant_weight_nz
+        first_weight = weight[0] if isinstance(weight, (list, tuple)) else weight
+        # Both native NZ storage tags (FRACTAL_NZ and FRACTAL_NZ_C0_16) use the NZ entry.
+        op = (
+            torch.ops._C_ascend.grouped_matmul_situ_quant_weight_nz
+            if torch_npu.get_npu_format(first_weight) in (29, 50)
+            else torch.ops._C_ascend.grouped_matmul_situ_quant
+        )
         if isinstance(weight, (list, tuple)):
             op = op.list
         out, out_scale = op(

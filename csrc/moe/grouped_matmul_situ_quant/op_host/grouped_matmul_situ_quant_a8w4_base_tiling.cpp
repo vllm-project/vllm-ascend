@@ -12,9 +12,10 @@
  * \file grouped_matmul_situ_quant_base_tiling.cpp
  * \brief
  */
-#include <algorithm>
 #include "grouped_matmul_situ_quant_a8w4_base_tiling.h"
 #include "err/ops_err.h"
+
+#include <algorithm>
 
 using namespace matmul_tiling;
 
@@ -279,10 +280,9 @@ ge::graphStatus GroupedMatmulSituQuantBaseTiling::ParseInputAndAttr()
     k_ = xShape->GetStorageShape().GetDim(1);
     auto wScaleDimNum = wScaleShape->GetStorageShape().GetDimNum();
     isWeightTrans_ = false;
-    if (wShape->GetStorageShape().GetDimNum() == NZ_WEIGHT_DIM_LIMIT ||
-        wShape->GetStorageShape().GetDimNum() == NZ_WEIGHT_MULTI_TENSOR_DIM) {
-        isNz_ = true;
-    }
+    // The ACLNN individual-op path can expose the logical rank for NZ weights.
+    isNz_ = isA8W4MSD_ ? weightDesc->GetStorageFormat() == ge::FORMAT_FRACTAL_NZ
+                       : wDimNum == NZ_WEIGHT_DIM_LIMIT || wDimNum == NZ_WEIGHT_MULTI_TENSOR_DIM;
     const auto tuningConfigPtr = attr->GetAttrPointer<gert::ContinuousVector>(ATTR_INDEX_TUNING_CONFIG);
     tuningConfig_ = tuningConfigPtr != nullptr && tuningConfigPtr->GetSize() > 1 ?
                         (reinterpret_cast<const int64_t*>(tuningConfigPtr->GetData()))[0] :
@@ -502,7 +502,7 @@ ge::graphStatus GroupedMatmulSituQuantBaseTiling::DoOpTiling()
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context_->GetPlatformInfo());
     // 主分块和备选分块（A8W4_BASEM_NZ_ALT）除了 baseM/baseN 之外完全一样，所以抽成
     // 一个 lambda 各生成一份 TCubeTiling；kernel 侧按 live 行数二选一。
-    auto genMmTiling = [&](auto& out, int64_t baseM, int64_t baseN, int64_t baseK) -> bool {
+    auto genMmTiling = [&](auto& out, int64_t baseM, int64_t baseN, int64_t baseK, int64_t kSteps = NUM_FOUR) -> bool {
         MatmulApiTiling tiling(ascendcPlatform);
         tiling.SetAType(TPosition::GM, CubeFormat::ND, matmul_tiling::DataType::DT_INT4);
         tiling.SetBType(TPosition::GM, CubeFormat::NZ, matmul_tiling::DataType::DT_INT4);
@@ -520,10 +520,10 @@ ge::graphStatus GroupedMatmulSituQuantBaseTiling::DoOpTiling()
             out.set_baseN(baseN);
             out.set_baseK(baseK);
             out.set_dbL0B(DOUBLE_BUFFER);
-            out.set_stepKa(NUM_FOUR);
-            out.set_stepKb(NUM_FOUR);
-            out.set_depthA1(NUM_EIGHT);
-            out.set_depthB1(NUM_EIGHT);
+            out.set_stepKa(kSteps);
+            out.set_stepKb(kSteps);
+            out.set_depthA1(DOUBLE_BUFFER * kSteps);
+            out.set_depthB1(DOUBLE_BUFFER * kSteps);
             out.set_stepM(1);
             out.set_stepN(1);
         }
@@ -546,6 +546,29 @@ ge::graphStatus GroupedMatmulSituQuantBaseTiling::DoOpTiling()
     } else {
         tilingData_.gmmSituQuantBaseParams.set_altRowsPerExpertLimit(0);
     }
+    // The wider N tile benefits these profiles when the live routes fit the same number of M tiles.
+    const bool matchesSquareProfile = k_ == A8W4_WIDE_TILE_KN && n_ == A8W4_WIDE_TILE_KN &&
+                                      groupNum_ == A8W4_WIDE_TILE_EXPERTS;
+    const bool matchesKimiRoutedWidth = k_ == A8W4_KIMI_ROUTED_K && n_ == A8W4_KIMI_ROUTED_N;
+    const bool matchesEp32Profile = matchesKimiRoutedWidth && groupNum_ == A8W4_WIDE_TILE_EP32_EXPERTS;
+    const int64_t wideBaseM = matchesSquareProfile ? A8W4_BASEM_NZ_WIDE : A8W4_BASEM_NZ_ALT;
+    const int64_t wideBaseN = matchesSquareProfile ? A8W4_BASEN_NZ_WIDE : A8W4_BASEN_NZ_ALT;
+    if (!isA8W4MSD_ || !isNz_ || !(matchesSquareProfile || matchesEp32Profile) ||
+        !genMmTiling(tilingData_.mmTilingDataWide, wideBaseM, wideBaseN, A8W4_BASEK_NZ)) {
+        tilingData_.mmTilingDataWide.set_baseM(0);
+    }
+
+    // Both profiles fit their N tiles in one wave on a 20-Cube grid.
+    const bool matchesEp128Profile = matchesKimiRoutedWidth && groupNum_ == A8W4_KIMI_EP128_EXPERTS;
+    const bool singleTokenProfile = isA8W4MSD_ && isNz_ && (matchesSquareProfile || matchesEp128Profile) &&
+        isSingleTensor_ == 1 &&
+        quantGroupNum_ == 1 && assistRowsPerExpert_ == 0 && m_ <= A8W4_SINGLE_TOKEN_MAX_CAPACITY;
+    const int64_t singleTokenBaseN = matchesSquareProfile ? A8W4_SINGLE_TOKEN_BASE_N : A8W4_KIMI_SINGLE_TOKEN_BASE_N;
+    if (!singleTokenProfile ||
+        !genMmTiling(tilingData_.mmTilingDataSingleToken, A8W4_SINGLE_TOKEN_BASE_M, singleTokenBaseN,
+                     A8W4_SINGLE_TOKEN_BASE_K, A8W4_SINGLE_TOKEN_K_STEPS)) {
+        tilingData_.mmTilingDataSingleToken.set_baseM(0);
+    }
 
     usrWorkspaceLimit_ = USER_WORKSPACE_LIMIT;
     mLimit_ = 0;
@@ -556,6 +579,11 @@ ge::graphStatus GroupedMatmulSituQuantBaseTiling::DoOpTiling()
             assistRowsPerExpert_ * groupNum_ * (k_ / 2 + n_ * static_cast<int64_t>(SIZE_OF_HALF_2));
         mLimit_ = ((usrWorkspaceLimit_ / DOUBLE_WORKSPACE_SPLIT) - auxBytesPerSplit) /
                   (k_ * sizeof(int8_t) + DOUBLE_ROW * n_ * SIZE_OF_HALF_2);
+        if (isNz_ && matchesKimiRoutedWidth && groupNum_ == A8W4_KIMI_EP128_EXPERTS && assistRowsPerExpert_ == 0) {
+            // Bound each slot while allowing replays to process every input row in more chunks.
+            mLimit_ = std::min(mLimit_, A8W4_KIMI_EP128_WORKSPACE_ROWS);
+        }
+        mLimit_ = std::min(mLimit_, std::max<int64_t>(m_, 1));
     } else if (isA4W4_) {
         mLimit_ = ((usrWorkspaceLimit_ / DOUBLE_WORKSPACE_SPLIT) / (n_ * SIZE_OF_HALF_2));
     } else {
@@ -571,22 +599,17 @@ ge::graphStatus GroupedMatmulSituQuantBaseTiling::DoOpTiling()
     DynamicTilingSingleN(context_, blockDim_, baseM_, baseN_, baseK_);
 
     if (isA8W4MSD_) {
-        // Captured calls own their workspace. Small decode batches only need
-        // space for their capacity, while larger batches reuse bounded chunks.
-        int64_t workSpaceMTemp = std::min(m_, mLimit_) * DOUBLE_WORKSPACE_SPLIT;
+        // The input capacity bounds all replays of the same graph. Use one
+        // slot when even the largest replay fits in a single chunk.
+        const int64_t workspaceSlots = m_ <= mLimit_ ? 1 : DOUBLE_WORKSPACE_SPLIT;
         // 每个 split 内每个非空专家块多一行（自算补偿矩阵时）：A 区一行 K 个 int4 = K/2 字节，
-        // C 区一行 N 个 fp16 = N*2 字节。按专家总数 groupNum_ 上界预留。
-        const int64_t auxRowsPerBuffer = assistRowsPerExpert_ * groupNum_;
-        const int64_t aBytesTotal =
-            workSpaceMTemp * k_ + DOUBLE_WORKSPACE_SPLIT * auxRowsPerBuffer * (k_ / 2);
-        const int64_t cBytesTotal =
-            DOUBLE_ROW * workSpaceMTemp * n_ * SIZE_OF_HALF_2 +
-            DOUBLE_WORKSPACE_SPLIT * auxRowsPerBuffer * n_ * SIZE_OF_HALF_2;
+        // C 区一行 N 个 fp16 = N*2 字节。非空专家数不超过块内行数。
+        const int64_t auxRowsPerBuffer = assistRowsPerExpert_ * std::min(groupNum_, mLimit_);
+        const int64_t aBytesTotal = workspaceSlots * (mLimit_ * k_ + auxRowsPerBuffer * (k_ / 2));
+        const int64_t cBytesTotal = workspaceSlots * (DOUBLE_ROW * mLimit_ + auxRowsPerBuffer) * n_ * SIZE_OF_HALF_2;
         tilingData_.gmmSituQuantBaseParams.set_workSpaceOffset1(aBytesTotal);
         tilingData_.gmmSituQuantBaseParams.set_workSpaceOffset2(cBytesTotal);
-        workspaceSize_ = SYS_WORKSPACE_SIZE + // 系统预留16MB
-                         aBytesTotal +       // 第一阶段 预处理左矩阵 (mLimit_, K) * int8 * 2(double WorkSpace)
-                         cBytesTotal;        // 第二阶段 矩阵乘结果 (2 * mLimit_, N) * fp16 * 2(double WorkSpace)
+        workspaceSize_ = SYS_WORKSPACE_SIZE + aBytesTotal + cBytesTotal;
     } else if (isA4W4_) {
         int workSpaceMTemp = mLimit_ * DOUBLE_WORKSPACE_SPLIT;
         tilingData_.gmmSituQuantBaseParams.set_workSpaceOffset1(mLimit_ * n_ * SIZE_OF_HALF_2);
@@ -662,7 +685,15 @@ void GroupedMatmulSituQuantBaseTiling::PrintTilingData()
 void GroupedMatmulSituQuantBaseTiling::SetTilingKeyAndScheMode()
 {
     // 本算子只实现 A8W4 MSD 一条路径，IsCapable 已保证进入这里时 isA8W4MSD_ 为真。
-    tilingKey_ = A8W4_MSD_TILING_KEY_MODE;
+    constexpr int64_t DECODE_CAPACITY = 2048;
+    const bool decodeShape = isNz_ && isSingleTensor_ == 1 && quantGroupNum_ == 1 && assistRowsPerExpert_ == 0 &&
+        m_ <= DECODE_CAPACITY && k_ == A8W4_KIMI_ROUTED_K && n_ == A8W4_KIMI_ROUTED_N &&
+        groupNum_ == A8W4_KIMI_EP128_EXPERTS;
+    if (tilingData_.mmTilingDataSingleToken.get_baseM() != 0) {
+        tilingKey_ = A8W4_MSD_SINGLE_TOKEN_TILING_KEY;
+    } else {
+        tilingKey_ = decodeShape ? A8W4_MSD_DECODE_TILING_KEY : A8W4_MSD_TILING_KEY_MODE;
+    }
     context_->SetScheduleMode(BATCH_MODE_SCHEDULE);
 }
 

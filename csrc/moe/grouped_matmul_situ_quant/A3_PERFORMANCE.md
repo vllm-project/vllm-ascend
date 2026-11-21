@@ -1,5 +1,7 @@
 # A3 SiTU integration and performance investigation
 
+These measurements apply to commit `52ed8b7b5`, before the kernel update and the E7/E14 two-projection route.
+
 ## Scope and status
 
 The A3 INT8/INT4 MSD path uses the same `DeviceOperator`, four Torch dispatcher
