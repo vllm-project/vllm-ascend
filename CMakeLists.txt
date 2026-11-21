@@ -91,6 +91,7 @@ include_directories(
   # some torch_npu wheels. Feature checks below use ASCEND_HOME_PATH as well.
   ${ASCEND_HOME_PATH}/include
   ${TORCH_NPU_PATH}/include
+  ${TORCH_NPU_PATH}/include/third_party/op-plugin
 )
 
 set(
