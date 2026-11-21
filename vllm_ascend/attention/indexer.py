@@ -31,6 +31,7 @@ from vllm.v1.worker.utils import select_common_block_size
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.context_parallel.common_cp import (
     build_pcp_ordered_slot_mapping,
+    get_cp_max_num_reqs,
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
@@ -39,7 +40,6 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     build_sfa_dcp_replicated_slot_mapping,
     get_sfa_dcp_local_block_table,
     get_sfa_dcp_max_local_block_table_cols,
-    get_sfa_max_num_reqs,
     get_sfa_pcp_global_metadata,
 )
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
@@ -1084,7 +1084,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         self._cache_scatter_indices_buffers: dict[object, torch.Tensor] = {}
         self._device_metadata_enabled = False
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
-        self._max_num_reqs = get_sfa_max_num_reqs(vllm_config)
+        self._max_num_reqs = get_cp_max_num_reqs(vllm_config)
         max_num_input_tokens = scheduler_config.max_num_batched_tokens
         self._rope_capacity = max_num_input_tokens
         pcp_size = vllm_config.parallel_config.prefill_context_parallel_size

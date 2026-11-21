@@ -33,8 +33,8 @@ serving path or change the existing non-HiSparse BF16 path.
 | --- | --- |
 | Hardware and software | A2/A3 with the arch22 custom operators, or 950PR&950DT Products with a SIMT-capable CANN 9.2 toolchain. |
 | Cache formats | A2/A3: INT8 C8. 950PR&950DT Products: BF16 or native E4M3FN C8. C4 and TurboQuant are outside the current support scope. |
-| Parallelism and transport | Context parallelism and external P/D transport are outside the current support scope. |
-| Host storage | Requires AIV Host-memory mapping support from the device and runtime/driver stack. Use private Host pools per tensor-parallel rank and Core eager Host mirroring. |
+| Parallelism and transport | Supports PCP (prefill and decode request sharding). DCP and external P/D transport are outside the current support scope. |
+| Host storage | Use private Host pools per tensor-parallel rank and Core eager Host mirroring. |
 | TopK | The existing SFA requirement of divisibility by 128 applies. |
 | Feature mutual exclusion | HiSparse and `additional_config.sparse_kv_offload_config.enabled` cannot be enabled together. |
 

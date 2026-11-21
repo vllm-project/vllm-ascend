@@ -8,6 +8,8 @@ from types import SimpleNamespace as NS
 
 import pytest
 import torch
+
+pytest.importorskip("vllm.v1.hisparse.backend")
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
@@ -28,6 +30,7 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.hisparse import cache_ops as hisparse_ops
 from vllm_ascend.hisparse import host_pool
+from vllm_ascend.hisparse.backend import AscendHiSparseBackend  # noqa: E402
 from vllm_ascend.hisparse.binding import (
     _bind_indexer_views,
     align_hisparse_indexer_specs,
@@ -39,9 +42,6 @@ from vllm_ascend.hisparse.c8 import (
     pack_c8_components,
 )
 from vllm_ascend.ops.triton import sfa_indexer_store
-
-pytest.importorskip("vllm.v1.hisparse.backend")
-from vllm_ascend.hisparse.backend import AscendHiSparseBackend  # noqa: E402
 
 
 @pytest.fixture(params=[False, True], ids=["standalone", "profiled"])
@@ -75,6 +75,7 @@ def test_c8_prolog_requires_matching_fp8_weight_scheme(mxfp8, cache_dtype):
     method = AscendW8A8MXFP8DynamicLinearMethod if mxfp8 else AscendW8A8DynamicLinearMethod
     impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
     impl.enable_sparse_sfa_c8 = True
+    impl.pcp_enabled = True
     impl.c8_cache_dtype = cache_dtype
     impl.fused_qkv_a_proj = NS(quant_method=NS(quant_method=method.__new__(method)))
     impl.is_kv_consumer, impl.has_indexer = False, False

@@ -11,8 +11,8 @@ The patch ``0001-fix-mtp-prefix-cache-hit-hybrid-pd`` makes three changes to
    the PD prefill producer and on standalone instances. The role is derived
    from ``kv_transfer_config`` (``is_kv_producer and not is_kv_consumer``),
    attached onto ``KVCacheConfig`` by the ``get_kv_cache_config_from_groups``
-   builder in ``patch_kv_cache_utils``, and read back by the coordinator -
-   no role environment variable is involved.
+   builder in ``vllm_ascend.core.kv_cache_config_builder``, and read back by
+   the coordinator - no role environment variable is involved.
 3. ``find_longest_cache_hit_per_group`` applies the same drop gating and
    keeps the ``(block_hashes, max_cache_hit_length)`` call convention used by
    RecomputeScheduler / DyntraLB / BalanceScheduler.
@@ -254,7 +254,7 @@ def test_mamba_checkpoint_drop_follows_lookup_policy(
     ],
 )
 def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_transfer_config):
-    from vllm_ascend.patch.platform import patch_kv_cache_utils as kcu_patch
+    from vllm_ascend.core import kv_cache_config_builder as builder_module
 
     sentinel_config = SimpleNamespace()
     vllm_config = SimpleNamespace(
@@ -262,15 +262,47 @@ def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_trans
         kv_transfer_config=kv_transfer_config,
     )
     monkeypatch.setattr(
-        kcu_patch,
-        "_orig_get_kv_cache_config_from_groups",
+        builder_module,
+        "_upstream_get_kv_cache_config_from_groups",
         lambda *args, **kwargs: sentinel_config,
     )
-    result = kcu_patch._ascend_get_kv_cache_config_from_groups(vllm_config, [], 0)
-    # The builder replaces the upstream entry point, so the coordinator-side
+    result = builder_module.get_ascend_kv_cache_config_from_groups(vllm_config, [], 0)
+    # The builder owns every config it materializes, so the coordinator-side
     # getattr in __init__ sees the attached role on every real engine path.
-    live_module = kcu_patch._kv_cache_planning
-    assert live_module.get_kv_cache_config_from_groups is kcu_patch._ascend_get_kv_cache_config_from_groups
+    assert result is sentinel_config
+    assert result.kv_transfer_config is kv_transfer_config
+
+
+@pytest.mark.parametrize(
+    "kv_transfer_config",
+    [
+        SimpleNamespace(is_kv_producer=False, is_kv_consumer=True),
+        None,
+    ],
+)
+def test_public_builder_mounts_kv_transfer_config_on_default_path(monkeypatch, kv_transfer_config):
+    from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
+
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
+    # A generic layout matches no Ascend divisor, so the public builder
+    # returns through the upstream default materializer. The PD consumer
+    # role must ride on that result too: the hybrid coordinator treats a
+    # config without it as standalone and would skip the EAGLE replay block
+    # drop used for external cache loads.
+    sentinel_config = SimpleNamespace()
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="llama")),
+        kv_transfer_config=kv_transfer_config,
+    )
+    monkeypatch.setattr(
+        DefaultKVCacheConfigBuilder,
+        "get_kv_cache_config_from_groups",
+        lambda self, vllm_config, groups, num_blocks: sentinel_config,
+    )
+    result = AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(
+        vllm_config, [KVCacheGroupSpec(["fa-layer"], FA_SPEC, False)], 8
+    )
     assert result is sentinel_config
     assert result.kv_transfer_config is kv_transfer_config
 

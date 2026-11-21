@@ -534,8 +534,15 @@ class MooncakeBaseConnectorScheduler:
         request._all_token_ids.pop()
         request.num_prompt_tokens -= 1
         request.max_tokens = 1
-        # Request already hashed the full prompt. Rebuild for the shortened one.
-        request.block_hashes.clear()
+        truncate_hashes = getattr(request, "truncate_block_hashes", None)
+        if callable(truncate_hashes):
+            # The engine resolves hash geometry before creating the connector.
+            hash_block_size = self.kv_cache_config.hash_block_size
+            assert hash_block_size is not None
+            truncate_hashes(hash_block_size, self.vllm_config.num_hash_lookahead_tokens)
+        else:
+            # Older vLLM versions do not provide incremental hash truncation.
+            request.block_hashes.clear()
         request.update_block_hashes()
         params["_p_side_truncated"] = True
 

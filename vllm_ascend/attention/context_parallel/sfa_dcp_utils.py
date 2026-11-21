@@ -56,12 +56,6 @@ def get_sfa_dcp_max_local_block_table_cols(
     return cdiv(max_model_len, physical_block_size * dcp_size) * blocks_per_physical_block
 
 
-def get_sfa_max_num_reqs(vllm_config: Any) -> int:
-    """Include PCP's two prefill segments and one graph-padding request."""
-    segments = 2 if vllm_config.parallel_config.prefill_context_parallel_size > 1 else 1
-    return vllm_config.scheduler_config.max_num_seqs * segments + 1
-
-
 def get_sfa_dcp_local_block_table(
     block_table: torch.Tensor,
     num_reqs: int,

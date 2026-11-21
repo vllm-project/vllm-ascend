@@ -65,6 +65,8 @@ class AscendPCPAttentionContext:
     local_token_indices: torch.Tensor | None = None
     # Padded tensor width consumed by each rank's model forward.
     local_num_tokens: int | None = None
+    # Local request order, including dual-chunk duplicates and graph padding.
+    local_request_state_indices: torch.Tensor | None = None
 
     # Shared across steps, with storage isolated from the local Group mapping.
     _kernel_block_table_groups: dict[int, tuple[AttentionGroup, torch.Tensor | None]] = field(
@@ -681,6 +683,7 @@ class AscendPCPManager(PCPManager):
         update_cos_sin(input_batch.positions)
         return AscendPCPAttentionContext(
             global_batch=global_batch,
+            local_request_state_indices=input_batch.idx_mapping,
             local_num_tokens=input_batch.num_tokens_after_padding,
             _kernel_block_table_groups=self._kernel_block_table_groups,
             global_block_tables=self._block_tables.get_dummy_block_tables(num_reqs),
@@ -707,6 +710,7 @@ class AscendPCPManager(PCPManager):
             restore_start = self.pcp_rank * num_tokens
             return AscendPCPAttentionContext(
                 global_batch=input_batch,
+                local_request_state_indices=input_batch.idx_mapping,
                 local_num_tokens=num_tokens,
                 _kernel_block_table_groups=self._kernel_block_table_groups,
                 local_to_global_req_indices=tuple(range(input_batch.num_reqs)),
@@ -740,6 +744,7 @@ class AscendPCPManager(PCPManager):
             )
         return AscendPCPAttentionContext(
             global_batch=global_batch,
+            local_request_state_indices=local_batch.idx_mapping,
             local_num_tokens=local_batch.num_tokens_after_padding,
             _kernel_block_table_groups=self._kernel_block_table_groups,
             local_to_global_req_indices=local_to_global_req_indices,
