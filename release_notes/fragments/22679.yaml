@@ -1,0 +1,10 @@
+pr: 22679
+entries:
+  - category: config
+    text: >-
+      AISBench accuracy cases now default to lower-bound-only verification
+      (verify_mode "ge"): a measured accuracy above the baseline passes instead
+      of failing the range check, while regressions below the baseline still
+      fail. Cases that intentionally need an upper bound can opt back in with
+      verify_mode "range"; an accuracy above baseline + threshold now logs a
+      re-baselining hint.

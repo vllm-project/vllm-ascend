@@ -737,6 +737,7 @@ Each key under `benchmarks` names one AISBench job. Common fields include:
 | `request_rate` | Request arrival rate; use `0` for no rate limit where supported |
 | `baseline` | Expected reference result |
 | `threshold` | Allowed accuracy or performance threshold |
+| `verify_mode` | Accuracy verification mode. `ge` (default): the measured accuracy must be >= `baseline`; values above `baseline + threshold` pass but log a re-baselining hint. `range`: the measured accuracy must stay within `baseline ± threshold` — opt in only when an upper bound is intentional (e.g. detecting response collapse). |
 
 Optional request fields such as `temperature`, `top_k`, and `top_p` are passed to the applicable benchmark configuration.
 
