@@ -4,8 +4,8 @@
 import torch
 
 from vllm_ascend.ops.gbsa import (
-    generic_block_sparse_attention,
     generic_block_sparse_attention_metadata,
+    generic_block_sparse_attention_out,
 )
 
 from .qsa_prepare import (
@@ -67,10 +67,9 @@ def qsa_gbsa_attention(
     # through Union GBSA and this normal GBSA entry point becomes Decode-only.
     # At that point all callers must provide the three prepared row tensors,
     # and ``prepare_qsa_gbsa_inputs`` plus this runtime branch can be deleted.
-    prepared = (
+    if (
         prepared_visible_lengths is not None and prepared_cu_query is not None and prepared_row_block_table is not None
-    )
-    if prepared:
+    ):
         rows = query.shape[0]
         row_visible_lens = prepared_visible_lengths[:rows]
         cu_q = prepared_cu_query[: rows + 1]
@@ -109,19 +108,19 @@ def qsa_gbsa_attention(
             max_seqlen_kv=int(logical_max_seqlen_kv),
             **common,
         )
-    result, _ = generic_block_sparse_attention(
+    generic_block_sparse_attention_out(
         query.contiguous(),
         key_cache,
         value_cache,
         sparse_idx,
         sparse_count,
         [1, GBSA_COMPRESS_RATIO],
+        output,
         metadata=metadata,
         block_table=row_block_table,
         softmax_scale=query.shape[-1] ** -0.5,
         **common,
     )
-    output.copy_(result)
     return output
 
 
