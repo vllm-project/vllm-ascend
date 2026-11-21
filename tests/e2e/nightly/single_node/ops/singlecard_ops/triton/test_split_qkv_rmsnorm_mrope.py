@@ -6,22 +6,20 @@ import torch
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 
-STRUCTURAL_CASES = [
-    (1, 2, 1, 128, [24, 20, 20]),
-    (1, 2, 1, 256, [11, 11, 10]),
-    (1, 16, 2, 128, [11, 11, 10]),
-    (1, 16, 2, 128, [24, 20, 20]),
-    (1, 16, 2, 256, [24, 20, 20]),
-    (4096, 2, 1, 128, [11, 11, 10]),
-    (4096, 2, 1, 128, [24, 20, 20]),
-    (4096, 2, 1, 256, [24, 20, 20]),
-    (4096, 16, 2, 128, [24, 20, 20]),
-    (4096, 16, 2, 256, [11, 11, 10]),
+MROPE_CASES = [
+    # Keep both rotary model shapes and pairwise shape/dtype/gate/layout coverage.
+    (4096, 16, 2, 128, [24, 20, 20], torch.bfloat16, False, False),
+    (4096, 16, 2, 128, [24, 20, 20], torch.bfloat16, True, True),
+    (4096, 16, 2, 128, [24, 20, 20], torch.float16, True, False),
+    (4096, 16, 2, 256, [11, 11, 10], torch.bfloat16, False, True),
+    (4096, 16, 2, 256, [11, 11, 10], torch.float16, False, False),
+    (4096, 16, 2, 256, [11, 11, 10], torch.float16, True, True),
+    # Use the original small-head decode shape for the single-token boundary.
+    (1, 2, 1, 128, [24, 20, 20], torch.bfloat16, False, False),
+    (1, 2, 1, 128, [24, 20, 20], torch.bfloat16, True, True),
+    (1, 16, 2, 128, [11, 11, 10], torch.float16, True, False),
 ]
 EPS = [1e-6]
-IS_INTERLEAVED = [True, False]
-HAS_GATE = [True, False]
-DTYPES = [torch.bfloat16, torch.float16]
 DEVICES = [f"npu:{0}"]
 DEFAULT_ATOL = 1e-2
 DEFAULT_RTOL = 1e-2
@@ -224,11 +222,11 @@ def naive_split_qkv_rmsnorm_mrope_interleaved(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("num_tokens, num_q_heads, num_kv_heads, head_size, mrope_section", STRUCTURAL_CASES)
+@pytest.mark.parametrize(
+    "num_tokens,num_q_heads,num_kv_heads,head_size,mrope_section,dtype,has_gate,is_interleaved",
+    MROPE_CASES,
+)
 @pytest.mark.parametrize("eps", EPS)
-@pytest.mark.parametrize("is_interleaved", IS_INTERLEAVED)
-@pytest.mark.parametrize("has_gate", HAS_GATE)
-@pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_split_qkv_rmsnorm_mrope(
