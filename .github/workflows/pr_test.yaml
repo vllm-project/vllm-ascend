@@ -838,7 +838,7 @@ jobs:
     # artifacts instead. Runs regardless of test outcomes because the
     # comment workflow fires on any completed run.
     if: ${{ !cancelled() }}
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-amd64-cpu-1-hk
     steps:
       - name: Write PR context
         run: |

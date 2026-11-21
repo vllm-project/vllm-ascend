@@ -40,7 +40,7 @@ on:
 jobs:
   build_and_release_code:
     name: release code
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     strategy:
       matrix:
         python-version: ["3.12"]
