@@ -402,6 +402,13 @@ Check MemCache dependency versions in Section 5.5. Budget pool DRAM and UBS IO m
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
+!!! note "PLE host offload on current main"
+    With `--engram-config '{"cpu_offload":true}'`, the Ascend PLE backend registers the BF16 embedding table with CANN and uses a Triton lookup to read it directly from host memory. The table requires sufficient host memory, Model Runner V2, and an embedding tensor parallel size equal to the model tensor parallel size (`ETP=TP`). PLE host offload does not require `PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True`.
+
+    With `dp_shared_memory=true`, eligible ranks on the same host share a table. They need a common IPC namespace and sufficient `/dev/shm` space. Ranks without a local sharing group use private host tables.
+
+    If an older image fails with `get_accelerator_view_from_cpu_tensor` unsupported on NPU, use a build that includes [the Ascend PLE host backend](https://github.com/vllm-project/vllm-ascend/pull/21751) and its matching vLLM revision. To keep the tables on the NPU, set both `cpu_offload` and `dp_shared_memory` to `false` and verify that the tables fit in device memory.
+
 ### 5.1 Single-Node Online Deployment
 
 Prefill and decode run in the same service. Select the hardware tab below.
@@ -1112,7 +1119,6 @@ For A2 and A3, make sure Mooncake is importable in both serving containers befor
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=2400
-    export VLLM_ASCEND_PLE_BACKEND=torch
     ```
 
     **Prefill:**
@@ -1264,7 +1270,6 @@ For A2 and A3, make sure Mooncake is importable in both serving containers befor
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=2400
-    export VLLM_ASCEND_PLE_BACKEND=torch
     ```
 
     **Prefill:**
@@ -1405,7 +1410,6 @@ For A2 and A3, make sure Mooncake is importable in both serving containers befor
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
-    export VLLM_ASCEND_PLE_BACKEND=torch
     export VLLM_PP_LAYER_PARTITION=25,23
     export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
     export HCCL_BUFFSIZE=512
@@ -1441,7 +1445,6 @@ For A2 and A3, make sure Mooncake is importable in both serving containers befor
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
-    export VLLM_ASCEND_PLE_BACKEND=torch
     unset VLLM_PP_LAYER_PARTITION
     export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
     export HCCL_BUFFSIZE=512
@@ -1505,7 +1508,6 @@ For A2 and A3, make sure Mooncake is importable in both serving containers befor
     - Decode uses TP2 × DP2 behind one API endpoint on port `8248`; the proxy routes to that endpoint rather than separate DP-rank APIs.
     - Both roles enable prefix caching. Prefill disables graph capture and sets MTP `enforce_eager=true`. Decode uses `FULL_DECODE_ONLY`, sets MTP `enforce_eager=false`, enables static kernels, and disables super kernels.
     - Both roles enable Engram CPU offload. Decode enables DP shared memory for its two replicas. Both roles use `HCCL_BUFFSIZE=512` and set `VLLM_ENGINE_READY_TIMEOUT_S=4800`. Provide sufficient host memory and container shared memory for the deployment.
-    - `VLLM_ASCEND_PLE_BACKEND` only applies to runtimes that implement it; an unknown-variable warning means it has no effect.
 
 ### 5.4 Long-Context PD Separation Deployment
 
@@ -1830,7 +1832,6 @@ On 950DT products, this case reuses ports 8247, 8248, and 8246 from the image-an
     export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=2400
-    export VLLM_ASCEND_PLE_BACKEND=torch
     export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
     export HCCL_BUFFSIZE=512
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
@@ -1872,7 +1873,6 @@ On 950DT products, this case reuses ports 8247, 8248, and 8246 from the image-an
     export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
-    export VLLM_ASCEND_PLE_BACKEND=torch
     export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
     export HCCL_BUFFSIZE=512
     export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
@@ -1938,7 +1938,6 @@ On 950DT products, this case reuses ports 8247, 8248, and 8246 from the image-an
     - Both roles use Mamba cache mode `align` and Mamba SSM cache dtype `bfloat16`.
     - Prefill disables graph capture and sets MTP `enforce_eager=true`. Decode uses `FULL_DECODE_ONLY`, sets MTP `enforce_eager=false`, and enables static kernels and recompute scheduling.
     - Both roles enable Engram CPU offload with `dp_shared_memory=false` and use `HCCL_BUFFSIZE=512`. The supplied configuration sets the engine-ready timeout to 2400 seconds on Prefill and 4800 seconds on Decode; the model-execution timeout is 3000 seconds on both roles.
-    - `VLLM_ASCEND_PLE_BACKEND` only applies to runtimes that implement it; an unknown-variable warning means it has no effect.
 
 ### 5.5 PD Separation with MemCache Three-Tier KV Cache Pool
 
