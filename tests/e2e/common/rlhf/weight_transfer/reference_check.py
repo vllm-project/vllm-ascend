@@ -18,6 +18,18 @@ from tests.e2e.common.rlhf.weight_transfer.weight_source import (
 UPDATE_ROUNDS = 2
 
 
+def update_rounds(case: WeightUpdateModelCase) -> int:
+    return 3 if case.online_quantization else UPDATE_ROUNDS
+
+
+def capture_update_result(server, case):
+    if case.online_quantization:
+        from tests.e2e.common.rlhf.weight_transfer.online_mx import capture_online_result
+
+        return capture_online_result(server, case)
+    return generation_signature(server.get_client(), case.model, prompts=case.prompts)
+
+
 FULL_DECODE_ONLY_CONFIG = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}'
 
 
@@ -210,6 +222,20 @@ def weight_transfer_servers(
     The reference server must release every TP device before the live-update
     server starts. Both use the case's environment and the same generated W.
     """
+    if case.online_quantization:
+        from tests.e2e.common.rlhf.weight_transfer.online_mx import online_weight_transfer_servers
+
+        with online_weight_transfer_servers(
+            source,
+            case,
+            backend=backend,
+            tensor_parallel_size=tensor_parallel_size,
+            device_index=device_index,
+            gpu_memory_utilization=gpu_memory_utilization,
+            env_dict=env_dict,
+        ) as servers:
+            yield servers
+        return
     reference = reference_signature(
         source,
         case,
@@ -249,6 +275,11 @@ def assert_weight_update_matches_reference(
     layerwise reload and graph-captured storage preserve the same behavior.
     Comparing updates only to each other could hide consistently wrong loads.
     """
+    if case.online_quantization:
+        from tests.e2e.common.rlhf.weight_transfer.online_mx import assert_online_updates
+
+        assert_online_updates(dummy_signature, reference_signature, updated_signatures, case)
+        return
     assert dummy_signature != reference_signature, (
         f"{case.id}: a dummy-loaded model already matches a normally loaded one; "
         "the reference cannot observe the payload"

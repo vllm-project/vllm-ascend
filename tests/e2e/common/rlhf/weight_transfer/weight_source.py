@@ -237,6 +237,9 @@ class FixedRandomWeightSource(WeightSource):
         """vLLM drives updates through `iter_full()`."""
         yield from self.__iter__()
 
+    def set_update_round(self, update_round: int) -> None:
+        """Fixed sources deliberately repeat the same payload."""
+
     @property
     def case_id(self) -> str:
         return self._case.id
@@ -269,6 +272,37 @@ class FixedRandomWeightSource(WeightSource):
         shutil.copyfile(hf_hub_download(self._case.model, "config.json"), target / "config.json")
         state = {name: tensor.detach().to("cpu").contiguous() for name, tensor in self}
         save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
+
+
+class OnlineMXWeightSource(FixedRandomWeightSource):
+    """CPU-seeded A/B/A BF16 payloads, shared by transfer and fresh loading."""
+
+    revision: int = 0
+
+    def __init__(self, case, device):
+        super().__init__(case, device)
+        assert all(param.dtype == torch.bfloat16 for param in self.metadata)
+        assert not any("scale" in param.name for param in self.metadata), "Sender must not supply quantization scales"
+
+    def set_update_round(self, update_round: int) -> None:
+        self.revision = update_round % 2
+
+    def _make_tensor(self, name, shape, dtype=torch.bfloat16):
+        tensor = _sampled_tensor(
+            f"{self.revision}:{name}",
+            shape,
+            dtype,
+            self._device,
+            num_experts=self._num_experts,
+            sample_on_cpu=True,
+            norm_suffixes=("norm.weight",),
+            integer_topk_names=None,
+        )
+        # Move B across MX exponent boundaries; different seeds alone can leave
+        # every scale unchanged for uniformly distributed random tensors.
+        if not name.endswith("norm.weight"):
+            tensor = tensor * (8**self.revision)
+        return tensor
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +719,8 @@ def make_weight_source(case: WeightUpdateModelCase, device: torch.device) -> Wei
     lives in this module too. ``packed_buffer_size_for`` works on either, because
     both answer ``metadata()`` with the same ``ParamMeta``.
     """
+    if case.online_quantization:
+        return OnlineMXWeightSource(case, device)
     if case.weight_source_factory is not None:
         return case.weight_source_factory(case, device)
     return FixedRandomWeightSource(case, device)

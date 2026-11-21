@@ -748,6 +748,7 @@ class AscendConfig:
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
+    online_quantize_weights: bool = False
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
@@ -1034,6 +1035,15 @@ class AscendConfig:
         if self.enable_sparse_li_c8 and self.enable_sparse_li_c4:
             raise ValueError("enable_sparse_li_c8 and enable_sparse_li_c4 are mutually exclusive.")
         quant_config = getattr(vc, "quant_config", None)
+        if self.online_quantize_weights:
+            if (
+                quant_config is None
+                or quant_config.get_name() != "compressed-tensors"
+                or quant_config.quant_format not in ("mxfp8-quantized", "mxfp4-pack-quantized")
+            ):
+                raise ValueError("online_quantize_weights requires compressed-tensors MXFP8 or MXFP4 configuration")
+            if vc.parallel_config.enable_eplb or self.eplb_config.dynamic_eplb or self.enable_fused_mc2 in (2, 3):
+                raise ValueError("online_quantize_weights does not support EPLB or MegaMoE")
         (
             self._sparse_li_c8_layer_ids,
             self._sparse_li_c8_layer_names,

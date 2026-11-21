@@ -1,0 +1,9 @@
+pr: 22712
+entries:
+  - category: feature
+    text: >-
+      Added opt-in receiver-side MXFP8 and W4A8 MXFP4 quantization of BF16
+      startup weights and RL weight updates on Ascend 950. Enable
+      `online_quantize_weights` in additional configuration with a
+      compressed-tensors MX configuration; serialized quantized checkpoint
+      loading remains the default.

@@ -132,9 +132,13 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                     else is_activation_quantization_format(quant_format)
                 )
                 mixed_precision_format = quant_format == CompressionFormat.mixed_precision.value
+                mx_quant_format = (format or quant_format) in (
+                    CompressionFormat.mxfp8_quantized.value,
+                    CompressionFormat.mxfp4_pack_quantized.value,
+                )
 
                 input_activations = quant_config.get("input_activations")
-                if (act_quant_format or mixed_precision_format) and input_activations is not None:
+                if (act_quant_format or mixed_precision_format or mx_quant_format) and input_activations is not None:
                     target_scheme_map[target]["input_activations"] = QuantizationArgs.model_validate(input_activations)
         return target_scheme_map
 
@@ -156,6 +160,12 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             # Store scheme on layer for reference (optional, for debugging)
             layer.scheme = linear_scheme
             logger.info_once("Using the vLLM Ascend llmcompressor Quantization now!")
+            from vllm_ascend.ascend_config import get_ascend_config
+
+            if self._supports_online_mx(linear_scheme) and get_ascend_config().online_quantize_weights:
+                from ..online_mx import AscendOnlineMXLinearMethod
+
+                return AscendOnlineMXLinearMethod(linear_scheme)
             return AscendLinearMethod(linear_scheme)
 
         if is_fused_moe_layer(layer):
@@ -173,9 +183,21 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             # Store scheme on layer for reference (optional, for debugging)
             layer.scheme = moe_scheme
             logger.info_once("Using the vLLM Ascend llmcompressor Quantization now!")
+            from vllm_ascend.ascend_config import get_ascend_config
+
+            if self._supports_online_mx(moe_scheme) and get_ascend_config().online_quantize_weights:
+                from ..online_mx import AscendOnlineMXMoEMethod
+
+                return AscendOnlineMXMoEMethod(moe_scheme, layer.moe_config)
             return AscendFusedMoEMethod(moe_scheme, layer.moe_config)
 
         return None
+
+    @staticmethod
+    def _supports_online_mx(scheme) -> bool:
+        from ..quant_type import QuantType
+
+        return getattr(scheme, "quant_type", None) in (QuantType.W8A8MXFP, QuantType.W4A8MXFP)
 
     def _get_linear_scheme(self, layer: torch.nn.Module, layer_name: str | None = None) -> AscendLinearScheme | None:
         """Get the linear quantization scheme for a layer.

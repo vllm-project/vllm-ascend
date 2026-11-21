@@ -20,9 +20,9 @@ from vllm.utils.network_utils import get_ip, get_open_port
 from tests.e2e.common.rlhf.common import post_control, register_engines_once, server_visible_devices
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
-    UPDATE_ROUNDS,
     assert_weight_update_matches_reference,
-    generation_signature,
+    capture_update_result,
+    update_rounds,
     weight_transfer_servers,
 )
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
@@ -60,8 +60,6 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
         gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
         env_dict=env_dict,
     ) as (server, reference, dummy_signature):
-        client = server.get_client()
-
         from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
 
         register_engines_once()
@@ -79,7 +77,9 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
         )
         signatures = []
         try:
-            for update_round in range(UPDATE_ROUNDS):
+            for update_round in range(update_rounds(case)):
+                if case.online_quantization:
+                    source.set_update_round(update_round)
                 print(
                     f"[trainer] {case.id}: sending {('packed' if packed else 'unpacked')} "
                     f"fixed-random update round={update_round + 1}",
@@ -90,7 +90,7 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
                     engine.send_weights()
                 finally:
                     post_control(server, "resume")
-                signatures.append(generation_signature(client, case.model, prompts=case.prompts))
+                signatures.append(capture_update_result(server, case))
         finally:
             engine.shutdown()
 
