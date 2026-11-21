@@ -30,7 +30,7 @@
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
-| `idx_mapping` | Input | Persistent block-table row per scheduled request. `-1` marks a dummy request. | int32 | 1-D tensor |
+| `idx_mapping` | Input | Persistent block-table row per scheduled request. `-1` marks a dummy request. | `int32` or `int64` | 1-D tensor |
 | `query_start_loc` | Input | Cumulative token offsets, with one extra entry for the total token count. | int32 | 1-D tensor |
 | `pos` | Input | Logical positions of scheduled tokens, converted to int32 in the kernel. | int64 | 1-D tensor |
 | `block_table_ptrs`, `block_table_strides` | Input | Base addresses of the int32 manager block tables and their row strides in entries, one per KV-cache group. | uint64 addresses, int64 strides | 1-D tensors |
