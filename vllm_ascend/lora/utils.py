@@ -168,10 +168,12 @@ class _PackedLoRAAWeightsMixin(MergedColumnParallelLinearWithLoRA):
     def reset_lora(self, index: int) -> None:
         super().reset_lora(index)
         if getattr(self, "_use_packed_lora", True):
-            if getattr(self, "lora_a_packed", None) is not None:
-                self.lora_a_packed[index].zero_()
-            if getattr(self, "lora_b_packed", None) is not None:
-                self.lora_b_packed[index].zero_()
+            lora_a_packed = getattr(self, "lora_a_packed", None)
+            if lora_a_packed is not None:
+                lora_a_packed[index].zero_()
+            lora_b_packed = getattr(self, "lora_b_packed", None)
+            if lora_b_packed is not None:
+                lora_b_packed[index].zero_()
         lora_slots = getattr(self, "_lora_slots", None)
         if lora_slots is not None:
             lora_slots.discard(index)
@@ -186,16 +188,14 @@ class _PackedLoRAAWeightsMixin(MergedColumnParallelLinearWithLoRA):
             super().set_lora(index, lora_a, lora_b)
         except RuntimeError as err:
             raise ValueError(_format_lora_shape_error(self, index, lora_a, lora_b, err)) from err
-        if (
-            getattr(self, "_use_packed_lora", True)
-            and getattr(self, "lora_a_packed", None) is not None
-            and getattr(self, "lora_b_packed", None) is not None
-        ):
+        lora_a_packed = getattr(self, "lora_a_packed", None)
+        lora_b_packed = getattr(self, "lora_b_packed", None)
+        if getattr(self, "_use_packed_lora", True) and lora_a_packed is not None and lora_b_packed is not None:
             rank = self.lora_a_stacked[0].size(2)
             for slice_index, slice_weight in enumerate(self.lora_a_stacked):
-                packed_slice = self.lora_a_packed[index, 0].narrow(0, slice_index * rank, rank)
+                packed_slice = lora_a_packed[index, 0].narrow(0, slice_index * rank, rank)
                 packed_slice.copy_(slice_weight[index, 0], non_blocking=True)
-            packed_b = self.lora_b_packed[index, 0].zero_()
+            packed_b = lora_b_packed[index, 0].zero_()
             offset = 0
             for slice_index, slice_weight in enumerate(self.lora_b_stacked):
                 out_size = self.output_slices[slice_index]
@@ -278,8 +278,9 @@ class _TransposedLoRABMixin(BaseLinearLayerWithLoRA):
 
     def reset_lora(self, index: int) -> None:
         super().reset_lora(index)
-        if getattr(self, "_use_packed_lora", True) and getattr(self, "lora_b_packed", None) is not None:
-            self.lora_b_packed[index].zero_()
+        lora_b_packed = getattr(self, "lora_b_packed", None)
+        if getattr(self, "_use_packed_lora", True) and lora_b_packed is not None:
+            lora_b_packed[index].zero_()
         lora_slots = getattr(self, "_lora_slots", None)
         if lora_slots is not None:
             lora_slots.discard(index)
@@ -295,8 +296,9 @@ class _TransposedLoRABMixin(BaseLinearLayerWithLoRA):
             super().set_lora(index, lora_a, lora_b)
         except RuntimeError as err:
             raise ValueError(_format_lora_shape_error(self, index, lora_a, lora_b, err)) from err
-        if getattr(self, "_use_packed_lora", True) and getattr(self, "lora_b_packed", None) is not None:
-            self.lora_b_packed[index, 0].copy_(
+        lora_b_packed = getattr(self, "lora_b_packed", None)
+        if getattr(self, "_use_packed_lora", True) and lora_b_packed is not None:
+            lora_b_packed[index, 0].copy_(
                 self.lora_b_stacked[0][index, 0].transpose(0, 1),
                 non_blocking=True,
             )
