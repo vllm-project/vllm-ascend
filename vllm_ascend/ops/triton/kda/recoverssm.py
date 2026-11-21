@@ -35,10 +35,9 @@ RECOVERSSM_CONV_STRIDED_TILE = 256
 
 @triton.jit
 def _kda_inverse_norm(norm_square):
-    nonzero = norm_square > 0.0
-    norm_input = tl.where(nonzero, norm_square, 1.0)
-    tl.static_assert(norm_input.dtype == tl.float32)
-    return tl.where(nonzero, tl.rsqrt(norm_input), 0.0)
+    norm_square = tl.where(norm_square > 0.0, norm_square, 1.0)
+    tl.static_assert(norm_square.dtype == tl.float32)
+    return tl.rsqrt(norm_square)
 
 
 @triton.jit

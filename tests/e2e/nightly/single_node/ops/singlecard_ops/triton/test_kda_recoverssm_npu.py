@@ -599,9 +599,7 @@ def test_recoverssm_matches_fp64_small_norms(amplitude, heads, record_property):
     checkpoint[1] = initial
     starts = torch.tensor([0, capacity], dtype=torch.int32, device=device)
     indices = torch.ones(1, dtype=torch.int32, device=device)
-    sequence = [0, capacity]
-    blocks = [1]
-    reference_inputs = (q, k, v, gate, beta, a_log, bias, -5.0, checkpoint, sequence, blocks)
+    reference_inputs = (q, k, v, gate, beta, a_log, bias, -5.0, checkpoint, [0, capacity], [1])
     expected, expected_final, _ = reference(*reference_inputs, [capacity])
     correction = torch.empty(2, heads, capacity, dim, device=device)
     kg = torch.empty(2, heads, capacity, 2 * dim, dtype=q.dtype, device=device)
@@ -611,7 +609,7 @@ def test_recoverssm_matches_fp64_small_norms(amplitude, heads, record_property):
         v,
         gate,
         beta,
-        a_log.reshape(-1),
+        a_log,
         bias,
         -5.0,
         checkpoint,
