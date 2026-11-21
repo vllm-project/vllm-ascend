@@ -36,6 +36,7 @@ from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeShapesAndDtypes,
     PreprocessType,
     ascend_chunked_prefill_workspace_size,
     get_sfa_qsfa_packed_head_dim,
@@ -49,6 +50,7 @@ from vllm_ascend.attention.utils import (
     uses_pcp_sharded_layout,
     wait_for_kv_layer_from_connector,
 )
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
@@ -401,6 +403,34 @@ class AscendSFABackend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, num_kv_heads, head_size)
+
+    @classmethod
+    def get_runtime_shapes_and_dtypes(
+        cls,
+        spec: AscendMLAAttentionSpec,
+        num_blocks: int,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapesAndDtypes:
+        """Describe the packed or split SFA main cache in storage elements."""
+        storage_block_size = get_storage_block_size(spec)
+        block_size = storage_block_size if kernel_block_size is None else kernel_block_size
+        if block_size <= 0 or storage_block_size % block_size:
+            raise ValueError("SFA kernel block size must divide the storage block size.")
+        runtime_blocks = num_blocks * (storage_block_size // block_size)
+        if spec.uses_packed_sfa_main_cache:
+            widths = (spec.head_size,)
+        else:
+            if spec.kv_lora_rank is None or spec.qk_rope_head_dim is None:
+                raise ValueError("SFA runtime views require component dimensions in the cache spec.")
+            widths = (spec.kv_lora_rank, spec.qk_rope_head_dim)
+        shapes = tuple(cls.get_kv_cache_shape(runtime_blocks, block_size, spec.num_kv_heads, width) for width in widths)
+        return shapes, (spec.dtype,) * len(widths)
+
+    @staticmethod
+    def format_runtime_views(
+        _spec: AscendMLAAttentionSpec, components: list[torch.Tensor]
+    ) -> tuple[torch.Tensor, ...]:
+        return tuple(components)
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:

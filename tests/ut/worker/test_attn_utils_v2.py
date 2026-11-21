@@ -1198,25 +1198,28 @@ def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_lay
     ("hf_config", "text_config", "use_unified"),
     [
         pytest.param({"model_type": "kimi_k3"}, {"model_type": "kimi_linear"}, True, id="kimi-k3"),
-        pytest.param({"model_type": "kimi_k31"}, {"model_type": "kimi_linear"}, False, id="kimi-k31-outer-type"),
+        pytest.param({"model_type": "kimi_k31"}, {"model_type": "kimi_linear"}, True, id="kimi-k31-outer-type"),
         pytest.param(
             {"model_type": "kimi_linear", "is_kimi_k31": True},
             {"model_type": "kimi_linear"},
-            False,
+            True,
             id="kimi-k31-flattened-config",
         ),
         pytest.param(
             {"model_type": "kimi_linear"},
             {"model_type": "kimi_linear", "is_kimi_k31": True},
-            False,
+            True,
             id="kimi-k31-text-marker",
         ),
         pytest.param({"model_type": "deepseek_v41"}, {"model_type": "deepseek_v41_text"}, True, id="deepseek-v41"),
+        pytest.param({"model_type": "deepseek_v3"}, {"model_type": "deepseek_v3"}, False, id="legacy-mla"),
     ],
 )
 def test_allocate_kv_cache_main_routes_kimi_variants(monkeypatch, hf_config, text_config, use_unified):
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(**hf_config), hf_text_config=SimpleNamespace(**text_config)),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(**hf_config), hf_text_config=SimpleNamespace(**text_config)
+        ),
         cache_config=SimpleNamespace(cache_dtype="auto"),
     )
     config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
