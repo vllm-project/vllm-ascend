@@ -1,0 +1,16 @@
+pr: 21817
+entries:
+  - category: feature
+    text: >-
+      Added native execution of block-wise FP8 checkpoints on Ascend 950. With
+      `additional_config.fp8_mode: "native"`, the checkpoint's own FP8 weights and
+      128x128 block scales feed the block-wise FP8 matmul and grouped matmul
+      directly, so no dequantize-and-requantize step runs at load time.
+    hardware: [A5]
+  - category: config
+    text: >-
+      Added `fp8_mode` to select how block-wise FP8 checkpoints run: `mxfp8`
+      (default, unchanged) or `native`. Because `native` is an explicit opt-in,
+      checkpoints or setups it cannot serve, such as a block size other than
+      [128, 128], dynamic EPLB or fused MC2, fail at startup with an explanatory
+      error instead of falling back silently.
