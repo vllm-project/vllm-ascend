@@ -50,6 +50,29 @@ def _enable_cache():
     _enable_static_kernel_run_package_cache()
 
 
+@pytest.fixture(autouse=True)
+def _reset_static_kernel_cache_patch():
+    """Keep the tests independent of each other and of their order.
+
+    The patch replaces torch_npu's compiler functions and sets a module-level
+    flag, so both have to be restored after every test.
+    """
+    from npugraph_ex._acl_concrete_graph import acl_graph, static_kernel
+
+    from vllm_ascend.compilation import compiler_interface
+
+    original_compile_static_kernel = static_kernel.compile_static_kernel
+    original_normalize_config = AclConcreteGraph.normalize_config
+    original_flag = compiler_interface._STATIC_KERNEL_CACHE_PATCHED
+    try:
+        yield
+    finally:
+        static_kernel.compile_static_kernel = original_compile_static_kernel
+        acl_graph.compile_static_kernel = original_compile_static_kernel
+        AclConcreteGraph.normalize_config = original_normalize_config
+        compiler_interface._STATIC_KERNEL_CACHE_PATCHED = original_flag
+
+
 def _cache_dir():
     from vllm_ascend.compilation.compiler_interface import _static_kernel_cache_dir
 

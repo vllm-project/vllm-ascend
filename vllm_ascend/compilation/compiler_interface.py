@@ -38,6 +38,14 @@ from vllm.utils.math_utils import round_up
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY, vllm_version_is
 
+# Whether the static kernel run-package cache patch has been applied to
+# torch_npu. The patch wraps torch_npu's compiler functions, so it must run
+# at most once per process: initialize_cache() can be called more than once,
+# and stacking the wrappers would nest the decisions. The flag lives for the
+# lifetime of the process and is only written by
+# _enable_static_kernel_run_package_cache().
+_STATIC_KERNEL_CACHE_PATCHED = False
+
 
 def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:
     recursive_compile_fx = functools.partial(compile_fx, inner_compile=inner_compile, decompositions=decompositions)
@@ -201,7 +209,8 @@ def _enable_static_kernel_run_package_cache() -> None:
     # The patch is applied once per process; initialize_cache() can be
     # called more than once, and stacking the wrappers would nest the
     # decisions.
-    if getattr(AclConcreteGraph.normalize_config, "_vllm_ascend_static_kernel_cache", False):
+    global _STATIC_KERNEL_CACHE_PATCHED
+    if _STATIC_KERNEL_CACHE_PATCHED:
         return
 
     original_normalize_config = AclConcreteGraph.normalize_config
@@ -216,7 +225,6 @@ def _enable_static_kernel_run_package_cache() -> None:
         configs.update(_static_kernel_cache_options())
         return configs
 
-    normalize_config._vllm_ascend_static_kernel_cache = True
     AclConcreteGraph.normalize_config = normalize_config
 
     logger.info_once(
@@ -253,10 +261,11 @@ def _enable_static_kernel_run_package_cache() -> None:
                 )
         return original_compile_static_kernel(fx_func, *args, config=config, build_dir=build_dir, **kwargs)
 
-    compile_static_kernel._vllm_ascend_static_kernel_cache = True
     static_kernel.compile_static_kernel = compile_static_kernel
     # acl_graph.py imported the symbol directly, so rebind it there too.
     acl_graph.compile_static_kernel = compile_static_kernel
+
+    _STATIC_KERNEL_CACHE_PATCHED = True
 
 
 def _configure_backend(
