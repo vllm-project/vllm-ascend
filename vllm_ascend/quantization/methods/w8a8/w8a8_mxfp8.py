@@ -290,7 +290,9 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
             layer._mxfp8_weight_buf = transposed_weight
-            if not getattr(layer, "_fused_preprocess_managed", False):
+            fused_preprocess_managed = getattr(layer, "_fused_preprocess_managed", False)
+            skip_weight_nz_conversion = getattr(layer, "skip_weight_nz_conversion", False)
+            if not fused_preprocess_managed and not skip_weight_nz_conversion:
                 layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, **mxfp8_nz().cast_kwargs())
             layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
@@ -905,3 +907,42 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
             # dimension, which requires contiguous HCCL inputs.
             layer.weight.data = layer.weight.data.contiguous()
             layer.weight_scale.data = layer.weight_scale.data.contiguous()
+
+
+@register_scheme("W8A8_MXFP8", "ds_linear")
+class AscendW8A8MXFP8DSRequantizedLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
+    """MXFP8 linear method for ModelSlim DeepSeek V4 and V4.1 checkpoints.
+
+    The checkpoint tensors match the shared MXFP8 layout. ``wo_a`` is additionally
+    stored as grouped ND ``[n_local_groups, hidden, o_lora_rank]`` for DSA.
+    """
+
+    weight_switch_output_gather_specs = (
+        WeightSwitchGatherSpec("weight"),
+        WeightSwitchGatherSpec("weight_scale"),
+    )
+
+    def process_weights_after_loading(self, layer):
+        wo_a_3d = getattr(layer, "prefix", "").endswith("wo_a") and getattr(layer, "o_lora_rank", 0) > 0
+        if not wo_a_3d:
+            super().process_weights_after_loading(layer)
+            return
+        if getattr(layer, "_mxfp8_transformed", False):
+            return
+
+        n_dim, k_dim = layer.weight_scale.data.shape
+        if layer.weight_scale.data.shape[-1] % 2 != 0:
+            reshaped_scale = F.pad(layer.weight_scale.data, (0, 1), mode="constant", value=0)
+            reshaped_scale = reshaped_scale.reshape(n_dim, k_dim // 2 + 1, 2)
+        else:
+            reshaped_scale = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
+
+        n_local_groups = layer.weight.data.shape[0] // layer.o_lora_rank
+        layer.weight.data = (
+            layer.weight.data.reshape(n_local_groups, layer.o_lora_rank, -1).transpose(1, 2).contiguous()
+        )
+        layer.weight_scale.data = (
+            reshaped_scale.reshape(n_local_groups, layer.o_lora_rank, -1, 2).transpose(1, 2).contiguous()
+        )
+
+        layer._mxfp8_transformed = True
