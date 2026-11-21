@@ -125,7 +125,6 @@ configuration rather than the runner input or sampling interface.
 | [hisparse.py](hisparse.py) | HiSparse mapped-Host refill, Resident gather, KV packing and invalidation; see [operator documentation](docs/hisparse.md). |
 | [layernorm_gated.py](layernorm_gated.py) | Model/attention primitive or shared utility |
 | [linearnorm/fused_eh_norm.py](linearnorm/fused_eh_norm.py) | Normalization/rotary fusion |
-| [linearnorm/qsa_rmsnorm_mrope.py](linearnorm/qsa_rmsnorm_mrope.py) | Model/attention primitive or shared utility |
 | [linearnorm/split_qkv_rmsnorm_mrope.py](linearnorm/split_qkv_rmsnorm_mrope.py) | Normalization/rotary fusion |
 | [linearnorm/split_qkv_rmsnorm_rope.py](linearnorm/split_qkv_rmsnorm_rope.py) | Normalization/rotary fusion |
 | [linearnorm/split_qkv_rmsnorm_rope_simt.py](linearnorm/split_qkv_rmsnorm_rope_simt.py) | Normalization/rotary fusion |

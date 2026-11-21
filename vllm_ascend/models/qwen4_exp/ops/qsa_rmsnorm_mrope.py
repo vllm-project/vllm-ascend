@@ -1,8 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Qwen4Exp QSA index-query RMSNorm and MRoPE fusion."""
+
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ops.triton.linearnorm.qsa_rope_utils import validate_qsa_rope_positions
+from .qsa_rope_utils import validate_qsa_rope_positions
 
 
 @triton.jit

@@ -82,8 +82,11 @@ def test_qsa_metadata_ignores_full_graph_dummy_request_boundaries() -> None:
 
 def test_qsa_uses_fused_sparse_backends_and_model_local_qkv_projection() -> None:
     qsa = _source("vllm_ascend/models/qwen4_exp/qsa.py")
+    global_ops = _source("vllm_ascend/ops/__init__.py")
     assert "return qsa_select_paged_tokens_lightning_v2(" in qsa
     assert "return dispatch_qsa_attention(" in qsa
+    assert "from .ops import qsa_rmsnorm_mrope" in qsa
+    assert "linearnorm.qsa_rmsnorm_mrope" not in global_ops
     assert "torch.ops.vllm.triton_qsa_rmsnorm_mrope(" in qsa
     assert "qwen4_exp_split_qkv_rmsnorm_mrope_out(" in qsa
     assert "gate.copy_(" not in qsa

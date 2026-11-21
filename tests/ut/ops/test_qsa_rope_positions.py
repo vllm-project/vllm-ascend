@@ -10,7 +10,7 @@ import torch
 @pytest.fixture
 def validate():
     # This shape-only helper intentionally has no vLLM, Triton or NPU dependency.
-    path = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/triton/linearnorm/qsa_rope_utils.py"
+    path = Path(__file__).resolve().parents[3] / "vllm_ascend/models/qwen4_exp/ops/qsa_rope_utils.py"
     spec = importlib.util.spec_from_file_location("qsa_rope_utils", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
