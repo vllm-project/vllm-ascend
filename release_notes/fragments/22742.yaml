@@ -1,0 +1,8 @@
+pr: 22742
+entries:
+  - category: feature
+    text: >-
+      Added layerwise KV cache offload for GLM-5.3 prefill workers using MemCache.
+      FP8 MLA and Indexer caches reuse NPU buffers when AscendStoreConnector
+      has `use_layerwise` enabled and `layerwise_num_shared_buffers` configured.
+    model: glm-5.3

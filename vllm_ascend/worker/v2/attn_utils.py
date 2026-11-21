@@ -1605,6 +1605,9 @@ def _reshape_kv_cache_v2(
 
     vllm_config = get_current_vllm_config()
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    use_contiguous_indexer_components = (
+        len(kv_cache_config.kv_cache_groups) == 1 and get_layerwise_reuse_layout(kv_cache_config) is not None
+    )
     kv_caches: dict[str, Any] = {}
     # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
     # view from the same deterministic layout that _allocate_kv_cache used:
@@ -1785,6 +1788,22 @@ def _reshape_kv_cache_v2(
                     )
                     if group_spec.cache_sparse_li_c4:
                         indexer_scale_cache_shape = (*indexer_scale_cache_shape[:-1], group_spec.scale_dim // 2, 2)
+
+                    if use_contiguous_indexer_components and isinstance(raw_cache, torch.Tensor):
+                        # Keep the native K/scale planes for P/D transfer when no other group overlays this slot.
+                        k_bytes = math.prod(kv_cache_shape) * get_dtype_size(group_spec.dtype)
+                        scale_elem_size = get_dtype_size(group_spec.scale_dtype)
+                        scale_offset = _align_up(k_bytes, scale_elem_size)
+                        scale_bytes = math.prod(indexer_scale_cache_shape) * scale_elem_size
+                        required_bytes = scale_offset + scale_bytes
+                        if required_bytes > sum_page_size_bytes:
+                            raise ValueError(
+                                f"Indexer KV cache for {layer_name} requires {required_bytes} bytes "
+                                f"for aligned K/scale views, got {sum_page_size_bytes} bytes."
+                            )
+                        raw_k_tensor = raw_cache[:k_bytes]
+                        raw_scale_tensor = raw_cache[scale_offset:required_bytes]
+                        raw_cache = (raw_k_tensor, raw_scale_tensor)
 
                 if isinstance(raw_cache, torch.Tensor):
                     if group_spec.scale_dim:
