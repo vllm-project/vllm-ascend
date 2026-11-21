@@ -414,6 +414,8 @@ class AscendCircularBufferSpec(CircularBufferSpec):
 
 
 def register_ascend_kv_cache_specs() -> None:
+    # Lazy because compressor_tail inherits the storage spec in this module.
+    from vllm_ascend.core.compressor_tail import AscendCompressorTailSpec, CompressorTailManager
     from vllm_ascend.core.single_type_kv_cache_manager import AscendCircularBufferManager
     from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
 
@@ -423,6 +425,11 @@ def register_ascend_kv_cache_specs() -> None:
         uniform_type_base_spec=AscendCircularBufferSpec,
     )
 
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendCompressorTailSpec,
+        manager_class=CompressorTailManager,
+        uniform_type_base_spec=AscendCompressorTailSpec,
+    )
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
         manager_class=FullAttentionManager,

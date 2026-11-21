@@ -35,8 +35,11 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.core.compressor_tail import AscendCompressorTailSpec
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
@@ -60,6 +63,19 @@ class AscendCompressorStateCache(CompressorStateCache):
 
         pads = dsv4_block_sizes(vllm_config)[vllm_config.cache_config.block_size][1]
         page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
+
+        if get_ascend_config().enable_dsv4_shared_compressor_workspace:
+            return AscendCompressorTailSpec(
+                block_size=self.block_size,
+                num_kv_heads=1,
+                head_size=self.state_dim,
+                dtype=self.dtype,
+                sliding_window=self.sliding_window,
+                alignment=None,
+                page_size_padded=page_size_padded,
+                tail_tokens=self.sliding_window,
+                ring_blocks_per_request=cdiv(self.sliding_window, self.block_size),
+            )
 
         return AscendSlidingWindowMLASpec(
             block_size=self.block_size,
@@ -219,6 +235,6 @@ class Compressor(nn.Module):
             coff=2 if self.overlap else 1,
             norm_eps=self.norm_eps,
             rotary_mode=2,
-            cache_mode=1,
+            cache_mode=2 if get_ascend_config().enable_dsv4_shared_compressor_workspace else 1,
         )
         return compressed_kv, slot_mapping

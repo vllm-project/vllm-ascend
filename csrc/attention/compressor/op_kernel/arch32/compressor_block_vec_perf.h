@@ -77,6 +77,8 @@ public:
                                                 GlobalTensor<T> kvCacheTcGm, GlobalTensor<T> scoreCacheTcGm,
                                                 GlobalTensor<T> vec1ResGm, GlobalTensor<T> vec2InputGm);
     __aicore__ inline void ComputeVec2(const Vec2RunInfo &info);
+    __aicore__ inline void InitHistoryWorkspace(__gm__ uint8_t *workspace);
+    __aicore__ inline void SnapshotHistory();
 
 protected:
     GlobalTensor<T> vec1ResGm_;
@@ -211,6 +213,7 @@ private:
     GlobalTensor<int32_t> sequsedGm_;
     GlobalTensor<int32_t> stateBlockTableGm_;
     GlobalTensor<T> stateCacheGm_;
+    GlobalTensor<T> historyStateGm_;
     GlobalTensor<T> apeGm_;
     GlobalTensor<T> normWeightGm_;
     GlobalTensor<T> ropeSinGm_;
@@ -345,6 +348,43 @@ __aicore__ inline uint32_t CompressorBlockVectorPerf<COMP>::GetSeqUsed(uint32_t 
         } else {
             return constInfo_.sSize;
         }
+    }
+}
+
+template <typename COMP>
+__aicore__ inline void CompressorBlockVectorPerf<COMP>::InitHistoryWorkspace(__gm__ uint8_t *workspace)
+{
+    historyStateGm_.SetGlobalBuffer((__gm__ T *)workspace);
+}
+
+template <typename COMP>
+__aicore__ inline void CompressorBlockVectorPerf<COMP>::SnapshotHistory()
+{
+    if constexpr (COMP::cacheMode == CACHE_MODE::CYCLE) {
+        const uint32_t ringTokens = coff_ * constInfo_.cmpRatio;
+        const uint32_t rowElements = 2 * coff_ * constInfo_.headDim;
+        const uint32_t vectorCoreNum = 2 * GetBlockNum();
+        for (uint32_t row = GetBlockIdx(); row < constInfo_.batchSize * ringTokens; row += vectorCoreNum) {
+            const uint32_t batchIdx = row / ringTokens;
+            if (GetSeqLength(batchIdx) == 0 || GetStartPos(batchIdx) == 0) {
+                continue;
+            }
+            const uint32_t slot = row % ringTokens;
+            const uint64_t tableOffset = static_cast<uint64_t>(batchIdx) * constInfo_.maxBlockNumPerBatch;
+            const uint64_t page = stateBlockTableGm_.GetValue(tableOffset + slot / constInfo_.blockSize);
+            const uint64_t stateOffset = page * constInfo_.stateCacheStrideDim0 +
+                                         (slot % constInfo_.blockSize) * rowElements;
+            LocalTensor<T> inputUb = inputQue1.AllocTensor<T>();
+            DataCopy(inputUb, stateCacheGm_[stateOffset], rowElements);
+            inputQue1.EnQue(inputUb);
+            inputQue1.DeQue<T>();
+            DataCopyWithOutputQue(historyStateGm_[static_cast<uint64_t>(row) * rowElements], inputUb,
+                                  1, rowElements, rowElements, rowElements);
+            inputQue1.FreeTensor(inputUb);
+        }
+        // Complete the immutable invocation snapshot before any tail overwrite.
+        PipeBarrier<PIPE_ALL>();
+        SyncAll();
     }
 }
 
@@ -780,10 +820,18 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::ReadFromCacheState(
     uint32_t copyFinishRowCnt = 0;
     uint32_t seqCnt = endSeqIdx - startSeqIdx;
     while (copyFinishRowCnt < seqCnt) {
-        uint64_t blockIdOffset = curSeqIdx / constInfo_.blockSize;
-        uint64_t remainRowCnt = curSeqIdx % constInfo_.blockSize;
+        uint32_t cacheSeqIdx = curSeqIdx;
+        const uint32_t ringTokenCount = coff_ * constInfo_.cmpRatio;
+        if constexpr (COMP::cacheMode == CACHE_MODE::CYCLE) {
+            cacheSeqIdx %= ringTokenCount;
+        }
+        uint64_t blockIdOffset = cacheSeqIdx / constInfo_.blockSize;
+        uint64_t remainRowCnt = cacheSeqIdx % constInfo_.blockSize;
         uint64_t idInBlockTable = blockTableGm.GetValue(blockTablebaseOffset + blockIdOffset);
         uint32_t copyRowCount = constInfo_.blockSize - remainRowCnt;
+        if constexpr (COMP::cacheMode == CACHE_MODE::CYCLE) {
+            copyRowCount = min(copyRowCount, ringTokenCount - cacheSeqIdx);
+        }
         if (copyFinishRowCnt + copyRowCount > seqCnt) {
             copyRowCount = seqCnt - copyFinishRowCnt;
         }
@@ -791,8 +839,16 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::ReadFromCacheState(
                                 remainRowCnt * 2 * coff_ * constInfo_.headDim +
                                 stateIdx * coff_ * constInfo_.headDim + dStartIdx;
 
-        DataCopyAlignGmToUb(output[copyFinishRowCnt * coff_ * dDealSize], state[stateOffset], copyRowCount,
-                                dDealSize, coff_ * constInfo_.headDim * 2, coff_ * dDealSize);
+        if constexpr (COMP::cacheMode == CACHE_MODE::CYCLE) {
+            const uint64_t historyOffset =
+                (static_cast<uint64_t>(batchIdx) * ringTokenCount + cacheSeqIdx) * 2 * coff_ * constInfo_.headDim +
+                stateIdx * coff_ * constInfo_.headDim + dStartIdx;
+            DataCopyAlignGmToUb(output[copyFinishRowCnt * coff_ * dDealSize], historyStateGm_[historyOffset],
+                               copyRowCount, dDealSize, coff_ * constInfo_.headDim * 2, coff_ * dDealSize);
+        } else {
+            DataCopyAlignGmToUb(output[copyFinishRowCnt * coff_ * dDealSize], state[stateOffset], copyRowCount,
+                               dDealSize, coff_ * constInfo_.headDim * 2, coff_ * dDealSize);
+        }
         copyFinishRowCnt += copyRowCount;
         curSeqIdx += copyRowCount;
     }
@@ -808,10 +864,18 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::WriteToCacheState(
     uint32_t copyFinishRowCnt = 0;
     uint32_t seqCnt = endSeqIdx - startSeqIdx;
     while (copyFinishRowCnt < seqCnt) {
-        uint64_t blockIdOffset = curSeqIdx / constInfo_.blockSize;
-        uint64_t remainRowCnt = curSeqIdx % constInfo_.blockSize;
+        uint32_t cacheSeqIdx = curSeqIdx;
+        const uint32_t ringTokenCount = coff_ * constInfo_.cmpRatio;
+        if constexpr (COMP::cacheMode == CACHE_MODE::CYCLE) {
+            cacheSeqIdx %= ringTokenCount;
+        }
+        uint64_t blockIdOffset = cacheSeqIdx / constInfo_.blockSize;
+        uint64_t remainRowCnt = cacheSeqIdx % constInfo_.blockSize;
         uint64_t idInBlockTable = blockTableGm.GetValue(blockTablebaseOffset + blockIdOffset);
         uint32_t copyRowCount = constInfo_.blockSize - remainRowCnt;
+        if constexpr (COMP::cacheMode == CACHE_MODE::CYCLE) {
+            copyRowCount = min(copyRowCount, ringTokenCount - cacheSeqIdx);
+        }
         if (copyFinishRowCnt + copyRowCount > seqCnt) {
             copyRowCount = seqCnt - copyFinishRowCnt;
         }
@@ -837,6 +901,17 @@ CompressorBlockVectorPerf<COMP>::SaveState(const LocalTensor<T> &srcLocal, const
     uint32_t startSeqIdx = sliceInfo.bStartPos + sliceInfo.sIdx;
     uint32_t endSeqIdx = startSeqIdx + sliceInfo.validSeqCnt;
     uint64_t srcBaseOffset = sliceInfo.dealedSeqCnt * coff_ * dDealSize;
+
+    if constexpr (COMP::cacheMode == CACHE_MODE::CYCLE) {
+        uint32_t compressSeqIdx = Trunc(sliceInfo.bStartPos + sliceInfo.bSeqUsed, constInfo_.cmpRatio);
+        uint32_t writeSeqStartIdx = compressSeqIdx > (coff_ - 1) * constInfo_.cmpRatio ?
+                                    compressSeqIdx - (coff_ - 1) * constInfo_.cmpRatio : 0;
+        if (endSeqIdx <= writeSeqStartIdx) {
+            return;
+        }
+        srcBaseOffset += (max(startSeqIdx, writeSeqStartIdx) - startSeqIdx) * coff_ * dDealSize;
+        startSeqIdx = max(startSeqIdx, writeSeqStartIdx);
+    }
 
     if constexpr (COMP::coff == COFF::OVERLAP) {
         WriteToCacheState(stateGm, blockTableGm, srcLocal[srcBaseOffset], sliceInfo.bIdx, startSeqIdx, endSeqIdx,

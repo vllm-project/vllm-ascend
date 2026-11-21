@@ -231,7 +231,7 @@ const std::vector<int> CMP_RATIO {2, 4, 8, 16, 32, 64, 128};
 const std::vector<int> ROTARY_MODE {1, 2};
 #endif
 const std::vector<uint32_t> HEAD_DIM {128, 512};
-const std::vector<int> CACHE_MODE {1};
+const std::vector<int> CACHE_MODE {1, 2};
 
 enum class ROTARY_MODE:uint8_t {
     HALF = 1,
