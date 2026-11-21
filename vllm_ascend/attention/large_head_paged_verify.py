@@ -266,10 +266,9 @@ class AscendLargeHeadPagedMetadataBuilder(AscendAttentionMetadataBuilder):
             AscendLargeHeadPagedMetadata,
             super().build(common_prefix_len, common_attn_metadata, fast_build=fast_build),
         )
-        if (
-            getattr(self.kv_cache_spec, "head_size", None) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
-            and in_full_cudagraph_mode(self.vllm_config)
-        ):
+        if getattr(
+            self.kv_cache_spec, "head_size", None
+        ) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE and in_full_cudagraph_mode(self.vllm_config):
             self._attach_pa_graph_rows(metadata, for_capture=False)
         return metadata
 
@@ -284,10 +283,9 @@ class AscendLargeHeadPagedMetadataBuilder(AscendAttentionMetadataBuilder):
                 common_attn_metadata=common_attn_metadata,
             ),
         )
-        if (
-            getattr(self.kv_cache_spec, "head_size", None) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
-            and in_full_cudagraph_mode(self.vllm_config)
-        ):
+        if getattr(
+            self.kv_cache_spec, "head_size", None
+        ) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE and in_full_cudagraph_mode(self.vllm_config):
             self._attach_pa_graph_rows(metadata, for_capture=True)
         return metadata
 
@@ -314,9 +312,13 @@ class AscendLargeHeadPagedAttentionBackendImpl(AscendAttentionBackendImpl):
         )
 
     def _maybe_init_kv_cache(self, kv_cache: Any = None) -> None:
-        if self.key_cache is None and kv_cache is not None and (
-            (isinstance(kv_cache, torch.Tensor) and kv_cache.dim() > 0 and kv_cache.shape[0] == 2)
-            or (isinstance(kv_cache, (list, tuple)) and len(kv_cache) >= 2)
+        if (
+            self.key_cache is None
+            and kv_cache is not None
+            and (
+                (isinstance(kv_cache, torch.Tensor) and kv_cache.dim() > 0 and kv_cache.shape[0] == 2)
+                or (isinstance(kv_cache, (list, tuple)) and len(kv_cache) >= 2)
+            )
         ):
             self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
@@ -361,9 +363,7 @@ class AscendLargeHeadPagedAttentionBackendImpl(AscendAttentionBackendImpl):
         if attn_metadata.block_tables.shape[0] < num_reqs:
             return False
         seq_lens_list = getattr(attn_metadata, "seq_lens_list", None) or []
-        if len(seq_lens_list) < num_reqs or any(int(s) <= 0 for s in seq_lens_list[:num_reqs]):
-            return False
-        return True
+        return len(seq_lens_list) >= num_reqs and all(int(s) > 0 for s in seq_lens_list[:num_reqs])
 
     def _can_use_large_head_eager_phase_split(
         self,
@@ -639,9 +639,7 @@ class AscendLargeHeadPagedAttentionBackendImpl(AscendAttentionBackendImpl):
             row_bt, row_kv_tensor = expanded
             row_count, row_kv = num_decode_tokens, row_kv_tensor.tolist()
         q_bsnd = query[:num_decode_tokens].contiguous().view(row_count, 1, self.num_heads, self.head_size)
-        attn_out = self._run_bsnd_fia_v2(
-            q_bsnd, row_bt, None, [1] * row_count, row_kv, block_size, sparse_mode=0
-        )
+        attn_out = self._run_bsnd_fia_v2(q_bsnd, row_bt, None, [1] * row_count, row_kv, block_size, sparse_mode=0)
         out_slice.copy_(attn_out.reshape(out_slice.shape))
 
     def _forward_large_head_eager_prefill_slice(
@@ -750,9 +748,7 @@ class AscendLargeHeadPagedAttentionBackendImpl(AscendAttentionBackendImpl):
             )
         qlen = num_tokens // num_reqs
         if [qlen * (i + 1) for i in range(num_reqs)] != actual_seq_lengths_q:
-            raise RuntimeError(
-                f"Large-head paged verify requires uniform query lengths, got {actual_seq_lengths_q}."
-            )
+            raise RuntimeError(f"Large-head paged verify requires uniform query lengths, got {actual_seq_lengths_q}.")
 
         _, _, block_size, _ = self.key_cache.shape
         if attn_metadata.block_tables is None:

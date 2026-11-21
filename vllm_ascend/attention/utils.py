@@ -386,10 +386,7 @@ def expand_pa_per_token_rows(metadata: Any) -> bool:
     if len(query_lengths) != len(seq_lens_list):
         return False
 
-    if all(
-        int(end) - (int(query_lengths[i - 1]) if i > 0 else 0) == 1
-        for i, end in enumerate(query_lengths)
-    ):
+    if all(int(end) - (int(query_lengths[i - 1]) if i > 0 else 0) == 1 for i, end in enumerate(query_lengths)):
         metadata.pa_rows_expanded = True
         return True
 
