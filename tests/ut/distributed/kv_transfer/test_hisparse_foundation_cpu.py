@@ -252,6 +252,8 @@ def test_private_host_allocator_selects_explicit_memfabric(
 @pytest.mark.parametrize("legacy", [False, True])
 def test_memfabric_host_pool_releases_arena(monkeypatch, device_address, legacy):
     released = []
+    backing = torch.empty(2 * mmap.PAGESIZE, dtype=torch.uint8)
+    offset = -backing.data_ptr() % mmap.PAGESIZE
     arena = NS(
         initialize=lambda config: 0,
         empty=lambda size, **kwargs: backing[offset : offset + size[0]],
@@ -265,8 +267,6 @@ def test_memfabric_host_pool_releases_arena(monkeypatch, device_address, legacy)
         offload.Offload = lambda: arena
     monkeypatch.setitem(sys.modules, "memfabric_hybrid", NS(offload=offload))
     monkeypatch.setattr(torch, "npu", NS(current_device=lambda: 0), raising=False)
-    backing = torch.empty(2 * mmap.PAGESIZE, dtype=torch.uint8)
-    offset = -backing.data_ptr() % mmap.PAGESIZE
 
     if not device_address:
         with pytest.raises(RuntimeError, match="device address"):
