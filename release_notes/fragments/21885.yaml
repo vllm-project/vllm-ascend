@@ -1,0 +1,5 @@
+pr: 21885
+entries:
+  - category: hardware
+    text: Added per-channel INT W4A8 GMM and SiTU fusion on A2 and A3, including a fused two-projection MoE path for supported E7 and E14 NZ weights. Updated the A5 MX kernel. Rebuild the custom OPP and framework extension together.
+    hardware: [A2, A3, A5]

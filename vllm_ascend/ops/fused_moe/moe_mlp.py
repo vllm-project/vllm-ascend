@@ -67,6 +67,14 @@ def apply_moe_mlp(
                 quant_method=quant_method,
             )
 
+    if mlp_compute_input.activation == MoEActivation.SITU:
+        fused_mlp = getattr(quant_method, "try_apply_fused_mlp", None)
+        if fused_mlp is not None:
+            output = fused_mlp(mlp_compute_input)
+            if output is not None:
+                # The fused path is eligible only with shared-expert overlap disabled.
+                return output, None
+
     if quant_method.supports_fused_activation(mlp_compute_input.activation):
         hidden_states, act_out_scale = quant_method.apply_gmm1_act_quant(mlp_compute_input)
     else:

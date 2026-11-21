@@ -1679,6 +1679,10 @@ std::tuple<at::Tensor, at::Tensor> make_grouped_matmul_situ_quant_meta_output(
     constexpr int64_t MX_SCALE_ALIGN = 2;
     auto m = x.sym_size(0);
     c10::SymDimVector output_shape = {m, n / 2};
+    if (x.scalar_type() == at::kChar) {
+        return {at::empty_symint(output_shape, x.options()),
+                at::empty_symint(c10::SymDimVector{m}, x.options().dtype(at::kFloat))};
+    }
     c10::SymDimVector scale_shape = {
         m, (n / 2 + MX_BLOCK_SPAN - 1) / MX_BLOCK_SPAN, MX_SCALE_ALIGN};
     return {at::empty_symint(output_shape, x.options().dtype(at::kFloat8_e4m3fn)),
@@ -1695,7 +1699,8 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant_meta(
 {
     auto k = x.sym_size(1);
     auto e = weight.sym_size(0);
-    auto n = weight.sym_numel() / (e * (k / 2));
+    auto n = x.scalar_type() == at::kChar ? weight_scale.sym_size(-1)
+                                         : weight.sym_numel() / (e * (k / 2));
     (void)weight_scale;
     (void)weight_assist_matrix;
     (void)bias;
@@ -1721,7 +1726,9 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant_list_meta(
     const std::optional<std::vector<int64_t>> &tuning_config, double beta, double linear_beta)
 {
     auto k = x.sym_size(1);
-    auto n = weight[0].sym_numel() / (k / 2);
+    TORCH_CHECK(!weight.empty() && !weight_scale.empty(), "SiTU weight and scale lists must not be empty");
+    auto n = x.scalar_type() == at::kChar ? weight_scale[0].sym_size(-1)
+                                         : weight[0].sym_numel() / (k / 2);
     (void)weight_scale;
     (void)weight_assist_matrix;
     (void)bias;
@@ -1837,6 +1844,11 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("grouped_matmul_situ_quant_weight_nz", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
     ops.impl("grouped_matmul_situ_quant_weight_nz.list",
              &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);
+    ops.impl("grouped_matmul_situ_quant_mlp",
+             +[](const at::Tensor& x, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                 const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, int64_t, double, double) {
+                 return at::empty_like(x, x.options().dtype(at::kBFloat16));
+             });
     // fused_quant_lightning_indexer_manage meta implementation
     ops.impl("npu_fused_quant_lightning_indexer_manage", &vllm_ascend::meta::npu_fused_quant_lightning_indexer_manage_meta);
     // Launch host print from device
