@@ -1127,6 +1127,9 @@ def test_union_overflow_preserves_state(capture, compact):
         # multiple of 128, so 128 keeps the vector path and 17 must fall back.
         ("vector_topk128", 480, 10240, 8, 128, 0, False),
         ("odd_topk_fallback", 480, 10240, 8, 17, 0, False),
+        # Above 48 * kTile the int16 permutation reaches into the miss-scan
+        # scratch, so the scan has to fall back to the scalar walk.
+        ("large_hot_scan_fallback", 480, 16384, 4, 512, 0, False),
     ],
 )
 def test_resolve_union_tiles_and_fallbacks(label, cols, hot, rows, topk, resident_pages, miss_mask):
