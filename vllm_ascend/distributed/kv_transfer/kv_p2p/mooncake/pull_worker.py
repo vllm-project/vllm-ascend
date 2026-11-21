@@ -40,6 +40,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeTransferMetadataGroups,
     ReqMeta,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import (
+    MooncakeKVConnectorStats,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     SizedDict,
     ensure_zmq_recv,
@@ -78,6 +81,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         dcp_size: int,
         device: Any,
         ready_event: threading.Event,
+        xfer_stats: MooncakeKVConnectorStats,
     ) -> None:
         super().__init__(daemon=True, name="MooncakePullRecvingThread")
         self.engine = engine
@@ -118,6 +122,10 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         self.dcp_size = dcp_size
         self.device = device
         self.ready_event = ready_event
+        # Shared with the worker: the pull executor records completed/failed
+        # transfers here and the worker loop drains them via
+        # get_kv_connector_stats() each step.
+        self.xfer_stats = xfer_stats
         self.executor = ThreadPoolExecutor(
             max_workers=32,
             initializer=torch.npu.set_device,
@@ -190,6 +198,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 for request_id in failed_request_ids:
                     self._mark_request_failed(requests[request_id])
             except Exception as exc:
+                self.xfer_stats.record_failed_transfer()
                 failed_request_ids = set(requests)
                 if self.can_report_invalid_block_ids:
                     for request_metadata in requests.values():
@@ -1199,11 +1208,14 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         transfer_start_time = time.perf_counter()
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
+            self.xfer_stats.record_failed_transfer()
             raise RuntimeError(
                 "Mooncake KV transfer failed for remote "
                 f"PP/PCP/TP rank {remote_pp_rank}/{remote_pcp_rank}/{remote_tp_rank}, ret={ret}"
             )
         transfer_elapsed_ms = (time.perf_counter() - transfer_start_time) * 1000
+        # Metric is a seconds histogram: record seconds, never ms.
+        self.xfer_stats.record_transfer(transfer_elapsed_ms / 1000.0, sum(length_list))
         logger.info(
             "KV cache transfer for requests %s took %.2f ms (%d ranges, %d bytes). "
             "local_ip %s local_device_id %s remote_session_id %s",
@@ -1363,6 +1375,7 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
                 dcp_size=self.dcp_size,
                 device=torch.npu.current_device(),
                 ready_event=ready_event,
+                xfer_stats=self.xfer_stats,
             )
             self._recving_thread.start()
             if not ready_event.wait(timeout=10):
