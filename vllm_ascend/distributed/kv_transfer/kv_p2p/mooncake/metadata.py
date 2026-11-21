@@ -187,7 +187,6 @@ class PushSendReqMeta:
     remote_num_computed_tokens: int
     remote_num_external_tokens: int
     remote_worker_addresses: tuple[tuple[int, int, int, str], ...]
-    dsv4_peer_compatible: bool = True
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -264,7 +263,6 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_num_computed_tokens=kv_transfer_params["remote_num_computed_tokens"],
             remote_num_external_tokens=kv_transfer_params["remote_num_external_tokens"],
             remote_worker_addresses=tuple(tuple(worker) for worker in kv_transfer_params["remote_worker_addresses"]),
-            dsv4_peer_compatible=kv_transfer_params.get("dsv4_peer_compatible", True),
         )
 
 

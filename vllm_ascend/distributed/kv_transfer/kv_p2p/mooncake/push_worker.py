@@ -320,8 +320,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 state.metadata = request
                 if not state.destinations:
                     self._prepare_destinations(state, request)
-                if self._is_dsv4 and not request.dsv4_peer_compatible:
-                    state.error = "DSV4 P/D model, component or cache-format identity differs"
                 # Prefix data is immediately readable only with resident KV.
                 if not self._slot_predecessors and not state.available_layers and request.num_computed_tokens:
                     event = torch.npu.Event()

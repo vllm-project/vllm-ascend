@@ -57,22 +57,10 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: "KVCacheConfig") -> None:
         super().__init__(vllm_config, engine_id, kv_cache_config)
-        # Scheduler projection keeps only one spec per group. Use the identity
-        # captured from all components before that projection.
+        # The component identity also identifies DSV4 after scheduler projection.
         component_identity = getattr(kv_cache_config, "dsv4_component_identity", None)
         self._is_dsv4 = component_identity is not None or is_deepseek_v4_cache(kv_cache_config.kv_cache_groups)
-        if self._is_dsv4 and component_identity is None:
-            raise ValueError("DSV4 Push requires a component identity from the physical cache config")
         self.need_truncate |= self._is_dsv4
-        self._dsv4_identity = (
-            (
-                component_identity,
-                vllm_config.model_config.compute_hash(),
-                vllm_config.cache_config.cache_dtype,
-            )
-            if self._is_dsv4
-            else None
-        )
         self._metadata_thread: MooncakePushMetadataThread | None = None
         self._reqs_pending_recv: dict[str, tuple[Request, BlockIds, int]] = {}
         self._reqs_need_send_layerwise: dict[str, tuple[Request, BlockIds]] = {}
@@ -141,8 +129,6 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                 remote_num_external_tokens=num_external_tokens,
                 remote_worker_addresses=self._remote_worker_addresses,
             )
-            if self._dsv4_identity is not None:
-                message["dsv4_identity"] = self._dsv4_identity
             assert self.metaserver_client is not None
             self.metaserver_client.submit(request.request_id, params.get("metaserver"), message)
 
@@ -191,15 +177,7 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                     num_scheduled_tokens=min(
                         num_scheduled_tokens, request.num_prompt_tokens - local_num_computed_tokens
                     ),
-                    kv_transfer_params=(
-                        dict(
-                            request.kv_transfer_params,
-                            dsv4_peer_compatible=tuple(request.kv_transfer_params.get("dsv4_identity", ()))
-                            == self._dsv4_identity,
-                        )
-                        if self._is_dsv4
-                        else request.kv_transfer_params
-                    ),
+                    kv_transfer_params=request.kv_transfer_params,
                 )
                 self._reqs_sent_to_worker.add(req_id)
             # These notifications must also be delivered in connector-only steps.
