@@ -132,6 +132,12 @@ private:
     uint32_t tmpBlockIdx = 0U;
     uint32_t aiCoreIdx = 0U;
     uint32_t usedCoreNum = 0U;
+    // Idle AICore V0/V1 workers assist MergeKv in V_TEMPLATE mode.
+    bool isHelperAiCore_ = false;
+    uint32_t numHelpers_ = 0U;
+    uint32_t helperTargetAiCoreIdx_ = 0U;
+    uint32_t helperPartIdx_ = 0U;
+    uint32_t helperPartCount_ = 1U;
 
     __gm__ uint8_t *keyPtr = nullptr;
     __gm__ uint8_t *valuePtr = nullptr;
@@ -198,6 +204,7 @@ private:
     __aicore__ inline void Bmm2DataCopyOut(uint64_t attenOutOffset, LocalTensor<OUT_T> &attenOutUb, uint32_t startRow,
                                            uint32_t dealRowCount, uint32_t columnCount, uint32_t actualColumnCount);
     __aicore__ inline void InitAllZeroOutput(uint32_t bIdx, uint32_t s1Idx, uint32_t n2Idx);
+    __aicore__ inline void ReduceSplitKVOut();
 };
 
 template <typename FusedSparseAttentionOverlapTraits> __aicore__ inline void FusedSparseAttentionOverlapMla<FusedSparseAttentionOverlapTraits>::InitTilingData()
@@ -436,7 +443,6 @@ __aicore__ inline void FusedSparseAttentionOverlapMla<FusedSparseAttentionOverla
     InitTilingData();
     InitActualSeqLen(actualSeqLengthsQ, actualSeqLengths);
 
-    // Initialize computation parameters.
     InitCalcParamsEach();
     pipe = tPipe;
     keyPtr = key;
@@ -462,9 +468,6 @@ __aicore__ inline void FusedSparseAttentionOverlapMla<FusedSparseAttentionOverla
     }
     topKGm.SetGlobalBuffer((__gm__ int32_t *)sparseIndices);
 
-    // Workspace memory layout
-    // |Q--|mm1ResGm(stores S)|vec1ResGm(stores A1,A2)|mm2ResGm(stores O)|vec2ResGm
-    // |Core0_Q1-Core0_Q2-Core1_Q1-Core1_Q2....Core32_Q1-Core32_Q2|Core0_mmRes
     uint64_t offset = 0;
     mm1ResGm.SetGlobalBuffer(
         (__gm__ MM1_OUT_T *)(workspace + offset +
@@ -482,12 +485,14 @@ __aicore__ inline void FusedSparseAttentionOverlapMla<FusedSparseAttentionOverla
     mm2ResInt32Gm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(mm2ResGm.GetPhyAddr(0)));
 
     if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
-        // s2  d+rope bufNum
         kvMergeGm_.SetGlobalBuffer((__gm__ KV_T *)(workspace + offset + aiCoreIdx * 512 * 576 * 4 * sizeof(KV_T)));
         offset += GetBlockNum() * 512 * 576 * 4 * sizeof(KV_T);
 
         kvValidSizeGm_.SetGlobalBuffer(
             (__gm__ int32_t *)(workspace + offset + (aiCoreIdx * 2) * 128 * 4 * sizeof(int32_t)));
+        offset += GetBlockNum() * 2 * 128 * 4 * sizeof(int32_t);
+        // Reserve separate workspace for helper done/credit handshake rings.
+        offset += GetBlockNum() * 2 * 64 * 8 * sizeof(int32_t);
     }
 
     if constexpr (FLASH_DECODE) {
@@ -503,6 +508,41 @@ __aicore__ inline void FusedSparseAttentionOverlapMla<FusedSparseAttentionOverla
         vectorService.InitMm2ResInt32GmGlobalTensor(mm2ResInt32Gm);
         if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
             vectorService.InitVec0GlobalTensor(kvValidSizeGm_, kvMergeGm_, kRopeGm, keyGm, blockTableGm);
+            if (numHelpers_ > 0) {
+                // Use per-pair done/credit rings to isolate helper synchronization.
+                constexpr uint32_t syncRing =
+                    FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::HELPER_SYNC_RING;
+                constexpr uint32_t syncSlot =
+                    FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::HELPER_SYNC_SLOT_INT32;
+                const uint64_t perCoreMergeBytes = 512ULL * 576 * 4 * sizeof(KV_T);
+                __gm__ uint8_t *kvMergeArena = workspace +
+                    GetBlockNum() * dbWorkspaceRatio * constInfo.mmResUbSize * sizeof(MM1_OUT_T) +
+                    GetBlockNum() * dbWorkspaceRatio * constInfo.mmResUbSize * sizeof(KV_T) +
+                    GetBlockNum() * dbWorkspaceRatio * constInfo.bmm2ResUbSize * sizeof(MM2_OUT_T);
+                uint32_t helperBaseCore = usedCoreNum;
+                __gm__ int32_t *syncBase = (__gm__ int32_t *)(kvMergeArena +
+                        (uint64_t)GetBlockNum() * perCoreMergeBytes +
+                        (uint64_t)GetBlockNum() * 2 * 128 * 4 * sizeof(int32_t));
+                GlobalTensor<int32_t> mergeDoneGm;
+                GlobalTensor<int32_t> mergeCreditGm;
+                mergeDoneGm.SetGlobalBuffer(syncBase);
+                mergeCreditGm.SetGlobalBuffer(syncBase +
+                    (uint64_t)numHelpers_ * syncRing * syncSlot);
+                vectorService.InitHelperSync(mergeDoneGm, mergeCreditGm, numHelpers_);
+                if (isHelperAiCore_) {
+                    GlobalTensor<KV_T> targetKvMergeGm;
+                    targetKvMergeGm.SetGlobalBuffer((__gm__ KV_T *)(kvMergeArena +
+                        (uint64_t)helperTargetAiCoreIdx_ * perCoreMergeBytes));
+                    vectorService.InitHelperV0(targetKvMergeGm, helperTargetAiCoreIdx_);
+                } else if (helperPartCount_ > 1) {
+                    GlobalTensor<int32_t> helperValidSizeGm;
+                    helperValidSizeGm.SetGlobalBuffer((__gm__ int32_t *)(kvMergeArena +
+                        GetBlockNum() * perCoreMergeBytes +
+                        (uint64_t)(helperBaseCore + aiCoreIdx) * 2 * 128 * 4 * sizeof(int32_t)));
+                    vectorService.SetHelperParts(helperPartIdx_, helperPartCount_, helperValidSizeGm,
+                                                 aiCoreIdx);
+                }
+            }
         }
         vectorService.InitVec1GlobalTensor(mm1ResGm, vec1ResGm, actualSeqLengthsQGm,
                                            actualSeqLengthsKVGm, lseMaxFdGm, lseSumFdGm, topKGm);
@@ -516,15 +556,17 @@ __aicore__ inline void FusedSparseAttentionOverlapMla<FusedSparseAttentionOverla
         matmulService.InitPageAttentionInfo(kvMergeGm_, blockTableGm, topKGm,
                                             constInfo.kvCacheBlockSize, constInfo.maxBlockNumPerBatch);
     }
-    // Must run after InitParams.
     if (pipe != nullptr) {
         InitBuffers();
+    }
+    // Serialize helper launches before clearing cross-core handshake state.
+    if (numHelpers_ > 0U) {
+        AscendC::SyncAll<false>();
     }
 }
 
 template <typename FusedSparseAttentionOverlapTraits> __aicore__ inline void FusedSparseAttentionOverlapMla<FusedSparseAttentionOverlapTraits>::InitCalcParamsEach()
 {
-    // Calculate the total number of base blocks.
     uint32_t totalBaseNum = 0;
 	uint32_t s1GBaseSize = constInfo.gSize;
 	uint32_t actBatchS2 = 1;
@@ -539,21 +581,56 @@ template <typename FusedSparseAttentionOverlapTraits> __aicore__ inline void Fus
         totalBaseNum += actBatchS1*actBatchS2 ;
     }
     uint32_t avgBaseNum = 1;
+    uint32_t kvSplitNum = 1;
     if (totalBaseNum > coreNum) {
         avgBaseNum = (totalBaseNum + coreNum - 1) / coreNum;
     }else {
         usedCoreNum = totalBaseNum;
+        if constexpr (FLASH_DECODE) {
+            uint32_t roomPerTask = (totalBaseNum > 0) ? (coreNum / totalBaseNum) : 1;
+            kvSplitNum = constInfo.splitKVNum;
+            if (kvSplitNum > roomPerTask) {
+                kvSplitNum = roomPerTask;
+            }
+            if (kvSplitNum < 1) {
+                kvSplitNum = 1;
+            }
+            usedCoreNum = totalBaseNum * kvSplitNum;
+        }
+    }
+    constInfo.splitKVNum = kvSplitNum;
+    // Enable helpers only when every active core has a dedicated idle core.
+    if (usedCoreNum < coreNum && coreNum - usedCoreNum >= usedCoreNum) {
+        numHelpers_ = usedCoreNum;
     }
     if(aiCoreIdx>=usedCoreNum){
-        return;
+        if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
+            uint32_t helperIdx = aiCoreIdx - usedCoreNum;
+            if (helperIdx >= numHelpers_) {
+                return;
+            }
+            isHelperAiCore_ = true;
+            helperTargetAiCoreIdx_ = helperIdx;
+            currCoreIdx = helperTargetAiCoreIdx_ / kvSplitNum;
+            helperPartIdx_ = 1;
+            helperPartCount_ = 2;
+        } else {
+            return;
+        }
+    } else {
+        currCoreIdx = aiCoreIdx / kvSplitNum;
+        if (aiCoreIdx < numHelpers_) {
+            helperPartIdx_ = 0;
+            helperPartCount_ = 2;
+        }
     }
-	// Calculate the base blocks assigned to the current core.
-	uint32_t accumBaseNum = 0;                       // Number of base blocks accumulated so far
+    constInfo.coreStartKVSplitPos = aiCoreIdx;
+	uint32_t accumBaseNum = 0;
     uint32_t targetBaseNum = 0;
     uint32_t lastValidBIdx = 0;
     uint32_t lastValidactBatchS1=0;
     bool setStart=false;
-	targetBaseNum = (currCoreIdx + 1) * avgBaseNum;  // Calculate the target workload for the current core
+	targetBaseNum = (currCoreIdx + 1) * avgBaseNum;
     uint32_t targetStartBaseNum = targetBaseNum-avgBaseNum;
     for (uint32_t bN2Idx = 0; bN2Idx < constInfo.batchSize * constInfo.kvHeadNum; bN2Idx++) { 
         uint32_t bIdx = bN2Idx / constInfo.kvHeadNum;
@@ -566,12 +643,11 @@ template <typename FusedSparseAttentionOverlapTraits> __aicore__ inline void Fus
                 setStart=true;
             }
             if (accumBaseNum >= targetBaseNum) {
-                // Update the end position in the current core partition.
                 constInfo.bN2End = bN2Idx;
                 constInfo.gS1End = s1GIdx;
                 constInfo.s2End = 0;
-                constInfo.coreStartKVSplitPos = 0;
-                if (aiCoreIdx != 0) {
+                constInfo.coreStartKVSplitPos = (kvSplitNum > 1) ? aiCoreIdx : 0;
+                if (currCoreIdx != 0) {
                     GetAxisStartIdx(constInfo.bN2Start, constInfo.gS1Start, 0);
                 }
                 return;
@@ -587,12 +663,11 @@ template <typename FusedSparseAttentionOverlapTraits> __aicore__ inline void Fus
         constInfo.gS1Start = lastValidactBatchS1-1;
     }
     if (accumBaseNum < targetBaseNum) {
-		// Update the end position in the final core partition.
 		constInfo.bN2End = lastValidBIdx;
         constInfo.gS1End = lastValidactBatchS1-1;
         constInfo.s2End = 0;
-        constInfo.coreStartKVSplitPos = 0;
-        if (aiCoreIdx != 0) {
+        constInfo.coreStartKVSplitPos = (kvSplitNum > 1) ? aiCoreIdx : 0;
+        if (currCoreIdx != 0) {
             GetAxisStartIdx(constInfo.bN2Start, constInfo.gS1Start, 0);
         }
         return;
@@ -709,11 +784,11 @@ __aicore__ inline void FusedSparseAttentionOverlapMla<FusedSparseAttentionOverla
     info.tensorBRopeOffset = tensorBRopeCoreOffset;
     info.attenOutOffset = tensorACoreOffset;
 
+
     uint64_t sInnerOffsetDataSize = info.s2Idx * constInfo.s2BaseSize;
     info.s2BatchOffset = s2BatchBaseOffset + sInnerOffsetDataSize;
 
     info.curActualSeqLenOri = tempLoopInfo.curActualSeqLenOri;
-    // Calculate the actual base-block size.
     if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
         if (tempLoopInfo.curActualSeqLen > sInnerOffsetDataSize) {
             info.actualSingleProcessSInnerSize = tempLoopInfo.curActualSeqLen - sInnerOffsetDataSize;
@@ -764,6 +839,11 @@ template <typename FusedSparseAttentionOverlapTraits> __aicore__ inline void Fus
 {
     if ASCEND_IS_AIV {
         vectorService.RunAllCoreSelectionUpdate();
+        if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
+            if (numHelpers_ > 0 && aiCoreIdx == 0 && GetSubBlockIdx() == 0) {
+                vectorService.ZeroHelperSyncArea();
+            }
+        }
     }
     SyncAll<false>();
 
@@ -781,7 +861,38 @@ template <typename FusedSparseAttentionOverlapTraits> __aicore__ inline void Fus
         } else {
             matmulService.FreeEventID();
         }
+    } else if (isHelperAiCore_) {
+        // Helpers only move MergeKv data and skip the main attention pipeline.
+        if ASCEND_IS_AIV {
+            vectorService.AllocEventID();
+            vectorService.InitSoftmaxDefaultBuffer();
+            ProcessBalance();
+            vectorService.FreeEventID();
+        }
     }
+
+    if constexpr (FLASH_DECODE) {
+        if (constInfo.splitKVNum > 1) {
+            SyncAll<false>();
+            if ASCEND_IS_AIV {
+                ReduceSplitKVOut();
+            }
+        }
+    }
+}
+
+template <typename FusedSparseAttentionOverlapTraits> __aicore__ inline void FusedSparseAttentionOverlapMla<FusedSparseAttentionOverlapTraits>::ReduceSplitKVOut()
+{
+    uint32_t part = constInfo.splitKVNum;
+    if (aiCoreIdx >= usedCoreNum || (aiCoreIdx % part) != 0) {
+        return;
+    }
+    uint32_t mCount = constInfo.mBaseSize;
+    uint32_t remainedGS1Size = tempLoopInfo.actS1Size * constInfo.gSize - tempLoopInfo.gS1Idx;
+    if (remainedGS1Size <= constInfo.mBaseSize && remainedGS1Size > 0) {
+        mCount = tempLoopInfo.mBasicSizeTail;
+    }
+    vectorService.ReduceSplitKV(aiCoreIdx, part, mCount, tensorACoreOffset);
 }
 
 template <typename FusedSparseAttentionOverlapTraits>
@@ -795,6 +906,10 @@ __aicore__ inline void FusedSparseAttentionOverlapMla<FusedSparseAttentionOverla
 template <typename FusedSparseAttentionOverlapTraits> __aicore__ inline void FusedSparseAttentionOverlapMla<FusedSparseAttentionOverlapTraits>::ProcessBalance()
 {
     RunInfo extraInfo[FUSED_SPARSE_ATTENTION_OVERLAP_PRELOAD_TASK_CACHE_SIZE];
+    // Explicitly initialize pipeline slots because lookahead reads adjacent entries.
+    for (uint32_t i = 0; i < FUSED_SPARSE_ATTENTION_OVERLAP_PRELOAD_TASK_CACHE_SIZE; i++) {
+        extraInfo[i].isValid = false;
+    }
     uint32_t gloop = 0;
     int gS1LoopEnd;
     bool globalLoopStart = true;
@@ -809,7 +924,7 @@ template <typename FusedSparseAttentionOverlapTraits> __aicore__ inline void Fus
     }
     for (uint32_t bN2LoopIdx = constInfo.bN2Start; bN2LoopIdx <= constInfo.bN2End; bN2LoopIdx++) {
         GetBN2Idx(bN2LoopIdx, tempLoopInfo.bIdx, tempLoopInfo.n2Idx);
-        GetActualSeqLen(tempLoopInfo.bIdx); // Obtain actualSeqLength and actualSeqLengthKV
+        GetActualSeqLen(tempLoopInfo.bIdx);
         GetPreNextTokensLeftUp();
         if (tempLoopInfo.actS1Size == 0) {
             continue;
@@ -818,27 +933,41 @@ template <typename FusedSparseAttentionOverlapTraits> __aicore__ inline void Fus
         gS1LoopEnd = (bN2LoopIdx == constInfo.bN2End) ? constInfo.gS1End : gS1SplitNum - 1;
         for (uint32_t gS1LoopIdx = constInfo.gS1Start; gS1LoopIdx <= gS1LoopEnd; gS1LoopIdx++) {
             tempLoopInfo.gS1Idx = gS1LoopIdx * constInfo.mBaseSize;
-            GetSparseActualSeqLen(tempLoopInfo.bIdx, gS1LoopIdx, tempLoopInfo.n2Idx); // actualSeqLengthKV after TopK sparsification
+            GetSparseActualSeqLen(tempLoopInfo.bIdx, gS1LoopIdx, tempLoopInfo.n2Idx);
             UpdateInnerLoopCond();
 
-            if (tempLoopInfo.curActSeqLenIsZero) {
+            if (tempLoopInfo.curActSeqLenIsZero && !isHelperAiCore_) {
                 DealActSeqLenIsZero(tempLoopInfo.bIdx, gS1LoopIdx, tempLoopInfo.n2Idx);
             }
             int s2SplitNum =
-                (tempLoopInfo.curActualSeqLen + constInfo.s2BaseSize - 1) / constInfo.s2BaseSize; // Number of S2 partitions
+                (tempLoopInfo.curActualSeqLen + constInfo.s2BaseSize - 1) / constInfo.s2BaseSize;
             bool isEnd = (bN2LoopIdx == constInfo.bN2End) && (gS1LoopIdx == constInfo.gS1End);
             tempLoopInfo.s2LoopTimes = s2SplitNum;
-            // Enable after updating core partitioning.
-            // Whether the current S2 is partitioned determines whether the output is written to attenOut.
+            if constexpr (FLASH_DECODE) {
+                if (constInfo.splitKVNum > 1) {
+                    uint32_t part = constInfo.splitKVNum;
+                    uint32_t perPart = ((uint32_t)s2SplitNum + part - 1) / part;
+                    uint32_t begin = (aiCoreIdx % part) * perPart;
+                    uint32_t end = begin + perPart;
+                    if (begin >= (uint32_t)s2SplitNum) {
+                        begin = (uint32_t)s2SplitNum;
+                        end = begin + 1;
+                    } else if (end > (uint32_t)s2SplitNum) {
+                        end = (uint32_t)s2SplitNum;
+                    }
+                    constInfo.s2Start = begin;
+                    tempLoopInfo.s2LoopTimes = end;
+                }
+            }
             tempLoopInfo.tndIsS2SplitCore =
                 ((constInfo.s2Start == 0) && (tempLoopInfo.s2LoopTimes == s2SplitNum)) ? false : true;
-            tempLoopInfo.tndCoreStartKVSplitPos = globalLoopStart ? constInfo.coreStartKVSplitPos : 0;
+            tempLoopInfo.tndCoreStartKVSplitPos =
+                (globalLoopStart || constInfo.splitKVNum > 1) ? constInfo.coreStartKVSplitPos : 0;
             uint32_t extraLoop = isEnd ? 2 : 0;
 
             uint32_t curTopKIdx = 0;
             uint64_t curOffsetInSparseBlock = 0;
             for (int s2LoopIdx = constInfo.s2Start; s2LoopIdx < (tempLoopInfo.s2LoopTimes + extraLoop); s2LoopIdx++) {
-                // The initial PreloadPipeline loop value must be PRELOAD_NUM.
                 PreloadPipeline(gloop, constInfo.s2Start, s2LoopIdx, extraInfo, curTopKIdx, curOffsetInSparseBlock);
                 ++gloop;
             }
@@ -848,12 +977,14 @@ template <typename FusedSparseAttentionOverlapTraits> __aicore__ inline void Fus
         constInfo.gS1Start = 0;
     }
     if ASCEND_IS_AIV {
-        CrossCoreWaitFlag(constInfo.syncC2V1);
-        if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
-            CrossCoreWaitFlag(3);
-            CrossCoreWaitFlag(3);
-            CrossCoreWaitFlag(3);
-            CrossCoreWaitFlag(3);
+        if (!isHelperAiCore_) {
+            CrossCoreWaitFlag(constInfo.syncC2V1);
+            if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
+                CrossCoreWaitFlag(3);
+                CrossCoreWaitFlag(3);
+                CrossCoreWaitFlag(3);
+                CrossCoreWaitFlag(3);
+            }
         }
     }
 }
@@ -863,9 +994,9 @@ __aicore__ inline void
 FusedSparseAttentionOverlapMla<FusedSparseAttentionOverlapTraits>::PreloadPipeline(uint32_t loop, uint64_t s2Start, uint64_t s2LoopIdx,
                                                                RunInfo extraInfo[FUSED_SPARSE_ATTENTION_OVERLAP_PRELOAD_TASK_CACHE_SIZE], uint32_t &curTopKIdx, uint64_t &curOffsetInSparseBlock)
 {
-    RunInfo &extraInfo0 = extraInfo[loop % FUSED_SPARSE_ATTENTION_OVERLAP_PRELOAD_TASK_CACHE_SIZE];         // Current task
-    RunInfo &extraInfo2 = extraInfo[(loop + 2) % FUSED_SPARSE_ATTENTION_OVERLAP_PRELOAD_TASK_CACHE_SIZE]; // Previous task
-    RunInfo &extraInfo1 = extraInfo[(loop + 1) % FUSED_SPARSE_ATTENTION_OVERLAP_PRELOAD_TASK_CACHE_SIZE]; // Task before the previous one
+    RunInfo &extraInfo0 = extraInfo[loop % FUSED_SPARSE_ATTENTION_OVERLAP_PRELOAD_TASK_CACHE_SIZE];
+    RunInfo &extraInfo2 = extraInfo[(loop + 2) % FUSED_SPARSE_ATTENTION_OVERLAP_PRELOAD_TASK_CACHE_SIZE];
+    RunInfo &extraInfo1 = extraInfo[(loop + 1) % FUSED_SPARSE_ATTENTION_OVERLAP_PRELOAD_TASK_CACHE_SIZE];
 
     CalcParams(loop, s2Start, s2LoopIdx, extraInfo0);
     CalcSinnerTopKBegin(extraInfo0, curTopKIdx, curOffsetInSparseBlock);
@@ -878,18 +1009,38 @@ FusedSparseAttentionOverlapMla<FusedSparseAttentionOverlapTraits>::PreloadPipeli
             ComputeMm1(extraInfo0);
         } else {
             if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
-                CrossCoreWaitFlag(3);
-                vectorService.MergeKv(extraInfo0);
-                CrossCoreSetFlag<ConstInfo::FUSED_SPARSE_ATTENTION_OVERLAP_SYNC_MODE2, PIPE_MTE3>(constInfo.syncV0C1);
-                if (vectorService.IsSelectionUpdateEnabled()) {
-                    vectorService.CopyOutSelectionUpdateFromKvMerge(extraInfo0);
+                if (isHelperAiCore_) {
+                    // Wait for credit, copy one MergeKv partition, then signal completion.
+                    vectorService.WaitHelperCredit(extraInfo0.loop);
+                    vectorService.MergeKv(extraInfo0);
+                    vectorService.SignalMergeDone(extraInfo0.loop);
+                    if (vectorService.IsSelectionUpdateEnabled()) {
+                        vectorService.CopyOutSelectionUpdateFromKvMerge(extraInfo0);
+                    }
+                } else {
+                    CrossCoreWaitFlag(3);
+                    if (helperPartCount_ > 1) {
+                        vectorService.PublishHelperCredit(extraInfo0.loop);
+                    }
+                    vectorService.MergeKv(extraInfo0);
+                    if (helperPartCount_ > 1) {
+                        // Merge helper counts before publishing the slot to Vec1.
+                        vectorService.WaitMergeDone(extraInfo0.loop);
+                        vectorService.FixValidSize(extraInfo0);
+                    }
+                    CrossCoreSetFlag<ConstInfo::FUSED_SPARSE_ATTENTION_OVERLAP_SYNC_MODE2, PIPE_MTE3>(constInfo.syncV0C1);
+                    if (vectorService.IsSelectionUpdateEnabled()) {
+                        vectorService.CopyOutSelectionUpdateFromKvMerge(extraInfo0);
+                    }
                 }
             }
         }
     }
     if (extraInfo2.isValid) {
         if ASCEND_IS_AIV {
-            vectorService.ProcessVec1L(extraInfo2);
+            if (!isHelperAiCore_) {
+                vectorService.ProcessVec1L(extraInfo2);
+            }
         }
         if ASCEND_IS_AIC {
             ComputeMm2(extraInfo2);
@@ -900,7 +1051,9 @@ FusedSparseAttentionOverlapMla<FusedSparseAttentionOverlapTraits>::PreloadPipeli
     }
     if (extraInfo1.isValid) {
         if ASCEND_IS_AIV {
-            vectorService.ProcessVec2L(extraInfo1);
+            if (!isHelperAiCore_) {
+                vectorService.ProcessVec2L(extraInfo1);
+            }
         }
         extraInfo1.isValid = false;
     }
@@ -942,7 +1095,7 @@ __aicore__ inline void FusedSparseAttentionOverlapMla<FusedSparseAttentionOverla
     constInfo.gS1Start = s1GEndPrev;
     
     constInfo.s2Start = 0;
-    if (s1GEndPrev >= s1GPrevBaseNum - 1) { // The previous core completed S1G
+    if (s1GEndPrev >= s1GPrevBaseNum - 1) {
         constInfo.gS1Start = 0;
         constInfo.bN2Start++;
     } else {

@@ -1,3 +1,5 @@
+"""DeepSeek sparse attention backends and kernel runtime interfaces."""
+
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -11,6 +13,7 @@ from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -36,6 +39,7 @@ from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeShapes,
     get_or_register_attention_buffer,
     is_pcp_enabled,
     maybe_save_kv_layer_to_connector,
@@ -317,6 +321,27 @@ class AscendDSABackend(AttentionBackend):
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
         return num_blocks, block_size, num_kv_heads, head_size
+
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: AttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        """Return page components as byte shapes [B,H,N,C] (RFC vLLM#65650).
+
+        V4 stores NHD components regardless of the generic layout selection.
+        Its compressed-token count comes from the spec, not the manager's
+        raw-token kernel block size. The combined indexer view is an alias,
+        rather than a third sequential component.
+        """
+        prefix = (num_blocks, spec.num_kv_heads, spec.num_states)
+        shapes = [(*prefix, spec.head_size * get_dtype_size(spec.dtype))]
+        if getattr(spec, "scale_dim", 0):
+            shapes.append((*prefix, spec.scale_dim * get_dtype_size(spec.scale_dtype)))
+        return tuple(shapes)
 
     @staticmethod
     def get_scale_shape(num_blocks: int, block_size: int, scale_size: int) -> tuple[int, ...]:
@@ -609,8 +634,22 @@ def build_dspark_swa_indices(
         slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
     slot_ids = slot_ids.where(col_mask, torch.full_like(slot_ids, -1))
 
-    per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
-    per_token_lens = torch.repeat_interleave(visible_lens, query_lens, dim=0, output_size=num_decode_tokens)
+    repeats = query_lens
+    active_rows = None
+    if (indices_output is not None or buffer is not None) and num_decode_tokens is not None and query_lens.numel() > 0:
+        # Match the fixed graph row count without reading device lengths on CPU.
+        active_rows = query_start_loc[-1]
+        repeats = query_lens.clone()
+        repeats[-1] += num_decode_tokens - active_rows
+
+    per_token_slots = torch.repeat_interleave(slot_ids, repeats, dim=0, output_size=num_decode_tokens).unsqueeze(1)
+    per_token_lens = torch.repeat_interleave(visible_lens, repeats, dim=0, output_size=num_decode_tokens)
+    if active_rows is not None:
+        valid_rows = (
+            torch.arange(num_decode_tokens, device=query_start_loc.device, dtype=query_start_loc.dtype) < active_rows
+        )
+        per_token_slots = per_token_slots.masked_fill(~valid_rows[:, None, None], -1)
+        per_token_lens = per_token_lens.masked_fill(~valid_rows, 0)
 
     if indices_output is not None:
         if indices_output.shape != per_token_slots.shape:

@@ -1,0 +1,4 @@
+pr: 22594
+entries:
+  - category: documentation
+    text: Added an experimental Hy4 FP8 deployment guide for Ascend 950DT products, covering single-node and two-node serving, four-node Prefill/Decode separation, and evaluation and troubleshooting examples.

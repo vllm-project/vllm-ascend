@@ -127,6 +127,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
         "k2q_csr"
+        "hisparse_resolve_residency"
         "mla_preprocess"
         "fused_sparse_attention_overlap"
         "fused_lightning_indexer_manage"
@@ -178,6 +179,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
         "k2q_csr"
+        "hisparse_resolve_residency"
         "mla_preprocess"
         "fused_sparse_attention_overlap"
         "fused_lightning_indexer_manage"
@@ -185,6 +187,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "fused_scatter_copy_sparse_flash_attention"
         "top_k_per_row"
     )
+
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
 elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
@@ -220,7 +223,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
         "k2q_csr"
-        "hi_sparse_resolve_residency"
+        "hisparse_resolve_residency"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")

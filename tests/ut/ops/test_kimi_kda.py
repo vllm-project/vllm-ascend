@@ -21,6 +21,33 @@ from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+from vllm_ascend.utils import vllm_version_is
+
+
+def test_fused_bfg_head_parallel_keeps_unpadded_checkpoint_layout():
+    with (
+        patch("vllm_ascend.ops.kimi_kda.get_kda_parallel_rank", return_value=0),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=0),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=2),
+    ):
+        linear = _KDAFusedBFGLinear(
+            hidden_size=6,
+            num_heads=4,
+            head_dim=2,
+            tp_size=2,
+            quant_config=None,
+            prefix="model.layers.0.self_attn.in_proj_gfab",
+            head_parallel=True,
+        )
+    assert tuple(linear.weight.shape) == (10, 6)
+    if not vllm_version_is("0.33.0"):
+        # The inherited loader queries this property even on the custom
+        # head-parallel path that bypasses the merged-layer constructor.
+        assert linear._checkpoint_output_sizes == [4, 8, 8]
+        assert linear.padding_fill_params() == []
+        linear.weight.data.fill_(3)
+        linear._zero_output_padding(linear.weight)
+        torch.testing.assert_close(linear.weight, torch.full_like(linear.weight, 3))
 
 
 class _RecordingLinear(nn.Module):

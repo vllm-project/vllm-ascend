@@ -449,6 +449,7 @@ def reference(q, k, v, raw_g, raw_beta, a_log, bias, lower_bound, state, starts,
     )
     output = torch.zeros_like(v)
     final = state.clone()
+    norm_epsilon = 1e-6
     records = {}
     heads, value_dim, key_dim = state.shape[1:]
     for row, block in enumerate(blocks):
@@ -459,10 +460,10 @@ def reference(q, k, v, raw_g, raw_beta, a_log, bias, lower_bound, state, starts,
         for position, token in enumerate(range(starts[row], starts[row + 1])):
             key = k[0, token]
             key_norm = key.square().sum(-1, keepdim=True)
-            key = key * torch.rsqrt(torch.where(key_norm > 0, key_norm, 1.0))
+            key = key * torch.rsqrt(key_norm + norm_epsilon)
             query = q[0, token]
             query_norm = query.square().sum(-1, keepdim=True)
-            query = query * torch.rsqrt(torch.where(query_norm > 0, query_norm, 1.0)) * key_dim**-0.5
+            query = query * torch.rsqrt(query_norm + norm_epsilon) * key_dim**-0.5
             gate_input = raw_g[0, token] + bias.view(heads, key_dim)
             a = a_log.view(heads, 1).exp()
             if lower_bound is None:
