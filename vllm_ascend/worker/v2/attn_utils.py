@@ -66,7 +66,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_cache_spec,
     mxfp_cache_views_for_spec,
 )
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionMetadataBuilder, AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
@@ -613,6 +613,8 @@ def build_attn_metadata(
                 else:
                     if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
                         attn_metadata_extra_kwargs["num_actual_reqs"] = num_actual_reqs
+                    elif type(attn_metadata_builder) is AscendAttentionMetadataBuilder:
+                        attn_metadata_extra_kwargs["full_graph_mode"] = full_graph_mode
                     metadata = attn_group.build_metadata(
                         common_prefix_len=0,
                         common_attn_metadata=variant_common,

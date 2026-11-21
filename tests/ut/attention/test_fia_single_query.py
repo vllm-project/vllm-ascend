@@ -6,6 +6,7 @@ import ast
 import copy
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,6 +21,8 @@ from vllm_ascend.attention.attention_v1 import (
     FIAParamProvider,
 )
 from vllm_ascend.attention.fia_single_query import (
+    _MAX_INDEX_CACHE_ENTRIES,
+    MAX_TND_FIA_BATCH,
     is_all_single_query,
     prepare_fia_layout,
     prepare_graph_fia_layout,
@@ -424,9 +427,9 @@ def test_mixed_spec_verify_short_extend_and_long_prefill_keeps_decode_slice_spar
         assert fia_calls[1]["atten_mask"] is not None
         assert fia_calls[1]["sparse_mode"] == 3
 
-        expected = _reference_paged_causal_attention(
-            query, k_cache, v_cache, block_table, [3, 5, 15], [39, 18, 25]
-        ).to(torch.bfloat16)
+        expected = _reference_paged_causal_attention(query, k_cache, v_cache, block_table, [3, 5, 15], [39, 18, 25]).to(
+            torch.bfloat16
+        )
         assert torch.equal(out, expected)
 
         # Also verify non-split eager batch [spec_verify width=3 (False), short_extend width=2 (True)] (num_prefills=0)
@@ -729,14 +732,226 @@ def test_device_index_cache_reuses_indices_tensor_across_steps():
     _, kv1, _ = prepare_fia_layout(meta, [3, 6], [40, 50], block_table, index_cache)
     assert kv1 == [38, 39, 40, 48, 49, 50]
     assert len(index_cache) == 1
-    cached_indices = next(iter(index_cache.values()))
+    cached_indices, cached_stream = next(iter(index_cache.values()))
+    assert cached_stream is None
 
     _, kv2, _ = prepare_fia_layout(meta, [3, 6], [41, 51], block_table, index_cache)
     assert kv2 == [39, 40, 41, 49, 50, 51]
     assert len(index_cache) == 1
-    assert next(iter(index_cache.values())) is cached_indices
+    assert next(iter(index_cache.values()))[0] is cached_indices
 
-    graph_ends, graph_kv, _ = prepare_graph_fia_layout([3, 6], [42, 52], block_table, 6, 6, index_cache)
+    graph_out = prepare_graph_fia_layout([3, 6], [42, 52], block_table, 6, 6, index_cache)
+    assert graph_out is not None
+    graph_ends, graph_kv, _ = graph_out
     assert graph_ends == [1, 2, 3, 4, 5, 6]
     assert graph_kv == [40, 41, 42, 50, 51, 52]
-    assert next(iter(index_cache.values())) is cached_indices
+    assert next(iter(index_cache.values()))[0] is cached_indices
+
+
+def test_tnd_batch_4096_boundary_eager_and_graph():
+    # 1024 requests x 4 tokens = 4096 unfolded TND entries (at limit -> unfolds).
+    q_ends_4096 = [4 * (i + 1) for i in range(1024)]
+    kv_lens_4096 = [32 + i for i in range(1024)]
+    table_1025 = torch.arange(2050, dtype=torch.int32).view(1025, 2)
+
+    meta_4096 = SimpleNamespace(
+        num_actual_tokens=4096,
+        fia_max_expand_width=4,
+        fia_single_query=None,
+    )
+    ends_ok, kv_ok, tbl_ok = prepare_fia_layout(meta_4096, q_ends_4096, kv_lens_4096, table_1025[:1024])
+    assert len(ends_ok) == MAX_TND_FIA_BATCH
+    assert is_all_single_query(ends_ok, 4096)
+    assert tbl_ok is not None and tbl_ok.shape == (4096, 2)
+
+    # Adding 1 more single-token request -> 4097 unfolded entries (> 4096 -> falls back to unexpanded 1025 rows).
+    q_ends_4097 = [*q_ends_4096, 4097]
+    kv_lens_4097 = [*kv_lens_4096, 20]
+    meta_4097 = SimpleNamespace(
+        num_actual_tokens=4097,
+        fia_max_expand_width=4,
+        fia_single_query=None,
+    )
+    ends_fb, kv_fb, tbl_fb = prepare_fia_layout(meta_4097, q_ends_4097, kv_lens_4097, table_1025)
+    assert ends_fb == q_ends_4097
+    assert kv_fb == kv_lens_4097
+    assert tbl_fb is table_1025
+    assert not is_all_single_query(ends_fb, 4097)
+
+    # Graph layout: 4096 succeeds, 4097 returns None so full_graph_fia stays on masked sparse_mode=3.
+    graph_ok = prepare_graph_fia_layout(q_ends_4096, kv_lens_4096, table_1025[:1024], 4096, 4096)
+    assert graph_ok is not None and len(graph_ok[0]) == 4096
+    assert prepare_graph_fia_layout(q_ends_4097, kv_lens_4097, table_1025, 4097, 4097) is None
+
+
+def test_pcp_dcp_batch_invariant_cross_page_and_full_graph_mode_guards():
+    a5_profile = get_hardware_profile(AscendDeviceType.A5)
+    a3_profile = get_hardware_profile(AscendDeviceType.A3)
+    a2_profile = get_hardware_profile(AscendDeviceType.A2)
+    spec = FullAttentionSpec(block_size=16, num_kv_heads=2, head_size=32, dtype=torch.bfloat16)
+
+    with (
+        patch("vllm_ascend.attention.attention_v1.get_current_hardware_profile", return_value=a5_profile),
+        patch("vllm_ascend.attention.attention_v1.envs_vllm.VLLM_BATCH_INVARIANT", False),
+    ):
+        pcp_builder = AscendAttentionMetadataBuilder(
+            spec, ["model.layers.0.self_attn.attn"], _make_vllm_config(pcp_size=2), torch.device("cpu")
+        )
+        dcp_builder = AscendAttentionMetadataBuilder(
+            spec, ["model.layers.0.self_attn.attn"], _make_vllm_config(dcp_size=2), torch.device("cpu")
+        )
+        full_only_builder = AscendAttentionMetadataBuilder(
+            spec,
+            ["model.layers.0.self_attn.attn"],
+            _make_vllm_config(cudagraph_mode=CUDAGraphMode.FULL),
+            torch.device("cpu"),
+        )
+        assert pcp_builder.enable_single_query_spec_verify is False
+        assert dcp_builder.enable_single_query_spec_verify is False
+        assert full_only_builder.enable_single_query_spec_verify is False
+
+    # A2 and A3 enable single-query spec verify when VLLM_BATCH_INVARIANT=1.
+    for profile in (a2_profile, a3_profile):
+        with (
+            patch("vllm_ascend.attention.attention_v1.get_current_hardware_profile", return_value=profile),
+            patch("vllm_ascend.attention.attention_v1.envs_vllm.VLLM_BATCH_INVARIANT", True),
+        ):
+            inv_builder = AscendAttentionMetadataBuilder(
+                spec, ["model.layers.0.self_attn.attn"], _make_vllm_config(), torch.device("cpu")
+            )
+            assert inv_builder.enable_single_query_spec_verify is True
+
+    # FULL_AND_PIECEWISE with full_graph_mode=False skips prepare_graph_fia_layout; cross-page KV lengths
+    # (31, 32, 33 across block_size=16 boundary 32) and multi-request 1-token PrefillCacheHit match reference.
+    k_cache = torch.randn(8, 16, 2, 32, dtype=torch.bfloat16)
+    v_cache = torch.randn(8, 16, 2, 32, dtype=torch.bfloat16)
+    cfg_fp = _make_vllm_config(num_speculative_tokens=2, cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE)
+    impl = _make_backend_impl(cfg_fp, key_cache=k_cache, value_cache=v_cache)
+
+    with (
+        patch("vllm_ascend.attention.attention_v1.get_current_hardware_profile", return_value=a5_profile),
+        patch("vllm_ascend.attention.attention_v1.envs_vllm.VLLM_BATCH_INVARIANT", False),
+        patch(
+            "vllm_ascend.ascend_forward_context.get_forward_context",
+            return_value=SimpleNamespace(capturing=False, is_draft_model=False),
+        ),
+    ):
+        builder = AscendAttentionMetadataBuilder(spec, ["model.layers.0.self_attn.attn"], cfg_fp, torch.device("cpu"))
+        builder.attn_mask_builder = MagicMock()
+        builder.attn_mask_builder.get_attention_mask.return_value = torch.ones((16, 16), dtype=torch.bool)
+
+        cross_page_table = torch.tensor([[1, 3, 5], [2, 4, 6]], dtype=torch.int32)
+        common_cross = _make_common_metadata(
+            query_ends=[3, 4],
+            seq_lens=[33, 18],
+            block_table=cross_page_table,
+            num_reqs=2,
+            num_actual_tokens=4,
+            num_input_tokens=4,
+            max_query_len=3,
+            is_prefilling=[False, False],
+            attn_state=AscendAttentionState.ChunkedPrefill,
+        )
+        meta_piecewise = builder.build(0, common_cross, full_graph_mode=False)
+        assert meta_piecewise.fia_single_query_graph is None
+        meta_full = builder.build(0, common_cross, full_graph_mode=True)
+        assert meta_full.fia_single_query_graph is not None
+
+        q_cross = torch.randn(4, 2, 32, dtype=torch.bfloat16)
+        with patch(
+            "vllm_ascend.attention.attention_v1.DeviceOperator.npu_fused_infer_attention_score",
+            side_effect=lambda **kw: (
+                _reference_paged_causal_attention(
+                    kw["query"],
+                    k_cache,
+                    v_cache,
+                    kw["block_table"],
+                    kw["actual_seq_lengths"],
+                    kw["actual_seq_lengths_kv"],
+                )
+                .to(torch.bfloat16)
+                .view(-1),
+                None,
+            ),
+        ) as mock_fia:
+            out_cross = impl.forward_fused_infer_attention(
+                q_cross, k_cache, v_cache, meta_piecewise, torch.empty_like(q_cross), kv_cache=(k_cache, v_cache)
+            )
+        assert mock_fia.call_args.kwargs["actual_seq_lengths"] == [1, 2, 3, 4]
+        assert mock_fia.call_args.kwargs["actual_seq_lengths_kv"] == [31, 32, 33, 18]
+        assert mock_fia.call_args.kwargs["sparse_mode"] == 0
+        ref_cross = _reference_paged_causal_attention(q_cross, k_cache, v_cache, cross_page_table, [3, 4], [33, 18]).to(
+            torch.bfloat16
+        )
+        assert torch.equal(out_cross, ref_cross)
+
+        # Multi-request all-1-token PrefillCacheHit under target spec-verify enabled skips mask safely with 1 query/row.
+        common_1tok = _make_common_metadata(
+            query_ends=[1, 2],
+            seq_lens=[17, 33],
+            block_table=cross_page_table,
+            num_reqs=2,
+            num_actual_tokens=2,
+            num_input_tokens=2,
+            max_query_len=1,
+            is_prefilling=[False, False],
+            attn_state=AscendAttentionState.PrefillCacheHit,
+        )
+        meta_1tok = builder.build(0, common_1tok, full_graph_mode=False)
+        q_1tok = torch.randn(2, 2, 32, dtype=torch.bfloat16)
+        seen_1tok: list[dict] = []
+        with patch(
+            "vllm_ascend.attention.attention_v1.DeviceOperator.npu_fused_infer_attention_score",
+            side_effect=lambda **kw: (seen_1tok.append(kw), (torch.zeros_like(kw["query"]), None))[1],
+        ):
+            impl.forward_fused_infer_attention(
+                q_1tok, k_cache, v_cache, meta_1tok, torch.empty_like(q_1tok), kv_cache=(k_cache, v_cache)
+            )
+        assert seen_1tok[0]["actual_seq_lengths"] == [1, 2]
+        assert seen_1tok[0]["actual_seq_lengths_kv"] == [17, 33]
+        assert seen_1tok[0]["atten_mask"] is None
+        assert seen_1tok[0]["sparse_mode"] == 0
+
+
+def test_device_index_cache_stream_isolation_and_eviction_records_stream():
+    block_table = torch.arange(600, dtype=torch.int32).view(300, 2)
+    index_cache: dict = {}
+
+    stream_a = SimpleNamespace(npu_stream=101)
+    stream_b = SimpleNamespace(npu_stream=202)
+    recorded_streams: list[Any] = []
+
+    class _TrackedIndices:
+        def __init__(self, tensor: torch.Tensor):
+            self.tensor = tensor
+
+        def record_stream(self, stream: Any) -> None:
+            recorded_streams.append(stream)
+
+    # Populate 256 distinct non-identity row patterns on stream_a, then trigger 257th insert on stream_b.
+    with patch(
+        "vllm_ascend.attention.fia_single_query._current_device_stream",
+        return_value=(stream_a, 101),
+    ):
+        for i in range(_MAX_INDEX_CACHE_ENTRIES):
+            num_tokens = i + 2
+            q_ends = [*range(1, i + 1), i + 2]
+            kv_lens = [10] * (i + 1)
+            meta = SimpleNamespace(num_actual_tokens=num_tokens, fia_max_expand_width=3, fia_single_query=None)
+            prepare_fia_layout(meta, q_ends, kv_lens, block_table, index_cache)
+            if i == 0:
+                first_key = next(iter(index_cache.keys()))
+                first_indices, first_stream = index_cache[first_key]
+                index_cache[first_key] = (_TrackedIndices(first_indices), first_stream)
+
+    assert len(index_cache) == _MAX_INDEX_CACHE_ENTRIES
+    # Same rows on stream_b misses stream_a's key, evicts entry 0, and calls record_stream(stream_a).
+    with patch(
+        "vllm_ascend.attention.fia_single_query._current_device_stream",
+        return_value=(stream_b, 202),
+    ):
+        meta_b = SimpleNamespace(num_actual_tokens=2, fia_max_expand_width=3, fia_single_query=None)
+        prepare_fia_layout(meta_b, [2], [10], block_table, index_cache)
+
+    assert len(index_cache) == _MAX_INDEX_CACHE_ENTRIES
+    assert recorded_streams == [stream_a]
