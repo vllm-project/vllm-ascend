@@ -47,6 +47,10 @@ class DynamicMXQuantScaleAlg(IntEnum):
     CEIL = 1
 
 
+_FP8_DYNAMIC_MX_QUANT_DTYPES = (
+    torch.float8_e4m3fn,
+    torch.float8_e5m2,
+)
 _CEIL_MX_SCALE_ARCHITECTURE_PREFIXES = (
     "MiniMaxM3",
     "Qwen3_5",
@@ -60,18 +64,48 @@ _CEIL_MX_SCALE_MODEL_TYPES = frozenset(
         "qwen3_5_moe_text",
     }
 )
+_MC2_CEIL_MX_SCALE_ARCHITECTURE_PREFIXES = ("MiniMaxM3",)
+_MC2_CEIL_MX_SCALE_MODEL_TYPES = frozenset({"minimax_m3"})
 
 
-def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
-    """Select the MX scale algorithm used by DynamicMxQuantV3.
+def _matches_model_family(
+    vllm_config,
+    architecture_prefixes: tuple[str, ...],
+    model_types: frozenset[str],
+) -> bool:
+    model_config = vllm_config.model_config
+    architectures = getattr(model_config, "architectures", None) or ()
+    if isinstance(architectures, str):
+        architectures = (architectures,)
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    model_type = getattr(hf_text_config, "model_type", None)
+    return (
+        any(
+            isinstance(architecture, str) and architecture.startswith(architecture_prefixes)
+            for architecture in architectures
+        )
+        or model_type in model_types
+    )
+
+
+def get_dynamic_mx_quant_scale_alg(
+    vllm_config=None,
+    *,
+    dst_type: torch.dtype | int = torch.float8_e4m3fn,
+) -> int:
+    """Select the MX scale algorithm used by DynamicMxQuantV3 for FP8 targets.
 
     ``scale_alg=0`` derives a shared exponent directly from the block's
     maximum absolute value, which clamps values in ``[448 * 2^k, 512 * 2^k)``
     to the FP8 E4M3 finite ceiling. ``scale_alg=1`` first maps that maximum to
     the destination FP8 range, then rounds the E8M0 scale exponent up to avoid
     quantization overflow during block-FP8-to-MXFP8 weight requantization and
-    dynamic activation quantization.
+    FP8 dynamic activation quantization. Non-FP8 destination formats (such as
+    FP4 E2M1, which only accepts ``scale_alg`` in ``{0, 2}``) keep ``0``.
     """
+    if dst_type not in _FP8_DYNAMIC_MX_QUANT_DTYPES:
+        return DynamicMXQuantScaleAlg.MAX_EXPONENT
+
     if not get_current_hardware_profile().supports(HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE):
         return DynamicMXQuantScaleAlg.MAX_EXPONENT
 
@@ -87,18 +121,35 @@ def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
 
         vllm_config = get_current_vllm_config()
 
-    model_config = vllm_config.model_config
-    architectures = getattr(model_config, "architectures", None) or ()
-    if isinstance(architectures, str):
-        architectures = (architectures,)
-    hf_text_config = getattr(model_config, "hf_text_config", None)
-    model_type = getattr(hf_text_config, "model_type", None)
-    if (
-        any(
-            isinstance(architecture, str) and architecture.startswith(_CEIL_MX_SCALE_ARCHITECTURE_PREFIXES)
-            for architecture in architectures
-        )
-        or model_type in _CEIL_MX_SCALE_MODEL_TYPES
+    if _matches_model_family(
+        vllm_config,
+        _CEIL_MX_SCALE_ARCHITECTURE_PREFIXES,
+        _CEIL_MX_SCALE_MODEL_TYPES,
+    ):
+        return DynamicMXQuantScaleAlg.CEIL
+    return DynamicMXQuantScaleAlg.MAX_EXPONENT
+
+
+def get_mc2_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
+    """Select the MX scale policy for MC2 expert-parallel dispatch/combine.
+
+    Keep the MC2 explicit pre-dispatch quantization and unquantized BF16
+    combine policy scoped to models whose multi-rank EP communication path was
+    validated under ``CEIL`` (#20120), without altering MC2 communication modes
+    for other models using FP8 ``CEIL`` weight/activation quantization.
+    """
+    if not get_current_hardware_profile().supports(HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE):
+        return DynamicMXQuantScaleAlg.MAX_EXPONENT
+
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+
+    if _matches_model_family(
+        vllm_config,
+        _MC2_CEIL_MX_SCALE_ARCHITECTURE_PREFIXES,
+        _MC2_CEIL_MX_SCALE_MODEL_TYPES,
     ):
         return DynamicMXQuantScaleAlg.CEIL
     return DynamicMXQuantScaleAlg.MAX_EXPONENT
