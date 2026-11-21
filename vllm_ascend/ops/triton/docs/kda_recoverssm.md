@@ -9,8 +9,9 @@
   speculative decoding without keeping a full recurrent checkpoint per draft.
   Kimi K3/K3.1 and GLM use request-indexed temporary records.
 - **Formula**: For one head, let `S` have shape `[V, K]`. Normalize each query/key
-  vector `z` as `z / sqrt(sum(z * z) + 1e-6)` over its `K` components. Scale the
-  normalized query by `K**-0.5`. With `a = exp(A_log)` and `x = raw_g + dt_bias`:
+  vector `z` as `z / sqrt(sum(z * z))` over its `K` components. A zero vector stays
+  zero. Scale the normalized query by `K**-0.5`. With `a = exp(A_log)` and
+  `x = raw_g + dt_bias`:
 
   ```text
   g = lower_bound * sigmoid(a * x)       if lower_bound is not None
@@ -204,8 +205,8 @@ for single-layer calls; it does not introduce a layer-count constexpr.
   in `vllm_ascend/ops/triton/kda/recoverssm.py`. It implements the paged verify and
   accepted-state commit contracts for Ascend GLM KDA.
 - **Differences**:
-    - Verify and both commit paths use the `1e-6` squared-norm epsilon from
-      AscendC RecurrentKDA.
+    - Verify and both commit paths use guarded unit L2 normalization for Q/K.
+      The squared norm uses FP32 reduction.
     - FP32 recurrent arithmetic, explicit strided request records and batched
     multi-layer commit are used for Ascend. Persistent state is not advanced
     during verification.
@@ -220,8 +221,9 @@ for single-layer calls; it does not introduce a layer-count constexpr.
 
 The NPU test file uses an independent CPU FP64 forward recurrence for verify
 outputs, FP32 correction records and accepted states. Raw key/gate records and
-convolution compaction are compared exactly. AscendC is an additional reference
-for zero/small-norm inputs, rather than the only mathematical reference.
+convolution compaction are compared exactly. The same FP64 recurrence covers
+zero and small-norm inputs, including the state after each selected accepted
+prefix.
 
 Each arithmetic comparison uses the **actual output storage dtype**, computes
 errors on CPU in FP64, and enforces both criteria:
@@ -236,7 +238,7 @@ At least 99% of elements must satisfy
 `abs(actual - golden) <= atol + rtol * abs(golden)`, and **all** elements must have
 absolute error at most `max(fixed_limit, 32 * ULP_1.0(output_dtype))`. Non-finite
 results/references fail. Pure data movement and unchanged regions require exact
-agreement. The small-norm AscendC tests also retain their stronger regression
+agreement. The small-norm FP64 tests also retain their stronger regression
 tolerances. JUnit properties record each comparison's dtype, element counts,
 tolerances, pass ratio, maximum error and error limit; comparisons are not pooled
 to conceal a failed output.
