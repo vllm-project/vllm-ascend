@@ -32,6 +32,7 @@ def _add_rms_norm_quant(
         linear.aclnn_input_scale,
         linear.aclnn_input_offset,
         epsilon=norm.variance_epsilon,
+        beta=norm.bias,
     )
     quantized_output = output[0]
     out1 = output[2]
