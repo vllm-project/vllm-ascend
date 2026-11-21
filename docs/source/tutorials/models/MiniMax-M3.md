@@ -363,7 +363,6 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --max-num-seqs 32 \
       --data-parallel-size 4 \
       --data-parallel-size-local 2 \
-      --data-parallel-start-rank 0 \
       --data-parallel-address $node0_ip \
       --distributed-executor-backend "mp" \
       --gpu-memory-utilization 0.92 \
@@ -441,7 +440,6 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --max-num-seqs 32 \
       --data-parallel-size 8 \
       --data-parallel-size-local 4 \
-      --data-parallel-start-rank 0 \
       --data-parallel-address $node0_ip \
       --distributed-executor-backend "mp" \
       --gpu-memory-utilization 0.92 \
