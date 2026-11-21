@@ -7,6 +7,7 @@ from .reference import (
     hc_gate_mix,
     hc_silu,
 )
+from .split_qkv_rmsnorm_mrope import qwen4_exp_split_qkv_rmsnorm_mrope_out
 
 __all__ = [
     "grouped_gemma_rmsnorm",
@@ -14,4 +15,5 @@ __all__ = [
     "hc_combine_norm",
     "hc_gate_mix",
     "hc_silu",
+    "qwen4_exp_split_qkv_rmsnorm_mrope_out",
 ]

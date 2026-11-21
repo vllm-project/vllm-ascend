@@ -54,7 +54,7 @@ def test_indexer_compressed_key_falls_back_when_fused_abi_is_not_satisfied(monke
     upstream_projection.assert_called_once_with(pooled, first_positions)
 
 
-def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> None:
+def test_fused_prepare_writes_directly_to_final_gate(monkeypatch) -> None:
     layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
     torch.nn.Module.__init__(layer)
     layer.layer_name = "model.layers.0.self_attn.attn"
@@ -97,14 +97,52 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> No
     projected_q = torch.arange(16, dtype=torch.float32).reshape(2, 8)
     projected_k = torch.arange(8, dtype=torch.float32).reshape(2, 4)
     projected_v = projected_k + 10
-    projected_gate = projected_q + 20
+    gate_data_ptr = None
 
-    def project_qkv(qkv_arg, positions_arg):
+    def project_qkv_to_gate(
+        qkv_arg,
+        q_weight,
+        k_weight,
+        cos_sin,
+        gate_output,
+        num_q_heads,
+        num_kv_heads,
+        head_size,
+        eps,
+        mrope_section,
+        is_interleaved,
+        rope_dim,
+        positions_arg,
+    ):
+        nonlocal gate_data_ptr
         assert qkv_arg is qkv
         assert positions_arg is positions
-        return projected_q, projected_k, projected_v, projected_gate
+        assert q_weight is layer.q_norm.weight
+        assert k_weight is layer.k_norm.weight
+        assert cos_sin is layer.rotary_emb.cos_sin_cache
+        assert (num_q_heads, num_kv_heads, head_size) == (2, 1, 4)
+        assert eps == 1e-6
+        assert mrope_section == [1, 1, 0]
+        assert is_interleaved
+        assert rope_dim == 4
+        gate_data_ptr = gate_output.data_ptr()
+        gate_output.copy_(projected_q + 20)
+        return projected_q, projected_k, projected_v
 
-    layer._project_qkv_gate = Mock(side_effect=project_qkv)
+    monkeypatch.setattr(
+        qsa,
+        "qwen4_exp_split_qkv_rmsnorm_mrope_out",
+        project_qkv_to_gate,
+    )
+    layer.q_norm = SimpleNamespace(weight=torch.empty(4), variance_epsilon=1e-6)
+    layer.k_norm = SimpleNamespace(weight=torch.empty(4), variance_epsilon=1e-6)
+    layer.rotary_emb = SimpleNamespace(
+        cos_sin_cache=torch.empty((8, 4)),
+        mrope_section=[1, 1, 0],
+        mrope_interleaved=True,
+        rotary_dim=4,
+        _match_cos_sin_cache_dtype=lambda _: layer.rotary_emb.cos_sin_cache,
+    )
 
     hidden_states = torch.empty((2, 8))
     positions = torch.arange(2)
@@ -123,8 +161,8 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> No
         gate=gate,
     )
 
-    layer._project_qkv_gate.assert_called_once_with(qkv, positions)
-    torch.testing.assert_close(gate, projected_gate.view_as(gate))
+    assert gate_data_ptr == gate.data_ptr()
+    torch.testing.assert_close(gate, (projected_q + 20).view_as(gate))
     layer.impl.do_kv_cache_update.assert_called_once()
     update_args = layer.impl.do_kv_cache_update.call_args.args
     torch.testing.assert_close(update_args[1], projected_k.view(2, 1, 4))

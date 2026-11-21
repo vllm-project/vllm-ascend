@@ -55,6 +55,9 @@ from .ops.qsa import (
 from .ops.qsa import (
     qsa_store_cache_rows as qsa_store_cache_rows_fused,
 )
+from .ops.split_qkv_rmsnorm_mrope import (
+    qwen4_exp_split_qkv_rmsnorm_mrope_out,
+)
 from .qsa_prepare import (
     prepare_qsa_gbsa_shared,
     prepare_qsa_lengths,
@@ -914,13 +917,37 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         # Q/K/V preparation and indexer paths, so materialize the same outputs
         # here before entering the existing cache/update transaction.
         if qkv is not None:
-            q, k, v, projected_gate = self._project_qkv_gate(qkv, positions)
+            if gate is None:
+                raise RuntimeError("Fused QSA preparation requires an output gate")
+            prepared_cos_sin = getattr(self.rotary_emb, "_prepared_cos_sin", None)
+            if prepared_cos_sin is None:
+                prepared_cos_sin = getattr(self, "_qsa_prepared_cos_sin", None)
+            # A prepared MRoPE table has one row group per position axis. For
+            # ordinary one-axis RoPE, gather the full cache in-kernel instead.
+            if prepared_cos_sin is not None and prepared_cos_sin.ndim == 3:
+                cos_sin = prepared_cos_sin
+                rope_positions = None
+            else:
+                cos_sin = self.rotary_emb._match_cos_sin_cache_dtype(qkv)  # noqa: SLF001
+                rope_positions = positions
+            q, k, v = qwen4_exp_split_qkv_rmsnorm_mrope_out(
+                qkv,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                cos_sin,
+                gate.view(qkv.shape[0], -1),
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.q_norm.variance_epsilon,
+                list(self.rotary_emb.mrope_section),
+                self.rotary_emb.mrope_interleaved,
+                self.rotary_emb.rotary_dim,
+                rope_positions,
+            )
             query = q.view(-1, self.num_heads, self.head_dim)
             key = k.view(-1, self.num_kv_heads, self.head_dim)
             value = v.view(-1, self.num_kv_heads, self.head_dim)
-            if gate is None or projected_gate is None:
-                raise RuntimeError("Fused QSA preparation requires an output gate")
-            gate.copy_(projected_gate.view_as(gate))
 
         if vllm_version_is("0.33.0"):
             selected = cast(

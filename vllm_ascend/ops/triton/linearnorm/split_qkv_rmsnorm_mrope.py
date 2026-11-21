@@ -477,46 +477,6 @@ def triton_split_qkv_rmsnorm_mrope(
     )
 
 
-def triton_split_qkv_rmsnorm_mrope_with_gate_out(
-    qkv: torch.Tensor,
-    q_weight: torch.Tensor,
-    k_weight: torch.Tensor,
-    cos_sin: torch.Tensor,
-    gate_output: torch.Tensor,
-    num_q_heads: int,
-    num_kv_heads: int,
-    head_size: int,
-    eps: float,
-    mrope_section: list[int],
-    is_interleaved: bool,
-    rope_dim: int | None = None,
-    q_bias: torch.Tensor | None = None,
-    k_bias: torch.Tensor | None = None,
-    positions: torch.Tensor | None = None,
-    weight_offset: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    q_output, k_output, v_output, _ = _triton_split_qkv_rmsnorm_mrope(
-        qkv,
-        q_weight,
-        k_weight,
-        cos_sin,
-        num_q_heads,
-        num_kv_heads,
-        head_size,
-        eps,
-        mrope_section,
-        is_interleaved,
-        rope_dim,
-        q_bias,
-        k_bias,
-        has_gate=True,
-        positions=positions,
-        weight_offset=weight_offset,
-        gate_output=gate_output,
-    )
-    return q_output, k_output, v_output
-
-
 def triton_split_qkv_rmsnorm_mrope_fake(
     qkv: torch.Tensor,
     q_weight: torch.Tensor,
@@ -571,43 +531,10 @@ def triton_split_qkv_rmsnorm_mrope_fake(
     return q_output, k_output, v_output, gate_output
 
 
-def triton_split_qkv_rmsnorm_mrope_with_gate_out_fake(
-    qkv: torch.Tensor,
-    q_weight: torch.Tensor,
-    k_weight: torch.Tensor,
-    cos_sin: torch.Tensor,
-    gate_output: torch.Tensor,
-    num_q_heads: int,
-    num_kv_heads: int,
-    head_size: int,
-    eps: float,
-    mrope_section: list[int],
-    is_interleaved: bool,
-    rope_dim: int | None = None,
-    q_bias: torch.Tensor | None = None,
-    k_bias: torch.Tensor | None = None,
-    positions: torch.Tensor | None = None,
-    weight_offset: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    num_tokens = qkv.shape[0]
-    q_output = torch.empty(num_tokens, num_q_heads * head_size, device=qkv.device, dtype=qkv.dtype)
-    k_output = torch.empty(num_tokens, num_kv_heads * head_size, device=qkv.device, dtype=qkv.dtype)
-    v_output = torch.empty_like(k_output)
-    return q_output, k_output, v_output
-
-
 direct_register_custom_op(
     op_name="triton_split_qkv_rmsnorm_mrope",
     op_func=triton_split_qkv_rmsnorm_mrope,
     fake_impl=triton_split_qkv_rmsnorm_mrope_fake,
     mutates_args=[],
-    dispatch_key="PrivateUse1",
-)
-
-direct_register_custom_op(
-    op_name="triton_split_qkv_rmsnorm_mrope_with_gate_out",
-    op_func=triton_split_qkv_rmsnorm_mrope_with_gate_out,
-    fake_impl=triton_split_qkv_rmsnorm_mrope_with_gate_out_fake,
-    mutates_args=["gate_output"],
     dispatch_key="PrivateUse1",
 )
