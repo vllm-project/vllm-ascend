@@ -1,0 +1,33 @@
+meta:
+  hardware:
+    ascend_910b: supported
+    ascend_910c: supported
+variants:
+  default:
+    supported_hardware:
+      - ascend_910b
+      - ascend_910c
+    tp:
+      ascend_910b: 1
+      ascend_910c: 1
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:nightly-main
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:nightly-main-a3
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+strategy_hardware:
+  multi_node_tp:
+    ascend_910b: unsupported
+    ascend_910c: unsupported
+guide_sections:
+  ascend: |
+    ## Ascend deployment and evaluation
+
+    Run the original BF16 checkpoint with one Ascend chip on a single node.
+    See the [Qwen3 Dense tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen3-Dense.html) for the functional check, AIME 2025 accuracy example, and serving benchmarks.
