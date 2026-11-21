@@ -1608,6 +1608,7 @@ Refer to the verification operations in Steps 1-5 of Configuration Examples.
 | `lookup_rpc_port` | str | No default | Yes | Distinct service identifier (e.g., "0", "1") | Local IPC identifier between pooling scheduler and worker processes. DP replicas within a service are isolated automatically; independently launched services sharing the RPC base directory need unique values. The legacy name `mooncake_rpc_port` is deprecated; use `lookup_rpc_port`. |
 | `load_async` | bool | false | No | true / false | Whether to enable asynchronous loading. |
 | `backend` | str | mooncake | No | mooncake / memcache / yuanrong | KV Pool storage backend. |
+| `cache_prefix` | str | `""` | No | `""` / `"auto"` / custom string | Mooncake only. Namespace prepended to every Store key. Empty preserves existing keys; `"auto"` derives a deployment fingerprint; other strings are literal prefixes. Memcache and Yuanrong reject nonempty values at startup. See below. |
 | `consumer_is_to_put` | bool | false | No | true / false | Whether Decode node puts KV Cache into KV Pool. |
 | `save_decode_cache` | bool | false | No | true / false | Save complete Decode KV blocks. A consumer can enable this without `consumer_is_to_put`, keeping Prefill writes disabled; this consumer mode requires `use_layerwise=false`. |
 | `consumer_is_to_load` | bool | false | No | true / false | Whether Decode node loads KV Cache from KV Pool. |
@@ -1617,6 +1618,72 @@ Refer to the verification operations in Steps 1-5 of Configuration Examples.
 | `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | KV Pool transfer QoS priority. |
 
 **NOTE:** When using `AscendStoreConnector` together with `MooncakeConnector` (V1) or `MooncakeConnectorV2`, the current TCP port allocations may still overlap ports reserved by other workers or components. This includes V1 worker handshake ports and V2 scheduler control ports. Distinct DP indices do not guarantee disjoint TCP port ranges; check these allocations against worker and component port reservations before deployment. `lookup_rpc_port` only identifies the local IPC endpoint and does not resolve these TCP port conflicts.
+
+#### Cache prefix
+
+Set `cache_prefix` in `kv_connector_extra_config` to share or isolate KV entries
+within the same Mooncake pool. It applies to both bulk and layerwise paths.
+
+```json
+{
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "backend": "mooncake",
+        "lookup_rpc_port": "0",
+        "cache_prefix": "model-release-v2"
+    }
+}
+```
+
+- Omitted or `""`: no prefix; preserve the existing key format.
+- A custom string: prepend it literally as `<cache_prefix>@<existing-key>`.
+  Use the same prefix on compatible instances that should share KV entries;
+  use different prefixes for rolling releases or incompatible weights.
+- `"auto"`: generate an `auto-<hash>` prefix from the deployment identity described
+  below. The value is case-sensitive: `"AUTO"` is a literal custom prefix.
+
+##### Automatic cache prefix
+
+Set `"cache_prefix": "auto"` to hash the following identity factors:
+
+- **vLLM build identity:** `VLLM_IMAGE_TAG`, falling back to `VLLM_BUILD_COMMIT`.
+  Surrounding whitespace is removed. The development defaults
+  `local/vllm-openai:dev` and `unknown`, respectively, are ignored. Startup fails
+  when neither provides a usable identity; use an immutable image tag or known
+  build commit.
+- **Model identity:** the upstream model configuration hash (including model
+  path, revision, dtype and quantization) and the resolved Hugging Face
+  configuration commit (`hf_config._commit_hash`, when available).
+- **KV cache identity:** the upstream cache configuration hash (including KV
+  dtype and block size). The connector normalizes the block size from resolved
+  cache groups so scheduler lookup and worker PUT/GET use the same fingerprint.
+
+Current vLLM hashes `compile_factors()` through `hash_factors()` (equivalent to
+`hash_config()`); v0.33.0 uses the configuration's `compute_hash()` method.
+
+Identical identity factors produce the same prefix; a change to a hashed factor
+produces a different namespace. Different model paths or build identities can
+therefore prevent otherwise compatible instances from sharing entries.
+
+##### Usage considerations
+
+- Automatic mode does not hash weight-file contents or every environment flag,
+  and does not independently identify vLLM-Ascend source changes. When these
+  change without changing the hashed identity, select a new custom prefix or
+  update the build identity. A shared prefix does not validate weight, layout
+  or parallel-topology compatibility.
+- Prefixes share the existing Mooncake tenant quota; they do not reserve memory,
+  SSD space or bandwidth and are not an access-control boundary. Old and new
+  prefixes coexist until eviction or cleanup, so allow capacity for both during
+  rolling upgrades. Changing the prefix does not require a full reset.
+- **External full reset is not filtered by `cache_prefix`.** It can remove every
+  prefix in the client's effective Mooncake tenant namespace. Coordinate clients
+  sharing that domain before cleanup. Layerwise external reset remains unsupported.
+- Nonempty prefixes are supported only by Mooncake. Memcache and Yuanrong reject
+  them at startup; omitted/empty prefixes preserve their existing behavior.
+- Use string values explicitly. Following upstream conversion semantics, JSON
+  `null`, `false` and `0` become the nonempty prefixes `"None"`, `"False"` and `"0"`.
 
 ### ASCEND_GLOBAL_RESOURCE_CONFIG
 
