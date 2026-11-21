@@ -1,0 +1,59 @@
+# Full GPQA on the colocated Qwen3.8 Flash Next service (TP8/DP1/EP on A3-560T, MTP=3).
+test_cases:
+  - name: "Qwen3.8-Flash-Next-w4a8-A3"
+    model: "Eco-Tech/Qwen3.8-Flash-Next-w4a8"
+    envs:
+      VLLM_USE_MODELSCOPE: "true"
+      VLLM_SERVER_DEV_MODE: "1"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      SERVER_PORT: "DEFAULT_PORT"
+      VLLM_ENGINE_READY_TIMEOUT_S: "3000"
+      VLLM_RPC_TIMEOUT: "6000"
+    server_cmd:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--served-model-name"
+      - "Eco-Tech/Qwen3.8-Flash-Next-w4a8"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "1"
+      - "--max-model-len"
+      - "141312"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-num-batched-tokens"
+      - "4096"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--no-enable-prefix-caching"
+      - "--async-scheduling"
+      - "--enable-expert-parallel"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,28,32],"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
+      - "--speculative-config"
+      - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}'
+    test_content: []
+    benchmarks:
+      acc_gpqa:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gpqa
+        request_conf: vllm_api_general_chat
+        dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+        max_out_len: 32768
+        batch_size: 32
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+        # Calibration only. Set the accuracy floor after hardware CI.
+        verify_mode: ge
+        baseline: 0
