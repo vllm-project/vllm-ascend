@@ -137,6 +137,7 @@ def _make_backend_impl(
     impl._use_max_workspace_for_fia_graph = False
     impl._layer_name = "model.layers.3.self_attn.attn"
     impl._is_draft_layer = is_draft_layer
+    impl._fia_index_cache = {}
     return impl
 
 
@@ -637,3 +638,105 @@ def test_speculator_update_decode_attn_metadata_clears_single_query_fields():
     assert meta.fia_max_expand_width == 0
     assert meta.fia_single_query is None
     assert meta.fia_single_query_graph is None
+
+
+@pytest.mark.parametrize(
+    ("device_type", "runner_type", "num_speculative_tokens"),
+    [
+        (AscendDeviceType.A2, "pooling", 0),
+        (AscendDeviceType.A3, "pooling", 0),
+        (AscendDeviceType.A5, "pooling", 0),
+        (AscendDeviceType.A5, "pooling", 2),
+        (AscendDeviceType.A3, "generate", 2),
+        (AscendDeviceType.A5, "generate", 0),
+    ],
+)
+def test_one_token_causal_pooling_with_spec_verify_disabled_keeps_mask_and_sparse_mode_3(
+    device_type: AscendDeviceType,
+    runner_type: str,
+    num_speculative_tokens: int,
+):
+    profile = get_hardware_profile(device_type)
+    cfg = _make_vllm_config(
+        num_speculative_tokens=num_speculative_tokens,
+        cudagraph_mode=CUDAGraphMode.NONE,
+        runner_type=runner_type,
+    )
+    spec = FullAttentionSpec(block_size=16, num_kv_heads=2, head_size=32, dtype=torch.bfloat16)
+    k_cache = torch.randn(8, 16, 2, 32, dtype=torch.bfloat16)
+    v_cache = torch.randn(8, 16, 2, 32, dtype=torch.bfloat16)
+    impl = _make_backend_impl(cfg, key_cache=k_cache, value_cache=v_cache)
+    mask = torch.ones((16, 16), dtype=torch.bool)
+
+    with (
+        patch("vllm_ascend.attention.attention_v1.get_current_hardware_profile", return_value=profile),
+        patch("vllm_ascend.attention.attention_v1.envs_vllm.VLLM_BATCH_INVARIANT", False),
+        patch(
+            "vllm_ascend.ascend_forward_context.get_forward_context",
+            return_value=SimpleNamespace(capturing=False, is_draft_model=False),
+        ),
+    ):
+        builder = AscendAttentionMetadataBuilder(spec, ["model.layers.0.self_attn.attn"], cfg, torch.device("cpu"))
+        builder.attn_mask_builder = MagicMock()
+        builder.attn_mask_builder.get_attention_mask.return_value = mask
+        assert builder.enable_single_query_spec_verify is False
+
+        # One-token cached causal batch (V2 pooling state builder selects PrefillCacheHit).
+        common = _make_common_metadata(
+            query_ends=[1],
+            seq_lens=[17],
+            block_table=torch.tensor([[2, 3]], dtype=torch.int32),
+            num_reqs=1,
+            num_actual_tokens=1,
+            num_input_tokens=1,
+            max_query_len=1,
+            is_prefilling=[True],
+            attn_state=AscendAttentionState.PrefillCacheHit,
+            causal=True,
+        )
+        meta = builder.build(0, common)
+        assert meta.fia_max_expand_width == 0
+
+        fia_calls: list[dict] = []
+
+        def record_fia(**kwargs):
+            fia_calls.append(kwargs)
+            return torch.zeros_like(kwargs["query"]), None
+
+        query = torch.randn(1, 2, 32, dtype=torch.bfloat16)
+        with patch("vllm_ascend.attention.attention_v1.DeviceOperator.npu_fused_infer_attention_score", record_fia):
+            impl.forward_fused_infer_attention(
+                query, k_cache, v_cache, meta, torch.empty_like(query), kv_cache=(k_cache, v_cache)
+            )
+
+        assert len(fia_calls) == 1
+        assert fia_calls[0]["actual_seq_lengths"] == [1]
+        assert fia_calls[0]["actual_seq_lengths_kv"] == [17]
+        assert fia_calls[0]["atten_mask"] is mask
+        assert fia_calls[0]["sparse_mode"] == 3
+
+
+def test_device_index_cache_reuses_indices_tensor_across_steps():
+    block_table = torch.tensor([[10, 11], [20, 21]], dtype=torch.int32)
+    index_cache: dict = {}
+    meta = SimpleNamespace(
+        num_actual_tokens=6,
+        fia_max_expand_width=3,
+        fia_single_query=None,
+    )
+
+    # Step 1 populates index_cache; step 2 (with incremented kv_lengths) reuses the exact indices tensor.
+    _, kv1, _ = prepare_fia_layout(meta, [3, 6], [40, 50], block_table, index_cache)
+    assert kv1 == [38, 39, 40, 48, 49, 50]
+    assert len(index_cache) == 1
+    cached_indices = next(iter(index_cache.values()))
+
+    _, kv2, _ = prepare_fia_layout(meta, [3, 6], [41, 51], block_table, index_cache)
+    assert kv2 == [39, 40, 41, 49, 50, 51]
+    assert len(index_cache) == 1
+    assert next(iter(index_cache.values())) is cached_indices
+
+    graph_ends, graph_kv, _ = prepare_graph_fia_layout([3, 6], [42, 52], block_table, 6, 6, index_cache)
+    assert graph_ends == [1, 2, 3, 4, 5, 6]
+    assert graph_kv == [40, 41, 42, 50, 51, 52]
+    assert next(iter(index_cache.values())) is cached_indices
