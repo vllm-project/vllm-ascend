@@ -30,15 +30,29 @@ def load_baseline(path):
     return module
 
 
-def run(module, indices, scores, world, rank):
+def local_ids(rows, world, rank, interleave, context_length, compact, generator):
+    shape = (rows, 1, 2048)
+    if context_length is None:
+        return torch.randint(1 << (16 if compact else 20), shape, dtype=torch.int32, generator=generator)
+    cycles, tail = divmod(context_length, world * interleave)
+    visible = cycles * interleave + min(interleave, max(0, tail - rank * interleave))
+    valid = min(visible, shape[-1])
+    ids = torch.full(shape, -1, dtype=torch.int32)
+    for row in range(rows):
+        ids[row, 0, :valid] = torch.randperm(visible, generator=generator, dtype=torch.int32)[:valid]
+    return ids
+
+
+def run(module, indices, scores, world, rank, *, compact=False):
     rows, _, topk = indices.shape
     interleave = 768
+    kwargs = {"compact": True} if compact else {}
     packed = module.pack_local_candidates(
-        indices, scores, world, rank, interleave, sort_candidates=True, fuse_sort=True
+        indices, scores, world, rank, interleave, sort_candidates=True, fuse_sort=True, **kwargs
     )
     if not dist.is_initialized():
         return packed
-    gathered = packed.new_empty((world * rows, topk, 2))
+    gathered = packed.new_empty((world * rows, topk, packed.shape[-1]))
     dist.all_gather_into_tensor(gathered, packed.contiguous())
     return module.merge_packed_candidates(
         gathered, rows, world, topk, local_rank=rank, interleave=interleave, presorted=True, owner_sharded=True
@@ -82,23 +96,33 @@ def main():
     parser.add_argument("--baseline", required=True, type=Path)
     parser.add_argument("--rows", nargs="+", type=int, default=[112, 120, 128, 144, 160, 192, 256])
     parser.add_argument("--dtype", choices=["bfloat16", "float32"], default="bfloat16")
+    parser.add_argument("--compact", action="store_true", help="Measure compact BF16 transport with 16-bit local IDs.")
+    parser.add_argument("--context-length", type=int, help="Sample unique candidates from each rank's visible prefix.")
     args = parser.parse_args()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.npu.set_device(local_rank)
     distributed = int(os.environ.get("WORLD_SIZE", 1)) > 1
+    if args.compact and (not distributed or args.dtype != "bfloat16"):
+        parser.error("--compact requires multiple ranks and --dtype bfloat16")
     if distributed:
         dist.init_process_group("hccl")
     world = dist.get_world_size() if distributed else 8
     rank = dist.get_rank() if distributed else 0
+    if args.context_length is not None:
+        cycles, tail = divmod(args.context_length, world * 768)
+        limit = 1 << (16 if args.compact else 20)
+        if args.context_length < 1 or cycles * 768 + min(tail, 768) > limit:
+            parser.error("--context-length exceeds the selected local ID range or is not positive")
     baseline = load_baseline(args.baseline)
     for rows in args.rows:
         generator = torch.Generator().manual_seed(81000 + rank * 500 + rows)
-        ids = torch.randint(1 << 20, (rows, 1, 2048), dtype=torch.int32, generator=generator).npu()
+        ids = local_ids(rows, world, rank, 768, args.context_length, args.compact, generator).npu()
         scores = torch.randn(ids.shape, generator=generator).to(getattr(torch, args.dtype)).npu()
         fn = partial(run, indices=ids, scores=scores, world=world, rank=rank)
         expected = fn(baseline)
         graphs = {
-            name: capture(partial(fn, mod), expected) for name, mod in (("base", baseline), ("patch", sharded_indexer))
+            "base": capture(partial(fn, baseline), expected),
+            "patch": capture(partial(fn, sharded_indexer, compact=args.compact), expected),
         }
         samples = {"base": [], "patch": []}
         for trial in range(10):
@@ -111,6 +135,8 @@ def main():
                 "rows": rows,
                 "dtype": args.dtype,
                 "ranks": world if distributed else 1,
+                "compact": args.compact,
+                "context_length": args.context_length,
                 "baseline_us": statistics.median(base),
                 "candidate_us": statistics.median(patch),
                 "paired_reduction_pct": 100 * statistics.median(1 - b / a for a, b in zip(base, patch)),

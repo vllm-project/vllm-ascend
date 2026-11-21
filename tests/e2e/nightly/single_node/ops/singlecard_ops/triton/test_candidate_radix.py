@@ -9,6 +9,22 @@ from tests.e2e.nightly.single_node.ops.singlecard_ops.triton.dcp_test_utils impo
 from vllm_ascend.ops.triton.sharded_indexer import pack_local_candidates
 
 
+@pytest.mark.parametrize("rows", [7, 128])
+def test_compact_words_preserve_bf16_payload_and_full_local_id(rows):
+    ids = torch.arange(2048, dtype=torch.int32).repeat(rows, 1).view(rows, 1, 2048)
+    ids[..., :5] = torch.tensor([65535, 0, -1, 1, 2])
+    scores = torch.ones(ids.shape, dtype=torch.bfloat16)
+    scores[..., :5] = torch.tensor([-0.0, 0.0, 1.0, torch.inf, torch.nan])
+    expected_order = torch.cat((torch.arange(5, 2048), torch.tensor([1, 0, 2, 3, 4])))
+    valid = (ids >= 0) & scores.isfinite()
+    words = torch.where(valid, scores.float(), -torch.inf).view(torch.int32) | torch.where(valid, ids, 0)
+    actual = pack_local_candidates(
+        ids.npu(), scores.npu(), 8, 7, 768, sort_candidates=True, fuse_sort=True, compact=True
+    )
+    assert actual.shape == (rows, 2048, 1)
+    assert torch.equal(actual.cpu().squeeze(-1), words[:, 0, expected_order])
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float64, torch.int32])
 @pytest.mark.parametrize("rows", [0, 48])
 def test_pack_rejects_unsupported_score_dtype(dtype, rows):

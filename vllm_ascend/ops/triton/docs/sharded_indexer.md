@@ -14,7 +14,8 @@
 | indices, scores | Input | Native local QLI candidates `[T,1,K_local]`, positive strides | INT32; FP32/BF16 | ND |
 | world_size, rank, interleave | Attribute | DCP group geometry and token stripe width | int | Scalar |
 | sort_candidates, fuse_sort | Attribute | Establish comparator order; permit workload-based fused preparation | bool | Scalar |
-| packed | Input/Output | Exact global ID and FP32 score-bit pairs `[P*T,K_local,2]` after gather | INT32 | Contiguous ND |
+| compact | Attribute | Pack BF16 scores and caller-bounded 16-bit local IDs in one word for owner-prefix merge | bool | Scalar |
+| packed | Input/Output | Global ID and FP32 score bits `[P*T,K_local,2]`, or one compact BF16/local-ID word `[P*T,K_local,1]` after gather | INT32 | Contiguous ND |
 | rows, topk | Attribute | Query count and global winner count | int | Scalar |
 | local_rank | Optional attribute | Owner-local output; None selects global coordinates | int/None | Scalar |
 | presorted, owner_sharded | Attribute | Explicit sorted-order and per-source owner contracts | bool | Scalar |
@@ -40,13 +41,21 @@
 
 ## Fused candidate sorting
 
-The radix key orders scores descending and local IDs ascending. The local-to-global ID map is strictly increasing within a rank, so mapping IDs after sorting preserves the tie order. Signed zeros share one sorting key while the original score payload is retained. Invalid candidates receive a negative-infinity score and are written with ID -1.
+The radix key orders scores descending and local IDs ascending. The local-to-global ID map is strictly increasing within a rank, so mapping IDs after sorting preserves the tie order. Signed zeros share one sorting key while the original score payload is retained. A negative-infinity score marks invalid candidates in either wire format. The final owner output pads invalid slots with ID -1.
 
 Each least-significant-digit pass tags its digit with the current position to preserve the order of ties. The kernel adds `0x20000000` to the 30-bit tagged integer and bitcasts the result to FP32. Every key is a positive normal float, so ascending native FP32 sort preserves unsigned integer order. With K2048, 19 bits hold the digit and the low 11 bits recover the permutation used to gather scores and IDs.
 
-Local IDs use a fixed 20-bit field under the input contract above. The logical key combines the descending score key and ascending local ID, totaling 36 bits for BF16 and 52 bits for FP32. With K2048, the compile-time radix loop takes two passes for BF16 and three for FP32. The wrapper supplies `SCORE_BITS` based on dtype.
+The full-range radix key uses 20 local-ID bits and either 16 BF16 or 32 FP32 score bits. Compact BF16 uses 16 local-ID bits. With K2048, the compile-time loop takes two passes for either BF16 representation and three for FP32.
 
-The wrapper keeps grid selection and routing outside the kernel. Fusion requires K2048, at least 75% as many rows as vector cores, and enough downstream merge levels to amortize local sorting. Other workloads keep separate sorting and packing. Runtime `num_rows` does not specialize the fused kernel; score width, strides, topology and block size do. This change adds no new warmup entry or routing policy.
+The wrapper keeps grid selection and routing outside the kernel. Fusion requires K2048, at least 75% as many rows as vector cores, and enough downstream merge levels to amortize local sorting. Other workloads keep separate sorting and packing. Score width, wire format, strides, topology and block size specialize the fused kernel. The row count is a runtime parameter.
+
+## Compact BF16 owner-prefix exchange
+
+When the caller requests owner-local K2048 and all possible local IDs fit in 16 bits, packing stores the BF16 score in the high half of each INT32 and the local ID in the low half. Negative infinity marks an invalid entry, so ID 65535 remains available. The merge reads each candidate directly from this representation. Each rank contributes four bytes per candidate to AllGather.
+
+All ranks use the same model-length bound. For length `L`, interleave `I` and world size `P`, rank zero has the largest local capacity, `(L // (P*I))*I + min(L % (P*I), I)`. The compact path requires this capacity to be at most 65536. FP32, unknown or larger capacities, and global-output paths keep eight-byte pairs.
+
+For equal scores on distinct ranks, compare the peer's local ID with the start of the owner's interleave block. Include that entire block when the peer rank is lower than the owner. This orders ties by their global IDs and lets the merge write winning local IDs directly.
 
 ## Test Cases
 
@@ -57,4 +66,13 @@ pytest -q tests/ut/attention/test_sharded_indexer.py
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_candidates.py
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_candidate_radix.py
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_pre_post.py -k local_lengths
+```
+
+To compare the pack kernel or the eight-rank pack/AllGather/owner-merge graph, save the baseline operator module and run the benchmark from the candidate checkout.
+
+```bash
+git show <baseline-commit>:vllm_ascend/ops/triton/sharded_indexer.py > /tmp/sharded_indexer_base.py
+python benchmarks/benchmark_sharded_indexer_pack.py --baseline /tmp/sharded_indexer_base.py
+torchrun --standalone --nproc-per-node=8 benchmarks/benchmark_sharded_indexer_pack.py \
+  --baseline /tmp/sharded_indexer_base.py --compact --context-length 131072 --rows 120 128
 ```

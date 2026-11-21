@@ -12,26 +12,43 @@ from tests.e2e.nightly.single_node.ops.singlecard_ops.triton.dcp_test_utils impo
 from vllm_ascend.ops.triton.sharded_indexer import merge_packed_candidates, pack_local_candidates
 
 
+def test_compact_transport_rejects_incompatible_calls():
+    ids = torch.empty((0, 1, 2048), dtype=torch.int32)
+    with pytest.raises(ValueError, match="sorted BF16 K2048"):
+        pack_local_candidates(ids, ids.float(), 8, 0, 768, sort_candidates=True, fuse_sort=True, compact=True)
+    with pytest.raises(ValueError, match="owner-prefix"):
+        merge_packed_candidates(torch.empty((0, 2048, 1), dtype=torch.int32), 0, 8, 2048, presorted=True)
+
+
 @pytest.mark.parametrize(
-    "world,rows,topk,local_k,dtype,local_rank",
+    "world,rows,topk,local_k,dtype,local_rank,compact",
     [
-        (1, 1, 2048, 2048, torch.bfloat16, 0),
-        (3, 17, 31, 33, torch.float32, None),
-        (8, 128, 2048, 2048, torch.bfloat16, 7),
-        (16, 48, 2048, 2048, torch.float32, 15),
-        (17, 49, 2048, 2048, torch.bfloat16, 16),
-        (8, 65, 2048, 2051, torch.float32, None),
+        (1, 1, 2048, 2048, torch.bfloat16, 0, False),
+        (3, 17, 31, 33, torch.float32, None, False),
+        (8, 128, 2048, 2048, torch.bfloat16, 7, False),
+        (16, 48, 2048, 2048, torch.float32, 15, False),
+        (17, 49, 2048, 2048, torch.bfloat16, 16, False),
+        (8, 65, 2048, 2051, torch.float32, None, False),
+        (3, 7, 2048, 2048, torch.bfloat16, 1, True),
+        (8, 120, 2048, 2048, torch.bfloat16, 0, True),
+        (8, 128, 2048, 2048, torch.bfloat16, 7, True),
     ],
 )
 @pytest.mark.parametrize("ties", [False, True])
-def test_candidate_pipeline_and_changed_graph_inputs(world, rows, topk, local_k, dtype, local_rank, ties):
+def test_candidate_pipeline_and_changed_graph_inputs(world, rows, topk, local_k, dtype, local_rank, compact, ties):
     torch.npu.set_device(0)
     interleave = 768
     generator = torch.Generator().manual_seed(20883)
-    ids = torch.randint(0, 131072, (world, rows, 1, local_k), dtype=torch.int32, generator=generator)
+    ids = torch.randint(
+        0, 65536 if compact else 131072, (world, rows, 1, local_k), dtype=torch.int32, generator=generator
+    )
     scores = torch.randn(ids.shape, generator=generator).to(dtype)
     if ties:
         scores.fill_(1)
+    if compact:
+        # Include the largest ID and ties across both sides of an interleave block.
+        ids[..., 7:12] = torch.tensor([65535, interleave, interleave - 1, interleave + 1, 0])
+        scores[..., 7:12] = 2
     ids[:, 0] = -1
     scores[..., :5] = torch.tensor([torch.nan, torch.inf, -torch.inf, 0.0, -0.0], dtype=dtype)
     if dtype == torch.float32:
@@ -53,6 +70,7 @@ def test_candidate_pipeline_and_changed_graph_inputs(world, rows, topk, local_k,
                     interleave,
                     sort_candidates=presorted,
                     fuse_sort=local_rank is not None,
+                    compact=compact,
                 )
                 for r in range(world)
             ],

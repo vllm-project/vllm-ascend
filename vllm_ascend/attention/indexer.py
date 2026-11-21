@@ -318,7 +318,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 False,
                 turboquant=get_ascend_config().enable_sparse_sfa_turboquant,
             )
-            if get_current_vllm_config().model_config.max_model_len > MAX_EXACT_FLOAT32_INTEGER:
+            self._dcp_max_model_len = get_current_vllm_config().model_config.max_model_len
+            if self._dcp_max_model_len > MAX_EXACT_FLOAT32_INTEGER:
                 raise ValueError("Sharded QLI's AiCore ID comparator supports at most 2**24 tokens.")
             text_config = get_current_vllm_config().model_config.hf_text_config
             expected_heads = getattr(text_config, "index_n_heads", getattr(text_config, "index_num_heads", self.n_head))
@@ -987,6 +988,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 self.topk_tokens,
                 self._dcp_interleave,
                 return_local=self._local_topk,
+                max_model_len=self._dcp_max_model_len,
             )
         return DeviceOperator.indexer_select_post_process(
             q_li,

@@ -33,6 +33,7 @@ def _pack_candidates(
     INTERLEAVE: tl.constexpr,
     BLOCK: tl.constexpr,
     ROWS_PER_PROGRAM: tl.constexpr,
+    COMPACT: tl.constexpr = False,
 ):
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)[None, :]
     lanes = tl.program_id(1) * (2 * BLOCK) + tl.arange(0, 2 * BLOCK)[None, :]
@@ -43,11 +44,15 @@ def _pack_candidates(
     score = tl.load(scores + row * score_row_stride + col * score_col_stride, mask, -float("inf")).to(tl.float32)
     valid = (local >= 0) & (tl.abs(score) < float("inf"))
     local = tl.where(valid, local, 0).to(tl.int32)
+    score = tl.where(valid, score, -float("inf"))
+    if COMPACT:
+        # Widened BF16 leaves the low 16 bits clear for the owner-local ID.
+        tl.store(packed + row * K + col, score.to(tl.int32, bitcast=True) | local, mask)
+        return
     # Recover the remainder algebraically so mapping needs only one division.
     local_block = local // INTERLEAVE
     global_id = local + (local_block * (WORLD - 1) + RANK) * INTERLEAVE
     global_id = tl.where(valid, global_id, -1)
-    score = tl.where(valid, score, -float("inf"))
     pair = tl.reshape(tl.join(global_id, score.to(tl.int32, bitcast=True)), (ROWS_PER_PROGRAM, 2 * BLOCK))
     tl.store(packed + row * K * 2 + lanes, pair, (lanes < 2 * K) & (row < ROWS))
 
@@ -157,6 +162,7 @@ def _pack_sorted_candidates(
     INTERLEAVE: tl.constexpr,
     LOG_BLOCK: tl.constexpr,
     SCORE_BITS: tl.constexpr,
+    COMPACT: tl.constexpr = False,
 ):
     """Sort by descending score/ascending ID and pack global ID/score bits."""
     SORT_KEY_BITS: tl.constexpr = 30
@@ -167,7 +173,7 @@ def _pack_sorted_candidates(
     BLOCK: tl.constexpr = 1 << LOG_BLOCK
     DIGIT_BITS: tl.constexpr = SORT_KEY_BITS - LOG_BLOCK
     # Caller guarantees valid local token IDs fit in 20 bits.
-    ID_BITS: tl.constexpr = 20
+    ID_BITS: tl.constexpr = 16 if COMPACT else 20
     candidate_offsets = tl.arange(0, BLOCK)
     packed_offsets = tl.arange(0, 2 * BLOCK)
     # Flat, loop-carried rows avoid the larger live set of a row/column tile.
@@ -207,10 +213,44 @@ def _pack_sorted_candidates(
             candidate_scores = tl.gather(candidate_scores, permutation, 0)
             local_id_keys = tl.gather(local_id_keys, permutation, 0)
         sorted_local_ids = tl.where(tl.abs(candidate_scores) < float("inf"), local_id_keys, 0).to(tl.int32)
-        global_ids = sorted_local_ids + (sorted_local_ids // INTERLEAVE * (WORLD_SIZE - 1) + RANK) * INTERLEAVE
-        output_ids = tl.where(tl.abs(candidate_scores) < float("inf"), global_ids, -1)
-        packed_pairs = tl.reshape(tl.join(output_ids, candidate_scores.to(tl.int32, bitcast=True)), (2 * BLOCK,))
-        tl.store(packed_ptr + row_idx * BLOCK * 2 + packed_offsets, packed_pairs)
+        if COMPACT:
+            word = candidate_scores.to(tl.int32, bitcast=True) | sorted_local_ids
+            tl.store(packed_ptr + row_idx * BLOCK + candidate_offsets, word)
+        else:
+            global_ids = sorted_local_ids + (sorted_local_ids // INTERLEAVE * (WORLD_SIZE - 1) + RANK) * INTERLEAVE
+            output_ids = tl.where(tl.abs(candidate_scores) < float("inf"), global_ids, -1)
+            packed_pairs = tl.reshape(tl.join(output_ids, candidate_scores.to(tl.int32, bitcast=True)), (2 * BLOCK,))
+            tl.store(packed_ptr + row_idx * BLOCK * 2 + packed_offsets, packed_pairs)
+
+
+@triton.jit
+def _load_owner_tile(ptr, TILE: tl.constexpr, COMPACT: tl.constexpr):
+    if COMPACT:
+        words = tl.load(ptr + tl.arange(0, TILE))
+        return words & 0xFFFF, (words & -0x10000).to(tl.float32, bitcast=True)
+    pairs = tl.load(ptr + tl.arange(0, 2 * TILE))
+    ids, bits = tl.split(tl.reshape(pairs, (TILE, 2)))
+    return ids, bits.to(tl.float32, bitcast=True)
+
+
+@triton.jit
+def _load_owner_item(ptr, mask, COMPACT: tl.constexpr):
+    if COMPACT:
+        word = tl.load(ptr, mask, -0x800000)  # BF16 -inf and local ID zero.
+        return (word & 0xFFFF).to(tl.float32), (word & -0x10000).to(tl.float32, bitcast=True)
+    return tl.load(ptr, mask, -1).to(tl.float32), tl.load(ptr + 1, mask, 0).to(tl.float32, bitcast=True)
+
+
+@triton.jit
+def _peer_id_limit(owner_id, rank, OWNER: tl.constexpr, INTERLEAVE: tl.constexpr, COMPACT: tl.constexpr):
+    if COMPACT:
+        # Within one interleave cycle, every ID on a lower rank precedes
+        # every ID on a higher rank. The two ranks never own the same block.
+        block_start = owner_id.to(tl.int32) // INTERLEAVE * INTERLEAVE
+        limit = (block_start + tl.where(rank < OWNER, INTERLEAVE, 0)).to(tl.float32)
+    else:
+        limit = owner_id
+    return limit
 
 
 @triton.jit(do_not_specialize=["ROWS"])
@@ -224,31 +264,29 @@ def _merge_owner_prefix(
     LOG_BLOCK: tl.constexpr,
     TILE: tl.constexpr,
     BLOCK_RANKS: tl.constexpr,
+    COMPACT: tl.constexpr = False,
 ):
     """Select an owner's exact sorted prefix without sorting other owners."""
     K: tl.constexpr = 1 << LOG_BLOCK
     col = tl.arange(0, K)
-    lanes = tl.arange(0, 2 * TILE)
+    WIDTH: tl.constexpr = 1 if COMPACT else 2
     ranks = tl.arange(0, BLOCK_RANKS)
     for row in range(tl.program_id(0), ROWS, tl.num_programs(0)):
-        own = packed + (OWNER * ROWS + row) * K * 2
-        own_pair = tl.load(own + tl.arange(0, 2 * K))
-        own_ids, own_bits = tl.split(tl.reshape(own_pair, (K, 2)))
-        own_scores = own_bits.to(tl.float32, bitcast=True)
+        own = packed + (OWNER * ROWS + row) * K * WIDTH
+        own_ids, own_scores = _load_owner_tile(own, K, COMPACT)
         own_valid = (own_ids.to(tl.float32) >= 0) & (tl.abs(own_scores) < float("inf"))
         upper = tl.sum(own_valid.to(tl.float32), 0).to(tl.int32)
-        tail_id = tl.load(own + (upper - 1) * 2, upper > 0, -1).to(tl.float32)
-        tail_score = tl.load(own + (upper - 1) * 2 + 1, upper > 0, 0).to(tl.float32, bitcast=True)
-        head_score = tl.load(own + 1, upper > 0, 0).to(tl.float32, bitcast=True)
+        tail_id, tail_score = _load_owner_item(own + tl.maximum(upper - 1, 0) * WIDTH, upper > 0, COMPACT)
+        _, head_score = _load_owner_item(own, upper > 0, COMPACT)
         equal_scores = (upper > 0) & (head_score == tail_score)
         head_mask = (ranks.to(tl.float32) < WORLD) & (ranks != OWNER) & (upper > 0)
         # A3's strided masked loads can still fault on padded peer addresses.
         # Bound the addresses as well as the mask for non-power-of-two worlds.
         peer_rank = tl.minimum(ranks, WORLD - 1)
-        peer_id = tl.load(packed + (peer_rank * ROWS + row) * K * 2, head_mask, -1).to(tl.float32)
-        peer_score = tl.load(packed + (peer_rank * ROWS + row) * K * 2 + 1, head_mask, 0).to(tl.float32, bitcast=True)
+        peer_id, peer_score = _load_owner_item(packed + (peer_rank * ROWS + row) * K * WIDTH, head_mask, COMPACT)
         peer_valid = (peer_id >= 0) & (tl.abs(peer_score) < float("inf"))
-        before_tail = peer_valid & ((peer_score > tail_score) | ((peer_score == tail_score) & (peer_id < tail_id)))
+        tail_limit = _peer_id_limit(tail_id, peer_rank, OWNER, INTERLEAVE, COMPACT)
+        before_tail = peer_valid & ((peer_score > tail_score) | ((peer_score == tail_score) & (peer_id < tail_limit)))
         # If even the worst own candidate precedes every peer head, all own
         # valid entries are winners. Other rows search their exact cutoff.
         lower = tl.where(tl.sum(before_tail.to(tl.float32), 0) == 0.0, upper, 0)
@@ -261,23 +299,23 @@ def _merge_owner_prefix(
         # every possible boundary. Estimates affect work only, never selection.
         iteration = tl.full((), 0, tl.int32)
         while (lower < upper) & (iteration < LOG_BLOCK + 4):
-            pivot_id = tl.load(own + pivot * 2).to(tl.float32)
-            pivot_score = tl.load(own + pivot * 2 + 1).to(tl.float32, bitcast=True)
+            pivot_id, pivot_score = _load_owner_item(own + pivot * WIDTH, True, COMPACT)
             pivot_valid = (pivot_id >= 0) & (tl.abs(pivot_score) < float("inf"))
             count = pivot.to(tl.float32)
             for rank in range(WORLD):
                 if rank != OWNER:
+                    limit = _peer_id_limit(pivot_id, rank, OWNER, INTERLEAVE, COMPACT)
                     start = tl.full((), 0, tl.int32)
                     amount = tl.full((), TILE, tl.float32)
                     # Sorted peers cannot have a better candidate after
                     # the first tile containing any non-better candidate.
                     while (start < K) & (amount == TILE):
-                        pair = tl.load(packed + (rank * ROWS + row) * K * 2 + start * 2 + lanes)
-                        raw_ids, bits = tl.split(tl.reshape(pair, (TILE, 2)))
+                        raw_ids, scores = _load_owner_tile(
+                            packed + ((rank * ROWS + row) * K + start) * WIDTH, TILE, COMPACT
+                        )
                         ids = raw_ids.to(tl.float32)
-                        scores = bits.to(tl.float32, bitcast=True)
                         valid = (ids >= 0) & (tl.abs(scores) < float("inf"))
-                        better = valid & ((scores > pivot_score) | ((scores == pivot_score) & (ids < pivot_id)))
+                        better = valid & ((scores > pivot_score) | ((scores == pivot_score) & (ids < limit)))
                         amount = tl.sum(better.to(tl.float32), 0)
                         count += amount
                         start += TILE
@@ -312,8 +350,11 @@ def _merge_owner_prefix(
             else:
                 pivot = (lower + upper) // 2
             iteration += 1
-        block = own_ids // INTERLEAVE
-        local = block // WORLD * INTERLEAVE + own_ids - block * INTERLEAVE
+        if COMPACT:
+            local = own_ids
+        else:
+            block = own_ids // INTERLEAVE
+            local = block // WORLD * INTERLEAVE + own_ids - block * INTERLEAVE
         result = tl.where(col.to(tl.float32) < lower.to(tl.float32), local, -1)
         tl.store(output + row * K + col, result)
 
@@ -473,7 +514,15 @@ def _sort_local_candidates(indices, scores):
 
 
 def pack_local_candidates(
-    indices, scores, world_size: int, rank: int, interleave: int, *, sort_candidates=False, fuse_sort=False
+    indices,
+    scores,
+    world_size: int,
+    rank: int,
+    interleave: int,
+    *,
+    sort_candidates=False,
+    fuse_sort=False,
+    compact=False,
 ):
     """Pack local candidates as global INT32 IDs and FP32 score-bit pairs.
 
@@ -484,12 +533,16 @@ def pack_local_candidates(
     Callers must ensure this bound; it is not validated by the wrapper.
     Sorting orders scores descending, then IDs ascending. ``fuse_sort`` permits
     fused sorting for workloads that meet the occupancy and merge-work gates.
+    Compact owner-prefix exchange requires BF16 scores and a caller-proven
+    local ID bound of 2**16. It stores one INT32 word per candidate.
     """
     if scores.dtype not in (torch.bfloat16, torch.float32):
         raise TypeError(f"scores must have dtype torch.bfloat16 or torch.float32, got {scores.dtype}")
     score_bits = 16 if scores.dtype == torch.bfloat16 else 32
     rows, _, topk = indices.shape
-    packed = torch.empty((rows, topk, 2), dtype=torch.int32, device=indices.device)
+    if compact and not (score_bits == 16 and sort_candidates and fuse_sort and topk == MAX_FUSED_TOPK):
+        raise ValueError("Compact owner-prefix packing requires sorted BF16 K2048 candidates")
+    packed = torch.empty((rows, topk, 1 if compact else 2), dtype=torch.int32, device=indices.device)
     if rows:
         if sort_candidates and fuse_sort and topk == MAX_FUSED_TOPK:
             init_device_properties_triton()
@@ -516,6 +569,7 @@ def pack_local_candidates(
                     interleave,
                     log_block,
                     SCORE_BITS=score_bits,
+                    COMPACT=compact,
                     multibuffer=False,
                 )
                 return packed
@@ -538,6 +592,7 @@ def pack_local_candidates(
             interleave,
             block,
             rows_per_program,
+            COMPACT=compact,
         )
     return packed
 
@@ -560,6 +615,12 @@ def merge_packed_candidates(
     IDs, as guaranteed by pack_local_candidates. Presorted alone is weaker.
     """
     local_k = packed.shape[1]
+    compact = packed.shape[-1] == 1
+    owner_prefix = (
+        presorted and owner_sharded and local_rank is not None and 0 <= local_rank < world_size and local_k == topk
+    )
+    if compact and not (topk == MAX_FUSED_TOPK and owner_prefix):
+        raise ValueError("Compact candidates require a presorted K2048 owner-prefix merge")
     output = torch.empty((rows, 1, topk), dtype=torch.int32, device=packed.device) if out is None else out
     if rows == 0:
         return output
@@ -570,7 +631,7 @@ def merge_packed_candidates(
         cores = get_vectorcore_num()
         programs = min(rows, cores)
         block = MAX_FUSED_TOPK  # The supported fused shape already is a power of two.
-        if presorted and owner_sharded and local_rank is not None and 0 <= local_rank < world_size and local_k == topk:
+        if owner_prefix:
             tile = min(block, triton.next_power_of_2(max(1, 2 * block // world_size)))
             _merge_owner_prefix[(programs,)](
                 packed,
@@ -582,6 +643,7 @@ def merge_packed_candidates(
                 block.bit_length() - 1,
                 tile,
                 triton.next_power_of_2(world_size),
+                COMPACT=compact,
                 multibuffer=False,
             )
             return output
