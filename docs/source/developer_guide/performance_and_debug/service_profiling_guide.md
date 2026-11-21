@@ -31,6 +31,8 @@ Two performance collection solutions are provided below: Ascend PyTorch Profiler
 
 No additional packages need to be installed; it can be enabled through command-line configuration. Currently, vLLM enables **python stack** by default, which can significantly inflate the collected performance data. If you do not wish to collect **python stack**, you can disable it using `torch_profiler_with_stack=false`.
 
+On Ascend, `torch_profiler_with_stack` is mapped to `with_modules` of `torch_npu.profiler`, which records the module hierarchy. The `with_stack` option of `torch_npu.profiler`, which also records operator-level call stacks, stays disabled because of its time overhead. To collect operator call stacks, keep `torch_profiler_with_stack` enabled and additionally pass `--additional-config '{"torch_npu_profiler_with_stack": true}'`.
+
 ### 1. Preparation for Collection
 
 Start the online service and set the `--profiler-config` parameter to control the path for saving performance files. After the parameter is set, the collection function is enabled.
