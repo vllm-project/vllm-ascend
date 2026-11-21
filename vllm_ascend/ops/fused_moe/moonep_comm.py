@@ -64,7 +64,6 @@ class MoonEPCombineMetadata:
     hidden_shape: torch.Size  # original hidden_states shape (for restore)
     group_list: torch.Tensor  # Home and Slot row counts for fused publication
     source_topk_weights_sk: torch.Tensor  # FP32 Top-K weights on the source rank
-    state: object | None = None  # weight state for the current MoE layer
 
 
 # AscendRoutedExperts registers each layer when MoonEP is enabled.
@@ -72,7 +71,6 @@ class MoonEPCombineMetadata:
 # Collective SHMEM initialization needs the full set of descriptors up front.
 _moonep_layer_registry: list[dict] = []
 _registry_lock = threading.Lock()
-_SLOT_TLS = threading.local()  # current layer weight state during dispatch
 
 # Planning, dispatch and combine always use the real token count. Buffer
 # capacity remains independent of the rows included in routing and computation.
@@ -809,7 +807,6 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # Return a disposable view: dispose_tensor() calls Tensor.set_, which
         # must not mutate the SDK's cached dispatch output tensor object.
         hidden_trim = h_nvs[:]
-        state = getattr(_SLOT_TLS, "state", None)
         return MoETokenDispatchOutput(
             hidden_states=hidden_trim,
             dynamic_scale=dispatch_scale[: hidden_trim.shape[0]] if dispatch_scale is not None else None,
@@ -820,7 +817,6 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
                 buffer=buffer,
                 num_tokens=T,
                 hidden_shape=hidden_states.shape,
-                state=state,
                 group_list=local_counts,
                 source_topk_weights_sk=source_topk_weights_sk,
             ),
@@ -893,28 +889,22 @@ class MoonEPCommImpl(MoECommMethod):
 
             record_stage_events = bool(get_ascend_config().multistream_overlap_shared_expert)
         before_dispatch_evt = torch.npu.current_stream().record_event() if record_stage_events else None
-        _SLOT_TLS.state = state
-        try:
-            disp = self.token_dispatcher.token_dispatch(
-                build_token_dispatch_input(fused_experts_input=fused_experts_input)
-            )
-            meta = disp.combine_metadata
-            mlp_rows, before_gmm2_evt = run_slot_forward(
-                state=meta.state,
-                lookup_slot_state=lookup_slot_state,
-                buffer=meta.buffer,
-                plan=meta.plan,
-                token_dispatch_output=disp,
-                fused_experts_input=fused_experts_input,
-                use_fusion_ops=None,
-                moe_config=self.moe_config,
-                quant_method=quant_method,
-                record_before_gmm2=record_stage_events,
-            )
-            before_combine_evt = torch.npu.current_stream().record_event() if record_stage_events else None
-            routed_out = self.token_dispatcher.token_combine(mlp_rows, meta)
-        finally:
-            _SLOT_TLS.state = None
+        disp = self.token_dispatcher.token_dispatch(build_token_dispatch_input(fused_experts_input=fused_experts_input))
+        meta = disp.combine_metadata
+        mlp_rows, before_gmm2_evt = run_slot_forward(
+            state=state,
+            lookup_slot_state=lookup_slot_state,
+            buffer=meta.buffer,
+            plan=meta.plan,
+            token_dispatch_output=disp,
+            fused_experts_input=fused_experts_input,
+            use_fusion_ops=None,
+            moe_config=self.moe_config,
+            quant_method=quant_method,
+            record_before_gmm2=record_stage_events,
+        )
+        before_combine_evt = torch.npu.current_stream().record_event() if record_stage_events else None
+        routed_out = self.token_dispatcher.token_combine(mlp_rows, meta)
         return FusedExpertsResult(
             routed_out=routed_out,
             before_dispatch_evt=before_dispatch_evt,
