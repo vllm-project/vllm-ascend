@@ -11,6 +11,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticTensorSym,
 )
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.layernorm import AscendRMSNorm
 from vllm_ascend.ops.linear import AscendQKVParallelLinear
 
@@ -43,7 +45,15 @@ def _add_rms_norm_quant(
 
 
 _FUSED_NORM_QUANT: dict[tuple[type, QuantKey], Callable] = {}
-_FUSED_NORM_QUANT[(AscendRMSNorm, kInt8StaticTensorSym)] = _add_rms_norm_quant
+
+
+ascend_compilation_config = get_ascend_config().ascend_compilation_config
+profile = get_current_hardware_profile()
+
+if ascend_compilation_config.fuse_norm_quant and profile.supports(
+    HardwareCapability.GRAPH_NORM_QUANT_FUSION
+):
+    _FUSED_NORM_QUANT[(AscendRMSNorm, kInt8StaticTensorSym)] = _add_rms_norm_quant
 
 
 def maybe_fused_norm_quant(
