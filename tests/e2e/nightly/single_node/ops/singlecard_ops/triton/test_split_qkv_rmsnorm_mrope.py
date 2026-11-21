@@ -88,25 +88,14 @@ def test_split_qkv_rmsnorm_mrope_applies_weight_offset_in_kernel():
 @pytest.mark.parametrize("use_prepared_cache", [False, True])
 def test_qwen4_exp_split_qkv_writes_final_gate_buffer(use_prepared_cache: bool):
     device = DEVICES[0]
-    dtype = torch.bfloat16
-    num_tokens, num_q_heads, num_kv_heads, head_size = 2, 2, 1, 128
+    num_q_heads, num_kv_heads, head_size = 2, 1, 128
     q_size = num_q_heads * head_size
     kv_size = num_kv_heads * head_size
-    qkv = torch.randn(
-        (num_tokens, 2 * q_size + 2 * kv_size),
-        dtype=dtype,
-        device=device,
-    )
-    q_weight = torch.randn(head_size, dtype=dtype, device=device)
-    k_weight = torch.randn(head_size, dtype=dtype, device=device)
-    full_cache = torch.randn(4, head_size, dtype=dtype, device=device)
-    positions = torch.tensor(
-        [[0, 1], [1, 2], [2, 3]],
-        dtype=torch.int64,
-        device=device,
-    )
+    qkv = torch.randn((2, 2 * (q_size + kv_size)), dtype=torch.bfloat16, device=device)
+    q_weight, k_weight = (torch.randn(head_size, dtype=qkv.dtype, device=device) for _ in range(2))
+    full_cache = torch.randn(4, head_size, dtype=qkv.dtype, device=device)
+    positions = torch.arange(6, device=device).reshape(3, 2) % 4
     cos_sin = full_cache[positions] if use_prepared_cache else full_cache
-    rope_positions = None if use_prepared_cache else positions
     kwargs = dict(
         qkv=qkv,
         q_weight=q_weight,
@@ -119,7 +108,7 @@ def test_qwen4_exp_split_qkv_writes_final_gate_buffer(use_prepared_cache: bool):
         mrope_section=[24, 20, 20],
         is_interleaved=True,
         rope_dim=head_size,
-        positions=rope_positions,
+        positions=None if use_prepared_cache else positions,
     )
 
     expected_q, expected_k, expected_v, expected_gate = (
@@ -130,13 +119,13 @@ def test_qwen4_exp_split_qkv_writes_final_gate_buffer(use_prepared_cache: bool):
         )
     )
     gate = torch.empty_like(expected_gate)
-    gate_data_ptr = gate.data_ptr()
+    gate_ptr = gate.data_ptr()
     actual_q, actual_k, actual_v = qwen4_exp_split_qkv_rmsnorm_mrope_out(
         gate_output=gate,
         **kwargs,
     )
 
-    assert gate.data_ptr() == gate_data_ptr
+    assert gate.data_ptr() == gate_ptr
     for actual, expected in zip(
         (actual_q, actual_k, actual_v, gate),
         (expected_q, expected_k, expected_v, expected_gate),
