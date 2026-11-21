@@ -321,25 +321,6 @@ def _get_parallel_config_for_attn_metadata(attn_groups: list[list[AttentionGroup
     return vllm_config.parallel_config if vllm_config is not None else None
 
 
-def _run_attn_metadata_postprocessors(
-    attn_metadata: dict[str, Any],
-    metadata_builders: list[tuple[list[str], Any]],
-    num_actual_reqs: int,
-    num_actual_tokens: int,
-) -> None:
-    """Run optional builder hooks after every attention group is available."""
-    for layer_names, builder in metadata_builders:
-        postprocess = getattr(builder, "postprocess_attn_metadata", None)
-        if not callable(postprocess):
-            continue
-        postprocess(
-            attn_metadata=attn_metadata,
-            layer_names=layer_names,
-            num_actual_reqs=num_actual_reqs,
-            num_actual_tokens=num_actual_tokens,
-        )
-
-
 def build_attn_metadata(
     *,
     attn_groups: list[list[AttentionGroup]],
@@ -432,7 +413,6 @@ def build_attn_metadata(
         positions = torch.zeros(num_input_tokens, dtype=torch.int64, device=query_start_loc_gpu.device)
 
     attn_metadata: dict[str, Any] = {}
-    metadata_postprocessors: list[tuple[list[str], Any]] = []
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
     common_v41_batch_metadata: dict[str, Any] = {}
@@ -524,8 +504,6 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
-            if callable(getattr(attn_metadata_builder, "postprocess_attn_metadata", None)):
-                metadata_postprocessors.append((attn_group.layer_names, attn_metadata_builder))
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_v41_builder = isinstance(attn_metadata_builder, AscendDSAV41MetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
@@ -608,13 +586,6 @@ def build_attn_metadata(
                     common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
                 for layer_name in variant_names:
                     attn_metadata[layer_name] = metadata
-    if metadata_postprocessors:
-        _run_attn_metadata_postprocessors(
-            attn_metadata,
-            metadata_postprocessors,
-            num_actual_reqs,
-            num_actual_tokens,
-        )
     return attn_metadata
 
 

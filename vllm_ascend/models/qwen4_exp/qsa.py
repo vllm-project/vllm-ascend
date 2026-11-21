@@ -61,11 +61,13 @@ if vllm_version_is("0.33.0"):
     import vllm.models.qwen4_exp.common.qsa_cache as qsa_indexer  # type: ignore[import-not-found]
 
     QSAIndexerBackend = qsa_indexer.QSAStateBackend
+    QSAIndexerMetadataBuilderBase = qsa_indexer.QSAMetadataBuilder
 else:
     import vllm.models.qwen4_exp.amd.qsa_indexer as upstream_indexer  # type: ignore[import-not-found]
     import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer  # type: ignore[import-not-found]
 
     QSAIndexerBackend = qsa_indexer.QSAIndexerBackend
+    QSAIndexerMetadataBuilderBase = qsa_indexer.QSAIndexerMetadataBuilder
 
 # The upstream backend class is renamed per tree; the class definition below
 # carries the resulting valid-type/misc ignores.
@@ -509,6 +511,7 @@ class AscendQSAImpl:
             seq_lens: torch.Tensor,
             output_scale: torch.Tensor | None = None,
             output_block_scale: torch.Tensor | None = None,
+            qsa_step_metadata: QSAIndexerMetadataProtocol | None = None,
         ) -> torch.Tensor:
             if output_scale is not None or output_block_scale is not None:
                 raise NotImplementedError("QSA output quantization is not supported on Ascend")
@@ -523,6 +526,7 @@ class AscendQSAImpl:
                 token_to_req,
                 logical_positions,
                 seq_lens,
+                qsa_step_metadata,
             )
 
     else:
@@ -540,6 +544,7 @@ class AscendQSAImpl:
             seq_lens: torch.Tensor | None = None,
             key: torch.Tensor | None = None,
             value: torch.Tensor | None = None,
+            qsa_step_metadata: QSAIndexerMetadataProtocol | None = None,
         ) -> torch.Tensor:
             # The base ABI forwards only `token_to_req`; the GBSA kernel also
             # needs the indexer-side positions/lengths, supplied by the Ascend
@@ -559,6 +564,7 @@ class AscendQSAImpl:
                 token_to_req,
                 logical_positions,
                 seq_lens,
+                qsa_step_metadata,
             )
 
     def _dispatch_qsa(
@@ -573,6 +579,7 @@ class AscendQSAImpl:
         token_to_req: torch.Tensor,
         logical_positions: torch.Tensor,
         seq_lens: torch.Tensor,
+        qsa_step_metadata: QSAIndexerMetadataProtocol | None = None,
     ) -> torch.Tensor:
         """Run GBSA, or the FIA/GBSA split planned for this step."""
         num_tokens = attn_metadata.num_actual_tokens
@@ -601,6 +608,21 @@ class AscendQSAImpl:
                 prepared_metadata=getattr(
                     attn_metadata,
                     "qsa_gbsa_metadata",
+                    None,
+                ),
+                prepared_visible_lengths=getattr(
+                    qsa_step_metadata,
+                    "qsa_gbsa_visible_lengths",
+                    None,
+                ),
+                prepared_cu_query=getattr(
+                    qsa_step_metadata,
+                    "qsa_gbsa_cu_query",
+                    None,
+                ),
+                prepared_row_block_table=getattr(
+                    qsa_step_metadata,
+                    "qsa_gbsa_row_block_table",
                     None,
                 ),
             )
@@ -664,41 +686,63 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
         metadata.qsa_request_plan = None
         return metadata
 
-    def postprocess_attn_metadata(
-        self,
-        *,
-        attn_metadata: dict[str, Any],
-        layer_names: list[str],
-        num_actual_reqs: int,
-        num_actual_tokens: int,
-    ) -> None:
-        """Prepare shared QSA metadata after every cache group is built."""
-        if not layer_names:
-            return
-        layer = self.vllm_config.compilation_config.static_forward_context.get(layer_names[0])
-        if layer is None or not hasattr(layer, "indexer"):
-            return
-        main_metadata = attn_metadata.get(layer_names[0])
-        compressed_metadata = attn_metadata.get(layer.indexer.compressed_key_cache.prefix)
-        if main_metadata is None or compressed_metadata is None:
-            return
-        if getattr(main_metadata, "qsa_request_plan", None) is not None:
-            return
 
-        requests = min(
-            num_actual_reqs,
-            int(getattr(compressed_metadata, "qsa_num_live_requests", num_actual_reqs)),
-        )
-        rows = min(
-            num_actual_tokens,
-            int(getattr(compressed_metadata, "qsa_num_live_tokens", num_actual_tokens)),
-        )
-        device = compressed_metadata.seq_lens.device
+class AscendQSAIndexerMetadataBuilder(QSAIndexerMetadataBuilderBase):  # type: ignore[misc, valid-type]
+    """Prepare QSA indexer and decode GBSA inputs in the owning builder.
+
+    Main and compressed QSA caches share one composite cache group, hence this
+    builder sees the same scheduler block table as the main QSA builder.  Keep
+    the derived tensors on the compressed/indexer metadata and let the model
+    consume both metadata objects, matching the GLM KPool ownership model.
+    """
+
+    _COMPRESSED_SUFFIX = ".indexer.compressed_key_cache"
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: Any,
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._qsa_layer_names = tuple(layer_names)
+
+    def _main_qsa_layer(self):
+        context = self.vllm_config.compilation_config.static_forward_context
+        for name in self._qsa_layer_names:
+            if name.endswith(self._COMPRESSED_SUFFIX):
+                source = name[: -len(self._COMPRESSED_SUFFIX)]
+                layer = context.get(f"{source}.attn")
+                if layer is not None and hasattr(layer, "indexer"):
+                    return layer
+        return None
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ):
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        if self.compress_ratio <= 1 or getattr(metadata, "num_prefills", 0):
+            return metadata
+
+        layer = self._main_qsa_layer()
+        if layer is None:
+            return metadata
+
+        requests = int(metadata.seq_lens.shape[0])
+        rows = int(metadata.num_actual_tokens)
+        device = metadata.seq_lens.device
         max_requests = self.vllm_config.scheduler_config.max_num_seqs
         max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+        # FULL graphs may pad the request dimension up to the token capacity.
+        max_requests = max(max_requests, max_tokens, requests)
         index_heads = int(layer.indexer.index_n_heads)
-        table_columns = int(main_metadata.block_table.shape[1])
-        signature = (device, max_requests, max_tokens, index_heads, table_columns, main_metadata.block_table.dtype)
+        table_columns = int(common_attn_metadata.block_table_tensor.shape[1])
+        table_dtype = common_attn_metadata.block_table_tensor.dtype
+        signature = (device, max_requests, max_tokens, index_heads, table_columns, table_dtype)
         buffer_cache = getattr(self, "_qsa_prepared_buffers", None)
         if buffer_cache is None:
             buffer_cache = {}
@@ -722,34 +766,35 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
                 "cu_query": torch.arange(max_tokens + 1, dtype=torch.int64, device=device),
                 "row_block_table": torch.empty(
                     (max_tokens, table_columns),
-                    dtype=main_metadata.block_table.dtype,
+                    dtype=table_dtype,
                     device=device,
                 ),
             }
             buffer_cache[signature] = buffers
 
         prepare_qsa_lengths(
-            compressed_metadata.seq_lens,
+            metadata.seq_lens,
             buffers["compressed_lengths"],
             buffers["residual_lengths"],
             requests,
-            int(layer.indexer.compress_ratio),
+            int(self.compress_ratio),
         )
         prepare_qsa_gbsa_shared(
-            compressed_metadata.logical_positions,
-            compressed_metadata.seq_lens,
-            compressed_metadata.token_to_req,
-            main_metadata.block_table,
+            metadata.logical_positions,
+            metadata.seq_lens,
+            metadata.token_to_req,
+            common_attn_metadata.block_table_tensor,
             buffers["visible_lengths"],
             buffers["row_block_table"],
             rows,
         )
-        compressed_metadata.qsa_compressed_lengths = buffers["compressed_lengths"]
-        compressed_metadata.qsa_residual_lengths = buffers["residual_lengths"]
-        compressed_metadata.qsa_score_weights = buffers["score_weights"]
-        main_metadata.qsa_gbsa_visible_lengths = buffers["visible_lengths"]
-        main_metadata.qsa_gbsa_cu_query = buffers["cu_query"]
-        main_metadata.qsa_gbsa_row_block_table = buffers["row_block_table"]
+        metadata.qsa_compressed_lengths = buffers["compressed_lengths"]
+        metadata.qsa_residual_lengths = buffers["residual_lengths"]
+        metadata.qsa_score_weights = buffers["score_weights"]
+        metadata.qsa_gbsa_visible_lengths = buffers["visible_lengths"]
+        metadata.qsa_gbsa_cu_query = buffers["cu_query"]
+        metadata.qsa_gbsa_row_block_table = buffers["row_block_table"]
+        return metadata
 
 
 class AscendQSABackend(UpstreamQSABackend):  # type: ignore[valid-type, misc]
@@ -814,6 +859,7 @@ else:
 # Their physical block stride is honored by the runner, so no compact copy is
 # required before LightningIndexer or the Triton QSA selector consumes them.
 QSAIndexerBackend.uses_descriptor_cache_view = True
+QSAIndexerBackend.get_builder_cls = staticmethod(lambda: AscendQSAIndexerMetadataBuilder)
 
 # The indexer module selects its Triton metadata builder at import time. The
 # upstream kernel uses CUDA PDL intrinsics, so Ascend uses the Torch path.
@@ -914,6 +960,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
                     token_to_req=side_metadata.token_to_req,
                     logical_positions=side_metadata.logical_positions,
                     seq_lens=side_metadata.seq_lens,
+                    qsa_step_metadata=side_metadata,
                 )
             else:
                 # main's ABI drops K/V from the signature; pass them back so
@@ -929,6 +976,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
                     seq_lens=side_metadata.seq_lens,
                     key=key,
                     value=value,
+                    qsa_step_metadata=side_metadata,
                 )
         maybe_save_kv_layer_to_connector(self.layer_name, list(self.kv_cache))
 

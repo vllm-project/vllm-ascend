@@ -82,8 +82,19 @@ def qsa_select_paged_tokens_lightning_v2(
     # Metadata uses original-token lengths. Only request-sized arrays are
     # materialized; there is no token-wise length or page-table gather.
     lengths = attn_metadata.seq_lens[:requests]
-    compressed_lengths = lengths.floor_divide(compress_ratio)
-    residual_lengths = lengths.remainder(compress_ratio)
+    prepared_compressed_lengths = getattr(attn_metadata, "qsa_compressed_lengths", None)
+    prepared_residual_lengths = getattr(attn_metadata, "qsa_residual_lengths", None)
+    if (
+        prepared_compressed_lengths is not None
+        and prepared_residual_lengths is not None
+        and prepared_compressed_lengths.shape[0] >= requests
+        and prepared_residual_lengths.shape[0] >= requests
+    ):
+        compressed_lengths = prepared_compressed_lengths[:requests]
+        residual_lengths = prepared_residual_lengths[:requests]
+    else:
+        compressed_lengths = lengths.floor_divide(compress_ratio)
+        residual_lengths = lengths.remainder(compress_ratio)
     common = dict(
         cu_seqlens_q=attn_metadata.query_start_loc[: requests + 1].clamp_max(rows),
         seqused_k=compressed_lengths,
@@ -112,12 +123,22 @@ def qsa_select_paged_tokens_lightning_v2(
         round(math.ldexp(1.0 / math.sqrt(_HEAD_DIM), _LI_V2_WEIGHT_FRACTION_BITS)),
         -_LI_V2_WEIGHT_FRACTION_BITS,
     )
-    weights = torch.full(
-        (rows, query.shape[1]),
-        score_weight,
-        dtype=torch.float32,
-        device=query.device,
-    )
+    prepared_weights = getattr(attn_metadata, "qsa_score_weights", None)
+    if (
+        prepared_weights is not None
+        and prepared_weights.shape[0] >= rows
+        and prepared_weights.shape[1] == query.shape[1]
+        and prepared_weights.dtype == torch.float32
+        and prepared_weights.device == query.device
+    ):
+        weights = prepared_weights[:rows]
+    else:
+        weights = torch.full(
+            (rows, query.shape[1]),
+            score_weight,
+            dtype=torch.float32,
+            device=query.device,
+        )
     groups, _ = torch.ops.cann_ops_transformer.lightning_indexer(
         query,
         compressed_key_cache,
