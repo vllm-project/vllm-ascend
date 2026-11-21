@@ -1,132 +1,193 @@
-# Source: https://github.com/vllm-project/vllm/blob/52a65d7b19e9e3ad86bf1e3b6954e4e11eeec7da/recipes/models/Qwen/Qwen3.6-27B.yaml
-# Extracted with vllm-project/recipes@b08ad73889f9e33319d8ac9c887dec6a0975c55d.
+# Ascend overlay for Qwen/Qwen3.6-27B — add-only, Huawei hardware scope only.
+#
+# Base recipe (unchanged by this overlay):
+#   https://github.com/vllm-project/vllm/blob/main/recipes/models/Qwen/Qwen3.6-27B.yaml
+# Deployment reference:
+#   docs/source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md (v0.30.0)
+#
+# Scope notes:
+#   * Atlas 300I DUO is intentionally absent: the renderer taxonomy has no 310P
+#     hardware profile. The 310P path is expressed downstream only.
+#   * `meta.hardware` uses `supported`, not `verified`: these layouts are
+#     transcribed from the tutorial, not measured by this repository. Promote a
+#     key to `verified` only after an end-to-end run of the rendered command on
+#     that hardware.
+#   * Every Ascend variant pins the v0.30.0 image line and hides the pip tab:
+#     no Ascend wheel on PyPI, and the pinned image carries the NPU kernels.
+meta:
+  hardware:
+    ascend_910c: supported
+    ascend_910b: supported
+    ascend_950dt: supported
 variants:
-  ascend_w8a8_mxfp8:
-    model_id: Eco-Tech/Qwen3.6-27B-w8a8-mxfp8
-    precision: mxfp8
-    label: W8A8 (Ascend)
-    vram_minimum_gb: 34
-    supported_hardware:
-      - ascend_950dt
-    tp: 1
-    min_vllm_version: 0.23.0
-    default_modes:
-      spec_decoding: qwen3_5_mtp
-    extra_args:
-      - '--distributed-executor-backend'
-      - mp
-      - '--data-parallel-size'
-      - '8'
-      - '--quantization'
-      - ascend
-      - '--served-model-name'
-      - qwen3.6
-      - '--max-num-seqs'
-      - '32'
-      - '--max-model-len'
-      - '262144'
-      - '--max-num-batched-tokens'
-      - '16384'
-      - '--gpu-memory-utilization'
-      - '0.90'
-      - '--no-enable-prefix-caching'
-      - '--compilation-config'
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - '--additional-config'
-      - '{"enable_cpu_binding":true}'
-    extra_env:
-      VLLM_USE_MODELSCOPE: 'True'
-      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
-      HCCL_BUFFSIZE: '512'
-      OMP_PROC_BIND: 'false'
-      OMP_NUM_THREADS: '1'
-      TASK_QUEUE_ENABLE: '1'
+  default:
+    tp:
+      ascend_910c: 2
+      ascend_910b: 2
     hardware_overrides:
-      ascend_950dt:
-        docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a5
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: vllm serve
+        extra_args:
+        - --host
+        - 0.0.0.0
+        - --port
+        - '8000'
+        extra_env:
+          VLLM_USE_MODELSCOPE: 'True'
+        install:
+          pip: false
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0
+        docker_serve_command: vllm serve
+        extra_args:
+        - --host
+        - 0.0.0.0
+        - --port
+        - '8000'
+        extra_env:
+          VLLM_USE_MODELSCOPE: 'True'
+        install:
+          pip: false
   ascend_w8a8:
     model_id: Eco-Tech/Qwen3.6-27B-w8a8
     precision: int8
-    label: W8A8 (Ascend A3)
+    label: W8A8 (Ascend)
     vram_minimum_gb: 33
     supported_hardware:
-      - ascend_910c
-    tp: 2
-    min_vllm_version: 0.23.0
+    - ascend_910c
+    - ascend_910b
+    tp:
+      ascend_910c: 2
+      ascend_910b: 2
+    min_vllm_version: 0.30.0
+    default_modes:
+      spec_decoding: qwen3_5_mtp
+    description: W8A8 checkpoint on one Atlas 800 A3 or Atlas 800 A2 node (v0.30.0 line). A3 runs TP2 + DP8, A2 runs TP2 + DP4, both with FULL_DECODE_ONLY and the Ascend MTP head.
+    extra_args:
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8000'
+    - --quantization
+    - ascend
+    - --served-model-name
+    - qwen3.6
+    - --max-num-seqs
+    - '32'
+    - --max-model-len
+    - '32768'
+    - --max-num-batched-tokens
+    - '16384'
+    - --trust-remote-code
+    - --allowed-local-media-path
+    - /
+    - --dtype
+    - bfloat16
+    - --reasoning-parser
+    - qwen3
+    - --mm-processor-cache-gb
+    - '0'
+    - --mm-encoder-tp-mode
+    - data
+    - --mm-processor-cache-type
+    - shm
+    - --gpu-memory-utilization
+    - '0.85'
+    - --compilation-config
+    - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    - --additional-config
+    - '{"enable_cpu_binding":true}'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+        extra_args:
+        - --data-parallel-size
+        - '8'
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+        extra_args:
+        - --data-parallel-size
+        - '4'
+  ascend_w8a8_mxfp8:
+    model_id: Eco-Tech/Qwen3.6-27B-w8a8c8-mxfp8
+    precision: mxfp8
+    label: W8A8C8 MXFP8 (Ascend A5, FP8 KV)
+    vram_minimum_gb: 33
+    supported_hardware:
+    - ascend_950dt
+    tp: 1
+    min_vllm_version: 0.30.0
     default_modes:
       spec_decoding: qwen3_5_mtp
     extra_args:
-      - '--data-parallel-size'
-      - '8'
-      - '--quantization'
-      - ascend
-      - '--served-model-name'
-      - qwen3.6
-      - '--max-num-seqs'
-      - '32'
-      - '--max-model-len'
-      - '133000'
-      - '--max-num-batched-tokens'
-      - '16384'
-      - '--gpu-memory-utilization'
-      - '0.90'
-      - '--no-enable-prefix-caching'
-      - '--compilation-config'
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - '--additional-config'
-      - '{"enable_cpu_binding":true}'
-      - '--async-scheduling'
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8000'
+    - --data-parallel-size
+    - '8'
+    - --quantization
+    - ascend
+    - --kv-cache-dtype
+    - mxfp8
+    - --served-model-name
+    - qwen3.6
+    - --max-num-seqs
+    - '32'
+    - --max-model-len
+    - '153600'
+    - --max-num-batched-tokens
+    - '16384'
+    - --trust-remote-code
+    - --allowed-local-media-path
+    - /
+    - --reasoning-parser
+    - qwen3
+    - --mm-processor-cache-gb
+    - '0'
+    - --mm-encoder-tp-mode
+    - data
+    - --mm-processor-cache-type
+    - shm
+    - --gpu-memory-utilization
+    - '0.90'
+    - --compilation-config
+    - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    - --additional-config
+    - '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
     extra_env:
       VLLM_USE_MODELSCOPE: 'True'
+      HCCL_BUFFSIZE: '1024'
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
-      HCCL_BUFFSIZE: '512'
       OMP_PROC_BIND: 'false'
       OMP_NUM_THREADS: '1'
       TASK_QUEUE_ENABLE: '1'
     hardware_overrides:
-      ascend_910c:
-        docker_image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:v0.23.0-a3
-    description: ModelSlim INT8 W8A8 checkpoint for one Atlas 800 A3 node (16x Ascend 910C), using TP2+DP8. Requires --quantization ascend.
-  default:
-    hardware_overrides:
-      ascend_910c:
-        docker_image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:v0.23.0-a3
-        extra_args:
-          - '--data-parallel-size'
-          - '8'
-          - '--served-model-name'
-          - qwen3.6
-          - '--max-num-seqs'
-          - '32'
-          - '--max-model-len'
-          - '133000'
-          - '--max-num-batched-tokens'
-          - '16384'
-          - '--gpu-memory-utilization'
-          - '0.90'
-          - '--no-enable-prefix-caching'
-          - '--compilation-config'
-          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-          - '--async-scheduling'
-        extra_env:
-          VLLM_USE_MODELSCOPE: 'True'
-          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
-          HCCL_BUFFSIZE: '512'
-          OMP_PROC_BIND: 'false'
-          OMP_NUM_THREADS: '1'
-          TASK_QUEUE_ENABLE: '1'
-    tp:
-      ascend_910c: 2
-meta:
-  hardware:
-    ascend_950dt: verified
-    ascend_910c: verified
+      ascend_950dt:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a5
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+    description: W8A8C8-MXFP8 checkpoint on one Ascend 950DT node (TP1 + DP8) with an MXFP8 KV cache, as the v0.30.0 tutorial recommends.
 strategy_overrides:
   multi_node_tp:
     hardware_overrides:
-      # TP already spans every device in this strategy. The single-node DP8
-      # setting must not create eight copies of that cluster-wide TP group.
       ascend_910c:
-        extra_args: ['--data-parallel-size', '1']
+        extra_args:
+        - --data-parallel-size
+        - '1'
+      ascend_910b:
+        extra_args:
+        - --data-parallel-size
+        - '1'
       ascend_950dt:
-        extra_args: ['--data-parallel-size', '1']
+        extra_args:
+        - --data-parallel-size
+        - '1'
