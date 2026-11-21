@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import yuanrong_backend as yuanrong_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import (
     YuanrongBackend,
     YuanrongConfig,
@@ -113,6 +114,97 @@ def test_exists_exception_returns_zeros():
     backend = _make_backend()
     backend.store.batch_is_exist.side_effect = Exception("fail")
     assert backend.exists(["k1", "k2"]) == [0, 0]
+
+
+def test_set_device_reuses_captured_device(monkeypatch):
+    npu = MagicMock()
+    backend = YuanrongBackend.__new__(YuanrongBackend)
+    backend.device_id = 6
+
+    monkeypatch.setattr(yuanrong_module.torch, "npu", npu)
+    backend.set_device()
+
+    npu.set_device.assert_called_once_with(6)
+
+
+def test_constructor_captures_current_device(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "yuanrong.json"
+    cfg_path.write_text(json.dumps({"worker_addr": "127.0.0.1:31501"}))
+    monkeypatch.setenv("YR_CONFIG_PATH", str(cfg_path))
+
+    native_client = MagicMock()
+    hetero_client = MagicMock(return_value=native_client)
+    monkeypatch.setattr(sys.modules["yr.datasystem.hetero_client"], "HeteroClient", hetero_client)
+    backend_module = sys.modules[YuanrongBackend.__module__]
+    monkeypatch.setattr(backend_module, "split_host_port", lambda _: ("127.0.0.1", 31501))
+    npu = MagicMock()
+    npu.current_device.return_value = 7
+    monkeypatch.setattr(backend_module.torch, "npu", npu)
+
+    backend = YuanrongBackend(MagicMock())
+
+    assert backend.device_id == 7
+    npu.current_device.assert_called_once_with()
+    npu.set_device.assert_not_called()
+
+
+def test_scheduler_client_does_not_resolve_npu_device(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "yuanrong.json"
+    cfg_path.write_text(json.dumps({"worker_addr": "127.0.0.1:31501"}))
+    monkeypatch.setenv("YR_CONFIG_PATH", str(cfg_path))
+
+    hetero_client = MagicMock()
+    monkeypatch.setattr(sys.modules["yr.datasystem.hetero_client"], "HeteroClient", hetero_client)
+    backend_module = sys.modules[YuanrongBackend.__module__]
+    monkeypatch.setattr(backend_module, "split_host_port", lambda _: ("127.0.0.1", 31501))
+    npu = MagicMock()
+    monkeypatch.setattr(backend_module.torch, "npu", npu)
+
+    backend = YuanrongBackend.create_scheduler_client(MagicMock())
+
+    assert backend.device_id is None
+    hetero_client.assert_called_once_with(
+        "127.0.0.1",
+        31501,
+        connect_timeout_ms=9000,
+        req_timeout_ms=0,
+        enable_remote_h2d=False,
+    )
+    hetero_client.return_value.init.assert_not_called()
+    npu.current_device.assert_not_called()
+    npu.set_device.assert_not_called()
+
+
+def test_metadata_only_client_rejects_device_binding(monkeypatch):
+    npu = MagicMock()
+    backend = YuanrongBackend.__new__(YuanrongBackend)
+    backend.device_id = None
+    monkeypatch.setattr(yuanrong_module.torch, "npu", npu)
+
+    with pytest.raises(RuntimeError, match="Metadata-only Yuanrong clients"):
+        backend.set_device()
+
+    npu.set_device.assert_not_called()
+
+
+def test_scheduler_client_may_initialize_store_without_binding_device(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "yuanrong.json"
+    cfg_path.write_text(json.dumps({"worker_addr": "127.0.0.1:31501", "use_layerwise": True}))
+    monkeypatch.setenv("YR_CONFIG_PATH", str(cfg_path))
+
+    hetero_client = MagicMock()
+    monkeypatch.setattr(sys.modules["yr.datasystem.hetero_client"], "HeteroClient", hetero_client)
+    backend_module = sys.modules[YuanrongBackend.__module__]
+    monkeypatch.setattr(backend_module, "split_host_port", lambda _: ("127.0.0.1", 31501))
+    npu = MagicMock()
+    monkeypatch.setattr(backend_module.torch, "npu", npu)
+
+    backend = YuanrongBackend.create_scheduler_client(MagicMock())
+
+    assert backend.device_id is None
+    hetero_client.return_value.init.assert_called_once_with()
+    npu.current_device.assert_not_called()
+    npu.set_device.assert_not_called()
 
 
 def test_yuanrong_config_loads_from_file(tmp_path):
