@@ -337,7 +337,7 @@ class NPUModelRunner(GPUModelRunner):
                 try:
                     super().load_model(load_dummy_weights, *args, **kwargs)
                     if getattr(get_ascend_config(), "enable_moonep", False):
-                        from vllm_ascend.ops.fused_moe.moonep_balance import maybe_install_pf_stream
+                        from vllm_ascend.ops.fused_moe.moonep_weight_manager import maybe_install_pf_stream
                         from vllm_ascend.ops.fused_moe.moonep_comm import (
                             ensure_runtime_initialized,
                             iter_prefetch_layers,

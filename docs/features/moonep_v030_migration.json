@@ -232,6 +232,7 @@
     "native_baseline": "public MLP, quant dataclasses/methods, shared experts and native routers unchanged by this repair"
   },
   "main_path_mapping": {
+    "vllm_ascend/ops/fused_moe/moonep_balance.py": "vllm_ascend/ops/fused_moe/moonep_weight_manager.py",
     "vllm_ascend/ops/fused_moe/moonep_home_gemm.py": "vllm_ascend/ops/fused_moe/moonep_mlp.py"
   }
 }

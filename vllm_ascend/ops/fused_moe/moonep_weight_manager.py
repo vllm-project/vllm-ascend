@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""MoonEP load-balance path (MindSpeed-MM style): per-rank prefetch slots.
+"""Publish local expert weights to Home, prefetch remote weights into Slots, and build zero-copy MLP views.
 
 Conventional owner-only dispatch sends every row to the rank
 that owns its expert. Under skewed routing that concentrates rows on the hot
@@ -53,13 +53,13 @@ validation unconditionally; this does not quantize BF16 model weights.
 
 from __future__ import annotations
 
-import atexit as _atexit_sc
 import dataclasses
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import torch
+from vllm.logger import logger
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -73,48 +73,9 @@ from vllm_ascend.quantization.quant_type import QuantType
 # （UB 内部暂存区 < 188 KiB），所以 Hp 最多 32768 个 2 字节元素 = 64 KiB 字节。
 _MAX_CARRIER_ROW_ELEMS = 32768
 
-# Persistent per-layer slot cache (FreeBalance-style "migrate once, reuse"):
-# each layer keeps the weights of its N most recently mirrored remote experts in
-# its own VMM chunk. A later step that mirrors the same expert into the same
-# layer serves it with a *local* copy instead of a remote GET. Measured plan
-# repeats make ~2/3 of the slot uses cacheable (docs/dev_results_2026-09-16.md).
-# Off by default: measured 2026-09-17, the cache reaches a 68% hit rate and
-# skips 80% of the prefetch launches, yet the step gets ~9 ms SLOWER -- the
-# per-layer host read of the plan row costs more than the prefetch it saves
-# (the prefetch is not on the critical path; the earlier 0.49 ms figure was
-# a sync-based measurement that included queue drain).
-# Snapshot once at module load; do not query the environment per MoE layer.
+# Optional per-layer cache reuses remote weights across steps. Snapshot the
+# configured capacity once so layers do not read the environment on each step.
 _CACHED_EXPERT_COUNT = envs.MOONEP_CACHED_REDUNDANT_EXPERT_COUNT
-
-_SLOT_CACHE_STATS: dict = {}
-_PF_SKIPPED = [0]
-
-
-def _dump_slot_cache_stats() -> None:
-    """Sum the per-layer hit/miss counters once, at exit."""
-    if not _SLOT_CACHE_STATS:
-        return
-    hits = sum(v[0] for v in _SLOT_CACHE_STATS.values())
-    misses = sum(v[1] for v in _SLOT_CACHE_STATS.values())
-    tot = max(hits + misses, 1)
-    print(
-        f"[slot-cache] layers={len(_SLOT_CACHE_STATS)} hits={hits} misses={misses} "
-        f"hit_rate={hits / tot:.3f} prefetch_skipped={_PF_SKIPPED[0]}",
-        flush=True,
-    )
-
-
-_atexit_sc.register(_dump_slot_cache_stats)
-
-
-def slot_mode_enabled() -> bool:
-    """Compatibility query for MoonEP's sole mode; does not enable MoonEP itself."""
-    return True
-
-
-def slot_quant_enabled() -> bool:
-    """Compatibility capability query; does not quantize or enable a model."""
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +346,6 @@ def _build_slot_states(entries, rank: int, dev: int) -> list:
             layout,
             rank,
             dev,
-            layer_index=len(states),
             cache_layer_index=cache_index,
             cache_layer_count=counts[key],
         )
@@ -457,7 +417,6 @@ class _LayerWeightState:
         rank: int,
         dev: int,
         *,
-        layer_index: int,
         cache_layer_index: int,
         cache_layer_count: int,
     ):
@@ -504,12 +463,10 @@ class _LayerWeightState:
         self._layer = layer
         # persistent per-layer expert cache (FreeBalance-style reuse): one cache
         # chunk per payload spec (bf16 carriers, like the slots themselves)
-        self.layer_index = layer_index
         self.cache_layer_index = cache_layer_index
         self.caches = dict(shared.get("cache") or {})
         self.cache_experts = [-1] * max(_CACHED_EXPERT_COUNT, 1)
         self.cache_next = 0
-        self.cache_stats = [0, 0]  # [hits, misses] over used slots
         self._vmm_tensors = list(self.homes.values())
         # Read-only metadata is stable for the life of this layer's aliases.
         self._prefetch_views = [self.fulls[spec.name] for spec in self._specs]
@@ -549,7 +506,7 @@ class _LayerWeightState:
             if getattr(self._layer, "quant_type", None) == QuantType.W4A8MXFP:
                 self._release_mxfp_sources()
             return
-        released = 0
+        released = False
         for name, src_attr, spec_name in (("w13_weight", "_w13_src", "w13"), ("w2_weight", "_w2_src", "w2")):
             src = getattr(self, src_attr, None)
             home = self.homes.get(spec_name)
@@ -568,17 +525,12 @@ class _LayerWeightState:
                     f"({tuple(layer_param.shape)} {layer_param.dtype} vs "
                     f"{tuple(home.shape)} {home.dtype}); refusing to swap"
                 )
-            released += home.numel() * home.element_size()
             # in-place storage swap: the Parameter object (and therefore the
             # runtime's id()-keyed state lookup) is preserved
             layer_param.data = home
+            released = True
         if released:
             self._released = True
-            print(
-                f"[moonep-release] {type(self._layer).__name__}: vllm weight copies "
-                f"released, home chunks now back the layer ({released / 2**20:.0f} MB)",
-                flush=True,
-            )
 
     def _release_mxfp_sources(self) -> None:
         """Transfer the four loaded packed-NZ / E8M0 parameters as one layer."""
@@ -778,9 +730,8 @@ def _packed_alias(home: torch.Tensor, slot: torch.Tensor, dev: int, spec: _Paylo
 # dispatch|home_gemm1: run Home GEMM1 before joining, then run Slot GEMM1.
 # Snapshot the validated setting at module load, not in the per-layer hot path.
 _PREFETCH_OVERLAP = envs.MOONEP_PREFETCH_SIDE_STREAM_OVERLAP
-_PF_STREAMED = [0]
 
-_PF: dict = {"stream": None, "done": False, "fail": 0, "cur_key": None}
+_PF: dict = {"stream": None, "done": False, "cur_key": None}
 
 
 def select_prefetch_layer(layer) -> None:
@@ -813,7 +764,6 @@ def maybe_install_pf_stream(decoder_layers: Iterable[torch.nn.Module]) -> None:
     try:
         layers = list(decoder_layers)
         if not layers:
-            print("[pf-stream] no decoder layers found; disabled", flush=True)
             return
 
         def _pre(blk, args, kwargs):
@@ -829,9 +779,8 @@ def maybe_install_pf_stream(decoder_layers: Iterable[torch.nn.Module]) -> None:
         for blk in layers:
             blk.register_forward_pre_hook(_pre, with_kwargs=True)
         _PF["done"] = True
-        print(f"[pf-stream] pre-hook installed on {len(layers)} decoder layers", flush=True)
     except Exception as exc:  # noqa: BLE001
-        print(f"[pf-stream] install failed: {exc}", flush=True)
+        logger.warning("Failed to register MoonEP prefetch layer hooks: %s", exc)
 
 
 def _prepare_slot_cache(state, plan):
@@ -856,17 +805,6 @@ def _prepare_slot_cache(state, plan):
         experts_to_copy = plan.experts_to_copy.clone()
         experts_to_copy[rank] = torch.tensor(masked, dtype=experts_to_copy.dtype, device=experts_to_copy.device)
         plan = dataclasses.replace(plan, experts_to_copy=experts_to_copy)
-    first_hit = state.cache_stats[0] == 0 and bool(hits)
-    state.cache_stats[0] += len(hits)
-    state.cache_stats[1] += len(misses)
-    _SLOT_CACHE_STATS[id(state)] = state.cache_stats
-    if first_hit:
-        print(
-            f"[slot-cache-active r{rank}] layer={state.layer_index} "
-            f"capacity={_CACHED_EXPERT_COUNT} hits={len(hits)} misses={len(misses)} "
-            f"payloads={','.join(state.caches)}",
-            flush=True,
-        )
     return plan, (hits, misses), not misses
 
 
@@ -917,21 +855,13 @@ def _pf_stream_hook(buffer, lookup_slot_state: Callable[[int], _LayerWeightState
                 if not skip_prefetch:
                     _pf_prefetch(buffer, state, plan_use)
             # Keep the prepared decision and completion event together on this
-            # Buffer; forward must not re-read the plan or count hits twice.
+            # Buffer so the forward path can reuse both.
             ctx["slot_prefetch_ready"] = (state, plan_use, cache_plan, skip_prefetch, side.record_event())
-            if _PF_STREAMED[0] == 0:
-                from vllm.distributed.parallel_state import get_ep_group
-
-                rank = get_ep_group().rank_in_group
-                print(f"[pf-stream-active r{rank}] overlap={_PREFETCH_OVERLAP} cache_aware=1", flush=True)
-            _PF_STREAMED[0] += 1
-        except Exception as exc:  # noqa: BLE001 - preserve the MTE diagnostic path
+        except Exception as exc:  # noqa: BLE001 - keep the MTE fallback
             if ctx.get("_prefetch_use_udma", False):
                 # A partial issue cannot safely fall back and submit again.
                 raise RuntimeError("UDMA side-stream prefetch failed") from exc
-            _PF["fail"] += 1
-            if _PF["fail"] in (1, 50):
-                print(f"[pf-stream] issue failed: {exc}", flush=True)
+            logger.warning_once("MoonEP side-stream prefetch failed: %s", exc)
 
     return _after
 
@@ -991,13 +921,7 @@ def run_slot_forward(
             raise RuntimeError("Slot prefetch belongs to a different MoE layer")
     else:
         plan_use, cache_plan, skip_prefetch = _prepare_slot_cache(state, plan_use)
-    if skip_prefetch:
-        _PF_SKIPPED[0] += 1
-    elif pf_ev is not None:
-        # 本层的 prefetch 已由 after_planning 钩子发到 side stream 上，与
-        # dispatch 并行了；这里不重复发，只把 event 留到 GEMM 前 join。
-        pass
-    else:
+    if not skip_prefetch and pf_ev is None:
         buffer.prefetch_projections(
             plan=plan_use,
             projections=state.prefetch_views(),
@@ -1041,26 +965,12 @@ def run_slot_forward(
             prefetch_ready=pf_ev,
             record_before_gmm2=record_before_gmm2,
         )
-        if pf_ev is not None and not runner.activation_logged:
-            from vllm.distributed.parallel_state import get_ep_group
-
-            rank = get_ep_group().rank_in_group
-            transport = "udma" if buffer._require_ctx().get("_prefetch_use_udma", False) else "mte"
-            print(
-                f"[home-gemm-active r{rank}] overlap={_PREFETCH_OVERLAP} split=gemm1 home={state.epn} "
-                f"slots={state.B} prefetch={transport} backend={mlp_compute_input.quant.quant_type} "
-                f"library={runner.library_path}",
-                flush=True,
-            )
-            runner.activation_logged = True
     else:
         rows, before_gmm2_evt = apply_slot_mlp(mlp_compute_input, quant_method, record_before_gmm2=record_before_gmm2)
     return rows, before_gmm2_evt
 
 
 __all__ = [
-    "slot_mode_enabled",
-    "slot_quant_enabled",
     "_LayerWeightState",
     "_SharedSlots",
     "run_slot_forward",

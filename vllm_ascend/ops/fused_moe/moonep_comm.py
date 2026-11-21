@@ -436,7 +436,7 @@ class _MoonEPRuntime:
                 "topk": torch.zeros(capacity, K, dtype=torch.int32, device=dev),
                 "combine_route": torch.zeros(capacity, ((K + 7) // 8) * 8, dtype=torch.float32, device=dev),
             }
-        from vllm_ascend.ops.fused_moe.moonep_balance import _build_slot_states
+        from vllm_ascend.ops.fused_moe.moonep_weight_manager import _build_slot_states
 
         dev = int(torch.npu.current_device())
         ep_grp = get_ep_group()
@@ -448,7 +448,7 @@ class _MoonEPRuntime:
         self._states = states = _build_slot_states(entries, rank, dev)
         self._state_by_w13 = {id(st._w13_src): st for st in states}
 
-        from vllm_ascend.ops.fused_moe.moonep_balance import udma_prefetch_overlap_requested
+        from vllm_ascend.ops.fused_moe.moonep_weight_manager import udma_prefetch_overlap_requested
 
         prefetch_overlap = udma_prefetch_overlap_requested(use_udma, True)
         if prefetch_overlap:
@@ -929,7 +929,7 @@ class MoonEPCommImpl(MoECommMethod):
 
     def fused_experts(self, fused_experts_input, quant_method=None):
         from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import build_token_dispatch_input
-        from vllm_ascend.ops.fused_moe.moonep_balance import run_slot_forward
+        from vllm_ascend.ops.fused_moe.moonep_weight_manager import run_slot_forward
 
         layer = fused_experts_input.layer
         if layer is None or quant_method is None:
@@ -940,7 +940,7 @@ class MoonEPCommImpl(MoECommMethod):
         state = lookup_slot_state(id(layer.w13_weight))
         if state is None:
             raise RuntimeError("MoonEP balance state missing: initialize after expert weight loading")
-        from vllm_ascend.ops.fused_moe.moonep_balance import select_prefetch_layer
+        from vllm_ascend.ops.fused_moe.moonep_weight_manager import select_prefetch_layer
 
         select_prefetch_layer(layer)
         record_stage_events = bool(getattr(layer, "return_with_event", False))
