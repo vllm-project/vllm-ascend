@@ -1408,11 +1408,63 @@ def _publish_action_artifacts(
         _atomic_write_json(action_state_path, action_state)
 
 
+def _pid_alive(pid: int) -> bool:
+    """Return True when `pid` refers to a live process."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
+def _reap_stale_opc_locks(root: Path) -> int:
+    """Remove ``kernel_meta.lock`` files left behind by dead processes.
+
+    The CANN opc tool guards each ``kernel_meta_<kernel>`` debug directory
+    with a lock file holding the owner PID and fails hard ("Another process
+    is using this dir") whenever the lock belongs to any other PID —
+    including one from a previously crashed build. Without reaping, a single
+    failed build poisons every later retry of the same kernel. A lock is
+    only removed when its recorded PID no longer exists, so concurrent
+    builds with live owners are never disturbed.
+    """
+    reaped = 0
+    try:
+        candidates = list(root.glob("kernel_meta_*/kernel_meta.lock"))
+    except OSError:
+        return 0
+    for lock in candidates:
+        try:
+            pid_text = lock.read_text(encoding="utf-8", errors="ignore").strip()
+        except OSError:
+            continue
+        if pid_text.isdigit() and _pid_alive(int(pid_text)):
+            continue
+        try:
+            lock.unlink()
+            reaped += 1
+        except OSError:
+            pass
+    return reaped
+
+
 def _run_build_command(
     args: argparse.Namespace,
     command: Sequence[str],
 ) -> tuple[int, float]:
     environment = _parse_set_env(args.set_env)
+    # subprocess treats cwd=None as the current directory; mirror that here.
+    working_directory = Path(args.working_directory) if args.working_directory else Path.cwd()
+    reaped_locks = _reap_stale_opc_locks(working_directory)
+    if reaped_locks:
+        print(
+            f"[build-cache] reaped {reaped_locks} stale opc lock(s) under {working_directory}",
+            flush=True,
+        )
     start = time.monotonic()
     process = subprocess.run(
         list(command),
