@@ -52,6 +52,7 @@ class WeightUpdateModelCase:
     )
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False
+    online_quantization: bool = False
     skip_reason: str | None = None
     """Why neither lane can carry this case yet.
 
@@ -103,6 +104,51 @@ QWEN35_CASE = WeightUpdateModelCase(
 
 
 QWEN_CASES = (QWEN35_CASE,)
+
+
+def _online_mx_case(bits: int) -> WeightUpdateModelCase:
+    quantization = {
+        "quant_method": "compressed-tensors",
+        "format": "mxfp8-quantized" if bits == 8 else "mxfp4-pack-quantized",
+        "quantization_status": "compressed",
+        "ignore": ["lm_head", "re:.*mlp.gate$", "re:.*shared_expert_gate$"],
+        "config_groups": {
+            "group_0": {
+                "targets": ["Linear"],
+                "weights": {
+                    "num_bits": bits,
+                    "type": "float",
+                    "strategy": "group",
+                    "group_size": 32,
+                    "symmetric": True,
+                    "dynamic": False,
+                },
+                "input_activations": {
+                    "num_bits": 8,
+                    "type": "float",
+                    "strategy": "group",
+                    "group_size": 32,
+                    "symmetric": True,
+                    "dynamic": True,
+                },
+            },
+        },
+    }
+    return replace(
+        QWEN35_CASE,
+        id=f"qwen3.5-online-{'mxfp8' if bits == 8 else 'w4a8-mxfp4'}",
+        hf_overrides={**QWEN35_CASE.hf_overrides, "quantization_config": quantization},
+        online_quantization=True,
+        extra_server_args=(
+            "--additional-config",
+            '{"weight_nz_mode": 0, "online_quantize_weights": true}',
+            "--worker-extension-cls",
+            "tests.e2e.common.rlhf.weight_transfer.online_mx.OnlineMXAuditWorker",
+        ),
+    )
+
+
+QWEN35_ONLINE_MX_CASES = (_online_mx_case(8), _online_mx_case(4))
 
 
 DEEPSEEK_V4_CASE = WeightUpdateModelCase(

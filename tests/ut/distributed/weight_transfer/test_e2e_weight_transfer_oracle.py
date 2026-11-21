@@ -24,12 +24,14 @@ silently turn the comparison into apples-to-oranges, so the parity and the
 caching contract are pinned here.
 """
 
+from copy import deepcopy
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from tests.e2e.common.rlhf.weight_transfer import reference_check as utils
 from tests.e2e.common.rlhf.weight_transfer.case import MODEL_CASES
+from tests.e2e.common.rlhf.weight_transfer.online_mx import assert_online_updates
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     live_update_serve_args,
     reference_serve_args,
@@ -39,6 +41,42 @@ from tests.e2e.common.rlhf.weight_transfer.reference_check import (
 CASE = MODEL_CASES[0]
 PORT = 8123
 GPU_MEMORY_UTILIZATION = 0.75
+
+
+@pytest.fixture
+def online_mx_results():
+    def result(value):
+        return {
+            "generation": [(str(value), (float(value),))],
+            "workers": [
+                {
+                    "tensors": {name: ["uint8", [4, 2], str(value)] for name in ("weight", "weight_scale")},
+                    "pointers": {"weight": 100, "weight_scale": 200},
+                }
+            ],
+        }
+
+    references = [result(1), result(2)]
+    return result(0), references, deepcopy([references[0], references[1], references[0]])
+
+
+def test_online_mx_accepts_aba_matching_independent_loads(online_mx_results):
+    assert_online_updates(*online_mx_results, CASE)
+
+
+@pytest.mark.parametrize("failure", ["stale_scale", "no_update", "wrong_output", "moved_storage"])
+def test_online_mx_oracle_rejects_incomplete_reload(online_mx_results, failure):
+    dummy, references, updates = online_mx_results
+    if failure == "stale_scale":
+        updates[1]["workers"][0]["tensors"]["weight_scale"] = references[0]["workers"][0]["tensors"]["weight_scale"]
+    elif failure == "no_update":
+        updates[1] = deepcopy(updates[0])
+    elif failure == "wrong_output":
+        updates[2]["generation"] = updates[1]["generation"]
+    else:
+        updates[2]["workers"][0]["pointers"]["weight_scale"] += 1
+    with pytest.raises(AssertionError):
+        assert_online_updates(dummy, references, updates, CASE)
 
 
 def _flag_map(args: list[str]) -> dict[str, str | bool]:

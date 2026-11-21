@@ -27,9 +27,9 @@ from tests.e2e.common.rlhf.common import (
 )
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
-    UPDATE_ROUNDS,
     assert_weight_update_matches_reference,
-    generation_signature,
+    capture_update_result,
+    update_rounds,
     weight_transfer_servers,
 )
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
@@ -81,7 +81,9 @@ def _ipc_trainer_peer(local_rank: int, case: WeightUpdateModelCase, packed: bool
             source=source,
         )
         try:
-            for _ in range(UPDATE_ROUNDS):
+            for update_round in range(update_rounds(case)):
+                if case.online_quantization:
+                    source.set_update_round(update_round)
                 # Rank 0 releases this barrier after both rollout workers wake.
                 dist.barrier()
                 engine.send_weights()
@@ -120,8 +122,6 @@ def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed:
         gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
         env_dict=env_dict,
     ) as (server, reference, dummy_signature):
-        client = server.get_client()
-
         from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
         from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 
@@ -155,7 +155,9 @@ def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed:
             )
 
             signatures = []
-            for _ in range(UPDATE_ROUNDS):
+            for update_round in range(update_rounds(case)):
+                if case.online_quantization:
+                    source.set_update_round(update_round)
                 post_control(server, "pause")
                 # Same-chip RL: hand the engine's HBM to the co-located trainer
                 # before generating the payload. Level 2 discards the weights and the
@@ -183,7 +185,7 @@ def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed:
                 # That wake leaves nothing asleep, so the engine resumes scheduling on
                 # its own and no explicit `/resume` is needed.
                 post_control(server, "wake_up", params={"tags": ["kv_cache"]})
-                signatures.append(generation_signature(client, case.model, prompts=case.prompts))
+                signatures.append(capture_update_result(server, case))
             if not peer.join(timeout=CONTROL_TIMEOUT):
                 raise TimeoutError("IPC trainer peer did not exit after the two updates")
         finally:
