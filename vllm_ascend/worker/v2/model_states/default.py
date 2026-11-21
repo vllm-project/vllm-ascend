@@ -37,6 +37,7 @@ from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.utils import apply_prefill_as_decode_mask
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import CopySfaRequestStates
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
@@ -547,7 +548,10 @@ class AscendModelState(DefaultModelState):
                     block_size=self.vllm_config.cache_config.block_size,
                     block_table=block_tables[0],
                 )
-        is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
+        prefill_runs_as_decode = getattr(input_batch, "prefill_runs_as_decode_np", None)
+        is_prefilling = torch.from_numpy(
+            apply_prefill_as_decode_mask(input_batch.is_prefilling_np, prefill_runs_as_decode)
+        )
         # Varlen graphs capture one-token dummy requests but may replay wider
         # verification rows. Preserve the descriptor's promised bound for C2
         # compressor launch grids and attention/indexer tiling.

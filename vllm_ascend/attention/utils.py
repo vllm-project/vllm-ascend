@@ -7,6 +7,7 @@ from importlib.util import find_spec
 from math import prod
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_npu
@@ -40,7 +41,32 @@ from vllm_ascend.utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.input_batch import InputBatch
+
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+
+def apply_prefill_as_decode_mask(
+    is_prefilling: np.ndarray | torch.Tensor,
+    prefill_runs_as_decode: np.ndarray | torch.Tensor | None = None,
+) -> np.ndarray:
+    """Return effective request phases from host masks without modifying the inputs."""
+    flags = np.asarray(is_prefilling, dtype=np.bool_)
+    if prefill_runs_as_decode is None:
+        return flags
+    override = np.asarray(prefill_runs_as_decode, dtype=np.bool_)
+    if override.shape != flags.shape:
+        raise RuntimeError(
+            f"Prefill-as-decode mask must match the request phase mask: {override.shape} != {flags.shape}."
+        )
+    return flags & ~override
+
+
+def has_requests_to_run_as_prefill(batch: "InputBatch") -> bool:
+    """Whether an input batch still contains requests computed by the prefill path."""
+    flags = apply_prefill_as_decode_mask(batch.is_prefilling_np, getattr(batch, "prefill_runs_as_decode_np", None))
+    return bool(flags.any())
+
 
 # Native npu_attention_update accepts at most 16 output/LSE pairs.
 ATTENTION_UPDATE_MAX_INPUTS = 16
