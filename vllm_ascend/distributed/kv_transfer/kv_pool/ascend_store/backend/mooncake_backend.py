@@ -677,6 +677,11 @@ class MooncakeBackend(Backend):
             global_te.get_transfer_engine(local_hostname, device_name=None)
             global_te.register_buffer(ptrs, sizes)
 
+    @property
+    def transfers_disabled(self) -> bool:
+        staging = self._host_staging
+        return staging is not None and staging.transfers_disabled
+
     def exists(self, keys: list[str]) -> list[int]:
         if self._host_staging is not None:
             return self._host_staging.exists(keys)

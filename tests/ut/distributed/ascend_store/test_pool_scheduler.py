@@ -1755,6 +1755,45 @@ def test_failed_hisparse_import_skips_repeated_get(hisparse, finished, should_re
     assert scheduler.get_num_new_matched_tokens(request, 0) == (256, True)
 
 
+def test_nonzero_rank_permanent_failure_disables_future_pool_reads():
+    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiKVConnectorWorkerMetadata
+
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+        AscendStoreKVConnectorWorkerMetadata,
+    )
+
+    config = make_config()
+    config.kv_transfer_config.kv_connector_extra_config["load_async"] = True
+    scheduler = KVPoolScheduler(config, use_layerwise=False)
+    scheduler.client = MagicMock(closed=False)
+    scheduler.client.lookup.return_value = 256
+    first = SimpleNamespace(
+        request_id="first", num_tokens=512, prompt_token_ids=list(range(512)), block_hashes=[b"key"] * 32
+    )
+    assert scheduler.get_num_new_matched_tokens(first, 0) == (256, True)
+    healthy = AscendStoreKVConnectorWorkerMetadata({1: 1})
+    failed = AscendStoreKVConnectorWorkerMetadata({1: 1}, transfers_disabled=True)
+    combined = healthy.aggregate(failed)
+    assert combined.completed_events == {1: 2}
+    assert combined.transfers_disabled
+    multi = MultiKVConnectorWorkerMetadata((None, healthy))
+    for rank in range(1, 8):
+        rank_meta = failed if rank == 7 else None
+        multi = multi.aggregate(MultiKVConnectorWorkerMetadata((None, rank_meta)))
+    assert multi.metadata[1].transfers_disabled
+    scheduler.update_connector_output(KVConnectorOutput(kv_connector_worker_meta=multi.metadata[1]))
+    scheduler.update_connector_output(KVConnectorOutput(kv_connector_worker_meta=healthy))
+    save = SimpleNamespace(can_save=True)
+    scheduler.retain_blocks_for_save(save)
+    assert not save.can_save
+    for request_id in ("first", "same-prefix-retry", "new-prefix"):
+        request = SimpleNamespace(**vars(first))
+        request.request_id = request_id
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+        assert request_id not in scheduler.load_specs
+    scheduler.client.lookup.assert_called_once()
+
+
 class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
     """Test update_connector_output."""
 

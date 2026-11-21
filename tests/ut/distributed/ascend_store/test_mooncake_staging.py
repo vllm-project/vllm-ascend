@@ -103,6 +103,7 @@ def test_get_rejects_malformed_sdk_results(registered):
 @pytest.mark.parametrize("failed_op", ["get", "put"])
 def test_unconfirmed_batch_drains_store_before_returning_and_blocks_reuse(registered, memory_location, failed_op):
     bulk, sdk, host, device = registered
+    assert not bulk.transfers_disabled
     buffer = host if memory_location is MemoryLocation.HOST else device
     args = (["key"], [[ctypes.addressof(buffer)]], [[8]])
     in_sdk = threading.Event()
@@ -147,6 +148,7 @@ def test_unconfirmed_batch_drains_store_before_returning_and_blocks_reuse(regist
             failed_future.result(timeout=5)
         assert other_future.result(timeout=5) in ([True], [0])
     sdk.close.assert_called_once_with()
+    assert bulk.transfers_disabled
     assert bulk.exists(["key"]) == [0]
     for op in (get, put):
         with pytest.raises(RuntimeError, match="disabled"):
@@ -178,6 +180,14 @@ def test_forward_after_timeout_preserves_failed_receipt_without_reinitializing_s
         with pytest.raises(RuntimeError, match="completion unconfirmed"):
             staging.get(["page"], [[ctypes.addressof(device)]], [[8]], memory_location=MemoryLocation.DEVICE)
         assert backend.store is None
+        assert backend.transfers_disabled
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = KVPoolWorker.__new__(KVPoolWorker)
+        worker.m_store = backend
+        worker.kv_send_thread = None
+        worker._transfer_layout = object()
+        assert worker.build_connector_worker_meta().transfers_disabled
         connector.get_finished.side_effect = lambda ids: AscendStoreConnector.get_finished(connector, ids)
         for failed in ({"failed"}, set()):
             connector._current_step_has_real_forward = True
@@ -194,6 +204,7 @@ def test_missing_object_does_not_disable_store(registered):
     bulk, sdk, host, _ = registered
     sdk.batch_get_into_multi_buffers.return_value = [-704]
     assert bulk.get(["missing"], [[ctypes.addressof(host)]], [[8]], memory_location=MemoryLocation.HOST) == [-704]
+    assert not bulk.transfers_disabled
     sdk.close.assert_not_called()
 
 

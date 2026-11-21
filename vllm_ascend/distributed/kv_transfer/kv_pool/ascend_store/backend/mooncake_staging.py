@@ -147,6 +147,12 @@ class MooncakeHostStaging:
                     else:
                         self._store_state_changed.wait_for(lambda: self._store_state is _StoreState.CLOSED)
 
+    @property
+    def transfers_disabled(self) -> bool:
+        # This state changes in one direction. Polling worker metadata must
+        # not take the condition lock held while the SDK drains transfers.
+        return self._store_state is not _StoreState.OPEN
+
     def exists(self, keys: list[str]) -> list[int]:
         try:
             return self._call_store(lambda: self.store.batch_is_exist(keys))

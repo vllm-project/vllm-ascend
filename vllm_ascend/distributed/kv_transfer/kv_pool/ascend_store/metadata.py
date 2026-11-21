@@ -1352,6 +1352,7 @@ class AscendConnectorMetadata(KVConnectorMetadata):
 class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
     completed_events: dict[int, int] = field(default_factory=dict)
     """key: event_id, value: completed worker count"""
+    transfers_disabled: bool = False
 
     def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
         assert isinstance(other, AscendStoreKVConnectorWorkerMetadata), (
@@ -1364,4 +1365,7 @@ class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
                 merged[event_id] = other.completed_events[event_id]
             else:
                 merged[event_id] = merged[event_id] + other.completed_events[event_id]
-        return AscendStoreKVConnectorWorkerMetadata(merged)
+        return AscendStoreKVConnectorWorkerMetadata(
+            completed_events=merged,
+            transfers_disabled=self.transfers_disabled or other.transfers_disabled,
+        )
