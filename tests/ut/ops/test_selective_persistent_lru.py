@@ -65,6 +65,28 @@ int main() {
   q.step=INT64_MAX;
   bool threw=false;try {q.plan(t,4,4,r,l,100,c,a,b);}catch(const std::exception&){threw=true;}
   assert(threw);
+
+  SelectivePersistentLRU::PageChecks checks;
+  checks.prepare(2,2,4);
+  int32_t pages[4]={1,2,3,4}; // Two logical blocks, two layers.
+  int32_t tags[8]={1,1,2,0,3,3,4,0};
+  checks.validate_block(pages,2,2,0,8,1);
+  assert(checks.matches(0,0,tags,4,2,2));
+  assert(checks.matches(0,1,tags,4,2,2));
+  assert(checks.blocks[0].checked==1 && checks.blocks[1].checked==0);
+  checks.validate_block(pages,2,2,1,8,1);
+  assert(checks.matches(1,2,tags,4,2,2));
+  pages[2]=5; // Remap only layer 1 of logical block 0.
+  checks.validate_block(pages,2,2,0,8,2);
+  assert(!checks.matches(0,0,tags,4,2,2) && !checks.matches(0,1,tags,4,2,2));
+  tags[4]=5; // Reload one row, leaving the other row on its prior mapping.
+  assert(checks.matches(0,0,tags,4,2,2) && !checks.matches(0,1,tags,4,2,2));
+  pages[2]=3;
+  checks.validate_block(pages,2,2,0,8,3);
+  assert(!checks.matches(0,0,tags,4,2,2) && checks.matches(0,1,tags,4,2,2));
+  pages[2]=-1;
+  threw=false;try {checks.validate_block(pages,2,2,0,8,4);}
+  catch(const std::exception&){threw=true;} assert(threw);
   std::vector<int> values(20,0);
   selective_parallel_requests(20,[&](int64_t i){values[i]=int(i+1);});
   for(int i=0;i<20;++i) assert(values[i]==i+1);

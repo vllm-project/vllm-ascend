@@ -2661,6 +2661,52 @@ void selective_check_disjoint(const std::vector<at::Tensor>& tensors) {
 
 // Shared by graph sizes through the existing group owner; one pool per physical request row.
 struct SelectivePersistentLRU {
+  struct PageChecks {
+    struct Block {
+      int64_t checked = 0;
+      int64_t version = 0;
+    };
+    std::vector<Block> blocks;
+    std::vector<int32_t> pages;
+    std::vector<int64_t> slots;
+
+    void prepare(int64_t columns, int64_t layers, int32_t capacity) {
+      if (blocks.size() == static_cast<size_t>(columns) &&
+          pages.size() == static_cast<size_t>(columns * layers) &&
+          slots.size() == static_cast<size_t>(capacity)) return;
+      blocks.assign(columns, {});
+      pages.assign(columns * layers, -1);
+      slots.assign(capacity, 0);
+    }
+
+    void validate_block(const int32_t* table, int64_t columns, int64_t layers,
+                        int32_t block, int64_t max_page, int64_t ticket) {
+      auto& entry = blocks[block];
+      if (entry.checked == ticket) return;
+      for (int64_t layer = 0; layer < layers; ++layer) {
+        const auto index = layer * columns + block;
+        const auto page = table[index];
+        TORCH_CHECK(page >= 0 && page < max_page, "historical token has an invalid Host page");
+        if (pages[index] != page) {
+          pages[index] = page;
+          entry.version = ticket;
+        }
+      }
+      entry.checked = ticket;
+    }
+
+    bool matches(int32_t block, int32_t slot, const int32_t* tags, int32_t capacity,
+                 int64_t columns, int64_t layers) {
+      const auto version = blocks[block].version;
+      if (slots[slot] == version) return true;
+      // A slot may still carry the right pages after another token in its block was remapped.
+      for (int64_t layer = 0; layer < layers; ++layer)
+        if (tags[layer * capacity + slot] != pages[layer * columns + block]) return false;
+      slots[slot] = version;
+      return true;
+    }
+  };
+
   std::unordered_map<int32_t, int32_t> slot_of_token;
   std::vector<int32_t> free_slots;
   std::vector<int64_t> last_used;
@@ -2669,6 +2715,7 @@ struct SelectivePersistentLRU {
   std::vector<std::pair<float, int32_t>> score_cold;
   int64_t step = 0;
   int32_t stable_prefix = -1;
+  PageChecks page_checks;
 
   void reset(int32_t capacity, int32_t* resident) {
     slot_of_token.clear();
@@ -2678,6 +2725,7 @@ struct SelectivePersistentLRU {
     for (int32_t i = 0; i < capacity; ++i) free_slots[i] = capacity - 1 - i;
     std::fill_n(resident, capacity, -1);
     if (!scores.empty()) scores.assign(capacity, -std::numeric_limits<float>::infinity());
+    std::fill(page_checks.slots.begin(), page_checks.slots.end(), 0);
     step = 0;
     stable_prefix = -1;
   }
@@ -2783,7 +2831,7 @@ std::vector<at::Tensor> selective_group_lru_plan_impl(
     const at::Tensor& topk, const at::Tensor& page_tables, at::Tensor slot_to_token,
     at::Tensor lru_slots, at::Tensor resident_pages, at::Tensor last_identity, at::Tensor token_mark,
     at::Tensor token_pos, at::Tensor epoch, at::Tensor control, const std::vector<int64_t>& meta, SelectivePersistentLRU* pool,
-    const float* score_table = nullptr, int32_t* statistics = nullptr) {
+    const float* score_table = nullptr, int32_t* statistics = nullptr, at::TensorList outputs = {}) {
   auto check = [](const at::Tensor& t, at::ScalarType dtype, const char* name) {
     TORCH_CHECK(t.device().is_cpu() && t.is_contiguous() && t.scalar_type() == dtype,
                 name, " must be contiguous CPU memory with the requested dtype");
@@ -2822,8 +2870,21 @@ std::vector<at::Tensor> selective_group_lru_plan_impl(
   TORCH_CHECK(meta[10] <= (INT32_MAX - block_count) / blocks_per_row &&
               tail_row <= (INT32_MAX - block_count) / blocks_per_row,
               "selective block table overflows");
-  selective_check_disjoint({topk, page_tables, slot_to_token, lru_slots, resident_pages, last_identity,
-                            token_mark, token_pos, epoch, control});
+  const int64_t transfer_width64 = width64 + (score_table ? 160 : 0);
+  TORCH_CHECK(transfer_width64 <= INT32_MAX, "selective transfer width overflows");
+  std::vector<at::Tensor> buffers{topk, page_tables, slot_to_token, lru_slots, resident_pages, last_identity,
+                                  token_mark, token_pos, epoch, control};
+  if (!outputs.empty()) {
+    TORCH_CHECK(pool && outputs.size() == 5, "invalid selective preallocated plan outputs");
+    const int64_t sizes[] = {width64, transfer_width64, transfer_width64, block_count + 1, 1};
+    for (size_t i = 0; i < outputs.size(); ++i) {
+      check(outputs[i], i == 4 ? at::kLong : at::kInt, "preallocated plan output");
+      TORCH_CHECK(outputs[i].dim() == 1 && outputs[i].numel() == sizes[i],
+                  "invalid selective preallocated plan output size");
+    }
+    buffers.insert(buffers.end(), outputs.begin(), outputs.end());
+  }
+  selective_check_disjoint(buffers);
   auto* busy = control.data_ptr<int64_t>();
   int64_t expected = 0;
   TORCH_CHECK(__atomic_compare_exchange_n(busy, &expected, -1, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED),
@@ -2838,7 +2899,9 @@ std::vector<at::Tensor> selective_group_lru_plan_impl(
   const auto* input = topk.data_ptr<int32_t>();
   const auto* pages = page_tables.data_ptr<int32_t>();
   const int64_t cols = page_tables.size(1);
-  const int32_t transfer_width = width + (score_table ? 160 : 0);
+  const int32_t transfer_width = static_cast<int32_t>(transfer_width64);
+  auto* page_checks = outputs.empty() ? nullptr : &pool->page_checks;
+  if (page_checks) page_checks->prepare(cols, page_tables.size(0), cap);
   std::vector<int32_t> unique(transfer_width, -1), original_to_unique(width, -1), tail_slots(width, -1);
   auto* epoch_value = epoch.data_ptr<int32_t>();
   TORCH_CHECK(*epoch_value >= 0 && *epoch_value < EPOCH_RESET_THRESHOLD, "invalid selective epoch");
@@ -2860,9 +2923,13 @@ std::vector<at::Tensor> selective_group_lru_plan_impl(
     }
     TORCH_CHECK(token != seq - 1, "current token requires a valid NPU tail");
     TORCH_CHECK(block < cols, "historical token is missing a Host page");
-    for (int64_t layer = 0; layer < page_tables.size(0); ++layer) {
-      const auto page = pages[layer * cols + block];
-      TORCH_CHECK(page >= 0 && page < meta[8], "historical token has an invalid Host page");
+    if (page_checks) {
+      page_checks->validate_block(pages, cols, page_tables.size(0), block, meta[8], ticket);
+    } else {
+      for (int64_t layer = 0; layer < page_tables.size(0); ++layer) {
+        const auto page = pages[layer * cols + block];
+        TORCH_CHECK(page >= 0 && page < meta[8], "historical token has an invalid Host page");
+      }
     }
     int32_t position;
     if (pool) {
@@ -2883,15 +2950,17 @@ std::vector<at::Tensor> selective_group_lru_plan_impl(
     }
     if (i < width) original_to_unique[i] = position;
   }
-  auto physical = at::full({width}, -1, topk.options());
+  auto physical = outputs.empty() ? at::empty({width}, topk.options()) : outputs[0];
+  std::fill_n(physical.data_ptr<int32_t>(), width, -1);
   if (!score_table) topk_unique = count;
-  auto miss_tokens = at::full({transfer_width}, -1, topk.options());
-  auto miss_slots = at::full({transfer_width}, -1, topk.options());
-  auto block_table = at::empty({block_count + 1}, topk.options());
+  auto miss_tokens = outputs.empty() ? at::full({transfer_width}, -1, topk.options()) : outputs[1];
+  auto miss_slots = outputs.empty() ? at::full({transfer_width}, -1, topk.options()) : outputs[2];
+  auto block_table = outputs.empty() ? at::empty({block_count + 1}, topk.options()) : outputs[3];
   auto* table = block_table.data_ptr<int32_t>();
   for (int64_t b = 0; b < block_count; ++b) table[b] = static_cast<int32_t>(meta[10] * blocks_per_row + b);
   table[block_count] = static_cast<int32_t>(tail_row * blocks_per_row + block_count);
-  auto ticket_tensor = at::full({1}, ticket, last_identity.options());
+  auto ticket_tensor = outputs.empty() ? at::empty({1}, last_identity.options()) : outputs[4];
+  ticket_tensor.data_ptr<int64_t>()[0] = ticket;
   std::vector<int32_t> current(transfer_width, -1), workspace(pool ? 0 : static_cast<size_t>(cap) * 3),
                        positions(pool ? 0 : width);
   int64_t last_req = std::equal(identity, identity + 4, meta.begin()) && identity[4] == meta[10] &&
@@ -2953,9 +3022,14 @@ std::vector<at::Tensor> selective_group_lru_plan_impl(
       }
       const auto slot = found->second;
       TORCH_CHECK(slot >= 0 && slot < cap && resident[slot] == token, "invalid selective resident lookup");
+      const auto block = token / block_size;
       bool reload = token >= prefix;
-      for (int64_t layer = 0; layer < page_tables.size(0); ++layer)
-        reload |= tags[layer * cap + slot] != pages[layer * cols + token / block_size];
+      if (page_checks) {
+        reload = reload || !page_checks->matches(block, slot, tags, cap, cols, page_tables.size(0));
+      } else {
+        for (int64_t layer = 0; layer < page_tables.size(0); ++layer)
+          reload |= tags[layer * cap + slot] != pages[layer * cols + block];
+      }
       if (reload) {
         if (i < topk_unique) ++topk_misses;
         pool->invalidate(token, resident);
@@ -2980,8 +3054,10 @@ std::vector<at::Tensor> selective_group_lru_plan_impl(
     for (int32_t i = 0; i < miss_count; ++i) {
       const auto token = miss_tokens.data_ptr<int32_t>()[i];
       const auto slot = miss_slots.data_ptr<int32_t>()[i];
+      const auto block = token / block_size;
       for (int64_t layer = 0; layer < page_tables.size(0); ++layer)
-        resident_page_data[layer * cap + slot] = pages[layer * cols + token / block_size];
+        resident_page_data[layer * cap + slot] = pages[layer * cols + block];
+      if (page_checks) page_checks->slots[slot] = page_checks->blocks[block].version;
     }
   } else {
     for (int32_t slot = 0; slot < cap; ++slot) {
@@ -4205,6 +4281,17 @@ class SelectiveNativeGraph {
       const size_t copy_capacity = static_cast<size_t>(rows_) * copy_width_;
       // The captured scatter ignores -1. Initialize its entire descriptor buffer on the first replay.
       size_t previous_packed_rows = copy_capacity;
+      const auto table_width = b_[20].numel() / rows_;
+      auto physical = b_[18].view({rows_, width_});
+      auto block_table = b_[20].view({rows_, table_width});
+      std::vector<std::vector<at::Tensor>> plan_outputs;
+      if (tp_world_ == 1) {
+        auto misses = at::empty({rows_, 2, copy_width_}, b_[18].options().pinned_memory(false));
+        auto tickets = at::empty({rows_, 1}, b_[5].options().pinned_memory(false));
+        plan_outputs.reserve(rows_);
+        for (int64_t row = 0; row < rows_; ++row)
+          plan_outputs.push_back({physical[row], misses[row][0], misses[row][1], block_table[row], tickets[row]});
+      }
       for (;;) {
         wait_notify(ready_);
         int64_t replay_epoch;
@@ -4219,10 +4306,7 @@ class SelectiveNativeGraph {
         const auto* metadata = b_[5].data_ptr<int64_t>();
         const auto max_rows = b_[22].numel() / capacity_;
         const auto max_seq = b_[26].numel() / max_rows;
-        const auto table_width = b_[20].numel() / rows_;
         auto topk = normalized_topk_.view({rows_, width_});
-        auto physical = b_[18].view({rows_, width_});
-        auto block_table = b_[20].view({rows_, table_width});
         auto keys = b_[22].view({max_rows, capacity_});
         auto lru = b_[23].view({max_rows, capacity_});
         auto resident = b_[24].view({max_rows, static_cast<int64_t>(layer_count_), capacity_});
@@ -4266,9 +4350,12 @@ class SelectiveNativeGraph {
               resident[slot_row], identity[slot_row], marks[slot_row], positions[slot_row], epoch,
               controls[slot_row], meta, &(*pools_)[slot_row],
               score_table_.defined() ? score_table_.data_ptr<float>() : nullptr,
-              statistics_.defined() ? statistics_.data_ptr<int32_t>() + row * 2 : nullptr);
-          physical[row].copy_(result[0]);
-          block_table[row].copy_(result[3]);
+              statistics_.defined() ? statistics_.data_ptr<int32_t>() + row * 2 : nullptr,
+              tp_world_ == 1 ? at::TensorList(plan_outputs[row]) : at::TensorList{});
+          if (tp_world_ > 1) {
+            physical[row].copy_(result[0]);
+            block_table[row].copy_(result[3]);
+          }
           plans[static_cast<size_t>(row)] = std::move(result);
         });
         if (tp_world_ > 1 && tp_rank_ == 0) tp_publish_plans(plans, replay_epoch);
