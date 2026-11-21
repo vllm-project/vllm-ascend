@@ -59,6 +59,16 @@ if not _npu_available:
     torch_npu.hifloat8 = 290  # type: ignore[attr-defined]
     torch_npu.float8_e8m0fnu = 293  # type: ignore[attr-defined]
     sys.modules["torch_npu"] = torch_npu
+    npu_multiprocessing = types.ModuleType("torch_npu.multiprocessing")
+    npu_multiprocessing.__spec__ = importlib.util.spec_from_loader("torch_npu.multiprocessing", loader=None)
+    npu_multiprocessing.__path__ = []
+    npu_reductions = types.ModuleType("torch_npu.multiprocessing.reductions")
+    npu_reductions.__spec__ = importlib.util.spec_from_loader("torch_npu.multiprocessing.reductions", loader=None)
+    npu_reductions.rebuild_npu_tensor = MagicMock()  # type: ignore[attr-defined]
+    npu_multiprocessing.reductions = npu_reductions  # type: ignore[attr-defined]
+    torch_npu.multiprocessing = npu_multiprocessing  # type: ignore[attr-defined]
+    sys.modules["torch_npu.multiprocessing"] = npu_multiprocessing
+    sys.modules["torch_npu.multiprocessing.reductions"] = npu_reductions
     sys.modules["torch_npu._C"] = torch_npu._C
     sys.modules["torch_npu._C._distributed_c10d"] = torch_npu._C._distributed_c10d
     # worker.py imports: from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions

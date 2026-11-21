@@ -160,6 +160,8 @@ if TYPE_CHECKING:
 @contextmanager
 def torch_cuda_wrapper():
     try:
+        # Upstream replay also creates events through the top-level factory.
+        torch.Event = torch.npu.Event
         torch.cuda.Event = torch.npu.Event
         torch.cuda.Stream = torch.npu.Stream
         torch.cuda.stream = torch.npu.stream
