@@ -1,0 +1,10 @@
+# Release note fragment. See release_notes/README.md.
+pr: 22059
+entries:
+  - category: feature
+    text: >
+      Add async scheduling metrics: async_scheduling:seq_lens_update_ms times
+      the whole NPUModelRunner._update_seq_lens_cpu call (detail level), and
+      async_scheduling:d2h_sync_ms times the blocking D2H wait inside it that
+      can stall the async pipeline. The wait is reported from the model runner
+      because no symbol hook can separate it from the rest of the call.

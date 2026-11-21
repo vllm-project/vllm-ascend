@@ -19,6 +19,7 @@
 
 import inspect
 import logging
+import time
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
@@ -1537,7 +1538,17 @@ class NPUModelRunner(GPUModelRunner):
         # req_states.num_computed_tokens_cpu also backs the NumPy view used by PCP.
         if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and not self._can_skip_spec_cpu_length_sync():
             # Blocks CPU submission until D2H completes; may stall the async pipeline.
+            from vllm_ascend.observability.ms_metrics.handlers.async_scheduling import (
+                d2h_sync_enabled,
+                record_d2h_sync_ms,
+            )
+
+            # Sample the clock only at the detail level; the wait itself must
+            # happen regardless of whether the metric is enabled.
+            d2h_start = time.perf_counter() if d2h_sync_enabled() else None
             self.num_computed_tokens_event.synchronize()
+            if d2h_start is not None:
+                record_d2h_sync_ms((time.perf_counter() - d2h_start) * 1000.0)
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
                 self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]

@@ -1,0 +1,7 @@
+# Async scheduling. _update_seq_lens_cpu reports two histograms: the whole call
+# (seq_lens_update_ms, symbol hook) and the blocking D2H wait inside it
+# (d2h_sync_ms, reported from the model runner). output_placeholders is not
+# mounted: counting them needs the running queue from the upstream scheduler.
+
+- symbol: vllm_ascend.worker.v2.model_runner:NPUModelRunner._update_seq_lens_cpu
+  handler: vllm_ascend.observability.ms_metrics.handlers:seq_lens_update_handler
