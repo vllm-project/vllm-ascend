@@ -80,7 +80,6 @@ variants:
           HCCL_SOCKET_IFNAME: '$IFACE_NAME'
           GLOO_SOCKET_IFNAME: '$IFACE_NAME'
           TP_SOCKET_IFNAME: '$IFACE_NAME'
-      ascend_910b:
         docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
         docker_serve_command: vllm serve
         install:
