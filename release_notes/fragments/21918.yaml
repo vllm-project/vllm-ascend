@@ -1,0 +1,4 @@
+pr: 21918
+entries:
+  - category: bugfix
+    text: Fixed a P/D disaggregation hang with `MooncakeConnectorV2` where the prefill (producer) engine could stop releasing KV cache for transfers the decode side had already finished. Its KV cache usage then stayed near 100% and new requests waited indefinitely behind `capacity` until the engine was restarted, which is most visible under sustained load with a throttled decode instance.
