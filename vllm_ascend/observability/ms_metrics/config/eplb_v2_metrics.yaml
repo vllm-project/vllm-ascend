@@ -1,0 +1,18 @@
+# EPLB for Model Runner V2. The handlers only read state that upstream
+# EplbState already produces; no business code is touched. Entries fire on
+# balancedness-log or rebalance-interval events rather than every decode step.
+
+- symbol: vllm_ascend.distributed.eplb.eplb_state:AscendEplbState.step
+  handler: vllm_ascend.observability.ms_metrics.handlers:eplb_load_balance_handler
+
+# HIXL communicator: one accumulator per layer, recorded when the layer is
+# executed. The Gloo communicator inherits add_send/add_recv from upstream and
+# is therefore out of scope; see the PR description.
+- symbol: vllm_ascend.distributed.eplb.eplb_communicator:AscendHixlEplbCommunicator.set_transfer_context
+  handler: vllm_ascend.observability.ms_metrics.handlers:eplb_transfer_context_handler
+- symbol: vllm_ascend.distributed.eplb.eplb_communicator:AscendHixlEplbCommunicator.add_send
+  handler: vllm_ascend.observability.ms_metrics.handlers:eplb_transfer_send_handler
+- symbol: vllm_ascend.distributed.eplb.eplb_communicator:AscendHixlEplbCommunicator.add_recv
+  handler: vllm_ascend.observability.ms_metrics.handlers:eplb_transfer_recv_handler
+- symbol: vllm_ascend.distributed.eplb.eplb_communicator:AscendHixlEplbCommunicator.execute
+  handler: vllm_ascend.observability.ms_metrics.handlers:eplb_transfer_execute_handler

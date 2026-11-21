@@ -82,12 +82,13 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert [Path(path).name for path in provider.config_paths] == [
         "base_metrics.yaml",
         "eplb_metrics.yaml",
+        "eplb_v2_metrics.yaml",
         "runtime_guard_metrics.yaml",
         "schedule_execute_metrics.yaml",
     ]
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
-    assert len(config) == 13
+    assert len(config) == 18
     assert all(item["symbol"].startswith("vllm_ascend.") for item in config)
     assert all("id" not in item for item in config)
     assert all(
@@ -152,6 +153,7 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
         "vllm_ascend.observability.ms_metrics.handlers",
         "vllm_ascend.observability.ms_metrics.handlers.common",
         "vllm_ascend.observability.ms_metrics.handlers.eplb",
+        "vllm_ascend.observability.ms_metrics.handlers.eplb_v2",
         "vllm_ascend.observability.ms_metrics.handlers.runtime_guard",
         "vllm_ascend.observability.ms_metrics.handlers.schedule_execute",
     ):
@@ -171,7 +173,7 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
 
 def test_provider_yaml_symbols_exist_in_current_vllm_ascend_source():
     config_paths = sorted((_PACKAGE_ROOT / "config").glob("*.yaml"))
-    assert len(config_paths) == 4
+    assert len(config_paths) == 5
     config = _load_all_provider_configs(config_paths)
 
     for item in config:
@@ -488,6 +490,302 @@ def test_custom_handlers_are_not_factory_created_from_yaml_metrics():
             # Provider built-ins follow the factory convention; nothing to
             # assert here beyond the prefix check already done above.
             pass
+
+
+# ---------------------------------------------------------------------------
+# EPLB V2 load balance (AscendEplbState.step)
+# ---------------------------------------------------------------------------
+
+
+def _install_ep_group(monkeypatch, ep_group):
+    package = ModuleType("vllm")
+    distributed = ModuleType("vllm.distributed")
+    parallel_state = ModuleType("vllm.distributed.parallel_state")
+    parallel_state.get_ep_group = lambda: type("Group", (), {"device_group": ep_group})()
+    package.distributed = distributed
+    distributed.parallel_state = parallel_state
+    monkeypatch.setitem(sys.modules, "vllm", package)
+    monkeypatch.setitem(sys.modules, "vllm.distributed", distributed)
+    monkeypatch.setitem(sys.modules, "vllm.distributed.parallel_state", parallel_state)
+
+
+def _install_all_reduce(monkeypatch, factor: float = 1.0):
+    """Stub the EP-group reduction; ``factor`` scales the reduced tensor."""
+    import torch
+    import torch.distributed
+
+    def fake_all_reduce(tensor, op=None, group=None):
+        if factor != 1.0:
+            tensor.mul_(factor)
+        return None
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", fake_all_reduce)
+
+
+def _load_balance_state(torch):
+    return type(
+        "State",
+        (),
+        {
+            "model_states": {
+                "main": type(
+                    "ModelState",
+                    (),
+                    {
+                        "model_name": "main",
+                        "expert_load_pass": torch.tensor([[1.0, 3.0], [2.0, 2.0]]),
+                    },
+                )()
+            }
+        },
+    )()
+
+
+def _clearing_step(state, *args, **kwargs):
+    """Mirror upstream on a balancedness logging step: clear the buffer."""
+    for model_state in state.model_states.values():
+        model_state.expert_load_pass.zero_()
+    return "stepped"
+
+
+def test_eplb_load_balance_handler_records_reduced_load(monkeypatch):
+    torch = pytest.importorskip("torch")
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_v2_load_balance", "eplb_v2")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
+    # The reduction doubles the snapshot, so the recorded values prove they
+    # come from the reduced tensor instead of the raw pre-step buffer.
+    _install_all_reduce(monkeypatch, factor=2.0)
+
+    result = handlers.eplb_load_balance_handler(
+        _clearing_step,
+        _load_balance_state(torch),
+        False,
+        False,
+        True,
+    )
+
+    assert result == "stepped"
+    assert metrics.record_metric.call_count == 3
+    recorded = {call.args[0]: call.kwargs for call in metrics.record_metric.call_args_list}
+    assert recorded["eplb:load_balance:avg_tokens"]["value"] == 8.0
+    assert recorded["eplb:load_balance:max_tokens"]["value"] == 10.0
+    assert recorded["eplb:load_balance:balancedness"]["value"] == pytest.approx(0.8)
+    assert recorded["eplb:load_balance:avg_tokens"]["labels"] == {"rank": "0", "model": "main"}
+
+
+def test_eplb_load_balance_handler_reduces_even_without_recorder(monkeypatch):
+    """A rank without a recorder still joins the EP reduction.
+
+    The recorder gate must sit after the collective loop: returning before
+    the reduction on such a rank would leave the other EP ranks blocked
+    inside all_reduce.
+    """
+    torch = pytest.importorskip("torch")
+
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: None,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_v2_lb_no_recorder", "eplb_v2")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
+
+    calls = []
+    monkeypatch.setattr(
+        torch.distributed,
+        "all_reduce",
+        lambda tensor, op=None, group=None: calls.append(tensor),
+    )
+
+    assert (
+        handlers.eplb_load_balance_handler(_clearing_step, _load_balance_state(torch), False, False, True) == "stepped"
+    )
+    # The reduction ran even though no recorder is available.
+    assert len(calls) == 1
+
+
+def test_eplb_load_balance_handler_skips_non_logging_steps(monkeypatch):
+    """Only steps that consume ``expert_load_pass`` record, like upstream."""
+    torch = pytest.importorskip("torch")
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_v2_lb_skip", "eplb_v2")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
+    _install_all_reduce(monkeypatch)
+
+    # log_stats=False: no snapshot is taken even though the step clears the
+    # buffer.
+    assert (
+        handlers.eplb_load_balance_handler(_clearing_step, _load_balance_state(torch), True, False, False) == "stepped"
+    )
+    metrics.record_metric.assert_not_called()
+
+    # log_stats=True but the step left the buffer intact: outside the
+    # balancedness logging interval upstream logs nothing, and neither does
+    # the handler.
+    state = _load_balance_state(torch)
+
+    def idle_step(state, *args, **kwargs):
+        return "idle"
+
+    assert handlers.eplb_load_balance_handler(idle_step, state, False, False, True) == "idle"
+    metrics.record_metric.assert_not_called()
+
+
+def test_eplb_load_balance_handler_records_only_on_rank_zero(monkeypatch):
+    torch = pytest.importorskip("torch")
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_v2_lb_rank", "eplb_v2")
+    ep_group = Mock()
+    ep_group.rank.return_value = 1
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
+    _install_all_reduce(monkeypatch)
+
+    assert (
+        handlers.eplb_load_balance_handler(_clearing_step, _load_balance_state(torch), False, False, True) == "stepped"
+    )
+    metrics.record_metric.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# EPLB V2 weight transfer (AscendHixlEplbCommunicator)
+# ---------------------------------------------------------------------------
+
+
+def test_eplb_transfer_handlers_record_per_layer_totals(monkeypatch):
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_v2_transfer", "eplb_v2")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
+    communicator = type("Communicator", (), {})()
+
+    assert (
+        handlers.eplb_transfer_context_handler(
+            lambda *args, **kwargs: "context",
+            communicator,
+            None,
+            3,
+        )
+        == "context"
+    )
+    send_tensors = [type("Tensor", (), {"nbytes": 8})(), type("Tensor", (), {"nbytes": 4})()]
+    recv_tensors = [type("Tensor", (), {"nbytes": 16})()]
+    for expert_id in (5, 6, 5):
+        assert (
+            handlers.eplb_transfer_send_handler(
+                lambda *args, **kwargs: "sent",
+                communicator,
+                send_tensors,
+                1,
+                expert_id,
+            )
+            == "sent"
+        )
+    assert (
+        handlers.eplb_transfer_recv_handler(
+            lambda *args, **kwargs: "received",
+            communicator,
+            recv_tensors,
+            0,
+            7,
+        )
+        == "received"
+    )
+    assert handlers.eplb_transfer_execute_handler(lambda *args, **kwargs: "done", communicator) == "done"
+
+    assert metrics.record_metric.call_count == 4
+    recorded = {call.args[0]: call.kwargs for call in metrics.record_metric.call_args_list}
+    assert recorded["eplb:transfer:send_experts"]["value"] == 2
+    assert recorded["eplb:transfer:recv_experts"]["value"] == 1
+    # Both directions accumulate per call: 3 send calls x 2 tensors + 1 recv
+    # tensor = 7 ops; 3 x (8 + 4) + 16 = 52 estimated bytes.
+    assert recorded["eplb:transfer:comm_ops"]["value"] == 7
+    assert recorded["eplb:transfer:est_bytes"]["value"] == 52
+    assert recorded["eplb:transfer:send_experts"]["labels"] == {"rank": "0", "layer": "3"}
+
+
+def test_eplb_transfer_execute_without_context_records_nothing(monkeypatch):
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_v2_transfer_no_ctx", "eplb_v2")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
+    communicator = type("Communicator", (), {})()
+
+    assert handlers.eplb_transfer_execute_handler(lambda *args, **kwargs: "done", communicator) == "done"
+
+    metrics.record_metric.assert_not_called()
+
+
+def test_eplb_transfer_execute_failure_clears_pending_accumulator(monkeypatch):
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_v2_transfer_fail", "eplb_v2")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
+    communicator = type("Communicator", (), {})()
+
+    handlers.eplb_transfer_context_handler(
+        lambda *args, **kwargs: "context",
+        communicator,
+        None,
+        3,
+    )
+
+    def failing_execute(*args, **kwargs):
+        raise RuntimeError("execute failed")
+
+    with pytest.raises(RuntimeError):
+        handlers.eplb_transfer_execute_handler(failing_execute, communicator)
+
+    # The accumulator is dropped, so nothing is recorded and a later execute
+    # on the same communicator starts from a clean state.
+    metrics.record_metric.assert_not_called()
+    assert communicator not in handlers._pending
 
 
 def test_runtime_guard_handler_counts_alerts_by_incident_type(monkeypatch):
