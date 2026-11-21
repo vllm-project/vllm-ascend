@@ -1,5 +1,5 @@
 pr: 22695
 entries:
   - category: bugfix
-    text: Unfolded causal speculative-verification queries on target full-attention layers into single-query TND FIA entries on Ascend 950 (and when VLLM_BATCH_INVARIANT=1), eliminating attention output drift between K>0 verification and K=0 decode.
+    text: Unfolded eligible causal full-attention target speculative-verification queries (up to 4096 TND entries) into single-query TND FIA entries on Ascend 950 and when VLLM_BATCH_INVARIANT=1, avoiding multi-token TND FIA invariance drift against K=0 decode.
     hardware: [950PR, 950DT]

@@ -8,6 +8,8 @@ from typing import Any
 import torch
 
 _MAX_INDEX_CACHE_ENTRIES = 256
+# Ascend npu_fused_infer_attention_score TND layout constrains len(actual_seq_lengths) <= 4096.
+MAX_TND_FIA_BATCH = 4096
 
 
 def is_all_single_query(query_ends: Sequence[int], num_tokens: int) -> bool:
@@ -40,27 +42,40 @@ def single_query_layout(
     return new_query_ends, new_kv_lengths, page_table_rows
 
 
+def _current_device_stream(device: torch.device) -> tuple[Any, Any]:
+    if device.type == "npu" and hasattr(torch, "npu") and hasattr(torch.npu, "current_stream"):
+        stream = torch.npu.current_stream(device)
+        return stream, getattr(stream, "npu_stream", id(stream))
+    if device.type == "cuda" and torch.cuda.is_available():
+        stream = torch.cuda.current_stream(device)
+        return stream, stream.cuda_stream
+    return None, None
+
+
 def _select_block_table_rows(
     block_table: torch.Tensor,
     rows: list[int],
-    device_index_cache: dict[Any, torch.Tensor] | None = None,
+    device_index_cache: dict[Any, Any] | None = None,
 ) -> torch.Tensor:
     if rows == list(range(len(rows))) and len(rows) <= block_table.shape[0]:
         return block_table[: len(rows)]
     if not isinstance(device_index_cache, dict):
         device_index_cache = None
     device = block_table.device
-    cache_key = (tuple(rows), device)
+    stream, stream_key = _current_device_stream(device)
+    cache_key = (tuple(rows), device, stream_key)
     if device_index_cache is not None and cache_key in device_index_cache:
-        indices = device_index_cache[cache_key]
+        indices, _ = device_index_cache[cache_key]
     else:
         indices = torch.tensor(rows, dtype=torch.long)
         if device.type != "cpu":
             indices = indices.pin_memory().to(device, non_blocking=True)
         if device_index_cache is not None:
             if len(device_index_cache) >= _MAX_INDEX_CACHE_ENTRIES:
-                device_index_cache.pop(next(iter(device_index_cache)))
-            device_index_cache[cache_key] = indices
+                evicted_indices, evicted_stream = device_index_cache.pop(next(iter(device_index_cache)))
+                if evicted_stream is not None and hasattr(evicted_indices, "record_stream"):
+                    evicted_indices.record_stream(evicted_stream)
+            device_index_cache[cache_key] = (indices, stream)
     return block_table.index_select(0, indices)
 
 
@@ -69,7 +84,7 @@ def prepare_fia_layout(
     query_ends: list[int],
     kv_lengths: list[int],
     block_table: torch.Tensor | None,
-    device_index_cache: dict[Any, torch.Tensor] | None = None,
+    device_index_cache: dict[Any, Any] | None = None,
 ) -> tuple[list[int], list[int], torch.Tensor | None]:
     """Return unfolded TND FIA metadata for eager and piecewise paged attention."""
     raw_expand_width = getattr(metadata, "fia_max_expand_width", 0)
@@ -95,7 +110,7 @@ def prepare_fia_layout(
     if cached is not None and cached[0] == cache_key:
         return cached[1], cached[2], cached[3]
     ends, lengths, rows = single_query_layout(query_ends, kv_lengths, max_expand_width)
-    if len(rows) == len(query_ends):
+    if len(rows) == len(query_ends) or len(ends) > MAX_TND_FIA_BATCH:
         result = (query_ends, kv_lengths, block_table)
     else:
         result = (ends, lengths, _select_block_table_rows(block_table, rows, device_index_cache))
@@ -109,10 +124,13 @@ def prepare_graph_fia_layout(
     block_table: torch.Tensor,
     num_actual_tokens: int,
     num_input_tokens: int | None = None,
-    device_index_cache: dict[Any, torch.Tensor] | None = None,
-) -> tuple[list[int], list[int], torch.Tensor]:
+    device_index_cache: dict[Any, Any] | None = None,
+) -> tuple[list[int], list[int], torch.Tensor] | None:
     """Unfold uniform, varlen, or short-extend decode-graph batches into single-query TND FIA rows."""
-    target_tokens = num_input_tokens if num_input_tokens is not None else (query_ends[-1] if query_ends else 0)
+    last_end = query_ends[-1] if query_ends else 0
+    target_tokens = num_input_tokens if num_input_tokens is not None else last_end
+    if max(target_tokens, last_end) > MAX_TND_FIA_BATCH:
+        return None
     lengths: list[int] = []
     rows: list[int] = []
     start = 0

@@ -48,6 +48,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.fia_single_query import (
+    MAX_TND_FIA_BATCH,
     is_all_single_query,
     prepare_fia_layout,
     prepare_graph_fia_layout,
@@ -295,10 +296,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 and getattr(vllm_config.quant_config, "enable_c8_quant", False) is True
             )
             or is_c8_mxfp_kv_quant(vllm_config)
-            or (
-                kv_cache_spec is not None
-                and kv_cache_spec.dtype not in (torch.float16, torch.bfloat16, torch.float32)
-            )
+            or (kv_cache_spec is not None and kv_cache_spec.dtype not in (torch.float16, torch.bfloat16, torch.float32))
         )
         parallel_drafting = self.speculative_config is not None and (
             getattr(
@@ -351,6 +349,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
+        *,
+        full_graph_mode: bool | None = None,
     ) -> AscendMetadata:
         pcp_shard_slot_mapping = (
             common_attn_metadata.slot_mapping if uses_pcp_sharded_layout(common_attn_metadata, self.use_pcp) else None
@@ -478,10 +478,13 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 attn_metadata.fia_max_expand_width = self.decode_threshold
             cudagraph_mode = self.compilation_config.cudagraph_mode
             if (
-                cudagraph_mode is not None
+                full_graph_mode is not False
+                and cudagraph_mode is not None
                 and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+                and num_prefills == 0
+                and attn_state != AscendAttentionState.PrefillNoCache
                 and (common_attn_metadata.max_query_len or 1) <= self.decode_threshold
-                and common_attn_metadata.num_input_tokens > 0
+                and 0 < common_attn_metadata.num_input_tokens <= MAX_TND_FIA_BATCH
             ):
                 attn_metadata.fia_single_query_graph = prepare_graph_fia_layout(
                     actual_seq_lengths_q,
@@ -722,9 +725,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         block_table: torch.Tensor | None,
     ) -> bool:
         expand_width = getattr(attn_metadata, "fia_max_expand_width", 0)
-        has_expand_width = (
-            isinstance(expand_width, int) and not isinstance(expand_width, bool) and expand_width > 1
-        )
+        has_expand_width = isinstance(expand_width, int) and not isinstance(expand_width, bool) and expand_width > 1
         return block_table is not None and has_expand_width and self._allow_single_query_fia(attn_metadata)
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
@@ -761,15 +762,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self._non_causal_swa_attn_mask = AttentionMaskBuilder(device).get_splitfuse_attn_mask()
             radius = self.sliding_window - 1
             return self._non_causal_swa_attn_mask, 4, radius, radius
-        # Graph capture must keep the mask + sparse_mode=3 (right-aligned
-        # causal): FULL-graph capture dummies are always DecodeOnly with one
-        # query token per request (AscendInputBatch.make_dummy), but the
-        # captured graphs also replay multi-token batches (speculative-decode
+        # Default graph capture keeps the mask + sparse_mode=3 (right-aligned
+        # causal): FULL-graph capture dummies are DecodeOnly with one query
+        # token per request (AscendInputBatch.make_dummy), while captured
+        # graphs may replay multi-token batches (speculative-decode
         # verification, adaptive verification, chunked prefill). FIA graph
-        # replay cannot rebind atten_mask/sparse_mode (FIAParamProvider only
-        # updates lengths/block tables), so capture-time parameters must stay
-        # valid for every replay shape. The mask is only skipped on the eager
-        # path, where the metadata describes the real batch.
+        # replay only rebinds atten_mask/sparse_mode=0 in full_graph_fia when
+        # fia_single_query_graph unfolds every replay token into unit-width
+        # queries (<= MAX_TND_FIA_BATCH); all other captured graphs keep these
+        # capture-time mask parameters.
         return (
             attn_metadata.attn_mask,
             4 if self.sliding_window else 3,
