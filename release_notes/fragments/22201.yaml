@@ -1,0 +1,8 @@
+pr: 22201
+entries:
+  - category: bugfix
+    model: Qwen3.8-Flash-Next
+    text: >-
+      Fixed incorrect outputs from Qwen3.8-Flash-Next on Ascend when requests
+      are reordered or Mamba cache blocks are copied. No configuration changes
+      are required.
