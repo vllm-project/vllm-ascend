@@ -43,7 +43,7 @@ variants:
       - '--speculative-config'
       - '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'
     hardware_overrides:
-      npu:
+      ascend_910b:
         extra_args:
           - '--data-parallel-size-local'
           - '1'
