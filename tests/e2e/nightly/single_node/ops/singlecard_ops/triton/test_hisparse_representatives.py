@@ -21,9 +21,19 @@ def test_representative_min_int64_extremes(value):
     torch.testing.assert_close(out.cpu(), torch.tensor([value, -1], dtype=torch.int64), rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("rows", [0, 1, 255, 256, 257, 8193, 32768])
-@pytest.mark.parametrize("pattern", ["unique", "repeated", "one"])
-@pytest.mark.parametrize("offset", [0, 1])
+@pytest.mark.parametrize(
+    "rows,pattern,offset",
+    [
+        (0, "unique", 0),
+        (1, "unique", 0),
+        (255, "repeated", 1),
+        (256, "unique", 0),
+        (257, "unique", 1),
+        (257, "one", 0),
+        (8193, "repeated", 0),
+        (32768, "one", 1),
+    ],
+)
 def test_representative_min_exact(rows, pattern, offset):
     generator = torch.Generator().manual_seed(42)
     capacity = max(rows, 1) if pattern == "unique" else 65

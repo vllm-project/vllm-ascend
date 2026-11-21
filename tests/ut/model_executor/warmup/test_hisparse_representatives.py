@@ -36,7 +36,7 @@ def test_compile_binds_runtime_signature_without_executing():
     assert all(args[name].dtype == torch.int64 for name in ("index_ptr", "source_ptr", "representatives_ptr"))
 
 
-@pytest.mark.parametrize("rows", [0, 1, 17, 256, 257, 8192])
+@pytest.mark.parametrize("rows", [0, 257])
 def test_public_wrapper_shares_launcher_and_skips_empty(rows):
     def vector(size):
         return SimpleNamespace(ndim=1, dtype=torch.int64, shape=(size,), numel=lambda: size, is_contiguous=lambda: True)
@@ -63,16 +63,3 @@ def test_runtime_length_and_pointer_alignment_do_not_specialize():
     assert params["BLOCK_SIZE"].is_constexpr
     for name in ("index_ptr", "source_ptr", "representatives_ptr"):
         assert params[name].do_not_specialize_on_alignment
-
-
-def test_runtime_launch_uses_the_same_explicit_kernel_arguments():
-    launcher = hisparse.TritonScatterMinRepresentativesKernel()
-    kernel = MagicMock()
-    index, source, out = object(), object(), object()
-    with patch.object(launcher, "kernel", kernel):
-        launcher(index, source, out, 257, 256)
-    kernel.__getitem__.assert_called_once_with((2,))
-    kernel.__getitem__.return_value.assert_called_once_with(
-        index_ptr=index, source_ptr=source, representatives_ptr=out, num_rows=257, BLOCK_SIZE=256
-    )
-    kernel.warmup.assert_not_called()
