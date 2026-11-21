@@ -1,0 +1,5 @@
+pr: 22735
+entries:
+  - category: bugfix
+    text: Fixed pixel discrepancies between mm_device_do_normalize=True device-side image preprocessing and CPU bicubic resampling on Qwen3.5-VL by matching separable two-pass half-up uint8 quantization.
+    model: Qwen3.5-VL
