@@ -547,12 +547,11 @@ Monitor the role logs while weights load and graph capture completes. Startup du
 
 Use one Prefill host and two hosts for the distributed Decode service (1P1D), each with all 16 NPUs and the W8A8 weights. Prefill uses DP1 × TP4 × PP4. Decode uses one global DP8 × TP4 × PP1 group across the two hosts: D1 runs global DP ranks 0–3 and D2 runs ranks 4–7, and each rank starts one TP4 replica on four local NPUs. Every Decode rank exposes its own HTTP API, and the proxy registers all eight Decode endpoints. Use the same image and weights on all three hosts.
 
-The Prefill table gives starting settings for 16K–128K inputs in this three-host deployment.
+The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles.
 
 | Parameter | Prefill | Decode |
 | --- | --- | --- |
 | DP × TP × PP | 1 × 4 × 4 | 8 × 4 × 1 across two nodes |
-| Expert-parallel group size | 4 per pipeline stage | 32 across both nodes |
 | Global DP ranks | 0 | D1: 0–3; D2: 4–7 |
 | API port | 19100 | D1: 19200–19203; D2: 19300–19303 |
 | DP RPC port | 16920 | 16920, D1 is the DP master |
@@ -563,30 +562,8 @@ The Prefill table gives starting settings for 16K–128K inputs in this three-ho
 | max-num-scheduled-tokens | 32768 | vLLM default |
 | long-prefill-token-threshold | 32768 | vLLM default |
 | gpu-memory-utilization | 0.86 | 0.92 |
-| Main-model execution | Eager | FULL_DECODE_ONLY |
+| Execution mode | Eager | FULL_DECODE_ONLY |
 | HCCL_BUFFSIZE (MB) | 2048 | 1024 |
-
-On Prefill, `--max-num-batched-tokens` sets the per-iteration token budget, `--max-num-scheduled-tokens` caps the tokens issued by the scheduler per iteration, and `--long-prefill-token-threshold` caps the tokens scheduled from a long prompt per iteration. `--max-num-seqs` limits the sequences processed per iteration. Tune `--gpu-memory-utilization` together with `HCCL_BUFFSIZE` to leave device memory for HCCL and temporary MoE buffers while retaining enough KV cache capacity.
-
-The A3 deployment script below uses the shared W8A8 checkpoint, a `15,15,15,15` layer partition, and eager execution for both the main model and the DSpark draft. If you change the Prefill layer partition, set the same partition in `VLLM_PP_LAYER_PARTITION` on Prefill and in `kv_connector_extra_config.prefill.pp_layer_partition` on Prefill and both Decode hosts. Validate startup, Prefill-to-Decode KV transfer, and generation for the complete deployment.
-
-**A3 Prefill with 4K inputs**
-
-For inputs of approximately 4096 tokens, use the 4K column for the A3 `run_prefill.sh` below.
-
-| Setting in `run_prefill.sh` | 16K–128K inputs | 4K inputs |
-| --- | --- | --- |
-| `MAX_BATCHED_TOKENS` | `32768` | `2048` |
-| `MAX_SCHEDULED_TOKENS` | `32768` | `2048` |
-| `LONG_PREFILL_TOKEN_THRESHOLD` | `32768` | `2048` |
-
-In the `vllm serve` command, replace the main model's `--enforce-eager` line with the following to enable graph capture for 4K inputs.
-
-```bash
---compilation-config '{"cudagraph_mode":"PIECEWISE","max_cudagraph_capture_size":2048}' \
-```
-
-With chunked Prefill, the 2048-token budget applies per iteration. A 4K prompt can span multiple iterations. `PIECEWISE` allows compatible parts of the main model to use ACLGraph during Prefill. This W8A8 deployment example keeps the DSpark draft in eager mode.
 
 **950DT products deployment configuration**
 
@@ -624,11 +601,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
 
     **Prefill Node (P)**
 
-    Save the following as `run_prefill.sh` on the Prefill node.
-
-    The script enables CANN MegaMoE with `enable_fused_mc2=2` and `multistream_overlap_shared_expert=false`. MegaMoE requires a compatible `cann_ops_transformer` package and checkpoint. To use shared-expert multistream overlap, set `enable_fused_mc2=0` and `multistream_overlap_shared_expert=true` in `--additional-config`.
-
-    DSpark uses seven speculative tokens and BF16 draft KV cache. Its `enforce_eager=true` applies to the draft model. The main model runs eagerly through the separate `--enforce-eager` flag.
+    Save the following as `run_prefill.sh` on the Prefill node. The script selects CANN MegaMoE (`enable_fused_mc2=2`) and requires `cann_ops_transformer` in the Prefill environment.
 
     ```bash
     #!/usr/bin/env bash
@@ -711,7 +684,15 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
         }'
     ```
 
-    Start the Prefill engine.
+    **A3 Prefill with 4K inputs**
+
+    For 4K inputs, set `MAX_BATCHED_TOKENS`, `MAX_SCHEDULED_TOKENS`, and `LONG_PREFILL_TOKEN_THRESHOLD` to `2048`. Replace the standalone `--enforce-eager` flag in `run_prefill.sh` with the following option to enable piecewise graph capture.
+
+    ```bash
+    --compilation-config '{"cudagraph_mode":"PIECEWISE","max_cudagraph_capture_size":2048}' \
+    ```
+
+    Start the Prefill engine:
 
     ```bash
     nohup bash run_prefill.sh > prefill.log 2>&1 &
@@ -1288,11 +1269,10 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
 
 ### 5.4 Prefill-Decode Disaggregation with KV Cache Pool
 
-This section uses the 1P1D topology and proxy mapping from [Section 5.3](#53-pd-disaggregation-1p1d). Use the role scripts in this section for the pooled deployment, including the A3 Prefill execution and buffer settings. On Atlas 800I A3, one Prefill service runs with `DP1 × TP4 × PP4` and one distributed Decode service runs with a global `DP8 × TP4 × PP1` group spanning two hosts, with four local ranks per host. On 950DT products, one Prefill service runs with `DP1 × TP4 × PP2` and one distributed Decode service runs with a global `DP4 × TP4 × PP1` group spanning two hosts, with two local ranks per host. Prefill and Decode use `MultiConnector` so live P→D KV transfer and Mooncake KV Cache Pool work together:
+This section builds on [Section 5.3](#53-pd-disaggregation-1p1d) and keeps its 1P1D topology and proxy mapping on both platforms. On Atlas 800I A3, one Prefill service runs with `DP1 × TP4 × PP4` and one distributed Decode service runs with a global `DP8 × TP4 × PP1` group spanning two hosts, with four local ranks per host. On 950DT products, one Prefill service runs with `DP1 × TP4 × PP2` and one distributed Decode service runs with a global `DP4 × TP4 × PP1` group spanning two hosts, with two local ranks per host. Prefill and Decode switch to `MultiConnector` so live P→D KV transfer and Mooncake KV Cache Pool work together:
 
 - `MooncakeConnectorV1` transfers KV from Prefill to Decode in real time (same role as Section 5.3).
 - `AscendStoreConnector` stores KV in the Mooncake KV Cache Pool so later Prefills with the same prefix can hit the pool instead of recomputing.
-
 - By default the Prefill node performs pool lookup, load, and write.
 
 The examples below enable three-tier KV storage: the active NPU KV cache, the Mooncake memory pool, and SSD offload.
@@ -1307,7 +1287,7 @@ For backend selection, `mooncake.json`, Mooncake Master, eviction, tenant option
 | Mooncake Master | Not required | Start `mooncake_master --enable_offload=true` before Decode / Prefill |
 | `mooncake.json` | Not required | Required on every rank; A3 P and both D nodes use `4GB`, 950DT P and both D nodes use `64GB`; enable SSD offload on all nodes |
 | `lookup_rpc_port` | Not used | **Must be unique per DP rank** (`37000/37100 + DP_RANK`); on 950DT products use one distinct base port per host (D1 `37100`, D2 `37102`) to avoid IPC endpoint collisions |
-| Extra env | Section 5.3 `HCCL_*` only | Use the role settings below and the A3 fabric-memory or 950DT Device UB exports from the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) |
+| Extra env | Section 5.3 `HCCL_*` only | Use the pooled role script environment, then add A3 fabric-memory or 950DT Device UB exports from [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) |
 | Container mounts | `/etc/hccn.conf`; 950DT products also keep `/etc/hixlep/` | Also mount the local SSD offload directory |
 | Startup order | Decode → Prefill → Proxy | **Mooncake Master → Decode → Prefill → Proxy** |
 | Verification | P→D KV transfer only | Also check Prefill pool lookup/get/put hits after a repeated-prefix warmup |
@@ -1416,7 +1396,7 @@ The 950DT examples use `64GB` per worker rank on Prefill and both Decode hosts. 
 
 #### 5.4.2 Environment Variables
 
-Use the runtime environment in the pooled role scripts below. Set `HCCL_IF_IP` and the `HCCL`/`GLOO` socket interfaces for your hosts. Choose the hardware and communication exports from the [Mooncake backend startup examples](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-4-start-vllm-inference-service) according to your machine and link type.
+Start from the environment block in the pooled role script for your platform (`HCCL_IF_IP`, `HCCL`/`GLOO` socket IFNAME, `HCCL_BUFFSIZE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and, on A3 Prefill, `VLLM_PP_LAYER_PARTITION="15,15,15,15"`). Then add the pooling-required variables below. Choose the hardware/communication exports from the [Mooncake backend startup examples](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-4-start-vllm-inference-service) according to your machine and link type.
 
 Common pooling exports on Prefill node and DP ranks:
 
@@ -1474,13 +1454,13 @@ Adjust both values to the workload and usable SSD space, allowing for all worker
 
 The shared `KVTransferConfig` schema provides a default `kv_port`, so omitting it is not equivalent to omitting `kv_role`. In particular, `AscendStoreConnector` still requires its own `kv_role`; do not remove that field from either child.
 
-Use the pooled role scripts below with the Section 5.3 launch commands. Each Decode rank uses a distinct IPC endpoint derived from `DP_RANK`. Prefill has one DP rank and uses `37000`. On 950DT products, one `vllm serve` process per host serves two local DP ranks. The lookup endpoint is namespaced per local DP rank, so each host uses one distinct base port (D1 `37100`, D2 `37102`).
+Use the pooled role scripts below with the Section 5.3 launch commands. Derive the Decode `lookup_rpc_port` from `DP_RANK` so each rank uses a distinct IPC endpoint; Prefill has one DP rank and uses `37000`. On 950DT products, one `vllm serve` process per host serves two local DP ranks and the lookup endpoint is namespaced per local DP rank from the base port, so each host uses one distinct base port (D1 `37100`, D2 `37102`).
 
 **A3 series (W8A8) deployment configuration**
 
 Prefill-Decode disaggregation with KV Cache Pool on 3 Atlas 800I A3 (64GB × 16) for `MiniMax-M3.1-Flash-W8A8` with DSpark speculative decoding.
 
-The 1P1D topology uses one Prefill service with `DP1 × TP4 × PP4` on one host and one distributed Decode service with a global `DP8 × TP4 × PP1` group spanning two hosts, with four local ranks per Decode host. The pooled A3 Prefill script uses eager execution and the buffer and scheduler settings shown below.
+The 1P1D topology uses one Prefill service with `DP1 × TP4 × PP4` on one host and one distributed Decode service with a global `DP8 × TP4 × PP1` group spanning two hosts, with four local ranks per Decode host. Use the Prefill settings in the pooled script below. `MultiConnector` adds the KV pool.
 
 **950DT products deployment configuration**
 
