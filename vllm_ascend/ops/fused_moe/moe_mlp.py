@@ -23,6 +23,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.utils import super_kernel_scope
 
 
 def maybe_record_event() -> torch.npu.Event | None:
@@ -49,6 +50,8 @@ def maybe_record_event() -> torch.npu.Event | None:
 def apply_moe_mlp(
     mlp_compute_input: MoEMlpComputeInput,
     quant_method,
+    *,
+    enable_super_kernel_scopes: bool = False,
 ) -> tuple[torch.Tensor, torch.npu.Event | None]:
     """
     Unified MoE MLP entry.
@@ -67,15 +70,18 @@ def apply_moe_mlp(
                 quant_method=quant_method,
             )
 
-    if quant_method.supports_fused_activation(mlp_compute_input.activation):
-        hidden_states, act_out_scale = quant_method.apply_gmm1_act_quant(mlp_compute_input)
-    else:
-        hidden_states = quant_method.apply_gmm1(mlp_compute_input)
-        hidden_states = _unified_apply_activation(mlp_compute_input, hidden_states, quant_method)
-        hidden_states, act_out_scale = quant_method.apply_act_quant(mlp_compute_input, hidden_states)
-
+    # Keep Vector dispatch/combine and each GMM in separate resource scopes.
+    # Intrinsic GMM/activation/quantization fusion remains unchanged.
+    with super_kernel_scope("moe_routed_gmm1", enabled=enable_super_kernel_scopes):
+        if quant_method.supports_fused_activation(mlp_compute_input.activation):
+            hidden_states, act_out_scale = quant_method.apply_gmm1_act_quant(mlp_compute_input)
+        else:
+            hidden_states = quant_method.apply_gmm1(mlp_compute_input)
+            hidden_states = _unified_apply_activation(mlp_compute_input, hidden_states, quant_method)
+            hidden_states, act_out_scale = quant_method.apply_act_quant(mlp_compute_input, hidden_states)
     before_gmm2_evt = maybe_record_event()
-    hidden_states = quant_method.apply_gmm2(mlp_compute_input, hidden_states, act_out_scale)
+    with super_kernel_scope("moe_routed_gmm2", enabled=enable_super_kernel_scopes):
+        hidden_states = quant_method.apply_gmm2(mlp_compute_input, hidden_states, act_out_scale)
     return hidden_states, before_gmm2_evt
 
 

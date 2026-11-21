@@ -47,7 +47,12 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, npu_stream_switch, shared_experts_calculation_stream
+from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
+    npu_stream_switch,
+    shared_experts_calculation_stream,
+    super_kernel_scope,
+)
 
 # CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
 SITU_MX_DST_TYPE_E4M3FN = 36
@@ -140,6 +145,10 @@ class AscendSharedExperts:
         self.quant_type = quant_type
         self.lora_context = None
         ascend_config = get_ascend_config()
+        self._enable_moe_super_kernel_scopes = (
+            ascend_config.ascend_compilation_config.enable_super_kernel
+            and ascend_config.multistream_overlap_shared_expert
+        )
         self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
         self.weights_replicated = ascend_config.enable_shared_expert_dp
 
@@ -705,12 +714,15 @@ class AscendSharedExperts:
             return PreparedSharedExpertInput(hidden_states=hidden_states)
 
         input_ready = torch.npu.current_stream().record_event()
+        # Scope shared work on its submission stream, separately from routed work.
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=True):
             torch.npu.current_stream().wait_event(input_ready)
-            # Keep TP padding across the custom-op boundary; the shared MLP
-            # trims it before computation.
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
-            all_gather_done = torch.npu.current_stream().record_event()
+            # Open scope only after the stream has joined graph capture.
+            with super_kernel_scope("moe_shared", enabled=self._enable_moe_super_kernel_scopes):
+                # Keep TP padding across the custom-op boundary; the shared MLP
+                # trims it before computation.
+                hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+                all_gather_done = torch.npu.current_stream().record_event()
         return PreparedSharedExpertInput(
             hidden_states=hidden_states,
             is_gathered=True,
@@ -734,7 +746,8 @@ class AscendSharedExperts:
         # Keep TP padding across the custom-op boundary; the shared MLP trims
         # it before computation. The caller records shared_input_ready after
         # this returns, handing the gathered tensor to the auxiliary stream.
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+        with super_kernel_scope("moe_shared", enabled=self._enable_moe_super_kernel_scopes):
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
         return PreparedSharedExpertInput(
             hidden_states=hidden_states,
             is_gathered=True,
@@ -774,10 +787,7 @@ class AscendSharedExperts:
         milestones: RoutedMoEMilestones,
         mode: SharedExpertParallelMode,
     ) -> tuple[torch.Tensor, tuple[int, int] | None]:
-        self._wait_for_milestone(
-            milestones.shared_input_ready,
-            "shared_input_ready",
-        )
+        # The caller joins the shared stream before opening its SK scope.
         hidden_states = prepared_input.hidden_states
         local_dp_metadata = None
         if mode is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY:
@@ -817,13 +827,17 @@ class AscendSharedExperts:
 
         mode = self.parallel_mode()
         milestones = RoutedMoEMilestones(shared_input_ready=shared_input_ready)
+        # Scope shared work on its submission stream, separately from routed work.
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=True):
-            hidden_states, local_dp_metadata = self._prepare_execution_input(
-                prepared_input,
-                milestones,
-                mode,
-            )
-            gate_up_input = self._prepare_gate_up_input(hidden_states)
+            self._wait_for_milestone(milestones.shared_input_ready, "shared_input_ready")
+            # Open scope only after the stream has joined graph capture.
+            with super_kernel_scope("moe_shared", enabled=self._enable_moe_super_kernel_scopes):
+                hidden_states, local_dp_metadata = self._prepare_execution_input(
+                    prepared_input,
+                    milestones,
+                    mode,
+                )
+                gate_up_input = self._prepare_gate_up_input(hidden_states)
         return PreparedSharedExpertExecution(
             hidden_states=hidden_states,
             gate_up_input=gate_up_input,
@@ -840,7 +854,14 @@ class AscendSharedExperts:
                 hidden_states,
                 dst_type=torch.float8_e4m3fn,
             )
-        return self._prepare_linear_input_for_overlap(self.layer.gate_up_proj, hidden_states)
+        # Keep the standalone shared MXFP input quantization out of SK. Its
+        # completion gates Gate-Up on this stream; there is no adjacent matmul
+        # fusion here because the registered linear executes after a milestone.
+        exclude_input_quantization = (
+            self._enable_moe_super_kernel_scopes and self.multistream_overlap and self.quant_type == QuantType.W8A8MXFP
+        )
+        with super_kernel_scope(None, enabled=exclude_input_quantization):
+            return self._prepare_linear_input_for_overlap(self.layer.gate_up_proj, hidden_states)
 
     def _prepare_linear_input_for_overlap(
         self,
@@ -877,28 +898,31 @@ class AscendSharedExperts:
         """
         path = self._select_mlp_path()
         gate_up_input_scale = None
+        # Scope shared work on its submission stream, separately from routed work.
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
             self._wait_for_milestone(router_output_ready, "router_output_ready")
-            if path is SharedExpertMLPPath.A8_INT_FUSED:
-                # W8A8/W4A8: INT8 activations with INT8 or INT4 weights.
-                assert isinstance(prepared_execution.gate_up_input, tuple)
-                quantized_x, gate_up_input_scale = prepared_execution.gate_up_input
-                gate_up = torch_npu.npu_quant_matmul(
-                    quantized_x,
-                    self.layer.gate_up_proj.weight,
-                    self.layer.gate_up_proj.weight_scale,
-                    pertoken_scale=None,
-                    bias=None,
-                    output_dtype=torch.int32,
-                )
-            elif path is SharedExpertMLPPath.A8_MXFP_FUSED:
-                # W4A8MXFP only: MXFP8 activations with MXFP4 weights.
-                # W8A8MXFP remains on the registered linear-wrapper path.
-                assert isinstance(prepared_execution.gate_up_input, tuple)
-                quantized_x, pertoken_scale = prepared_execution.gate_up_input
-                gate_up = self.layer.gate_up_proj((quantized_x, pertoken_scale))[0]
-            else:
-                gate_up = self.part1(prepared_execution.gate_up_input)
+            # Open scope only after the stream has joined graph capture.
+            with super_kernel_scope("moe_shared", enabled=self._enable_moe_super_kernel_scopes):
+                if path is SharedExpertMLPPath.A8_INT_FUSED:
+                    # W8A8/W4A8: INT8 activations with INT8 or INT4 weights.
+                    assert isinstance(prepared_execution.gate_up_input, tuple)
+                    quantized_x, gate_up_input_scale = prepared_execution.gate_up_input
+                    gate_up = torch_npu.npu_quant_matmul(
+                        quantized_x,
+                        self.layer.gate_up_proj.weight,
+                        self.layer.gate_up_proj.weight_scale,
+                        pertoken_scale=None,
+                        bias=None,
+                        output_dtype=torch.int32,
+                    )
+                elif path is SharedExpertMLPPath.A8_MXFP_FUSED:
+                    # W4A8MXFP only: MXFP8 activations with MXFP4 weights.
+                    # W8A8MXFP remains on the registered linear-wrapper path.
+                    assert isinstance(prepared_execution.gate_up_input, tuple)
+                    quantized_x, pertoken_scale = prepared_execution.gate_up_input
+                    gate_up = self.layer.gate_up_proj((quantized_x, pertoken_scale))[0]
+                else:
+                    gate_up = self.part1(prepared_execution.gate_up_input)
 
         return SubmittedSharedExpertGateUp(
             hidden_states=prepared_execution.hidden_states,
@@ -1137,13 +1161,17 @@ class AscendSharedExperts:
     ) -> torch.Tensor:
         mode = self.parallel_mode()
         if submitted_gate_up is None:
+            # Scope shared work on its submission stream, separately from routed work.
             with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
-                hidden_states, local_dp_metadata = self._prepare_execution_input(
-                    prepared_input,
-                    milestones,
-                    mode,
-                )
-                gate_up_input = self._prepare_gate_up_input(hidden_states)
+                self._wait_for_milestone(milestones.shared_input_ready, "shared_input_ready")
+                # Open scope only after the stream has joined graph capture.
+                with super_kernel_scope("moe_shared", enabled=self._enable_moe_super_kernel_scopes):
+                    hidden_states, local_dp_metadata = self._prepare_execution_input(
+                        prepared_input,
+                        milestones,
+                        mode,
+                    )
+                    gate_up_input = self._prepare_gate_up_input(hidden_states)
             prepared_execution = PreparedSharedExpertExecution(
                 hidden_states=hidden_states,
                 gate_up_input=gate_up_input,
@@ -1155,7 +1183,11 @@ class AscendSharedExperts:
             )
 
         local_dp_metadata = submitted_gate_up.local_dp_metadata
-        with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
+        # Scope shared work on its submission stream, separately from routed work.
+        with (
+            npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap),
+            super_kernel_scope("moe_shared", enabled=self._enable_moe_super_kernel_scopes),
+        ):
             shared_out = self._finish_shared_mlp(submitted_gate_up, milestones)
             if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
                 self._wait_for_milestone(
@@ -1171,7 +1203,9 @@ class AscendSharedExperts:
 
         if mode is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY:
             assert local_dp_metadata is not None
-            shared_out = self._finalize_local_dp_output(shared_out, local_dp_metadata)
+            with super_kernel_scope("moe_shared", enabled=self._enable_moe_super_kernel_scopes):
+                shared_out = self._finalize_local_dp_output(shared_out, local_dp_metadata)
         elif mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY and not self.multistream_overlap:
-            shared_out = self._pad_and_reduce_scatter(shared_out)
+            with super_kernel_scope("moe_shared", enabled=self._enable_moe_super_kernel_scopes):
+                shared_out = self._pad_and_reduce_scatter(shared_out)
         return shared_out

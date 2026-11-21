@@ -26,6 +26,7 @@ def build_executor(with_gate=True, device="cpu", dtype=torch.float32):
     torch.manual_seed(310)
     weights = [torch.randn(*shape, device=device, dtype=dtype) * 0.1 for shape in ((16, 8), (8, 8), (1, 8))]
     executor = AscendSharedExperts.__new__(AscendSharedExperts)
+    executor._enable_moe_super_kernel_scopes = False
     executor.layer = SimpleNamespace(
         gate_up_proj=lambda x: (F.linear(x, weights[0]), None),
         down_proj=lambda x: (F.linear(x, weights[1]), None),
