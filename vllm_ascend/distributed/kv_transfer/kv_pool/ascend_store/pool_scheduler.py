@@ -42,8 +42,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     BoundaryPut,
     LoadSpec,
     ReqMeta,
+    StoreLookupResult,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import StoreLookupResult
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.request_state import (
     RequestTracker,
     normalize_block_ids_by_group,

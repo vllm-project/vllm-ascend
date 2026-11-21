@@ -141,7 +141,8 @@ class RequestTracker:
         """
         if (
             self.num_mamba_speculative_blocks_by_group is not None
-            and (num_speculative_blocks := self.num_mamba_speculative_blocks_by_group.get(kv_cache_group_id)) is not None
+            and (num_speculative_blocks := self.num_mamba_speculative_blocks_by_group.get(kv_cache_group_id))
+            is not None
         ):
             assert self.block_sizes is not None and len(self.block_sizes) > kv_cache_group_id
             num_skipped_blocks = (
@@ -177,14 +178,10 @@ class RequestTracker:
         target_token_len = self.token_len
         discard = discard_partial_chunks or enable_partial_hash_hits
         chunk_boundary = (
-            cdiv(self.num_saved_tokens + 1, cache_transfer_granularity) * cache_transfer_granularity
-            if discard
-            else 0
+            cdiv(self.num_saved_tokens + 1, cache_transfer_granularity) * cache_transfer_granularity if discard else 0
         )
         num_tokens_to_save = (
-            target_token_len // cache_transfer_granularity * cache_transfer_granularity
-            if discard
-            else target_token_len
+            target_token_len // cache_transfer_granularity * cache_transfer_granularity if discard else target_token_len
         )
         hash_block_size = hash_block_size or cache_transfer_granularity
         assert cache_transfer_granularity % hash_block_size == 0

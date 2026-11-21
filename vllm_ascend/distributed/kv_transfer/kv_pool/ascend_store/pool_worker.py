@@ -80,6 +80,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_keys import (
     KeyMetadata,
+    block_hash_to_bytes,
+    block_hash_to_str,
     get_block_hashes,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.token_database import (

@@ -48,6 +48,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
     create_kv_pool_worker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_layout import GroupBufferLayout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.draft_host_mirror import (
     HiSparseDraftHostMirrorSaveHook,
 )
@@ -3715,7 +3716,8 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual([call.args[0] for call in worker.m_store.batch_alloc.call_args_list], expected)
         self.assertEqual(request.transfer.save_keys, [key for keys in expected for key in keys])
         self.assertEqual(
-            [gvas.tolist() for gvas in request.transfer.block_gvas_by_group_np], [[101, 102, 103, 104]] * 2 + [[101, 102]]
+            [gvas.tolist() for gvas in request.transfer.block_gvas_by_group_np],
+            [[101, 102, 103, 104]] * 2 + [[101, 102]],
         )
 
     def test_save_hash_conversion_does_not_hash_skipped_prefix(self):
@@ -3844,7 +3846,9 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                     worker._data_plane._alloc_gvas_for_save(requests)
                 self.assertEqual(convert.call_count, 2)
                 self.assertTrue(worker._save_disabled.is_set())
-                self.assertTrue(all(request.can_save is False and request.transfer.save_keys == [] for request in requests))
+                self.assertTrue(
+                    all(request.can_save is False and request.transfer.save_keys == [] for request in requests)
+                )
                 worker.m_store.batch_alloc.assert_called_once()
                 worker.m_store.batch_delete.assert_not_called()
 

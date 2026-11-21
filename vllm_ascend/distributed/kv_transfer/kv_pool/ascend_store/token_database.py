@@ -30,6 +30,13 @@ class ChunkedTokenDatabase:
         self.metadata = metadata
         self.block_size = block_size
         self.group_layouts: dict[int, GroupBufferLayout] = {}
+        # Raw per-group buffers, kept alongside the layouts for local
+        # group-id projection (see project_group_ids) and for consumers
+        # that read addresses at construction time.
+        self.group_kv_caches_base_addr: dict[int, list[int]] = {}
+        self.group_block_len: dict[int, list[int]] = {}
+        self.group_block_stride: dict[int, list[int]] = {}
+        self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
         self.group_cache_families: dict[str, dict[int, str]] = {
             "kv": {},
             "state": {},
@@ -154,11 +161,22 @@ class ChunkedTokenDatabase:
                 )
                 for group_id, addresses in group_kv_caches_base_addr.items()
             }
+            # Raw per-group buffers are kept alongside the layouts: consumers
+            # like LayerBatchBuilder read them at construction time so tests
+            # and workers can still swap addresses after registration.
+            self.group_kv_caches_base_addr = group_kv_caches_base_addr
+            self.group_block_len = group_block_len
+            self.group_block_stride = group_block_stride or {}
+            self.group_layer_cache_entry_offsets = group_layer_cache_entry_offsets or {}
         if group_cache_families is not None:
             self.group_cache_families[cache_role] = group_cache_families.copy()
             self._key_prefix_cache.clear()
         if group_num_layers is not None:
             self.group_num_layers[cache_role] = group_num_layers.copy()
+
+    def project_group_ids(self, group_ids: list[int]) -> list[int]:
+        """Project global cache-group IDs onto locally registered regions."""
+        return [group_id for group_id in group_ids if self.group_block_len.get(group_id)]
 
     def prepare_value(
         self,
@@ -206,12 +224,15 @@ class ChunkedTokenDatabase:
         block_hashes: BlockHashList | list[str],
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
+        cache_role: str = "kv",
+        cache_family: str | None = None,
         block_ids: list[int] | None = None,
         skip_null_blocks: bool = False,
         chunk_filter: Callable[[int], bool] | None = None,
         shard_rank: int | None = None,
         shard_size: int | None = None,
         chunk_mask: Sequence[bool] | None = None,
+        tail_key_boundary: int | None = None,
     ) -> Iterable[tuple[int, int, BlockHash | str, int | None]]:
         # Private circular state has no prefix key, even when its block size
         # happens to be divisible by the request's hashing unit.
@@ -220,10 +241,13 @@ class ChunkedTokenDatabase:
         if not block_hashes:
             return
         logical_block_size = self.get_block_size(kv_cache_group_id)
-        grouped_hashes = get_block_hashes(block_hashes, logical_block_size, self.hash_block_size)
-        if not grouped_hashes:
-            return
-        num_logical_blocks = min(len(grouped_hashes), cdiv(token_len, logical_block_size)) if token_len > 0 else 0
+        partial = bool(self.cache_coordinator is not None and self.cache_coordinator.enable_partial_hash_hits)
+        num_logical_blocks = cdiv(token_len, logical_block_size) if token_len > 0 else 0
+        if not partial:
+            grouped_hashes = get_block_hashes(block_hashes, logical_block_size, self.hash_block_size)
+            if not grouped_hashes:
+                return
+            num_logical_blocks = min(len(grouped_hashes), num_logical_blocks)
         block_id_offset = max(num_logical_blocks - len(block_ids), 0) if block_ids is not None else 0
         first_chunk = max(0, cdiv(mask_num, logical_block_size), block_id_offset)
         chunk_ids: Iterable[int] = range(first_chunk, num_logical_blocks)
@@ -257,7 +281,19 @@ class ChunkedTokenDatabase:
             candidate_index += 1
             if not shard_allows:
                 continue
-            yield start_idx, end_idx, grouped_hashes[chunk_id], block_id
+            if partial:
+                boundary = tail_key_boundary if end_idx == token_len and tail_key_boundary is not None else end_idx
+                hash_index = boundary // self.hash_block_size - 1
+                if hash_index < 0 or hash_index >= len(block_hashes):
+                    raise ValueError("Missing committed hash for a Store chunk")
+                chunk_hash = block_hashes[hash_index]
+            else:
+                chunk_hash = grouped_hashes[chunk_id]
+            # Partial-hit keys name a recoverable hash boundary, but their
+            # values contain the whole physical page (or Mamba checkpoint).
+            if partial:
+                end_idx = start_idx + logical_block_size
+            yield start_idx, end_idx, chunk_hash, block_id
 
     def process_tokens(
         self,
@@ -274,6 +310,8 @@ class ChunkedTokenDatabase:
             block_hashes,
             mask_num,
             kv_cache_group_id,
+            cache_role,
+            cache_family,
         ):
             yield (
                 start,
@@ -319,6 +357,7 @@ class ChunkedTokenDatabase:
         shard_rank: int | None = None,
         shard_size: int | None = None,
         chunk_mask: Sequence[bool] | None = None,
+        tail_key_boundary: int | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str, int]]:
         """Yield cache key strings and resolved block ids without PoolKey allocation."""
         prefix = self._get_key_prefix(kv_cache_group_id)
@@ -333,6 +372,7 @@ class ChunkedTokenDatabase:
             shard_rank=shard_rank,
             shard_size=shard_size,
             chunk_mask=chunk_mask,
+            tail_key_boundary=tail_key_boundary,
         ):
             assert block_id is not None
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val, block_id
