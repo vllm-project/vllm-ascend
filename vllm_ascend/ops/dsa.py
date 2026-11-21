@@ -175,6 +175,12 @@ def dsa_forward(
     self = forward_context.no_compile_layers[layer_name]
     attn_metadata = forward_context.attn_metadata
 
+    # LoRA replaces registered module aliases after construction. The backend
+    # implementation is not an nn.Module, so resolve its output projections
+    # from the owning module before entering either profiling or inference.
+    self.dsa_attn.impl.wo_a = self.wo_a
+    self.dsa_attn.impl.wo_b = self.wo_b
+
     if attn_metadata is None:
         # Profiling run: forward() handles OTP by running _forward_o_proj on a
         # zero input so HCCL collectives are captured by the ACL graph.

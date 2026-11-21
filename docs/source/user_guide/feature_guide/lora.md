@@ -19,6 +19,27 @@ LoRA applies to both dense models and mixture-of-experts (MoE) models. The base 
 
 Other MoE quantization methods, Fused MC2, and dynamic EPLB are not supported with LoRA.
 
+### DeepSeek V4 projections
+
+DeepSeek V4 applies adapters to `compressor.wkv`, `compressor.wgate`,
+`indexer.compressor.wkv`, `indexer.compressor.wgate`, and `wo_a`. Requests using
+different adapters can share a batch with base-model requests. For `wo_a`,
+LoRA-A is shared across attention groups and LoRA-B contains each group's
+output rows. With `--fully-sharded-loras`, this projection retains a full
+LoRA-A on each tensor-parallel rank because the groups consume different inputs.
+
+DeepSeek V4 LoRA requires `--prefill-context-parallel-size 1`,
+`--decode-context-parallel-size 1`, and
+`finegrained_tp_config.oproj_tensor_parallel_size=1` in `--additional-config`
+(their defaults). Other values fail at initialization because these token
+exchanges do not carry adapter mappings. Standard tensor parallelism is
+independent of this restriction.
+
+With `--enable-lora`, DeepSeek V4 automatically disables DSA multi-stream
+overlap, even when `multistream_dsv4_dsa_overlap` is `true` in
+`--additional-config`. This keeps concurrent adapter operations from interfering
+with one another and can reduce throughput.
+
 ## LoRA Parameters
 
 | Parameter | Type | Default | Description |

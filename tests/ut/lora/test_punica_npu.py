@@ -106,6 +106,53 @@ def test_prefill_calls_sgmv_when_lora_active() -> None:
     wrapper.sgmv_expand_slice.assert_called_once()
 
 
+def test_delta_scratch_reuses_capacity_and_clears_previous_adapter_values() -> None:
+    wrapper = _make_wrapper()
+    wrapper._max_num_batched_tokens = 8
+    wrapper._lora_delta_buffers = {}
+    device = torch.device("cpu")
+    first = wrapper.get_lora_delta_buffer(3, 4, torch.bfloat16, device)
+    first.fill_(7)
+    for tokens in (1, 8, 0, 3):
+        delta = wrapper.get_lora_delta_buffer(tokens, 4, torch.bfloat16, device)
+        assert delta.untyped_storage().data_ptr() == first.untyped_storage().data_ptr()
+        assert delta.shape == (tokens, 4)
+        assert torch.count_nonzero(delta) == 0
+        delta.fill_(9)
+
+
+def test_delta_scratch_keeps_widths_and_dtypes_independent() -> None:
+    wrapper = _make_wrapper()
+    wrapper._max_num_batched_tokens = 8
+    wrapper._lora_delta_buffers = {}
+    device = torch.device("cpu")
+    first = wrapper.get_lora_delta_buffer(3, 4, torch.bfloat16, device)
+    first.fill_(7)
+    for width, dtype in ((8, torch.bfloat16), (4, torch.float16)):
+        delta = wrapper.get_lora_delta_buffer(3, width, dtype, device)
+        assert delta.dtype == dtype and delta.shape == (3, width)
+        assert torch.count_nonzero(delta) == 0
+        delta.fill_(9)
+        torch.testing.assert_close(first, torch.full_like(first, 7))
+
+
+def test_delta_scratch_grows_for_larger_padded_batches() -> None:
+    wrapper = _make_wrapper()
+    wrapper._max_num_batched_tokens = 8
+    wrapper._lora_delta_buffers = {}
+    device = torch.device("cpu")
+    first = wrapper.get_lora_delta_buffer(8, 4, torch.bfloat16, device)
+    first.fill_(7)
+    grown = wrapper.get_lora_delta_buffer(16, 4, torch.bfloat16, device)
+    assert grown.shape == (16, 4)
+    assert torch.count_nonzero(grown) == 0
+    torch.testing.assert_close(first, torch.full_like(first, 7))
+    grown.fill_(9)
+    reused = wrapper.get_lora_delta_buffer(8, 4, torch.bfloat16, device)
+    assert reused.data_ptr() == grown.data_ptr()
+    assert torch.count_nonzero(reused) == 0
+
+
 def test_prefill_shrink_and_expand_skip_when_no_lora() -> None:
     wrapper = _make_wrapper(is_prefill=True, no_lora=True)
     y = torch.zeros(2, 8)
