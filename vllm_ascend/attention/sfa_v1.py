@@ -1932,6 +1932,9 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _on_kv_cache_written(self, kv_cache: tuple[torch.Tensor, ...], attn_metadata: M) -> None:
         """Allow parallel implementations to overlap communication with the indexer."""
 
+    def _before_indexer(self, attn_metadata: M) -> None:
+        """Order parallel attention communication before indexer cache gathers."""
+
     def _start_o_proj_weight_gather(self) -> None:
         """Prefetch PCP output weights after the cache-input collectives."""
         if self._parallel_o_proj is not None:
@@ -2257,12 +2260,14 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert k_hidden_states is not None
             assert indexer_attn_metadata is not None
             self._prepare_indexer_metadata(indexer_attn_metadata, attn_metadata)
+            self._before_indexer(attn_metadata)
             topk_indices = self.indexer(
                 hidden_states,
                 q_c,
                 k_hidden_states,
                 indexer_attn_metadata,
-                compute_topk=not self.skip_topk and has_local_query,
+                compute_topk=not self.skip_topk
+                and (has_local_query or getattr(indexer_attn_metadata, "kv_gather_block_ids", None) is not None),
             )
             # Release pending indexer receive buffers after their consumer.
             k_hidden_states = None

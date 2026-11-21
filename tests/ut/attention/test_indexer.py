@@ -31,6 +31,9 @@ def _make_builder(
     dcp_size: int = 1,
     num_speculative_tokens: int | None = None,
     physical_block_size: int = 128,
+    sharded_dcp: bool = False,
+    max_model_len: int = 512,
+    interleave: int = 128,
 ) -> AscendSFAIndexerMetadataBuilder:
     kv_cache_spec = FullAttentionSpec(
         block_size=physical_block_size,
@@ -44,12 +47,13 @@ def _make_builder(
         hf_text_config=SimpleNamespace(index_topk=2048),
         hf_config=SimpleNamespace(),
         # DCP fixtures below provide two 128-token columns per rank.
-        max_model_len=512,
+        max_model_len=max_model_len,
     )
     vllm_config.parallel_config = ParallelConfig(
         prefill_context_parallel_size=pcp_size,
         decode_context_parallel_size=dcp_size,
-        tensor_parallel_size=max(4, dcp_size),
+        tensor_parallel_size=max(4, dcp_size // pcp_size),
+        cp_kv_cache_interleave_size=interleave,
     )
     vllm_config.scheduler_config = SimpleNamespace(
         max_num_seqs=4,
@@ -62,6 +66,11 @@ def _make_builder(
         patch(
             "vllm_ascend.attention.indexer.select_common_block_size",
             return_value=_KERNEL_BLOCK_SIZE,
+        ),
+        patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=sharded_dcp),
+        patch(
+            "vllm_ascend.attention.indexer.get_dcp_group",
+            return_value=SimpleNamespace(ranks=[0, 4, 1, 5, 2, 6, 3, 7] if dcp_size == 8 else list(range(dcp_size))),
         ),
     ):
         return AscendSFAIndexerMetadataBuilder(
@@ -458,6 +467,7 @@ def test_c4_cache_write_preserves_packed_bytes(monkeypatch):
 @pytest.mark.parametrize("query_lengths,key_lengths", [([2, 3], [2, 3]), ([1, 1], [31, 65])])
 def test_c4_a5_selector_operator_contract(monkeypatch, query_lengths, key_lengths):
     tokens, heads, head_dim = sum(query_lengths), 64, 128
+    topk = 1024
     query = torch.zeros(tokens * heads, head_dim // 2, dtype=torch.uint8)
     query_scale = torch.zeros(tokens, heads, 2, 2, dtype=torch.uint8).view(torch.float8_e8m0fnu)
     key = torch.zeros(4, 128, 1, head_dim // 2, dtype=torch.uint8)
@@ -467,7 +477,7 @@ def test_c4_a5_selector_operator_contract(monkeypatch, query_lengths, key_length
     key_lengths = torch.tensor(key_lengths, dtype=torch.int32)
     metadata = SimpleNamespace(block_table=torch.tensor([[1], [3]], dtype=torch.int32))
     kernel_metadata = object()
-    expected = torch.zeros(tokens, 1, 2048, dtype=torch.int32)
+    expected = torch.zeros(tokens, 1, topk, dtype=torch.int32)
     metadata_op = Mock(return_value=kernel_metadata)
     select_op = Mock(return_value=(expected, torch.empty(0)))
     monkeypatch.setattr(A5DeviceAdaptor, "_load_cann_quant_lightning_indexer_ops", lambda: (metadata_op, select_op))
@@ -486,6 +496,7 @@ def test_c4_a5_selector_operator_contract(monkeypatch, query_lengths, key_length
         False,
         True,
         False,
+        topk=topk,
     )
 
     assert result is expected
@@ -497,7 +508,7 @@ def test_c4_a5_selector_operator_contract(monkeypatch, query_lengths, key_length
     torch.testing.assert_close(w_arg, weights.float())
     for call in (metadata_op.call_args, select_op.call_args):
         args = call.kwargs
-        assert args["quant_mode"] == 5 and args["topk"] == 2048
+        assert args["quant_mode"] == 5 and args["topk"] == topk
         assert args["layout_q"] == "TND" and args["layout_k"] == "PA_BBND"
         assert args["mask_mode"] == 3 and args["cmp_ratio"] == 1
         assert torch.equal(args["cu_seqlens_q"], torch.cat((torch.zeros(1, dtype=torch.int32), query_ends)))
@@ -685,3 +696,62 @@ def test_indexer_owner_tracks_runtime_cache_requirement(monkeypatch, mtp):
         if enabled:
             assert specs["cache_owner"] == replace(spec, block_stride_alignment=MultipleOf(_KERNEL_BLOCK_SIZE))
             assert owner.cache_spec == spec
+
+
+@pytest.mark.parametrize("world", [2, 8])
+@pytest.mark.parametrize("local_tokens", [0, 8])
+@pytest.mark.parametrize("draft", [False, True])
+@patch("vllm_ascend.attention.indexer.get_ascend_config")
+@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
+def test_sharded_pcp_prefill_uses_global_history_and_local_query_rows(
+    mock_cos_sin, mock_get_ascend_config, world, local_tokens, draft
+):
+    mock_cos_sin.return_value = (torch.zeros(8, 1, 1, 8), torch.zeros(8, 1, 1, 8))
+    builder = _make_builder(
+        pcp_size=2,
+        dcp_size=world,
+        sharded_dcp=True,
+        physical_block_size=768,
+        max_model_len=1536 * world,
+        interleave=768,
+    )
+    global_table = torch.tensor(
+        [
+            list(range(6)) + [999] * 6,
+            list(range(6)) + list(range(6, 12)),
+            list(range(6)) + [998] * 6,
+            list(range(6)) + list(range(18, 24)),
+        ],
+        dtype=torch.int32,
+    )
+    context = SimpleNamespace(
+        global_batch=SimpleNamespace(num_reqs=4, is_prefilling_np=torch.ones(4, dtype=torch.bool)),
+        global_block_tables=(global_table,),
+        global_block_table_num_blocks=torch.tensor([[6, 12, 6, 12]], dtype=torch.int32),
+    )
+    common = _make_common_metadata()
+    common.num_reqs = 8  # Two PCP segments per request, exceeding decode capacity.
+    common.num_actual_tokens, common.num_input_tokens = local_tokens, 8
+    common.block_table_tensor = global_table[[3, 1, 0, 2, 2, 0, 1, 3]]
+    common.query_start_loc = common.query_start_loc_cpu = torch.arange(9, dtype=torch.int32)
+    common.seq_lens = torch.arange(101, 109, dtype=torch.int32)
+    common.positions = common.seq_lens - 1
+    common.slot_mapping = torch.full((16,), -1, dtype=torch.int64)
+    common.is_prefilling = torch.ones(8, dtype=torch.bool)
+    common.max_query_len = 1
+    common.pcp_context = context
+    common.pcp_cache_group_idx = 0
+    with builder.defer_device_metadata():
+        metadata = (
+            builder.build_for_drafting(common, draft_index=0, pcp_context=context, pcp_cache_group_idx=0)
+            if draft
+            else builder.build(0, common)
+        )
+    assert metadata.kv_gather_block_ids.tolist() == list(range(12)) + list(range(18, 24))
+    assert metadata.slot_mapping is common.slot_mapping
+    assert metadata.actual_seq_lengths_key is metadata.seq_lens
+    assert metadata.block_table.shape == (8, 12 * world)
+    assert metadata.local_visible_lengths is None
+    assert metadata.qli_metadata is None and metadata.qli_metadata_group_id is None
+    assert builder.take_device_metadata_tasks() == ()
+    assert builder._sharded_seq_buffers == {}
