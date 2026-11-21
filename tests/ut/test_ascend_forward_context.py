@@ -19,6 +19,7 @@ from vllm_ascend.utils import vllm_version_is
 def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(afc, "_mc2_tokens_capacity", None)
     monkeypatch.setattr(afc, "_USE_V2_EXTRA_KWARGS", False)
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: False)
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
@@ -774,3 +775,399 @@ def test_prefill_mc2_capacity_keeps_per_rank_operator_limit(monkeypatch, fused, 
     config.speculative_config = None
     afc.set_mc2_tokens_capacity(config, 500, 1)
     assert afc.get_mc2_tokens_capacity() == expected
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "expected"),
+    [
+        (None, MoECommType.FUSED_MC2),
+        (192, MoECommType.FUSED_MC2),
+        (384, MoECommType.FUSED_MC2),
+        (385, MoECommType.ALLTOALL),
+        (512, MoECommType.ALLTOALL),
+        (4096, MoECommType.ALLTOALL),
+    ],
+)
+def test_select_moe_comm_method_a3_megamoe_respects_mc2_tokens_capacity(
+    monkeypatch,
+    num_tokens,
+    expected,
+):
+    # AscendConfig normalizes enable_fused_mc2=2/3 to 1 alongside
+    # is_mega_moe_supported()=True; verify oversized steps do not fall through
+    # into the legacy enable_fused_mc2 == 1 branch.
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A3,
+        capacity=384,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    vllm_config = _make_vllm_config(world_size=8, num_experts=384, quant_type="w4a8")
+
+    assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+@pytest.mark.parametrize(
+    ("is_draft_model", "draft_moe_quant_type", "num_tokens", "expected"),
+    [
+        (False, QuantType.NONE, 48, MoECommType.FUSED_MC2),
+        (True, QuantType.NONE, 48, MoECommType.MC2),
+        (True, QuantType.NONE, 512, MoECommType.ALLTOALL),
+        (True, QuantType.W8A8, 48, MoECommType.FUSED_MC2),
+        (True, QuantType.W8A8, 512, MoECommType.ALLTOALL),
+    ],
+)
+def test_select_moe_comm_method_a3_megamoe_isolates_unquantized_draft_model(
+    monkeypatch,
+    is_draft_model,
+    draft_moe_quant_type,
+    num_tokens,
+    expected,
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A3,
+        capacity=384,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    vllm_config = _make_vllm_config(world_size=8, num_experts=384, quant_type="w4a8")
+
+    assert (
+        afc.select_moe_comm_method(
+            num_tokens,
+            vllm_config,
+            is_draft_model=is_draft_model,
+            draft_moe_quant_type=draft_moe_quant_type,
+        )
+        == expected
+    )
+
+
+def test_sync_draft_moe_comm_context_restores_target_mrv2_state(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A3,
+        capacity=384,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    monkeypatch.setattr(afc, "_USE_V2_EXTRA_KWARGS", True)
+    vllm_config = _make_vllm_config(world_size=8, num_experts=384, quant_type="w4a8")
+    vllm_config.speculative_config = SimpleNamespace(
+        draft_model_config=SimpleNamespace(draft_moe_quant_type=QuantType.NONE),
+        target_model_config=vllm_config.model_config,
+    )
+
+    target_comm = object()
+    draft_comm = object()
+    moe_mod_name = "vllm_ascend.ops.fused_moe.moe_comm_method"
+    comm_table = {MoECommType.FUSED_MC2: target_comm, MoECommType.MC2: draft_comm}
+    if moe_mod_name in sys.modules:
+        monkeypatch.setattr(sys.modules[moe_mod_name], "get_moe_comm_method", lambda t: comm_table[t])
+    else:
+        monkeypatch.setitem(sys.modules, moe_mod_name, SimpleNamespace(get_moe_comm_method=lambda t: comm_table[t]))
+
+    forward_context = SimpleNamespace(
+        vllm_config=vllm_config,
+        additional_kwargs={
+            "is_draft_model": False,
+            "is_draft_model_prefill": False,
+            "draft_moe_quant_type": QuantType.NONE,
+            "moe_comm_type": MoECommType.FUSED_MC2,
+            "moe_comm_method": target_comm,
+            "use_mega_moe": True,
+            "max_tokens_across_dp": 24,
+            "num_tokens": 24,
+        },
+    )
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    with afc.sync_draft_moe_comm_context(vllm_config, is_draft_model_prefill=True):
+        assert afc._EXTRA_CTX.is_draft_model is True
+        assert afc._EXTRA_CTX.is_draft_model_prefill is True
+        assert afc._EXTRA_CTX.moe_comm_type is MoECommType.MC2
+        assert afc._EXTRA_CTX.moe_comm_method is draft_comm
+        assert afc._EXTRA_CTX.use_mega_moe is False
+
+    assert afc._EXTRA_CTX.is_draft_model is False
+    assert afc._EXTRA_CTX.is_draft_model_prefill is False
+    assert afc._EXTRA_CTX.moe_comm_type is MoECommType.FUSED_MC2
+    assert afc._EXTRA_CTX.moe_comm_method is target_comm
+    assert afc._EXTRA_CTX.use_mega_moe is True
+
+
+def test_bind_draft_moe_comm_context_eager_exception_and_dense_draft(monkeypatch):
+    import torch.nn as nn
+
+    from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext, model_capture_wrapper
+    from vllm_ascend.worker.v2.spec_decode import _wrap_speculator_draft_model_context
+
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A3,
+        capacity=384,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    monkeypatch.setattr(afc, "_USE_V2_EXTRA_KWARGS", True)
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False, raising=False)
+
+    target_comm = object()
+    draft_comm = object()
+    moe_mod_name = "vllm_ascend.ops.fused_moe.moe_comm_method"
+    comm_table = {MoECommType.FUSED_MC2: target_comm, MoECommType.MC2: draft_comm, None: None}
+    if moe_mod_name in sys.modules:
+        monkeypatch.setattr(sys.modules[moe_mod_name], "get_moe_comm_method", lambda t: comm_table[t])
+    else:
+        monkeypatch.setitem(sys.modules, moe_mod_name, SimpleNamespace(get_moe_comm_method=lambda t: comm_table[t]))
+
+    draft_vllm_config = _make_vllm_config(world_size=8, num_experts=384, quant_type="w4a8")
+    draft_vllm_config.speculative_config = SimpleNamespace(
+        draft_model_config=SimpleNamespace(draft_moe_quant_type=QuantType.NONE),
+        target_model_config=SimpleNamespace(),
+    )
+
+    observed: list[tuple[object, ...]] = []
+
+    class DummyDraftModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.moe_comm_methods = {MoECommType.MC2: draft_comm}
+            self.should_fail = False
+
+        def forward(self, x):
+            try:
+                observed.append(
+                    (
+                        afc._EXTRA_CTX.is_draft_model,
+                        afc._EXTRA_CTX.is_draft_model_prefill,
+                        afc._EXTRA_CTX.moe_comm_type,
+                        afc._EXTRA_CTX.moe_comm_method,
+                        afc._EXTRA_CTX.use_mega_moe,
+                    )
+                )
+            except AssertionError:
+                observed.append(("no_ctx",))
+            if self.should_fail:
+                raise RuntimeError("boom")
+            return x + 1
+
+    class DummySpeculator:
+        def __init__(self):
+            self.draft_vllm_config = draft_vllm_config
+            self.model = None
+
+        def load_model(self):
+            self.model = DummyDraftModel()
+
+    speculator = _wrap_speculator_draft_model_context(DummySpeculator(), draft_vllm_config)
+    speculator.load_model()
+    assert isinstance(speculator.model, DummyDraftModel)
+
+    # Outside forward_context (get_forward_context raises AssertionError): safe no-op.
+    def _raise_no_ctx():
+        raise AssertionError("Forward context is not set")
+
+    monkeypatch.setattr(afc, "get_forward_context", _raise_no_ctx)
+    assert torch.equal(speculator.model(torch.zeros(2)), torch.ones(2))
+    observed.clear()
+
+    # ForwardContext intentionally has NO .vllm_config attribute (upstream vLLM ForwardContext).
+    from vllm.config import CUDAGraphMode
+
+    forward_context = SimpleNamespace(
+        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+        additional_kwargs={
+            "is_draft_model": False,
+            "is_draft_model_prefill": False,
+            "draft_moe_quant_type": QuantType.NONE,
+            "moe_comm_type": MoECommType.FUSED_MC2,
+            "moe_comm_method": target_comm,
+            "use_mega_moe": True,
+            "max_tokens_across_dp": 24,
+            "num_tokens": 24,
+        },
+    )
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+    monkeypatch.setattr("vllm_ascend.worker.v2.aclgraph_utils.get_forward_context", lambda: forward_context)
+
+    # 1. Eager / PIECEWISE direct speculator.model(...) call isolates draft comm & restores target.
+    out = speculator.model(torch.zeros(2))
+    assert torch.equal(out, torch.ones(2))
+    assert observed[-1] == (True, False, MoECommType.MC2, draft_comm, False)
+    assert afc._EXTRA_CTX.moe_comm_type is MoECommType.FUSED_MC2
+    assert afc._EXTRA_CTX.use_mega_moe is True
+
+    # 2. Exception inside draft forward still restores target state cleanly.
+    speculator.model.should_fail = True
+    with pytest.raises(RuntimeError, match="boom"):
+        speculator.model(torch.zeros(2))
+    speculator.model.should_fail = False
+    assert afc._EXTRA_CTX.is_draft_model is False
+    assert afc._EXTRA_CTX.moe_comm_type is MoECommType.FUSED_MC2
+    assert afc._EXTRA_CTX.moe_comm_method is target_comm
+    assert afc._EXTRA_CTX.use_mega_moe is True
+
+    # 3. Capture wrapper (ModelWithContext) preserves is_draft_model_prefill=True without forward_context.vllm_config.
+    with model_capture_wrapper(speculator, is_draft_model_prefill=True):
+        assert isinstance(speculator.model, ModelWithContext)
+        speculator.model(torch.zeros(2))
+    assert observed[-1] == (True, True, MoECommType.MC2, draft_comm, False)
+    assert afc._EXTRA_CTX.is_draft_model is False
+    assert afc._EXTRA_CTX.is_draft_model_prefill is False
+    assert afc._EXTRA_CTX.moe_comm_type is MoECommType.FUSED_MC2
+
+    # 4. Dense draft model (is_moe_model=False -> moe_comm_type=None) with model_comm_methods={} never raises KeyError.
+    dense_draft_cfg = _make_vllm_config(world_size=8, num_experts=0, quant_type=None)
+    monkeypatch.setattr(afc, "is_moe_model", lambda cfg: cfg is not dense_draft_cfg)
+    speculator.model.moe_comm_methods = {}
+    afc.bind_draft_moe_comm_context(speculator.model, dense_draft_cfg)
+    speculator.model(torch.zeros(2))
+    assert observed[-1] == (True, False, None, None, False)
+    assert afc._EXTRA_CTX.moe_comm_type is MoECommType.FUSED_MC2
+
+
+def test_megamoe_routed_scaling_factor_never_double_scales_router_scaled_weights():
+    from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
+    from vllm_ascend.ops.fused_moe.moe_comm_method import FusedMC2CommImpl, TokenDispatcherWithMC2
+
+    captured: dict[str, torch.Tensor] = {}
+
+    def fake_mega_moe(_x, _topk_ids, topk_weights, *_args, **_kwargs):
+        captured["topk_weights"] = topk_weights.clone()
+        return torch.zeros(2, 8), torch.zeros(2, dtype=torch.int32)
+
+    comm_impl = object.__new__(FusedMC2CommImpl)
+    comm_impl.mega_moe = fake_mega_moe
+    comm_impl._mega_moe_supported_kwargs = frozenset(
+        {
+            "shared_l1_weights",
+            "shared_l2_weights",
+            "shared_l1_weights_sf",
+            "shared_l2_weights_sf",
+            "shared_expert_quant_out_dtype",
+            "shared_weight1_type",
+            "shared_weight2_type",
+        }
+    )
+    comm_impl.mega_moe_activation_kwargs = {}
+    comm_impl.mega_moe_symm_buffer = MagicMock()
+    comm_impl.token_dispatcher = object.__new__(TokenDispatcherWithMC2)
+    comm_impl.token_dispatcher.max_num_tokens_per_rank = 64
+    comm_impl.token_dispatcher.global_bs = 0
+
+    weights = MoEWeights(
+        w1=[torch.zeros(8, 16, dtype=torch.int8)],
+        w2=[torch.zeros(8, 8, dtype=torch.int8)],
+        w1_scale=[torch.ones(16)],
+        w2_scale=[torch.ones(8)],
+        shared_w1=[torch.zeros(8, 16, dtype=torch.int8)],
+        shared_w2=[torch.zeros(8, 8, dtype=torch.int8)],
+        shared_w1_scale=[torch.ones(16)],
+        shared_w2_scale=[torch.ones(8)],
+    )
+
+    for fold_scale in (1.0, None):
+        inp = MagicMock()
+        inp.hidden_states = torch.zeros(2, 8, dtype=torch.bfloat16)
+        inp.topk_ids = torch.zeros(2, 2, dtype=torch.int32)
+        inp.topk_weights = torch.full((2, 2), 1.5, dtype=torch.float32)
+        inp.quant.quant_type = QuantType.W8A8
+        inp.routing.mc2_mask = torch.ones(2, dtype=torch.bool)
+        inp.layer = SimpleNamespace(
+            routed_scaling_factor=1.5,
+            apply_routed_scale_to_output=False,
+            ascend_megamoe_fold_scale=fold_scale,
+            mega_moe_activation_kwargs={},
+            ascend_megamoe_shared_fusion=SimpleNamespace(quant_out_dtype=258, weight_type=258),
+        )
+        comm_impl._apply_cann_mega_moe(inp, weights, is_decode_only_node=True)
+        torch.testing.assert_close(captured["topk_weights"], torch.full((2, 2), 1.5))
+
+    inp_out_scaled = MagicMock()
+    inp_out_scaled.hidden_states = torch.zeros(2, 8, dtype=torch.bfloat16)
+    inp_out_scaled.topk_ids = torch.zeros(2, 2, dtype=torch.int32)
+    inp_out_scaled.topk_weights = torch.ones(2, 2, dtype=torch.float32)
+    inp_out_scaled.quant.quant_type = QuantType.W8A8
+    inp_out_scaled.routing.mc2_mask = torch.ones(2, dtype=torch.bool)
+    inp_out_scaled.layer = SimpleNamespace(
+        routed_scaling_factor=1.0,
+        apply_routed_scale_to_output=True,
+        ascend_megamoe_fold_scale=1.5,
+        mega_moe_activation_kwargs={},
+        ascend_megamoe_shared_fusion=SimpleNamespace(quant_out_dtype=258, weight_type=258),
+    )
+    comm_impl._apply_cann_mega_moe(inp_out_scaled, weights, is_decode_only_node=True)
+    torch.testing.assert_close(captured["topk_weights"], torch.full((2, 2), 1.5))
+
+
+def test_resolve_use_mega_moe_requires_fused_mc2(monkeypatch):
+    vllm_config = MagicMock()
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda cfg: cfg is vllm_config)
+    assert afc.resolve_use_mega_moe(vllm_config, MoECommType.FUSED_MC2) is True
+    assert afc.resolve_use_mega_moe(vllm_config, MoECommType.ALLTOALL) is False
+    assert afc.resolve_use_mega_moe(vllm_config, MoECommType.MC2) is False
+    assert afc.resolve_use_mega_moe(None, MoECommType.FUSED_MC2) is False
+
+
+def test_moe_config_key_isolates_distinct_shapes():
+    from vllm_ascend.ops.fused_moe.moe_comm_method import _moe_config_key
+
+    target_cfg = SimpleNamespace(
+        num_experts=64,
+        num_local_experts=8,
+        hidden_dim=5120,
+        intermediate_size_per_partition=1536,
+        experts_per_token=6,
+    )
+    draft_cfg = SimpleNamespace(
+        num_experts=64,
+        num_local_experts=8,
+        hidden_dim=2048,
+        intermediate_size_per_partition=1024,
+        experts_per_token=4,
+    )
+    assert _moe_config_key(MoECommType.FUSED_MC2, target_cfg) != _moe_config_key(MoECommType.FUSED_MC2, draft_cfg)
+
+
+def test_unquantized_moe_draft_stays_on_3d_nz_and_maybe_transpose_2d_list(monkeypatch):
+    import vllm_ascend.ops.fused_moe.routed_experts as routed_mod
+    from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
+
+    method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
+    method.dynamic_eplb = False
+    method._maybe_pad_weight = lambda w: w
+
+    # 2D per-expert weight list must transpose (0, 1) without IndexError.
+    t_list = [torch.randn(8, 16), torch.randn(8, 16)]
+    transposed = method._maybe_transpose(t_list, need_trans=True)
+    assert [tuple(t.shape) for t in transposed] == [(16, 8), (16, 8)]
+
+    # Draft unquantized layer must bypass MegaMoe ND list split and keep 3D NZ weights.
+    layer = torch.nn.Module()
+    layer.register_parameter("w13_weight", torch.nn.Parameter(torch.zeros(2, 16, 8), requires_grad=False))
+    layer.register_parameter("w2_weight", torch.nn.Parameter(torch.zeros(2, 8, 8), requires_grad=False))
+    format_calls = []
+
+    def fake_format_cast(tensor, fmt):
+        format_calls.append(fmt)
+        return tensor
+
+    draft_cfg = SimpleNamespace(model_config=SimpleNamespace(runner_type="draft"), speculative_config=None)
+    monkeypatch.setattr(routed_mod, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=1))
+    monkeypatch.setattr(routed_mod, "get_current_vllm_config", lambda: draft_cfg)
+    monkeypatch.setattr(routed_mod, "use_cann_megamoe", lambda _cfg: True)
+    monkeypatch.setattr(routed_mod, "is_draft_vllm_config", lambda _cfg: True)
+    monkeypatch.setattr(routed_mod.torch_npu, "npu_format_cast", fake_format_cast, raising=False)
+
+    method.process_weights_after_loading(layer)
+    assert hasattr(layer, "w13_weight")
+    assert hasattr(layer, "w2_weight")
+    assert not hasattr(layer, "w13_weight_list")
+    assert format_calls == [routed_mod.ACL_FORMAT_FRACTAL_NZ, routed_mod.ACL_FORMAT_FRACTAL_NZ]

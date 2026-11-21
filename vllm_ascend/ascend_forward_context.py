@@ -10,7 +10,11 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
+from vllm_ascend.ascend_config import (
+    get_ascend_config,
+    is_draft_config_context,
+    is_mega_moe_supported,
+)
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     MoECommPolicy,
@@ -113,6 +117,155 @@ def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
     )
 
 
+def resolve_use_mega_moe(
+    vllm_config: VllmConfig | None,
+    moe_comm_type: MoECommType | None,
+) -> bool:
+    """Return True iff the active step executes on CANN MegaMoe (FUSED_MC2)."""
+    return vllm_config is not None and use_cann_megamoe(vllm_config) and moe_comm_type is MoECommType.FUSED_MC2
+
+
+def is_draft_vllm_config(vllm_config: VllmConfig | None) -> bool:
+    """Return True when ``vllm_config`` or the active config context belongs to a draft model."""
+    if is_draft_config_context():
+        return True
+    if vllm_config is None:
+        return False
+    model_config = getattr(vllm_config, "model_config", None)
+    if getattr(model_config, "runner_type", None) == "draft":
+        return True
+    spec_cfg = getattr(vllm_config, "speculative_config", None)
+    return bool(
+        spec_cfg is not None
+        and model_config is not None
+        and model_config is getattr(spec_cfg, "draft_model_config", None)
+        and model_config is not getattr(spec_cfg, "target_model_config", None)
+    )
+
+
+def resolve_draft_moe_quant_type(
+    vllm_config: VllmConfig | None,
+    *,
+    is_draft_model: bool,
+) -> QuantType:
+    """Resolve the MoE quantization type of a speculative draft model."""
+    if not is_draft_model or vllm_config is None:
+        return QuantType.NONE
+    spec_cfg = getattr(vllm_config, "speculative_config", None)
+    draft_model_config = getattr(spec_cfg, "draft_model_config", None)
+    if draft_model_config is None:
+        draft_model_config = getattr(vllm_config, "model_config", None)
+    explicit_quant_type = getattr(draft_model_config, "draft_moe_quant_type", None)
+    if isinstance(explicit_quant_type, QuantType):
+        return explicit_quant_type
+    return QuantType.NONE
+
+
+@contextmanager
+def sync_draft_moe_comm_context(
+    vllm_config: VllmConfig | None = None,
+    *,
+    model_instance: torch.nn.Module | None = None,
+    is_draft_model_prefill: bool = False,
+):
+    """Synchronize forward-context MoE communication state for a draft forward."""
+    from vllm.config import get_current_vllm_config_or_none
+
+    from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
+
+    try:
+        get_forward_context()
+    except AssertionError:
+        yield
+        return
+
+    resolved_config = vllm_config if vllm_config is not None else get_current_vllm_config_or_none()
+    prev_state = (
+        _EXTRA_CTX.is_draft_model,
+        _EXTRA_CTX.is_draft_model_prefill,
+        _EXTRA_CTX.draft_moe_quant_type,
+        _EXTRA_CTX.moe_comm_type,
+        _EXTRA_CTX.moe_comm_method,
+        _EXTRA_CTX.use_mega_moe,
+    )
+    try:
+        _EXTRA_CTX.is_draft_model = True
+        if is_draft_model_prefill:
+            _EXTRA_CTX.is_draft_model_prefill = True
+        draft_moe_quant_type = resolve_draft_moe_quant_type(
+            resolved_config,
+            is_draft_model=True,
+        )
+        _EXTRA_CTX.draft_moe_quant_type = draft_moe_quant_type
+        if resolved_config is not None:
+            max_num_tokens = _EXTRA_CTX.max_tokens_across_dp
+            if max_num_tokens is None:
+                max_num_tokens = _EXTRA_CTX.num_tokens
+            moe_comm_type = select_moe_comm_method(
+                max_num_tokens,
+                resolved_config,
+                is_draft_model=True,
+                draft_moe_quant_type=draft_moe_quant_type,
+            )
+            model_comm_methods = getattr(model_instance, "moe_comm_methods", None)
+            _EXTRA_CTX.moe_comm_type = moe_comm_type
+            _EXTRA_CTX.moe_comm_method = (
+                model_comm_methods.get(moe_comm_type)
+                if model_comm_methods is not None
+                else get_moe_comm_method(moe_comm_type)
+            )
+            _EXTRA_CTX.use_mega_moe = resolve_use_mega_moe(resolved_config, moe_comm_type)
+        yield
+    finally:
+        (
+            _EXTRA_CTX.is_draft_model,
+            _EXTRA_CTX.is_draft_model_prefill,
+            _EXTRA_CTX.draft_moe_quant_type,
+            _EXTRA_CTX.moe_comm_type,
+            _EXTRA_CTX.moe_comm_method,
+            _EXTRA_CTX.use_mega_moe,
+        ) = prev_state
+
+
+def bind_draft_moe_comm_context(
+    model: torch.nn.Module,
+    vllm_config: VllmConfig | None,
+) -> torch.nn.Module:
+    """Bind draft MoE communication isolation onto a loaded draft ``nn.Module``.
+
+    Upstream MRV2 eager (``enforce_eager=True``), ``PIECEWISE`` (``run_pw_graph``),
+    and prompt-context initialization call ``self.model(...)`` directly inside a
+    base ``set_forward_context(..., target_vllm_config)`` scope. Subclassing the
+    draft instance's ``__call__`` intercepts every eager/piecewise/capture call
+    before ``@support_torch_compile`` dispatches ``aot_compiled_fn`` while
+    preserving ``isinstance``, parameter/module names, and Dynamo inner tracing.
+    """
+    if getattr(model, "_ascend_draft_comm_bound", False):
+        model._ascend_draft_vllm_config = vllm_config  # type: ignore[attr-defined]
+        return model
+
+    base_cls = type(model)
+
+    class _DraftContextBoundModel(base_cls):  # type: ignore[valid-type,misc]
+        _ascend_draft_comm_bound = True
+
+        def __call__(self, *args: Any, **kwargs: Any) -> Any:
+            if torch.compiler.is_compiling():
+                return super().__call__(*args, **kwargs)
+            with sync_draft_moe_comm_context(
+                getattr(self, "_ascend_draft_vllm_config", None),
+                model_instance=self,
+            ):
+                return super().__call__(*args, **kwargs)
+
+    _DraftContextBoundModel.__name__ = base_cls.__name__
+    _DraftContextBoundModel.__qualname__ = base_cls.__qualname__
+    _DraftContextBoundModel.__module__ = base_cls.__module__
+    model.__class__ = _DraftContextBoundModel
+    model._ascend_draft_vllm_config = vllm_config  # type: ignore[attr-defined]
+    return model
+
+
 @contextmanager
 def set_ascend_forward_context(
     attn_metadata: Any,
@@ -160,14 +313,25 @@ def set_ascend_forward_context(
 
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
-        max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
-        if is_draft_model:
-            draft_model_config = getattr(vllm_config.speculative_config, "draft_model_config", None)
-            draft_moe_quant_type = getattr(draft_model_config, "draft_moe_quant_type", QuantType.NONE)
+        if num_tokens is None and attn_metadata is not None:
+            num_tokens = attn_metadata.num_actual_tokens
+
+        dp_world_size = get_dp_group().world_size
+        if dp_world_size > 1 and forward_context.dp_metadata is not None:
+            dp_meta = forward_context.dp_metadata
+            max_tokens_across_dp = dp_meta.num_tokens_across_dp_cpu.max().item()
+        elif num_tokens_across_dp is not None:
+            max_tokens_across_dp = int(num_tokens_across_dp.max().item())
         else:
-            draft_moe_quant_type = QuantType.NONE
+            max_tokens_across_dp = num_tokens
+
+        is_draft_model = bool(is_draft_model or is_draft_vllm_config(vllm_config))
+        draft_moe_quant_type = resolve_draft_moe_quant_type(
+            vllm_config,
+            is_draft_model=is_draft_model,
+        )
         moe_comm_type = select_moe_comm_method(
-            max_num_tokens,
+            max_tokens_across_dp,
             vllm_config,
             is_draft_model=is_draft_model,
             draft_moe_quant_type=draft_moe_quant_type,
@@ -179,10 +343,12 @@ def set_ascend_forward_context(
         # models retain the original singleton implementation.
         model_comm_methods = getattr(model_instance, "moe_comm_methods", None)
         forward_context.moe_comm_method = (
-            model_comm_methods[moe_comm_type] if model_comm_methods is not None else get_moe_comm_method(moe_comm_type)
+            model_comm_methods.get(moe_comm_type)
+            if model_comm_methods is not None
+            else get_moe_comm_method(moe_comm_type)
         )
         forward_context.is_decode_only_node = _is_decode_only_node(vllm_config)
-        forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
+        forward_context.use_mega_moe = resolve_use_mega_moe(vllm_config, moe_comm_type)
         forward_context.draft_moe_quant_type = draft_moe_quant_type
 
         tp_world_size = get_tensor_model_parallel_world_size()
@@ -215,16 +381,6 @@ def set_ascend_forward_context(
         forward_context.model_instance = model_instance
         forward_context.is_draft_model = is_draft_model
         forward_context.is_draft_model_prefill = False
-
-        if num_tokens is None and attn_metadata is not None:
-            num_tokens = attn_metadata.num_actual_tokens
-
-        dp_world_size = get_dp_group().world_size
-        if dp_world_size > 1 and forward_context.dp_metadata is not None:
-            dp_meta = forward_context.dp_metadata
-            max_tokens_across_dp = dp_meta.num_tokens_across_dp_cpu.max().item()
-        else:
-            max_tokens_across_dp = num_tokens
 
         forward_context.max_tokens_across_dp = max_tokens_across_dp
         forward_context.max_tokens_across_pcp = max_tokens_across_pcp
@@ -367,12 +523,20 @@ def _select_fused_or_capacity_moe_comm_method(
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
+    within_capacity = num_tokens is None or mc2_tokens_capacity is None or num_tokens <= mc2_tokens_capacity
+    is_unquantized_draft = is_draft_model and draft_moe_quant_type == QuantType.NONE
     if use_cann_megamoe(vllm_config):
-        return MoECommType.FUSED_MC2
-    if get_ascend_config().enable_fused_mc2 == 1 and get_ep_group().world_size <= 32:
+        # MegaMoe allocates its symmetric receive buffer for mc2_tokens_capacity
+        # and must skip unquantized speculative draft MoE layers so draft models
+        # neither allocate a redundant symm_buffer nor run BF16 persistent MegaMoe.
+        # Keep this branch mutually exclusive with legacy enable_fused_mc2 == 1
+        # because AscendConfig normalizes enable_fused_mc2=2/3 to 1.
+        if not is_unquantized_draft and within_capacity:
+            return MoECommType.FUSED_MC2
+    elif not is_unquantized_draft and get_ascend_config().enable_fused_mc2 == 1 and get_ep_group().world_size <= 32:
         return MoECommType.FUSED_MC2
 
-    if num_tokens is None or num_tokens <= mc2_tokens_capacity:
+    if within_capacity:
         return MoECommType.MC2
 
     return MoECommType.ALLTOALL
@@ -463,7 +627,7 @@ def select_moe_comm_method(
             draft_moe_quant_type,
         )
     logger.debug(
-        "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s, "
+        "MoE comm method selected: policy=%s, method=%s, num_tokens=%s, mc2_capacity=%s, "
         "is_draft_model=%s, draft_moe_quant_type=%r",
         moe_comm_policy,
         moe_comm_type,

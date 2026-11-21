@@ -30,13 +30,17 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, is_draft_vllm_config, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.expert_transfer.expert_offload_utils import expert_offload_weights
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import (
+    MoEWeights,
+    build_fused_experts_input,
+    shared_moe_weight_kwargs,
+)
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.eplb import use_allgather_eplb
@@ -121,7 +125,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # in their native format without explicit casting here.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
-            use_megamoe = use_cann_megamoe(get_current_vllm_config())
+            vllm_config = get_current_vllm_config()
+            # Unquantized speculative draft layers bypass MegaMoe and stay on
+            # standard 3D FRACTAL_NZ for MC2/ALLTOALL execution.
+            use_megamoe = use_cann_megamoe(vllm_config) and not is_draft_vllm_config(vllm_config)
             if not use_megamoe:
                 layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
                 layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
@@ -182,7 +189,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w13_weight_list = getattr(layer, "w13_weight_list", None)
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
-        if _EXTRA_CTX.use_mega_moe:
+        use_mega_moe = bool(_EXTRA_CTX.use_mega_moe)
+        if use_mega_moe:
             w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
             w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
             w1_scale = None
@@ -208,6 +216,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_scale=w2_scale,
             w1_scale_bias=w1_scale_bias,
             w2_scale_bias=w2_scale_bias,
+            **shared_moe_weight_kwargs(layer, use_mega_moe=use_mega_moe),
         )
 
     def get_mlp_weights(self, layer):
@@ -221,7 +230,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if not need_trans:
             return weight
         if isinstance(weight, list):
-            return [w.transpose(1, 2) for w in weight]
+            return [w.transpose(0, 1) if w.ndim == 2 else w.transpose(1, 2) for w in weight]
         return weight.transpose(1, 2)
 
     def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
@@ -455,9 +464,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         runner_type = getattr(vllm_config.model_config, "runner_type", None)
         if runner_type is None:
             logger.warning_once("The runner_type is not set when initializing the model config in the prefill stage")
-        else:
-            if vllm_config.model_config.runner_type == "draft":
-                draft_model_config = vllm_config.speculative_config.draft_model_config
+        if runner_type == "draft" or is_draft_vllm_config(vllm_config):
+            spec_cfg = getattr(vllm_config, "speculative_config", None)
+            draft_model_config = getattr(spec_cfg, "draft_model_config", None)
+            if draft_model_config is None:
+                draft_model_config = getattr(vllm_config, "model_config", None)
+            if draft_model_config is not None:
                 draft_model_config.draft_moe_quant_type = self.quant_type
 
     def get_expert_weights(self) -> Iterable[torch.Tensor | EplbExpertTensorList]:

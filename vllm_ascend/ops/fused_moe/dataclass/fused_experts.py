@@ -30,26 +30,25 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 @dataclass(frozen=True, slots=True)
 class MegamoeSharedWeights:
-    """Shared-expert weights rebuilt for the A5 MegaMoe operator.
+    """Shared-expert weights rebuilt for the CANN MegaMoe operator (A3 and A5).
 
     Produced by ``AscendSharedExperts`` after weight loading and carried by
     ``MegamoeSharedExpertFusion`` on the routed-expert layer; quant methods
     forward it into ``MoEWeights.shared_*`` for the operator call.
     Field names mirror the ``MoEWeights.shared_*`` fields: one tensor per
-    shared expert, w1 (2*intermediate, hidden) + scale
-    (2*intermediate, k//2, 2), w2 (hidden, intermediate) + scale
-    (hidden, k//2, 2).
+    shared expert, with ``w1_scale``/``w2_scale`` omitted (``None``) for
+    unquantized BF16 shared experts.
     """
 
     w1: list[torch.Tensor]
     w2: list[torch.Tensor]
-    w1_scale: list[torch.Tensor]
-    w2_scale: list[torch.Tensor]
+    w1_scale: list[torch.Tensor] | None = None
+    w2_scale: list[torch.Tensor] | None = None
 
 
 @dataclass(slots=True)
 class MegamoeSharedExpertFusion:
-    """Live handle for the shared expert fused into the A5 MegaMoe operator.
+    """Live handle for the shared expert fused into the CANN MegaMoe operator.
 
     ``AscendSharedExperts.megamoe_shared_fusion()`` returns one instance and
     ``AscendMoERunner`` installs it on the routed-expert layer at
@@ -61,6 +60,26 @@ class MegamoeSharedExpertFusion:
     weights: MegamoeSharedWeights | None = None
     quant_out_dtype: int | None = None
     weight_type: int | None = None
+
+
+def shared_moe_weight_kwargs(
+    layer: torch.nn.Module | None,
+    *,
+    use_mega_moe: bool = True,
+) -> dict[str, list[torch.Tensor] | None]:
+    """Return ``MoEWeights`` shared-expert kwargs when MegaMoe executes on this step."""
+    if not use_mega_moe or layer is None:
+        return {}
+    shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None)
+    shared = getattr(shared_fusion, "weights", None)
+    if shared is None:
+        return {}
+    return {
+        "shared_w1": shared.w1,
+        "shared_w2": shared.w2,
+        "shared_w1_scale": shared.w1_scale,
+        "shared_w2_scale": shared.w2_scale,
+    }
 
 
 @dataclass(frozen=True, slots=True)
