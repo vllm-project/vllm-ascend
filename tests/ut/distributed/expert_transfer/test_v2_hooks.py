@@ -286,3 +286,32 @@ def test_quantized_execution_uses_slot_weights_ids_and_comm(load_hook_class):
     assert cls().apply(layer, x, torch.ones(1, 2), logical) is x
     binding.prepare.assert_called_once_with(layer, logical)
     assert context.moe_comm_method is original_comm
+    binding.manager.finish_prefill_layer.assert_called_once_with(binding, prefetch=True)
+
+
+@pytest.mark.parametrize("failure", ["prepare", "compute"])
+def test_quantized_failure_restores_comm_without_prefetch(load_hook_class, failure):
+    original_comm, slot_comm = object(), object()
+    context = SimpleNamespace(moe_comm_method=original_comm)
+
+    class Parent:
+        def apply(self, **kwargs):
+            assert context.moe_comm_method is slot_comm
+            raise RuntimeError("compute failed")
+
+    cls = load_hook_class(
+        "vllm_ascend/distributed/expert_transfer/expert_offload_method.py",
+        "ExpertOffloadMoEMethod",
+        {"apply"},
+        Parent,
+        {"_EXTRA_CTX": context},
+    )
+    binding = Mock()
+    binding.prepare.return_value = object(), torch.zeros(1, 1), slot_comm
+    if failure == "prepare":
+        binding.prepare.side_effect = RuntimeError("prepare failed")
+    layer = SimpleNamespace(_expert_offload_binding=binding)
+    with pytest.raises(RuntimeError, match=f"{failure} failed"):
+        cls().apply(layer, torch.ones(1, 4), torch.ones(1, 1), torch.zeros(1, 1))
+    assert context.moe_comm_method is original_comm
+    binding.manager.finish_prefill_layer.assert_called_once_with(binding, prefetch=False)

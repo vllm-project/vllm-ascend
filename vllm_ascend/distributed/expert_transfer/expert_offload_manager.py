@@ -189,7 +189,7 @@ class LayerOffloadBinding:
                 )
         # Prefill and decode batches exceeding resident capacity use all experts.
         return (
-            ExpertWeightView(layer, manager.full_pool.load_layer(self)),
+            ExpertWeightView(layer, manager.prepare_full_weights(self)),
             topk_ids,
             manager.get_comm(self, layer.moe_config, self.num_experts),
         )
@@ -242,8 +242,10 @@ class FullExpertPool:
 
     def __init__(self):
         self.tensors: dict[str, torch.Tensor] = {}
+        self.owner: LayerOffloadBinding | None = None
 
     def allocate(self, bindings) -> None:
+        self.owner = None
         first_binding, *remaining_bindings = bindings
         expert_layout = self._expert_layout(first_binding)
         for binding in remaining_bindings:
@@ -277,15 +279,101 @@ class FullExpertPool:
             },
         )
 
-    def load_layer(self, binding):
+    def load_layer(self, binding, *, stream=None, synchronize=True):
+        # Weights are immutable: a pool already holding this layer stays valid
+        # even if subsequent decode steps replace the layer's resident slots.
+        if self.owner is binding:
+            return self.tensors
+
+        # Join pending replay callbacks before reading slot metadata or copying
+        # resident bytes. Once fenced, later prefill loads can stay asynchronous.
+        if binding.device.type == "npu":
+            binding.manager.synchronize_graph_residency(binding.device)
+
+        resident_loads = tuple((slot, expert_id) for slot, expert_id in enumerate(binding.slot_to_expert))
+        resident_ids = set(binding.slot_to_expert)
+        host_loads = tuple(
+            (expert_id, expert_id) for expert_id in range(binding.num_experts) if expert_id not in resident_ids
+        )
+        # A partial transfer leaves the shared pool unusable even for its old owner.
+        self.owner = None
         TorchExpertTransfer.copy_experts(
             binding.adapter,
             binding.host_store,
             self.tensors,
-            tuple((expert_id, expert_id) for expert_id in range(binding.num_experts)),
+            host_loads,
             binding.device,
+            resident_weights=binding.resident,
+            resident_loads=resident_loads,
+            stream=stream,
+            synchronize=synchronize,
         )
+        self.owner = binding
         return self.tensors
+
+
+class PrefillPipeline:
+    """Rotate two full pools using explicit load and last-reader events."""
+
+    def __init__(self, bindings, pools, load_stream):
+        self.bindings = list(bindings)
+        self.pools = pools
+        self.load_stream = load_stream
+        self.ready = [None, None]
+        self.last_use = [None, None]
+        self.active = None
+        self.inflight = False
+
+    def prepare(self, binding):
+        compute = torch.npu.current_stream(binding.device)
+        slot = next((i for i, pool in enumerate(self.pools) if pool.owner is binding), 0)
+        if self.ready[slot] is not None:
+            compute.wait_event(self.ready[slot])
+            self.ready[slot] = None
+        if self.last_use[slot] is not None:
+            compute.wait_event(self.last_use[slot])
+        tensors = self.pools[slot].load_layer(binding)
+        self.active = (binding, slot)
+        return tensors
+
+    def finish(self, binding, *, prefetch):
+        if self.active is None or self.active[0] is not binding:
+            return
+        _, slot = self.active
+        self.active = None
+        compute = torch.npu.current_stream(binding.device)
+        used = torch.npu.Event()
+        compute.record_event(used)
+        self.last_use[slot] = used
+        if not prefetch:
+            return
+        index = self.bindings.index(binding) + 1
+        if index >= len(self.bindings):
+            return
+        target = self.bindings[index]
+        next_slot = 1 - slot
+        if self.pools[next_slot].owner is target:
+            return
+        if self.last_use[next_slot] is not None:
+            self.load_stream.wait_event(self.last_use[next_slot])
+        self.ready[next_slot] = None
+        try:
+            self.inflight = True
+            self.pools[next_slot].load_layer(target, stream=self.load_stream, synchronize=False)
+            done = torch.npu.Event()
+            self.load_stream.record_event(done)
+            self.ready[next_slot] = done
+        except BaseException:
+            self.load_stream.synchronize()
+            self.inflight = False
+            self.pools[next_slot].owner = None
+            raise
+
+    def drain(self):
+        self.load_stream.synchronize()
+        self.inflight = False
+        self.ready = [None, None]
+        self.active = None
 
 
 class ExpertOffloadManager:
@@ -298,6 +386,8 @@ class ExpertOffloadManager:
         self.has_prefill = True
         self.graph_load_stream = None
         self.graph_streams = set()
+        self._graph_residency_pending = True
+        self.prefill_pipeline = None
 
     def capture_stream(self, _desc):
         # Use the actual NPU stream rather than torch_cuda_wrapper's CUDA cache.
@@ -305,6 +395,7 @@ class ExpertOffloadManager:
         if stream not in self.graph_streams:
             torch.npu._subscribe_report(stream)
             self.graph_streams.add(stream)
+        self._graph_residency_pending = True
         return stream
 
     def unsubscribe_graph_streams(self) -> None:
@@ -347,7 +438,7 @@ class ExpertOffloadManager:
             graph_manager.capture = partial(self.capture, graph_manager.capture)
 
     def capture(self, capture_fn, *args, **kwargs):
-        self.has_prefill = False
+        self.set_batch_phase(False)
         return capture_fn(*args, **kwargs)
 
     def initialize(self, model) -> None:
@@ -359,6 +450,46 @@ class ExpertOffloadManager:
         for binding in self.bindings.values():
             binding.manager = self
         self.full_pool.allocate(self.bindings.values())
+        bindings = list(self.bindings.values())
+        if bindings and bindings[0].device.type == "npu":
+            second_pool = FullExpertPool()
+            second_pool.allocate(bindings)
+            self.prefill_pipeline = PrefillPipeline(
+                bindings, (self.full_pool, second_pool), torch.npu.Stream(device=bindings[0].device)
+            )
+
+    def prepare_full_weights(self, binding):
+        if self.prefill_pipeline is not None and self.has_prefill:
+            # Fence once before either pool can prefetch resident bytes. Merely
+            # having registered graph streams does not disable the pipeline.
+            self.synchronize_graph_residency(binding.device)
+            return self.prefill_pipeline.prepare(binding)
+        if self.prefill_pipeline is not None:
+            self.prefill_pipeline.drain()
+        return self.full_pool.load_layer(binding)
+
+    def synchronize_graph_residency(self, device):
+        if self.graph_streams and self._graph_residency_pending:
+            # Report callbacks publish both resident bytes and their host map.
+            # Clear only after success so a failed fence is retried safely.
+            torch.npu.synchronize(device)
+            self._graph_residency_pending = False
+
+    def set_batch_phase(self, has_prefill):
+        # An interrupted prefill may leave an outstanding read of resident
+        # slots. Drain before decode can replace those slots, including replay.
+        if not has_prefill:
+            if self.prefill_pipeline is not None and self.prefill_pipeline.inflight:
+                self.prefill_pipeline.drain()
+            # Capture/replay may enqueue slot updates after this phase change.
+            # Defer the fence until full weights are needed, so decode-only
+            # steps do not synchronize the device at the batch boundary.
+            self._graph_residency_pending = True
+        self.has_prefill = has_prefill
+
+    def finish_prefill_layer(self, binding, *, prefetch):
+        if self.prefill_pipeline is not None:
+            self.prefill_pipeline.finish(binding, prefetch=prefetch)
 
     def get_comm(self, binding, moe_config, num_physical_experts):
         # Lazy import avoids an initialization cycle with quantization and routed experts.

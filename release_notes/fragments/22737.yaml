@@ -1,0 +1,9 @@
+pr: 22737
+entries:
+  - category: performance
+    text: >-
+      With expert_offload_config.enabled on Ascend 950 (A5), prefill reuses
+      resident experts and prefetches subsequent layers through two reusable
+      buffers, including after decode graph replay. This reduces host-to-device
+      weight traffic and reserves one additional full expert layer of NPU memory.
+    hardware: [A5]
