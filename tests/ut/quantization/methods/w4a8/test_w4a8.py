@@ -355,8 +355,8 @@ class TestAscendW4A8DynamicLinearMethod(unittest.TestCase):
         ):
             self.method.get_pergroup_param(16, 80, torch.bfloat16, "row")
 
-    def test_nz_conversion_alignment_and_scale_bias_reduction(self):
-        for input_size, output_size, use_nz in [(16, 64, True), (16, 80, False), (8, 64, False)]:
+    def test_nd_packing_and_scale_bias_reduction(self):
+        for input_size, output_size in [(16, 64), (16, 80), (8, 64)]:
             with self.subTest(input_size=input_size, output_size=output_size):
                 layer = torch.nn.Module()
                 layer.weight = torch.nn.Parameter(
@@ -368,16 +368,8 @@ class TestAscendW4A8DynamicLinearMethod(unittest.TestCase):
                     "scale_bias": torch.ones(output_size, 2),
                 }.items():
                     layer.register_parameter(name, torch.nn.Parameter(value, requires_grad=False))
-                with patch(
-                    "vllm_ascend.quantization.methods.w4a8.w4a8.maybe_trans_nz",
-                    side_effect=lambda x: x,
-                ) as convert:
-                    self.method.process_weights_after_loading(layer)
-                self.assertEqual(convert.call_count, int(use_nz))
-                if use_nz:
-                    self.assertEqual(convert.call_args.args[0].shape, (1, input_size, output_size // 2))
-                    self.assertIsNone(convert.call_args.args[0]._base)
-                self.assertEqual(layer.weight.shape, (1, input_size, output_size // 8))
+                self.method.process_weights_after_loading(layer)
+                self.assertEqual(layer.weight.shape, (input_size, output_size // 8))
                 self.assertEqual(layer.weight.dtype, torch.int32)
                 expected_scale = torch.ones(output_size).view(torch.int32).to(torch.int64)
                 torch.testing.assert_close(layer.weight_scale, expected_scale)
@@ -397,7 +389,7 @@ class TestAscendW4A8DynamicLinearMethod(unittest.TestCase):
         layer = SimpleNamespace(weight_scale=torch.ones(80))
         with (
             patch("vllm_ascend.quantization.methods.w4a8.w4a8.torch_npu.npu_dynamic_quant", create=True) as quant,
-            patch("vllm_ascend.quantization.methods.w4a8.w4a8.torch_npu.npu_grouped_matmul", create=True) as matmul,
+            patch("vllm_ascend.quantization.methods.w4a8.w4a8.torch_npu.npu_quant_matmul", create=True) as matmul,
         ):
             output = self.method.apply(layer, torch.empty(2, 0, 16, dtype=torch.bfloat16))
         self.assertEqual(output.shape, (2, 0, 80))
@@ -408,14 +400,14 @@ class TestAscendW4A8DynamicLinearMethod(unittest.TestCase):
     def test_prepared_input_survives_mutating_matmul(self):
         original = torch.ones(2, 16, dtype=torch.int8)
         prepared = PreparedLinearInput(original.clone(), torch.ones(2), torch.bfloat16)
-        layer = SimpleNamespace(weight=torch.zeros(1, 16, 8), weight_scale=torch.ones(64), scale_bias=torch.zeros(64))
+        layer = SimpleNamespace(weight=torch.zeros(16, 8), weight_scale=torch.ones(64), scale_bias=torch.zeros(64))
 
-        def mutating_matmul(**kwargs):
-            kwargs["x"][0].zero_()
-            return [torch.ones(2, 64, dtype=torch.bfloat16)]
+        def mutating_matmul(x, weight, scale, **kwargs):
+            x.zero_()
+            return torch.ones(2, 64, dtype=torch.bfloat16)
 
         with patch(
-            "vllm_ascend.quantization.methods.w4a8.w4a8.torch_npu.npu_grouped_matmul",
+            "vllm_ascend.quantization.methods.w4a8.w4a8.torch_npu.npu_quant_matmul",
             side_effect=mutating_matmul,
             create=True,
         ):
@@ -423,3 +415,36 @@ class TestAscendW4A8DynamicLinearMethod(unittest.TestCase):
                 output = self.method.apply(layer, prepared, bias=torch.ones(64, dtype=torch.bfloat16))
                 torch.testing.assert_close(output, torch.full((2, 64), 2.0, dtype=torch.bfloat16))
                 torch.testing.assert_close(prepared.quantized, original)
+
+    def test_quant_matmul_scales_offset_and_model_bias(self):
+        x = torch.ones(2, 3, 16, dtype=torch.bfloat16)
+        quantized = torch.ones(6, 16, dtype=torch.int8)
+        token_scale = torch.arange(1, 7, dtype=torch.float32)
+        layer = SimpleNamespace(
+            weight=torch.zeros(16, 8, dtype=torch.int32),
+            weight_scale=torch.ones(64, dtype=torch.int64),
+            scale_bias=torch.arange(64, dtype=torch.float32),
+        )
+        with (
+            patch(
+                "vllm_ascend.quantization.methods.w4a8.w4a8.torch_npu.npu_dynamic_quant",
+                return_value=(quantized, token_scale),
+                create=True,
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w4a8.w4a8.torch_npu.npu_quant_matmul",
+                return_value=torch.ones(6, 64, dtype=torch.bfloat16),
+                create=True,
+            ) as matmul,
+        ):
+            output = self.method.apply(layer, x, bias=torch.full((64,), 2.0, dtype=x.dtype))
+        torch.testing.assert_close(output, torch.full((2, 3, 64), 3.0, dtype=x.dtype))
+        args, kwargs = matmul.call_args
+        self.assertIs(args[0], quantized)
+        self.assertIs(args[1], layer.weight)
+        self.assertIs(args[2], layer.weight_scale)
+        self.assertIs(kwargs["offset"], layer.scale_bias)
+        self.assertIs(kwargs["pertoken_scale"], token_scale)
+        self.assertEqual(kwargs["group_sizes"], [0, 0, 0])
+        self.assertEqual(kwargs["output_dtype"], x.dtype)
+        self.assertNotIn("bias", kwargs)
