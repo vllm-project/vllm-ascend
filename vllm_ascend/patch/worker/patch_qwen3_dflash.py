@@ -46,6 +46,24 @@ def _project_context_kv(
     return all_kv[0], all_kv[1]
 
 
+def _apply_context_rope(self, all_k: torch.Tensor, context_positions: torch.Tensor) -> None:
+    """Preserve the upstream in-place hook contract with Ascend RoPE backends."""
+    num_layers, num_ctx = all_k.shape[:2]
+    nope_layers = getattr(self.config, "no_rope_layers", None) or ()
+    # Layer zero can itself be NoPE. Use a rotating layer for the fused call;
+    # the model's override restores its NoPE keys after this hook returns.
+    rope_layer = next((i for i in range(num_layers) if i not in nope_layers), None)
+    if rope_layer is None:
+        return
+
+    all_k_flat = all_k.view(num_layers * num_ctx, self._kv_size)
+    rotated_k, _ = self.layers[rope_layer].self_attn.rotary_emb(context_positions.repeat(num_layers), all_k_flat, None)
+    # Some Ascend backends return a new tensor. Subclass hooks operate on
+    # all_k in place, so keep their buffer authoritative for cache insertion.
+    if rotated_k is not all_k_flat:
+        all_k_flat.copy_(rotated_k)
+
+
 def precompute_and_store_context_kv(
     self,
     context_states: torch.Tensor,
@@ -57,7 +75,6 @@ def precompute_and_store_context_kv(
 
     num_ctx = context_states.shape[0]
     L = self._num_attn_layers
-    kv = self._kv_size
     hd = self._head_dim
     nkv = self._num_kv_heads
 
@@ -69,13 +86,8 @@ def precompute_and_store_context_kv(
         k_norm_layer = self.layers[i].self_attn.k_norm
         all_k_normed[i] = k_norm_layer(all_k[i])
 
-    # --- Fused RoPE across all layers ---
-    # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
-    # Ascend RoPE can return a new tensor (e.g. the non-Triton path).
-    # Consume its result rather than relying on an in-place update.
-    all_k_flat = all_k_normed.view(L * num_ctx, kv)
-    positions_repeated = context_positions.repeat(L)
-    all_k_flat, _ = self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, None)
+    # Retain model-specific context RoPE behavior, including Ricursive NoPE.
+    self._apply_context_rope(all_k_normed, context_positions)
 
     if context_slot_mapping is None:
         return
@@ -85,7 +97,6 @@ def precompute_and_store_context_kv(
         all_v.mul_(v_scale)
 
     # --- Per-layer cache insert ---
-    all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
     per_layer = isinstance(context_slot_mapping, (list, tuple))
     for i in range(L):
         slot_mapping = context_slot_mapping[i] if per_layer else context_slot_mapping
@@ -95,7 +106,7 @@ def precompute_and_store_context_kv(
         kv_cache = attn.kv_cache
         attn.impl.do_kv_cache_update(
             attn,
-            all_k_final[i],
+            all_k_normed[i],
             all_v[i],
             kv_cache,
             slot_mapping,
@@ -103,6 +114,7 @@ def precompute_and_store_context_kv(
 
 
 DFlashQwen3Model._project_context_kv = _project_context_kv
+DFlashQwen3Model._apply_context_rope = _apply_context_rope
 DFlashQwen3Model.precompute_and_store_context_kv = precompute_and_store_context_kv
 
 _orig_read_mask_embedding = DFlashQwen3ForCausalLM._read_mask_embedding

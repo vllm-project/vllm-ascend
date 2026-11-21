@@ -6,13 +6,25 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import _log1p_neg_stable
 from vllm.v1.worker.gpu.spec_decode.dflash2 import speculator as dflash2_speculator
 
+import vllm_ascend.ops.rotary_embedding as rope_module
 import vllm_ascend.patch.worker.patch_dflash_speculator  # noqa: F401
+import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa: F401
 from vllm_ascend.worker.v2.sample.gumbel import _gumbel_sample
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
+
+try:
+    from vllm.model_executor.models.ricursive_dflash2 import RicursiveDFlash2Model, _NoRope
+except ModuleNotFoundError as exc:
+    if exc.name != "vllm.model_executor.models.ricursive_dflash2":
+        raise
+    # The paired vLLM release can precede upstream Ripple model support.
+    RicursiveDFlash2Model = None
+    _NoRope = None
 
 
 @triton.jit
@@ -42,14 +54,25 @@ def test_stable_gumbel_matches_fp64_reference():
 @pytest.mark.parametrize("is_neox_style", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("mrope", [False, True])
-def test_context_cache_contains_rotated_keys(monkeypatch, use_triton, is_neox_style, dtype, mrope):
-    """Both NPU RoPE backends must write rotated context K, including key-only calls."""
-    import vllm_ascend.ops.rotary_embedding as rope_module
-    from vllm_ascend.patch.worker.patch_qwen3_dflash import precompute_and_store_context_kv
-
+@pytest.mark.parametrize(
+    "model_cls,no_rope_layers",
+    [
+        pytest.param(DFlashQwen3Model, [], id="qwen3"),
+        pytest.param(RicursiveDFlash2Model, [], id="ricursive-all-rope"),
+        pytest.param(RicursiveDFlash2Model, [1], id="ricursive-middle-nope"),
+        pytest.param(RicursiveDFlash2Model, [0], id="ricursive-first-nope"),
+        pytest.param(RicursiveDFlash2Model, [0, 1, 2], id="ricursive-all-nope"),
+    ],
+)
+def test_context_cache_contains_rotated_keys(
+    monkeypatch, use_triton, is_neox_style, dtype, mrope, model_cls, no_rope_layers
+):
+    """Both NPU RoPE backends must rotate RoPE context K and retain NoPE K."""
+    if model_cls is None:
+        pytest.skip("Ricursive DFlash2 is unavailable in this upstream vLLM revision.")
     monkeypatch.setattr(rope_module, "HAS_TRITON", use_triton)
     torch.manual_seed(7)
-    layers, tokens, heads, head_dim = 2, 3, 2, 64
+    layers, tokens, heads, head_dim = 3, 3, 2, 64
     keys = torch.randn(layers, tokens, heads, head_dim, dtype=dtype, device="npu")
     values = torch.randn_like(keys)
     positions = torch.tensor([2, 4, 7], device="npu")
@@ -75,17 +98,26 @@ def test_context_cache_contains_rotated_keys(monkeypatch, use_triton, is_neox_st
         return rope.forward_oot(pos, query, key)
 
     caches = [SimpleNamespace(impl=MagicMock(), kv_cache=object()) for _ in range(layers)]
-    model = SimpleNamespace(
-        _num_attn_layers=layers,
-        _kv_size=heads * head_dim,
-        _head_dim=head_dim,
-        _num_kv_heads=heads,
-        _project_context_kv=lambda *args: (keys.clone(), values.clone()),
-        layers=[SimpleNamespace(self_attn=SimpleNamespace(k_norm=torch.nn.Identity(), rotary_emb=rotate))] * layers,
-        _attn_layers=caches,
-    )
+    model = model_cls.__new__(model_cls)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(no_rope_layers=no_rope_layers)
+    model._num_attn_layers = layers
+    model._kv_size = heads * head_dim
+    model._head_dim = head_dim
+    model._num_kv_heads = heads
+    model._project_context_kv = lambda *args: (keys.clone(), values.clone())
+    model.layers = [
+        SimpleNamespace(
+            self_attn=SimpleNamespace(
+                k_norm=torch.nn.Identity(),
+                rotary_emb=_NoRope(rope) if layer in no_rope_layers else rotate,
+            )
+        )
+        for layer in range(layers)
+    ]
+    model._attn_layers = caches
     mapping = torch.arange(tokens, dtype=torch.int32, device="npu")
-    precompute_and_store_context_kv(model, torch.zeros(tokens, heads * head_dim, device="npu"), positions, mapping)
+    model.precompute_and_store_context_kv(torch.zeros(tokens, heads * head_dim, device="npu"), positions, mapping)
 
     original = keys.cpu().float()
     cos, sin = cache.cpu().float()[positions.cpu()].chunk(2, dim=-1)
@@ -99,7 +131,8 @@ def test_context_cache_contains_rotated_keys(monkeypatch, use_triton, is_neox_st
     for layer, attn in enumerate(caches):
         attn.impl.do_kv_cache_update.assert_called_once()
         args = attn.impl.do_kv_cache_update.call_args.args
-        torch.testing.assert_close(args[1].cpu().float(), expected[layer], atol=0.03, rtol=0.02)
+        expected_key = original[layer] if layer in no_rope_layers else expected[layer]
+        torch.testing.assert_close(args[1].cpu().float(), expected_key, atol=0.03, rtol=0.02)
         torch.testing.assert_close(args[2], values[layer])
 
 
