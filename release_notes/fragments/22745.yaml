@@ -1,0 +1,7 @@
+pr: 22745
+entries:
+  - category: bugfix
+    text: >-
+      Fixed a first-prefill stall with MiniMax-M3 EAGLE3, pipeline parallelism,
+      and expert parallelism on vLLM 0.33.0. Initializing draft attention now
+      preserves the target model's parallel configuration.
