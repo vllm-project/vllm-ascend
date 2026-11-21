@@ -1,0 +1,4 @@
+pr: 22450
+entries:
+  - category: performance
+    text: Kimi K3.1 RecoverSSM speculative verification reduces device work by reading the F gate directly from the fused projection.
