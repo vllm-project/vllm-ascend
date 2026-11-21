@@ -1,0 +1,4 @@
+pr: 22219
+entries:
+  - category: bugfix
+    text: Fixed an LMHead TP capacity error during MTP speculative decoding with Model Runner V2 when graph padding expands an idle data-parallel rank's dummy batch.
