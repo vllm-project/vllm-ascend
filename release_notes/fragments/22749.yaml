@@ -1,0 +1,6 @@
+pr: 22749
+entries:
+  - category: performance
+    text: >-
+      Reduced short-context decode latency for Kimi-K3.1-Pro on Ascend A3 with
+      decode context parallelism by skipping peer ranks with no valid indexer candidates.
