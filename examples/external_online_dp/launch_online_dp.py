@@ -3,8 +3,14 @@
 
 import argparse
 import os
+import signal
 import subprocess
 import sys
+import time
+from contextlib import suppress
+
+SHUTDOWN_TIMEOUT = 10
+POLL_INTERVAL = 0.1
 
 
 def parse_args():
@@ -32,38 +38,92 @@ def parse_args():
     return args
 
 
+def shutdown_processes(processes):
+    # Include vLLM workers even if their shell has already exited.
+    for process in processes:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGTERM)
+
+    deadline = time.monotonic() + SHUTDOWN_TIMEOUT
+    pending = list(processes)
+    while pending and time.monotonic() < deadline:
+        for process in pending[:]:
+            process.poll()  # Reap exited shells before checking their groups.
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                pending.remove(process)
+        if pending:
+            time.sleep(POLL_INTERVAL)
+
+    for process in pending:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+    for process in processes:
+        process.wait()
+
+
+def handle_sigterm(signum, frame):
+    sys.exit(128 + signum)
+
+
 def main():
     args = parse_args()
     devices_per_rank = args.tp_size * args.pcp_size * args.pp_size
     processes = []
+    pending_signal = None
 
-    for i in range(args.dp_size_local):
-        dp_rank = args.dp_rank_start + i
-        port = args.vllm_start_port + i
-        devices = ",".join(str(x) for x in range(i * devices_per_rank, (i + 1) * devices_per_rank))
-        command = [
-            "bash",
-            "-o",
-            "pipefail",
-            args.template,
-            devices,  # $1: visible devices
-            str(port),  # $2: API port
-            str(args.dp_size),  # $3: global DP size
-            str(dp_rank),  # $4: global DP rank
-            args.dp_address,  # $5: DP address
-            str(args.dp_rpc_port),  # $6: DP RPC port
-            str(args.tp_size),  # $7: TP
-            str(args.pcp_size),  # $8: PCP
-            str(args.pp_size),  # $9: PP
-        ]
+    def defer_stop(signum, frame):
+        # Let Popen return so the new process is recorded before cleanup.
+        nonlocal pending_signal
+        pending_signal = signum
 
-        print(f"DP rank={dp_rank}, devices={devices}, API port={port}", flush=True)
-        # Start all local ranks before waiting for any of them.
-        processes.append(subprocess.Popen(command))
+    previous_sigint = signal.signal(signal.SIGINT, defer_stop)
+    previous_sigterm = signal.signal(signal.SIGTERM, defer_stop)
+    try:
+        for i in range(args.dp_size_local):
+            if pending_signal is not None:
+                sys.exit(128 + pending_signal)
+            dp_rank = args.dp_rank_start + i
+            port = args.vllm_start_port + i
+            devices = ",".join(str(x) for x in range(i * devices_per_rank, (i + 1) * devices_per_rank))
+            command = [
+                "bash",
+                "-o",
+                "pipefail",
+                args.template,
+                devices,  # $1: visible devices
+                str(port),  # $2: API port
+                str(args.dp_size),  # $3: global DP size
+                str(dp_rank),  # $4: global DP rank
+                args.dp_address,  # $5: DP address
+                str(args.dp_rpc_port),  # $6: DP RPC port
+                str(args.tp_size),  # $7: TP
+                str(args.pcp_size),  # $8: PCP
+                str(args.pp_size),  # $9: PP
+            ]
 
-    # Wait for every rank and propagate failure to the launcher exit status.
-    exit_codes = [process.wait() for process in processes]
-    return 1 if any(code != 0 for code in exit_codes) else 0
+            print(f"DP rank={dp_rank}, devices={devices}, API port={port}", flush=True)
+            # Start all local ranks before waiting; each rank owns a process group.
+            processes.append(subprocess.Popen(command, start_new_session=True))
+
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, handle_sigterm)
+        if pending_signal is not None:
+            sys.exit(128 + pending_signal)
+
+        # Wait for every rank and propagate failure to the launcher exit status.
+        exit_codes = [process.wait() for process in processes]
+        return 1 if any(code != 0 for code in exit_codes) else 0
+    except BaseException:
+        # Repeated stop signals must not interrupt cleanup halfway through.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        shutdown_processes(processes)
+        raise
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":

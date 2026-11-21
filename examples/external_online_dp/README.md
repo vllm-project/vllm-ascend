@@ -48,6 +48,13 @@ for every shell process and returns a nonzero exit status if any rank fails; it
 does not automatically stop the remaining ranks. Bash `pipefail` also preserves
 failures when a template pipes vLLM output through `tee`.
 
+On Linux, each rank runs in its own process group. If the launcher is interrupted
+with `Ctrl+C` or `SIGTERM`, or raises an exception while starting or waiting for
+ranks, it sends `SIGTERM` to all started groups, allows up to 10 seconds for
+cleanup, then sends `SIGKILL` to any remaining groups and reaps the shells.
+Templates must keep their workers in the same process group; do not daemonize
+them or use `setsid` inside the template.
+
 An example of running external DP in one single node:
 
 ```bash

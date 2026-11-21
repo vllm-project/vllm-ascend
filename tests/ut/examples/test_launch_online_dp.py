@@ -3,9 +3,14 @@
 import contextlib
 import importlib.util
 import io
+import os
+import shlex
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -52,6 +57,8 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(calls[0].args[0][4:], ["0,1", "9000", "4", "2", "127.0.0.1", "12345", "2", "1", "1"])
         self.assertEqual(calls[1].args[0][4:], ["2,3", "9001", "4", "3", "127.0.0.1", "12345", "2", "1", "1"])
+        for call in calls:
+            self.assertTrue(call.kwargs["start_new_session"])
 
     def test_pcp_and_pp_individually_and_together(self):
         for sizes, tail, devices in [
@@ -112,6 +119,179 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(result, 1)
         for worker in workers:
             worker.wait.assert_called_once()
+
+    def test_spawn_failure_cleans_started_groups(self):
+        worker = mock.Mock(pid=101)
+        error = OSError("cannot spawn second rank")
+        previous_handlers = [signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)]
+        with (
+            mock.patch.object(launcher.sys, "argv", ["launch_online_dp.py", *self.base]),
+            mock.patch.object(launcher.subprocess, "Popen", side_effect=[worker, error]),
+            mock.patch.object(launcher.os, "killpg", side_effect=[None, ProcessLookupError()], create=True) as killpg,
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(OSError) as caught,
+        ):
+            launcher.main()
+        self.assertIs(caught.exception, error)
+        self.assertEqual(killpg.call_args_list, [mock.call(101, signal.SIGTERM), mock.call(101, 0)])
+        worker.wait.assert_called_once()
+        self.assertEqual([signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)], previous_handlers)
+
+    def test_interrupt_during_wait_cleans_all_groups(self):
+        def interrupted_wait():
+            if stop_signal == signal.SIGTERM:
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            raise KeyboardInterrupt
+
+        def group_signal(pid, sig):
+            if sig == 0:
+                raise ProcessLookupError
+            self.assertEqual(signal.getsignal(signal.SIGINT), signal.SIG_IGN)
+            self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+
+        for stop_signal in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(stop_signal=stop_signal):
+                workers = [mock.Mock(pid=101), mock.Mock(pid=102)]
+
+                def wait(worker=workers[0]):
+                    worker.wait.side_effect = None
+                    interrupted_wait()
+
+                workers[0].wait.side_effect = wait
+                previous_handlers = [signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)]
+                with (
+                    mock.patch.object(launcher.sys, "argv", ["launch_online_dp.py", *self.base]),
+                    mock.patch.object(launcher.subprocess, "Popen", side_effect=workers),
+                    mock.patch.object(launcher.os, "killpg", side_effect=group_signal, create=True) as killpg,
+                    contextlib.redirect_stdout(io.StringIO()),
+                    self.assertRaises((KeyboardInterrupt, SystemExit)) as caught,
+                ):
+                    launcher.main()
+                if stop_signal == signal.SIGTERM:
+                    self.assertEqual(caught.exception.code, 128 + signal.SIGTERM)
+                self.assertEqual(
+                    killpg.call_args_list[:2], [mock.call(101, signal.SIGTERM), mock.call(102, signal.SIGTERM)]
+                )
+                self.assertEqual(workers[0].wait.call_count, 2)
+                workers[1].wait.assert_called_once()
+                self.assertEqual([signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)], previous_handlers)
+
+    def test_signal_during_spawn_records_worker_before_cleanup(self):
+        worker = mock.Mock(pid=101)
+
+        def spawn(*args, **kwargs):
+            signal.getsignal(stop_signal)(stop_signal, None)
+            return worker
+
+        for stop_signal in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(stop_signal=stop_signal):
+                worker.reset_mock()
+                with (
+                    mock.patch.object(launcher.sys, "argv", ["launch_online_dp.py", *self.base]),
+                    mock.patch.object(launcher.subprocess, "Popen", side_effect=spawn) as popen,
+                    mock.patch.object(launcher.os, "killpg", side_effect=[None, ProcessLookupError()], create=True),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    self.assertRaises(SystemExit) as caught,
+                ):
+                    launcher.main()
+                self.assertEqual(caught.exception.code, 128 + stop_signal)
+                popen.assert_called_once()
+                worker.wait.assert_called_once()
+
+    def test_shutdown_waits_for_descendants_after_shell_exits(self):
+        worker = mock.Mock(pid=101, poll=mock.Mock(return_value=0))
+        with (
+            mock.patch.object(
+                launcher.os, "killpg", side_effect=[None, None, ProcessLookupError()], create=True
+            ) as killpg,
+            mock.patch.object(launcher.time, "monotonic", side_effect=[0, 0, 1]),
+            mock.patch.object(launcher.time, "sleep") as sleep,
+        ):
+            launcher.shutdown_processes([worker])
+        self.assertEqual(killpg.call_args_list, [mock.call(101, signal.SIGTERM), mock.call(101, 0), mock.call(101, 0)])
+        sleep.assert_called_once()
+        worker.wait.assert_called_once()
+
+    def test_shutdown_kills_remaining_groups_after_shared_timeout(self):
+        workers = [mock.Mock(pid=101), mock.Mock(pid=102)]
+        with (
+            mock.patch.object(launcher.os, "killpg", create=True) as killpg,
+            mock.patch.object(launcher.signal, "SIGKILL", 9, create=True),
+            mock.patch.object(launcher.time, "monotonic", side_effect=[0, 0, launcher.SHUTDOWN_TIMEOUT + 1]),
+            mock.patch.object(launcher.time, "sleep"),
+        ):
+            launcher.shutdown_processes(workers)
+        self.assertEqual(
+            killpg.call_args_list,
+            [
+                mock.call(101, signal.SIGTERM),
+                mock.call(102, signal.SIGTERM),
+                mock.call(101, 0),
+                mock.call(102, 0),
+                mock.call(101, 9),
+                mock.call(102, 9),
+            ],
+        )
+        for worker in workers:
+            worker.wait.assert_called_once()
+
+    @unittest.skipUnless(os.name == "posix", "Requires POSIX process groups")
+    def test_real_stop_signals_reach_shell_descendants(self):
+        self.bash()
+        worker_script = self.template.parent / "worker.py"
+        worker_script.write_text(
+            "import os, signal, sys\nfrom pathlib import Path\n"
+            "def stop(signum, frame):\n"
+            "    Path(sys.argv[2]).write_text('cleaned')\n"
+            "    sys.exit(0)\n"
+            "signal.signal(signal.SIGTERM, stop)\n"
+            "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+            "while True:\n    signal.pause()\n",
+            encoding="utf-8",
+        )
+        for stop_signal in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(stop_signal=stop_signal):
+                ready = self.template.parent / f"ready-{stop_signal}"
+                cleaned = self.template.parent / f"cleaned-{stop_signal}"
+                group = self.template.parent / f"group-{stop_signal}"
+                self.template.write_text(
+                    f"echo $$ > {shlex.quote(str(group))}\n"
+                    f"{shlex.join([sys.executable, str(worker_script), str(ready), str(cleaned)])}\nwait\n",
+                    encoding="utf-8",
+                )
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(EXAMPLE_DIR / "launch_online_dp.py"),
+                        *self.base,
+                        "--dp-size",
+                        "1",
+                        "--dp-size-local",
+                        "1",
+                        "--dp-rank-start",
+                        "0",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                )
+                try:
+                    deadline = time.monotonic() + 5
+                    while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    self.assertTrue(ready.exists(), "Worker did not become ready")
+                    process.send_signal(stop_signal)
+                    _, stderr = process.communicate(timeout=launcher.SHUTDOWN_TIMEOUT + 5)
+                    self.assertNotEqual(process.returncode, 0, stderr)
+                    self.assertEqual(cleaned.read_text(), "cleaned")
+                finally:
+                    if group.exists():
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(int(group.read_text()), signal.SIGKILL)
+                    if process.poll() is None:
+                        process.kill()
+                    process.communicate(timeout=5)
 
     def bash(self):
         bash = shutil.which("bash")
