@@ -75,7 +75,7 @@ if TYPE_CHECKING:
     from vllm.utils import FlexibleArgumentParser
     from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
     from vllm.v1.attention.backends.mla.prefill.selector import MLAPrefillSelectorConfig
-    from vllm_ascend.ascend_config import AscendConfig
+    from vllm_ascend.ascend_config import AscendConfig, SchedulerConfig
 else:
     ModelConfig = None
     SpeculativeConfig = None
@@ -1621,7 +1621,32 @@ def _setup_worker_and_scheduler(
                 "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler"
             )
 
+    _setup_mixed_batch_scheduler(vllm_config, scheduler_config)
     _downgrade_swa_bounded_replay(vllm_config, ascend_config)
+
+
+def _setup_mixed_batch_scheduler(vllm_config: VllmConfig, ascend_scheduler_config: SchedulerConfig) -> None:
+    if ascend_scheduler_config.max_num_decode_seqs_in_mixed_batch is None:
+        return
+
+    scheduler_config = vllm_config.scheduler_config
+    if (
+        scheduler_config.scheduler_cls is not None
+        or ascend_scheduler_config.enable_balance_scheduling
+        or ascend_scheduler_config.short_request_first_config.enabled
+    ):
+        raise ValueError("Mixed-batch decode limiting requires the default scheduler.")
+    parallel_config = vllm_config.parallel_config
+    if (
+        scheduler_config.policy != "fcfs"
+        or parallel_config.data_parallel_size != 1
+        or parallel_config.pipeline_parallel_size != 1
+        or vllm_config.kv_transfer_config is not None
+    ):
+        raise ValueError("Mixed-batch decode limiting requires FCFS, DP=PP=1, and local KV caching.")
+
+    name = "AsyncMixedBatchScheduler" if scheduler_config.async_scheduling else "MixedBatchScheduler"
+    scheduler_config.scheduler_cls = f"vllm_ascend.core.mixed_batch_scheduler.{name}"
 
 
 def _swa_bounded_replay_unsupported_mode(ascend_config) -> str | None:
