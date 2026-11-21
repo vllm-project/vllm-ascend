@@ -1,0 +1,9 @@
+pr: 22747
+entries:
+  - category: feature
+    text: >-
+      External DP deployments can now combine `--pcp-size` and `--pp-size`,
+      with device allocation accounting for TP, PCP, and PP.
+      Custom templates must read PCP from argument 8 and PP from argument 9;
+      move PP from argument 8 if adapting an older model-specific template.
+      Use `--dry-run` to inspect device allocations and startup commands.
