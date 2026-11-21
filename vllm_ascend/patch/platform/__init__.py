@@ -30,6 +30,7 @@ if get_current_hardware_profile().supports(HardwareCapability.STANDARD_MAMBA_PAT
 else:
     import vllm_ascend.patch.platform.patch_mamba_config_310  # noqa
 import vllm_ascend.patch.platform.patch_structured_output  # noqa
+import vllm_ascend.patch.platform.patch_kimi_structured_boundary  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
 
