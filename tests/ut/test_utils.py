@@ -28,6 +28,7 @@ from tests.ut.base import TestBase
 from vllm_ascend import ascend_forward_context, utils
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.mrv2_utils import MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY
 from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
 
 
@@ -291,35 +292,33 @@ class TestUtils(TestBase):
         )
         self.assertFalse(utils.enable_sp(no_sequence_parallel_config))
 
-    def test_mrv2_padding_plan_identity(self):
-        plan = utils.MRV2PaddingPlan()
-
-        self.assertEqual(plan.align_tokens(5), 5)
-        self.assertEqual(plan.align_requests(3, query_len=2), 3)
-        self.assertEqual(plan.align_batch_tokens(5, num_reqs=2, uniform_query_len=None), 5)
-        self.assertFalse(plan.requires_uniform_token_rows)
-
-    def test_mrv2_padding_plan_composes_tp_token_alignment(self):
-        for sequence_parallel, enable_hc_sp, shared_expert_dp in (
-            (True, False, False),
-            (False, True, False),
-            (False, False, True),
-        ):
-            with self.subTest(
-                sequence_parallel=sequence_parallel,
-                enable_hc_sp=enable_hc_sp,
-                shared_expert_dp=shared_expert_dp,
-            ):
-                config = self.mrv2_parallel_config(4, hc_sp=enable_hc_sp)
-
-                plan = utils.get_mrv2_padding_plan(
-                    config,
-                    enable_shared_expert_dp=shared_expert_dp,
-                    sequence_parallel=sequence_parallel,
+    def test_mrv2_padding_plan_feature_constraints(self):
+        cases = (
+            (1, 1, False, 1, False, False, None, (1, False)),
+            (4, 1, False, 1, True, False, None, (4, False)),
+            (4, 1, True, 1, False, False, None, (4, False)),
+            (4, 1, False, 1, False, True, None, (4, False)),
+            (8, 1, False, 2, False, False, None, (1, False)),
+            (8, 2, False, 1, False, False, (2, 1), (1, True)),
+        )
+        for tp, dp, hc, pcp, sp, shared_dp, finegrained, expected in cases:
+            with self.subTest(tp=tp, dp=dp, hc=hc, pcp=pcp, sp=sp, shared_dp=shared_dp):
+                finegrained_config = (
+                    SimpleNamespace(oproj_tensor_parallel_size=finegrained[0], mlp_tensor_parallel_size=finegrained[1])
+                    if finegrained
+                    else None
                 )
-
-                self.assertEqual(plan.token_alignment, 4)
-                self.assertEqual(plan.align_tokens(5), 8)
+                plan = utils.get_mrv2_padding_plan(
+                    self.mrv2_parallel_config(tp, dp_size=dp, hc_sp=hc, pcp_size=pcp),
+                    enable_shared_expert_dp=shared_dp,
+                    sequence_parallel=sp,
+                    finegrained_tp_config=finegrained_config,
+                )
+                self.assertEqual((plan.token_alignment, plan.requires_uniform_token_rows), expected)
+                self.assertEqual(plan.align_tokens(5), 8 if expected[0] == 4 else 5)
+                if expected[0] == 1:
+                    self.assertEqual(plan.align_requests(3, query_len=2), 3)
+                    self.assertEqual(plan.align_batch_tokens(5, num_reqs=2, uniform_query_len=None), 5)
 
     def test_mrv2_padding_plan_aligns_uniform_requests(self):
         plan = utils.MRV2PaddingPlan(token_alignment=8)
@@ -349,34 +348,6 @@ class TestUtils(TestBase):
             {4: 6, 6: 0},
         )
 
-    def test_mrv2_padding_plan_keeps_pcp_separate_from_tp_alignment(self):
-        config = self.mrv2_parallel_config(8, pcp_size=2)
-
-        plan = utils.get_mrv2_padding_plan(
-            config,
-            enable_shared_expert_dp=False,
-            sequence_parallel=False,
-        )
-
-        self.assertEqual(plan.token_alignment, 1)
-
-    def test_mrv2_padding_plan_finegrained_tp_only_requires_uniform_rows(self):
-        config = self.mrv2_parallel_config(8, dp_size=2)
-        finegrained_tp_config = SimpleNamespace(
-            oproj_tensor_parallel_size=2,
-            mlp_tensor_parallel_size=1,
-        )
-
-        plan = utils.get_mrv2_padding_plan(
-            config,
-            enable_shared_expert_dp=False,
-            sequence_parallel=False,
-            finegrained_tp_config=finegrained_tp_config,
-        )
-
-        self.assertEqual(plan.token_alignment, 1)
-        self.assertTrue(plan.requires_uniform_token_rows)
-
     def test_mrv2_decode_query_lens_uses_main_resolver(self):
         resolver = mock.Mock(return_value={3: 8, 5: 16})
         config = SimpleNamespace(
@@ -388,59 +359,30 @@ class TestUtils(TestBase):
         self.assertEqual(utils.get_mrv2_decode_query_limits(config), {3: 8, 5: 16})
         self.assertEqual(resolver.call_args_list, [mock.call(4)])
 
-    def test_mrv2_physical_capacity_does_not_mutate_scheduler_limits(self):
-        config = self.mrv2_capacity_config(
-            max_tokens=5,
-            max_reqs=3,
-            query_limits={2: 3},
-            capture_sizes=[8],
-            prefill_sizes=[8],
-            decode_sizes=[4],
+    def test_mrv2_physical_capacity_cases(self):
+        cases = (
+            (5, 3, {2: 3}, 4, ([8], [8], [4]), None, (8, 4)),
+            (10, 1, {6: 1}, 8, ((), (), ()), None, (24, 4)),
+            (64, 1, {4: 1, 6: 1}, 12, ((), (), ()), None, (72, 6)),
+            (5, 1, {1: 1}, 4, ((), (), ()), {MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY: {1: [8, 12]}}, (12, 4)),
         )
-        scheduler_config = config.scheduler_config
-
-        capacity = utils.get_mrv2_physical_batch_capacity(
-            config,
-            utils.MRV2PaddingPlan(token_alignment=4),
-        )
-
-        self.assertEqual(capacity, (8, 4))
-        self.assertEqual(scheduler_config.max_num_batched_tokens, 5)
-        self.assertEqual(scheduler_config.max_num_seqs, 3)
-
-        scheduler_config.max_num_batched_tokens = 10
-        scheduler_config.max_num_seqs = 1
-        config.compilation_config.cudagraph_capture_sizes = []
-        config.compilation_config.prefill_cudagraph_capture_token_sizes = []
-        config.compilation_config.decode_cudagraph_capture_request_sizes = []
-        config.uniform_decode_query_len = 6
-        config.get_decode_cudagraph_query_lens = lambda _query_len: {6: 1}
-
-        capacity = utils.get_mrv2_physical_batch_capacity(
-            config,
-            utils.MRV2PaddingPlan(token_alignment=8),
-        )
-
-        self.assertEqual(capacity, (24, 4))
-        self.assertEqual(scheduler_config.max_num_batched_tokens, 10)
-        self.assertEqual(scheduler_config.max_num_seqs, 1)
-
-    def test_mrv2_physical_capacity_uses_common_query_grid(self):
-        config = self.mrv2_capacity_config(
-            max_tokens=64,
-            max_reqs=1,
-            query_limits={4: 1, 6: 1},
-        )
-
-        capacity = utils.get_mrv2_physical_batch_capacity(
-            config,
-            utils.MRV2PaddingPlan(token_alignment=12),
-        )
-
-        # The split graph API shares one request grid across both query
-        # lengths, so capacity follows their common request alignment (6), not
-        # the larger individual alignment (3).
-        self.assertEqual(capacity, (72, 6))
+        for max_tokens, max_reqs, query_limits, alignment, graph_sizes, additional_config, expected in cases:
+            with self.subTest(max_tokens=max_tokens, max_reqs=max_reqs, query_limits=query_limits):
+                config = self.mrv2_capacity_config(
+                    max_tokens=max_tokens,
+                    max_reqs=max_reqs,
+                    query_limits=query_limits,
+                    capture_sizes=graph_sizes[0],
+                    prefill_sizes=graph_sizes[1],
+                    decode_sizes=graph_sizes[2],
+                    additional_config=additional_config,
+                )
+                self.assertEqual(
+                    utils.get_mrv2_physical_batch_capacity(config, utils.MRV2PaddingPlan(token_alignment=alignment)),
+                    expected,
+                )
+                self.assertEqual(config.scheduler_config.max_num_batched_tokens, max_tokens)
+                self.assertEqual(config.scheduler_config.max_num_seqs, max_reqs)
 
     def test_ensure_mrv2_physical_capacity_preserves_logical_budget(self):
         config = self.mrv2_capacity_config(
@@ -470,23 +412,6 @@ class TestUtils(TestBase):
             ),
             (8, 4),
         )
-
-    def test_mrv2_physical_capacity_includes_adaptive_varlen_gears(self):
-        from vllm_ascend.mrv2_utils import MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY
-
-        config = self.mrv2_capacity_config(
-            max_tokens=5,
-            max_reqs=1,
-            query_limits={1: 1},
-            additional_config={MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY: {1: [8, 12]}},
-        )
-
-        capacity = utils.get_mrv2_physical_batch_capacity(
-            config,
-            utils.MRV2PaddingPlan(token_alignment=4),
-        )
-
-        self.assertEqual(capacity, (12, 4))
 
     def test_enable_pcp_o_proj_weight_sharding_reads_validated_ascend_config(self):
         ascend_config = SimpleNamespace(enable_pcp_o_proj_weight_sharding=True)

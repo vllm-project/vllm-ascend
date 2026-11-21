@@ -1,5 +1,6 @@
 import importlib
 import math
+from contextlib import contextmanager
 from functools import partial
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -588,6 +589,26 @@ class TestNPUPlatform(TestBase):
             return manager_cls(config, torch.device("cpu"), CUDAGraphMode.FULL_DECODE_ONLY, **kwargs)
 
     @staticmethod
+    def run_compile_backend(config, *, sequence_parallel=True, shared_expert_dp=False, initialize=True):
+        if initialize:
+            config._set_cudagraph_sizes()
+        with patch("vllm_ascend.platform.enable_sp", return_value=sequence_parallel):
+            _setup_compile_backend(
+                config,
+                compile_backend="test_backend",
+                enable_shared_expert_dp=shared_expert_dp,
+            )
+
+    @staticmethod
+    @contextmanager
+    def patched_graph_resolvers(config, **resolvers):
+        with patch.multiple(VllmConfig, **resolvers):
+            apply_v2_model_runner_config_patch()
+            for name in resolvers:
+                setattr(config, name, MethodType(getattr(VllmConfig, name), config))
+            yield
+
+    @staticmethod
     def mock_vllm_ascend_config():
         mock_ascend_config = MagicMock()
         mock_ascend_config.xlite_graph_config.enabled = False
@@ -1147,9 +1168,7 @@ class TestNPUPlatform(TestBase):
                         max_num_tokens=1024,
                     )
                     self.platform.apply_config_platform_defaults(config)
-                    config._set_cudagraph_sizes()
-                    with patch("vllm_ascend.platform.enable_sp", return_value=False):
-                        _setup_compile_backend(config, compile_backend="test_backend")
+                    self.run_compile_backend(config, sequence_parallel=False)
                     self.assertIn(max_num_seqs, config.compilation_config.cudagraph_capture_sizes)
                     self.assertEqual(config.compilation_config.max_cudagraph_capture_size, max_num_seqs)
                     config._set_cudagraph_sizes()
@@ -1171,10 +1190,12 @@ class TestNPUPlatform(TestBase):
                         )
                         config._set_cudagraph_sizes()
                         decode_sizes = list(config.compilation_config.decode_cudagraph_capture_request_sizes)
-                        with patch("vllm_ascend.platform.enable_sp", return_value=sequence_parallel):
-                            _setup_compile_backend(
-                                config, compile_backend="test_backend", enable_shared_expert_dp=not sequence_parallel
-                            )
+                        self.run_compile_backend(
+                            config,
+                            sequence_parallel=sequence_parallel,
+                            shared_expert_dp=not sequence_parallel,
+                            initialize=False,
+                        )
                         # Engine handshakes re-enter the native config resolver.
                         config._set_cudagraph_sizes()
                         config._set_cudagraph_sizes()
@@ -1227,16 +1248,11 @@ class TestNPUPlatform(TestBase):
         # Install the production wrapper over a deterministic stand-in for
         # main's dynamic schedule resolver. Binding the wrapped class method to
         # this config ensures the test fails if the patch is not wired.
-        with patch.object(VllmConfig, "get_decode_cudagraph_query_lens", dynamic_query_limits):
-            apply_v2_model_runner_config_patch()
-            config.get_decode_cudagraph_query_lens = MethodType(
-                VllmConfig.get_decode_cudagraph_query_lens,
-                config,
-            )
-            config._set_cudagraph_sizes()
-
-            with patch("vllm_ascend.platform.enable_sp", return_value=True):
-                _setup_compile_backend(config, compile_backend="test_backend")
+        with self.patched_graph_resolvers(
+            config,
+            get_decode_cudagraph_query_lens=dynamic_query_limits,
+        ):
+            self.run_compile_backend(config)
 
             assert config.additional_config[MRV2_DECODE_QUERY_LIMITS_KEY] == {6: 4}
             assert config.scheduler_config.max_num_seqs == 4
@@ -1268,10 +1284,7 @@ class TestNPUPlatform(TestBase):
             capture_sizes=[6],
             query_limits={4: 1, 6: 1},
         )
-        config._set_cudagraph_sizes()
-
-        with patch("vllm_ascend.platform.enable_sp", return_value=True):
-            _setup_compile_backend(config, compile_backend="test_backend")
+        self.run_compile_backend(config)
 
         assert config.additional_config[MRV2_DECODE_QUERY_LIMITS_KEY] == {4: 6, 6: 6}
         assert config.scheduler_config.max_num_seqs == 6
@@ -1287,10 +1300,7 @@ class TestNPUPlatform(TestBase):
             capture_sizes=[6],
             max_decode_tokens=20,
         )
-        config._set_cudagraph_sizes()
-
-        with patch("vllm_ascend.platform.enable_sp", return_value=True):
-            _setup_compile_backend(config, compile_backend="test_backend")
+        self.run_compile_backend(config)
 
         assert config.additional_config[MRV2_DECODE_QUERY_LIMITS_KEY] == {6: 0}
         assert config.compilation_config.decode_cudagraph_capture_request_sizes == []
@@ -1316,31 +1326,12 @@ class TestNPUPlatform(TestBase):
             "_vllm_ascend_upstream",
             VllmConfig.get_varlen_decode_cudagraph_token_sizes,
         )
-        with (
-            patch.object(
-                VllmConfig,
-                "get_decode_cudagraph_query_lens",
-                lambda _self, _q: {6: 1},
-            ),
-            patch.object(
-                VllmConfig,
-                "get_varlen_decode_cudagraph_token_sizes",
-                upstream_varlen_resolver,
-            ),
+        with self.patched_graph_resolvers(
+            config,
+            get_decode_cudagraph_query_lens=lambda _self, _q: {6: 1},
+            get_varlen_decode_cudagraph_token_sizes=upstream_varlen_resolver,
         ):
-            apply_v2_model_runner_config_patch()
-            config.get_decode_cudagraph_query_lens = MethodType(
-                VllmConfig.get_decode_cudagraph_query_lens,
-                config,
-            )
-            config.get_varlen_decode_cudagraph_token_sizes = MethodType(
-                VllmConfig.get_varlen_decode_cudagraph_token_sizes,
-                config,
-            )
-            config._set_cudagraph_sizes()
-
-            with patch("vllm_ascend.platform.enable_sp", return_value=True):
-                _setup_compile_backend(config, compile_backend="test_backend")
+            self.run_compile_backend(config)
 
             aligned_sizes = config.additional_config[MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY][6]
             assert aligned_sizes
@@ -1384,36 +1375,17 @@ class TestNPUPlatform(TestBase):
             VllmConfig.get_varlen_decode_cudagraph_token_sizes,
         )
         with (
-            patch.object(
-                VllmConfig,
-                "get_decode_cudagraph_query_lens",
-                lambda _self, _q: {6: 1},
+            self.patched_graph_resolvers(
+                config,
+                get_decode_cudagraph_query_lens=lambda _self, _q: {6: 1},
+                get_varlen_decode_cudagraph_token_sizes=upstream_varlen_resolver,
             ),
-            patch.object(
-                VllmConfig,
-                "get_varlen_decode_cudagraph_token_sizes",
-                upstream_varlen_resolver,
+            pytest.raises(
+                ValueError,
+                match="Adaptive-verification CUDA graph token sizes",
             ),
         ):
-            apply_v2_model_runner_config_patch()
-            config.get_decode_cudagraph_query_lens = MethodType(
-                VllmConfig.get_decode_cudagraph_query_lens,
-                config,
-            )
-            config.get_varlen_decode_cudagraph_token_sizes = MethodType(
-                VllmConfig.get_varlen_decode_cudagraph_token_sizes,
-                config,
-            )
-            config._set_cudagraph_sizes()
-
-            with (
-                patch("vllm_ascend.platform.enable_sp", return_value=True),
-                pytest.raises(
-                    ValueError,
-                    match="Adaptive-verification CUDA graph token sizes",
-                ),
-            ):
-                _setup_compile_backend(config, compile_backend="test_backend")
+            self.run_compile_backend(config)
 
     def test_setup_compile_backend_aligns_single_module_mtp_draft_grid(self):
         from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
@@ -1430,20 +1402,11 @@ class TestNPUPlatform(TestBase):
 
         # Model c410's single-module MTP path: the draft model has a separate
         # one-token graph grid even though the target verifies four tokens.
-        with patch.object(
-            VllmConfig,
-            "get_draft_decode_cudagraph_request_sizes",
-            lambda _self: [1],
+        with self.patched_graph_resolvers(
+            config,
+            get_draft_decode_cudagraph_request_sizes=lambda _self: [1],
         ):
-            apply_v2_model_runner_config_patch()
-            config.get_draft_decode_cudagraph_request_sizes = MethodType(
-                VllmConfig.get_draft_decode_cudagraph_request_sizes,
-                config,
-            )
-            config._set_cudagraph_sizes()
-
-            with patch("vllm_ascend.platform.enable_sp", return_value=True):
-                _setup_compile_backend(config, compile_backend="test_backend")
+            self.run_compile_backend(config)
 
             assert config.additional_config[MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY] == [4]
             assert config.get_draft_decode_cudagraph_request_sizes() == [4]

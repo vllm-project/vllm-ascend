@@ -1,6 +1,4 @@
-from contextlib import AbstractContextManager, nullcontext
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -83,45 +81,30 @@ def _make_graph_manager(buffers, mode, uniform, capture_size):
     return manager
 
 
-def test_gather_batch_req_state_aligns_eager_token_rows(runner):
+@pytest.mark.parametrize(
+    "scheduled,uniform,expected_tokens",
+    [({"req0": 3, "req1": 2}, None, 8), ({"req0": 2, "req1": 2, "req2": 2}, 2, 8)],
+)
+def test_gather_batch_req_state_aligns_physical_rows(runner, scheduled, uniform, expected_tokens):
     runner.input_padding_plan = MRV2PaddingPlan(token_alignment=8)
     scheduler_output = SimpleNamespace(
-        num_scheduled_tokens={"req0": 3, "req1": 2},
-        total_num_scheduled_tokens=5,
+        num_scheduled_tokens=scheduled,
+        total_num_scheduled_tokens=sum(scheduled.values()),
     )
-    logical_state = SimpleNamespace(num_tokens=5)
+    logical_state = SimpleNamespace(num_tokens=scheduler_output.total_num_scheduled_tokens)
 
     with (
-        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(logical_state, None)),
+        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(logical_state, uniform)),
         patch("vllm_ascend.worker.v2.model_runner.expert_offload.prepare_batch"),
     ):
         physical_state, uniform_token_count = runner.gather_batch_req_state(scheduler_output, dummy_run=False)
 
-    assert uniform_token_count is None
+    assert uniform_token_count == uniform
     assert physical_state.base is logical_state
-    assert physical_state.logical_num_tokens == 5
-    assert physical_state.num_tokens == 8
-
-
-def test_gather_batch_req_state_aligns_uniform_requests(runner):
-    runner.input_padding_plan = MRV2PaddingPlan(token_alignment=8)
-    scheduler_output = SimpleNamespace(
-        num_scheduled_tokens={"req0": 2, "req1": 2, "req2": 2},
-        total_num_scheduled_tokens=6,
-    )
-    logical_state = SimpleNamespace(num_tokens=6)
-
-    with (
-        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(logical_state, 2)),
-        patch("vllm_ascend.worker.v2.model_runner.expert_offload.prepare_batch"),
-    ):
-        physical_state, uniform_token_count = runner.gather_batch_req_state(scheduler_output, dummy_run=False)
-
-    assert uniform_token_count == 2
-    assert len(scheduler_output.num_scheduled_tokens) == 3
-    assert physical_state.logical_num_tokens == 6
-    assert physical_state.num_tokens == 8
-    assert physical_state.num_tokens // uniform_token_count == 4
+    assert physical_state.logical_num_tokens == scheduler_output.total_num_scheduled_tokens
+    assert physical_state.num_tokens == expected_tokens
+    if uniform:
+        assert physical_state.num_tokens // uniform == 4
 
 
 def test_prepare_padding_mask_marks_only_physical_tail(buffers, runner):
@@ -221,18 +204,15 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         assert reused_sync is sync
         return None, None
 
-    extra_collective_patch: AbstractContextManager[Any]
     # vLLM main collects through ``get_dp_group().cpu_all_reduce_(votes)``.
     collective = Mock(side_effect=lambda votes: other_rank_votes(votes, None))
     dp_group = SimpleNamespace(cpu_all_reduce_=collective)
-    extra_collective_patch = nullcontext()
 
     with (
         patch.object(GPUModelRunner, "_dummy_run", side_effect=execute_dummy),
         patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=False),
         patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
         patch("vllm.v1.worker.gpu.dp_utils.get_dp_group", return_value=dp_group),
-        extra_collective_patch,
     ):
         runner._dummy_run(uniform, uniform_decode=True)
     assert collective.call_count == 1
@@ -275,8 +255,8 @@ def test_dummy_scope_restores_state_on_exception(buffers, runner, kwargs, mode, 
     assert buffers.dummy_num_reqs == 5
 
 
-@pytest.mark.parametrize("inner_mode,expected", [(CUDAGraphMode.PIECEWISE, 6), (CUDAGraphMode.NONE, 6)])
-def test_nested_dummy_runs_restore_outer_query_tokens(buffers, runner, inner_mode, expected):
+@pytest.mark.parametrize("inner_mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE])
+def test_nested_dummy_runs_restore_outer_query_tokens(buffers, runner, inner_mode):
     buffers.dummy_num_tokens = 7
     buffers.dummy_num_reqs = 5
 
@@ -292,8 +272,7 @@ def test_nested_dummy_runs_restore_outer_query_tokens(buffers, runner, inner_mod
             assert buffers.dummy_num_tokens == 2
             assert buffers.dummy_num_reqs == 2
             return None, None
-        assert buffers.dummy_num_tokens == expected
-        assert buffers.dummy_num_reqs == expected
+        assert buffers.dummy_num_tokens == buffers.dummy_num_reqs == 6
         raise RuntimeError("inner dummy")
 
     with patch.object(GPUModelRunner, "_dummy_run", side_effect=execute_dummy):
