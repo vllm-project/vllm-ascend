@@ -129,7 +129,6 @@ In the PD separation scenario, we provide an optimized configuration. You can us
 
     # enable the distributed DP server
     export VLLM_WORKER_MULTIPROC_METHOD="fork"
-    export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1
 
     # The w8a8 weight can be obtained from https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8
     # "--additional-config" is used to enable characteristics from vllm-ascend
@@ -193,7 +192,6 @@ In the PD separation scenario, we provide an optimized configuration. You can us
 
     # enable the distributed DP server
     export VLLM_WORKER_MULTIPROC_METHOD="fork"
-    export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1
 
     # The w8a8 weight can be obtained from https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8
     # "--additional-config" is used to enable characteristics from vllm-ascend
