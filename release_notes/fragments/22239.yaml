@@ -1,0 +1,4 @@
+pr: 22239
+entries:
+  - category: bugfix
+    text: Fixed a vLLM startup failure in x86 Ascend 310P container images that reported a missing `triton.language` attribute.
