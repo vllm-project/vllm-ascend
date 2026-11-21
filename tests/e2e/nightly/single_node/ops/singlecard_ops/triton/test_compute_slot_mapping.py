@@ -4,6 +4,7 @@
 import pytest
 import torch
 from vllm.triton_utils import triton
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -181,13 +182,15 @@ def test_ascend_block_tables_compute_slot_mappings_out() -> None:
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-def test_compute_slot_mapping_deepseek_v4_prefill() -> None:
+@pytest.mark.parametrize("disabled_group", [None, 4], ids=["all-groups", "disabled-group"])
+def test_compute_slot_mapping_deepseek_v4_prefill(disabled_group: int | None) -> None:
     """Replay the slot-mapping input shapes captured from a DeepSeek V4 Flash prefill."""
     device = torch.device("npu")
     num_tokens = 79
     block_sizes = [128, 4096, 32, 32, 2, 8]
     block_counts = [triton.cdiv(num_tokens, size) for size in block_sizes]
     req_row = 1
+    slot_mapping_enabled = [group != disabled_group for group in range(len(block_sizes))]
     block_tables = AscendBlockTables(
         block_sizes=block_sizes,
         max_num_reqs=4,
@@ -195,6 +198,7 @@ def test_compute_slot_mapping_deepseek_v4_prefill() -> None:
         max_num_blocks_per_group=block_counts,
         device=device,
         cp_size=1,
+        slot_mapping_enabled=slot_mapping_enabled,
     )
 
     # The shape and block sizes came from the runner. Use synthetic block
@@ -221,4 +225,8 @@ def test_compute_slot_mapping_deepseek_v4_prefill() -> None:
             for ids, size in zip(block_ids, block_sizes)
         ]
     )
+    if disabled_group is not None:
+        expected[disabled_group].fill_(PAD_SLOT_ID)
+        disabled_slots = block_tables.slot_mappings[disabled_group].cpu()
+        torch.testing.assert_close(disabled_slots, torch.full_like(disabled_slots, PAD_SLOT_ID), rtol=0, atol=0)
     torch.testing.assert_close(result.cpu(), expected.to(torch.int32), rtol=0, atol=0)

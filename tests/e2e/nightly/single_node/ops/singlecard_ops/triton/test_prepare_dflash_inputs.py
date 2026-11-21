@@ -405,7 +405,7 @@ def _build_reference(data, case):
     expected_steps = case["num_query_per_req"] - sample_off
     assert case["num_speculative_steps"] == expected_steps
 
-    num_reqs = data.input_batch.num_reqs
+    num_reqs = case.get("num_reqs_override", data.input_batch.num_reqs)
     max_num_reqs = case["max_num_reqs"]
     max_num_tokens = case["max_num_tokens"]
     num_query_per_req = case["num_query_per_req"]
@@ -419,6 +419,7 @@ def _build_reference(data, case):
 
     positions = data.input_batch.positions.cpu().tolist()
     query_start_loc = data.input_batch.query_start_loc.cpu().tolist()
+    total_context = query_start_loc[num_reqs]
     idx_mapping = data.input_batch.idx_mapping.cpu().tolist()
     num_sampled = data.num_sampled.cpu().tolist()
     num_rejected = data.num_rejected.cpu().tolist()
@@ -434,8 +435,8 @@ def _build_reference(data, case):
         query_start_loc=[None] * (max_num_reqs + 1),
         seq_lens=[None] * max_num_reqs,
         query_slot_mapping=[None] * max_num_tokens,
-        context_positions=[None] * len(positions),
-        context_slot_mapping=[None] * len(positions),
+        context_positions=[None] * total_context,
+        context_slot_mapping=[None] * total_context,
         sample_indices=[None] * (max_num_reqs * num_speculative_steps),
         sample_pos=[None] * (max_num_reqs * num_speculative_steps),
         sample_idx_mapping=[None] * (max_num_reqs * num_speculative_steps),
@@ -516,7 +517,7 @@ def _assert_exact(actual, expected):
 
 def _validate_outputs(data, case, ref):
     outputs = data.outputs
-    num_reqs = data.input_batch.num_reqs
+    num_reqs = case.get("num_reqs_override", data.input_batch.num_reqs)
     total_context = int(data.input_batch.query_start_loc[num_reqs].item())
     total_query = num_reqs * case["num_query_per_req"]
 
@@ -669,3 +670,33 @@ def test_worker_entry_point_uses_ascend_launcher(monkeypatch):
     launcher.assert_called_once()
     _validate_outputs(data, case, _build_reference(data, case))
     _cleanup()
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+def test_prepare_dflash_inputs_num_reqs_override() -> None:
+    case = next(case for case in ACCURACY_CASES if case["name"] == "one_valid_context_after_another_request").copy()
+    case["num_reqs_override"] = 1
+    data = _build_inputs(case, "npu")
+    outputs = data.outputs
+    context_end = case["req_lens"][0]
+    query_end = case["num_query_per_req"]
+    skipped_state = case["idx_mapping"][1]
+    untouched = (
+        outputs.context_positions[context_end:],
+        outputs.context_slot_mapping[context_end:],
+        outputs.input_buffers.input_ids[query_end:],
+        outputs.input_buffers.positions[query_end:],
+        outputs.temperature[skipped_state],
+        outputs.seeds[skipped_state],
+    )
+    initial_values = tuple(tensor.clone() for tensor in untouched)
+    outputs.input_buffers.is_padding.fill_(False)
+
+    prepare_dflash_inputs_triton(*_impl_args(data, case), num_reqs_override=case["num_reqs_override"])
+
+    _validate_outputs(data, case, _build_reference(data, case))
+    for actual, initial in zip(untouched, initial_values):
+        torch.testing.assert_close(actual, initial, rtol=0, atol=0, equal_nan=True)
