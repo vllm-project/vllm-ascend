@@ -246,8 +246,13 @@ def _gemma4_selector(**overrides):
     )
 
 
-def _speculative_config():
-    return SimpleNamespace(speculative_config=SimpleNamespace(num_speculative_tokens=3))
+def _speculative_config(dynamic: bool = False):
+    return SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=3,
+            uses_dynamic_speculative_decoding=lambda: dynamic,
+        )
+    )
 
 
 @pytest.fixture
@@ -273,6 +278,19 @@ def test_want_b1_paged_verify_requires_explicit_opt_in(monkeypatch):
 
     monkeypatch.delenv("VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY", raising=False)
     with patch("vllm.config.get_current_vllm_config_or_none", return_value=_speculative_config()):
+        assert platform._want_b1_paged_verify(_gemma4_selector()) is False
+
+
+def test_want_b1_paged_verify_rejects_dynamic_speculative_decoding(b1_enabled):
+    from vllm_ascend import platform
+
+    with (
+        patch(
+            "vllm.config.get_current_vllm_config_or_none",
+            return_value=_speculative_config(dynamic=True),
+        ),
+        patch("vllm_ascend.utils.is_950", return_value=False),
+    ):
         assert platform._want_b1_paged_verify(_gemma4_selector()) is False
 
 

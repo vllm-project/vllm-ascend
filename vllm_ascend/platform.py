@@ -2009,10 +2009,12 @@ def _want_b1_paged_verify(attn_selector_config) -> bool:
 
     The shared Ascend backend runs every other GQA layer, but the
     Gemma4-style head_dim=512 MTP verify step cannot be captured by its
-    TND/PA paths. Keep this narrowly scoped: MTP, decoder self-attention,
-    head_dim=512, no sliding window, no MLA/sparse/compress/PCP/DCP/
-    KV-connector/sinks, and not A5 (where the stock PagedAttention capture
-    works). Otherwise keep the default backend.
+    TND/PA paths. Keep this narrowly scoped: static MTP, decoder
+    self-attention, head_dim=512, no sliding window, no
+    MLA/sparse/compress/PCP/DCP/KV-connector/sinks, and not A5 (where the
+    stock PagedAttention capture works). Dynamic speculative decoding is
+    excluded because it captures verify widths below k+1. Otherwise keep the
+    default backend.
     """
     from vllm.config import get_current_vllm_config_or_none
     from vllm.v1.attention.backend import AttentionType
@@ -2026,7 +2028,19 @@ def _want_b1_paged_verify(attn_selector_config) -> bool:
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None:
         return False
-    if vllm_config.speculative_config is None:
+    spec_cfg = vllm_config.speculative_config
+    if spec_cfg is None:
+        return False
+    # Dynamic speculative decoding captures uniform verify widths below the
+    # configured maximum (including one query when the schedule picks K=0).
+    # The B1 capture contract only serves the full k+1 width, so keep dynamic
+    # SD on the default backend until those narrower graphs are supported.
+    if getattr(spec_cfg, "uses_dynamic_speculative_decoding", lambda: False)():
+        logger.warning_once(
+            "VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY is ignored with dynamic speculative decoding "
+            "(num_speculative_tokens_per_batch_size): B1 capture only supports the uniform "
+            "k+1 verify width, so the default attention backend is used."
+        )
         return False
     if attn_selector_config.head_size != FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
         return False
