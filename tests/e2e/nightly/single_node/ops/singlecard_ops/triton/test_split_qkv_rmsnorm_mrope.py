@@ -364,7 +364,7 @@ MAX_POSITION_ID = 4096
 
 @pytest.mark.parametrize("scaling_factor", [None, 2.0], ids=["default", "yarn"])
 def test_inline_cos_sin_model_inputs(scaling_factor: float | None):
-    with torch.device("cpu"):
+    with set_current_vllm_config(VllmConfig()), torch.device("cpu"):
         rotary_emb = AscendMRotaryEmbedding(
             head_size=128,
             rotary_dim=64,
