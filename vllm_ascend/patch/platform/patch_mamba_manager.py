@@ -40,7 +40,11 @@ class AscendMambaManager(MambaManager):
         if retention_interval is None or alignment_tokens is None:
             return None
         assert isinstance(kv_cache_spec, MambaSpec)
-        block_size = kv_cache_spec.block_size
+        # The mask indexes group-effective blocks, which align mode pads to the
+        # lcm boundary. The raw spec block size (e.g. 128) can be finer than the
+        # mask granularity (e.g. 1,152); using it makes every boundary land out
+        # of range and silently drops the final reachable block.
+        block_size = alignment_tokens if alignment_tokens > kv_cache_spec.block_size else kv_cache_spec.block_size
         mask = [False] * (end_block - start_block)
 
         segment_tokens = None if retention_interval == 0 else retention_interval
