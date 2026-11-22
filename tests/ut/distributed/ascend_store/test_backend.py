@@ -1637,6 +1637,15 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
         self.assertEqual(b.batch_is_readable(["k1", "k2", "k3"]), [True, False, False])
 
+    def test_batch_is_readable_finds_resident_replica_after_ssd(self):
+        b = self._make_backend()
+        resident = SimpleNamespace(size=lambda: 64, type_list=lambda: [2, 1], gva_list=lambda: [0, 4096])
+        ssd_only = SimpleNamespace(size=lambda: 64, type_list=lambda: [2], gva_list=lambda: [0])
+        b.store.batch_get_key_info.return_value = [resident, ssd_only]
+
+        self.assertEqual(b.batch_is_readable(["resident", "ssd-only"]), [True, False])
+        b.store.batch_get_into.assert_not_called()
+
     def test_batch_is_readable_treats_absent_key_as_miss(self):
         b = self._make_backend()
         readable = SimpleNamespace(size=lambda: 64, gva_list=lambda: [0x1000])

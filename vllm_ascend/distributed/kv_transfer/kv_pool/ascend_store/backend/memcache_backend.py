@@ -380,7 +380,8 @@ class MemcacheBackend(Backend):
             try:
                 size = int(key_info.size())
                 gvas = key_info.gva_list()
-                readable.append(size > 0 and bool(gvas) and int(gvas[0]) > 0)
+                # An SSD descriptor can precede a readable memory replica.
+                readable.append(size > 0 and bool(gvas) and any(int(gva) > 0 for gva in gvas))
             except (AttributeError, IndexError, TypeError, ValueError) as exc:
                 raise BatchResultShapeError("batch_get_key_info returned invalid key metadata") from exc
         return readable
