@@ -17,7 +17,6 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheSpec,
-    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -247,13 +246,14 @@ class AscendStoreCoordinator:
                 continue
             unwrapped_spec = _unwrap_spec(self.kv_cache_groups[group_id].kv_cache_spec)
             manager_cls = _get_manager_class(unwrapped_spec)
-            if isinstance(unwrapped_spec, MambaSpec):
-                # The spec registry binds the upstream class at import time, so
-                # the module-level MambaManager patch never reaches this lookup.
-                # Use the patched manager so align-mode boundaries stay inside
-                # the group-effective mask.
-                from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+            # The spec registry binds the upstream class at import time, so the
+            # module-level MambaManager patch never reaches this lookup. Resolve
+            # by class rather than by spec: hybrid groups wrap their specs in
+            # UniformTypeKVCacheSpecs and would otherwise keep the upstream -1
+            # boundary, which lands outside the group-effective mask.
+            from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
+            if manager_cls.__name__ == "MambaManager" and not issubclass(manager_cls, AscendMambaManager):
                 manager_cls = AscendMambaManager
             mask = _reachable_block_mask(
                 manager_cls,
