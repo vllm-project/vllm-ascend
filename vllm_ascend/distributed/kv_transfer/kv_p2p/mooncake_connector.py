@@ -70,6 +70,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_transfer_timeout_value,
     inject_qos,
     tensor_storage_key,
+    truncate_block_hashes_fallback,
     validate_register_region_count,
 )
 from vllm_ascend.distributed.utils import (
@@ -1932,9 +1933,14 @@ class MooncakeConnectorScheduler:
             request._all_token_ids.pop()
             request.num_prompt_tokens -= 1
             request.max_tokens = 1
-            # Request already hashed the full prompt. Rebuild for the shortened one.
-            request.block_hashes.clear()
-            request.update_block_hashes()
+            hash_block_size = self.kv_cache_config.hash_block_size
+            assert hash_block_size is not None
+            lookahead = self.vllm_config.num_hash_lookahead_tokens
+            truncate_hashes = getattr(request, "truncate_block_hashes", None)
+            if callable(truncate_hashes):
+                truncate_hashes(hash_block_size, lookahead)
+            else:
+                truncate_block_hashes_fallback(request, hash_block_size, lookahead)
             params["_p_side_truncated"] = True
 
     def on_new_request(self, request: "Request") -> None:

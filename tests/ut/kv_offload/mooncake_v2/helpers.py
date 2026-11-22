@@ -223,16 +223,10 @@ def make_request(**overrides: Any) -> SimpleNamespace:
         "_all_token_ids": list(range(32)),
         "max_tokens": 16,
         "block_hashes": [],
+        "truncate_block_hashes": MagicMock(),
     }
     values.update(overrides)
-    request = SimpleNamespace(**values)
-    if "update_block_hashes" not in overrides:
-
-        def update_block_hashes() -> None:
-            request.block_hashes.append(tuple(request._all_token_ids))
-
-        request.update_block_hashes = update_block_hashes
-    return request
+    return SimpleNamespace(**values)
 
 
 def make_blocks(
