@@ -906,7 +906,25 @@ class AscendSFAImpl(MLAAttentionImpl):
         # applies only to layers that own an indexer cache.
         self._update_indexer_cache_enabled()
         self.store_kv_cache_on_host = ascend_config.sparse_kv_offload_config.enabled
-        self._init_kv_cache_format()
+        # The draft cache dtype can differ from the target config.
+        self.kv_cache_dtype = self.vllm_config.cache_config.cache_dtype
+        self.enable_sparse_sfa_turboquant = self.kv_cache_dtype == TURBOQUANT_CACHE_DTYPE
+        self.enable_sparse_sfa_c8 = self.kv_cache_dtype in ("int8", "fp8")
+        if self.enable_sparse_sfa_c8:
+            self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
+                self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
+            )
+
+        if self.enable_sparse_sfa_turboquant:
+            self.sfa_qsfa_packed_kv_head_dim = get_tq_fused_slot_bytes(self.kv_lora_rank, self.qk_rope_head_dim)
+        elif self.enable_sparse_sfa_c8:
+            self.sfa_qsfa_packed_kv_head_dim = get_sfa_qsfa_packed_head_dim(
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+                self.sfa_qsfa_tile_size,
+            )
+        # Shared signed-Hadamard transform plus the ops-nn quantizer.
+        self.turboquant = TurboQuantLatent() if self.enable_sparse_sfa_turboquant else None
         self.preprocess_type = PreprocessType.NATIVE
 
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
@@ -939,29 +957,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                     exc,
                 )
                 self.enable_pcp_o_proj_weight_sharding = False
-
-    def _init_kv_cache_format(self) -> None:
-        # Draft models can have a separate cache config (e.g. auto/BF16 under
-        # an INT8 target). Writers, readers and owner specs must all select
-        # their format from this layer's config, not the target's global flags.
-        self.kv_cache_dtype = self.vllm_config.cache_config.cache_dtype
-        self.enable_sparse_sfa_turboquant = self.kv_cache_dtype == TURBOQUANT_CACHE_DTYPE
-        self.enable_sparse_sfa_c8 = self.kv_cache_dtype in ("int8", "fp8")
-        if self.enable_sparse_sfa_c8:
-            self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
-                self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
-            )
-
-        if self.enable_sparse_sfa_turboquant:
-            self.sfa_qsfa_packed_kv_head_dim = get_tq_fused_slot_bytes(self.kv_lora_rank, self.qk_rope_head_dim)
-        elif self.enable_sparse_sfa_c8:
-            self.sfa_qsfa_packed_kv_head_dim = get_sfa_qsfa_packed_head_dim(
-                self.kv_lora_rank,
-                self.qk_rope_head_dim,
-                self.sfa_qsfa_tile_size,
-            )
-        # Shared signed-Hadamard transform plus the ops-nn quantizer.
-        self.turboquant = TurboQuantLatent() if self.enable_sparse_sfa_turboquant else None
 
     @property
     def uses_packed_sfa_main_cache(self) -> bool:

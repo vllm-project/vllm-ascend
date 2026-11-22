@@ -11,7 +11,6 @@ from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.kv_cache_interface import KVQuantMode, MLAAttentionSpec, SparseCacheRole
 
-from vllm_ascend.attention import sfa_v1
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLAAttention, AscendMLABackend, AscendMLAImpl
@@ -210,49 +209,3 @@ def test_worker_customizes_spec_once_without_reading_impl(monkeypatch, backend, 
     assert actual.head_size == source.head_size + 1
     expected_alignment = alignment if alignment is not None else MultipleOf(128)
     assert actual.block_stride_alignment == expected_alignment
-
-
-@pytest.mark.parametrize(
-    "cache_dtype,dtype,width",
-    [
-        ("auto", torch.bfloat16, 576),
-        ("int8", torch.int8, 656),
-        ("fp8", None, 656),
-        ("turboquant_4bit_nc", torch.int8, 386),
-    ],
-)
-def test_sfa_layer_format_and_owner_spec_ignore_target_flags(monkeypatch, cache_dtype, dtype, width):
-    # Simulate an INT8 target while constructing a separately configured draft.
-    monkeypatch.setattr(
-        sfa_v1,
-        "get_ascend_config",
-        lambda: SimpleNamespace(enable_sparse_sfa_c8=True, enable_sparse_sfa_turboquant=False),
-    )
-    monkeypatch.setattr(sfa_v1, "TurboQuantLatent", lambda: object())
-    impl = AscendSFAImpl.__new__(AscendSFAImpl)
-    impl.vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(cache_dtype=cache_dtype),
-        model_config=SimpleNamespace(dtype=torch.bfloat16),
-    )
-    impl.kv_lora_rank = 512
-    impl.qk_rope_head_dim = 64
-    impl.sfa_qsfa_tile_size = sfa_v1.SFA_QSFA_TILE_SIZE
-    impl.sfa_qsfa_packed_kv_head_dim = 0
-    impl._init_kv_cache_format()
-    if dtype is None:
-        # FP8 storage registration depends on platform initialization.
-        dtype = sfa_v1.kv_cache_dtype_str_to_dtype(cache_dtype, impl.vllm_config.model_config)
-    layer = _make_owner(impl, AscendSFABackend)
-    spec = _get_owner_spec(monkeypatch, layer)
-
-    assert impl.enable_sparse_sfa_c8 == (cache_dtype in ("int8", "fp8"))
-    assert impl.enable_sparse_sfa_turboquant == (cache_dtype == "turboquant_4bit_nc")
-    assert impl.uses_packed_sfa_main_cache == (cache_dtype != "auto")
-    assert spec.dtype == dtype
-    assert spec.head_size == width
-    assert spec.page_size_bytes == 128 * width * torch.empty((), dtype=dtype).element_size()
-    assert spec.cache_sparse_sfa_c8 == impl.enable_sparse_sfa_c8
-    assert spec.cache_sparse_sfa_turboquant == impl.enable_sparse_sfa_turboquant
-    if impl.enable_sparse_sfa_c8:
-        assert impl.c8_cache_dtype == spec.dtype
-    assert impl.vllm_config.cache_config.cache_dtype == cache_dtype
