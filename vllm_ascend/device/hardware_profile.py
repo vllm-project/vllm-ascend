@@ -179,7 +179,6 @@ class HardwareCapability(Enum):
     QWEN4EXP_HC_GATE_MIX_ROW_BLOCK = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
-    # Run BF16 DeepSeek router GEMM with FP32 output.
     # Fused RMSNorm+cast is available for the A2/A3 (CANN 9.1) path.
     RMS_NORM_CAST = auto()
     # Fused RMSNorm and dynamic per-token INT8 quantization on A3.
