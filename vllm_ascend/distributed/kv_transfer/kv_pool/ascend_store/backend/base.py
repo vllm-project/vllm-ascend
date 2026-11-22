@@ -75,6 +75,11 @@ class Backend(ABC):
     layerwise_data_plane: str | None = None
     # Whether the connector must filter existing keys before calling put().
     requires_exists_before_put: bool = True
+    # Whether an owner-sharded (VMM) KV range must be staged through a local
+    # registered buffer before the transport engine can read or write it. The
+    # default is the safe choice: backends that can address the VMM range
+    # directly (for example fabric-memory mode) override this to False.
+    requires_owner_transport_staging: bool = True
 
     @abstractmethod
     def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):

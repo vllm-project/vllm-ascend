@@ -61,7 +61,13 @@ def get_pd_dspark_aux_layer_ids(vllm_config: VllmConfig) -> tuple[int, ...]:
         return ()
     parallel = vllm_config.parallel_config
     if parallel.prefill_context_parallel_size * parallel.decode_context_parallel_size != 1:
-        raise ValueError("P-side DSpark draft KV generation does not support context parallelism.")
+        raise ValueError(
+            "P-side DSpark draft KV generation (SfaRemoteD2HConnector) does not support context "
+            "parallelism: the draft cache is rank-local and the direct transfer assumes one copy. "
+            "Use the AscendStore target-KV path with P-side draft KV disabled, or PCP=1/DCP=1. "
+            "A PCP-aware path would need a full-prompt draft context on P plus owner-aware draft "
+            "page transfer and a PD equality run."
+        )
     model_config = vllm_config.model_config
     if not model_config.enforce_eager:
         raise ValueError("P-side DSpark draft KV generation currently requires eager prefill.")
