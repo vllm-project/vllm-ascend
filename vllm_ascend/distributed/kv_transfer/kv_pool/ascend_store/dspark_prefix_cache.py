@@ -197,9 +197,10 @@ class DSparkPrefixCache:
             if info is None or info.size() != self.page_bytes:
                 raise RuntimeError("DSpark prefix KV object is missing or has a different page layout")
             addresses = info.gva_list()
-            if not addresses or addresses[0] <= 0:
+            gva = next((int(address) for address in addresses or () if address > 0), 0)
+            if not gva:
                 raise RuntimeError("DSpark prefix KV object is not readable")
-            result.append(addresses[0])
+            result.append(gva)
         return result
 
     def restore(self, request: ReqMeta, offset: int, blocks_by_group: Mapping[int, Sequence[int]]) -> int:

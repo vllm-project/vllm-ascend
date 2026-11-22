@@ -270,7 +270,7 @@ def test_incomplete_other_writer_object_is_not_overwritten_or_published():
     assert not any(call[0] in ("copy", "finish", "release") for call in backend.calls)
 
 
-@pytest.mark.parametrize("failure", ["missing", "size", "lease"])
+@pytest.mark.parametrize("failure", ["missing", "size", "lease", "ssd-only"])
 def test_failed_prefix_restore_does_not_copy_unvalidated_pages(failure):
     cache, backend, _, request = _cache_case()
     cache.save(request, 4, {0: (0,), 1: (0,)})
@@ -280,11 +280,13 @@ def test_failed_prefix_restore_does_not_copy_unvalidated_pages(failure):
         backend.readable.remove(key)
     elif failure == "size":
         backend.buffers[key] = np.zeros(cache.page_bytes + 1, dtype=np.uint8)
+    elif failure == "ssd-only":
+        backend.readable.remove(key)  # Metadata has only the zero SSD address.
     else:
         backend.lease_error = True
     backend.calls.clear()
     cache.copy_fn = Mock(return_value=0)
-    with pytest.raises(RuntimeError, match="missing|layout|lease"):
+    with pytest.raises(RuntimeError, match="missing|layout|lease|not readable"):
         cache.restore(request, 4, {0: (1,), 1: (1,)})
     cache.copy_fn.assert_not_called()
     assert not backend.leases
@@ -339,12 +341,24 @@ def test_writing_prefix_object_is_copied_from_allocation_address_before_becoming
     torch.testing.assert_close(tensors["draft.a"][0][0], expected_k)
 
 
-def test_prefix_restore_refreshes_addresses_under_lease_before_copy():
+@pytest.mark.parametrize("ssd_first", [False, True])
+def test_prefix_restore_refreshes_addresses_under_lease_before_copy(ssd_first):
     cache, backend, tensors, request = _cache_case()
     cache.save(request, 4, {0: (2,), 1: (3,)})
     expected_k = tensors["draft.a"][0][2].clone()
     previous_addresses = {key: buffer.ctypes.data for key, buffer in backend.buffers.items()}
     previous_buffers = list(backend.buffers.values())  # Keep old GVAs alive to catch stale-address use.
+
+    if ssd_first:
+        get_key_info = backend.batch_get_key_info
+
+        def get_key_info_with_ssd_first(keys, for_load=False):
+            return [
+                SimpleNamespace(size=info.size, gva_list=lambda info=info: [0, *info.gva_list()])
+                for info in get_key_info(keys, for_load=for_load)
+            ]
+
+        backend.batch_get_key_info = get_key_info_with_ssd_first
 
     def relocate(keys):
         for key in keys:
