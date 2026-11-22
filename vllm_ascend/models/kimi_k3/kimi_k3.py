@@ -1239,10 +1239,33 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                     if mapped_name in params_dict:
                         kwargs = dict(args[2]) if len(args) > 2 else {}
                         kwargs["loaded_shard_id"] = shard_id
-                        yield mapped_name, loaded_weight, kwargs
+                        if ".self_attn.indexer." in mapped_name:
+                            # The Ascend DSA stack builds the GLM/DeepSeek
+                            # indexer under self_attn.indexer.*, while the
+                            # inherited upstream loader renames every
+                            # .self_attn.indexer.* weight to its native
+                            # .dsa_indexer.* layout. Consume the mapped
+                            # weight here, like the standalone gates above.
+                            weight_loader = getattr(
+                                params_dict[mapped_name], "weight_loader", default_weight_loader
+                            )
+                            weight_loader(params_dict[mapped_name], loaded_weight, **kwargs)
+                            standalone_gate_params.add(name)
+                        else:
+                            yield mapped_name, loaded_weight, kwargs
                         break
                 else:
-                    yield args
+                    if ".self_attn.indexer." in name and name in params_dict:
+                        # Un-fused indexer weights (wq_b, k_norm) already
+                        # match the Ascend parameter names; load them here
+                        # so the upstream DSA rename never sees them.
+                        param = params_dict[name]
+                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                        kwargs = args[2] if len(args) > 2 else {}
+                        weight_loader(param, loaded_weight, **kwargs)
+                        standalone_gate_params.add(name)
+                    else:
+                        yield args
 
         loaded_params = super().load_weights(
             load_eplb_expert_weights(self, remap_mixed_gate_weights(), self.n_redundant_experts)
