@@ -122,16 +122,16 @@ def test_graph_residency_is_fenced_once_across_layer_loads(expert_factory, manag
             binding.slot_to_expert = (4, 5)
 
     native_runtime.npu.synchronize = Mock(side_effect=finish_graph)
-    manager.set_batch_phase(False)
-    manager.set_batch_phase(True)
+    manager.has_prefill = False
+    manager.has_prefill = True
     for binding, weights in zip(bindings, expected):
         actual = manager.full_pool.load_layer(binding)
         for name in weights:
             torch.testing.assert_close(actual[name].float(), weights[name].float())
     native_runtime.npu.synchronize.assert_called_once_with(bindings[0].device)
 
-    manager.set_batch_phase(False)
-    manager.set_batch_phase(True)
+    manager.has_prefill = False
+    manager.has_prefill = True
     manager.full_pool.load_layer(bindings[0])
     assert native_runtime.npu.synchronize.call_count == 2
 
@@ -167,11 +167,11 @@ def test_failed_prefill_transfer_invalidates_previous_owner(
     monkeypatch.setattr(acl.rt, "memcpy_async", fail_copy)
     with pytest.raises(RuntimeError, match="asynchronous expert .* copy failed"):
         manager.full_pool.load_layer(bindings[1])
-    assert manager.full_pool.owner is None
+    assert manager.full_pool.owners[0] is None
     assert native_runtime.calls[-1] == "sync"
     monkeypatch.setattr(acl.rt, "memcpy_async", original_copy)
     result = manager.full_pool.load_layer(bindings[0])
-    assert manager.full_pool.owner is bindings[0]
+    assert manager.full_pool.owners[0] is bindings[0]
     for name in expected:
         torch.testing.assert_close(result[name].float(), expected[name].float())
 

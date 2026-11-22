@@ -36,7 +36,7 @@ def test_native_storage_chunking_transfer_and_full_pool(expert_factory, manager_
         for tensor in manager.full_pool.tensors.values():
             tensor.zero_()
         # Simulate an overwritten pool; immutable pool contents are otherwise reused.
-        manager.full_pool.owner = None
+        manager.full_pool.owners[0] = None
         actual = manager.full_pool.load_layer(binding)
         for name, tensor in actual.items():
             torch.testing.assert_close(tensor.float(), expected[name].float())

@@ -92,10 +92,12 @@ compilation mode `NONE` with `FULL_DECODE_ONLY` graphs.
 | `enabled` | bool | `False` | Enable exact expert weight offload. |
 | `num_device_experts` | int or null | `None` | Resident expert slots per layer. Required when enabled; must satisfy `top_k <= num_device_experts < num_experts`. |
 
-Prefill and mixed batches use two reusable full-layer expert buffers on the NPU.
+Prefill and mixed batches use two reusable full-layer expert buffers on the NPU
+(one buffer suffices for a model with only one offloaded layer).
 Experts already resident on the device are copied into these buffers locally;
-only missing experts are transferred from the host. After each layer submits its
-MoE computation, the next layer's weights can be prefetched on a separate stream.
+only missing experts are transferred from the host. Preparing a layer's buffer
+also submits the next layer's prefetch, overlapping it with the current layer's
+MoE computation on a separate stream.
 The two buffers are reused across layers and remain available after decode graph
 capture and replay. Decode batches that exceed resident capacity use a synchronous
 full-layer fallback.
