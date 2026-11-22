@@ -19,6 +19,7 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -43,12 +44,14 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
 )
 from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
+from vllm_ascend.ops.triton.dsv41_long_kv_store import HEAD_DIM, NOPE_DIM, ROPE_DIM, LongKVStore
 from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
@@ -357,6 +360,8 @@ class AscendDSAV41Impl:
     model construction is independent from cache-aware attention execution.
     """
 
+    supports_fused_long_kv_store = True
+
     def __init__(self, prefix, role, topology, long_kv_source_prefix, index_k_source_prefix):
         self.multistream_dsv4_dsa_overlap = get_ascend_config().multistream_dsv4_dsa_overlap
         self.prefix = prefix
@@ -589,6 +594,37 @@ class AscendDSAV41Impl:
             self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
         return q, qr
 
+    def _long_kv_store(self, attn, hidden_states, local_metadata, global_metadata, cos, sin):
+        if not HAS_TRITON or not self.supports_fused_long_kv_store or hidden_states.device.type != "npu":
+            return None
+        swa = local_metadata.swa
+        if (
+            swa.num_prefills
+            or swa.num_decodes != swa.num_reqs
+            or local_metadata is not global_metadata
+            or not get_current_hardware_profile().supports(HardwareCapability.DSV41_LONG_KV_STORE)
+            or attn.head_dim != HEAD_DIM
+            or attn.nope_head_dim != NOPE_DIM
+        ):
+            return None
+        norm = attn.compressor.norm
+        cache = attn.long_kv_cache.kv_cache
+        if (
+            getattr(norm, "bias_loaded", False)
+            or not isinstance(cache, torch.Tensor)
+            or cache.dtype != torch.bfloat16
+            or cache.shape[-2:] != (1, HEAD_DIM)
+            or cache.stride(-1) != 1
+            or cos.shape[-1] != ROPE_DIM
+            or cos.stride(-1) != 1
+            or sin.stride(-1) != 1
+        ):
+            return None
+        # Rows, slots and RoPE tables share the builder's token alignment.
+        return LongKVStore(
+            norm.weight, norm.variance_epsilon, cache, global_metadata.compressor.cache.slot_mapping, cos, sin
+        )
+
     def _compress_and_write_caches(
         self, attn, hidden_states, cos, sin, local_metadata, global_metadata, *, prepared_indexer=None
     ):
@@ -599,12 +635,17 @@ class AscendDSAV41Impl:
         ratio = self.role.compress_ratio
         if ratio == 1:
             self._quantize_indexer_query(attn, prepared_indexer, local_metadata)
-            latent = compressor(hidden_states)
             # C1 source positions are the current token positions. Reuse the
             # query RoPE selected by the SWA metadata builder instead of
             # indexing the global table a second time.
             source_cos = cos
             source_sin = sin
+            cache_store = self._long_kv_store(
+                attn, hidden_states, local_metadata, global_metadata, source_cos, source_sin
+            )
+            latent = (
+                compressor(hidden_states) if cache_store is None else compressor(hidden_states, cache_store=cache_store)
+            )
         else:
             state_metadata = compressor_metadata.state
             if state_metadata.c2_metadata_group_id is not None:
@@ -615,17 +656,25 @@ class AscendDSAV41Impl:
             self._quantize_indexer_query(attn, prepared_indexer, local_metadata)
             kv = compressor.wkv(hidden_states_fp32)
             score = compressor.wgate(hidden_states_fp32)
-            latent = compressor.pool_projected(kv, score, state_metadata, prev_rows=None, prev_row_indices=None)
             source_cos = state_metadata.c2_source_cos
             source_sin = state_metadata.c2_source_sin
             if source_cos is None or source_sin is None:
                 fallback_cos, fallback_sin = get_cos_and_sin_dsa(state_metadata.c2_source_positions)
                 source_cos = fallback_cos[attn.rotary_emb.layername]
                 source_sin = fallback_sin[attn.rotary_emb.layername]
+            cache_store = self._long_kv_store(
+                attn, hidden_states, local_metadata, global_metadata, source_cos, source_sin
+            )
+            store_kwargs = {} if cache_store is None else {"cache_store": cache_store}
+            latent = compressor.pool_projected(
+                kv, score, state_metadata, prev_rows=None, prev_row_indices=None, **store_kwargs
+            )
 
-        self._write_compressed_caches(attn, latent, source_cos, source_sin, global_metadata)
+        self._write_compressed_caches(
+            attn, latent, source_cos, source_sin, global_metadata, long_kv_written=cache_store is not None
+        )
 
-    def _write_compressed_caches(self, attn, latent, source_cos, source_sin, metadata):
+    def _write_compressed_caches(self, attn, latent, source_cos, source_sin, metadata, *, long_kv_written=False):
         compressor_metadata = metadata.compressor
         indexer_metadata = metadata.indexer
         num_tokens = latent.shape[0]
@@ -633,13 +682,14 @@ class AscendDSAV41Impl:
         source_cos = source_cos[:num_tokens]
         source_sin = source_sin[:num_tokens]
         index_slots = indexer_metadata.cache.slot_mapping[:num_tokens]
-        long_slots = compressor_metadata.cache.slot_mapping[:num_tokens]
         attn.indexer.update_keys(
             latent,
             index_slots,
             source_cos,
             source_sin,
         )
+        if long_kv_written:
+            return
         latent = latent.view(-1, 1, attn.head_dim)
         AscendDSAV41Impl._apply_rotary(attn, latent, source_cos, source_sin)
         backend = getattr(attn, "packed_cache_ops", None)
@@ -653,7 +703,7 @@ class AscendDSAV41Impl:
         else:
             scatter_cache_sk(
                 attn.long_kv_cache.kv_cache,
-                long_slots,
+                compressor_metadata.cache.slot_mapping[:num_tokens],
                 latent.squeeze(1),
             )
 

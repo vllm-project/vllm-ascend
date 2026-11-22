@@ -12,6 +12,7 @@ from vllm.v1.kv_cache_interface import CircularBufferSpec
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
 from vllm_ascend.core.kv_cache_interface import AscendCircularBufferSpec
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS, uses_a5_packed_cache
+from vllm_ascend.ops.triton.dsv41_long_kv_store import LongKVStore, normalize_and_store_c1
 
 
 class DeepseekV41Compressor(nn.Module):
@@ -54,10 +55,13 @@ class DeepseekV41Compressor(nn.Module):
 
         self._ring_num_cores = _cube_core_num()
 
-    def pool_projected(self, kv, scores, metadata, *, prev_rows, prev_row_indices):
+    def pool_projected(
+        self, kv, scores, metadata, *, prev_rows, prev_row_indices, cache_store: LongKVStore | None = None
+    ):
         from vllm_ascend.ops.triton.compressor.compressor_triton import compressor_from_projected
 
         ring_state = cast(torch.Tensor, self.state_cache.kv_cache)
+        store_kwargs = {} if cache_store is None else {"cache_store": cache_store}
         pooled = compressor_from_projected(
             kv,
             scores,
@@ -70,9 +74,13 @@ class DeepseekV41Compressor(nn.Module):
             num_cores=self._ring_num_cores,
             prev_rows=prev_rows,
             prev_row_indices=prev_row_indices,
+            **store_kwargs,
         )
-        return self.norm(pooled)
+        return self.norm(pooled) if cache_store is None else pooled
 
-    def forward(self, x):
+    def forward(self, x, *, cache_store: LongKVStore | None = None):
         """Project an uncompressed source; ratio-2 uses ``pool_projected``."""
-        return self.norm(self.wkv(x))
+        projected = self.wkv(x)
+        if cache_store is not None:
+            return normalize_and_store_c1(projected, cache_store)
+        return self.norm(projected)

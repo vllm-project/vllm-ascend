@@ -15,6 +15,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
+from vllm_ascend.ops.triton.dsv41_long_kv_store import ROPE_DIM, LongKVStore, _normalize_and_store_long_kv
 
 DEV = "npu"
 MAX_CHUNK_ROWS = 8  # Max rows per pooling chunk; intermediates across three passes use <192 KB of UB.
@@ -239,10 +240,13 @@ def _pool_kernel(
     NO_PAD: tl.constexpr,
     HAS_PREV_ROWS: tl.constexpr,
     TOKEN_ALIGNED: tl.constexpr = False,
+    store_ptrs=None,
+    STORE_STRIDES: tl.constexpr = (),
+    STORE_ROPE_DIM: tl.constexpr = 0,
 ):
     pid = tl.program_id(0)
     offs_h = tl.arange(0, HEAD_DIM)
-    if not TOKEN_ALIGNED:
+    if not TOKEN_ALIGNED or STORE_ROPE_DIM:
         norm_w = tl.load(norm_w_ptr + offs_h).to(tl.float32)
     for task_id in range(pid, total_group_slots, tl.num_programs(0)):
         batch = task_id // group_slots_per_batch
@@ -338,10 +342,14 @@ def _pool_kernel(
                         False,
                     )
             if TOKEN_ALIGNED:
-                # Keep Aurora's existing RMSNorm outside this kernel. Place
-                # each completed pair at its original completion-token row.
+                # Keep each pair at its original completion-token row.
                 out_row = seg_row_base + (group_idx + 1) * RATIO - 1 - start_pos
-                tl.store(out_ptr + out_row * HEAD_DIM + offs_h, pooled.to(tl.bfloat16))
+                latent = pooled.to(tl.bfloat16)
+                if STORE_ROPE_DIM:
+                    latent = _normalize_and_store_long_kv(
+                        latent, norm_w, out_row, store_ptrs, STORE_STRIDES, EPS, HEAD_DIM, STORE_ROPE_DIM
+                    )
+                tl.store(out_ptr + out_row * HEAD_DIM + offs_h, latent)
             else:
                 pooled_bf16 = pooled.to(tl.bfloat16).to(tl.float32)
                 var = tl.sum(pooled_bf16 * pooled_bf16, axis=0) / HEAD_DIM
@@ -735,7 +743,17 @@ def write_pcp_ring_rows(
 
 
 def compressor_from_projected(
-    kv, scores, state_cache, metadata, out, *, max_query_len, num_cores, prev_rows, prev_row_indices
+    kv,
+    scores,
+    state_cache,
+    metadata,
+    out,
+    *,
+    max_query_len,
+    num_cores,
+    prev_rows,
+    prev_row_indices,
+    cache_store: LongKVStore | None = None,
 ):
     """Pool C2 into token-aligned BF16 rows; PCP updates the ring after gathering.
 
@@ -745,6 +763,8 @@ def compressor_from_projected(
     have used length and block ID zero. No tensor contents are read by the host.
     With prev_rows, chunk predecessors come from the gather or the old ring,
     and the caller writes the global request tails after all local reads.
+    For A2 decode, cache_store normalizes the completed rows and writes the
+    rotated Long KV cache in place. The returned rows remain unrotated.
     """
     if kv.dtype != torch.float32 or scores.dtype != torch.float32 or state_cache.dtype != torch.float32:
         raise ValueError("Aurora projections and ring state must be FP32")
@@ -782,6 +802,14 @@ def compressor_from_projected(
         raise ValueError("Projected Triton compressor requires an NPU")
     groups = (max_query_len + 1) // 2
     writes = min(max_query_len, STATE_RING_ROWS)
+    store_args = {}
+    norm_weight, eps = out, 0.0
+    if cache_store is not None:
+        store_ptrs, store_strides = cache_store.kernel_args()
+        norm_weight, eps = cache_store.weight, cache_store.eps
+        store_args = dict(
+            store_ptrs=store_ptrs, STORE_STRIDES=store_strides, STORE_ROPE_DIM=ROPE_DIM, enable_fp_fusion=False
+        )
     # Same-stream launch order is required: residual reads precede ring writes.
     _pool_kernel[(min(num_cores, batches * groups),)](
         out,
@@ -790,7 +818,7 @@ def compressor_from_projected(
         state_cache,
         prev_rows,
         prev_row_indices,
-        out,
+        norm_weight,
         metadata,
         metadata[4],
         batches * groups,
@@ -802,11 +830,12 @@ def compressor_from_projected(
         RATIO=2,
         RATIO_PAD=2,
         CHUNK_ROWS=2,
-        EPS=0.0,
+        EPS=eps,
         SINGLE_BLOCK=True,
         NO_PAD=True,
         HAS_PREV_ROWS=prev_rows is not None,
         TOKEN_ALIGNED=True,
+        **store_args,
     )
     if prev_rows is not None:
         return out

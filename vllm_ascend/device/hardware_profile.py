@@ -91,6 +91,8 @@ class HardwareCapability(Enum):
     DSV4_COMPRESSED_CACHE = auto()
     # Use the DeepSeek-V4.1 mixed-quant cache and packaged QLI/QSMLA ABI.
     DSV41_PACKED_CACHE = auto()
+    # Fuse compressor normalization, partial RoPE, and paged Long KV writes.
+    DSV41_LONG_KV_STORE = auto()
     # Triton RMS/dot/gate/residual fusion for unrotated Engram inputs.
     ENGRAM_UNROTATED_GATE = auto()
     # Decode native FP8 codes and E8M0 group scales in Engram table lookups.
@@ -425,6 +427,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             native_weight_formats=_INT4_WEIGHT_FORMATS,
             capabilities=_STANDARD_CAPABILITIES
             | {
+                HardwareCapability.DSV41_LONG_KV_STORE,
                 HardwareCapability.FLASH_ATTN_NPU_3,
                 HardwareCapability.MM_REDUCE_SCATTER_BF16,
                 HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
