@@ -18,7 +18,7 @@ from vllm_ascend.patch.worker import patch_model_runner  # noqa: F401
 def test_initialize_hisparse_slab_padding_survives_both_runner_copies():
     pytest.importorskip("vllm.v1.hisparse.backend")
     pytest.importorskip("vllm.v1.hisparse.binding")
-    from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
+    from vllm.v1.hisparse import binding
     from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheLayout, KVCacheTensor, SparseCacheRole
 
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
@@ -53,6 +53,7 @@ def test_initialize_hisparse_slab_padding_survives_both_runner_copies():
     runner.jit_warmup_registry.activate.side_effect = nullcontext
     runner.compilation_config.static_forward_context = context
     runner.vllm_config.compilation_config = runner.compilation_config
+    runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = KVCacheLayout.BLHNC
     runner.vllm_config.aux_output_config.enabled = False
     runner.vllm_config.attention_config.hisparse_config = None
     runner.vllm_config.kv_transfer_config.has_connector = lambda name: name == "AscendStoreConnector"
@@ -63,15 +64,20 @@ def test_initialize_hisparse_slab_padding_survives_both_runner_copies():
     host_pool = SimpleNamespace(allocate=MagicMock(return_value=host))
     allocate = MagicMock(return_value=backing)
 
-    def init_cache(forward_context, core_config, device, kernel_block_sizes, *_args, **_kwargs):
+    def init_cache(
+        forward_context, core_config, device, kernel_block_sizes, vllm_config, *_args, block_tables, **_kwargs
+    ):
         assert core_config is runner.kv_cache_config
         assert core_config is not config and core_config.kv_cache_tensors is not tensors
         assert [tensor.size for tensor in core_config.kv_cache_tensors] == [3 * page, size + alignment - 1]
-        caches = allocate_hisparse_kv_caches(
-            core_config, device, KVCacheLayout.BLHNC, kernel_block_sizes, host_pool, allocate=allocate
+        return binding.init_hisparse_kv_cache(
+            core_config, device, kernel_block_sizes, vllm_config, forward_context, block_tables, allocate=allocate
         )
-        AscendHiSparseBackend().prepare_kv_cache_views(core_config, caches, forward_context)
-        return caches
+
+    def bind_caches(*, kv_caches, **_kwargs):
+        (indexer_view,) = kv_caches["indexer"]
+        assert indexer_view.untyped_storage().data_ptr() % alignment == 0
+        return []
 
     def initialize_upstream(runner_config, allocation_context):
         assert runner_config is not config
@@ -80,6 +86,10 @@ def test_initialize_hisparse_slab_padding_survives_both_runner_copies():
 
     runner._initialize_kv_cache_upstream.side_effect = initialize_upstream
     with (
+        patch.object(binding, "get_hisparse_backend", return_value=AscendHiSparseBackend()),
+        patch.object(binding, "get_hisparse_host_pool", return_value=host_pool),
+        patch.object(binding, "bind_hisparse_kv_caches", side_effect=bind_caches) as bind,
+        patch.object(binding, "initialize_hisparse_runtime_buffers"),
         patch.object(upstream, "init_attn_backend", return_value=([], MagicMock(), [128, 128])),
         patch.object(upstream, "maybe_create_adaptive_verification_manager", return_value=None),
         patch.object(upstream, "BlockTables"),
@@ -99,6 +109,7 @@ def test_initialize_hisparse_slab_padding_survives_both_runner_copies():
         NPUModelRunner.initialize_kv_cache(runner, config)
 
     allocate.assert_called_once_with(size + alignment - 1)
+    bind.assert_called_once()
     host_pool.allocate.assert_called_once_with(3 * page)
     assert config.kv_cache_tensors is tensors
     assert [tensor.size for tensor in runner.kv_cache_config.kv_cache_tensors] == [3 * page, size]

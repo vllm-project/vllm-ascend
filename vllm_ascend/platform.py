@@ -575,6 +575,25 @@ class NPUPlatform(Platform):
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         """Apply Ascend-specific defaults."""
 
+        transfer = vllm_config.kv_transfer_config
+        if (
+            transfer is not None
+            and transfer.has_connector("AscendStoreConnector")
+            and (
+                vllm_config.attention_config.hisparse_config is not None or transfer.has_connector("HiSparseConnector")
+            )
+        ):
+            # Core may infer HiSparse from the connector after this callback.
+            # Reject incompatible Core builds before any KV cache allocation.
+            backend_module = "vllm.v1.hisparse.backend"
+            if util.find_spec(backend_module) is None or not callable(
+                getattr(import_module(backend_module).HiSparseBackend, "prepare_kv_cache_views", None)
+            ):
+                raise ValueError(
+                    "HiSparse with AscendStore requires vLLM Core's prepare_kv_cache_views pre-bind hook. "
+                    "vLLM v0.33.0 lacks this hook. Use a compatible newer Core build or disable the combination."
+                )
+
         # TODO: Remove this memory-saving capture-size override and its ceiling
         # restoration once MC2 is no longer used.
         reduced_cg_cap = _get_reduced_cg_cap(vllm_config)
