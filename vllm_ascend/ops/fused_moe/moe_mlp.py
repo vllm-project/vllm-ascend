@@ -95,7 +95,7 @@ def _unified_apply_activation(
         w1 = weights.w1
         if isinstance(w1, list):
             w1 = w1[0]
-        _, _, hidden_size = w1.shape
+        hidden_size = w1.shape[-1]
         hidden_states = AscendSwigluOAIAndMul.swiglu_oai_forward(hidden_states.view(-1, hidden_size))
     elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
         hidden_states = DeviceOperator.clipped_swiglu(
