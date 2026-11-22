@@ -80,7 +80,6 @@ from vllm_ascend.utils import (
     enable_sp,
     is_mtp_layer,
     is_rl_weight_update_enabled,
-    kv_cache_spec_uses_packed_sfa_main_cache,
     maybe_trans_nz,
     vllm_version_is,
 )
@@ -265,7 +264,8 @@ class SparseMLAMetadataState:
         self.split = block_size // kernel_block_size
         self.use_smla = get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
         if self.use_smla:
-            self.use_smla = not kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec)
+            config = get_ascend_config()
+            self.use_smla = not (config.enable_sparse_sfa_c8 or config.enable_sparse_sfa_turboquant)
         self.block_size = kernel_block_size
         self.table_stride = 1
         cache_block_size = vllm_config.cache_config.block_size

@@ -12,7 +12,6 @@ from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 
 import vllm_ascend.attention.sfa_v1 as sfa
 import vllm_ascend.attention.sfa_v1 as sparse_mla
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
 
 
@@ -660,23 +659,3 @@ def test_nope_c8_output_returns_kernel_buffer_without_python_mask(monkeypatch):
             torch.empty(4, 2, 8), None, (cache,), None, metadata, None, None
         )
     assert result is dispatch.return_value
-
-
-@pytest.mark.parametrize("packed", [False, True])
-def test_nope_metadata_selects_reader_from_layer_spec(monkeypatch, packed):
-    builder = _builder(128, True, monkeypatch)
-    # The process-wide target choice deliberately disagrees with this layer.
-    monkeypatch.setattr(
-        sfa,
-        "get_ascend_config",
-        lambda: SimpleNamespace(enable_sparse_sfa_c8=not packed, enable_sparse_sfa_turboquant=False),
-    )
-    spec = AscendMLAAttentionSpec(
-        block_size=128,
-        num_kv_heads=1,
-        head_size=528 if packed else 512,
-        dtype=torch.int8 if packed else torch.bfloat16,
-        cache_sparse_sfa_c8=packed,
-    )
-    state = sfa.SparseMLAMetadataState(spec, builder.vllm_config, torch.device("cpu"))
-    assert state.use_smla is (not packed)

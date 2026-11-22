@@ -2806,7 +2806,6 @@ def _run_get_kv_cache_spec(monkeypatch, vllm_config, spec) -> dict:
         get_attn_backend=lambda: AscendAttentionBackend,
     )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda _cfg, _type: {"attn": attn_module})
-    monkeypatch.setattr(attn_utils, "kv_cache_dtype_str_to_dtype", lambda _s, _m: torch.bfloat16)
     return attn_utils.get_kv_cache_spec(vllm_config)
 
 
@@ -3427,8 +3426,7 @@ def test_step5_reshape_rejects_non_tensor_step_aux_raw(monkeypatch) -> None:
     [
         ("int8", torch.bfloat16, False),
         ("int8", torch.bfloat16, True),
-        ("auto", torch.int8, True),
-        ("int8", torch.float8_e4m3fn, True),
+        ("int8", torch.int8, True),
     ],
 )
 def test_sfa_reshape_uses_each_layer_storage_format(monkeypatch, target_dtype, layer_dtype, packed):
