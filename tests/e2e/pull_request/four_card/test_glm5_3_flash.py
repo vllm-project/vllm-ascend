@@ -290,8 +290,9 @@ def _pool_leg(use_pool: bool, case_name: str, model):
             disable_log_stats=False,
             gpu_memory_utilization=0.9,
             seed=1024,
-            # Layerwise forces PIECEWISE capture; not eager anymore.
-            compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+            # TEMPORARY experiment: the pool leg runs without graph capture to
+            # isolate the npugraph_ex `PythonMod` failure from pool transfer.
+            compilation_config={"cudagraph_mode": "NONE" if use_pool else "FULL_DECODE_ONLY"},
             speculative_config={
                 "method": "deepseek_mtp",
                 "num_speculative_tokens": NUM_SPECULATIVE_TOKENS,
