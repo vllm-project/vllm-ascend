@@ -191,11 +191,19 @@ class AscendIpcModelLoader(IpcModelLoader):
             return model
 
     def _apply_entries(self, model: torch.nn.Module, state: WeightCacheState, device_index: int) -> None:
+        # Methods validate these parameters during post-processing, before upstream
+        # materializes any remaining meta tensors.
+        method_validated = {
+            f"{path}.{leaf}" if path else leaf
+            for path, module in model.named_modules(remove_duplicate=False)
+            for leaf in getattr(getattr(module, "quant_method", None), "pre_processed_weight_names", ())
+        }
         expected = {
             name: (tensor.shape, tensor.dtype)
             for name, tensor in itertools.chain(
                 model.named_parameters(remove_duplicate=False), model.named_buffers(remove_duplicate=False)
             )
+            if name not in method_validated
         }
         provided = set(state.entries) | set(state.aliases)
         missing = set(expected) - provided
@@ -210,8 +218,6 @@ class AscendIpcModelLoader(IpcModelLoader):
         for name, (shape, dtype) in expected.items():
             if actual[name].shape != shape or actual[name].dtype != dtype:
                 raise ValueError(f"Cached tensor {name} has an incompatible shape or dtype")
-        remaining = [
-            name for name, tensor in itertools.chain(model.named_parameters(), model.named_buffers()) if tensor.is_meta
-        ]
+        remaining = [name for name, tensor in actual.items() if tensor.is_meta and name not in method_validated]
         if remaining:
             raise ValueError(f"Unresolved meta tensors in Ascend weight cache: {remaining}")

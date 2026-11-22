@@ -9,6 +9,10 @@ Preload supports Atlas A2 and Atlas A3 hardware. Other hardware families,
 including A5 (950PR/950DT), are rejected before weight loading in both zero-copy
 and copy modes; this is the current preload support scope.
 
+Preload also accepts non-quantized BF16 or FP16 MoE text models with standard
+tensor parallelism. Set `weight_nz_mode=0` on both preload and serve, and keep
+expert parallelism, EPLB and fused MC2 disabled.
+
 The tests use one NPU and a non-quantized dense text model. The default model is
 `Qwen/Qwen3-0.6B`; pass `--preload-model /path/to/checkpoint` to use a local copy.
 Run from the repository root with the supported vLLM/CANN/torch_npu environment.

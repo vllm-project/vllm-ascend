@@ -28,8 +28,10 @@ def validate_preload_config(vllm_config: VllmConfig, *, mode: str = "zero_copy")
         reasons.append("only BF16 and FP16 weights are supported")
     if model.quantization is not None or getattr(model.hf_config, "quantization_config", None):
         reasons.append("quantized weights are unsupported")
-    if model.is_moe or model.use_mla or model.is_multimodal_model:
-        reasons.append("only non-MoE, non-MLA text Dense models are supported")
+    if model.use_mla or model.is_multimodal_model:
+        reasons.append("only non-MLA text models are supported")
+    if model.is_moe and ascend.enable_fused_mc2:
+        reasons.append("MoE preload requires enable_fused_mc2=0")
     if getattr(model, "is_hybrid", False) or getattr(model, "is_attention_free", False):
         reasons.append("hybrid and attention-free models are unsupported")
     if model.runner_type != "generate":

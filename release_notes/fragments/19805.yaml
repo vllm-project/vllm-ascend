@@ -5,5 +5,6 @@ entries:
       Added Ascend support for vllm preload and the ipc_cache load format, allowing
       engines to reuse preloaded NPU weights through zero-copy IPC or copy mode.
       Initial support covers Atlas A2 and Atlas A3 hardware with non-quantized
-      BF16 and FP16 dense text models on Model Runner V2 with weight_nz_mode=0.
+      BF16 and FP16 dense text models and TP-only MoE text models on Model Runner V2
+      with weight_nz_mode=0. MoE support requires fused MC2 to be disabled.
     hardware: [A2, A3]

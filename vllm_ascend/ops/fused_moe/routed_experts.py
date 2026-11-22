@@ -27,7 +27,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoERouter, RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
@@ -62,6 +62,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     """
 
     quant_type = QuantType.NONE
+    pre_processed_weight_names = ("w13_weight", "w2_weight")
 
     def __init__(self, moe: FusedMoEConfig = None):
         super().__init__(moe=moe)
@@ -104,6 +105,23 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
+        if is_weights_pre_processed():
+            num_experts = layer.local_num_experts
+            hidden_size = layer.hidden_size
+            intermediate_size = layer.intermediate_size_per_partition
+            gate_up_size = 2 * intermediate_size if layer.moe_config.is_act_and_mul else intermediate_size
+            # Grouped matmul reads weights in [expert, input, output] layout.
+            expected_shapes = ((num_experts, hidden_size, gate_up_size), (num_experts, intermediate_size, hidden_size))
+            for name, shape in zip(self.pre_processed_weight_names, expected_shapes, strict=True):
+                weight = getattr(layer, name, None)
+                if weight is None or weight.is_meta:
+                    raise ValueError(f"Missing pre-processed MoE weight {name}")
+                if weight.shape != shape or weight.dtype != layer.params_dtype:
+                    raise ValueError(
+                        f"Pre-processed MoE weight {name} has an incompatible shape or dtype. "
+                        f"Expected {shape} and {layer.params_dtype}, got {tuple(weight.shape)} and {weight.dtype}"
+                    )
+            return
 
         # Keep expert-aware loaders attached for later online weight updates.
         w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()

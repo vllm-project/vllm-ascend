@@ -12,12 +12,14 @@ import pytest
 import torch
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader.weight_cache.protocol import TensorEntry, WeightCacheState
+from vllm.model_executor.utils import weights_already_processed
 
 from vllm_ascend.ascend_config import FinegrainedTPConfig
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.model_loader.preload import config, transport
 from vllm_ascend.model_loader.preload.loader import AscendIpcModelLoader
+from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
 
 
 def _config():
@@ -54,7 +56,7 @@ def _config():
 
 @pytest.fixture
 def valid_config(monkeypatch):
-    monkeypatch.setattr(config, "init_ascend_config", lambda _: SimpleNamespace(weight_nz_mode=0))
+    monkeypatch.setattr(config, "init_ascend_config", lambda _: SimpleNamespace(weight_nz_mode=0, enable_fused_mc2=0))
     monkeypatch.setattr(config, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A2))
     return _config()
 
@@ -75,15 +77,28 @@ def test_supported_dense_config_retains_tp_placement(valid_config):
     config.validate_preload_config(valid_config)
 
 
+@pytest.mark.parametrize("mode", ["zero_copy", "copy"])
+def test_preload_supports_pure_tp_moe(valid_config, mode):
+    valid_config.model_config.is_moe = True
+    valid_config.parallel_config.tensor_parallel_size = 2
+    config.validate_preload_config(valid_config, mode=mode)
+
+
+def test_preload_rejects_moe_with_fused_mc2(valid_config, monkeypatch):
+    valid_config.model_config.is_moe = True
+    monkeypatch.setattr(config, "init_ascend_config", lambda _: SimpleNamespace(weight_nz_mode=0, enable_fused_mc2=1))
+    with pytest.raises(ValueError, match="enable_fused_mc2=0"):
+        config.validate_preload_config(valid_config)
+
+
 @pytest.mark.parametrize(
     "owner,field,value,message",
     [
         ("root", "use_v2_model_runner", False, "V2"),
         ("model_config", "dtype", torch.float32, "BF16"),
         ("model_config", "quantization", "ascend", "quantized"),
-        ("model_config", "is_moe", True, "Dense"),
-        ("model_config", "use_mla", True, "Dense"),
-        ("model_config", "is_multimodal_model", True, "Dense"),
+        ("model_config", "use_mla", True, "non-MLA text"),
+        ("model_config", "is_multimodal_model", True, "non-MLA text"),
         ("model_config", "is_hybrid", True, "hybrid"),
         ("model_config", "is_attention_free", True, "attention-free"),
         ("model_config", "runner_type", "pooling", "generate"),
@@ -210,6 +225,61 @@ def test_wrong_shape_is_rejected():
     state = WeightCacheState({"weight": TensorEntry.from_tensor(torch.ones(8), "param")}, {}, {})
     with pytest.raises(ValueError, match="shape or dtype"):
         _loader()._apply_entries(model, state, 0)
+
+
+@pytest.mark.parametrize("mode", ["zero_copy", "copy"])
+@pytest.mark.parametrize(
+    "invalid_weight,error",
+    [
+        (None, None),
+        ("missing", "Missing pre-processed MoE weight w2_weight"),
+        ("shape", "w2_weight has an incompatible shape or dtype"),
+        ("dtype", "w2_weight has an incompatible shape or dtype"),
+    ],
+)
+def test_moe_method_validates_preprocessed_weights_after_binding(mode, invalid_weight, error):
+    model = torch.nn.Module()
+    model.experts = torch.nn.Module()
+    model.experts.local_num_experts = 2
+    model.experts.hidden_size = 3
+    model.experts.intermediate_size_per_partition = 2
+    model.experts.params_dtype = torch.bfloat16
+    model.experts.moe_config = SimpleNamespace(is_act_and_mul=True)
+    method = object.__new__(AscendUnquantizedFusedMoEMethod)
+    torch.nn.Module.__init__(method)
+    model.experts.quant_method = method
+    source_weights = {
+        "w13_weight": torch.arange(24).reshape(2, 3, 4).to(torch.bfloat16),
+        "w2_weight": torch.arange(12).reshape(2, 2, 3).to(torch.bfloat16),
+    }
+    entries = {}
+    for name, weight in source_weights.items():
+        meta = torch.empty_like(weight.transpose(1, 2), device="meta")
+        model.experts.register_parameter(name, torch.nn.Parameter(meta, requires_grad=False))
+        entries[f"experts.{name}"] = TensorEntry.from_tensor(weight, "param")
+
+    if invalid_weight == "missing":
+        del entries["experts.w2_weight"]
+    elif invalid_weight == "shape":
+        entries["experts.w2_weight"] = TensorEntry.from_tensor(source_weights["w2_weight"].transpose(1, 2), "param")
+    elif invalid_weight == "dtype":
+        entries["experts.w2_weight"] = TensorEntry.from_tensor(source_weights["w2_weight"].float(), "param")
+
+    _loader(mode)._apply_entries(model, WeightCacheState(entries, {}, {}), 0)
+    if error is not None:
+        with weights_already_processed(), pytest.raises(ValueError, match=error):
+            method.process_weights_after_loading(model.experts)
+        return
+
+    storage_ptrs = {name: getattr(model.experts, name).data_ptr() for name in source_weights}
+    with weights_already_processed():
+        method.process_weights_after_loading(model.experts)
+
+    for name, weight in source_weights.items():
+        actual = getattr(model.experts, name)
+        torch.testing.assert_close(actual, weight)
+        assert actual.data_ptr() == storage_ptrs[name]
+        assert (actual.data_ptr() == weight.data_ptr()) == (mode == "zero_copy")
 
 
 def test_zero_copy_reload_does_not_write_shared_weights():
