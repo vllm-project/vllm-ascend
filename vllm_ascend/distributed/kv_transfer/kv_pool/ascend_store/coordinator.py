@@ -266,6 +266,16 @@ class AscendStoreCoordinator:
                 num_prompt_tokens=num_prompt_tokens,
                 reachable_boundaries=reachable_boundaries,
             )
+            # TEMPORARY P11 diagnosis: mask construction inputs and result.
+            print(
+                f"[p11-mask] aligned={aligned_token_len} lcm={self.lcm_block_size} "
+                f"effective={self.group_effective_block_sizes[group_id]} chunks={num_chunks} "
+                f"manager={manager_cls.__name__} boundaries={list(reachable_boundaries)[:2]}.. "
+                f"mask={None if mask is None else sum(mask)} "
+                f"first_true={None if mask is None or not any(mask) else mask.index(True)} "
+                f"prompt={num_prompt_tokens}",
+                flush=True,
+            )
             masks.append((num_chunks, mask))
         return masks
 
