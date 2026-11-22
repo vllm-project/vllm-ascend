@@ -227,6 +227,7 @@ def test_gdn_shared_metadata_aclgraph_reads_updated_group_states():
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
         speculative_config=SimpleNamespace(
             num_speculative_tokens=3,
+            max_num_new_slots_for_drafting=0,
             parallel_drafting=False,
             enable_adaptive_verification=False,
             use_eagle_block_drop=lambda: False,
