@@ -91,7 +91,14 @@ def serve_args(model, port, kv_port, producer, eager, prefix_caching):
         "--speculative-config",
         json.dumps({"method": "deepseek_mtp", "num_speculative_tokens": 3, "enforce_eager": producer or eager}),
         "--additional-config",
-        json.dumps({"enable_cpu_binding": False, "enable_fused_mc2": 0}),
+        json.dumps(
+            {
+                "enable_cpu_binding": False,
+                "enable_fused_mc2": 0,
+                # The INT8 GMM-SwiGLU fusion kernel is not built for A5.
+                "ascend_fusion_config": {"fusion_ops_gmmswigluquant": False},
+            }
+        ),
         "--kv-transfer-config",
         json.dumps(
             {
