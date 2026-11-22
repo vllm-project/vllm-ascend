@@ -1,0 +1,5 @@
+pr: 22374
+entries:
+  - category: performance
+    text: Reduced Qwen GDN projection slices, padded-row initialization, and same-shape layout copies around Conv1D and gated normalization.
+    model: qwen3.8-flash-next
