@@ -305,19 +305,24 @@ def using_paged_attention(runtime_shape: int | None, vllm_config: VllmConfig, he
     return bool(pa_shape_list) if runtime_shape is None else runtime_shape in pa_shape_list
 
 
-def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAttentionSpec) -> bool:
-    """Require contiguous K/V only for unpadded ordinary Attention layers eligible for PA."""
+def requires_contiguous_kv_cache(layer, vllm_config: VllmConfig, spec: FullAttentionSpec) -> bool:
+    """Check whether PA or sink-attention graphs require contiguous K/V."""
     # Import lazily to avoid a circular dependency with attention_v1.
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
 
     impl = getattr(layer, "impl", None)
-    return (
-        type(impl) is AscendAttentionBackendImpl
-        and impl.sliding_window is None
-        and getattr(vllm_config.model_config, "runner_type", None) != "pooling"
-        and spec.page_size_bytes == spec.real_page_size_bytes
-        and using_paged_attention(None, vllm_config, spec.head_size)
-    )
+    if (
+        type(impl) is not AscendAttentionBackendImpl
+        or getattr(vllm_config.model_config, "runner_type", None) == "pooling"
+        or spec.page_size_bytes != spec.real_page_size_bytes
+    ):
+        return False
+
+    # The FIA V2 graph workspace call can reject strided paged K/V with sinks.
+    # Allocate contiguous views once so graph replay can read the live cache directly.
+    if impl.sinks is not None and vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
+        return True
+    return impl.sliding_window is None and using_paged_attention(None, vllm_config, spec.head_size)
 
 
 def is_dcp_enabled():

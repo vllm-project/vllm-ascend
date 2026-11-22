@@ -20,7 +20,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     cache_graph_workspace,
     needs_layer_aware_fia_graph_replay,
-    requires_contiguous_pa_kv_cache,
+    requires_contiguous_kv_cache,
     using_paged_attention,
 )
 from vllm_ascend.device.device_op import A5DeviceAdaptor
@@ -40,17 +40,19 @@ class TestAttentionGraphHelpers(TestBase):
             with self.subTest(impl=impl_cls):
                 impl = impl_cls.__new__(impl_cls)
                 impl.sliding_window = None
+                impl.sinks = None
                 self.assertEqual(
-                    requires_contiguous_pa_kv_cache(SimpleNamespace(impl=impl), config, spec),
+                    requires_contiguous_kv_cache(SimpleNamespace(impl=impl), config, spec),
                     impl_cls is AscendAttentionBackendImpl,
                 )
         impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
         impl.sliding_window = 128
-        self.assertFalse(requires_contiguous_pa_kv_cache(SimpleNamespace(impl=impl), config, spec))
-        self.assertFalse(requires_contiguous_pa_kv_cache(None, config, spec))
+        impl.sinks = None
+        self.assertFalse(requires_contiguous_kv_cache(SimpleNamespace(impl=impl), config, spec))
+        self.assertFalse(requires_contiguous_kv_cache(None, config, spec))
         impl.sliding_window = None
         config.model_config.runner_type = "pooling"
-        self.assertFalse(requires_contiguous_pa_kv_cache(SimpleNamespace(impl=impl), config, spec))
+        self.assertFalse(requires_contiguous_kv_cache(SimpleNamespace(impl=impl), config, spec))
         config.model_config.runner_type = "generate"
         padded_spec = FullAttentionSpec(
             block_size=8,
@@ -59,7 +61,7 @@ class TestAttentionGraphHelpers(TestBase):
             dtype=torch.float16,
             page_size_padded=spec.real_page_size_bytes + 64,
         )
-        self.assertFalse(requires_contiguous_pa_kv_cache(SimpleNamespace(impl=impl), config, padded_spec))
+        self.assertFalse(requires_contiguous_kv_cache(SimpleNamespace(impl=impl), config, padded_spec))
         mock_using_pa.assert_called_once()
 
     def test_paged_attention_allocation_checks_any_configured_shape(self):
