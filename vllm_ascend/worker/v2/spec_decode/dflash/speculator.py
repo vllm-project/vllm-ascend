@@ -94,8 +94,8 @@ def _prepare_dflash_inputs_with_block_stride(
     )
 
 
-def validate_grouped_draft_causal(model: Any, kv_cache_config: Any) -> None:
-    """Reject mixed-causal draft layers that share one KV cache group.
+def validate_grouped_draft_attn(model: Any, kv_cache_config: Any) -> None:
+    """Reject draft layers with mismatched attention modes in one KV cache group.
 
     The pinned upstream DFlash speculator stores draft causality per KV cache
     group (``_group_causal``), so the last layer's flag wins for the whole
@@ -105,18 +105,24 @@ def validate_grouped_draft_causal(model: Any, kv_cache_config: Any) -> None:
     its non-causal mask then attends to later positions in its draft block.
     Mixed causality needs the modes split into separate KV cache groups,
     which Ascend MLA drafts do not publish yet; fail fast instead of silently
-    corrupting draft attention. Models without the per-layer hooks keep the
-    upstream per-group fallback unchanged.
+    corrupting draft attention. The same per-group collapse applies to
+    sliding-window drafts: layers that publish different sliding windows
+    (or mix windowed and full attention) in one group would keep only
+    the last layer's window in the shared metadata, so they are rejected
+    as well. Models without the per-layer hooks keep the upstream
+    per-group fallback unchanged.
     """
     get_layer_names = getattr(model, "get_draft_kv_cache_layer_names", None)
     get_causal = getattr(model, "get_draft_attn_causal", None)
     if get_layer_names is None or get_causal is None:
         return
+    layer_names = get_layer_names()
+    causal_modes = get_causal()
     name_to_gid = {
         layer_name: gid for gid, group in enumerate(kv_cache_config.kv_cache_groups) for layer_name in group.layer_names
     }
     causal_by_gid: dict[int, bool] = {}
-    for layer_name, causal in zip(get_layer_names(), get_causal()):
+    for layer_name, causal in zip(layer_names, causal_modes):
         gid = name_to_gid.get(layer_name)
         if gid is None:
             continue
@@ -130,6 +136,24 @@ def validate_grouped_draft_causal(model: Any, kv_cache_config: Any) -> None:
                 "groups or use a checkpoint with homogeneous draft causality."
             )
         causal_by_gid[gid] = causal
+
+    get_windows = getattr(model, "get_draft_attn_sliding_window", None)
+    if get_windows is None:
+        return
+    window_by_gid: dict[int, int | None] = {}
+    for layer_name, window in zip(layer_names, get_windows()):
+        gid = name_to_gid.get(layer_name)
+        if gid is None:
+            continue
+        if gid in window_by_gid and window_by_gid[gid] != window:
+            raise ValueError(
+                "DFlash draft layers with mismatched sliding windows share one "
+                f"KV cache group (group {gid}); the per-group metadata would keep "
+                "only the last layer's window and corrupt draft attention. Split "
+                "the windows into separate KV cache groups or use a checkpoint with "
+                "homogeneous draft sliding windows."
+            )
+        window_by_gid[gid] = window
 
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
@@ -260,7 +284,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
 
         self.attn_backends = attn_backends
         install_ascend_dflash_input_preparation()
-        validate_grouped_draft_causal(self.model, kv_cache_config)
+        validate_grouped_draft_attn(self.model, kv_cache_config)
 
     def propose(
         self,

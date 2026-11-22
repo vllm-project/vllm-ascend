@@ -85,6 +85,7 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
         dtype=torch.bfloat16,
         enable_kv_nz=False,
         use_pcp=False,
+        sliding_window=None,
     )
     monkeypatch.setattr(
         mla_v1,
@@ -229,6 +230,7 @@ def test_flashmla_dspark_target_model_gate(monkeypatch, dcp_size, pcp_size, mode
         dtype=torch.bfloat16,
         enable_kv_nz=False,
         use_pcp=False,
+        sliding_window=None,
     )
     monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
     monkeypatch.setattr(mla_v1, "use_component_major_mla_pd_layout", lambda _: True)
@@ -249,6 +251,81 @@ def test_flashmla_dspark_target_model_gate(monkeypatch, dcp_size, pcp_size, mode
     assert AscendMLAImpl._can_use_flashmla(impl) is expected_flashmla
     config.speculative_config.method = "eagle"
     assert not AscendMLAImpl._can_use_flashmla(impl)
+
+
+def test_flashmla_rejects_sliding_window_draft(monkeypatch):
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        speculative_config=SimpleNamespace(method="dflash"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="kimi_k31"),
+            hf_text_config=SimpleNamespace(model_type="kimi_linear"),
+        ),
+    )
+    impl = SimpleNamespace(
+        vllm_config=config,
+        num_heads=12,
+        num_kv_heads=1,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        fa_quant_layer=False,
+        dtype=torch.bfloat16,
+        enable_kv_nz=False,
+        use_pcp=False,
+        sliding_window=1024,
+    )
+    monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
+    monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
+    monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (object(), object()))
+    monkeypatch.setattr(mla_v1, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
+
+    # FlashMLA has no sliding-window band; windowed DFlash2 drafts
+    # must stay on the FIA pre_tokens path.
+    assert not AscendMLAImpl._can_use_flashmla(impl)
+
+    impl.sliding_window = None
+    assert AscendMLAImpl._can_use_flashmla(impl)
+
+
+def test_sliding_window_patch_clears_stale_flashmla_flag(monkeypatch):
+    # Real construction order: the upstream MLA wrapper hardcodes
+    # sliding_window=None, so AscendMLAImpl.__init__ evaluates
+    # use_flashmla while the window is still unknown (True on eligible
+    # configs); the DFlash2 layer then patches impl.sliding_window.
+    # The patch must neutralize the stale flag, or the group's decode
+    # backend would stay FlashMLA and the window would never be
+    # enforced by the FIA pre_tokens band.
+    import vllm_ascend.models.kimi_k3.kimi_k3 as kimi_k3_mod
+    from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiMLAAttention
+
+    fake_impl = SimpleNamespace(sliding_window=None, use_flashmla=True)
+    fake_layer = SimpleNamespace(impl=fake_impl, sliding_window=None)
+
+    def fake_upstream_init(self, **_kwargs):
+        # _attention_layer is a read-only property on the upstream wrapper;
+        # set the attribute it reads (self.mla_attn.mla_attn) instead.
+        self.mla_attn = SimpleNamespace(mla_attn=fake_layer)
+
+    monkeypatch.setattr(kimi_k3_mod.UpstreamKimiMLAAttention, "__init__", fake_upstream_init)
+
+    AscendKimiMLAAttention(
+        config=SimpleNamespace(mla_use_output_gate=False),
+        hidden_size=16,
+        num_heads=4,
+        qk_nope_head_dim=16,
+        qk_rope_head_dim=8,
+        v_head_dim=16,
+        q_lora_rank=32,
+        kv_lora_rank=16,
+        use_output_gate=False,
+        use_rope=False,
+        sliding_window=1024,
+    )
+
+    assert fake_layer.sliding_window == 1024
+    assert fake_impl.sliding_window == 1024
+    assert fake_impl.use_flashmla is False
 
 
 @pytest.mark.parametrize("prefilling", [[True, False, True], [False, False, False]])

@@ -24,6 +24,7 @@ from vllm_ascend.models.qwen3_dflash2 import (
     DFlash2Qwen3ForCausalLM,
     _draft_uses_causal_attention,
     _resolve_draft_layer_causal,
+    _resolve_draft_layer_sliding_window,
 )
 
 _NUM_LAYERS = 3
@@ -105,3 +106,83 @@ class TestGetDraftAttnCausal:
         layer_types = ["sliding_attention", "full_attention", "sliding_attention"]
         draft = self._draft_model(_config(layer_types=layer_types))
         assert draft.get_draft_attn_causal() == [True, False, True]
+
+class TestResolveDraftLayerSlidingWindow:
+    def test_no_sliding_window_by_default(self):
+        config = _config()
+        assert all(_resolve_draft_layer_sliding_window(config, i) is None for i in range(_NUM_LAYERS))
+
+    def test_kimi_dflash2_checkpoint_resolves_all_layers(self):
+        config = _config(
+            use_sliding_window=True,
+            sliding_window=1024,
+            max_window_layers=5,
+            layer_types=_ALL_SLIDING,
+        )
+        assert all(_resolve_draft_layer_sliding_window(config, i) == 1024 for i in range(_NUM_LAYERS))
+
+    def test_max_window_layers_is_not_consulted(self):
+        # Upstream _resolve_layer_attention ignores the top-level
+        # use_sliding_window/max_window_layers pair entirely: sliding
+        # layer_types stay windowed past max_window_layers.
+        config = _config(
+            use_sliding_window=True,
+            sliding_window=1024,
+            max_window_layers=2,
+            layer_types=_ALL_SLIDING,
+        )
+        assert all(_resolve_draft_layer_sliding_window(config, i) == 1024 for i in range(_NUM_LAYERS))
+
+    def test_full_attention_layer_types_stay_unwindowed(self):
+        layer_types = ["sliding_attention", "full_attention", "sliding_attention"]
+        config = _config(use_sliding_window=True, sliding_window=1024, layer_types=layer_types)
+        assert [_resolve_draft_layer_sliding_window(config, i) for i in range(_NUM_LAYERS)] == [1024, None, 1024]
+
+    def test_use_swa_forces_window_on_full_attention_layers(self):
+        # dflash_config.use_swa forces SWA on every layer, even an
+        # all-full layer_types; swa_window_size wins over the top-level
+        # sliding_window.
+        config = _config(
+            dflash_config={"use_swa": True, "swa_window_size": 512},
+            layer_types=_ALL_FULL,
+        )
+        assert all(_resolve_draft_layer_sliding_window(config, i) == 512 for i in range(_NUM_LAYERS))
+
+    def test_no_layer_types_falls_back_to_use_swa_flag(self):
+        config = _config(dflash_config={"use_swa": False}, sliding_window=1024)
+        assert all(_resolve_draft_layer_sliding_window(config, i) is None for i in range(_NUM_LAYERS))
+
+    def test_zero_window_passes_through_like_upstream(self):
+        # Upstream has no zero-window guard and passes 0 through; the hook
+        # must agree with the attention layers upstream builds from the same
+        # config, so it mirrors that instead of second-guessing the value.
+        config = _config(use_sliding_window=True, sliding_window=0, layer_types=_ALL_SLIDING)
+        assert all(_resolve_draft_layer_sliding_window(config, i) == 0 for i in range(_NUM_LAYERS))
+
+    def test_missing_window_size_raises(self):
+        # Upstream raises for a sliding layer without any configured window
+        # size; a silent None would run the draft window-free and hide the
+        # config error.
+        config = _config(dflash_config={"use_swa": True}, layer_types=_ALL_FULL)
+        with pytest.raises(ValueError, match="requires a window size"):
+            _resolve_draft_layer_sliding_window(config, 0)
+
+
+class TestGetDraftAttnSlidingWindow:
+    def _draft_model(self, config):
+        draft = DFlash2Qwen3ForCausalLM.__new__(DFlash2Qwen3ForCausalLM)
+        draft.config = config
+        draft.model = SimpleNamespace(layers=[object()] * _NUM_LAYERS)
+        return draft
+
+    def test_kimi_dflash2_checkpoint_publishes_window(self):
+        config = _config(
+            use_sliding_window=True,
+            sliding_window=1024,
+            max_window_layers=5,
+            layer_types=_ALL_SLIDING,
+        )
+        assert self._draft_model(config).get_draft_attn_sliding_window() == [1024] * _NUM_LAYERS
+
+    def test_legacy_checkpoint_publishes_none(self):
+        assert self._draft_model(_config()).get_draft_attn_sliding_window() == [None] * _NUM_LAYERS

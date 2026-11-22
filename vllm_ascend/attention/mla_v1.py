@@ -68,7 +68,7 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.compilation.updatable_graph import get_capture_resource, register_task
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, SlidingWindowMLASpec
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -183,6 +183,18 @@ class AscendMLAAttention(MLAAttention):
         if getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None:
             return spec
         values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+        if isinstance(spec, SlidingWindowMLASpec):
+            # Sliding-window drafts (e.g. Kimi-K3.1-DFlash2) keep full
+            # KV retention: DFlash context precompute writes every
+            # context row, and the window is enforced by the FIA
+            # pre_tokens band in the decode path instead of a
+            # window-limited cache. Publish the plain MLA spec so
+            # cache planning and block tables stay unchanged. The
+            # SlidingWindowMLASpec-only fields (sliding_window,
+            # extra_retained_tokens, bounded_replay) must not leak
+            # into the Ascend spec constructor.
+            allowed = {field.name for field in fields(AscendMLAAttentionSpec) if field.init}
+            values = {name: value for name, value in values.items() if name in allowed}
         model_type = getattr(vllm_config.model_config.hf_text_config, "model_type", None)
         storage_heads = self.num_heads
         if model_type == "kimi_linear":
@@ -1085,6 +1097,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
+        self.sliding_window = sliding_window
         self.num_kv_heads = num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
 
@@ -1223,6 +1236,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         # Upstream restricts FlashMLA drafts to DSpark; the DFlash2 MLA
         # draft shares the same metadata contract, so allow it as well.
         if config.speculative_config is not None and config.speculative_config.method not in ("dspark", "dflash"):
+            return False
+        if self.sliding_window is not None:
+            # FlashMLA has no sliding-window band; windowed drafts
+            # attend through the FIA pre_tokens path instead.
             return False
         if not self._supports_flashmla(MLA_FLASH_SUPPORTED_Q_HEADS):
             return False
@@ -3056,6 +3073,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             else:
                 sparse_mode = 3
                 attn_mask = decode_meta.attn_mask
+                if self.sliding_window is not None:
+                    # Sliding-window drafts attend through a fixed
+                    # band; CANN expresses it with sparse_mode=4 and
+                    # pre/next token counts, which stay valid for
+                    # every full-graph replay shape.
+                    sparse_mode = 4
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
             if self.fa_quant_layer:
                 assert dequant_scale_q_nope is not None
@@ -3140,6 +3163,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_qlen": actual_seq_lengths,
             "actual_seq_kvlen": decode_meta.seq_lens_list,
         }
+        if sparse_mode == 4 and self.sliding_window is not None:
+            common_kwargs["pre_tokens"] = self.sliding_window
+            common_kwargs["next_tokens"] = 0
         common_kwargs["query_rope"] = q_pe
         common_kwargs["key_rope"] = k_pe
         if self.fa_quant_layer:

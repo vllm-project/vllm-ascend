@@ -64,6 +64,44 @@ def _draft_uses_causal_attention(config) -> bool:
     return all(_resolve_draft_layer_causal(config, i) for i in range(config.num_hidden_layers))
 
 
+def _resolve_draft_layer_sliding_window(config, layer_idx: int) -> int | None:
+    """Resolve the draft attention sliding window from the checkpoint config.
+
+    Mirrors upstream vLLM's ``_resolve_layer_attention`` exactly:
+    ``dflash_config.use_swa`` forces SWA on every layer (even an
+    all-full ``layer_types``); otherwise only ``sliding_attention``
+    layers are windowed, with the size taken from
+    ``dflash_config.swa_window_size`` or the top-level
+    ``sliding_window``. The top-level ``use_sliding_window`` /
+    ``max_window_layers`` pair is intentionally not consulted: upstream
+    ignores it, and this hook must agree with the attention layers
+    upstream builds from the same config. Like upstream, a sliding
+    layer without any configured window size raises ValueError instead
+    of silently running window-free; a zero window passes through as
+    configured (no checkpoint ships one, and upstream has no zero
+    guard to mirror).
+    """
+    dflash_config = getattr(config, "dflash_config", None) or {}
+    layer_types = getattr(config, "layer_types", None)
+    use_swa = dflash_config.get("use_swa", False)
+
+    any_sliding = bool(layer_types) and any(lt == _SLIDING_ATTENTION for lt in layer_types)
+    if not layer_types or (use_swa and not any_sliding):
+        is_sliding = use_swa
+    else:
+        is_sliding = layer_types[layer_idx] == _SLIDING_ATTENTION
+
+    if not is_sliding:
+        return None
+    window = dflash_config.get("swa_window_size", getattr(config, "sliding_window", None))
+    if window is None:
+        raise ValueError(
+            "DFlash sliding attention requires a window size configured in "
+            "dflash_config.swa_window_size or the top-level sliding_window."
+        )
+    return int(window)
+
+
 def _grouped_conv(
     hidden_states: torch.Tensor,
     delta: torch.Tensor,
@@ -413,6 +451,7 @@ class DFlash2Qwen3MLADecoderLayer(DFlash2Qwen3DecoderLayer):
             prefix=f"{prefix}.self_attn",
             non_causal_multi_token_decode=not _draft_uses_causal_attention(config),
             disable_mlapo=True,
+            sliding_window=_resolve_draft_layer_sliding_window(config, layer_idx),
         )
         self.mlp = Qwen2MLP(
             hidden_size=config.hidden_size,
@@ -541,6 +580,9 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
 
     def get_draft_attn_causal(self) -> list[bool]:
         return [_resolve_draft_layer_causal(self.config, i) for i in range(len(self.model.layers))]
+
+    def get_draft_attn_sliding_window(self) -> list[int | None]:
+        return [_resolve_draft_layer_sliding_window(self.config, i) for i in range(len(self.model.layers))]
 
     def post_process(self, vllm_config: VllmConfig) -> None:
         if get_rotation_path(vllm_config) is None:
