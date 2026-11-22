@@ -200,6 +200,10 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                     step=1,
                     cg_mode=desc.cg_mode,
                 )
+                # The captured graph closes over this metadata object and
+                # the attention kernel reads its seq_lens tensor, so keep
+                # a handle for the runtime loop to refresh per step.
+                self.speculator._capture_decode_attn = attn_metadata
                 # Move capture-stable attn tensors to NPU before graph begin
                 # (pageable H2D inside capture is banned).
                 device = self.speculator.device
@@ -241,8 +245,19 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                         self.speculator.current_draft_step,
                         self.speculator.draft_logits,
                     )
-                    # Persist sampled drafts into the capture-stable buffer.
-                    self.speculator.draft_tokens[:num_reqs, 1].copy_(draft_tokens[:num_reqs])
+                    # Persist the sampled draft at this step's column and
+                    # feed the token plus hidden states into the next
+                    # draft forward (mirrors update_draft_inputs).
+                    _step_idx = self.speculator.current_draft_step
+                    self.speculator.draft_tokens.scatter_(
+                        1,
+                        _step_idx.reshape(1, 1).expand(num_reqs, 1),
+                        draft_tokens[:num_reqs].unsqueeze(1),
+                    )
+                    self.speculator.input_buffers.input_ids[:num_reqs].copy_(
+                        draft_tokens[:num_reqs])
+                    self.speculator.hidden_states[:num_reqs].copy_(
+                        _hidden_states[:num_reqs])
 
                 return run
 

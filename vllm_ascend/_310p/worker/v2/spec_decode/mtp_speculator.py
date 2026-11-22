@@ -362,6 +362,21 @@ class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
             self._set_draft_step(step)
             if use_full:
                 assert self.decode_cudagraph_manager is not None
+                # The captured graph reads attn_metadata[...].seq_lens,
+                # not input_buffers.seq_lens (that is what
+                # _refresh_capture_seq_lens refreshes), so copy this
+                # step's length in or every replay attends over the
+                # capture-time length.
+                _cap = getattr(self, "_capture_decode_attn", None)
+                if _cap:
+                    for _layer, _meta in attn_metadata.items():
+                        _c = _cap.get(_layer)
+                        _s1 = getattr(_meta, "seq_lens", None)
+                        _s2 = (getattr(_c, "seq_lens", None)
+                               if _c is not None else None)
+                        if (_s1 is not None and _s2 is not None
+                                and _s2.numel() >= _s1.numel()):
+                            _s2[:_s1.numel()].copy_(_s1)
                 self._pending_draft_attn_metadata = attn_metadata
                 self.decode_cudagraph_manager.run_fullgraph(batch_desc)
                 if attn_metadata is not None:
