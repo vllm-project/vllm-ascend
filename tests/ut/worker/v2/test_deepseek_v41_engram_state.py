@@ -74,19 +74,25 @@ def test_history_preparation_defers_lookup_and_excludes_padding(state, monkeypat
     kernel = Mock()
     kernel.__getitem__ = Mock(return_value=launch)
     monkeypatch.setattr(engram_lookback, "_gather_lookback_kernel", kernel)
+    input_batch = batch()
+    history = torch.arange(48, dtype=torch.int32).reshape(4, 12)[:, :8]
     reqs = SimpleNamespace(
-        all_token_ids=SimpleNamespace(gpu=torch.arange(32).reshape(4, 8)),
+        all_token_ids=SimpleNamespace(gpu=history),
         num_computed_tokens=SimpleNamespace(gpu=torch.tensor([5, 0, 2, 0])),
     )
-    inputs = state.prepare_inputs(batch(), reqs)
+    inputs = state.prepare_inputs(input_batch, reqs)
     state.model.prepare_engram_inputs.assert_not_called()
     assert inputs["lookback_token_ids"] is state.lookback_token_ids
     assert state.lookback_token_ids.shape == (4, 3)
     assert state.lookback_token_ids.dtype == torch.int32
+    kernel.__getitem__.assert_called_once_with((4,))
+    launch.assert_called_once()
     args, kwargs = launch.call_args
     assert args[0] is state.lookback_token_ids
+    assert args[1] is input_batch.idx_mapping
     assert args[2] is reqs.num_computed_tokens.gpu
     assert args[3] is reqs.all_token_ids.gpu
+    assert args[4] == history.stride(0) == 12
     assert args[5] == 2
     assert kwargs == {"DEPTH": 3, "BLOCK_DEPTH": 4}
 
