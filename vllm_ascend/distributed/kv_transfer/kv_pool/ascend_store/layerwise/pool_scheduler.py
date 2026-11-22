@@ -203,8 +203,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     ) -> int:
         self._get_or_create_request_tracker(request.request_id)
         if self.layerwise_offload and (
-            getattr(self.kv_cache_config, "dsv4_component_identity", None) is not None
-            or self.num_speculative_blocks_by_group
+            self.num_speculative_blocks_by_group
             or len(self.cacheable_group_ids) != len(self.original_block_size)
         ):
             # Probe the endpoint we can actually resume from. Trimming a full
