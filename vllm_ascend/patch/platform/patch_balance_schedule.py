@@ -187,9 +187,10 @@ class BalanceScheduler(Scheduler):
         preempted_reqs: list[Request] = []
 
         iteration_details = None
-        if (
-            self.log_stats and self.observability_config.enable_logging_iteration_details
-        ) or self.vllm_config.profiler_config.profiler is not None:
+        if not vllm_version_is("0.34.0") and (
+            (self.log_stats and self.observability_config.enable_logging_iteration_details)
+            or self.vllm_config.profiler_config.profiler is not None
+        ):
             iteration_details = IterationDetails()
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
