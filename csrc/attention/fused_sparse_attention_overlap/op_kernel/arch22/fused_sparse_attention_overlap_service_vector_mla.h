@@ -269,6 +269,8 @@ private:
 
     static constexpr uint64_t MERGE_CACHE_GM_BUF_NUM = 4;
     static constexpr int64_t SELECTION_STATUS_UB_OFFSET = 512;
+    // Reserve one word per writeback window after bulk TopK staging.
+    static constexpr int64_t SELECTION_READBACK_SWAP_UB_OFFSET = 1536;
     static constexpr int32_t SELECTION_MAX_TOPK = 2048;
     static constexpr int32_t SELECTION_SORT_UNIT = 32;
     static constexpr int32_t SELECTION_COMPARE_SCALAR_NUM = 256 / sizeof(int32_t);
@@ -2717,6 +2719,9 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     SetFlag<AscendC::HardEvent::MTE2_S>(1);
     WaitFlag<AscendC::HardEvent::MTE2_S>(1);
 
+    // MergeKv leaves the local valid count and readback masks on this same subblock.
+    const int64_t mergedCount = v0ValidSizeUb_.GetValue(runInfo.loop % MERGE_CACHE_GM_BUF_NUM);
+    auto readbackSwapStarts = v0ValidSizeUb_.ReinterpretCast<uint32_t>()[SELECTION_READBACK_SWAP_UB_OFFSET];
     int64_t localOffset = s2GmStartOffset;
     while (localOffset < s2GmLimit) {
         int64_t writeCount = s2GmLimit - localOffset;
@@ -2733,83 +2738,25 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
         int64_t updateDstSlot[32];
         int64_t updateSrcIdx[32];
         int64_t updateCount = 0;
-        int64_t s2IdLimit = runInfo.curActualSeqLenOri;
-        if (constInfo.sparseMode == 3) {
-            s2IdLimit = runInfo.curActualSeqLenOri - runInfo.actS1Size +
-                        runInfo.gS1Idx / constInfo.gSize + 1;
-        }
-        int64_t cachedPairOffset = -1;
-        bool cachedPairTransposed = false;
-        // Decode two packed plan values per read.
+        // Unvisited windows were zero-filled by MergeKv and have no saved pair order.
+        uint32_t swapStarts = constInfo.sparseBlockSize == 1 && localOffset - s2GmStartOffset < mergedCount ?
+            readbackSwapStarts.GetValue(directWindowIdx) : 0U;
+        uint32_t swapEnds = swapStarts << 1;
         for (int64_t base = 0; base < writeCount; base += 2) {
             int64_t basePlanIdx = localOffset - s2GmStartOffset + base;
-            int64_t cachedPackedPlanIdx = basePlanIdx >> 1;
-            uint32_t cachedPackedPlanValue =
-                packedPlanLocal.GetValue(cachedPackedPlanIdx);
+            uint32_t packedPlan = packedPlanLocal.GetValue(basePlanIdx >> 1);
             int64_t pairCount = (base + 1 < writeCount) ? 2 : 1;
             for (int64_t half = 0; half < pairCount; half++) {
-            int64_t idx = base + half;
-            int64_t planIdx = basePlanIdx + half;
-            int16_t planValue = half == 0 ?
-                static_cast<int16_t>(cachedPackedPlanValue & 0xFFFFU) :
-                static_cast<int16_t>(cachedPackedPlanValue >> 16);
-            if (!IsSelectionPlanUpdate(planValue)) {
-                continue;
-            }
-            int32_t destinationSlot = DecodeSelectionPlanSlot(planValue);
-            int64_t srcIdx = idx;
-            int64_t absoluteOffset = localOffset + idx;
-            int64_t pairSize = 2L * static_cast<int64_t>(constInfo.sparseBlockSize);
-            int64_t pairOffset = (absoluteOffset / pairSize) * pairSize;
-            if (constInfo.sparseBlockSize == 1 && pairOffset + 1 < s2ProcessSize) {
-                bool pairTransposed;
-                if (pairOffset == cachedPairOffset) {
-                    pairTransposed = cachedPairTransposed;
-                } else {
-                bool pairHasSelectionHit = false;
-                int64_t pairPlanIdx = pairOffset - s2GmStartOffset;
-                if (pairPlanIdx >= 0 && pairPlanIdx + 1 < planCount) {
-                    int64_t pairPackedPlanIdx = pairPlanIdx / 2;
-                    uint32_t pairPackedPlanValue =
-                        pairPackedPlanIdx == cachedPackedPlanIdx ?
-                            cachedPackedPlanValue :
-                            packedPlanLocal.GetValue(pairPackedPlanIdx);
-                    int16_t pairPlan0 =
-                        static_cast<int16_t>(pairPackedPlanValue & 0xFFFFU);
-                    int16_t pairPlan1 =
-                        static_cast<int16_t>(pairPackedPlanValue >> 16);
-                    pairHasSelectionHit = IsSelectionPlanHit(pairPlan0) ||
-                        IsSelectionPlanHit(pairPlan1);
+                int16_t planValue = half == 0 ? static_cast<int16_t>(packedPlan & 0xFFFFU) :
+                    static_cast<int16_t>(packedPlan >> 16);
+                if (!IsSelectionPlanUpdate(planValue)) {
+                    continue;
                 }
-                pairTransposed = false;
-                if (!pairHasSelectionHit) {
-                int64_t realS2Idx0 = -1;
-                int64_t realS2Idx1 = -1;
-                GetRealS2Idx(pairOffset, realS2Idx0, runInfo.topKBaseOffset, runInfo);
-                GetRealS2Idx(pairOffset + 1, realS2Idx1, runInfo.topKBaseOffset, runInfo);
-                int64_t keyOffset0 = GetKeyGmOffset(realS2Idx0, runInfo, s2IdLimit);
-                int64_t keyOffset1 = GetKeyGmOffset(realS2Idx1, runInfo, s2IdLimit);
-                int64_t keySrcStride = 0;
-                int64_t keyRopeSrcStride = 0;
-                bool usedPairedCopy = keyOffset0 >= 0 && keyOffset1 >= 0 &&
-                    CanUsePairedKvCopy(
-                        realS2Idx0, realS2Idx1, keyOffset0, keyOffset1, s2IdLimit,
-                        runInfo, keySrcStride, keyRopeSrcStride);
-                pairTransposed = usedPairedCopy && keyOffset1 < keyOffset0;
-                }
-                cachedPairOffset = pairOffset;
-                cachedPairTransposed = pairTransposed;
-                }
-                if (pairTransposed) {
-                    int64_t srcAbsoluteOffset = (absoluteOffset == pairOffset) ? pairOffset + 1 : pairOffset;
-                    if (srcAbsoluteOffset >= localOffset && srcAbsoluteOffset < localOffset + writeCount) {
-                        srcIdx = srcAbsoluteOffset - localOffset;
-                    }
-                }
-            }
-            updateDstSlot[updateCount] = destinationSlot;
-            updateSrcIdx[updateCount] = srcIdx;
-            updateCount++;
+                int64_t idx = base + half;
+                uint32_t bit = 1U << idx;
+                updateDstSlot[updateCount] = DecodeSelectionPlanSlot(planValue);
+                updateSrcIdx[updateCount] = idx + ((swapStarts & bit) != 0) - ((swapEnds & bit) != 0);
+                updateCount++;
             }
         }
 
@@ -3411,6 +3358,7 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     const int32_t sparseBlockSize32 = (int32_t)constInfo.sparseBlockSize;
     // Plan sign distinguishes hits, updates, and ordinary misses.
     int32_t slotBuf[32];
+    auto readbackSwapStarts = v0ValidSizeUb_.ReinterpretCast<uint32_t>()[SELECTION_READBACK_SWAP_UB_OFFSET];
     bool mergeStopped = false;
     for (int32_t winStart = s2Start32; winStart < s2Limit32 && !mergeStopped; winStart += 32) {
         if (needWaitMte3ToMte2) {
@@ -3438,6 +3386,7 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
             }
         }
         // Phase B: copy hits and misses in logical token order.
+        uint32_t swapStarts = 0;
         int32_t cur = 0;
         while (cur < winCount && !mergeStopped) {
             int32_t tokenPos = winStart + cur;
@@ -3515,6 +3464,10 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
                                  topkGmBaseOffset, runInfo);
                     CopyInKv(mte2Size, mte3Size, mergeMte3Idx, s2IdxArray0, s2IdxArray1,
                              -1, -1, s2IdLimit, runInfo, ubTokenIdx0, ubTokenIdx1);
+                    // CopyInKv reports the actual UB order, including pairs starting at odd positions.
+                    if (selectionUpdatePlanActive_ && ubTokenIdx1 >= 0 && ubTokenIdx0 > ubTokenIdx1) {
+                        swapStarts |= 1U << cur;
+                    }
                     if (directCollectEnabled && directUpdateCount >= 0) {
                         bool takeUpdate0 = slotBuf[cur] < 0 && ubTokenIdx0 >= 0;
                         bool takeUpdate1 = slotBuf[cur + 1] < 0 && ubTokenIdx1 >= 0;
@@ -3560,6 +3513,10 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
         FlushDirectSelectionUpdate(directUpdateDstSlot, directUpdateUbIdx,
             directUpdateCount, directCollectEnabled, mte3Size, mte2Size,
             mergeMte3Idx, directSelectionRow, batchCollected);
+        uint32_t windowIdx = static_cast<uint32_t>((winStart - s2Start32) >> 5);
+        if (selectionUpdatePlanActive_ && (directWrittenWindowMask_ & (1U << windowIdx)) == 0) {
+            readbackSwapStarts.SetValue(windowIdx, swapStarts);
+        }
         mte3Size = mte2Size;
         SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2);
         mergeMte3Idx++;
