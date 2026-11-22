@@ -51,6 +51,7 @@ def selector(monkeypatch):
 
 
 def _inputs():
+    score_weight = torch.tensor(1 / 128**0.5, dtype=torch.bfloat16).float()
     return dict(
         query=torch.empty(6, 4, 128, dtype=torch.bfloat16),
         compressed_key_cache=torch.empty(8, 16, 1, 128, dtype=torch.bfloat16)[::2],
@@ -61,6 +62,9 @@ def _inputs():
             seq_lens=torch.tensor([33, 34, 0], dtype=torch.int32),
             query_start_loc=torch.tensor([0, 2, 4, 6], dtype=torch.int32),
             num_actual_tokens=6,
+            qsa_compressed_lengths=torch.tensor([8, 8, 0], dtype=torch.int32),
+            qsa_residual_lengths=torch.tensor([1, 2, 0], dtype=torch.int32),
+            qsa_score_weights=torch.full((8, 4), score_weight, dtype=torch.float32),
         ),
         token_topk=2048,
         compress_ratio=4,
@@ -166,3 +170,19 @@ def test_further_trimmed_query_regenerates_prepared_schedule(selector):
         bindings.lightning_indexer_v2_metadata.call_args.kwargs["cu_seqlens_q"],
         torch.tensor([0, 2, 4, 4], dtype=torch.int32),
     )
+
+
+def test_builder_prepared_lengths_and_weights_are_consumed_directly(selector):
+    module, bindings, _, _ = selector
+    inputs = _inputs()
+    metadata = inputs["attn_metadata"]
+    metadata.qsa_compressed_lengths = torch.tensor([8, 8, 0], dtype=torch.int32)
+    metadata.qsa_residual_lengths = torch.tensor([1, 2, 0], dtype=torch.int32)
+    metadata.qsa_score_weights = torch.full((8, 4), 1 / 128**0.5, dtype=torch.float32)
+
+    module.qsa_select_paged_tokens_lightning_v2(**inputs)
+
+    _, kwargs = bindings.lightning_indexer_v2.call_args
+    assert kwargs["seqused_k"].data_ptr() == metadata.qsa_compressed_lengths.data_ptr()
+    assert kwargs["cmp_residual_k"].data_ptr() == metadata.qsa_residual_lengths.data_ptr()
+    assert bindings.lightning_indexer_v2.call_args.args[2].data_ptr() == metadata.qsa_score_weights.data_ptr()
