@@ -567,6 +567,7 @@ class BaseKVPoolScheduler(ABC):
         if new_block_ids is not None:
             request_tracker.update(new_block_ids, request.num_computed_tokens)
         self._sync_swa_block_ids(request_tracker)
+        self._sync_align_mamba_block_ids(request_tracker, num_computed_tokens)
         load_spec = self._running_load_spec(request_tracker, num_current_tokens)
         # save_decode_cache is intentionally narrower than
         # consumer_is_to_put: a consumer keeps skipping prefill writes and is
@@ -589,6 +590,31 @@ class BaseKVPoolScheduler(ABC):
         for group_id in self.swa_group_ids:
             if group_id < len(current_ids) and group_id < len(tracker.allocated_block_ids_by_group):
                 tracker.allocated_block_ids_by_group[group_id][:] = current_ids[group_id]
+
+    def _sync_align_mamba_block_ids(self, tracker: RequestTracker, num_computed_tokens: int) -> None:
+        """Use the live align-state table instead of accumulated deltas.
+
+        TEMPORARY P11 experiment: speculative state-block relocation nulls the
+        checkpoint column in the accumulated tracker, while the live table
+        still holds the block that carries the boundary state.
+        """
+        if not self.use_layerwise or not self.num_speculative_blocks_by_group:
+            return
+        assert self._kv_cache_manager is not None
+        current_ids = self._kv_cache_manager.get_block_ids(tracker.req_id)
+        for group_id in self.num_speculative_blocks_by_group:
+            if group_id >= len(current_ids) or group_id >= len(tracker.allocated_block_ids_by_group):
+                continue
+            live = list(current_ids[group_id])
+            rows = tracker.allocated_block_ids_by_group[group_id]
+            if num_computed_tokens >= 13000:
+                print(
+                    f"[p11-sync] g={group_id} nct={num_computed_tokens} "
+                    f"tracker={list(rows[max(0, len(rows) - 6):])} live={live[max(0, len(live) - 6):]} "
+                    f"len_t={len(rows)} len_l={len(live)}",
+                    flush=True,
+                )
+            rows[:] = live
 
     def _process_async_load_request(
         self,
