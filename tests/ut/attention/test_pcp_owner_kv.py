@@ -7,6 +7,17 @@ import pytest
 from vllm_ascend.attention.context_parallel import pcp_owner_kv as owner_kv
 
 
+def _kv_transfer(name, extra=None):
+    return type(
+        "KVTransfer",
+        (),
+        {
+            "kv_connector": name,
+            "kv_connector_extra_config": extra or {},
+        },
+    )()
+
+
 def _config(*, pcp=4, dcp=1, tp=1, kv_transfer=None, additional_config=None):
     return type(
         "Config",
@@ -49,9 +60,57 @@ def test_validate_owner_sharing_rejects_incompatible_topologies():
     assert owner_kv.validate_owner_sharing(_config(pcp=1))[0] is False
     assert owner_kv.validate_owner_sharing(_config(dcp=2))[0] is False
     assert owner_kv.validate_owner_sharing(_config(tp=2))[0] is False
-    # KV-transfer connectors are out of scope for this placement.
-    assert owner_kv.validate_owner_sharing(_config(kv_transfer=object()))[0] is False
     assert owner_kv.validate_owner_sharing(_config())[0] is True
+
+
+def test_owner_connector_gate_allows_owner_aware_store():
+    store = _kv_transfer("AscendStoreConnector", {"backend": "mooncake"})
+    assert owner_kv.validate_owner_connector(_config(kv_transfer=store)) == (True, "")
+    assert owner_kv.validate_owner_sharing(_config(kv_transfer=store))[0] is True
+
+    old_name = _kv_transfer("MooncakeConnectorStoreV1", {"backend": "mooncake"})
+    assert owner_kv.validate_owner_connector(_config(kv_transfer=old_name)) == (True, "")
+
+
+def test_owner_connector_gate_accepts_multi_connector_store_children():
+    multi = _kv_transfer(
+        "MultiConnector",
+        {
+            "connectors": [
+                {"kv_connector": "AscendStoreConnector", "kv_connector_extra_config": {"backend": "mooncake"}},
+                {"kv_connector": "AscendStoreConnector", "kv_connector_extra_config": {"backend": "mooncake"}},
+            ]
+        },
+    )
+    assert owner_kv.validate_owner_connector(_config(kv_transfer=multi)) == (True, "")
+
+
+def test_owner_connector_gate_rejects_unvalidated_connectors():
+    direct = _kv_transfer("MooncakeConnectorV1", {})
+    supported, reason = owner_kv.validate_owner_connector(_config(kv_transfer=direct))
+    assert supported is False
+    assert "not owner-aware" in reason
+
+    layerwise = _kv_transfer("AscendStoreConnector", {"use_layerwise": True})
+    supported, reason = owner_kv.validate_owner_connector(_config(kv_transfer=layerwise))
+    assert supported is False
+    assert "layerwise" in reason
+
+    mixed = _kv_transfer(
+        "MultiConnector",
+        {
+            "connectors": [
+                {"kv_connector": "AscendStoreConnector", "kv_connector_extra_config": {}},
+                {"kv_connector": "MooncakeHybridConnector", "kv_connector_extra_config": {}},
+            ]
+        },
+    )
+    supported, reason = owner_kv.validate_owner_connector(_config(kv_transfer=mixed))
+    assert supported is False
+    assert "MooncakeHybridConnector" in reason
+
+    unnamed = _kv_transfer("MultiConnector", {"connectors": [{"kv_role": "kv_producer"}]})
+    assert owner_kv.validate_owner_connector(_config(kv_transfer=unnamed))[0] is False
 
 
 def test_resolve_owner_sharing_uses_the_device_backend_probe(monkeypatch):

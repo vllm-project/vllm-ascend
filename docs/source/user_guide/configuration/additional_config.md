@@ -301,7 +301,9 @@ llm = LLM(
 
 Typed configuration for the DeepSeek V4.1 prefill context parallelism (PCP) KV placement. With the default `kv_sharing="replicated"`, every PCP rank keeps a complete physical copy of the KV cache and every other field is ignored. With `kv_sharing="owner"`, each rank reserves the complete logical address range over a VMM slab but owns only `1 / pcp_size` of its physical 2 MiB chunks, so attention can still address the full cache.
 
-Owner sharing requires `prefill_context_parallel_size > 1`, `decode_context_parallel_size == 1`, `tensor_parallel_size == 1`, and no external KV-transfer connector. If the VMM backend cannot be initialized, the cache falls back to the replicated path unless `owner_capacity` sized the pool for owner sharding, in which case startup fails instead of allocating a cache that no longer fits.
+Owner sharing requires `prefill_context_parallel_size > 1`, `decode_context_parallel_size == 1`, and `tensor_parallel_size == 1`. It can be combined with an external KV-transfer connector when every configured connector is owner-aware. `AscendStoreConnector` (including `MooncakeConnectorStoreV1`) stages complete logical blocks through a transport-registered HBM buffer, because the owner VMM range cannot be registered directly with HIXL/Mooncake on every platform. Layerwise transfer and direct P2P connectors are not yet validated with owner sharding; they fall back collectively to the replicated cache with a warning. If the VMM backend cannot be initialized, the cache falls back to the replicated path unless `owner_capacity` sized the pool for owner sharding, in which case startup fails instead of allocating a cache that no longer fits.
+
+In a PD deployment the owner placement applies to the prefill engine only. The decode engine keeps `prefill_context_parallel_size=1` and a replicated cache, so it receives complete KV pages through its normal connector path.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |

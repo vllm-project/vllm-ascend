@@ -466,10 +466,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
         enable_kv_event: bool = False,
         worker: Any = None,
         sharded_mamba_group_ids: set[int] | None = None,
+        owner_stager: Any = None,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
         )
+        self.owner_stager = owner_stager
         self.pcp_rank = pcp_rank
         self.pcp_size = pcp_size
         self.put_step = put_step
@@ -953,7 +955,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return False
             if current_event is not None:
                 current_event.synchronize()
-            put_result = self.m_store.put(keys, addrs, sizes)
+            if self.owner_stager is not None:
+                put_result = self.owner_stager.put(self.m_store, keys, addrs, sizes)
+            else:
+                put_result = self.m_store.put(keys, addrs, sizes)
             if isinstance(put_result, list):
                 if len(put_result) != len(keys):
                     logger.error("KV store backend returned %s results for %s keys", len(put_result), len(keys))
@@ -1003,6 +1008,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         invalid_block_ids_lock: threading.Lock | None = None,
         worker: Any = None,
         record_operation: Callable[[str, float, int], None] | None = None,
+        owner_stager: Any = None,
     ):
         super().__init__(
             m_store,
@@ -1014,6 +1020,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             ready_event,
             name="KVCacheStoreRecvingThread",
         )
+        self.owner_stager = owner_stager
         self._invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self.worker = worker
@@ -1096,7 +1103,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 key_list_c[:3],
             )
             load_get_start = time.perf_counter() if self._record_operation_cb is not None else 0.0
-            ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            if self.owner_stager is not None:
+                ret = self.owner_stager.get(self.m_store, key_list_c, addr_list_c, size_list_c)
+            else:
+                ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
             if self._record_operation_cb is not None:
                 self._record_operation_cb(
                     "load_get",

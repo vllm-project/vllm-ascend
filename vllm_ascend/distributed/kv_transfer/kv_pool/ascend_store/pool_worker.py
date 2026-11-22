@@ -67,6 +67,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
+from vllm_ascend.distributed.kv_transfer.utils.owner_transfer import (
+    OwnerTransferStager,
+    owner_backed_tensor,
+)
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -108,6 +112,9 @@ class BaseKVPoolWorker(ABC):
         self._init_backend(parallel_config, extra_config)
         self._init_kv_events(vllm_config)
         self._previous_save_batch: KVCacheStoreBatch | None = None
+        # Non-None when this rank's KV cache is owner-sharded. The transport
+        # engine stages complete logical blocks through this registered buffer.
+        self.owner_transfer_stager: OwnerTransferStager | None = None
         self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
         self._global_to_local_layer: dict[int, int] = {}
         self.kv_send_thread: KVTransferThread | None = None
@@ -766,6 +773,32 @@ class BaseKVPoolWorker(ABC):
 
         registered_regions: dict[int, tuple[int, int]] = {}
         registration_caches = {**kv_caches, **auxiliary_caches} if auxiliary_caches else kv_caches
+        owner_tensor = owner_backed_tensor(registration_caches)
+        owner_staging = owner_tensor is not None and getattr(self.m_store, "requires_owner_transport_staging", True)
+        if owner_staging:
+            from vllm_ascend.attention.context_parallel.pcp_owner_vmm import (
+                owner_slab_for_tensor,
+            )
+
+            self.owner_transfer_stager = OwnerTransferStager(owner_tensor.device)
+            logger.info_once(
+                "Owner-sharded PCP KV detected: staging complete blocks through a "
+                "%.1f MiB transport-registered buffer.",
+                self.owner_transfer_stager.capacity / (1 << 20),
+            )
+
+            def _owner_backed(cache: torch.Tensor) -> bool:
+                return owner_slab_for_tensor(cache) is not None
+        else:
+            if owner_tensor is not None:
+                logger.info_once(
+                    "Owner-sharded PCP KV detected: the transport engine addresses the "
+                    "logical VMM range directly; no staging buffer is used."
+                )
+
+            def _owner_backed(cache: torch.Tensor) -> bool:
+                return False
+
         for cache_or_caches in registration_caches.values():
             for cache in self._as_cache_tuple(cache_or_caches):
                 base_addr = cache.data_ptr()
@@ -773,6 +806,11 @@ class BaseKVPoolWorker(ABC):
                 if not isinstance(region_len, int):
                     region_len = 0
                 self.kv_caches_base_addr.append(base_addr)
+                if _owner_backed(cache):
+                    # The VMM range contains peer-mapped pages and cannot be
+                    # registered with HIXL/Mooncake. Complete blocks are staged
+                    # through owner_transfer_stager instead.
+                    continue
                 storage_key = self._get_storage_key(cache)
                 start = base_addr
                 end = base_addr + region_len
@@ -785,6 +823,12 @@ class BaseKVPoolWorker(ABC):
         self._align_kv_ptrs(registered_regions)
         ptrs = [start for start, _ in registered_regions.values()]
         lengths = [end - start for start, end in registered_regions.values()]
+        if self.owner_transfer_stager is not None:
+            # Register only the staging buffer (plus any replicated auxiliary
+            # cache); the owner VMM range must never reach the engine. One
+            # registration call keeps backends that accept a single batch.
+            ptrs.append(self.owner_transfer_stager.ptr)
+            lengths.append(self.owner_transfer_stager.capacity)
 
         if self.kv_cache_config is not None and self.use_hybrid:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
@@ -1375,6 +1419,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 self.enable_kv_events,
                 worker=self if self.tp_mismatch else None,
                 sharded_mamba_group_ids=self.sharded_mamba_group_ids,
+                owner_stager=self.owner_transfer_stager,
             )
             self.kv_send_thread.start()
             ready_event_sending.wait()
@@ -1392,6 +1437,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 invalid_block_ids_lock=self._invalid_block_ids_lock,
                 worker=self if self.tp_mismatch else None,
                 record_operation=self._record_kv_connector_operation,
+                owner_stager=self.owner_transfer_stager,
             )
             self.kv_recv_thread.start()
             ready_event.wait()
@@ -1509,7 +1555,10 @@ class KVPoolWorker(BaseKVPoolWorker):
                 key_list_c[:3],
             )
             load_get_start = time.perf_counter()
-            ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            if self.owner_transfer_stager is not None:
+                ret = self.owner_transfer_stager.get(self.m_store, key_list_c, addr_list_c, size_list_c)
+            else:
+                ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
             self._record_kv_connector_operation(
                 "load_get",
                 time.perf_counter() - load_get_start,
@@ -1682,7 +1731,10 @@ class KVPoolWorker(BaseKVPoolWorker):
             keys_c[:3],
         )
         load_get_start = time.perf_counter()
-        ret = self.m_store.get(keys_c, addrs_c, sizes_c)
+        if self.owner_transfer_stager is not None:
+            ret = self.owner_transfer_stager.get(self.m_store, keys_c, addrs_c, sizes_c)
+        else:
+            ret = self.m_store.get(keys_c, addrs_c, sizes_c)
         self._record_kv_connector_operation(
             "load_get",
             time.perf_counter() - load_get_start,
@@ -1767,7 +1819,10 @@ class KVPoolWorker(BaseKVPoolWorker):
             len(missing_keys),
             missing_keys[:3],
         )
-        put_result = self.m_store.put(missing_keys, missing_addrs, missing_sizes)
+        if self.owner_transfer_stager is not None:
+            put_result = self.owner_transfer_stager.put(self.m_store, missing_keys, missing_addrs, missing_sizes)
+        else:
+            put_result = self.m_store.put(missing_keys, missing_addrs, missing_sizes)
         if isinstance(put_result, list):
             if len(put_result) != len(missing_keys):
                 logger.error(

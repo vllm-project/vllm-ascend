@@ -187,7 +187,13 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             raise ValueError("P-side DSpark prompt initialization requires MLA without DCP")
         parallel = self.attn_vllm_config.parallel_config
         if parallel.prefill_context_parallel_size != 1 or parallel.decode_context_parallel_size != 1:
-            raise ValueError("P-side DSpark prompt initialization does not support context parallelism")
+            raise ValueError(
+                "P-side DSpark prompt initialization writes one rank-local draft KV cache and does not "
+                "support context parallelism. Use the AscendStore target-KV path without P-side draft KV, "
+                "or set prefill_context_parallel_size=1/decode_context_parallel_size=1. A PCP-aware "
+                "draft-context implementation would need per-chunk target auxiliary states plus owner-aware "
+                "draft page writes and a PD equality run."
+            )
         expected_layers = get_eagle3_aux_layers_from_config(self.speculative_config)
         descriptor = chunk.descriptor
         if (
