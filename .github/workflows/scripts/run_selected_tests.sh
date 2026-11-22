@@ -6,8 +6,10 @@ if [ "${ENABLE_COVERAGE:-}" = "true" ]; then
   enable_coverage=true
 fi
 
-# Set to true temporarily to run all selected targets before reporting failure.
-continue_on_error=false
+# Temporary: keep going after a failed target so the operator verification
+# runs every selected test. The script still exits non-zero at the end.
+# Restore false before merging.
+continue_on_error=true
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
