@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-"""Standalone NPU correctness checks for Qwen4Exp HC Triton kernels."""
+"""NPU correctness checks for Qwen4Exp HC Triton kernels."""
 
 from __future__ import annotations
 
-import argparse
-import time
-
+import pytest
 import torch
 import torch_npu  # noqa: F401
 from vllm.models.qwen4_exp.amd import hyperconnection as upstream_hc
+from vllm.triton_utils import HAS_TRITON
 
 import vllm_ascend.models.qwen4_exp.model  # noqa: F401
 from vllm_ascend.ops.triton.qwen4_exp.hc import (
@@ -29,8 +28,10 @@ DTYPE = torch.bfloat16
 ATOL = 3e-2
 RTOL = 3e-2
 
+pytestmark = pytest.mark.skipif(not HAS_TRITON, reason="Triton is not available")
 
-def verify_model_binding() -> None:
+
+def test_qwen4_exp_hc_model_binding_and_custom_op_registration() -> None:
     functions = {
         "grouped_gemma_rmsnorm": grouped_gemma_rmsnorm,
         "hc_silu": hc_silu,
@@ -52,7 +53,6 @@ def verify_model_binding() -> None:
     for op_name in op_names:
         if not hasattr(torch.ops.vllm, op_name):
             raise AssertionError(f"missing custom op vllm::{op_name}")
-    print("PASS Qwen4Exp model binding and custom-op registration")
 
 
 def reference_grouped_norm(x: torch.Tensor, weight: torch.Tensor, eps: float, groups: int) -> torch.Tensor:
@@ -115,7 +115,13 @@ def make_input(rows: int, width: int, *, padded: bool = False) -> torch.Tensor:
     return result
 
 
-def run_correctness(rows: int, *, padded_input: bool) -> None:
+@pytest.mark.parametrize(
+    ("rows", "padded_input"),
+    ((1, False), (17, False), (7, True), (257, False)),
+)
+@torch.inference_mode()
+def test_qwen4_exp_hc_kernels_match_references(rows: int, padded_input: bool) -> None:
+    torch.manual_seed(20261010 + rows)
     suffix = f"M={rows},row_strided={padded_input}"
     residual = make_input(rows, HYPER_HIDDEN_SIZE, padded=padded_input)
     block_output = make_input(rows, HIDDEN_SIZE, padded=padded_input)
@@ -181,7 +187,9 @@ def run_correctness(rows: int, *, padded_input: bool) -> None:
             )
 
 
-def verify_fullgraph_capture() -> None:
+@torch.inference_mode()
+def test_qwen4_exp_hc_fullgraph_captures_all_custom_ops() -> None:
+    torch.manual_seed(20261010)
     rows = 2
     residual = make_input(rows, HYPER_HIDDEN_SIZE)
     block_output = make_input(rows, HIDDEN_SIZE)
@@ -243,63 +251,3 @@ def verify_fullgraph_capture() -> None:
     captured = {target for target in captured_targets if "qwen4_exp_ascend" in target}
     if not expected_targets.issubset(captured):
         raise AssertionError(f"fullgraph is missing custom ops: {expected_targets - captured}")
-    print("PASS torch.compile fullgraph captured all five Ascend HC custom ops")
-
-
-def benchmark() -> None:
-    rows = 32
-    residual = make_input(rows, HYPER_HIDDEN_SIZE)
-    block_output = make_input(rows, HIDDEN_SIZE)
-    injection = make_input(rows, HC_COUNT)
-    gate = make_input(rows, HYPER_HIDDEN_SIZE)
-    lowrank = make_input(rows, LOWRANK_SIZE)
-    weight = torch.randn(HYPER_HIDDEN_SIZE, device="npu", dtype=DTYPE) * 0.1
-    cases = {
-        "grouped_gemma_rmsnorm": lambda: grouped_gemma_rmsnorm(residual, weight, EPS, HC_COUNT),
-        "hc_silu": lambda: hc_silu(lowrank, HC_COUNT),
-        "hc_gate_mix": lambda: hc_gate_mix(residual, gate, HC_COUNT),
-        "hc_combine": lambda: hc_combine(residual, block_output, injection, HC_COUNT),
-        "hc_combine_norm": lambda: hc_combine_norm(residual, block_output, injection, weight, EPS, HC_COUNT),
-    }
-    for name, function in cases.items():
-        for _ in range(5):
-            function()
-        torch.npu.synchronize()
-        start = time.perf_counter()
-        iterations = 20
-        for _ in range(iterations):
-            function()
-        torch.npu.synchronize()
-        elapsed_us = (time.perf_counter() - start) * 1e6 / iterations
-        print(f"BENCH {name:<28} M={rows} average={elapsed_us:.3f} us")
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--benchmark", action="store_true")
-    args = parser.parse_args()
-    if not torch.npu.is_available():
-        raise RuntimeError("No NPU is available")
-    torch.npu.set_device(0)
-    torch.manual_seed(20261010)
-    verify_model_binding()
-    print(
-        "device=",
-        torch.npu.get_device_name(0),
-        "dtype=",
-        DTYPE,
-        "hidden_size=",
-        HIDDEN_SIZE,
-        "hc_count=",
-        HC_COUNT,
-    )
-    for rows, padded in ((1, False), (17, False), (7, True), (257, False)):
-        run_correctness(rows, padded_input=padded)
-    verify_fullgraph_capture()
-    if args.benchmark:
-        benchmark()
-    print("ALL QWEN4_EXP HC TRITON NPU CHECKS PASSED")
-
-
-if __name__ == "__main__":
-    main()
