@@ -16,7 +16,10 @@ from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
-_ALIGN_ELEMENTS = 8  # 32 bytes of INT32: output span and window-start alignment.
+_STATE_ALIGNMENT_BYTES = 32
+_INT32_BYTES = torch.int32.itemsize
+_ALIGN_ELEMENTS = _STATE_ALIGNMENT_BYTES // _INT32_BYTES
+_ALIGN_ELEMENTS_TL = tl.constexpr(_ALIGN_ELEMENTS)
 _FLAT_BLOCK = 256  # One flat program covers 256 output elements (1 KiB).
 _MAX_WINDOW_ELEMENTS = 4096  # Bounds one row tile so the gathered window fits UB.
 
@@ -61,7 +64,7 @@ def _aligned_indices_window_kernel(
         # Preserve the length dtype: Ascend BlockPtrAnalysis cannot parse an
         # int64-to-int32 truncation in GM pointer offsets.
         first_slot = tl.maximum((lengths - 1) // CACHE_BLOCK_SIZE, 0)
-        window_start = first_slot // _ALIGN_ELEMENTS * _ALIGN_ELEMENTS
+        window_start = first_slot // _ALIGN_ELEMENTS_TL * _ALIGN_ELEMENTS_TL
         if BLOCK_ROWS == 1:
             source_columns = window_start + columns[None, :]
             local_indices = first_slot - window_start + tl.minimum(slots[None, :], STATE_SLOTS - 1)
