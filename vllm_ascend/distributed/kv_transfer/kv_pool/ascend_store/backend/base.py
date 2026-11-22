@@ -96,11 +96,6 @@ class Backend(ABC):
         """Release backend resources after all store operations have stopped."""
         return None
 
-    @property
-    def transfers_disabled(self) -> bool:
-        """Whether this client can no longer transfer KV for the worker."""
-        return False
-
     def ensure_initialized(self) -> None:
         """Initialize the store if this backend supports lazy initialization."""
         return None

@@ -593,15 +593,7 @@ def test_hisparse_requires_async_store_load(extra_config):
 
 @pytest.mark.parametrize("role", [KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER])
 @pytest.mark.parametrize("backend", [{}, {"backend": "mooncake"}], ids=["default", "explicit"])
-def test_hisparse_rejects_mooncake_before_creating_pool(role, backend, monkeypatch, tmp_path):
-    config_path = tmp_path / "mooncake.json"
-    config_path.write_text('{"protocol": "ascend"}', encoding="utf-8")
-    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("ASCEND_GLOBAL_RESOURCE_CONFIG", "{}")
-    monkeypatch.setenv("MC_TRANSFER_TIMEOUT", "15")
-    monkeypatch.setenv("ASCEND_TRANSFER_TIMEOUT", "5000")
-    monkeypatch.delenv("ASCEND_USE_ASYNC_TRANSFER", raising=False)
-    monkeypatch.delenv("ASCEND_ENABLE_USE_FABRIC_MEM", raising=False)
+def test_hisparse_rejects_mooncake_before_creating_pool(role, backend):
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(rank=1),
         attention_config=SimpleNamespace(hisparse_config=SimpleNamespace(eager_host_mirror=True)),

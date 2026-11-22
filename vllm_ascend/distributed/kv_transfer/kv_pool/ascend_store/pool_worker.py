@@ -1446,14 +1446,6 @@ class KVPoolWorker(BaseKVPoolWorker):
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self._init_cache_layout()
 
-    def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
-        meta = super().build_connector_worker_meta()
-        if self._transfer_layout is not None and self.m_store.transfers_disabled:
-            if meta is None:
-                meta = AscendStoreKVConnectorWorkerMetadata()
-            meta.transfers_disabled = True
-        return meta
-
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
         return False
 

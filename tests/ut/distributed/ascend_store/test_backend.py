@@ -845,7 +845,6 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             backend._use_fabric_mem = False
             backend._use_store_independent_te = False
             backend._prefetch_conf = SsdPrefetchConf.disabled()
-            backend._host_staging = None
             backend._store_init_lock = MagicMock()
             backend.local_seg = None
             return backend
@@ -1027,6 +1026,16 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         b._use_fabric_mem = True
         b.register_buffer([BufferDescriptor(address=100, size_bytes=200)])
         b.store.register_buffer.assert_not_called()
+
+    def test_rejects_host_pool_buffers_and_transfers(self):
+        backend = self._make_backend()
+        host = BufferDescriptor(address=100, size_bytes=200, memory_location=MemoryLocation.HOST)
+        with self.assertRaisesRegex(ValueError, "does not support Host pool buffers"):
+            backend.register_buffer([BufferDescriptor(address=400, size_bytes=200), host])
+        for transfer in (backend.get, backend.put):
+            with self.assertRaisesRegex(ValueError, "does not support Host pool transfers"):
+                transfer(["key"], [[host.address]], [[host.size_bytes]], memory_location=MemoryLocation.HOST)
+        self.assertEqual(backend.store.mock_calls, [])
 
     def test_setup_store_with_store_independent_te(self):
         b = self._make_backend()

@@ -876,7 +876,6 @@ class KVPoolScheduler(BaseKVPoolScheduler):
     ) -> None:
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self._failed_external_load_req_ids: set[str] = set()
-        self._store_transfers_disabled = False
         self._in_flight_save_blocks = InFlightSaveBlockTracker(vllm_config.parallel_config.world_size)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
@@ -887,12 +886,8 @@ class KVPoolScheduler(BaseKVPoolScheduler):
                     self._failed_external_load_req_ids.add(request_id)
         super().update_connector_output(connector_output)
         meta = connector_output.kv_connector_worker_meta
-        if isinstance(meta, AscendStoreKVConnectorWorkerMetadata):
-            if meta.transfers_disabled and not self._store_transfers_disabled:
-                self._store_transfers_disabled = True
-                logger.warning("Disabling HiSparse AscendStore transfers because a worker's Store is unavailable.")
-            if self._block_pool is not None:
-                self._in_flight_save_blocks.complete(meta.completed_events, self._block_pool)
+        if isinstance(meta, AscendStoreKVConnectorWorkerMetadata) and self._block_pool is not None:
+            self._in_flight_save_blocks.complete(meta.completed_events, self._block_pool)
 
     def request_finished_all_groups(
         self, request: Request, block_ids: tuple[list[int], ...]
@@ -916,15 +911,12 @@ class KVPoolScheduler(BaseKVPoolScheduler):
 
     def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
         """Keep Mamba source blocks alive until bulk save completes."""
-        if self._store_transfers_disabled:
-            req_meta.can_save = False
-            return
         self._in_flight_save_blocks.retain(req_meta, self.num_speculative_blocks_by_group, self._block_pool)
 
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
         # Core may reschedule the request with zero computed tokens after an
         # import failure. A key can still be visible to lookup while GET fails.
-        if self._store_transfers_disabled or request.request_id in self._failed_external_load_req_ids:
+        if request.request_id in self._failed_external_load_req_ids:
             return None
         prompt_token_len = len(request.prompt_token_ids)
         if self.enable_partial_hash_hits:
