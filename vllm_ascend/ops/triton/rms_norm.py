@@ -32,7 +32,7 @@ def _rms_tile(
     mask_row = mask_r[:, None]
     offset_hidden = offset_row[:, None] * hidden_state_stride_bs + offset_d[None, :]
 
-    x = tl.load(hidden_state_ptr + offset_hidden, mask=mask_row)
+    x = tl.load(hidden_state_ptr + offset_hidden, mask=mask_row, other=0.0)
 
     variance = tl.sum(x * x, axis=-1) / DIM
     output = x * tl.rsqrt(variance[:, None] + variance_epsilon)
