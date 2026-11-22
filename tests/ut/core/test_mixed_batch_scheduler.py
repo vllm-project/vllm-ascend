@@ -74,7 +74,7 @@ def _add_decodes(scheduler, count=4):
 
 
 @pytest.mark.parametrize("async_scheduling", [False, True])
-@pytest.mark.parametrize("cap", [None, 2])
+@pytest.mark.parametrize("cap", [None, 0, 2])
 def test_mixed_step_caps_decodes_then_holds_new_prefill(async_scheduling, cap):
     scheduler = _make_scheduler(async_scheduling, cap=cap)
     decodes = _add_decodes(scheduler)
@@ -176,8 +176,8 @@ def test_running_prefill_resumes_after_decode_drain(async_scheduling):
     assert len(decodes & resumed.num_scheduled_tokens.keys()) == 2
 
 
-@pytest.mark.parametrize("cap", [0, -1, True, 2.5, "2"])
-def test_mixed_decode_limit_accepts_only_a_positive_integer_or_null(cap):
+@pytest.mark.parametrize("cap", [-1, True, 2.5, "2"])
+def test_mixed_decode_limit_accepts_only_a_nonnegative_integer_or_null(cap):
     with pytest.raises(ValueError, match="max_num_decode_seqs_in_mixed_batch"):
         SchedulerConfig.from_additional_config({"scheduler_config": {"max_num_decode_seqs_in_mixed_batch": cap}})
 
