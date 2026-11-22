@@ -735,8 +735,18 @@ _PCP_STAGE_STEP: dict[str, Any] = {
     "long_kv_host_calls": 0,
     "smla_host_s": 0.0,
     "smla_host_calls": 0,
+    "swa_sync_host_s": 0.0,
+    "swa_sync_host_calls": 0,
+    "long_kv_sync_host_s": 0.0,
+    "long_kv_sync_host_calls": 0,
 }
 _PCP_STAGE_REPORT_EVERY = 128
+# Side-stream staging measured 7-8 ms (SWA) and 22-25 ms (long-KV) of host
+# stall per issue on A3: the table build's pageable H2D is issued after
+# ``wait_event(start)`` and therefore waits for the whole cache-write
+# dependency.  Keep the shared plan/metadata caches but stage synchronously
+# on the main stream, where the writes are already ordered ahead of us.
+_OWNER_STAGE_ASYNC = False
 
 
 def _pcp_stage_count(kind: str, name: str, amount: int = 1) -> None:
@@ -775,7 +785,8 @@ def _pcp_stage_note_step(step_token, stage_cache) -> None:
             logger.info(
                 "PCP stage counters: steps=%d swa=%s long_kv=%s smla_ops=%d step_smla_ops=%d "
                 "step_smla_entries=%d swa_blocks=%d/%d long_kv_blocks=%d/%d "
-                "swa_host_us=%.1f long_kv_host_us=%.1f smla_host_us=%.1f",
+                "swa_host_us=%.1f long_kv_host_us=%.1f smla_host_us=%.1f "
+                "swa_sync_us=%.1f long_kv_sync_us=%.1f",
                 state["steps"],
                 dict(sorted(_PCP_STAGE_STATS.get("swa", {}).items())),
                 dict(sorted(_PCP_STAGE_STATS.get("long_kv", {}).items())),
@@ -789,6 +800,8 @@ def _pcp_stage_note_step(step_token, stage_cache) -> None:
                 1e6 * state["swa_host_s"] / max(1, state["swa_host_calls"]),
                 1e6 * state["long_kv_host_s"] / max(1, state["long_kv_host_calls"]),
                 1e6 * state["smla_host_s"] / max(1, state["smla_host_calls"]),
+                1e6 * state["swa_sync_host_s"] / max(1, state["swa_sync_host_calls"]),
+                1e6 * state["long_kv_sync_host_s"] / max(1, state["long_kv_sync_host_calls"]),
             )
         # The operator tiling cache survives in the builder's batch dictionary
         # across steps, while its signature cannot see the per-request
@@ -1485,6 +1498,7 @@ class AscendDSAV41Impl:
                 metadata.attention._pcp_stage_memo = (pending[0], staged)
                 _pcp_stage_count("long_kv", "async_consumed")
             else:
+                long_kv_host_started = time.perf_counter()
                 staged = _maybe_stage_owner_cmp_cache(
                     source_cache,
                     cmp_block_table,
@@ -1495,6 +1509,8 @@ class AscendDSAV41Impl:
                     block_size=getattr(metadata.attention, "storage_block_size", None),
                     counts=self._cmp_stage_counts(metadata.attention, num_reqs),
                 )
+                _PCP_STAGE_STEP["long_kv_sync_host_calls"] += 1
+                _PCP_STAGE_STEP["long_kv_sync_host_s"] += time.perf_counter() - long_kv_host_started
             _timing_exit(timing)
             if staged is not None:
                 source_cache, cmp_block_table = staged
@@ -1544,6 +1560,7 @@ class AscendDSAV41Impl:
                 if async_compressed == has_compressed:
                     staged, plan, rebuilt = staged_pair, async_plan, async_rebuilt
             if staged is None:
+                sync_host_started = time.perf_counter()
                 fallback_stage_cache = getattr(metadata, "swa_stage_cache", None)
                 eligible = (
                     # A negative from the overlapped path means this step's
@@ -1569,15 +1586,27 @@ class AscendDSAV41Impl:
                     if owner_slab_for_tensor(swa_cache) is not None:
                         timing = _timing_enter("stage_swa_chunk", self.pcp_config.enable_timing)
                         stage_cache = getattr(metadata, "swa_stage_cache", None)
-                        plan = _build_swa_chunk_plan(
-                            metadata.swa,
-                            ori_block_table,
-                            num_reqs,
-                            int(metadata.swa.storage_block_size),
-                            int(metadata.swa.ori_win_left) + 1,
-                            int(swa_cache.shape[0]),
-                            stage_cache=stage_cache,
-                        )
+                        block_size = int(metadata.swa.storage_block_size)
+                        window = int(metadata.swa.ori_win_left) + 1
+                        num_blocks = int(swa_cache.shape[0])
+                        plan_key = (int(ori_block_table.data_ptr()), int(num_reqs), num_blocks, block_size, window)
+                        plan_cache = getattr(stage_cache, "plan_cache", None)
+                        if isinstance(plan_cache, dict) and plan_key in plan_cache:
+                            plan = plan_cache[plan_key]
+                            _pcp_stage_count("swa", "plan_hit")
+                        else:
+                            plan = _build_swa_chunk_plan(
+                                metadata.swa,
+                                ori_block_table,
+                                num_reqs,
+                                block_size,
+                                window,
+                                num_blocks,
+                                stage_cache=stage_cache,
+                            )
+                            if isinstance(plan_cache, dict):
+                                plan_cache[plan_key] = plan
+                            _pcp_stage_count("swa", "plan_miss")
                         if plan is not None and plan.total_blocks > 0:
                             rebuilt = _build_swa_chunk_smla_metadata(
                                 attn,
@@ -1605,6 +1634,8 @@ class AscendDSAV41Impl:
                                     enable_timing=self.pcp_config.enable_timing,
                                 )
                         _timing_exit(timing)
+                _PCP_STAGE_STEP["swa_sync_host_calls"] += 1
+                _PCP_STAGE_STEP["swa_sync_host_s"] += time.perf_counter() - sync_host_started
             if staged is not None:
                 swa_cache, ori_block_table = staged
                 seq_lens = plan.replay_seq_lens

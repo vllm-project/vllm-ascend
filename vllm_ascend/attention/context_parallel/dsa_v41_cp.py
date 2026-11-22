@@ -26,6 +26,7 @@ from vllm_ascend.attention.context_parallel.pcp_owner_kv import (
     resolve_owner_sharing,
 )
 from vllm_ascend.attention.dsa_v41 import (
+    _OWNER_STAGE_ASYNC,
     AscendDSAV41AttentionMetadataBuilder,
     AscendDSAV41FoldedIndexMetadataBuilder,
     AscendDSAV41Impl,
@@ -751,8 +752,9 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         # overlaps the indexer selection; ``_forward_attention`` joins it just
         # before the kernel.  Every rank still issues its own writes and
         # collectives unchanged: only the copy moves streams.
-        self._start_owner_swa_stage_async(attn, metadata)
-        self._start_owner_long_kv_stage_async(attn, metadata)
+        if _OWNER_STAGE_ASYNC:
+            self._start_owner_swa_stage_async(attn, metadata)
+            self._start_owner_long_kv_stage_async(attn, metadata)
         projector._parallel_o_proj.all_gather_weights()
         return prepared
 
