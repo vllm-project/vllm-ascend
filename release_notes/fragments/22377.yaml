@@ -1,0 +1,5 @@
+pr: 22377
+entries:
+  - category: performance
+    text: Reduced recurrent Qwen GDN preprocessing and removed the runtime parameter cast for compatible fused operator interfaces.
+    model: qwen3.8-flash-next
