@@ -1344,13 +1344,15 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         # getattr(..., False): unit tests build this model through mocks
         # that bypass __init__, leaving the marker unset; an unprovisioned
         # instance must not fail here.
-        if getattr(self, "_draft_embed_provisioned", False) and not _embed_weight_loaded(loaded_params):
-            raise RuntimeError(
-                "Kimi K3 provisioned the last-stage input embedding for a DSpark "
-                "draft, but the checkpoint loader loaded no *embed_tokens.weight "
-                "tensor on this stage; the draft would alias uninitialized "
-                f"memory. Loaded parameter names: {sorted(loaded_params)[:8]}"
-            )
+        # AutoWeightsLoader may split the checkpoint into several load_weights
+        # invocations (it groups weights by consecutive name prefixes), so
+        # the embed shard may arrive in a later invocation than the layer
+        # weights. Record the fill across invocations; the DSpark draft load
+        # follows target loading, and its share wrapper raises if no target
+        # invocation ever provided the shard.
+        if getattr(self, "_draft_embed_provisioned", False) and not getattr(self, "_embed_shard_filled", False):
+            if _embed_weight_loaded(loaded_params):
+                self._embed_shard_filled = True
         return loaded_params | standalone_gate_params
 
     def forward(

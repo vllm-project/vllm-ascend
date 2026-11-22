@@ -167,6 +167,19 @@ def _make_pp_safe_maybe_share_target_embed(mark_shared: bool):
         shared_embed = getattr(target_embed, "base_layer", target_embed)
         if getattr(draft_inner, "embed_tokens", None) is shared_embed:
             draft_model.has_own_embed_tokens = True
+            # Fail fast when a provisioned last-stage shard was never filled:
+            # The DSpark draft load follows target loading, so the fill state
+            # accumulated across target load_weights invocations is final here
+            # and the draft is about to alias the shard.
+            if getattr(target_inner, "_draft_embed_provisioned", False) and not getattr(
+                target_inner, "_embed_shard_filled", False
+            ):
+                raise RuntimeError(
+                    "Kimi K3 provisioned the last-stage input embedding for a DSpark "
+                    "draft, but the checkpoint loader never loaded any "
+                    "*embed_tokens.weight tensor across all load invocations on "
+                    "this stage; the draft would alias uninitialized memory."
+                )
 
     return _pp_safe_maybe_share_target_embed
 

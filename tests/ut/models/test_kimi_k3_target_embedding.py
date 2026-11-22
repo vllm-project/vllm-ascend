@@ -267,7 +267,10 @@ def test_last_stage_embedding_uses_normal_loader_and_draft_shares_it(monkeypatch
     checkpoint_weight = torch.arange(VOCAB_SIZE * HIDDEN_SIZE, dtype=torch.float32).reshape(VOCAB_SIZE, HIDDEN_SIZE)
     # The normal target loader dispatches to the embedding's own weight_loader
     # with the full checkpoint tensor; each TP rank keeps its vocab shard.
-    target.embed_tokens.weight_loader(target.embed_tokens.weight, checkpoint_weight)
+    # Going through load_weights (not a manual weight_loader call) also
+    # records the shard fill for the share-time check in the PP-safe wrapper.
+    loaded = target.load_weights([("embed_tokens.weight", checkpoint_weight)])
+    assert "embed_tokens.weight" in loaded
     expected = _expected_shard(target.embed_tokens, checkpoint_weight)
     torch.testing.assert_close(target.embed_tokens.weight, expected)
 
@@ -288,7 +291,7 @@ def test_last_stage_embed_loads_through_real_load_weights(monkeypatch):
     # RFC acceptance #1: the normal target loader itself (not a manually
     # invoked weight_loader) dispatches the checkpoint's embed_tokens.weight
     # into the provisioned shard and reports it in loaded_params, which is
-    # also what the fail-fast check in load_weights keys on.
+    # also what the cross-invocation fill recording in load_weights keys on.
     _stub_vocab_parallel_groups(monkeypatch, 0)
     target, _ = _make_target(monkeypatch, 2, 1, "dspark", ["Qwen3DSparkModel"], real_embedding=True)
     checkpoint_weight = torch.arange(VOCAB_SIZE * HIDDEN_SIZE, dtype=torch.float32).reshape(VOCAB_SIZE, HIDDEN_SIZE)
@@ -416,7 +419,9 @@ def test_post_process_share_and_rotation_paths(monkeypatch, scenario):
     )
     checkpoint_weight = torch.arange(VOCAB_SIZE * HIDDEN_SIZE, dtype=torch.float32).reshape(VOCAB_SIZE, HIDDEN_SIZE)
     if shares_target:
-        target.embed_tokens.weight_loader(target.embed_tokens.weight, checkpoint_weight)
+        # Fill through the real target loader so the cross-invocation fill
+        # marker is set before the wrapper's share-time check.
+        target.load_weights([("embed_tokens.weight", checkpoint_weight)])
         params = dict(target.named_parameters())
         assert params["embed_tokens.weight"] is target.embed_tokens.weight
 
@@ -575,24 +580,58 @@ def test_embed_weight_loaded_detection(loaded_names, expected):
     assert kimi_k3._embed_weight_loaded(loaded_names) is expected
 
 
-def test_load_weights_fails_fast_when_provisioned_shard_unfilled(monkeypatch):
-    target, _ = _make_target(monkeypatch, 2, 1, "dspark", ["Qwen3DSparkModel"], real_embedding=False)
+def test_embed_fill_recorded_across_multiple_load_invocations(monkeypatch):
+    # Hardware regression (4 × 950DT, TP8/PP4): AutoWeightsLoader groups
+    # weights by consecutive name prefixes and may split the checkpoint into
+    # several load_weights invocations, with the embed shard arriving in a
+    # later invocation than the layer weights. A per-invocation raise fired
+    # on the first partial invocation; the fill must instead be recorded
+    # across invocations, and the share-time check must not fire once the
+    # shard arrives.
+    _stub_vocab_parallel_groups(monkeypatch, 0)
+    target, _ = _make_target(monkeypatch, 2, 1, "dspark", ["Qwen3DSparkModel"], real_embedding=True)
     assert target._draft_embed_provisioned is True
+    checkpoint_weight = torch.arange(VOCAB_SIZE * HIDDEN_SIZE, dtype=torch.float32).reshape(VOCAB_SIZE, HIDDEN_SIZE)
 
-    monkeypatch.setattr(
-        kimi_k3.UpstreamKimiLinearModel,
-        "load_weights",
-        lambda _self, _weights: {"model.embed_tokens.weight"},
-    )
-    assert target.load_weights(iter(())) == {"model.embed_tokens.weight"}
+    # First invocation: no embed shard (a partial prefix group) — must not
+    # raise even though the shard is provisioned and still unfilled.
+    target.load_weights(iter(()))
+    assert getattr(target, "_embed_shard_filled", False) is False
+    # A further partial invocation still must not raise.
+    target.load_weights(iter(()))
+    assert getattr(target, "_embed_shard_filled", False) is False
 
-    monkeypatch.setattr(
-        kimi_k3.UpstreamKimiLinearModel,
-        "load_weights",
-        lambda _self, _weights: {"model.layers.0.weight"},
-    )
-    with pytest.raises(RuntimeError, match="embed_tokens.weight"):
-        target.load_weights(iter(()))
+    # The embed shard arrives in its own invocation.
+    loaded = target.load_weights([("embed_tokens.weight", checkpoint_weight)])
+    assert "embed_tokens.weight" in loaded
+    assert target._embed_shard_filled is True
+
+    # The share-time check passes: the wrapper shares without raising.
+    draft, draft_inner = _make_draft()
+    patch_dspark._pp_safe_maybe_share_target_embed(draft, draft_inner, target)
+    assert draft_inner.embed_tokens is target.embed_tokens
+    assert draft.has_own_embed_tokens is True
+
+
+def test_share_time_check_raises_when_shard_never_filled(monkeypatch):
+    # The DSpark draft load follows target loading, so the share-time wrapper
+    # sees the final cross-invocation fill state (RFC validation item 2): a provisioned shard that no invocation ever filled
+    # must fail at share time instead of letting the draft alias
+    # uninitialized memory.
+    _stub_vocab_parallel_groups(monkeypatch, 0)
+    target, _ = _make_target(monkeypatch, 2, 1, "dspark", ["Qwen3DSparkModel"], real_embedding=True)
+    assert target._draft_embed_provisioned is True
+    checkpoint_weight = torch.arange(VOCAB_SIZE * HIDDEN_SIZE, dtype=torch.float32).reshape(VOCAB_SIZE, HIDDEN_SIZE)
+
+    # Several invocations, none carrying the embed shard (e.g. prefix groups
+    # for ranks that hold none of their weights).
+    target.load_weights(iter(()))
+    target.load_weights(iter(()))
+    assert getattr(target, "_embed_shard_filled", False) is False
+
+    draft, draft_inner = _make_draft()
+    with pytest.raises(RuntimeError, match="never loaded any \\*embed_tokens\\.weight"):
+        patch_dspark._pp_safe_maybe_share_target_embed(draft, draft_inner, target)
 
 
 def test_load_weights_skips_embed_check_when_not_provisioned(monkeypatch):
