@@ -589,9 +589,11 @@ def _build_swa_chunk_smla_metadata(
         cached = stage_cache.smla_cache[key]
         if cached is False:
             return None
-        # Every layer gets its own tensor even though the op ran once; a
-        # kernel or caller that mutates the tiling cannot affect its peers.
-        return cached.clone() if isinstance(cached, torch.Tensor) else cached
+        # The operator allocates a fresh int32[1024] output per call
+        # (csrc/attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h),
+        # so the cached tensor is private and the kernel only reads it.
+        # Layers with identical geometry share it instead of paying a clone.
+        return cached
     try:
         value = torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
             attn.n_local_heads,
@@ -630,11 +632,10 @@ def _build_swa_chunk_smla_metadata(
         )
         stage_cache.smla_cache[key] = False
         return None
-    # The operator may return a tensor backed by an internal reusable buffer;
-    # cache an owned copy and hand out a separate copy per caller.
-    stored = value.clone() if isinstance(value, torch.Tensor) else value
-    stage_cache.smla_cache[key] = stored
-    return stored.clone() if isinstance(stored, torch.Tensor) else stored
+    # The adapter returns a freshly allocated output tensor, so it can be
+    # cached and shared by every layer with this geometry.
+    stage_cache.smla_cache[key] = value
+    return value
 
 
 def _maybe_stage_owner_cmp_cache(

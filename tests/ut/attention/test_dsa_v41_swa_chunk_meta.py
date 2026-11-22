@@ -156,25 +156,31 @@ def test_identical_signatures_share_one_metadata_op(monkeypatch):
 
     assert op.call_count == 1
     assert all(result is not None for result in results)
-    assert len({result.data_ptr() for result in results}) == 4
-    for result in results[1:]:
-        assert torch.equal(result, results[0])
+    # The C++ adapter allocates a fresh int32[1024] output per call, so the
+    # cache hands the same read-only tiling to every layer in this geometry.
+    assert len({result.data_ptr() for result in results}) == 1
+    assert all(result is results[0] for result in results)
 
 
-def test_cached_metadata_is_cloned_from_a_reused_buffer(monkeypatch):
-    shared_buffer = torch.arange(4, dtype=torch.int32)
-    op = _install_op(monkeypatch, lambda *_args, **_kwargs: shared_buffer)
+def test_metadata_cache_shares_the_fresh_operator_output(monkeypatch):
+    outputs = []
+
+    def output(*_args, **_kwargs):
+        tensor = torch.full((4,), len(outputs) + 1, dtype=torch.int32)
+        outputs.append(tensor)
+        return tensor
+
+    op = _install_op(monkeypatch, output)
     stage_cache = dsa_v41._SwaChunkStageCache()
     plan = _plan(_swa_metadata(), _layer_table(0), stage_cache)
 
-    results = [_smla_metadata(stage_cache, plan) for _ in range(2)]
+    first = _smla_metadata(stage_cache, plan)
+    second = _smla_metadata(stage_cache, plan)
 
     assert op.call_count == 1
-    assert all(result.data_ptr() != shared_buffer.data_ptr() for result in results)
-    assert results[0].data_ptr() != results[1].data_ptr()
-    results[0].fill_(-1)
-    assert shared_buffer.tolist() == [0, 1, 2, 3]
-    assert results[1].tolist() == [0, 1, 2, 3]
+    assert first is second
+    # No defensive copy: the cached tensor is the operator's own allocation.
+    assert first.data_ptr() == outputs[0].data_ptr()
 
 
 def test_differing_signatures_rebuild_and_do_not_share(monkeypatch):
