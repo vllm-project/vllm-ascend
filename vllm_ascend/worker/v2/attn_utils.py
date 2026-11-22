@@ -78,6 +78,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
+    AscendReplicatedDraftCacheSpec,
     AscendSFAIndexerCacheSpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
@@ -1990,6 +1991,8 @@ def _reshape_kv_cache_v2(
                 raise ValueError(f"KV cache for {layer_name} is not a whole number of pages.")
             num_blocks = total_bytes // page_stride_bytes
             num_blocks_per_kv_block = get_storage_block_size(kv_cache_spec) // kernel_block_size
+            if isinstance(kv_cache_spec, AscendReplicatedDraftCacheSpec):
+                num_blocks_per_kv_block *= kv_cache_spec.replication_size
             kernel_num_blocks = num_blocks * num_blocks_per_kv_block
             kv_cache_shape = group.backend.get_kv_cache_shape(
                 kernel_num_blocks,

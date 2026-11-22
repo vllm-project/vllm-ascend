@@ -311,6 +311,28 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class AscendReplicatedDraftCacheSpec(FullAttentionSpec):
+    """Full-token draft storage sharing a DCP target's scheduler block IDs.
+
+    ``block_size`` and ``dcp_sharded`` describe allocation by the target's
+    manager. Each allocation owns ``replication_size`` times as many physical
+    kernel pages; the draft consumes an expanded table at DCP=1. This follows
+    the replicated SFA indexer contract, without changing the draft's TP heads.
+    """
+
+    replication_size: int = 1
+
+    @property
+    def state_content_size_bytes(self) -> int:
+        return self.replication_size * super().state_content_size_bytes
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, cls) and spec.replication_size == specs[0].replication_size for spec in specs)
+        return replace(super().merge(specs), replication_size=specs[0].replication_size)
+
+
+@dataclass(frozen=True, kw_only=True)
 class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
     """KV cache spec for SFA indexer K/scale cache.
 
@@ -557,6 +579,11 @@ def register_ascend_kv_cache_specs() -> None:
     from vllm_ascend.core.single_type_kv_cache_manager import AscendCircularBufferManager
     from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
 
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendReplicatedDraftCacheSpec,
+        manager_class=FullAttentionManager,
+        uniform_type_base_spec=FullAttentionSpec,
+    )
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendCircularBufferSpec,
         manager_class=AscendCircularBufferManager,

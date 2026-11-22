@@ -22,6 +22,7 @@ from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dfl
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.spec_decode.dflash.kv_cache import ReplicatedDFlashBlockTables, draft_block_tables
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 
 
@@ -308,6 +309,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         target_input_buffers: Any,
         target_attn_groups: Any,
     ) -> None:
+        block_tables = draft_block_tables(block_tables, kv_cache_config, self.draft_attn_layer_names)
         super().set_attn(
             model_state,
             kv_cache_config,
@@ -362,6 +364,8 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
+        if isinstance(getattr(self, "block_tables", None), ReplicatedDFlashBlockTables):
+            self.block_tables.refresh()
         sync_state = dp_sync_state
         if self.pcp_manager is not None:
             # The target's DP sync describes PCP-local requests. The replicated

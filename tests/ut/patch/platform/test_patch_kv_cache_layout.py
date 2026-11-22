@@ -37,8 +37,10 @@ def layout_inputs(specs):
 @pytest.mark.parametrize(
     "requested, expected", [("HND", "LBHNC"), ("LBHNC", "LBHNC"), ("NHD", "LBNHC"), ("LBNHC", "LBNHC")]
 )
-def test_glm_dflash_private_pools_allow_layer_layout(monkeypatch, requested, expected):
+@pytest.mark.parametrize("model_version", [None, "glm5_next", "deepseek_v4"])
+def test_dflash_private_pools_allow_layer_layout(monkeypatch, requested, expected, model_version):
     config, target, draft = make_case()
+    target = replace(target, model_version=model_version)
     monkeypatch.setattr(layout_patch.envs, "VLLM_KV_CACHE_LAYOUT", requested)
     supported = [["LBNHC", "LBHNC", "BLNHC", "BLHNC"]]
     inputs = layout_inputs([target, draft])
@@ -52,14 +54,12 @@ def test_glm_dflash_private_pools_allow_layer_layout(monkeypatch, requested, exp
     assert inputs == layout_inputs([target, draft])
 
 
-@pytest.mark.parametrize("case", ["other_model", "other_method", "unsupported_backend"])
+@pytest.mark.parametrize("case", ["other_method", "unsupported_backend"])
 def test_generic_layout_rejections_are_preserved(monkeypatch, case):
     config, target, draft = make_case()
     monkeypatch.setattr(layout_patch.envs, "VLLM_KV_CACHE_LAYOUT", "HND")
     supported = [["LBNHC", "LBHNC", "BLNHC", "BLHNC"]]
-    if case == "other_model":
-        target = replace(target, model_version=None)
-    elif case == "other_method":
+    if case == "other_method":
         config.speculative_config.method = "eagle3"
     else:
         supported = [["BLNHC", "BLHNC"]]

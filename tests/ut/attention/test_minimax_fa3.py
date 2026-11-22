@@ -371,7 +371,7 @@ def test_cache_write_precedes_attention_and_transfer_completion(fa3):
         ]
     ],
 )
-def test_glm_dflash_local_draft_routing(selection, device, eager, fault):
+def test_dflash_local_draft_routing(selection, device, eager, fault):
     r = selection
     r.device = getattr(r.profiles.AscendDeviceType, device)
     target = NS(hf_text_config=NS(model_type="glm_moe_dsa"), hf_config=NS(architectures=["GlmMoeDsaForCausalLM"]))
@@ -409,7 +409,7 @@ def test_glm_dflash_local_draft_routing(selection, device, eager, fault):
     elif fault == "no_model":
         r.config.model_config = None
     actual = r.select()
-    assert ("flash_attention_v3" in actual) == (fault is None and eager)
+    assert ("flash_attention_v3" in actual) == (fault in (None, "other_target") and eager)
 
 
 @pytest.mark.parametrize("layout", ["NHD", "HND"])
@@ -425,7 +425,7 @@ def test_cache_layout_alias_resolution(fa3, monkeypatch, layout_source):
     from vllm.config import CacheConfig
     from vllm.v1.attention.backends import utils
 
-    config = NS(cache_config=CacheConfig(), kv_transfer_config=NS(kv_role="kv_both"))
+    config = NS(cache_config=CacheConfig(), kv_transfer_config=NS(kv_role="kv_both"), speculative_config=None)
     monkeypatch.setattr(utils.envs, "VLLM_KV_CACHE_LAYOUT", layout if layout_source == "env" else None)
     monkeypatch.setattr(utils, "get_kv_connector_cache_layout", lambda _: layout)
     resolved = utils.resolve_kv_cache_layout(config, [["LBNHC", "LBHNC"]])

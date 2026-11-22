@@ -31,11 +31,14 @@
 # * platform/patch_kv_cache_layout.py:
 #   Target: attention.backends.utils.resolve_kv_cache_layout and EngineCore's
 #           imported reference.
-#   Why: GLM-5.3-Flash + DFlash2 uses the Ascend GLM planner's separate physical
-#        pools; the generic shared-backing DCP check wrongly rejects HND/LBHNC.
-#   How: For explicit NHD/HND/LBNHC/LBHNC with method=dflash, exclude GLM-owned
-#        specs only from generic layout validation. Backend checks and the
-#        real grouping, allocation, DCP flags and memory accounting stay intact.
+#   Why: DFlash uses Ascend per-layer/private pools rather than the generic
+#        mixed-page shared backing that forces block-outer layouts.
+#   How: For explicit NHD/HND/LBNHC/LBHNC with method=dflash, negotiate against
+#        backend support without a target-model whitelist. AscendKVCacheConfigBuilder
+#        keeps incompatible groups in disjoint pools, while replicated dense
+#        draft specs share compatible target block IDs with expanded storage.
+#        No per-token work is added by this resolver patch; DCP draft table
+#        expansion is performed once per proposal on device.
 #   Related PR: None; the upstream resolver has no platform placement hook.
 #   Future plan: Remove when layout resolution delegates physical-packing
 #                constraints to the platform KVCacheConfigBuilder.

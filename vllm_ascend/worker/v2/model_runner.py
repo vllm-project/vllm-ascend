@@ -74,6 +74,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.core.dflash_kv_cache import apply_replicated_dflash_specs
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
@@ -414,6 +415,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         kv_cache_spec = super().get_kv_cache_spec()
+        kv_cache_spec = apply_replicated_dflash_specs(kv_cache_spec, self.vllm_config, self.speculator)
 
         return apply_dspark_resident_kv_specs(
             kv_cache_spec,

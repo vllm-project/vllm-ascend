@@ -1800,7 +1800,6 @@ def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str | Non
         return (
             bool(spec.enforce_eager)
             and model_tag == "dflash_head"
-            and target.hf_text_config.model_type == "glm_moe_dsa"
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
         )
     if spec.method == "dspark":
@@ -1884,7 +1883,7 @@ def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
 
 
 def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
-    """Select optional FA3 for compatible MiniMax, Step5 and local GLM DFlash2 drafts."""
+    """Select optional FA3 for compatible MiniMax, Step5 and local DFlash2 drafts."""
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.FLASH_ATTN_NPU_3
     ):
@@ -1902,12 +1901,12 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
         return False
     from vllm.compilation import backends
 
-    local_glm_dflash = (
+    local_dflash = (
         spec.method == "dflash"
         and _is_supported_flash_attn_draft(spec, getattr(backends, "model_tag", None))
         and not getattr(selector, "use_pcp", False)
     )
-    if not (local_glm_dflash or _uses_minimax_fa3(config) or _uses_step5_fa3(config)):
+    if not (local_dflash or _uses_minimax_fa3(config) or _uses_step5_fa3(config)):
         return False
     parallel = config.parallel_config
     return (
@@ -1928,7 +1927,7 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
             )
         )
         and (
-            local_glm_dflash
+            local_dflash
             or (
                 parallel.pipeline_parallel_size == 1
                 and parallel.prefill_context_parallel_size == 1
@@ -1936,7 +1935,7 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
             )
         )
         and config.cache_config.cache_dtype in ("auto", "float16", "bfloat16")
-        and (local_glm_dflash or not getattr(config.quant_config, "enable_c8_quant", False))
+        and (local_dflash or not getattr(config.quant_config, "enable_c8_quant", False))
         and not getattr(spec, "enable_adaptive_verification", False)
         and util.find_spec("flash_attn_npu_3") is not None
     )

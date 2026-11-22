@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-"""Keep GLM's private cache pools out of generic shared-backing checks."""
+"""Negotiate DFlash layer layouts against backend support on Ascend."""
 
 from collections.abc import Iterable
 from functools import wraps
@@ -28,18 +28,11 @@ def resolve_kv_cache_layout(
     ):
         return _orig_resolve_kv_cache_layout(vllm_config, supported_layouts, kv_cache_specs)
 
-    # Core passes specs on the older API and layer configs on the newer API.
-    # GLM's planner owns its MLA/indexer/tail pools and allocates each draft
-    # layer separately. These specs do not share the generic packed backing,
-    # so their different page sizes / DCP sharding must not force a BL layout.
-    # Keep the original specs for grouping, allocation and slot mapping; only
-    # omit GLM-owned pools from the generic layout check. Draft/state specs and
-    # every worker's backend-supported layouts still go through upstream.
-    specs = tuple(kv_cache_specs or ())
-    layout_specs = tuple(
-        entry for entry in specs if getattr(getattr(entry, "spec", entry), "model_version", None) != "glm5_next"
-    )
-    return _orig_resolve_kv_cache_layout(vllm_config, supported_layouts, layout_specs)
+    # Ascend uses per-layer storage, paired replicated draft pages, or native
+    # model pools rather than upstream's mixed-page shared backing. Do not
+    # constrain this choice by target model name. Keep backend intersections
+    # and the real specs used by grouping, accounting and slot mapping intact.
+    return _orig_resolve_kv_cache_layout(vllm_config, supported_layouts, ())
 
 
 attention_utils.resolve_kv_cache_layout = resolve_kv_cache_layout

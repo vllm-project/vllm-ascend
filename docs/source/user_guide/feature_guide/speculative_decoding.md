@@ -352,6 +352,20 @@ the *anchor*) followed by K masked queries.
    path's scores are also scattered back into full-vocabulary draft logits for
    the rejection sampler.
 
+For layer-outer KV storage, set `VLLM_KV_CACHE_LAYOUT=LBHNC` (`HND`) or
+`LBNHC` (`NHD`). These choices have no target-model whitelist; the selected
+attention backends must still support the requested layout. On A2/A3, an
+installed `flash_attn_npu_3` package enables the optional FA3 path for compatible
+dense DFlash2 drafts with `"enforce_eager": true` in the speculative config.
+
+With a DCP target and a TP-only dense draft, compatible full-attention caches
+can share allocation IDs while retaining the draft's complete token history
+on each TP shard. This path uses PCP=1 and increases the draft storage per
+target allocation by the DCP size; the draft still executes with DCP=1.
+Other cache groups retain independent storage, and model-specific hybrid
+planners keep their existing grouping. Selecting an LB layout does not remove
+model, backend, or parallelism restrictions.
+
 A few important things to consider when using DFlash2 draft models:
 
 1. **Draft sampling**: DFlash2 drafts greedily by default. Set

@@ -359,7 +359,7 @@ def test_replicated_dflash_uses_glm_planner_before_generic_draft_pools():
     specs = make_specs()
     draft_name = "draft.layers.0.self_attn.attn"
     specs[draft_name] = FullAttentionSpec(
-        block_size=16, num_kv_heads=1, head_size=32, dtype=torch.bfloat16, dcp_sharded=False
+        block_size=16, num_kv_heads=1, head_size=32, dtype=torch.bfloat16, dcp_sharded=False, is_draft=True
     )
     groups = get_glm5_next_kv_cache_groups(config, specs)
     assert cache_patch._get_replicated_draft_pools(groups) is None

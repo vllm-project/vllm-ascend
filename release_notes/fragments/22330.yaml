@@ -2,6 +2,9 @@ pr: 22330
 entries:
   - category: bugfix
     text: >-
-      Fixed a startup layout validation error for GLM-5.3-Flash with DFlash2
-      and decode context parallelism when VLLM_KV_CACHE_LAYOUT is explicitly
-      set to HND, LBHNC, NHD, or LBNHC and the selected backends support it.
+      DFlash and DFlash2 can select HND, LBHNC, NHD, or LBNHC through
+      VLLM_KV_CACHE_LAYOUT without a target-model whitelist, subject to backend
+      support. Fixed mixed-page cache planning for these layouts and added
+      full-token dense draft KV storage for compatible DCP targets while
+      keeping the draft at DCP=1. Compatible eager DFlash2 drafts can select the optional
+      A2/A3 FA3 backend without a target-model whitelist.

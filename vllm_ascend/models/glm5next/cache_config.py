@@ -320,7 +320,9 @@ def _group_glm5_next_mamba_layer_names(
 
     layer_is_mamba: dict[int, bool] = {}
     mamba_name_by_index: dict[int, str] = {}
-    for name in kv_cache_spec:
+    for name, spec in kv_cache_spec.items():
+        if spec.is_draft:
+            continue
         try:
             layer_idx = extract_layer_index(name)
         except ValueError as exc:

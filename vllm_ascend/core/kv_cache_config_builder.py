@@ -35,6 +35,8 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.core.dflash_kv_cache import uses_dflash_layer_layout
+from vllm_ascend.core.kv_cache_interface import AscendReplicatedDraftCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     get_layerwise_offload_config,
     get_spec_reuse_rules,
@@ -124,6 +126,35 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         if kimi_k3_groups is not None:
             return kimi_k3_groups
 
+        if (
+            uses_dflash_layer_layout(vllm_config)
+            and not is_deepseek_v41_cache(kv_cache_spec)
+            and not any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in kv_cache_spec.values())
+            and not any(
+                getattr(spec, "cache_dtype_str", None) == TURBOQUANT_CACHE_DTYPE for spec in kv_cache_spec.values()
+            )
+        ):
+            # Group by allocation semantics, not physical page bytes. Running the
+            # upstream grouping per bucket avoids its cross-group page unification.
+            buckets: list[dict[str, KVCacheSpec]] = []
+            for name, spec in kv_cache_spec.items():
+                for bucket in buckets:
+                    if UniformTypeKVCacheSpecs.from_specs({**bucket, name: spec}) is not None:
+                        bucket[name] = spec
+                        break
+                else:
+                    buckets.append({name: spec})
+            groups = []
+            for bucket in buckets:
+                if any(isinstance(spec, AscendReplicatedDraftCacheSpec) for spec in bucket.values()):
+                    # FullAttentionSpec.merge can otherwise erase the subclass's
+                    # physical expansion when target and draft have equal shapes.
+                    uniform = UniformTypeKVCacheSpecs.from_specs(bucket)
+                    assert uniform is not None
+                    groups.append(KVCacheGroupSpec(list(bucket), uniform))
+                else:
+                    groups.extend(super().get_kv_cache_groups(vllm_config, bucket))
+            return groups
         return super().get_kv_cache_groups(vllm_config, kv_cache_spec)
 
     def get_kv_cache_config_from_groups(
@@ -173,7 +204,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         """Return the pool cost used to build the native descriptors."""
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_pool_bytes(kv_cache_groups)
-        pools = _get_replicated_draft_pools(kv_cache_groups)
+        pools = _get_replicated_draft_pools(kv_cache_groups, vllm_config)
         if pools is not None:
             return sum(_upstream_pool_bytes_per_block(vllm_config, pool) for pool in pools)
         if is_step5_groups(kv_cache_groups):
@@ -194,10 +225,27 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
 
 def _get_replicated_draft_pools(
     groups: list[KVCacheGroupSpec],
+    vllm_config: VllmConfig | None = None,
 ) -> list[list[KVCacheGroupSpec]] | None:
     """Keep contiguous dense draft K/V outside the target/state alias pool."""
+    # GLM already allocates every draft layer separately and accounts for it.
+    # Sending its target pools to the generic planner loses the MLA/indexer/
+    # tail placement and reintroduces the mixed-page BL-layout restriction.
     if _get_glm5_next_cache_layout(groups) is not None:
         return None
+    if (
+        vllm_config is not None
+        and uses_dflash_layer_layout(vllm_config)
+        and not is_step5_groups(groups)
+        and not is_deepseek_v41_cache(groups)
+        and not _is_deepseek_v4_groups(groups)
+        and not tq_cache.uses_turboquant_groups(groups)
+        and get_qwen4_exp_pool_bytes_per_block(groups) is None
+    ):
+        # Independent layer-outer pools do not alias pages between groups.
+        # A replicated full-attention draft can share its target's group;
+        # hybrid/windowed drafts retain separate groups and native page sizes.
+        return [[group] for group in groups] if len(groups) > 1 else None
     if not any(get_kv_cache_spec_kind(group.kv_cache_spec) == KVCacheSpecKind.MAMBA for group in groups):
         return None
     target_groups = []
@@ -506,7 +554,7 @@ def get_ascend_kv_cache_config_from_groups(
         if vllm_version_is("0.28.0")
         else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     )
-    pools = _get_replicated_draft_pools(kv_cache_groups)
+    pools = _get_replicated_draft_pools(kv_cache_groups, vllm_config)
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif is_step5_groups(kv_cache_groups):
