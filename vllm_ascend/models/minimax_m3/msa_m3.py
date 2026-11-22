@@ -235,6 +235,7 @@ def _get_minimax_m3_dense_backend(backend: type[AttentionBackend]) -> type[Atten
 
 
 class AscendMiniMaxM3IndexerBackend(AttentionBackend):
+    graph_params_managed_by_builder = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16, torch.float16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -679,14 +680,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         speculative_config=None,
         draft_attn_metadatas=None,
     ):
-        """No-op: indexer replay parameters are owned by its metadata builder,
-        not by the full-graph parameter-update channel.
-
-        Selection note: _get_graph_update_backend picks the first executable
-        backend, so correct updates for mixed-attention models rely on the
-        full-attention (GQA) group being scanned first — M3's full-attention
-        layers are the first layers registered, which holds today.
-        """
+        """The metadata builder updates indexer replay parameters."""
 
 
 class AscendMiniMaxM3Indexer(nn.Module):
@@ -738,6 +732,7 @@ class AscendMiniMaxM3Indexer(nn.Module):
 
 
 class AscendMiniMaxM3SparseBackend(AttentionBackend):
+    graph_params_managed_by_builder = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16, torch.float16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -1243,14 +1238,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         speculative_config=None,
         draft_attn_metadatas=None,
     ):
-        """No-op: sparse-attention replay parameters are owned by its metadata
-        builder, not by the full-graph parameter-update channel.
-
-        Selection note: _get_graph_update_backend picks the first executable
-        backend, so correct updates for mixed-attention models rely on the
-        full-attention (GQA) group being scanned first — M3's full-attention
-        layers are the first layers registered, which holds today.
-        """
+        """The metadata builder updates sparse-attention replay parameters."""
 
 
 class AscendMiniMaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):

@@ -68,6 +68,7 @@ def collect_sorted_captured_token_sizes(capture_descs: dict) -> list[int]:
 def _get_graph_update_backend(
     attn_groups: list[list[AttentionGroup]],
 ) -> type[AttentionBackend]:
+    builder_managed_backend = None
     for groups in attn_groups:
         for group in groups:
             backend = group.backend
@@ -76,8 +77,14 @@ def _get_graph_update_backend(
             except NotImplementedError:
                 # Metadata-only backends such as GDN have no attention impl.
                 continue
-            if impl_cls is not None:
+            if impl_cls is None:
+                continue
+            if not getattr(backend, "graph_params_managed_by_builder", False):
                 return backend
+            if builder_managed_backend is None:
+                builder_managed_backend = backend
+    if builder_managed_backend is not None:
+        return builder_managed_backend
     raise RuntimeError("No executable attention backend is available for full-graph parameter updates.")
 
 
