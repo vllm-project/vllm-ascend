@@ -30,20 +30,24 @@ call-path descriptions do not establish A3 runtime validation or CI coverage.
 `EngramModelState.prepare_engram_inputs` refreshes a persistent, contiguous
 `int32` window of shape `[max_num_reqs, depth]`. The step's `idx_mapping`
 contains one state slot per active request in batch order. For each active
-row, the kernel reads that slot's device-side computed-token count and its
-row of `int32` token history. History columns are contiguous and rows are
-addressed with the supplied row stride. With PCP the mapping comes from the
-global batch.
+row, the kernel reads the slot's device-side computed-token count. It gathers
+from that slot's `int32` history when the count is positive. History columns
+are contiguous and rows are addressed with the supplied row stride. With
+PCP the mapping comes from the global batch.
 
 For a count `k`, the reference takes the first `k` tokens in the slot,
 reverses them, keeps at most `depth` and pads the rest with `-1`. A new
-request has `k = 0`. Rows beyond the active batch write `-1` across the
-window without addressing any input. One program handles each window row.
+request has `k = 0` and fills its window with `-1` without computing a history
+address. Short histories keep masked lanes inside the same slot. Rows beyond
+the active batch write `-1` across the window without addressing any input.
+One program handles each window row.
 `DEPTH` and its power-of-two tile size are compile-time parameters.
 
 The [single-card PR cases](../../../../tests/e2e/pull_request/one_card/test_engram_lookback.py)
-compare every output and both guard regions exactly. The
-[nightly case](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_engram_lookback.py)
+compare every output and both guard regions exactly. They include the full
+eight-request batch with six empty slots reported in
+[#21392](https://github.com/vllm-project/vllm-ascend/issues/21392).
+The [nightly case](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_engram_lookback.py)
 uses eight request slots and 128K history columns. Run either file with `pytest -q` on an NPU.
 
 ### Embedding lookup
