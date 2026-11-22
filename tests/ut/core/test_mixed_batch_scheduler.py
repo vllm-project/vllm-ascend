@@ -13,8 +13,21 @@ from vllm_ascend.ascend_config import SchedulerConfig
 from vllm_ascend.platform import _setup_mixed_batch_scheduler
 
 
-def _make_scheduler(async_scheduling, *, cap=2, max_num_seqs=16, chunked_prefill=True, max_model_len=32):
-    additional_config = {"scheduler_config": {"max_num_decode_seqs_in_mixed_batch": cap}}
+def _make_scheduler(
+    async_scheduling,
+    *,
+    cap=2,
+    max_num_seqs=16,
+    chunked_prefill=True,
+    max_model_len=32,
+    decode_after_prefill=False,
+):
+    additional_config = {
+        "scheduler_config": {
+            "max_num_decode_seqs_in_mixed_batch": cap,
+            "decode_step_after_prefill": decode_after_prefill,
+        }
+    }
 
     def configure(**kwargs):
         kwargs["model_config"].max_model_len = max_model_len
@@ -51,8 +64,8 @@ def _retire(scheduler, output):
     scheduler.update_from_output(output, feedback)
 
 
-def _add_decodes(scheduler):
-    requests = [create_request(i, num_tokens=8, max_tokens=16, block_size=16) for i in range(1, 5)]
+def _add_decodes(scheduler, count=4):
+    requests = [create_request(i, num_tokens=8, max_tokens=16, block_size=16) for i in range(1, count + 1)]
     for request in requests:
         scheduler.add_request(request)
     _retire(scheduler, scheduler.schedule())
@@ -82,6 +95,26 @@ def test_mixed_step_caps_decodes_then_holds_new_prefill(async_scheduling, cap):
     _retire(scheduler, following)
     if cap is not None:
         assert next_prefill.request_id in scheduler.schedule().num_scheduled_tokens
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("cap", [None, 2])
+def test_prefill_step_drains_decodes_even_without_a_deferred_row(async_scheduling, cap):
+    scheduler = _make_scheduler(async_scheduling, cap=cap, decode_after_prefill=True)
+    decodes = _add_decodes(scheduler, count=2)
+    first = create_request(5, num_tokens=8, max_tokens=1)
+    scheduler.add_request(first)
+    _retire(scheduler, scheduler.schedule())  # Decode opportunity after the bootstrapping prefill.
+    mixed = scheduler.schedule()
+    assert set(mixed.num_scheduled_tokens) == decodes | {first.request_id}
+    _retire(scheduler, mixed)
+
+    second = create_request(6, num_tokens=8, max_tokens=1)
+    scheduler.add_request(second)
+    drain = scheduler.schedule()
+    assert set(drain.num_scheduled_tokens) == decodes
+    _retire(scheduler, drain)
+    assert second.request_id in scheduler.schedule().num_scheduled_tokens
 
 
 @pytest.mark.parametrize("async_scheduling", [False, True])
@@ -133,7 +166,9 @@ def test_mixed_decode_limit_accepts_only_a_positive_integer_or_null(cap):
 
 
 def test_mixed_decode_limit_preserves_an_explicit_custom_scheduler():
-    vllm_config = SimpleNamespace(scheduler_config=SimpleNamespace(scheduler_cls="custom.Scheduler"))
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(scheduler_cls="custom.Scheduler", async_scheduling=True)
+    )
     with pytest.raises(ValueError, match="requires the default scheduler"):
         _setup_mixed_batch_scheduler(vllm_config, SchedulerConfig(max_num_decode_seqs_in_mixed_batch=2))
     assert vllm_config.scheduler_config.scheduler_cls == "custom.Scheduler"

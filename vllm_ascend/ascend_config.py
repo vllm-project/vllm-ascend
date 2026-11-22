@@ -1756,6 +1756,7 @@ class SchedulerConfig:
     enable_balance_scheduling: bool = False
     recompute_scheduler_enable: bool = False
     max_num_decode_seqs_in_mixed_batch: int | None = Field(default=None, ge=1, strict=True)
+    decode_step_after_prefill: bool = Field(default=False, strict=True)
     short_request_first_config: ShortRequestFirstConfig = dataclasses.field(default_factory=ShortRequestFirstConfig)
     batch_job_sched_config: BatchJobSchedConfig = dataclasses.field(default_factory=BatchJobSchedConfig)
     dyntra_lb_config: DyntraLBConfig = dataclasses.field(default_factory=DyntraLBConfig)

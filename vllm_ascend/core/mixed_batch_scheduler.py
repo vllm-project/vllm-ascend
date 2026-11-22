@@ -15,14 +15,16 @@ class MixedBatchScheduler(Scheduler):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._decode_cap = init_ascend_config(self.vllm_config).scheduler_config.max_num_decode_seqs_in_mixed_batch
+        settings = init_ascend_config(self.vllm_config).scheduler_config
+        self._decode_cap = settings.max_num_decode_seqs_in_mixed_batch
+        self._decode_after_prefill = settings.decode_step_after_prefill
         if self._decode_cap is not None and not hasattr(Scheduler, "_reserve_prefill_lookahead"):
             raise ValueError("Mixed-batch decode limiting requires vLLM's prefill lookahead scheduling hook.")
         self._remaining_mixed_decodes: int | None = None
         self._drain_decodes = False
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
-        if self._decode_cap is None:
+        if self._decode_cap is None and not self._decode_after_prefill:
             return super().schedule(throttle_prefills=throttle_prefills)
 
         capacity_bound = self.prefill_capacity_bound
@@ -32,6 +34,9 @@ class MixedBatchScheduler(Scheduler):
         defer_prefills = has_decode and (drain or (throttle_prefills and not capacity_bound))
         waiting_can_prefill = (
             bool(self.waiting) and len(self.running) + self.num_waiting_for_streaming_input < self.max_num_active_reqs
+        )
+        running_prefills = (
+            {req.request_id for req in self.running if req.is_prefill_chunk} if self._decode_after_prefill else set()
         )
         if (
             has_decode
@@ -47,7 +52,12 @@ class MixedBatchScheduler(Scheduler):
             # preserve the saturation state for the next ordinary step.
             self.prefill_capacity_bound = False
         try:
-            return super().schedule(throttle_prefills=throttle_prefills or drain)
+            output = super().schedule(throttle_prefills=throttle_prefills or drain)
+            if self._decode_after_prefill and (
+                output.scheduled_new_reqs or running_prefills.intersection(output.num_scheduled_tokens)
+            ):
+                self._drain_decodes = True
+            return output
         finally:
             self._remaining_mixed_decodes = None
             if drain:

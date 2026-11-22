@@ -1626,12 +1626,17 @@ def _setup_worker_and_scheduler(
 
 
 def _setup_mixed_batch_scheduler(vllm_config: VllmConfig, ascend_scheduler_config: SchedulerConfig) -> None:
-    if ascend_scheduler_config.max_num_decode_seqs_in_mixed_batch is None:
+    if (
+        ascend_scheduler_config.max_num_decode_seqs_in_mixed_batch is None
+        and not ascend_scheduler_config.decode_step_after_prefill
+    ):
         return
 
     scheduler_config = vllm_config.scheduler_config
+    name = "AsyncMixedBatchScheduler" if scheduler_config.async_scheduling else "MixedBatchScheduler"
+    scheduler_path = f"vllm_ascend.core.mixed_batch_scheduler.{name}"
     if (
-        scheduler_config.scheduler_cls is not None
+        scheduler_config.scheduler_cls not in (None, scheduler_path)
         or ascend_scheduler_config.enable_balance_scheduling
         or ascend_scheduler_config.short_request_first_config.enabled
     ):
@@ -1645,8 +1650,7 @@ def _setup_mixed_batch_scheduler(vllm_config: VllmConfig, ascend_scheduler_confi
     ):
         raise ValueError("Mixed-batch decode limiting requires FCFS, DP=PP=1, and local KV caching.")
 
-    name = "AsyncMixedBatchScheduler" if scheduler_config.async_scheduling else "MixedBatchScheduler"
-    scheduler_config.scheduler_cls = f"vllm_ascend.core.mixed_batch_scheduler.{name}"
+    scheduler_config.scheduler_cls = scheduler_path
 
 
 def _swa_bounded_replay_unsupported_mode(ascend_config) -> str | None:
