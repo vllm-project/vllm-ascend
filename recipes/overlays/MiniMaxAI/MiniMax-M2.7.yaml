@@ -1,0 +1,771 @@
+meta:
+  hardware:
+    ascend_910c: supported
+variants:
+  ascend_w8a8:
+    label: Ascend W8A8 QuaRot
+    model_id: vllm-ascend/MiniMax-M2.7-w8a8-QuaRot
+    precision: int8
+    description: W8A8-QuaRot with EAGLE3 on Atlas 800I A3. The automatic Docker and Serve cards cover single-node short context.
+    vram_minimum_gb: 276
+    nightly_required: false
+    supported_frontends: [python]
+    supported_hardware:
+      - ascend_910c
+    extra_args:
+      - --quantization
+      - ascend
+      - --max-model-len
+      - "40690"
+      - --max-num-seqs
+      - "48"
+      - --max-num-batched-tokens
+      - "16384"
+      - --gpu-memory-utilization
+      - "0.85"
+      - --async-scheduling
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - --additional-config
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":1,"enable_flashcomm1":true,"weight_nz_mode":1}'
+      - --speculative-config
+      - '{"method":"eagle3","model":"Eco-Tech/MiniMax-M2.7-eagle-model-short","num_speculative_tokens":3,"enforce_eager":true}'
+      - --served-model-name
+      - MiniMax-M2.7
+      - vllm-ascend/MiniMax-M2.7-w8a8-QuaRot
+      - --host
+      - 127.0.0.1
+    extra_env:
+      HCCL_OP_EXPANSION_MODE: AIV
+      HCCL_BUFFSIZE: "1024"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      VLLM_USE_MODELSCOPE: "true"
+      MODELSCOPE_CACHE: /root/.cache/huggingface/modelscope
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
+        docker_serve_command: env --chdir=/root/.cache/huggingface/modelscope/models vllm serve
+        install:
+          pip: false
+          docker: true
+features:
+  reasoning:
+    hardware_overrides:
+      ascend_910c:
+        args:
+          - --reasoning-parser
+          - minimax_m2_append_think
+strategy_overrides:
+  single_node_dep:
+    hardware_overrides:
+      ascend_910c:
+        extra_args:
+          - --tensor-parallel-size
+          - "4"
+          - --data-parallel-size
+          - "4"
+strategy_hardware:
+  single_node_tp:
+    ascend_910c: unsupported
+  single_node_tep:
+    ascend_910c: unsupported
+  single_node_dep:
+    ascend_910c: supported
+  multi_node_tp:
+    ascend_910c: unsupported
+  multi_node_tp_pp:
+    ascend_910c: unsupported
+  multi_node_tep:
+    ascend_910c: unsupported
+  multi_node_dep:
+    ascend_910c: unsupported
+  pd_cluster:
+    ascend_910c: unsupported
+guide_sections:
+  ascend: |-
+    ## A3 W8A8 deployment choices
+
+    MiniMax-M2.7 is a sparse MoE language model for coding, reasoning and tool calling. These A3 examples use W8A8-QuaRot weights and an EAGLE3 draft model. The Guide covers short and long context on one node and Prefill/Decode separation across two nodes (1P1D), all tested on vLLM Ascend v0.30.0.
+
+    Select the [A3 W8A8 / Python configuration](?hardware=ascend_910c&variant=ascend_w8a8&strategy=single_node_dep&frontend=python&features=tool_calling%2Creasoning). Its Docker and Serve cards cover single-node **short context** (TP4 × DP4 + EP, 40,690 tokens). The Docker command mounts the host's standard Hugging Face cache. To stage the verified checkpoints in that mount, run this export, then run the **Prepare local checkpoints** block below in the same Linux host shell.
+
+    ```bash
+    export WEIGHTS_ROOT="$HOME/.cache/huggingface/modelscope/models"
+    ```
+
+    The preparation block downloads the two ModelScope checkpoints and checks the SHA-256 of 76 files. Docker starts from the models directory so EAGLE3 can find `optional/quarot.safetensors` using a relative path. For an existing container with that cache mount, run `cd /root/.cache/huggingface/modelscope/models` inside the container before running the Serve Copy. The Serve Copy exports the cache path after this directory change.
+
+    Start the generated worker on port 8100, then start the generated vLLM Router on port 8000. Use the generated request to verify routing. If it reaches its 32-token limit before returning final text, increase `max_tokens` to 512 for the same request.
+
+    For the fixed [short context](#single-node-a3-short-context), [long context](#single-node-a3-long-context), and [two-node Prefill/Decode](#two-node-a3-release-review) Guide commands, switch to a new host shell with the default `/models` root, or set `WEIGHTS_ROOT` to the alternate host root passed to the Guide container. The fixed short-context Guide serves directly on port 8000. The release image is `v0.30.0-a3-openeuler` (tested OCI digest `sha256:0b8bf5b484d49c667ceab717347eb3a8695388429aebd9084b79fa0f57a545c0`).
+
+    ## Prepare local checkpoints
+
+    On each serving host use Linux, Bash, curl and Python 3.11 or 3.12. Use a writable checkpoint root with at least 300 GB free. Set `WEIGHTS_ROOT` before running this block if you use a host directory other than `/models`; give that same root to the Guide container step. The [W8A8 main checkpoint](https://modelscope.cn/models/vllm-ascend/MiniMax-M2.7-w8a8-QuaRot) has 54 shards, and the [EAGLE3 draft checkpoint](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.7-eagle-model-short) has one. The download endpoint uses ModelScope `master`, and the recorded ordered SHA-256 lists pin all 70 and 6 files respectively, including config and tokenizer files. Continue only after both lists match. The lists verify the contents of the 76 files. Availability of a complete immutable repository snapshot remains unverified. If the provider changes those bytes, stage the verified release files from an approved mirror and run the same check.
+
+    ```bash
+    (
+    set -euo pipefail
+    export WEIGHTS_ROOT=${WEIGHTS_ROOT:-/models}
+    mkdir -p "$WEIGHTS_ROOT"
+    python3 - "$WEIGHTS_ROOT" <<'PY'
+    import hashlib
+    from pathlib import Path
+    import subprocess
+    import sys
+    from urllib.parse import urlencode
+
+    root = Path(sys.argv[1])
+    main_files = [
+        ".gitattributes",
+        "MiniMax-M2.7_best_practice.yaml",
+        "README.md",
+        "chat_template.jinja",
+        "config.json",
+        "configuration.json",
+        "configuration_minimax_m2.py",
+        "generation_config.json",
+        "merges.txt",
+        "modeling_minimax_m2.py",
+        "optional/quarot.safetensors",
+        "quant_model_description.json",
+        "quant_model_weights.safetensors.index.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "vocab.json",
+    ]
+    main_files += [f"quant_model_weights-{i:05d}-of-00054.safetensors" for i in range(1, 55)]
+    models = (
+        ("vllm-ascend/MiniMax-M2.7-w8a8-QuaRot", main_files, "78f17fbd07840d914d27ed135c2762c155795859d5dc69e12ba5e57ab2611416"),
+        ("Eco-Tech/MiniMax-M2.7-eagle-model-short", [".gitattributes", "README.md", "config.json", "config.py", "generation_config.json", "model.safetensors"], "8e059415e636df34d8347717b5ac67ae8f86e93c2825e5765402e49dd624e17f"),
+    )
+
+    for repo, files, expected in models:
+        target = root / repo
+        target.mkdir(parents=True, exist_ok=True)
+        entries = []
+        for name in files:
+            local = target / name
+            if not local.is_file():
+                local.parent.mkdir(parents=True, exist_ok=True)
+                url = f"https://www.modelscope.cn/api/v1/models/{repo}/repo?" + urlencode(
+                    {"Revision": "master", "FilePath": name}
+                )
+                part = local.with_name(local.name + ".part")
+                subprocess.run(
+                    ["curl", "-fLSs", "--retry", "3", "-C", "-", "-o", str(part), url], check=True
+                )
+                part.replace(local)
+            with local.open("rb") as handle:
+                digest = hashlib.file_digest(handle, "sha256").hexdigest()
+            entries.append(f"{digest}  {name}\n")
+        actual = hashlib.sha256("".join(sorted(entries)).encode()).hexdigest()
+        if actual != expected:
+            raise SystemExit(f"{repo}: checkpoint differs (list SHA-256 {actual}); use verified release files")
+        print(f"{repo}: {len(files)} files verified (list SHA-256 {actual})")
+    PY
+    )
+    ```
+
+    ## Evaluate with AISBench
+
+    Install the [AISBench source](https://github.com/AISBench/benchmark) at the recorded commit on a Linux client with Bash, Git, curl and Python 3.11 or 3.12. For single-node use a host terminal on the serving machine. For PD use a client that can reach the Prefill gateway and has the verified main checkpoint for tokenization. The setup checks the [OpenCompass GSM8K demo source](https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gsm8k.zip) and downloads one file at the full commit ID from each of [AIME2025](https://modelscope.cn/datasets/vllm-ascend/aime2025), [short GSM8K performance](https://modelscope.cn/datasets/vllm-ascend/GSM8K_in3500_bs4000_minimax) and [128K GSM8K performance](https://modelscope.cn/datasets/vllm-ascend/GSM8K_prefix90_in131072_bs1000_Minimax), verifying each SHA-256.
+
+    ```bash
+    (
+    set -euo pipefail
+    bench=${BENCH_ROOT:-/models/minimax-aisbench}
+    mkdir -p "$bench/datasets"
+    bench=$(realpath "$bench")
+    python3 -m venv "$bench/venv"
+    python="$bench/venv/bin/python"
+    "$python" -m pip install 'modelscope==1.37.1'
+    commit=e968d1bd7f48404bd913b95560f33938072336fa
+    if [[ ! -d "$bench/benchmark/.git" ]]; then
+      git clone https://github.com/AISBench/benchmark.git "$bench/benchmark"
+    fi
+    git -C "$bench/benchmark" checkout --detach "$commit"
+    test "$(git -C "$bench/benchmark" rev-parse HEAD)" = "$commit"
+    cd "$bench/benchmark"
+    "$python" -m pip install -e . --use-pep517 -r requirements/api.txt -r requirements/extra.txt
+    mkdir -p ais_bench/datasets
+    curl -fLSs --retry 3 https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gsm8k.zip \
+      -o "$bench/gsm8k.zip"
+    "$python" -m zipfile -e "$bench/gsm8k.zip" ais_bench/datasets
+    sha256sum -c <<<"3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14  ais_bench/datasets/gsm8k/test.jsonl"
+    while read -r name revision file hash; do
+      target="$bench/datasets/$name"
+      "$bench/venv/bin/modelscope" download --dataset "vllm-ascend/$name" \
+        --revision "$revision" --local_dir "$target" --include "$file"
+      sha256sum -c <<<"$hash  $target/$file"
+    done <<'DATA'
+    aime2025 370b7322a9d6faecaa125c13217eed1c8b89983a aime2025.jsonl dee94372847a43a5eb6b0a439047efa82f3804db221a55dc640053425315dd4b
+    GSM8K_in3500_bs4000_minimax 36996650780e218d838b7acbb6f157938e4b0376 test.jsonl 9f2e153c669141202b80762c2e3cfcccf53afd1235e4a0b021d15f43312c71b4
+    GSM8K_prefix90_in131072_bs1000_Minimax 083449f8db030c93a9907d802b35436a358d4f5d test.jsonl 3ab40bcbb089448d2f3e68a6d2446a13930c2b22bdc3895ddac85b069de19192
+    DATA
+    "$bench/venv/bin/ais_bench" --help >/dev/null
+    )
+    ```
+
+    The default profile is `short-demo` (GSM8K 8 items). Set `PROFILE=aime` for the 30-item AIME2025 evaluation. The performance profiles are `short-perf20` and `short-perf50` (192 and 760 requests), `long-perf` (80) and `pd-perf` (160). The profiles configure the measured requests. Run any warmup separately before measuring. Keep `BENCH_ROOT` and `WEIGHTS_ROOT` consistent with setup. Both single-node variants use port 8000 and model `MiniMax-M2.7`. For PD set `HOST` to the Prefill gateway IP, `PORT=8009` and `MODEL=minimax`.
+
+    ```bash
+    (
+    set -euo pipefail
+    export BENCH_ROOT=$(realpath "${BENCH_ROOT:-/models/minimax-aisbench}")
+    export WEIGHTS_ROOT=$(realpath "${WEIGHTS_ROOT:-/models}")
+    export HOST=${HOST:-127.0.0.1} PORT=${PORT:-8000} MODEL=${MODEL:-MiniMax-M2.7}
+    export NO_PROXY='*' no_proxy='*'
+    profile=${PROFILE:-short-demo}
+    request=vllm_api_general_chat
+    datasets_name=gsm8k_datasets
+    opts=(--dump-eval-details)
+    case "$profile" in
+      short-demo)
+        dataset=demo.demo_gsm8k_gen_4_shot_cot_chat_prompt
+        data="$BENCH_ROOT/benchmark/ais_bench/datasets/gsm8k"
+        batch=1; tokens=1024; generation='temperature=0, ignore_eos=False'
+        ;;
+      aime)
+        dataset=aime2025.aime2025_gen_0_shot_chat_prompt
+        datasets_name=aime2025_datasets
+        data="$BENCH_ROOT/datasets/aime2025/aime2025.jsonl"
+        batch=32; tokens=65536; generation='temperature=1, top_p=1, top_k=40, ignore_eos=False'
+        ;;
+      short-perf20|short-perf50|long-perf|pd-perf)
+        dataset=gsm8k.gsm8k_gen_0_shot_cot_str_perf
+        request=vllm_api_stream_chat
+        generation='temperature=0, ignore_eos=True'
+        case "$profile" in
+          short-perf20) name=GSM8K_in3500_bs4000_minimax; batch=48; prompts=192; tokens=1500 ;;
+          short-perf50) name=GSM8K_in3500_bs4000_minimax; batch=190; prompts=760; tokens=1500 ;;
+          long-perf) name=GSM8K_prefix90_in131072_bs1000_Minimax; batch=20; prompts=80; tokens=1024 ;;
+          pd-perf) name=GSM8K_prefix90_in131072_bs1000_Minimax; batch=40; prompts=160; tokens=1024 ;;
+        esac
+        data="$BENCH_ROOT/datasets/$name"
+        opts=(--mode perf --num-prompts "$prompts")
+        ;;
+      *) printf '%s\n' "Unknown profile: $profile" >&2; exit 2 ;;
+    esac
+    export AIS_MINIMAX_DATA="$data" AIS_MINIMAX_OUTPUT="$BENCH_ROOT/results/$profile"
+    cd "$BENCH_ROOT/benchmark"
+    config=$(mktemp "$BENCH_ROOT/minimax-$profile.XXXXXX.py")
+    trap 'rm -f -- "$config"' EXIT
+    cat >"$config" <<PY
+    import os
+    from mmengine.config import read_base
+
+    with read_base():
+        from ais_bench.benchmark.configs.datasets.$dataset import $datasets_name as datasets
+        from ais_bench.benchmark.configs.models.vllm_api.$request import models
+
+    datasets[0]['path'] = os.environ['AIS_MINIMAX_DATA']
+    models[0]['model'] = os.environ['MODEL']
+    models[0]['host_ip'] = os.environ['HOST']
+    models[0]['host_port'] = int(os.environ['PORT'])
+    models[0]['path'] = os.path.join(os.environ['WEIGHTS_ROOT'], 'vllm-ascend/MiniMax-M2.7-w8a8-QuaRot')
+    models[0]['batch_size'] = $batch
+    models[0]['request_rate'] = 0
+    models[0]['max_out_len'] = $tokens
+    models[0]['generation_kwargs'].update($generation)
+    work_dir = os.environ['AIS_MINIMAX_OUTPUT']
+    PY
+    "$BENCH_ROOT/venv/bin/ais_bench" "$config" "${opts[@]}"
+    )
+    ```
+
+    ## Two-node A3 release review
+
+    MiniMax-M2.7 W8A8 on two Ascend A3 hosts with vLLM Ascend v0.30.0, using separate Prefill and Decode nodes.
+
+    Follow this section for two-node Prefill/Decode disaggregation. [Historical section 5.2](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/MiniMax-M2.html#multi-node-pd-separation-deployment).
+
+    Use the routable host IPv4 addresses on the interface selected by `ip route get "$peer" from "$self"`. The route interface is used by Gloo, TP and HCCL. Check the A3 device-side fabric and peer NPU vNIC connectivity separately. Allow the gateway to reach backend HTTP ports 7000–7001 on Prefill and 7100–7101 on Decode. Clients must reach TCP 8009 on the Prefill gateway. Reserve 12321 for the DP RPC on each host. Allow peer TCP traffic to the required Mooncake control endpoints (Prefill base 55880 and Decode base 56900) and the rank-specific AscendDirect/HIXL listeners. After startup, match the role container PIDs and logs against `ss -lntp` to identify the actual listeners, then check both directions from the peer. Scope any temporary rules to those ports and the peer address. After the HTTP checks, use the gateway request and Decode counters to verify cross-host KV transfer.
+
+    ### 1. Configure and start the containers
+
+    Run both blocks on each A3 host. Enter the host IPs and the directory containing the local W8A8 and EAGLE3 checkpoints.
+
+    ```bash
+    {
+      read -r -p 'Role (prefill or decode): ' PD_ROLE
+      read -r -p 'Prefill host IP: ' PREFILL_NODE_0_IP
+      read -r -p 'Decode host IP: ' DECODE_NODE_0_IP
+      read -r -p 'Host directory containing both checkpoint repositories [/models]: ' WEIGHTS_ROOT
+      export WEIGHTS_ROOT=${WEIGHTS_ROOT:-/models}
+      export PD_ROLE PREFILL_NODE_0_IP DECODE_NODE_0_IP
+      export GATEWAY_NODE_0_IP=$PREFILL_NODE_0_IP
+      export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
+      export PD_OUT="/models/evidence/minimax-m27-w8a8-a3/release-pd-$(date -u +%Y%m%dT%H%M%SZ)-$PD_ROLE"
+      export PD_CONTAINER="minimax-${PD_OUT##*/}"
+      case "$PD_ROLE" in
+        prefill) self=$PREFILL_NODE_0_IP; peer=$DECODE_NODE_0_IP ;;
+        decode) self=$DECODE_NODE_0_IP; peer=$PREFILL_NODE_0_IP ;;
+        *) printf 'Invalid role\n' >&2; self=; peer= ;;
+      esac
+      (
+        test -n "$self" && test -n "$peer" && test "$self" != "$peer" || exit 1
+        route=$(ip -o route get "$peer") || exit 1
+        awk -v ip="$self" '{for(i=1;i<NF;i++) if($i=="src" && $(i+1)==ip) found=1} END {exit !found}' <<<"$route" || exit 1
+        IFACE_NAME=$(awk '{for(i=1;i<NF;i++) if($i=="dev") print $(i+1)}' <<<"$route")
+        test -n "$IFACE_NAME" && mkdir -p "$PD_OUT" || exit 1
+        printf 'export %s=%q\n' PD_ROLE "$PD_ROLE" PREFILL_NODE_0_IP "$PREFILL_NODE_0_IP" \
+          DECODE_NODE_0_IP "$DECODE_NODE_0_IP" GATEWAY_NODE_0_IP "$GATEWAY_NODE_0_IP" \
+          WEIGHTS_ROOT "$WEIGHTS_ROOT" IMAGE "$IMAGE" PD_OUT "$PD_OUT" PD_CONTAINER "$PD_CONTAINER" \
+          self "$self" peer "$peer" IFACE_NAME "$IFACE_NAME" > "$PD_OUT/session.env" || exit 1
+        printf 'Session file: %s/session.env\n' "$PD_OUT"
+      )
+      if [[ $? == 0 ]]; then source "$PD_OUT/session.env"; else false; fi
+    }
+    ```
+
+    ```bash
+    devices=()
+    for i in {0..15}; do devices+=(--device "/dev/davinci$i"); done
+    docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE"
+    docker image inspect --format '{{.Id}} {{json .RepoDigests}}' "$IMAGE" &&
+    docker run -d --name "$PD_CONTAINER" --net=host --ipc=host --entrypoint bash \
+      "${devices[@]}" --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
+      -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+      -v /usr/local/dcmi:/usr/local/dcmi:ro -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+      -v /etc/ascend_install.info:/etc/ascend_install.info:ro -v /etc/hccn.conf:/etc/hccn.conf:ro \
+      -v "$WEIGHTS_ROOT:/models:ro" -v "$PD_OUT:/evidence" \
+      -e PREFILL_NODE_0_IP -e DECODE_NODE_0_IP -e GATEWAY_NODE_0_IP -e IFACE_NAME \
+      "$IMAGE" -lc 'exec sleep infinity'
+    ```
+
+    ### 2. Prepare the launcher
+
+    Enter each container with the first block, then run the second block inside that container.
+
+    ```bash
+    docker exec -it "$PD_CONTAINER" bash
+    ```
+
+    ```bash
+    mkdir -p /workspace/recipe-helpers/examples/external_online_dp /workspace/recipe-helpers/examples/disaggregated_prefill_v1
+    cat > /workspace/recipe-helpers/examples/external_online_dp/launch_online_dp.py <<'PY'
+    import argparse
+    import os
+    import signal
+    import subprocess
+    import time
+    parser = argparse.ArgumentParser()
+    for key in ("dp-size", "tp-size", "dp-size-local", "dp-rank-start", "dp-rpc-port", "vllm-start-port"):
+        parser.add_argument("--" + key, type=int, required=True)
+    parser.add_argument("--dp-address", required=True)
+    args = parser.parse_args()
+    assert args.dp_size_local > 0 and args.tp_size > 0
+    assert args.dp_rank_start + args.dp_size_local <= args.dp_size
+    processes = []
+    def stop(signum, frame):
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    try:
+        for i in range(args.dp_size_local):
+            devices = ",".join(str(x) for x in range(i * args.tp_size, (i + 1) * args.tp_size))
+            template = os.environ.get("MINIMAX_PD_TEMPLATE", "./run_dp_template.sh")
+            command = ["bash", template, devices, str(args.vllm_start_port + i)]
+            command.extend([str(args.dp_size), str(args.dp_rank_start + i), args.dp_address])
+            command.extend([str(args.dp_rpc_port), str(args.tp_size)])
+            processes.append(subprocess.Popen(command, start_new_session=True))
+        while True:
+            codes = [process.poll() for process in processes]
+            failure = next((code for code in codes if code not in (None, 0)), None)
+            if failure is not None:
+                raise SystemExit(failure if failure > 0 else 1)
+            if all(code is not None for code in codes):
+                break
+            time.sleep(0.1)
+        codes = [process.wait() for process in processes]
+        raise SystemExit(next((code if code > 0 else 1 for code in codes if code), 0))
+    finally:
+        # Ignore repeated termination while cleaning up only groups created above.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        for process in processes:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + 10
+        for process in processes:
+            try:
+                process.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+        for process in processes:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        for process in processes:
+            if process.poll() is None:
+                process.wait()
+    PY
+    cp /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+      /workspace/recipe-helpers/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py &&
+      python /workspace/recipe-helpers/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py --help >/dev/null
+    ```
+
+    ### 3. Start Prefill
+
+    Run both blocks in the Prefill container and keep that terminal open.
+
+    ```bash
+    cat > /workspace/recipe-helpers/run_dp_template.sh <<'BASH'
+    #!/usr/bin/env bash
+    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_BUFFSIZE=1024
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_IF_IP=${PREFILL_NODE_0_IP}
+    export VLLM_HOST_IP="$HCCL_IF_IP"
+    export GLOO_SOCKET_IFNAME=${IFACE_NAME}
+    export TP_SOCKET_IFNAME=${IFACE_NAME}
+    export HCCL_SOCKET_IFNAME=${IFACE_NAME}
+    export PYTHONHASHSEED=0
+    export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    cd /models || exit 1
+    exec vllm serve /models/vllm-ascend/MiniMax-M2.7-w8a8-QuaRot \
+      --host "$HCCL_IF_IP" \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --enable-expert-parallel \
+      --served-model-name minimax \
+      --max-model-len 200000 \
+      --max-num-batched-tokens 16384 \
+      --max-num-seqs 64 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.75 \
+      --quantization ascend \
+      --enforce-eager \
+      --speculative-config '{"method":"eagle3","model":"/models/Eco-Tech/MiniMax-M2.7-eagle-model-short","num_speculative_tokens":1}' \
+      --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1,"enable_flashcomm1":true}' \
+      --enable-request-id-headers \
+      --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"55880","engine_id":"0","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":8},"decode":{"dp_size":2,"tp_size":8}}}'
+    BASH
+    ```
+
+    ```bash
+    cd /models
+    export MINIMAX_PD_TEMPLATE=/workspace/recipe-helpers/run_dp_template.sh
+    python /workspace/recipe-helpers/examples/external_online_dp/launch_online_dp.py \
+      --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 \
+      --dp-address "$PREFILL_NODE_0_IP" --dp-rpc-port 12321 --vllm-start-port 7000
+    ```
+
+    ### 4. Start Decode
+
+    Run both blocks in the Decode container and keep that terminal open.
+
+    ```bash
+    cat > /workspace/recipe-helpers/run_dp_template.sh <<'BASH'
+    #!/usr/bin/env bash
+    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_BUFFSIZE=2048
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_IF_IP=${DECODE_NODE_0_IP}
+    export VLLM_HOST_IP="$HCCL_IF_IP"
+    export GLOO_SOCKET_IFNAME=${IFACE_NAME}
+    export TP_SOCKET_IFNAME=${IFACE_NAME}
+    export HCCL_SOCKET_IFNAME=${IFACE_NAME}
+    export PYTHONHASHSEED=0
+    export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    cd /models || exit 1
+    exec vllm serve /models/vllm-ascend/MiniMax-M2.7-w8a8-QuaRot \
+      --host "$HCCL_IF_IP" \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --enable-expert-parallel \
+      --served-model-name minimax \
+      --max-model-len 200000 \
+      --max-num-batched-tokens 16384 \
+      --max-num-seqs 16 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.75 \
+      --quantization ascend \
+      --async-scheduling \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --no-enable-prefix-caching \
+      --speculative-config '{"method":"eagle3","model":"/models/Eco-Tech/MiniMax-M2.7-eagle-model-short","num_speculative_tokens":3}' \
+      --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1,"enable_flashcomm1":false}' \
+      --enable-request-id-headers \
+      --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"56900","engine_id":"1","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":8},"decode":{"dp_size":2,"tp_size":8}}}'
+    BASH
+    ```
+
+    ```bash
+    cd /models
+    export MINIMAX_PD_TEMPLATE=/workspace/recipe-helpers/run_dp_template.sh
+    python /workspace/recipe-helpers/examples/external_online_dp/launch_online_dp.py \
+      --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 \
+      --dp-address "$DECODE_NODE_0_IP" --dp-rpc-port 12321 --vllm-start-port 7100
+    ```
+
+    ### 5. Check the backends and start the gateway
+
+    In a new Prefill host shell, source the session.env path printed in step 1 and use the first block from step 2 to enter its container. Start the gateway after all four backends list minimax.
+
+    ```bash
+    curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 --max-time 15 "http://${PREFILL_NODE_0_IP}:7000/v1/models" &&
+    curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 --max-time 15 "http://${PREFILL_NODE_0_IP}:7001/v1/models" &&
+    curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 --max-time 15 "http://${DECODE_NODE_0_IP}:7100/v1/models" &&
+    curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 --max-time 15 "http://${DECODE_NODE_0_IP}:7101/v1/models"
+    ```
+
+    ```bash
+    unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+    export NO_PROXY='*' no_proxy='*'
+    python /workspace/recipe-helpers/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+      --host "$GATEWAY_NODE_0_IP" --port 8009 \
+      --prefiller-hosts "$PREFILL_NODE_0_IP" "$PREFILL_NODE_0_IP" --prefiller-ports 7000 7001 \
+      --decoder-hosts "$DECODE_NODE_0_IP" "$DECODE_NODE_0_IP" --decoder-ports 7100 7101
+    ```
+
+    ### 6. Verify inference and cross-host KV transfer
+
+    Run on the Prefill host. Check the response and confirm that the Decode external-KV token counter increases.
+
+    ```bash
+    (
+      : "${PD_OUT:?Load the session.env from step 1}" "${DECODE_NODE_0_IP:?Missing Decode IP}" "${GATEWAY_NODE_0_IP:?Missing gateway IP}"
+      kv_metrics() {
+        local rank
+        for rank in 7100 7101; do
+          curl --noproxy '*' -fsS --max-time 15 "http://$DECODE_NODE_0_IP:$rank/metrics" \
+            -o "$PD_OUT/08-decode-$rank.$1.prom" || return
+        done
+      }
+      curl --noproxy '*' -fsS --max-time 15 "http://$GATEWAY_NODE_0_IP:8009/healthcheck" -o "$PD_OUT/08-health.json" || exit 1
+      cat "$PD_OUT/08-health.json"
+      python3 -c 'import json,sys; h=json.load(open(sys.argv[1])); assert h["prefill_instances"] == h["decode_instances"] == 2, h' "$PD_OUT/08-health.json" || exit 1
+      kv_metrics before || exit 1
+      id="release-pd-$(date -u +%s)-$$"
+      printf '%s\n' "$id" > "$PD_OUT/08-request-id.txt" || exit 1
+      cat "$PD_OUT/08-request-id.txt"
+      python3 - <<'PY' > "$PD_OUT/08-request.json" || exit 1
+    import json
+    context = 'This context is a geography reference. Tokyo is the capital of Japan.\n' * 128
+    prompt = context + '\nQuestion: What is the capital of Japan? Answer in a complete sentence.\nAnswer: The capital of Japan is'
+    print(json.dumps(dict(model='minimax', temperature=0, max_tokens=96, prompt=prompt)))
+    PY
+      curl --noproxy '*' -fsS --max-time 180 "http://$GATEWAY_NODE_0_IP:8009/v1/completions" \
+        -H 'Content-Type: application/json' -H "X-Request-Id: $id" \
+        --data-binary "@$PD_OUT/08-request.json" -o "$PD_OUT/08-response.json" || exit 1
+      cat "$PD_OUT/08-response.json"
+      python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["model"] == "minimax"; assert "tokyo" in r["choices"][0]["text"].lower(); assert r["usage"]["prompt_tokens"] > 1024' "$PD_OUT/08-response.json" || exit 1
+      kv_metrics after || exit 1
+      awk '/^vllm:prompt_tokens_by_source_total\{/ && /source="external_kv_transfer"/ {print FILENAME, $0}' "$PD_OUT"/08-decode-*.prom
+    )
+    ```
+
+    ## Single-node A3 short context
+
+    [Historical section 5.1](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/MiniMax-M2.html#a3-single-node)
+
+    ### 1. Start the release container
+
+    Run on the A3 host. Set WEIGHTS_ROOT to the directory containing both checkpoints if it differs from /models.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
+    export MINIMAX_CONTAINER=${MINIMAX_CONTAINER:-minimax-single-a3}
+    export WEIGHTS_ROOT=${WEIGHTS_ROOT:-/models}
+    devices=()
+    for id in {0..15}; do devices+=(--device "/dev/davinci$id"); done
+    docker run -d --name "$MINIMAX_CONTAINER" --network host --ipc host \
+      "${devices[@]}" --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
+      -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+      -v /usr/local/dcmi:/usr/local/dcmi:ro \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+      -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
+      -v /etc/hccn.conf:/etc/hccn.conf:ro \
+      -v "$WEIGHTS_ROOT:/models:ro" -w /models --entrypoint bash "$IMAGE" -lc 'exec sleep infinity'
+    ```
+
+    ### 2. Start MiniMax
+
+    Enter the container and run the startup block there.
+
+    ```bash
+    docker exec -it "$MINIMAX_CONTAINER" bash
+    ```
+
+    ```bash
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_BUFFSIZE=1024
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+    vllm serve /models/vllm-ascend/MiniMax-M2.7-w8a8-QuaRot \
+      --served-model-name MiniMax-M2.7 \
+      --host 127.0.0.1 \
+      --port 8000 \
+      --trust-remote-code \
+      --quantization ascend \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --async-scheduling \
+      --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1,"enable_flashcomm1":true,"weight_nz_mode":1}' \
+      --enable-expert-parallel \
+      --tensor-parallel-size 4 \
+      --data-parallel-size 4 \
+      --max-num-seqs 48 \
+      --max-model-len 40690 \
+      --max-num-batched-tokens 16384 \
+      --gpu-memory-utilization 0.85 \
+      --speculative-config '{"enforce_eager":true,"method":"eagle3","model":"/models/Eco-Tech/MiniMax-M2.7-eagle-model-short","num_speculative_tokens":3}' \
+      --enable-auto-tool-choice \
+      --tool-call-parser minimax_m2 \
+      --reasoning-parser minimax_m2_append_think
+    ```
+
+    ### 3. Verify inference
+
+    Run in another A3 host terminal while the server is running.
+
+    ```bash
+    curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 --max-time 15 http://127.0.0.1:8000/v1/models |
+      python3 -c 'import json,sys; data=json.load(sys.stdin); print(json.dumps(data)); assert any(m["id"] == "MiniMax-M2.7" for m in data["data"])'
+    response=$(curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 --max-time 120 http://127.0.0.1:8000/v1/chat/completions \
+      -H 'Content-Type: application/json' \
+      -d '{"model":"MiniMax-M2.7","max_tokens":512,"temperature":0,"messages":[{"role":"user","content":"Say hi in one word."}]}')
+    python3 -c 'import json,sys; r=json.load(sys.stdin); print(json.dumps(r, ensure_ascii=False, indent=2)); assert r["model"] == "MiniMax-M2.7"; c=(r["choices"][0]["message"].get("content") or "").strip(); assert not c.startswith("<think>") or "</think>" in c; assert c.rsplit("</think>",1)[-1].strip().casefold().strip(".!") in {"hello","hi"}' <<<"$response"
+    ```
+
+    ### 4. Verify tool calling
+
+    Verify the tool name and city returned by the model.
+
+    ```bash
+    response=$(curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 --max-time 120 http://127.0.0.1:8000/v1/chat/completions \
+      -H 'Content-Type: application/json' \
+      -d '{"model":"MiniMax-M2.7","messages":[{"role":"user","content":"请查询上海的天气。"}],"tools":[{"type":"function","function":{"name":"get_current_weather","description":"Get weather by city","parameters":{"type":"object","properties":{"city":{"type":"string"},"unit":{"type":"string","enum":["celsius","fahrenheit"]}},"required":["city"]}}}],"tool_choice":"auto","temperature":0,"max_tokens":512}')
+    python3 -c 'import json,sys; r=json.load(sys.stdin); print(json.dumps(r, ensure_ascii=False, indent=2)); assert r["model"] == "MiniMax-M2.7"; calls=r["choices"][0]["message"]["tool_calls"]; fn=next(c["function"] for c in calls if c["function"]["name"] == "get_current_weather"); city=json.loads(fn["arguments"])["city"].casefold(); assert "shanghai" in city or "上海" in city' <<<"$response"
+    ```
+
+    ## Single-node A3 long context
+
+    [Historical section 5.1](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/MiniMax-M2.html#a3-single-node)
+
+    ### 1. Start the release container
+
+    Run on the A3 host. Set WEIGHTS_ROOT to the directory containing both checkpoints if it differs from /models.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
+    export MINIMAX_CONTAINER=${MINIMAX_CONTAINER:-minimax-single-a3}
+    export WEIGHTS_ROOT=${WEIGHTS_ROOT:-/models}
+    devices=()
+    for id in {0..15}; do devices+=(--device "/dev/davinci$id"); done
+    docker run -d --name "$MINIMAX_CONTAINER" --network host --ipc host \
+      "${devices[@]}" --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
+      -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+      -v /usr/local/dcmi:/usr/local/dcmi:ro \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+      -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
+      -v /etc/hccn.conf:/etc/hccn.conf:ro \
+      -v "$WEIGHTS_ROOT:/models:ro" -w /models --entrypoint bash "$IMAGE" -lc 'exec sleep infinity'
+    ```
+
+    ### 2. Start MiniMax
+
+    Enter the container and run the startup block there.
+
+    ```bash
+    docker exec -it "$MINIMAX_CONTAINER" bash
+    ```
+
+    ```bash
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_BUFFSIZE=1024
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+    vllm serve /models/vllm-ascend/MiniMax-M2.7-w8a8-QuaRot \
+      --served-model-name MiniMax-M2.7 \
+      --host 127.0.0.1 \
+      --port 8000 \
+      --trust-remote-code \
+      --quantization ascend \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --async-scheduling \
+      --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1,"enable_flashcomm1":true,"weight_nz_mode":1}' \
+      --enable-expert-parallel \
+      --tensor-parallel-size 8 \
+      --data-parallel-size 1 \
+      --decode-context-parallel-size 1 \
+      --prefill-context-parallel-size 2 \
+      --cp-kv-cache-interleave-size 1 \
+      --max-num-seqs 16 \
+      --max-model-len 138000 \
+      --max-num-batched-tokens 65536 \
+      --gpu-memory-utilization 0.85 \
+      --speculative-config '{"enforce_eager":true,"method":"eagle3","model":"/models/Eco-Tech/MiniMax-M2.7-eagle-model-short","num_speculative_tokens":1}' \
+      --enable-auto-tool-choice \
+      --tool-call-parser minimax_m2 \
+      --reasoning-parser minimax_m2_append_think
+    ```
+
+    ### 3. Verify inference
+
+    Run in another A3 host terminal while the server is running.
+
+    ```bash
+    curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 --max-time 15 http://127.0.0.1:8000/v1/models |
+      python3 -c 'import json,sys; data=json.load(sys.stdin); print(json.dumps(data)); assert any(m["id"] == "MiniMax-M2.7" for m in data["data"])'
+    response=$(curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 --max-time 120 http://127.0.0.1:8000/v1/chat/completions \
+      -H 'Content-Type: application/json' \
+      -d '{"model":"MiniMax-M2.7","max_tokens":512,"temperature":0,"messages":[{"role":"user","content":"Say hi in one word."}]}')
+    python3 -c 'import json,sys; r=json.load(sys.stdin); print(json.dumps(r, ensure_ascii=False, indent=2)); assert r["model"] == "MiniMax-M2.7"; c=(r["choices"][0]["message"].get("content") or "").strip(); assert not c.startswith("<think>") or "</think>" in c; assert c.rsplit("</think>",1)[-1].strip().casefold().strip(".!") in {"hello","hi"}' <<<"$response"
+    ```
+
+    ```bash
+    python3 - <<'PY'
+    import json
+    from urllib.request import ProxyHandler, Request, build_opener
+    prefix = "The access word for this exercise is ORCHID.\n"
+    body = "".join(f"Archive entry {i:06d}: The museum opens each morning and overlooks the river.\n" for i in range(8248))
+    suffix = "\nQuestion: What is the access word? Answer with the access word only.\nAnswer:"
+    prompt = prefix + body + suffix
+    payload = dict(model="MiniMax-M2.7", prompt=prompt, max_tokens=16, temperature=0, stop=["\n"])
+    request = Request("http://127.0.0.1:8000/v1/completions", json.dumps(payload).encode())
+    request.add_header("Content-Type", "application/json")
+    with build_opener(ProxyHandler({})).open(request, timeout=900) as response:
+        result = json.load(response)
+    answer = result["choices"][0]["text"].strip()
+    assert result["usage"]["prompt_tokens"] >= 131072, result["usage"]
+    assert answer.casefold() == "orchid", answer
+    print(result["id"], result["usage"], answer)
+    PY
+    ```
+
+    ### 4. Verify tool calling
+
+    Verify the tool name and city returned by the model.
+
+    ```bash
+    response=$(curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 --max-time 120 http://127.0.0.1:8000/v1/chat/completions \
+      -H 'Content-Type: application/json' \
+      -d '{"model":"MiniMax-M2.7","messages":[{"role":"user","content":"请查询上海的天气。"}],"tools":[{"type":"function","function":{"name":"get_current_weather","description":"Get weather by city","parameters":{"type":"object","properties":{"city":{"type":"string"},"unit":{"type":"string","enum":["celsius","fahrenheit"]}},"required":["city"]}}}],"tool_choice":"auto","temperature":0,"max_tokens":512}')
+    python3 -c 'import json,sys; r=json.load(sys.stdin); print(json.dumps(r, ensure_ascii=False, indent=2)); assert r["model"] == "MiniMax-M2.7"; calls=r["choices"][0]["message"]["tool_calls"]; fn=next(c["function"] for c in calls if c["function"]["name"] == "get_current_weather"); city=json.loads(fn["arguments"])["city"].casefold(); assert "shanghai" in city or "上海" in city' <<<"$response"
+    ```
