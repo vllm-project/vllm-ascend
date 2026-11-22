@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import inspect
+from functools import wraps
 
 import torch
 
@@ -132,6 +133,38 @@ class _DirectMirrorSources:
         )
 
 
+class _LegacyDecodeRowMirror:
+    """Defer current rows on Core pins without the native per-step flag."""
+
+    deferred = False
+
+    @classmethod
+    def bind(cls, worker):
+        state = getattr(worker, "_ascend_legacy_decode_row_mirror", None)
+        if state is None:
+            state = worker._ascend_legacy_decode_row_mirror = cls()
+        worker._stage_row_mirror_mapping = state._guard(worker._stage_row_mirror_mapping)
+        worker._enqueue_host_mirror = state._guard(worker._enqueue_host_mirror)
+        for handle in worker.cache_handles:
+            submit = handle.submit_layer_mirror
+            if submit is not None:
+                # Core binds this callback before the runner wraps its connector.
+                handle.submit_layer_mirror = state._guard(submit)
+        return state
+
+    def _guard(self, callback):
+        if getattr(callback, "_ascend_legacy_decode_row_mirror", None) is self:
+            return callback
+
+        @wraps(callback)
+        def guarded(*args, **kwargs):
+            if not self.deferred:
+                return callback(*args, **kwargs)
+
+        guarded._ascend_legacy_decode_row_mirror = self
+        return guarded
+
+
 class HostMirrorConnector:
     """Join one worker's Host mirror at the existing Core draft finalizer."""
 
@@ -145,12 +178,14 @@ class HostMirrorConnector:
         rank=None,
         *,
         defer_resident_decode_row_mirror: bool = False,
+        legacy_decode_row_mirror: _LegacyDecodeRowMirror | None = None,
     ):
         self._connector = connector
         self._worker = worker
         self._output_copy_stream = output_copy_stream
         self._sources = sources
         self._defer_resident_decode_row_mirror = defer_resident_decode_row_mirror
+        self._legacy_decode_row_mirror = legacy_decode_row_mirror
         self._logger = logger
         self._rank = rank
         self._logged_lazy_decode = False
@@ -175,8 +210,13 @@ class HostMirrorConnector:
         self.join_pending()
         self._allow_step = allow_step
         self._eligible_forward = False
+        if self._legacy_decode_row_mirror is not None:
+            self._legacy_decode_row_mirror.deferred = False
 
     def pre_forward(self, scheduler_output, input_batch=None, attn_metadata=None):
+        legacy = self._legacy_decode_row_mirror
+        if legacy is not None:
+            legacy.deferred = False
         self._eligible_forward = (
             self._allow_step
             and scheduler_output.has_sync_kv_loads
@@ -207,6 +247,15 @@ class HostMirrorConnector:
                         input_batch.num_reqs,
                     )
                     self._logged_lazy_decode = True
+                if legacy is not None:
+                    # The old worker drains prior draft rows through _enqueue_row_dma
+                    # and whole-page transfers through _submit_transfers.
+                    legacy.deferred = not self._connector._disabled
+                    try:
+                        return self._connector.pre_forward(scheduler_output, input_batch, attn_metadata=attn_metadata)
+                    except BaseException:
+                        legacy.deferred = False
+                        raise
                 return self._connector.pre_forward(
                     scheduler_output, input_batch, attn_metadata=attn_metadata, defer_decode_row_mirror=True
                 )
@@ -326,6 +375,15 @@ def overlap_target_host_mirror(runner):
         return connector
     rank = get_tensor_model_parallel_rank()
     logger.info("HiSparse direct Target Host mirror overlap enabled: rank=%d", rank)
+    defer_decode_row_mirror = (
+        type(connector) is ActiveKVConnector
+        and not worker.cache_handles[0].runtime.eager_host_mirror
+        and supports_flash_resident_decode_graph(runner.vllm_config)
+        and runner.vllm_config.num_speculative_tokens + 1 == FLASH_MTP_QUERY_LEN
+    )
+    legacy = None
+    if defer_decode_row_mirror and "defer_decode_row_mirror" not in inspect.signature(connector.pre_forward).parameters:
+        legacy = _LegacyDecodeRowMirror.bind(worker)
     return HostMirrorConnector(
         connector,
         worker,
@@ -333,11 +391,6 @@ def overlap_target_host_mirror(runner):
         sources,
         logger,
         rank,
-        defer_resident_decode_row_mirror=(
-            type(connector) is ActiveKVConnector
-            and not worker.cache_handles[0].runtime.eager_host_mirror
-            and supports_flash_resident_decode_graph(runner.vllm_config)
-            and runner.vllm_config.num_speculative_tokens + 1 == FLASH_MTP_QUERY_LEN
-            and "defer_decode_row_mirror" in inspect.signature(connector.pre_forward).parameters
-        ),
+        defer_resident_decode_row_mirror=defer_decode_row_mirror,
+        legacy_decode_row_mirror=legacy,
     )

@@ -28,6 +28,7 @@ from vllm_ascend.attention.sfa_v1 import (
 )
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.hisparse import cache_ops, supports_glm5_next_hisparse
+from vllm_ascend.hisparse.flash_compat import install_flash_layer_view_bounds
 from vllm_ascend.hisparse.pcp import hisparse_write_target, prepare_pcp_query_metadata, prepare_pcp_query_states
 from vllm_ascend.ops.triton.hisparse import _SCATTER_MIN_REPRESENTATIVES, scatter_min_representatives
 
@@ -267,6 +268,8 @@ class AscendHiSparseImpl(AscendSFAImpl):
         if not isinstance(self.index_group, HiSparseMLAIndexGroup):
             raise RuntimeError("Ascend HiSparse was initialized without a HiSparse index group")
         self.hisparse_cache = self.index_group.cache(self.index_group_index)
+        if supports_glm5_next_hisparse(self.vllm_config):
+            install_flash_layer_view_bounds(self.hisparse_cache)
         self.topk = self.index_group.logical_topk_indices.shape[-1]
         if self.topk % 128:
             raise ValueError("Ascend HiSparse SFA requires top-k to be divisible by 128")

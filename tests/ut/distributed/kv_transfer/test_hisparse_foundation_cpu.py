@@ -121,11 +121,12 @@ def test_flash_hisparse_scope(monkeypatch, model_type, hisparse_enabled, indexer
 )
 def test_resident_mixed_attention_preserves_native_paged_metadata(monkeypatch, resident, padded):
     from vllm.config.compilation import CUDAGraphMode
-    from vllm.v1.hisparse.runtime import PagedCacheView
+    from vllm.v1.hisparse.runtime import HiSparseCacheHandle, HiSparseRuntime
 
     from vllm_ascend import hisparse
     from vllm_ascend.attention import sfa_hisparse
     from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
+    from vllm_ascend.hisparse.flash_compat import install_flash_layer_view_bounds
 
     num_decode, num_live = 6, 15
     query = torch.arange(num_live, dtype=torch.bfloat16).view(num_live, 1, 1)
@@ -149,15 +150,21 @@ def test_resident_mixed_attention_preserves_native_paged_metadata(monkeypatch, r
         query_start_loc=torch.cat((query_ends.new_zeros(1), query_ends)),
     )
     raw = torch.empty(5 * 9 * 128 * 528, dtype=torch.int8)
-    view = PagedCacheView.bind(
+    layer_runtime = object.__new__(HiSparseRuntime)
+    layer_runtime.kv_dtype = torch.float8_e4m3fn
+    layer_runtime.row_width = 528
+    handle = HiSparseCacheHandle(layer_runtime)
+    install_flash_layer_view_bounds(handle)
+    handle.bind_cache(
         raw,
-        dtype=torch.float8_e4m3fn,
-        row_width=528,
         byte_offset=0,
         block_stride=9 * 128 * 528,
         num_blocks=5,
         block_size=128,
+        block_table=resident_table,
+        slot_mapping=torch.empty(0, dtype=torch.int64),
     )
+    view = handle.view
     calls = []
     impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
     impl.enable_sparse_sfa_c8 = True
@@ -167,7 +174,9 @@ def test_resident_mixed_attention_preserves_native_paged_metadata(monkeypatch, r
         attention_config=NS(hisparse_config=NS(), indexer_kv_dtype="fp8"),
         compilation_config=NS(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY),
         cache_config=NS(cache_dtype="fp8"),
-        model_config=NS(hf_text_config=NS(model_type="glm5_next_text", index_topk=2048, index_kpool=4, qk_rope_head_dim=0)),
+        model_config=NS(
+            hf_text_config=NS(model_type="glm5_next_text", index_topk=2048, index_kpool=4, qk_rope_head_dim=0)
+        ),
         parallel_config=NS(
             data_parallel_size=1,
             pipeline_parallel_size=1,

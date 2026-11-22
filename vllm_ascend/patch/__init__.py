@@ -28,6 +28,15 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * platform/patch_flash_hisparse.py and the Flash HiSparse layer/worker adapters:
+#   Targets: Core cache budget, layer binding, row mirror and terminal spill.
+#   Why: The verified pin lacks compact layout bounds and resident-copy hooks.
+#   How: Use the compact budget and bound Flash attention views while keeping
+#        the arena backing. Defer only current rows of eligible Q6 steps.
+#        Keep terminal spill refs through all-rank ACK and Host publication.
+#   Related PR: https://github.com/vllm-project/vllm/pull/69247
+#   Future plan: Remove the adapters after the verified Core pin has all four changes.
+# --------------------------------
 # * vllm_ascend/hisparse/host_pool.py (HiSparse backend initialization):
 #   Target: vllm.v1.hisparse.runtime.allocate_pinned_host_pool.
 #   Why: AIV mapping alone does not enable DMA to pageable Host storage.
