@@ -5,7 +5,6 @@
 from dataclasses import replace
 
 import torch
-from vllm import envs
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -64,7 +63,7 @@ def separate_gdn_checkpoint_spec(layer, spec):
     if (
         getattr(layer, "_ascend_internal_checkpoint_enabled", False)
         and layer._exports_checkpoints
-        and envs.VLLM_USE_V2_MODEL_RUNNER
+        and layer.vllm_config.use_v2_model_runner
         and layer.vllm_config.speculative_config is None
         and hasattr(spec, "separate_prefill_checkpoint_blocks")
     ):

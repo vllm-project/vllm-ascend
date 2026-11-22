@@ -195,7 +195,7 @@ def test_workspace_sharing_and_fallback():
     "enabled,mrv2,speculative,expected",
     [(True, True, False, True), (False, True, False, False), (True, False, False, False), (True, True, True, False)],
 )
-def test_private_checkpoint_spec_requires_supported_worker(monkeypatch, enabled, mrv2, speculative, expected):
+def test_private_checkpoint_spec_requires_supported_worker(enabled, mrv2, speculative, expected):
     from vllm.v1.kv_cache_interface import MambaSpec
 
     spec = MambaSpec(block_size=2048, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
@@ -207,11 +207,10 @@ def test_private_checkpoint_spec_requires_supported_worker(monkeypatch, enabled,
             is spec
         )
         return
-    monkeypatch.setattr(gdn_checkpoint.envs, "VLLM_USE_V2_MODEL_RUNNER", mrv2)
     layer = SimpleNamespace(
         _ascend_internal_checkpoint_enabled=enabled,
         _exports_checkpoints=True,
-        vllm_config=SimpleNamespace(speculative_config=object() if speculative else None),
+        vllm_config=SimpleNamespace(use_v2_model_runner=mrv2, speculative_config=object() if speculative else None),
     )
     actual = gdn_checkpoint.separate_gdn_checkpoint_spec(layer, spec)
     assert actual.separate_prefill_checkpoint_blocks is expected
