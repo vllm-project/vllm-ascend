@@ -341,7 +341,7 @@ class FusedMC2CommImpl(MoECommMethod):
 
         context_manager = getattr(symm_buffer, "_ctx_manager", None)
         update_group = getattr(context_manager, "update_group", None)
-        if not callable(update_group):
+        if not callable(update_group) and not callable(getattr(symm_buffer, "_recreate_for_group", None)):
             raise RuntimeError(
                 "The installed cann_ops_transformer MegaMoe context manager "
                 "does not expose update_group(); refusing to tear down its HCCL group."
@@ -360,6 +360,7 @@ class FusedMC2CommImpl(MoECommMethod):
         mc2 = get_mc2_group()
         device_group = mc2.device_group
         owner = getattr(mc2, "_main_mega_moe_symm_buffer", symm_buffer)
+        recreate = getattr(owner, "_recreate_for_group", None)
         # The coordinator survives sleep, but its device group is recreated.
         # The first stale view to wake rebinds the shared context for all views.
         if owner.group is not device_group:
@@ -367,17 +368,23 @@ class FusedMC2CommImpl(MoECommMethod):
             world_size = torch.distributed.get_world_size(group=device_group)
             backend = device_group._get_backend(torch.device("npu"))
             group_name = backend.get_hccl_comm_name(local_rank)
-            context_manager = owner._ctx_manager
-
-            # CANN updates the inference tensor allocated during initialization.
             with torch.inference_mode():
-                context_manager.update_group(group_name, owner.context)
+                if recreate is None:
+                    owner._ctx_manager.update_group(group_name, owner.context)
+                else:
+                    # A5 channel buffers with a capacity resolver need a fresh manager.
+                    # Keep the context tensor's address for already captured graphs.
+                    replacement = recreate(device_group)
+                    owner.context.copy_(replacement.context)
+                    owner._ctx_manager = replacement._ctx_manager
+                    owner.topo_type = replacement.topo_type
+                    owner.rank_num_per_server = replacement.rank_num_per_server
             torch.distributed.barrier(group=device_group, device_ids=[torch.npu.current_device()])
 
             owner.rank_id = local_rank
             owner.group_name = group_name
             owner.ep_world_size = world_size
-            owner.ccl_buffer_size = context_manager.ccl_buffer_size
+            owner.ccl_buffer_size = owner._ctx_manager.ccl_buffer_size
             owner.group = device_group
             logger.info(
                 "Refreshed MegaMoe HCCL runtime context after MC2 group restore: rank=%d, world_size=%d.",
@@ -386,6 +393,10 @@ class FusedMC2CommImpl(MoECommMethod):
             )
 
         if symm_buffer is not owner:
+            if recreate is not None:
+                symm_buffer._ctx_manager = owner._ctx_manager
+                symm_buffer.topo_type = owner.topo_type
+                symm_buffer.rank_num_per_server = owner.rank_num_per_server
             symm_buffer.group = owner.group
             symm_buffer.rank_id = owner.rank_id
             symm_buffer.group_name = owner.group_name
@@ -479,6 +490,7 @@ class FusedMC2CommImpl(MoECommMethod):
             get_mc2_group(),
             self.get_symm_buffer_for_mega_moe,
             is_draft=self._mega_moe_is_draft,
+            recreate_on_wake=get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP),
             group=group,
             num_experts=num_experts,
             num_max_tokens_per_rank=num_max_tokens_per_rank,

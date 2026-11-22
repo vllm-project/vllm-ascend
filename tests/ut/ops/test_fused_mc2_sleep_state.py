@@ -107,6 +107,51 @@ def test_fused_mc2_refresh_is_noop_when_context_was_not_invalidated():
     context_manager.update_group.assert_not_called()
 
 
+@pytest.mark.parametrize("draft_first", [True, False])
+def test_channel_wakeup_replaces_manager_but_preserves_captured_context(draft_first):
+    old_manager = MagicMock()
+    old_manager.update_group.side_effect = RuntimeError("create a replacement CommContextManager instead")
+    new_manager = SimpleNamespace(ccl_buffer_size=4096)
+    with torch.inference_mode():
+        captured_context = torch.tensor([1, 2])
+    replacement = SimpleNamespace(
+        _ctx_manager=new_manager, context=torch.tensor([3, 4]), topo_type=1, rank_num_per_server=8
+    )
+    recreate = MagicMock(return_value=replacement)
+    owner = SimpleNamespace(
+        group=object(),
+        _ctx_manager=old_manager,
+        context=captured_context,
+        _recreate_for_group=recreate,
+        num_experts=384,
+    )
+    draft = SimpleNamespace(**vars(owner))
+    draft.num_experts = 128
+    new_group = MagicMock()
+    coordinator = SimpleNamespace(device_group=new_group, _main_mega_moe_symm_buffer=owner)
+    with (
+        patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group", return_value=coordinator),
+        patch.object(torch.distributed, "get_rank", return_value=0),
+        patch.object(torch.distributed, "get_world_size", return_value=8),
+        patch.object(torch.distributed, "barrier") as barrier,
+        patch.object(torch.npu, "current_device", return_value=0),
+    ):
+        for buf in (draft, owner) if draft_first else (owner, draft):
+            comm = _new_comm_impl(buf)
+            assert comm.prepare_hccl_teardown()
+            assert comm.refresh_hccl_runtime_state()
+
+    recreate.assert_called_once_with(new_group)
+    old_manager.update_group.assert_not_called()
+    barrier.assert_called_once()
+    for buf in (owner, draft):
+        assert buf.context is captured_context
+        assert buf._ctx_manager is new_manager
+        assert (buf.ccl_buffer_size, buf.topo_type, buf.rank_num_per_server) == (4096, 1, 8)
+    assert (owner.num_experts, draft.num_experts) == (384, 128)
+    torch.testing.assert_close(captured_context, replacement.context)
+
+
 def test_fused_mc2_sleep_wakeup_rebinds_shared_context_once_per_restored_group():
     context = MagicMock()
     context_manager = MagicMock(ccl_buffer_size=4096)

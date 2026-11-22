@@ -132,6 +132,15 @@ class TestMainOwnedMegaMoeBuffer(unittest.TestCase):
         self.assertEqual(bound.arguments["topk_weights_type"], 1)
         self.factory.assert_called_once()
 
+    def test_recreate_uses_main_allocation_parameters_on_the_new_group(self):
+        main = self._get_buffer(recreate_on_wake=True)
+        self._get_buffer(is_draft=True, num_experts=128, num_topk=3)
+        new_group = object()
+        replacement = main._recreate_for_group(new_group)
+        self.assertIs(replacement.group, new_group)
+        self.assertEqual((replacement.num_experts, replacement.num_topk), (384, 6))
+        self.assertEqual(self.factory.call_count, 2)
+
     def test_cross_server_size_query_uses_owner_topology(self):
         self.size_query.__signature__ = signature(_current_size_query)
         main = self._get_buffer()

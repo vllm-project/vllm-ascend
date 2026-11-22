@@ -38,6 +38,7 @@ def get_main_owned_buffer(
     factory: Callable,
     *,
     is_draft: bool,
+    recreate_on_wake: bool = False,
     group: Any,
     num_experts: int,
     num_max_tokens_per_rank: int,
@@ -58,6 +59,12 @@ def get_main_owned_buffer(
         if is_draft:
             raise RuntimeError("Main must initialize MegaMoe before the draft")
         owner = factory(*bound.args, **bound.kwargs)
+        if recreate_on_wake:
+            # Keep the target's allocation parameters even when the draft wakes first.
+            def recreate_for_group(new_group):
+                return factory(new_group, num_experts, num_max_tokens_per_rank, num_topk, **kwargs)
+
+            owner._recreate_for_group = recreate_for_group
         scope._main_mega_moe_symm_buffer = owner
         return owner
 

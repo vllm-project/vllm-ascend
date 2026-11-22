@@ -68,7 +68,7 @@ class TestMoECommMethod(TestBase):
         comm_impl.token_dispatcher.max_num_tokens_per_rank = 128
         comm_impl.token_dispatcher.ep_world_size = 8
         comm_impl.token_dispatcher.ep_rank_id = 0
-        comm_impl.get_symm_buffer_for_mega_moe = MagicMock(return_value="symm_buffer")
+        comm_impl.get_symm_buffer_for_mega_moe = MagicMock(return_value=SimpleNamespace())
         comm_impl.mega_moe_symm_buffer = None
         comm_impl._mega_moe_is_draft = False
         return comm_impl
