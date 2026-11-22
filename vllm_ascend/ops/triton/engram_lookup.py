@@ -124,8 +124,7 @@ def _engram_host_uva_gather_dequant_kernel(
     QUANTIZED: tl.constexpr,
     MXFP8: tl.constexpr,
 ):
-    row = tl.program_id(0)
-    if row < rows:
+    for row in range(tl.program_id(0), rows, tl.num_programs(0)):
         token = row // LOCAL_HEADS
         head_local = row % LOCAL_HEADS
         index = tl.load(ids + token * ids_stride_t + HEAD_START + head_local).to(tl.int64)

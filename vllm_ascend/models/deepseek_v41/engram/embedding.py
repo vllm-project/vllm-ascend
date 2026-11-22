@@ -532,7 +532,13 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         logger.info("Engram rows [%d, %d) loaded from %s", start, end, index[key])
 
     def embed_gathered(
-        self, gathered: torch.Tensor, num_tokens: int, *, cpu_ids=None, local_values=None
+        self,
+        gathered: torch.Tensor,
+        num_tokens: int,
+        *,
+        cpu_ids=None,
+        local_values=None,
+        host_uva_core_percentage: int | None = None,
     ) -> torch.Tensor:
         """Embed ids already gathered across the EDP group.
 
@@ -549,10 +555,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                 dtype=torch.bfloat16,
                 device=gathered.device,
             )
-            if cpu_ids is None:
-                self.lookup(gathered, out)
-            else:
-                self.lookup(gathered, out, cpu_ids=cpu_ids)
+            self.lookup(gathered, out, cpu_ids=cpu_ids, host_uva_core_percentage=host_uva_core_percentage)
         if self.dp_size > 1:
             out = exchange_engram_rows(out, num_tokens)
         else:
@@ -582,7 +585,15 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         gathered = gather_engram_hashes(indices, dp_shared_memory=self._shared_group is not None)
         return self.embed_gathered(gathered, num_tokens)
 
-    def lookup(self, indices: torch.Tensor, out: torch.Tensor, background: bool = False, *, cpu_ids=None) -> None:
+    def lookup(
+        self,
+        indices: torch.Tensor,
+        out: torch.Tensor,
+        background: bool = False,
+        *,
+        cpu_ids=None,
+        host_uva_core_percentage: int | None = None,
+    ) -> None:
         """Look up this shard's heads into ``[tokens, padded_heads, dim]`` bf16.
 
         All local head columns are written, including zeroes for invalid IDs.
@@ -605,7 +616,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         if self._codes_uva is not None:
             codes_uva = cast(HostUvaBuffer, self._codes_uva)
             scales_uva = cast(HostUvaBuffer, self._scales_uva) if self._scales_uva is not None else None
-            gather_dequantize_host_uva(codes_uva, scales_uva, indices, **launch)
+            gather_dequantize_host_uva(
+                codes_uva, scales_uva, indices, core_percentage=host_uva_core_percentage, **launch
+            )
         elif self.weight.device.type != "cpu":
             gather_dequantize_engram_int8(self.weight, self.weight_scale_inv, indices, self.dim, **launch)
         else:

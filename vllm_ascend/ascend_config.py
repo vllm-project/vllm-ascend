@@ -695,6 +695,7 @@ class AscendConfig:
             get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
         )
     )
+    engram_prefill_uva_core_percentage: int | None = Field(default=None, ge=1, le=100)
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False

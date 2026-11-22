@@ -248,14 +248,17 @@ def gather_dequantize_host_uva(
     output: torch.Tensor | None = None,
     vocab_start: int = 0,
     vocab_end: int | None = None,
+    core_percentage: int | None = None,
 ) -> torch.Tensor:
     """Gather registered host rows, preserving BF16 when scales are absent.
 
     Returns ``[tokens * pad_heads, width]``; the head path views it as
     ``[tokens, pad_heads, width]``.
+    A core percentage limits the launch grid to that share of device vector
+    cores, with each program processing multiple rows when needed.
     """
 
-    from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+    from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
     pad_heads = local_heads if pad_heads is None else pad_heads
     assert codes.tensor is not None
@@ -271,7 +274,8 @@ def gather_dequantize_host_uva(
     # The kernel widens loaded IDs to int64; no extra cast/copy is needed here.
     from vllm_ascend.ops.triton.engram_lookup import _engram_host_uva_gather_dequant_kernel
 
-    _engram_host_uva_gather_dequant_kernel[(rows,)](
+    programs = rows if core_percentage is None else min(rows, max(1, get_vectorcore_num() * core_percentage // 100))
+    _engram_host_uva_gather_dequant_kernel[(programs,)](
         codes.ptrs,
         scales.ptrs if scales is not None else None,
         ids,

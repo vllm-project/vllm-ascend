@@ -3,7 +3,7 @@
 """MRV2 history preparation must not perform context-dependent lookups."""
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import numpy as np
 import pytest
@@ -11,6 +11,7 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.models.deepseek_v41.engram import model_state as deepseek_v41
 from vllm_ascend.ops.triton import engram_lookback
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -48,8 +49,14 @@ def state(monkeypatch, request):
     monkeypatch.setattr(DefaultModelState, "prepare_inputs", lambda *args: {})
     monkeypatch.setattr(DefaultModelState, "prepare_dummy_inputs", lambda *args: {})
     monkeypatch.setattr(deepseek_v41, "ring_state_update_skipped", lambda: False)
+    pcp_size, percentage, device_type, is_consumer = getattr(request, "param", (1, None, AscendDeviceType.A2, False))
+    monkeypatch.setattr(
+        deepseek_v41, "get_ascend_config", lambda: SimpleNamespace(engram_prefill_uva_core_percentage=percentage)
+    )
+    monkeypatch.setattr(deepseek_v41, "get_ascend_device_type", lambda: device_type)
     config = SimpleNamespace(
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=getattr(request, "param", 1))
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size),
+        kv_transfer_config=SimpleNamespace(is_kv_producer=True, is_kv_consumer=is_consumer),
     )
     return deepseek_v41.EngramModelState(config, EngramModel(), None, torch.device("cpu"))
 
@@ -64,6 +71,7 @@ def batch():
         positions=torch.arange(8),
         idx_mapping=torch.tensor([2, 0]),
         query_start_loc=torch.tensor([0, 1, 3, 8, 8], dtype=torch.int32),
+        is_prefilling_np=np.array([True, True]),
     )
 
 
@@ -118,6 +126,34 @@ def test_idle_rank_defers_collective_without_reading_request_history(state, monk
     assert inputs["engram_mask"] is state.model.buffers_for_graph["engram_mask"]
 
 
+@pytest.mark.parametrize(
+    ("state", "mode", "prefills", "expected"),
+    [
+        ((1, 75, AscendDeviceType.A2, False), CUDAGraphMode.NONE, [True, True], 75),
+        ((1, 75, AscendDeviceType.A2, False), CUDAGraphMode.NONE, [True, False], None),
+        ((1, 75, AscendDeviceType.A2, False), CUDAGraphMode.NONE, [False, False], None),
+        ((1, 75, AscendDeviceType.A2, False), CUDAGraphMode.FULL, [True, True], None),
+        ((1, 75, AscendDeviceType.A2, True), CUDAGraphMode.NONE, [True, True], None),
+        ((1, 75, AscendDeviceType.A3, False), CUDAGraphMode.NONE, [True, True], None),
+    ],
+    indirect=["state"],
+    ids=["prefill", "mixed", "decode", "full", "dual-role", "a3"],
+)
+def test_grid_cap_only_reaches_a2_eager_prefill(state, mode, prefills, expected, monkeypatch):
+    monkeypatch.setattr(deepseek_v41, "triton", SimpleNamespace(next_power_of_2=lambda _: 4))
+    monkeypatch.setattr(engram_lookback, "_gather_lookback_kernel", MagicMock())
+    state._cg_mode = mode
+    input_batch = batch()
+    input_batch.is_prefilling_np = np.array(prefills)
+    reqs = SimpleNamespace(
+        all_token_ids=SimpleNamespace(gpu=torch.zeros(4, 8, dtype=torch.int32)),
+        num_computed_tokens=SimpleNamespace(gpu=torch.zeros(4, dtype=torch.int32)),
+    )
+    state.prepare_engram_inputs(input_batch, reqs)
+    state.prepare_engram()
+    assert state.model.prepare_engram_inputs.call_args.kwargs.get("host_uva_core_percentage") == expected
+
+
 def test_capture_discards_pending_lookup_and_resets_history(state):
     state.kvpp_is_dummy_run = True
     state.prepare_inputs(batch(), None)
@@ -147,7 +183,7 @@ def test_eager_hook_forwards_lookup_events(state):
     state.model.prepare_engram_inputs.assert_called_once()
 
 
-@pytest.mark.parametrize("state", [1, 2, 4], indirect=True)
+@pytest.mark.parametrize("state", [(pcp, None, AscendDeviceType.A2, False) for pcp in (1, 2, 4)], indirect=True)
 @pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
 def test_replay_metadata_follows_local_segments_and_preserves_global_history(state, mode, monkeypatch):
     state._replay_start_np[:] = [11, 22, 33, 44]

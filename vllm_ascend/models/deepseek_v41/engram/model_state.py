@@ -28,6 +28,9 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.models.deepseek_v41.decoder_replay_state import DecoderReplayInputs, DecoderReplayState
 from vllm_ascend.worker.v2.attn_utils import ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -80,6 +83,7 @@ class EngramModelState(AscendModelState):
 
     _engram_graph_inputs: dict[str, torch.Tensor] | None = None
     _engram_inputs: dict[str, Any] | None = None
+    _host_uva_core_percentage: int | None = None
 
     def _initialize_decoder_replay(self) -> None:
         # Engram uses the model-specific replay state instead of preparing
@@ -102,6 +106,16 @@ class EngramModelState(AscendModelState):
         depth = model.token_lookback_depth
         self.lookback_token_ids: torch.Tensor | None = None
         self._cg_mode: CUDAGraphMode | None = None
+        percentage = get_ascend_config().engram_prefill_uva_core_percentage
+        transfer = vllm_config.kv_transfer_config
+        if (
+            percentage is not None
+            and get_ascend_device_type() == AscendDeviceType.A2
+            and transfer is not None
+            and transfer.is_kv_producer
+            and not transfer.is_kv_consumer
+        ):
+            self._host_uva_core_percentage = percentage
         if depth > 0:
             model.register_forward_pre_hook(self._prepare_engram_before_forward, with_kwargs=True)
             # Persistent so a captured graph can read it on replay.
@@ -312,6 +326,14 @@ class EngramModelState(AscendModelState):
             "force_dummy": dummy,
             "token_indices": token_indices,
         }
+        if (
+            self._host_uva_core_percentage is not None
+            and self._cg_mode == CUDAGraphMode.NONE
+            and not dummy
+            and batch.num_reqs > 0
+            and batch.is_prefilling_np[: batch.num_reqs].all()
+        ):
+            self._engram_inputs["host_uva_core_percentage"] = self._host_uva_core_percentage
         model_inputs.update(self.model.prepare_engram_graph_inputs(input_batch.num_tokens_after_padding))
         return model_inputs
 
