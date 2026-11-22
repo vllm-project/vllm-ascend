@@ -16,7 +16,7 @@
 # limitations under the License.
 #
 import torch
-from torch._inductor.pattern_matcher import PatternMatcherPass
+from torch._inductor.pattern_matcher import Match, PatternMatcherPass
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
@@ -24,6 +24,7 @@ from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
 from vllm_ascend.utils import enable_custom_op
 
 
@@ -314,9 +315,54 @@ class AddRMSNormDynamicQuantPatternWithBias(BasePattern):
         return replacement
 
 
+def _make_mx_quant_extra_check(expected_scale_alg: int):
+    """Guard MXFP8 norm-quant fusion against silent keyword-argument drops.
+
+    Inductor's pattern matcher ignores keyword arguments not declared in the
+    pattern node. Because ``npu_dynamic_mx_quant`` defaults ``scale_alg`` to 0
+    (and also accepts ``axis``, ``round_mode``, ``block_size``, ``dst_type_max``,
+    and ``max_low_bound``), a pattern omitting ``scale_alg`` would otherwise
+    match ``scale_alg=1`` (CEIL) or non-default quantizer arguments and silently
+    rewrite them to schema defaults in the fused op.
+    """
+
+    def _check(match: Match) -> bool:
+        quant_op = torch.ops.npu.npu_dynamic_mx_quant
+        quant_nodes = [
+            node
+            for node in match.nodes
+            if node.op == "call_function" and getattr(node.target, "overloadpacket", node.target) == quant_op
+        ]
+        if len(quant_nodes) != 1:
+            return False
+        kwargs = quant_nodes[0].kwargs
+        raw_scale_alg = kwargs.get("scale_alg", 0)
+        effective_scale_alg = 0 if raw_scale_alg is None else raw_scale_alg
+        if isinstance(effective_scale_alg, bool) or effective_scale_alg != expected_scale_alg:
+            return False
+        if kwargs.get("axis", -1) != -1:
+            return False
+        if kwargs.get("round_mode", "rint") != "rint":
+            return False
+        if kwargs.get("block_size", 32) != 32:
+            return False
+        if kwargs.get("dst_type_max", 0.0) != 0.0:
+            return False
+        return kwargs.get("max_low_bound", 0.0) == 0.0
+
+    return _check
+
+
 class AddRMSNormDynamicMXQuantPattern(BasePattern):
-    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
+    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6, scale_alg: int = 0):
         super().__init__(vllm_config, eps)
+        self.scale_alg = int(scale_alg)
+
+    def pattern_key(self) -> str:
+        return f"{self.__class__.__name__}_{self.eps}_scale_alg_{self.scale_alg}"
+
+    def get_extra_check(self):
+        return _make_mx_quant_extra_check(self.scale_alg)
 
     def get_inputs(self):
         """
@@ -335,7 +381,12 @@ class AddRMSNormDynamicMXQuantPattern(BasePattern):
             output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
             out0 = output[0]
             out1 = output[2]
-            quantized_output = torch.ops.npu.npu_dynamic_mx_quant(out0, dst_type=torch.float8_e4m3fn)
+            if self.scale_alg == 0:
+                quantized_output = torch.ops.npu.npu_dynamic_mx_quant(out0, dst_type=torch.float8_e4m3fn)
+            else:
+                quantized_output = torch.ops.npu.npu_dynamic_mx_quant(
+                    out0, dst_type=torch.float8_e4m3fn, scale_alg=self.scale_alg
+                )
             return quantized_output[0], quantized_output[1], out1
 
         return pattern
@@ -350,6 +401,7 @@ class AddRMSNormDynamicMXQuantPattern(BasePattern):
                 residual,
                 rms_norm_weight,
                 epsilon=self.eps,
+                scale_alg=self.scale_alg,
                 dst_type=torch.float8_e4m3fn,
             )
             return (
@@ -362,8 +414,15 @@ class AddRMSNormDynamicMXQuantPattern(BasePattern):
 
 
 class RMSNormDynamicMXQuantPattern(BasePattern):
-    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
+    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6, scale_alg: int = 0):
         super().__init__(vllm_config, eps)
+        self.scale_alg = int(scale_alg)
+
+    def pattern_key(self) -> str:
+        return f"{self.__class__.__name__}_{self.eps}_scale_alg_{self.scale_alg}"
+
+    def get_extra_check(self):
+        return _make_mx_quant_extra_check(self.scale_alg)
 
     def get_inputs(self):
         """
@@ -380,7 +439,12 @@ class RMSNormDynamicMXQuantPattern(BasePattern):
             """
             output = torch.ops.npu.npu_rms_norm(rms_norm_input, rms_norm_weight, self.eps)
             out0 = output[0]
-            quantized_output = torch.ops.npu.npu_dynamic_mx_quant(out0, dst_type=torch.float8_e4m3fn)
+            if self.scale_alg == 0:
+                quantized_output = torch.ops.npu.npu_dynamic_mx_quant(out0, dst_type=torch.float8_e4m3fn)
+            else:
+                quantized_output = torch.ops.npu.npu_dynamic_mx_quant(
+                    out0, dst_type=torch.float8_e4m3fn, scale_alg=self.scale_alg
+                )
             return quantized_output[0], quantized_output[1]
 
         return pattern
@@ -394,6 +458,7 @@ class RMSNormDynamicMXQuantPattern(BasePattern):
                 rms_norm_input,
                 rms_norm_weight,
                 epsilon=self.eps,
+                scale_alg=self.scale_alg,
                 dst_type=torch.float8_e4m3fn,
             )
             return output[0], output[1]
@@ -456,8 +521,16 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
         for eps in common_epsilons:
             AddRMSNormDynamicQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
             if profile.supports(HardwareCapability.DYNAMIC_MX_QUANT_FUSION):
-                AddRMSNormDynamicMXQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
-                RMSNormDynamicMXQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
+                mx_scale_algs = [DynamicMXQuantScaleAlg.MAX_EXPONENT]
+                if profile.supports(HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE):
+                    mx_scale_algs.append(DynamicMXQuantScaleAlg.CEIL)
+                for scale_alg in mx_scale_algs:
+                    AddRMSNormDynamicMXQuantPattern(vllm_config, eps=eps, scale_alg=scale_alg).register(
+                        self.pattern_match_passes
+                    )
+                    RMSNormDynamicMXQuantPattern(vllm_config, eps=eps, scale_alg=scale_alg).register(
+                        self.pattern_match_passes
+                    )
             if enable_custom_op():
                 AddRMSNormQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
