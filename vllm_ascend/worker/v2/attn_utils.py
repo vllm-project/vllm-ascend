@@ -41,7 +41,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import (
@@ -105,7 +105,6 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     make_qsa_kernel_page_cache,
     make_slab_view,
 )
-from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.cache import uses_turboquant_groups
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
@@ -2047,11 +2046,8 @@ def _reshape_kv_cache_v2(
 
             if packed_sfa_main_cache:
                 raw_k_tensor = raw_cache
-                k_dtype = (
-                    torch.int8
-                    if vllm_config.cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE
-                    else kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
-                )
+                # Allocation and the layer's reader/writer share this spec.
+                k_dtype = kv_cache_spec.dtype
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)
             elif isinstance(raw_cache, tuple):

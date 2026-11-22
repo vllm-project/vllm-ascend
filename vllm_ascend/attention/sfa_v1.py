@@ -69,6 +69,7 @@ from vllm_ascend.quantization.methods import (
     AscendW8A8LinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQuantLatent
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
@@ -79,6 +80,7 @@ from vllm_ascend.utils import (
     enable_sp,
     is_mtp_layer,
     is_rl_weight_update_enabled,
+    kv_cache_spec_uses_packed_sfa_main_cache,
     maybe_trans_nz,
     vllm_version_is,
 )
@@ -263,8 +265,7 @@ class SparseMLAMetadataState:
         self.split = block_size // kernel_block_size
         self.use_smla = get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
         if self.use_smla:
-            config = get_ascend_config()
-            self.use_smla = not (config.enable_sparse_sfa_c8 or config.enable_sparse_sfa_turboquant)
+            self.use_smla = not kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec)
         self.block_size = kernel_block_size
         self.table_stride = 1
         cache_block_size = vllm_config.cache_config.block_size
@@ -905,24 +906,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # applies only to layers that own an indexer cache.
         self._update_indexer_cache_enabled()
         self.store_kv_cache_on_host = ascend_config.sparse_kv_offload_config.enabled
-        self.kv_cache_dtype = self.vllm_config.cache_config.cache_dtype
-        self.enable_sparse_sfa_turboquant = ascend_config.enable_sparse_sfa_turboquant
-        self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
-        if self.enable_sparse_sfa_c8:
-            self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
-                self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
-            )
-
-        if self.enable_sparse_sfa_turboquant:
-            self.sfa_qsfa_packed_kv_head_dim = get_tq_fused_slot_bytes(self.kv_lora_rank, self.qk_rope_head_dim)
-        elif self.enable_sparse_sfa_c8:
-            self.sfa_qsfa_packed_kv_head_dim = get_sfa_qsfa_packed_head_dim(
-                self.kv_lora_rank,
-                self.qk_rope_head_dim,
-                self.sfa_qsfa_tile_size,
-            )
-        # Shared signed-Hadamard transform plus the ops-nn quantizer.
-        self.turboquant = TurboQuantLatent() if self.enable_sparse_sfa_turboquant else None
+        self._init_kv_cache_format()
         self.preprocess_type = PreprocessType.NATIVE
 
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
@@ -955,6 +939,29 @@ class AscendSFAImpl(MLAAttentionImpl):
                     exc,
                 )
                 self.enable_pcp_o_proj_weight_sharding = False
+
+    def _init_kv_cache_format(self) -> None:
+        # Draft models can have a separate cache config (e.g. auto/BF16 under
+        # an INT8 target). Writers, readers and owner specs must all select
+        # their format from this layer's config, not the target's global flags.
+        self.kv_cache_dtype = self.vllm_config.cache_config.cache_dtype
+        self.enable_sparse_sfa_turboquant = self.kv_cache_dtype == TURBOQUANT_CACHE_DTYPE
+        self.enable_sparse_sfa_c8 = self.kv_cache_dtype in ("int8", "fp8")
+        if self.enable_sparse_sfa_c8:
+            self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
+                self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
+            )
+
+        if self.enable_sparse_sfa_turboquant:
+            self.sfa_qsfa_packed_kv_head_dim = get_tq_fused_slot_bytes(self.kv_lora_rank, self.qk_rope_head_dim)
+        elif self.enable_sparse_sfa_c8:
+            self.sfa_qsfa_packed_kv_head_dim = get_sfa_qsfa_packed_head_dim(
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+                self.sfa_qsfa_tile_size,
+            )
+        # Shared signed-Hadamard transform plus the ops-nn quantizer.
+        self.turboquant = TurboQuantLatent() if self.enable_sparse_sfa_turboquant else None
 
     @property
     def uses_packed_sfa_main_cache(self) -> bool:

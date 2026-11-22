@@ -3420,3 +3420,59 @@ def test_step5_reshape_rejects_non_tensor_step_aux_raw(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="must use one raw tensor"):
         _step5_reshape(config, raw, monkeypatch)
+
+
+@pytest.mark.parametrize(
+    "target_dtype,layer_dtype,packed",
+    [
+        ("int8", torch.bfloat16, False),
+        ("auto", torch.int8, True),
+        ("int8", torch.float8_e4m3fn, True),
+    ],
+)
+def test_sfa_reshape_uses_each_layer_storage_format(monkeypatch, target_dtype, layer_dtype, packed):
+    layer_name = "model.layers.78.self_attn.attn"
+    num_blocks, block_size = 2, 128
+    spec = AscendMLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=656 if packed else 576,
+        dtype=layer_dtype,
+        is_draft=True,
+        cache_sparse_sfa_c8=packed,
+    )
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype=target_dtype),
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: True)
+    monkeypatch.setattr(attn_utils, "_uses_single_raw_mla_cache", lambda *_: False)
+    monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *_: (512, 64))
+    raw = torch.zeros(num_blocks * spec.page_size_bytes, dtype=torch.int8)
+    cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[_make_kv_cache_tensor(raw.numel(), [layer_name], spec.page_size_bytes)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+    )
+    group = AttentionGroup(
+        backend=AscendSFABackend,
+        layer_names=[layer_name],
+        kv_cache_spec=spec,
+        kv_cache_group_id=0,
+    )
+    caches = attn_utils._reshape_kv_cache_v2(
+        attn_groups=[group],
+        kv_cache_raw_tensors={layer_name: raw},
+        cache_dtype=target_dtype,
+        kernel_block_sizes=[block_size],
+        shared_kv_cache_layers={},
+        kv_cache_config=cache_config,
+    )[layer_name]
+    assert len(caches) == (1 if packed else 2)
+    assert all(cache.dtype == layer_dtype for cache in caches)
+    assert all(cache.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr() for cache in caches)
+    assert sum(cache.numel() * cache.element_size() for cache in caches) == raw.numel()
+    assert caches[0].shape == (num_blocks, block_size, 1, 656 if packed else 512)
+    if not packed:
+        assert caches[1].shape == (num_blocks, block_size, 1, 64)
