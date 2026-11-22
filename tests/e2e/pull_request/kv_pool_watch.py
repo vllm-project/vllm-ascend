@@ -444,12 +444,14 @@ def _collect_perf(
     prompt_tokens: int,
     *,
     reset_local_cache: bool = False,
+    seed_concurrency: bool = False,
 ) -> float:
     """Return input throughput for 32 requests at concurrency 16."""
     prompt, _ = build_pool_prompts(prompt_tokens)
-    # Seed the pool at the target concurrency once; otherwise the first timed
-    # wave can measure an under-populated hybrid align tail block.
-    runner.generate_greedy([prompt] * AB_CONCURRENCY, 1)
+    if seed_concurrency:
+        # Hybrid align only: seed the tail block at the target concurrency so
+        # the first timed wave does not measure an under-populated block.
+        runner.generate_greedy([prompt] * AB_CONCURRENCY, 1)
     for _ in range(AB_WARMUP_ROUNDS):
         runner.generate_greedy([prompt] * AB_WARMUP_REQUESTS, 1)
     # Let scheduling and in-flight async writes settle before timing.
@@ -549,6 +551,7 @@ def run_pool_ab(
     max_tokens: int = POOL_MAX_TOKENS,
     token_identity: bool = True,
     perf_reset_local: bool = False,
+    perf_seed_concurrency: bool = False,
     gate: bool = True,
     pool_first: bool = False,
     acceptance_ratio: float | None = None,
@@ -582,6 +585,7 @@ def run_pool_ab(
                     runner,
                     perf_tokens,
                     reset_local_cache=perf_reset_local and use_pool,
+                    seed_concurrency=perf_seed_concurrency,
                 )
                 result = LegResult(
                     True,

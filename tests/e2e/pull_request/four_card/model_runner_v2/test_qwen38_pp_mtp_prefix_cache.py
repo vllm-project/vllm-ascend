@@ -296,4 +296,5 @@ def test_qwen38_pp_mtp_prefix_cache():
         prompt_ids=prompt_ids,
         perf_prompt_tokens=POOL_PERF_PROMPT_TOKENS,
         perf_reset_local=True,  # A leg only: reset local before each sample.
+        perf_seed_concurrency=True,  # Hybrid align: populate the tail block first.
     )
