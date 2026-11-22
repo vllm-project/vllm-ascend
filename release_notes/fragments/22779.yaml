@@ -1,0 +1,7 @@
+pr: 22779
+entries:
+  - category: bugfix
+    text: >-
+      Fixed native Kimi-K3 packed MXFP4 checkpoints failing quantization
+      validation on Ascend when vLLM selects the mxfp4 method. Supported
+      checkpoints no longer require a quantization override.
