@@ -733,6 +733,8 @@ _PCP_STAGE_STEP: dict[str, Any] = {
     "swa_host_calls": 0,
     "long_kv_host_s": 0.0,
     "long_kv_host_calls": 0,
+    "smla_host_s": 0.0,
+    "smla_host_calls": 0,
 }
 _PCP_STAGE_REPORT_EVERY = 128
 
@@ -773,7 +775,7 @@ def _pcp_stage_note_step(step_token, stage_cache) -> None:
             logger.info(
                 "PCP stage counters: steps=%d swa=%s long_kv=%s smla_ops=%d step_smla_ops=%d "
                 "step_smla_entries=%d swa_blocks=%d/%d long_kv_blocks=%d/%d "
-                "swa_host_us=%.1f long_kv_host_us=%.1f",
+                "swa_host_us=%.1f long_kv_host_us=%.1f smla_host_us=%.1f",
                 state["steps"],
                 dict(sorted(_PCP_STAGE_STATS.get("swa", {}).items())),
                 dict(sorted(_PCP_STAGE_STATS.get("long_kv", {}).items())),
@@ -786,6 +788,7 @@ def _pcp_stage_note_step(step_token, stage_cache) -> None:
                 state["long_kv_capacity"],
                 1e6 * state["swa_host_s"] / max(1, state["swa_host_calls"]),
                 1e6 * state["long_kv_host_s"] / max(1, state["long_kv_host_calls"]),
+                1e6 * state["smla_host_s"] / max(1, state["smla_host_calls"]),
             )
         # The operator tiling cache survives in the builder's batch dictionary
         # across steps, while its signature cannot see the per-request
@@ -918,6 +921,7 @@ class AscendDSAV41Impl:
             if plan is not None and plan.total_blocks > 0:
                 smla_token = _timing_enter("stage_swa_smla", config.enable_timing)
                 before_entries = len(stage_cache.smla_cache) if stage_cache is not None else 0
+                smla_started = time.perf_counter()
                 rebuilt = _build_swa_chunk_smla_metadata(
                     attn,
                     swa_metadata,
@@ -932,6 +936,8 @@ class AscendDSAV41Impl:
                     num_reqs=num_reqs,
                 )
                 _timing_exit(smla_token)
+                _PCP_STAGE_STEP["smla_host_calls"] += 1
+                _PCP_STAGE_STEP["smla_host_s"] += time.perf_counter() - smla_started
                 if stage_cache is not None:
                     missed = max(0, len(stage_cache.smla_cache) - before_entries)
                     _PCP_STAGE_STEP["smla_ops"] += missed
