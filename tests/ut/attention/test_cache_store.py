@@ -14,6 +14,32 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 
 
+def test_interleaved_fp8_indexer_writes_physical_byte_rows(monkeypatch):
+    block = width = 128
+    page_bytes = block * (width + 4)
+    backing = torch.full((2 * page_bytes + 512,), 91, dtype=torch.uint8)
+    pages = backing[256:-256].view(2, page_bytes)
+    cache = pages[:, : block * width].view(torch.float8_e4m3fn).view(2, block, 1, width)
+    slots = torch.tensor([127, -1, 128, 255], dtype=torch.int32)
+    updates = torch.arange(4 * width).reshape(4, width).to(torch.uint8)
+    expected = backing.clone()
+    for row, slot in enumerate(slots.tolist()):
+        if slot >= 0:
+            offset = 256 + (slot // block) * page_bytes + (slot % block) * width
+            expected[offset : offset + width] = updates[row]
+
+    def scatter(rows, indices, values):
+        assert rows.dtype == values.dtype == torch.uint8
+        assert rows.is_contiguous() and rows.data_ptr() == cache.data_ptr()
+        assert indices.flatten().tolist() == [127, -1, 132, 259]
+        valid = indices.flatten() >= 0
+        rows[indices.flatten()[valid].long()] = values[valid]
+
+    monkeypatch.setattr("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache", scatter)
+    AscendSFAIndexerBackend._write_cache_tensor(cache, updates.view(cache.dtype), slots)
+    torch.testing.assert_close(backing, expected)
+
+
 def pa_writer(write):
     def wrapped(key, slots, *, key_cache):
         assert key.ndim == 3 and key_cache.ndim == 4 and slots.ndim == 1

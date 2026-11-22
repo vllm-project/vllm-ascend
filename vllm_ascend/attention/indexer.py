@@ -647,6 +647,32 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         slots: torch.Tensor,
         cache_scatter_indices: torch.Tensor | None = None,
     ) -> None:
+        if (
+            cache.ndim == 4
+            and cache.dtype == torch.float8_e4m3fn
+            and updates.dtype == cache.dtype
+            and not cache.is_contiguous()
+        ):
+            pages, block, heads, width = cache.shape
+            page_stride = cache.stride(0)
+            # In a hybrid FP8 page the packed K rows are followed by one FP32 scale per token.
+            # Scatter byte rows at the physical page pitch, preserving the view's storage offset.
+            if (
+                heads == 1
+                and cache.stride(1) == width
+                and cache.stride(-1) == 1
+                and page_stride == block * (width + 4)
+                and page_stride % width == 0
+            ):
+                rows_per_page = page_stride // width
+                num_rows = (pages - 1) * rows_per_page + block
+                byte_rows = cache.as_strided((num_rows, width), (width, 1)).view(torch.uint8)
+                slots = slots.reshape(-1)
+                physical = torch.where(slots >= 0, (slots // block) * rows_per_page + slots % block, slots)
+                DeviceOperator.scatter_cache(
+                    byte_rows, physical.view(-1, 1), updates.view(torch.uint8).reshape(-1, width)
+                )
+                return
         if cache.is_contiguous():
             DeviceOperator.scatter_cache(cache.view(-1, *updates.shape[1:]), slots.view(-1, 1), updates)
         else:

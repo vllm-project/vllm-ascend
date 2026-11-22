@@ -35,6 +35,10 @@
 #   How: Size each child's device slice using TP * PP * PCP.
 #   Related PR: https://github.com/vllm-project/vllm/pull/69664
 #   Future plan: Remove once both the release and verified-main pins include the fix.
+# * platform/patch_glm_moe_dsa_hnd.py:
+#   EngineCore negotiates layouts before the Ascend builder allocates KV.
+#   For GLM-MoE-DSA with DFlash and explicit HND, omit planner-owned target
+#   pages from the generic shared-page check. Keep backend layout validation.
 # --------------------------------
 # * vllm_ascend/hisparse/host_pool.py (HiSparse backend initialization):
 #   Target: vllm.v1.hisparse.runtime.allocate_pinned_host_pool.

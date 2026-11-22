@@ -44,6 +44,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     LAYERWISE_REUSE_BACKING_BYTES,
     get_layerwise_reuse_backing_bytes,
 )
+from vllm_ascend.models import glm_moe_dsa_dflash_hnd
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -96,6 +97,8 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         """
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
+        if glm_moe_dsa_dflash_hnd.applies_to(vllm_config):
+            return glm_moe_dsa_dflash_hnd.build_groups(vllm_config, kv_cache_spec)
         step5_groups = get_step5_kv_cache_groups(vllm_config, kv_cache_spec, super().get_kv_cache_groups)
         if step5_groups is not None:
             return step5_groups
@@ -159,6 +162,9 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         pool cost so the model planners materialize exactly the requested block
         count before layerwise reuse is planned.
         """
+        if glm_moe_dsa_dflash_hnd.applies_to(vllm_config):
+            placement = glm_moe_dsa_dflash_hnd.build_cache_config(vllm_config, kv_cache_groups, num_blocks)
+            return _attach_transfer_and_speculation_metadata(vllm_config, placement)
         bytes_per_block = self._get_native_pool_bytes_per_block(vllm_config, kv_cache_groups)
         if bytes_per_block is None:
             return _attach_transfer_and_speculation_metadata(
@@ -191,6 +197,9 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> int | None:
         """Return the pool cost used to build the native descriptors."""
+        if glm_moe_dsa_dflash_hnd.applies_to(vllm_config):
+            regions = glm_moe_dsa_dflash_hnd.layers_by_spec(kv_cache_groups)
+            return glm_moe_dsa_dflash_hnd.bytes_per_block(regions)
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_pool_bytes(kv_cache_groups)
         pools = _get_replicated_draft_pools(kv_cache_groups)
