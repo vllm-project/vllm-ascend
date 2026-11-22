@@ -16,7 +16,6 @@
 
 import os
 
-import vllm_ascend.patch.platform.patch_device_ids_visibility  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kimi_k31_config  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_admission  # noqa
