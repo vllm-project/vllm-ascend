@@ -591,6 +591,38 @@ def test_hisparse_requires_async_store_load(extra_config):
         AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
 
 
+@pytest.mark.parametrize("role", [KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER])
+@pytest.mark.parametrize("backend", [{}, {"backend": "mooncake"}], ids=["default", "explicit"])
+def test_hisparse_rejects_mooncake_before_creating_pool(role, backend, monkeypatch, tmp_path):
+    config_path = tmp_path / "mooncake.json"
+    config_path.write_text('{"protocol": "ascend"}', encoding="utf-8")
+    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("ASCEND_GLOBAL_RESOURCE_CONFIG", "{}")
+    monkeypatch.setenv("MC_TRANSFER_TIMEOUT", "15")
+    monkeypatch.setenv("ASCEND_TRANSFER_TIMEOUT", "5000")
+    monkeypatch.delenv("ASCEND_USE_ASYNC_TRANSFER", raising=False)
+    monkeypatch.delenv("ASCEND_ENABLE_USE_FABRIC_MEM", raising=False)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(rank=1),
+        attention_config=SimpleNamespace(hisparse_config=SimpleNamespace(eager_host_mirror=True)),
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_both",
+            kv_connector="AscendStoreConnector",
+            kv_connector_extra_config={"load_async": True, **backend},
+        ),
+    )
+    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
+    with (
+        patch(f"{module}.create_kv_pool_scheduler") as scheduler,
+        patch(f"{module}.create_kv_pool_worker") as worker,
+        pytest.raises(ValueError, match=r"timed-out PUT.*backend=memcache.*host_tcp"),
+    ):
+        AscendStoreConnector(config, role, cache)
+    scheduler.assert_not_called()
+    worker.assert_not_called()
+
+
 @pytest.mark.parametrize(("save_decode", "eager"), [(True, False), (False, False), (True, True), (False, True)])
 def test_whole_block_put_requires_current_host_rows(save_decode, eager):
     config = SimpleNamespace(

@@ -50,8 +50,6 @@ MOONCAKE_LAYERWISE_CLIENT_METHODS = (
     "batch_get_session_end",
 )
 _KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
-# TransferEngineOperationState::wait_for_completion in Mooncake v0.3.13.
-_MOONCAKE_STORE_BATCH_TIMEOUT_MS = 60_000
 
 
 def _emit_whole_key_debug_event(direction: str, key_count: int) -> None:
@@ -594,28 +592,12 @@ class MooncakeBackend(Backend):
 
     @classmethod
     def validate_hisparse_colocated_config(cls) -> None:
-        config = MooncakeStoreConfig.load_from_env()
-        if config.protocol != "ascend" or not os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG"):
-            raise ValueError("HiSparse with Mooncake requires protocol=ascend and a Store-owned transfer engine")
-        if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM") == "1" or config.enable_ssd_offload or config.enable_ssd_prefetch:
-            raise ValueError("HiSparse with Mooncake requires a DDR Store without FabricMem or SSD spilling/prefetch")
-
-        # Mooncake enables async transfer whenever the variable is present.
-        if "ASCEND_USE_ASYNC_TRANSFER" in os.environ:
-            raise ValueError(
-                "HiSparse with Mooncake requires synchronous Ascend Direct transfers. Unset ASCEND_USE_ASYNC_TRANSFER."
-            )
-        # Ascend Direct can retry a transfer once within the Store deadline.
-        configured_timeout_ms = 1000 * int(os.getenv("MC_TRANSFER_TIMEOUT", "30"))
-        ascend_attempt_timeout_ms = int(os.getenv("ASCEND_TRANSFER_TIMEOUT", "10000"))
-        store_timeout_ms = min(configured_timeout_ms, _MOONCAKE_STORE_BATCH_TIMEOUT_MS)
-        if ascend_attempt_timeout_ms <= 0 or 2 * ascend_attempt_timeout_ms >= store_timeout_ms:
-            raise ValueError(
-                "HiSparse with Mooncake requires twice ASCEND_TRANSFER_TIMEOUT to be below both "
-                f"MC_TRANSFER_TIMEOUT and the Store's 60s batch deadline: "
-                f"ASCEND_TRANSFER_TIMEOUT={ascend_attempt_timeout_ms}ms, "
-                f"MC_TRANSFER_TIMEOUT={configured_timeout_ms}ms"
-            )
+        # Closing the client after the SDK reports a timeout cannot protect a
+        # pool allocation that the master has already made available for reuse.
+        raise ValueError(
+            "HiSparse with Mooncake is disabled because a timed-out PUT can overwrite another pool object "
+            "(kvcache-ai/Mooncake#4491). Set backend=memcache and configure the host_tcp protocol."
+        )
 
     def _register_buffers_with_host_staging(self, buffers: list[BufferDescriptor]) -> None:
         if not self._use_store_independent_te:

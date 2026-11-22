@@ -42,7 +42,7 @@ def serving_instance():
     assert {child["kv_connector"] for child in children} == {"HiSparseConnector", "AscendStoreConnector"}
     store = next(child for child in children if child["kv_connector"] == "AscendStoreConnector")
     backend = store["kv_connector_extra_config"]["backend"]
-    assert backend in {"mooncake", "memcache"}
+    assert backend == "memcache"
     assert store["kv_connector_extra_config"]["load_async"] is True
     return url, served_model(url), backend
 

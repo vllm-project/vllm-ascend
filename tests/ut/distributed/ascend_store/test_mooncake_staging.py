@@ -249,42 +249,6 @@ def test_invalid_host_geometry_never_reaches_sdk(registered, offset, size, messa
     sdk.batch_get_into_multi_buffers.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    ("outer_timeout", "inner_timeout", "async_transfer", "error"),
-    [
-        ("15", "5000", None, None),
-        ("90", "29500", None, None),
-        ("10", "5000", None, "MC_TRANSFER_TIMEOUT"),
-        ("90", "40000", None, "60s batch deadline"),
-        ("90", "30000", None, "60s batch deadline"),
-        ("15", "5000", "", "requires synchronous Ascend Direct"),
-        ("15", "5000", "0", "requires synchronous Ascend Direct"),
-        ("15", "5000", "1", "requires synchronous Ascend Direct"),
-    ],
-)
-def test_mooncake_mixed_config_prevents_early_outer_timeout(
-    monkeypatch, tmp_path, outer_timeout, inner_timeout, async_transfer, error
-):
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
-
-    config_path = tmp_path / "mooncake.json"
-    config_path.write_text('{"protocol": "ascend"}', encoding="utf-8")
-    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("ASCEND_GLOBAL_RESOURCE_CONFIG", "{}")
-    monkeypatch.setenv("MC_TRANSFER_TIMEOUT", outer_timeout)
-    monkeypatch.setenv("ASCEND_TRANSFER_TIMEOUT", inner_timeout)
-    if async_transfer is None:
-        monkeypatch.delenv("ASCEND_USE_ASYNC_TRANSFER", raising=False)
-    else:
-        monkeypatch.setenv("ASCEND_USE_ASYNC_TRANSFER", async_transfer)
-    monkeypatch.delenv("ASCEND_ENABLE_USE_FABRIC_MEM", raising=False)
-    if error is None:
-        MooncakeBackend.validate_hisparse_colocated_config()
-    else:
-        with pytest.raises(ValueError, match=error):
-            MooncakeBackend.validate_hisparse_colocated_config()
-
-
 def test_mooncake_partial_registration_rolls_back_device_and_staging(monkeypatch):
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
 
