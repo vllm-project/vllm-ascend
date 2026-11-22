@@ -320,6 +320,19 @@ def _gdn_cache_key(builder: object) -> tuple[KVCacheSpec, type]:
     return (builder.kv_cache_spec, type(builder))  # type: ignore[attr-defined]
 
 
+def _uses_batch_global_mamba_common_fields(
+    model_specific_attn_metadata: ModelSpecificAttnMetadata | None,
+) -> bool:
+    """Whether common fields are batch-global and safe to share across groups."""
+    if model_specific_attn_metadata is None:
+        return True
+    return (
+        type(model_specific_attn_metadata) is MambaHybridAttnMetadata
+        and getattr(model_specific_attn_metadata.get_extra_common_attn_kwargs, "__func__", None)
+        is MambaHybridAttnMetadata.get_extra_common_attn_kwargs
+    )
+
+
 def _gdn_reuse_eligible(
     builder: object,
     kv_cache_spec: KVCacheSpec,
@@ -331,7 +344,7 @@ def _gdn_reuse_eligible(
         isinstance(builder, AscendGDNAttentionMetadataBuilder)
         and builder.supports_update_block_table
         and isinstance(kv_cache_spec, MambaSpec)
-        and (model_specific_attn_metadata is None or type(model_specific_attn_metadata) is MambaHybridAttnMetadata)
+        and _uses_batch_global_mamba_common_fields(model_specific_attn_metadata)
         and not extra_kwargs
         and pcp_context is None
     )
@@ -523,9 +536,8 @@ def build_attn_metadata(
     batch_seq_lens = seq_lens[:num_reqs]
     batch_common_attn_kwargs = None
     if (
-        type(model_specific_attn_metadata) is MambaHybridAttnMetadata
-        and getattr(model_specific_attn_metadata.get_extra_common_attn_kwargs, "__func__", None)
-        is MambaHybridAttnMetadata.get_extra_common_attn_kwargs
+        model_specific_attn_metadata is not None
+        and _uses_batch_global_mamba_common_fields(model_specific_attn_metadata)
         and kv_cache_groups
     ):
         # The standard Mamba provider exposes a batch-global prefill mask.
@@ -709,12 +721,14 @@ def build_attn_metadata(
             for variant_names, variant_common in metadata_variants:
                 gdn_cache_key = _gdn_cache_key(attn_metadata_builder) if reuse_gdn_metadata else None
                 # Model-specific common fields can differ between groups. Only
-                # reuse the unmodified dense batch view. is_prefilling is not
-                # consumed by the non-PCP dense builder. Preserve group
-                # causality (parallel drafters may be non-causal).
+                # reuse the unmodified dense batch view when common fields are
+                # batch-global. is_prefilling changes FIA's padded query
+                # boundary, so a per-group override must not be shared. Preserve
+                # group causality (parallel drafters may be non-causal).
                 reuse_dense_metadata = (
                     type(attn_metadata_builder) is AscendAttentionMetadataBuilder
                     and attn_metadata_builder.supports_update_block_table
+                    and _uses_batch_global_mamba_common_fields(model_specific_attn_metadata)
                     and not for_cudagraph_capture
                     and not common_attn_metadata_extra_kwargs
                     and not attn_metadata_extra_kwargs
