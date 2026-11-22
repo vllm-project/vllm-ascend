@@ -107,11 +107,16 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
 
         # Keep expert-aware loaders attached for later online weight updates.
-        w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
-        replace_parameter(layer, "w13_weight", w13_data)
-
-        w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
-        replace_parameter(layer, "w2_weight", w2_data)
+        for name in ("w13_weight", "w2_weight"):
+            weight = getattr(layer, name)
+            transposed = self._maybe_pad_weight(weight.data).transpose(1, 2).contiguous()
+            if weight.shape == transposed.shape:
+                replace_parameter(layer, name, transposed)
+            else:
+                # NZ packing reads the NPU storage's base shape. Reusing the
+                # pre-transpose storage here would pack a rectangular matrix
+                # with its old dimensions.
+                weight.data = transposed
 
         # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.
         # Therefore, we must cast weights to NZ when fusion is enabled.
