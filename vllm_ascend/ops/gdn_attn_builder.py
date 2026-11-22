@@ -39,7 +39,7 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_final_chunk_indices,
     prepare_update_chunk_offsets,
 )
-from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
+from vllm_ascend.ops.triton.mamba.gdn_prepare import GroupedSpecGDN, prepare_gdn
 
 _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
@@ -1139,6 +1139,8 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         self._conv_output_buffer: torch.Tensor | None = None
         self._fused_layout_cpu: torch.Tensor | None = None
         self._fused_layout: torch.Tensor | None = None
+        self._grouped_spec_gdn: GroupedSpecGDN | None = None
+        self._grouped_spec_views: tuple[int, int, tuple[torch.Tensor, ...], GDNAttentionMetadata] | None = None
 
     def _ensure_conv_output_buffer(self) -> None:
         if self._conv_output_buffer is not None:
@@ -1199,6 +1201,7 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         num_spec_decodes: int,
         graph_request_count: int,
         batch: tuple[int, int, int, int, int, torch.Tensor | None],
+        grouped_spec: GroupedSpecGDN | None = None,
     ) -> GDNAttentionMetadata | None:
         # Request validation and phase classification have already run in build.
         if (
@@ -1234,18 +1237,34 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         def buffer_view(buffer: torch.Tensor, rows: int) -> torch.Tensor:
             return buffer[:rows] if rows <= buffer.shape[0] else buffer.new_empty((rows, *buffer.shape[1:]))
 
-        spec_states = buffer_view(self.spec_state_indices_tensor, spec_rows)
-        non_spec_states = buffer_view(self.non_spec_state_indices_tensor, non_spec_rows)
-        spec_query = buffer_view(self.spec_query_start_loc, spec_rows + 1)
-        non_spec_query = buffer_view(self.non_spec_query_start_loc, non_spec_rows + 1)
-        assert self.spec_actual_seq_lengths is not None and self.non_spec_actual_seq_lengths is not None
-        spec_lengths = self.spec_actual_seq_lengths[: spec_rows + 1]
-        non_spec_lengths = self.non_spec_actual_seq_lengths[: non_spec_rows + 1]
-        accepted = buffer_view(self.num_accepted_tokens, spec_rows)
+        cached = self._grouped_spec_views if grouped_spec is not None else None
+        if cached is not None and (cached[0], cached[1]) != (m.num_reqs, m.num_actual_tokens):
+            cached = None
+        if cached is None:
+            spec_states = buffer_view(self.spec_state_indices_tensor, spec_rows)
+            non_spec_states = buffer_view(self.non_spec_state_indices_tensor, non_spec_rows)
+            spec_query = buffer_view(self.spec_query_start_loc, spec_rows + 1)
+            non_spec_query = buffer_view(self.non_spec_query_start_loc, non_spec_rows + 1)
+            assert self.spec_actual_seq_lengths is not None and self.non_spec_actual_seq_lengths is not None
+            spec_lengths = self.spec_actual_seq_lengths[: spec_rows + 1]
+            non_spec_lengths = self.non_spec_actual_seq_lengths[: non_spec_rows + 1]
+            accepted = buffer_view(self.num_accepted_tokens, spec_rows)
+            spec_tokens = buffer_view(self.spec_token_indx, num_spec_tokens)
+            non_spec_tokens = self.non_spec_token_indx[:0]
+        else:
+            (
+                spec_states,
+                non_spec_states,
+                spec_query,
+                non_spec_query,
+                spec_lengths,
+                non_spec_lengths,
+                accepted,
+                spec_tokens,
+                non_spec_tokens,
+            ) = cached[2]
         has_initial_state = m.seq_lens.new_empty(non_spec_rows, dtype=torch.bool) if num_prefills else None
         prefill_query = non_spec_query.new_empty(non_spec_rows - num_decodes + 1) if num_prefills else None
-        spec_tokens = buffer_view(self.spec_token_indx, num_spec_tokens)
-        non_spec_tokens = self.non_spec_token_indx[:0]
         layout = None
         if mixed_spec:
             # One compact transfer replaces the mask and two sequence-index copies.
@@ -1303,7 +1322,10 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             mixed_spec=mixed_spec,
             block_size=self.kv_cache_spec.block_size,
             pad_block_id=self._SPEC_GRAPH_PAD_SLOT_ID,
+            grouped_spec=grouped_spec,
         )
+        if cached is not None:
+            return cached[3]
         metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -1337,7 +1359,47 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         self._attach_non_spec_prefill_metadata(metadata, chunk, non_spec_states)
         self._attach_spec_decode_metadata(metadata, spec_lengths, self._spec_conv_indices)
         self._attach_non_spec_decode_metadata(metadata, non_spec_states, non_spec_lengths)
-        return self._finalize_metadata(metadata, fused=True)
+        metadata = self._finalize_metadata(metadata, fused=True)
+        if grouped_spec is not None:
+            # Pure Q6 geometry only. Replay still stages this step's table,
+            # sequence offsets, lengths and accepted counts above.
+            views = (
+                spec_states,
+                non_spec_states,
+                spec_query,
+                non_spec_query,
+                spec_lengths,
+                non_spec_lengths,
+                accepted,
+                spec_tokens,
+                non_spec_tokens,
+            )
+            self._grouped_spec_views = (m.num_reqs, m.num_actual_tokens, views, metadata)
+        return metadata
+
+    def begin_grouped_spec_gdn(self) -> GroupedSpecGDN:
+        if self._grouped_spec_gdn is None:
+            self._grouped_spec_gdn = GroupedSpecGDN()
+        self._grouped_spec_gdn.reset()
+        return self._grouped_spec_gdn
+
+    def build_grouped_spec_gdn(
+        self,
+        common: CommonAttentionMetadata,
+        accepted: torch.Tensor,
+        grouped_spec: GroupedSpecGDN,
+    ) -> GDNAttentionMetadata | None:
+        # The runner has verified homogeneous, unpadded speculative decode.
+        # Skip per-group request partitioning and keep each group's usual views.
+        self._ensure_conv_index_buffers()
+        self._ensure_conv_output_buffer()
+        batch = (0, 0, 0, 0, common.num_actual_tokens, None)
+        metadata = self._build_fused_metadata(
+            common, accepted, None, common.num_reqs, common.num_reqs, batch, grouped_spec
+        )
+        if metadata is not None:
+            metadata.pcp_context = getattr(common, "pcp_context", None)
+        return metadata
 
     def build(
         self,

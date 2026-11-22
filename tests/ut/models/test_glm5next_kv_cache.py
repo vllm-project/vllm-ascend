@@ -730,7 +730,10 @@ def test_metadata_delegates_to_kernel_and_keeps_capture_storage(input_tokens, un
 
 @pytest.mark.parametrize("width", [1, 4])
 @pytest.mark.parametrize("ring_capacity", [7, 9])
-def test_tail_inputs_pass_page_stride_and_isolate_step_buffers(width, ring_capacity, keypool_kernels, monkeypatch):
+@pytest.mark.parametrize("hisparse", [False, True])
+def test_tail_inputs_pass_page_stride_and_isolate_step_buffers(
+    width, ring_capacity, hisparse, keypool_kernels, monkeypatch
+):
     config, common = _config(), _common()
     spec = AscendIndexerKPoolTailSpec(
         block_size=4,
@@ -742,7 +745,21 @@ def test_tail_inputs_pass_page_stride_and_isolate_step_buffers(width, ring_capac
         compress_ratio=4,
         page_size_padded=81920,
     )
-    builder = AscendIndexerKPoolTailMetadataBuilder(spec, ["layer.indexer.tail_cache"], config, torch.device("cpu"))
+    layer_name = "layer.indexer.tail_cache"
+    expected_page_rows = 80
+    if hisparse:
+        from vllm_ascend.hisparse.binding import align_hisparse_indexer_specs
+
+        specs = align_hisparse_indexer_specs({layer_name: spec})
+        assert specs[layer_name].get_block_stride_alignment() == 1024
+        assert specs[layer_name].page_size_bytes == spec.page_size_bytes
+        expected_page_rows = 561
+        tail = torch.empty_strided((2, ring_capacity, 256), (expected_page_rows * 256, 256, 1), dtype=torch.float32)
+        config.attention_config = SimpleNamespace(hisparse_config=object())
+        config.compilation_config = SimpleNamespace(
+            static_forward_context={layer_name: SimpleNamespace(kv_cache=(tail,))}
+        )
+    builder = AscendIndexerKPoolTailMetadataBuilder(spec, [layer_name], config, torch.device("cpu"))
     common.max_query_len = width
     common.num_actual_tokens = common.num_input_tokens = 2 * width
     common.query_start_loc = torch.tensor([0, width, 2 * width], dtype=torch.int32)
@@ -751,7 +768,7 @@ def test_tail_inputs_pass_page_stride_and_isolate_step_buffers(width, ring_capac
     first = builder.build(0, common)
     args = keypool_kernels.build_tail_inputs.call_args.args
     assert args[0] is common
-    assert args[1:5] == (4, ring_capacity, 80, width)
+    assert args[1:5] == (4, ring_capacity, expected_page_rows, width)
     assert first.block_size == ring_capacity
     assert first.cann_inputs is keypool_kernels.build_tail_inputs.return_value
     assert first.slot_mapping.data_ptr() == common.slot_mapping.data_ptr()

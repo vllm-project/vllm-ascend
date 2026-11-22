@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import torch
+from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 
 
@@ -26,6 +27,7 @@ def _prepare_gdn_kernel(
     initial_state,
     prefill_query,
     conv_output,
+    group_pointers,
     NUM_REQS,
     NUM_ROWS,
     NUM_DECODES,
@@ -44,6 +46,7 @@ def _prepare_gdn_kernel(
     CONV_NUMEL: tl.constexpr,
     BLOCK: tl.constexpr,
     CLEAR_BLOCK: tl.constexpr,
+    GROUPED: tl.constexpr,
 ):
     """Materialize aligned-cache metadata, stable token partitions and padding.
 
@@ -53,6 +56,20 @@ def _prepare_gdn_kernel(
     independent clear programs zero the shared output in the same launch.
     Batch counts stay dynamic; phase flags specialize optional tensor accesses.
     """
+    if GROUPED:
+        tl.static_assert(HAS_SPEC and not MIXED_SPEC and not HAS_PREFILL)
+        # Pure spec batches share query/length/acceptance inputs; state IDs
+        # and buffers captured by each cache group remain independently owned.
+        group = group_pointers + tl.program_id(1) * 9
+        block_table = tl.load(group).to(block_table.dtype)
+        spec_states = tl.load(group + 1).to(spec_states.dtype)
+        conv_indices = tl.load(group + 2).to(conv_indices.dtype)
+        sequence_masks = tl.load(group + 3).to(sequence_masks.dtype)
+        spec_query = tl.load(group + 4).to(spec_query.dtype)
+        spec_lengths = tl.load(group + 5).to(spec_lengths.dtype)
+        accepted_out = tl.load(group + 6).to(accepted_out.dtype)
+        spec_tokens = tl.load(group + 7).to(spec_tokens.dtype)
+        conv_output = tl.load(group + 8).to(conv_output.dtype)
     row = tl.program_id(0)
     if row < NUM_ROWS:
         active = row < NUM_REQS
@@ -117,6 +134,60 @@ def _prepare_gdn_kernel(
         tl.store(conv_output + offsets, 0, offsets < CONV_NUMEL)
 
 
+class GroupedSpecGDN:
+    """Combine pure spec metadata launches without changing graph-owned buffers."""
+
+    def __init__(self) -> None:
+        self._pending = []
+        self._addresses: tuple[tuple[int, ...], ...] | None = None
+        self._pointers: torch.Tensor | None = None
+
+    def reset(self) -> None:
+        self._pending.clear()
+
+    def stage(self, grid, arguments, geometry, group_tensors, shared_inputs) -> None:
+        self._pending.append((grid, arguments, geometry, group_tensors, shared_inputs))
+
+    def launch(self, *, clear_conv_tokens: int | None = None) -> None:
+        pending, self._pending = self._pending, []
+        if not pending:
+            return
+        grid, arguments, geometry, tensors, shared = pending[0]
+        if len(pending) == 1 or any(
+            current_grid != grid or current_geometry != geometry or current_shared != shared
+            for current_grid, _, current_geometry, _, current_shared in pending[1:]
+        ):
+            logger.info_once(
+                "Flash HiSparse GDN metadata uses separate launches: groups=%d requests=%d query=%d",
+                len(pending),
+                geometry["NUM_REQS"],
+                geometry["SPEC_WIDTH"],
+                scope="process",
+            )
+            for grid, arguments, geometry, _, _ in pending:
+                _prepare_gdn_kernel[(grid,)](*arguments, None, **geometry, GROUPED=False)
+            return
+        addresses = tuple(tuple(tensor.data_ptr() for tensor in item[3]) for item in pending)
+        if self._addresses != addresses:
+            pointer_map = torch.tensor(addresses, dtype=torch.int64, device="cpu", pin_memory=True)
+            self._pointers = pointer_map.to(tensors[0].device, non_blocking=True)
+            self._addresses = addresses
+        logger.info_once(
+            "Flash HiSparse GDN metadata grouped: groups=%d requests=%d query=%d",
+            len(pending),
+            geometry["NUM_REQS"],
+            geometry["SPEC_WIDTH"],
+            scope="process",
+        )
+        if clear_conv_tokens is not None:
+            # The unpadded GLM Q6 graph passes only the live projection rows
+            # to causal_conv1d_update. Keep full clears on separate launches.
+            conv_numel = tensors[-1][:clear_conv_tokens].numel()
+            geometry["CONV_NUMEL"] = conv_numel
+            grid = geometry["NUM_ROWS"] + triton.cdiv(conv_numel, geometry["CLEAR_BLOCK"])
+        _prepare_gdn_kernel[(grid, len(pending))](*arguments, self._pointers, **geometry, GROUPED=True)
+
+
 def prepare_gdn(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -147,6 +218,7 @@ def prepare_gdn(
     mixed_spec: bool,
     block_size: int,
     pad_block_id: int,
+    grouped_spec: GroupedSpecGDN | None = None,
 ) -> None:
     """Populate GDN metadata buffers through a single Triton launch.
 
@@ -158,7 +230,8 @@ def prepare_gdn(
     conv_numel = conv_output.numel() if conv_output is not None else 0
     block = 256
     clear_block = 1024
-    _prepare_gdn_kernel[(rows + (conv_numel + clear_block - 1) // clear_block,)](
+    grid = rows + (conv_numel + clear_block - 1) // clear_block
+    arguments = (
         block_table,
         seq_lens,
         query,
@@ -178,6 +251,8 @@ def prepare_gdn(
         initial_state,
         prefill_query,
         conv_output,
+    )
+    geometry = dict(
         NUM_REQS=num_reqs,
         NUM_ROWS=rows,
         NUM_DECODES=num_decodes,
@@ -197,3 +272,20 @@ def prepare_gdn(
         BLOCK=block,
         CLEAR_BLOCK=clear_block,
     )
+    if grouped_spec is not None and conv_output is not None and num_spec_decodes and not (mixed_spec or has_prefill):
+        assert accepted is not None
+        group_tensors = (
+            block_table,
+            spec_states,
+            conv_indices,
+            sequence_masks,
+            spec_query,
+            spec_lengths,
+            accepted_out,
+            spec_tokens,
+            conv_output,
+        )
+        shared_inputs = (seq_lens.data_ptr(), query.data_ptr(), accepted.data_ptr())
+        grouped_spec.stage(grid, arguments, geometry, group_tensors, shared_inputs)
+    else:
+        _prepare_gdn_kernel[(grid,)](*arguments, None, **geometry, GROUPED=False)

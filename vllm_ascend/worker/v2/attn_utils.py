@@ -72,6 +72,7 @@ from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    get_sfa_qsfa_packed_head_dim,
     requires_contiguous_pa_kv_cache,
     supports_strided_mla_cache,
 )
@@ -93,6 +94,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     reshape_kv_cache_tensors_for_sparse_kv_offload,
 )
+from vllm_ascend.hisparse import FLASH_MTP_QUERY_LEN, is_glm5_next_hisparse, supports_glm5_next_hisparse
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
@@ -105,6 +107,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     make_qsa_kernel_page_cache,
     make_slab_view,
 )
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBuilder
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.cache import uses_turboquant_groups
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -198,6 +201,13 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     attention_layer_names: list[str] = []
     mamba_specs: dict[str, MambaSpec] = {}
+    hisparse_enabled = vllm_config.attention_config.hisparse_config is not None
+    flash_hisparse = is_glm5_next_hisparse(vllm_config)
+    if flash_hisparse and not supports_glm5_next_hisparse(vllm_config):
+        raise ValueError(
+            "GLM-5.3-Flash HiSparse requires A5 FP8 main and indexer KV with DP, PP, PCP and DCP set to 1."
+        )
+    flash_packed_sources: set[str] = set()
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
     for layer_name, attn_module in attn_layers.items():
@@ -231,13 +241,22 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             mamba_specs[layer_name] = spec
             continue
 
-        if isinstance(attn_module, MLAAttention) and vllm_config.attention_config.hisparse_config is not None:
+        if isinstance(attn_module, MLAAttention) and hisparse_enabled:
             # Keep Core's row-packed source spec and actual index-group ownership.
             source_layout: dict[str, Any] = {}
             if getattr(attn_module.impl, "enable_sparse_sfa_c8", False):
                 from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
 
-                source_layout.update(head_size=C8_ROW_BYTES, dtype=attn_module.impl.c8_cache_dtype)
+                row_bytes = C8_ROW_BYTES
+                if flash_hisparse:
+                    row_bytes = get_sfa_qsfa_packed_head_dim(attn_module.kv_lora_rank, attn_module.qk_rope_head_dim)
+                    source_layout.update(state_content_bytes=row_bytes, block_stride_alignment=row_bytes)
+                    flash_packed_sources.add(layer_name)
+                source_layout.update(head_size=row_bytes, dtype=attn_module.impl.c8_cache_dtype)
+            if flash_hisparse:
+                # Hot and Host pages contain exactly one packed latent row per
+                # token. KDA uses its own device group's native state bytes.
+                source_layout["page_size_padded"] = None
             kv_cache_spec[layer_name] = replace(
                 spec, is_index_group_leader=attn_module.hisparse_cache.runtime.is_group_leader, **source_layout
             )
@@ -252,7 +271,9 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             attention_layer_names.append(layer_name)
             continue
 
-    if mamba_specs:
+    if flash_hisparse:
+        kv_cache_spec.update(mamba_specs)
+    elif mamba_specs:
         if any(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in kv_cache_spec.values()):
             # K3.1 recurrent padding is settled by NPUPlatform before the
             # layers construct their specs. Keep indexer/draft pages native.
@@ -291,19 +312,27 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                     mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
             kv_cache_spec.update(mamba_specs)
 
-    if vllm_config.attention_config.hisparse_config is not None:
+    if hisparse_enabled:
         from vllm.v1.hisparse.binding import resolve_hisparse_specs
 
         from vllm_ascend.hisparse.binding import align_hisparse_indexer_specs
 
         packed_row_bytes = None
-        if get_ascend_config().enable_sparse_sfa_c8:
+        if not flash_hisparse and get_ascend_config().enable_sparse_sfa_c8:
             from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
 
             packed_row_bytes = C8_ROW_BYTES
-        return align_hisparse_indexer_specs(
-            resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers), packed_row_bytes=packed_row_bytes
-        )
+        specs = resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers)
+        for name in flash_packed_sources:
+            # Preserve a zero-copy paged view for the all-resident FP8 prefill.
+            source = specs[name]
+            specs[name] = replace(source, block_stride_alignment=source.page_size_bytes)
+        if flash_hisparse:
+            # Core may rebuild the Mamba specs after choosing its source page.
+            # Drop the ordinary Flash overlay padding after this rebuild.
+            for name in mamba_specs:
+                specs[name] = replace(specs[name], page_size_padded=None)
+        return align_hisparse_indexer_specs(specs, packed_row_bytes=packed_row_bytes)
     return kv_cache_spec
 
 
@@ -448,6 +477,16 @@ def build_attn_metadata(
                 dsa_builder.tq_group_block_sizes = block_sizes
             plan = get_dsa_attn_kv_plan(dsa_builder.vllm_config, dsa_builder.compressor_ratio)
             formatted_slot_mappings = plan.format_dsa_slot_mapping(slot_mappings[:, :num_input_tokens], block_sizes)
+    can_group_spec_gdn = (
+        not for_cudagraph_capture
+        and full_graph_mode
+        and pcp_context is None
+        and 0 < num_actual_reqs == num_reqs
+        and num_actual_tokens == num_input_tokens
+        and max_query_len == FLASH_MTP_QUERY_LEN
+        and num_actual_tokens == num_reqs * max_query_len
+    )
+    grouped_spec_gdn = None
     for i, kv_cache_spec in enumerate(kv_cache_groups):
         # Resident/hot storage groups have no Attention metadata consumer.
         if not attn_groups[i]:
@@ -575,17 +614,51 @@ def build_attn_metadata(
                 else:
                     if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
                         attn_metadata_extra_kwargs["num_actual_reqs"] = num_actual_reqs
-                    metadata = attn_metadata_builder.build(
-                        common_prefix_len=0,
-                        common_attn_metadata=variant_common,
-                        **attn_metadata_extra_kwargs,
-                    )
+                    metadata = None
+                    if can_group_spec_gdn and type(attn_metadata_builder) is AscendGDNHostMetadataBuilder:
+                        accepted = attn_metadata_extra_kwargs.get("num_accepted_tokens")
+                        if grouped_spec_gdn is None:
+                            from vllm_ascend.attention.sfa_hisparse import supports_flash_resident_decode_graph
+
+                            drafts = attn_metadata_extra_kwargs.get("num_decode_draft_tokens_cpu")
+                            prefill = variant_common.is_prefilling
+                            can_group_spec_gdn = (
+                                accepted is not None
+                                and attn_metadata_builder.num_spec + 1 == max_query_len
+                                and not getattr(
+                                    attn_metadata_builder.speculative_config, "enable_adaptive_verification", False
+                                )
+                                and supports_flash_resident_decode_graph(attn_metadata_builder.vllm_config)
+                                and drafts is not None
+                                and drafts.device.type == "cpu"
+                                and drafts.shape == (num_reqs,)
+                                and bool((drafts == max_query_len - 1).all())
+                                and prefill is not None
+                                and prefill.device.type == "cpu"
+                                and not bool(prefill.any())
+                                and query_start_loc_cpu.device.type == "cpu"
+                                and bool((query_start_loc_cpu[: num_reqs + 1].diff() == max_query_len).all())
+                            )
+                            if can_group_spec_gdn:
+                                grouped_spec_gdn = attn_metadata_builder.begin_grouped_spec_gdn()
+                        if grouped_spec_gdn is not None and accepted is not None:
+                            metadata = attn_metadata_builder.build_grouped_spec_gdn(
+                                variant_common, accepted, grouped_spec_gdn
+                            )
+                    if metadata is None:
+                        metadata = attn_metadata_builder.build(
+                            common_prefix_len=0,
+                            common_attn_metadata=variant_common,
+                            **attn_metadata_extra_kwargs,
+                        )
                 if is_dsa_builder:
                     # Preserve sharing even if a builder replaces one of the
                     # dictionaries while constructing its metadata.
                     common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
                 for layer_name in variant_names:
                     attn_metadata[layer_name] = metadata
+    if grouped_spec_gdn is not None:
+        grouped_spec_gdn.launch(clear_conv_tokens=num_actual_tokens)
     return attn_metadata
 
 

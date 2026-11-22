@@ -18,6 +18,11 @@
   graph-padded buffers on Ascend NPU. Metadata preparation runs outside model graphs.
 - **Compilation**: Request and decode counts are runtime scalars. Phase flags
   and tile sizes remain compile-time constants.
+- **Grouped verification**: On A5 Flash HiSparse, unpadded homogeneous
+  speculative replay can stage one call per KDA group and submit one grid
+  with the cache group as its second axis. Each group keeps its original
+  block table and graph-owned output buffers. References to those buffers
+  form an INT64 device pointer table. Other phases use the ordinary launch.
 
 ## Parameters
 

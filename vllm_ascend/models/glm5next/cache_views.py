@@ -16,6 +16,8 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 
+GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
+
 
 def _row_major_strides(shape: tuple[int, ...]) -> list[int]:
     strides = [1] * len(shape)
@@ -110,6 +112,54 @@ def view_compressed_indexer_cache(
             f"packed={strides[0] * shape[0]} elements, slot={typed_slot.numel()}."
         )
     return (torch.as_strided(typed_slot, size=shape, stride=tuple(strides)),)
+
+
+def view_hisparse_kpool_cache(cache: torch.Tensor, spec: AscendMLAAttentionSpec) -> tuple[torch.Tensor, ...]:
+    """Expose HiSparse pooled keys and scales in PA_BBND layout."""
+    width = spec.head_size
+    rows = get_storage_block_size(spec)
+    row_elements = spec.state_content_size_bytes // cache.element_size()
+    if (
+        cache.ndim != 4
+        or cache.shape[1:] != (1, rows, row_elements)
+        or cache.stride()[2:] != (row_elements, 1)
+        or cache.dtype != spec.dtype
+        or cache.stride(0) < rows * row_elements
+    ):
+        raise ValueError("Invalid HiSparse KPool cache geometry.")
+    if not spec.scale_dim:
+        return (cache.transpose(1, 2),)
+
+    # Compact FP8 layers have no gap between manager blocks. Store each
+    # kernel page as its contiguous keys followed by its contiguous scales,
+    # with the same 128-token page geometry as ordinary KPool.
+    pages = cache.shape[0]
+    stride = cache.stride(0)
+    if spec.dtype == torch.float8_e4m3fn and stride == rows * row_elements:
+        compression_ratio = get_kv_cache_compression_ratio(spec)
+        kernel_rows = GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE // compression_ratio
+        if kernel_rows < rows and kernel_rows > 0 and rows % kernel_rows == 0:
+            subpages = rows // kernel_rows
+            pages *= subpages
+            stride //= subpages
+            rows = kernel_rows
+    key_bytes = rows * width
+    scale_size = get_dtype_size(spec.scale_dtype)
+    scale_offset = cache.storage_offset() + key_bytes
+    if (
+        cache.element_size() != 1
+        or spec.scale_dim != 1
+        or row_elements != width + scale_size
+        or stride % scale_size
+        or scale_offset % scale_size
+    ):
+        raise ValueError("Invalid HiSparse KPool scale alignment.")
+    keys = cache.as_strided((pages, rows, 1, width), (stride, width, width, 1))
+    scale_base = cache.as_strided((0,), (1,), storage_offset=0).view(spec.scale_dtype)
+    scales = scale_base.as_strided(
+        (pages, rows, 1, 1), (stride // scale_size, 1, 1, 1), storage_offset=scale_offset // scale_size
+    )
+    return keys, scales
 
 
 def _view_nope_main_mla_cache(

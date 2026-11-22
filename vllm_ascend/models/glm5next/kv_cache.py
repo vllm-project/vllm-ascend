@@ -9,10 +9,11 @@ import torch
 from torch import nn
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, SparseCacheRole
 from vllm.v1.request import Request
 
 from vllm_ascend.core.kv_cache_interface import (
@@ -105,19 +106,30 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
         static_context[prefix] = self
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        del vllm_config
-        ratio_kwargs: dict[str, Any] = {"tokens_per_state": self.compress_ratio}
+        scale_dtype = {torch.float8_e4m3fn: torch.float32, torch.int8: torch.float16}.get(self.dtype, torch.int8)
+        scale_dim = int(self.dtype in (torch.float8_e4m3fn, torch.int8))
+        hisparse_kwargs: dict[str, Any] = {}
+        if getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None:
+            # Core measures one pooled K row and its scale, even though the
+            # operator consumes K and scales in separate regions of each page.
+            row_bytes = self.head_dim * get_dtype_size(self.dtype) + scale_dim * get_dtype_size(scale_dtype)
+            hisparse_kwargs = {
+                "cache_role": SparseCacheRole.INDEXER,
+                "state_content_bytes": row_bytes,
+                "block_stride_alignment": get_dtype_size(scale_dtype) if scale_dim else get_dtype_size(self.dtype),
+            }
         return AscendMLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
-            scale_dim=1 if self.dtype in (torch.float8_e4m3fn, torch.int8) else 0,
-            scale_dtype={torch.float8_e4m3fn: torch.float32, torch.int8: torch.float16}.get(self.dtype, torch.int8),
+            scale_dim=scale_dim,
+            scale_dtype=scale_dtype,
             cache_dtype_str=None,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
-            **ratio_kwargs,
+            tokens_per_state=self.compress_ratio,
+            **hisparse_kwargs,
         )
 
     def get_attn_backend(self):

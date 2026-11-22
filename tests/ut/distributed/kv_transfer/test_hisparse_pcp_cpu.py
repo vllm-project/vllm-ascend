@@ -327,6 +327,7 @@ def test_builder_padding_uses_safe_prefill_request_without_forward_ops(
     builder.is_pcp_decode_sharded = True
     builder._row_capacity = padded
     builder._request_row_buffers = {}
+    builder._use_npu_representatives = False
     builder._pcp_request_state_indices = torch.empty(num_reqs, dtype=torch.int32)
     common = NS(num_reqs=num_reqs, query_start_loc_cpu=starts)
     context = NS(local_request_state_indices=torch.arange(num_reqs)) if use_pcp else None
@@ -345,7 +346,7 @@ def test_builder_padding_uses_safe_prefill_request_without_forward_ops(
     monkeypatch.setattr(
         sfa_hisparse,
         "build_hisparse_prefill_staging_plan",
-        lambda table, *args: NS(block_table=table, block_size=128),
+        lambda table, *args, **kwargs: NS(block_table=table, block_size=128),
     )
     built = builder._build(common, pcp_context=context)
     assert calls == [(padded, padded)]

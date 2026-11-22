@@ -764,6 +764,22 @@ class NPUModelRunner(GPUModelRunner):
         )
         dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
         profile_kwargs = {"randomize_inputs": randomize_inputs}
+        graph_manager = getattr(self, "cudagraph_manager", None)
+        if (
+            not dummy_run
+            and not is_profile
+            and isinstance(graph_manager, ModelAclGraphManager)
+            and self.vllm_config.attention_config.hisparse_config is not None
+        ):
+            from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnectorMetadata
+
+            from vllm_ascend.attention.sfa_hisparse import supports_flash_resident_decode_graph
+
+            if supports_flash_resident_decode_graph(self.vllm_config):
+                metadata = scheduler_output.kv_connector_metadata
+                graph_manager.force_eager_target = not (
+                    isinstance(metadata, HiSparseConnectorMetadata) and metadata.all_context_pages_resident
+                )
         forward_failed = True
         with dp_coordination_context:
             try:
@@ -779,6 +795,8 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 forward_failed = False
             finally:
+                if isinstance(graph_manager, ModelAclGraphManager):
+                    graph_manager.force_eager_target = False
                 finish_execution = getattr(self.model_state, "finish_execution", None)
                 if finish_execution is not None:
                     finish_execution(failed=forward_failed)

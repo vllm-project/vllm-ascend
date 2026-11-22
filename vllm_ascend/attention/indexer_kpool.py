@@ -40,8 +40,7 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
-
-GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
+from vllm_ascend.models.glm5next.cache_views import GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE
 
 # Below this many query rows per rank, keep every rank scoring the whole
 # batch: short batches spend more on the extra TP gather than the removed
@@ -282,7 +281,10 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         if not layer_names or any(not name.endswith(".indexer.k_cache") for name in layer_names):
             raise ValueError(f"Invalid Indexer KPool cache layer names: {layer_names}.")
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.logical_block_size = vllm_config.cache_config.block_size
+        use_hisparse = getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None
+        # The HiSparse indexer has its own packed manager pages; its table and
+        # slot mapping are not split like the ordinary main/Indexer group.
+        self.logical_block_size = kv_cache_spec.block_size if use_hisparse else vllm_config.cache_config.block_size
         self.storage_block_size = get_storage_block_size(kv_cache_spec)
         if self.storage_block_size <= 0:
             raise ValueError(f"Indexer KPool storage block size must be positive, got {self.storage_block_size}.")
@@ -294,9 +296,19 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
                 f"kernel block size: logical={self.logical_block_size}, "
                 f"kernel={GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE}."
             )
-        self.kernel_row_block_size = GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE // self.compress_ratio
-        # MTP tables count expanded kernel pages.
-        self.kernel_blocks_per_logical_block = self.logical_block_size // GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE
+        if use_hisparse:
+            # CANN PoolKeyIndexer PA_BBND counts pooled rows per block.
+            if self.storage_block_size % 16 or self.storage_block_size > 2048:
+                raise ValueError(
+                    "HiSparse KPool pages must have a multiple of 16 pooled rows and at most 2048, "
+                    f"got {self.storage_block_size}."
+                )
+            self.kernel_row_block_size = self.storage_block_size
+            self.kernel_blocks_per_logical_block = 1
+        else:
+            self.kernel_row_block_size = GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE // self.compress_ratio
+            # Ordinary MTP tables count expanded kernel pages.
+            self.kernel_blocks_per_logical_block = self.logical_block_size // GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE
         scheduler_config = vllm_config.scheduler_config
         # Builders also run in CPU unit tests without the distributed runtime;
         # treat that as TP1 so the sharding gate stays closed there.
@@ -654,6 +666,10 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
         self._tail_inputs: dict[int, dict[str, torch.Tensor]] = {}
         self._pool_size = kv_cache_spec.compress_ratio
         self._page_rows = kv_cache_spec.page_size_bytes // (2 * kv_cache_spec.head_size * 4)
+        use_hisparse = getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None
+        self._hisparse_tail_layer = (
+            vllm_config.compilation_config.static_forward_context[layer_names[0]] if use_hisparse else None
+        )
         self._lookahead = self.block_size > self._pool_size
 
     def build(
@@ -690,11 +706,18 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
         retained_width = (
             min(self.block_size, getattr(write_common, "max_query_len", self.block_size)) if self._lookahead else 0
         )
+        page_rows = self._page_rows
+        if self._hisparse_tail_layer is not None:
+            (tail,) = self._hisparse_tail_layer.kv_cache
+            # The logical ring lives inside a shared block-outermost slab.
+            page_rows, remainder = divmod(tail.stride(0), tail.shape[-1])
+            if remainder:
+                raise ValueError("HiSparse KeyPool tail stride must cover complete FP32 rows.")
         cann_inputs = build_tail_inputs(
             write_common,
             self._pool_size,
             self.block_size,
-            self._page_rows,
+            page_rows,
             max(1, retained_width) if self._lookahead else 0,
             self._tail_inputs[key],
         )
@@ -780,6 +803,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
     """
 
     _head_weight_f32: torch.Tensor | None
+    use_hisparse_topk = False
 
     def __init__(self, vllm_indexer: nn.Module, qk_rope_head_dim: int) -> None:
         super().__init__()
@@ -814,6 +838,8 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         self.kpool_int8 = getattr(self.k_cache, "dtype", torch.bfloat16) == torch.int8
         self.tail_cache: Any = vllm_indexer.tail_cache
         self.topk_indices_buffer: torch.Tensor | None = vllm_indexer.topk_indices_buffer
+        attention_config = getattr(vllm_indexer.vllm_config, "attention_config", None)
+        self.use_hisparse_topk = getattr(attention_config, "hisparse_config", None) is not None
         # Reserve the shared exchange workspace at model-build time: backend
         # init runs before the memory profile on every runner, so the KV-cache
         # budget accounts for the worst sharded step even when profiling skips
@@ -1009,6 +1035,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         cache_metadata = indexer_metadata.write_metadata or indexer_metadata
         num_tokens = q_values.shape[0] if q_values is not None else indexer_metadata.positions.shape[0]
         output_width = self.topk_tokens + self.index_kpool - 1
+        result_width = output_width
         if compute_topk and self.topk_indices_buffer is not None:
             if (
                 self.topk_indices_buffer.ndim != 2
@@ -1020,13 +1047,15 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
                 raise ValueError("GLM KPool output buffer requires int32 contiguous columns on the query device.")
             if self.topk_indices_buffer.shape[0] < num_tokens or self.topk_indices_buffer.shape[1] < output_width:
                 raise ValueError("GLM KPool output buffer must cover the token rows and top-k width.")
+            if self.use_hisparse_topk:
+                result_width = self.topk_indices_buffer.shape[1]
         if self.index_kpool <= 0 or self.topk_tokens <= 0 or self.topk_tokens % self.index_kpool:
             raise ValueError("KPool top-k must be divisible by its positive pool size.")
         if hidden_states.shape[0] == 0:
             if not compute_topk:
                 return None
             if self.topk_indices_buffer is not None:
-                return self.topk_indices_buffer[:0, :output_width].unsqueeze(1)
+                return self.topk_indices_buffer[:0, :result_width].unsqueeze(1)
             return torch.empty((0, 1, output_width), dtype=torch.int32, device=hidden_states.device)
         if (
             cache_metadata.cum_query_lens is None
@@ -1121,7 +1150,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             if self.topk_indices_buffer is not None:
                 output = self.topk_indices_buffer[:num_tokens]
                 output.fill_(-1)
-                return output[:, :output_width].unsqueeze(1)
+                return output[:, :result_width].unsqueeze(1)
             return torch.full((num_tokens, 1, output_width), -1, dtype=torch.int32, device=hidden_states.device)
         assert q_values is not None and weights is not None
         # Under TP row sharding the scorer and packer address the rank's
@@ -1143,6 +1172,11 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             indexer_op = partial(self._pool_key_indexer_fp8, k_descale=indexer_scale_cache[..., 0])
             select = partial(self._pool_key_indexer, indexer_op)
             extra = {}
+            if self.use_hisparse_topk and indexer_metadata.block_size != indexer_cache.size(1):
+                page_ratio, remainder = divmod(indexer_metadata.block_size, indexer_cache.size(1))
+                if remainder or page_ratio < 1:
+                    raise ValueError("HiSparse KPool subpages must exactly divide the manager page.")
+                extra["block_table_page_ratio"] = page_ratio
         elif int8:
             assert indexer_scale_cache is not None
             query, q_descale = self._symmetric_int8(q_values)
@@ -1170,5 +1204,13 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         output = self._pack_keypool_indices(indices, scoring, self.topk_tokens, self.index_kpool, output_buffer)
         if row_shard is not None and self.topk_indices_buffer is not None:
             _exchange_row_shard_topk(self.topk_indices_buffer, row_shard, output_width)
-            return self.topk_indices_buffer[: sum(row_shard.sizes), :output_width].unsqueeze(1)
+            restored = self.topk_indices_buffer[: sum(row_shard.sizes), :result_width]
+            if result_width > output_width:
+                restored[:, output_width:].fill_(-1)
+            return restored.unsqueeze(1)
+        if result_width > output_width:
+            # The packer already fills the backing's columns beyond the KPool
+            # selection with -1. Expose those columns to the HiSparse resolver.
+            assert self.topk_indices_buffer is not None
+            return self.topk_indices_buffer[: output.shape[0]].unsqueeze(1)
         return output

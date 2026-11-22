@@ -4,7 +4,11 @@
 
 from __future__ import annotations
 
+import inspect
+
 import torch
+
+from vllm_ascend.hisparse import FLASH_MTP_QUERY_LEN
 
 
 def _host_disjoint(caches, draft_layers):
@@ -131,13 +135,25 @@ class _DirectMirrorSources:
 class HostMirrorConnector:
     """Join one worker's Host mirror at the existing Core draft finalizer."""
 
-    def __init__(self, connector, worker, output_copy_stream, sources, logger=None, rank=None):
+    def __init__(
+        self,
+        connector,
+        worker,
+        output_copy_stream,
+        sources,
+        logger=None,
+        rank=None,
+        *,
+        defer_resident_decode_row_mirror: bool = False,
+    ):
         self._connector = connector
         self._worker = worker
         self._output_copy_stream = output_copy_stream
         self._sources = sources
+        self._defer_resident_decode_row_mirror = defer_resident_decode_row_mirror
         self._logger = logger
         self._rank = rank
+        self._logged_lazy_decode = False
         self._logged_draft_defer = False
         self._logged_finalize = False
         self._overlap_draft = False
@@ -169,6 +185,31 @@ class HostMirrorConnector:
             and not input_batch.has_prefill
             and 0 < input_batch.num_tokens == input_batch.num_tokens_after_padding
         )
+        if (
+            self._eligible_forward
+            and self._defer_resident_decode_row_mirror
+            and input_batch is not None
+            and attn_metadata is not None
+            and bool((input_batch.num_scheduled_tokens == FLASH_MTP_QUERY_LEN).all())
+            and getattr(scheduler_output.kv_connector_metadata, "all_context_pages_resident", False)
+        ):
+            target_metadata = [
+                attn_metadata.get(name) for name, handle in self._worker._group_leaders if not handle.draft_layer
+            ]
+            if target_metadata and all(
+                metadata is not None and 0 < metadata.num_decode_tokens == metadata.num_actual_tokens
+                for metadata in target_metadata
+            ):
+                if self._logger is not None and not self._logged_lazy_decode:
+                    self._logger.info(
+                        "HiSparse lazy row mirroring active for fully resident target decode: tokens=%d requests=%d",
+                        input_batch.num_tokens,
+                        input_batch.num_reqs,
+                    )
+                    self._logged_lazy_decode = True
+                return self._connector.pre_forward(
+                    scheduler_output, input_batch, attn_metadata=attn_metadata, defer_decode_row_mirror=True
+                )
         return self._connector.pre_forward(scheduler_output, input_batch, attn_metadata=attn_metadata)
 
     def finish_forward(self) -> None:
@@ -249,6 +290,7 @@ def overlap_target_host_mirror(runner):
     from vllm.logger import logger
     from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
+    from vllm_ascend.attention.sfa_hisparse import supports_flash_resident_decode_graph
     from vllm_ascend.hisparse.backend import AscendHiSparseBackend
     from vllm_ascend.hisparse.pcp import PCPHiSparseConnector
 
@@ -284,4 +326,18 @@ def overlap_target_host_mirror(runner):
         return connector
     rank = get_tensor_model_parallel_rank()
     logger.info("HiSparse direct Target Host mirror overlap enabled: rank=%d", rank)
-    return HostMirrorConnector(connector, worker, output_stream, sources, logger, rank)
+    return HostMirrorConnector(
+        connector,
+        worker,
+        output_stream,
+        sources,
+        logger,
+        rank,
+        defer_resident_decode_row_mirror=(
+            type(connector) is ActiveKVConnector
+            and not worker.cache_handles[0].runtime.eager_host_mirror
+            and supports_flash_resident_decode_graph(runner.vllm_config)
+            and runner.vllm_config.num_speculative_tokens + 1 == FLASH_MTP_QUERY_LEN
+            and "defer_decode_row_mirror" in inspect.signature(connector.pre_forward).parameters
+        ),
+    )

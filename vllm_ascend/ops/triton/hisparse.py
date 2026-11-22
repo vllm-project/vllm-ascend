@@ -5,8 +5,15 @@
 Residency planning is provided by the native AscendC resolver.
 """
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import LaunchSpec, TritonWarmupTensor
 from vllm.triton_utils import tl, triton
+
+from vllm_ascend.ops.triton.ascend_jit_warmup import AscendTritonJitKernel
 
 _INVALID_INDEX = tl.constexpr(-1)
 # Hot table entries hold nonnegative signed int32 Host slots.
@@ -14,6 +21,82 @@ _HOST_SLOT_BITS = tl.constexpr(torch.iinfo(torch.int32).bits - 1)
 _MAX_HOST_SLOT = tl.constexpr(torch.iinfo(torch.int32).max)
 # The largest signed int64 sorts after every valid (state, slot) key.
 _INVALID_SORTED_SLOT_KEY = tl.constexpr(torch.iinfo(torch.int64).max)
+
+
+_PREFILL_REPRESENTATIVE_TILE = 256
+_MAX_PREFILL_REPRESENTATIVE_ROWS = torch.iinfo(torch.int32).max - _PREFILL_REPRESENTATIVE_TILE
+
+
+@triton.jit(
+    do_not_specialize=["num_rows"],
+    do_not_specialize_on_alignment=["indices", "values", "representatives"],
+)
+def _scatter_min_representatives_kernel(indices, values, representatives, num_rows, BLOCK_SIZE: tl.constexpr):
+    rows = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    valid = rows < num_rows
+    destinations = tl.load(indices + rows, mask=valid, other=0)
+    minima = tl.load(values + rows, mask=valid, other=0)
+    tl.atomic_min(representatives + destinations, minima, mask=valid, sem="relaxed")
+
+
+class ScatterMinRepresentativesKernel(AscendTritonJitKernel["ScatterMinRepresentativesKernel.CompileKey"]):
+    kernel = _scatter_min_representatives_kernel
+    bind_launch_inputs = False
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        block_size: int
+
+    def dispatch(self, *, block_size: int) -> CompileKey:
+        return self.CompileKey(block_size=block_size)
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(block_size=_PREFILL_REPRESENTATIVE_TILE)
+
+    def warmup_inputs(self, key: CompileKey) -> dict[str, Any]:
+        vector = TritonWarmupTensor(torch.int64, shape=(key.block_size,))
+        return dict(
+            indices=vector,
+            values=vector,
+            representatives=vector,
+            num_rows=key.block_size,
+            BLOCK_SIZE=key.block_size,
+        )
+
+    @kernel_launcher
+    def __call__(self, indices, values, representatives, num_rows: int, BLOCK_SIZE: int) -> LaunchSpec:
+        return (triton.cdiv(num_rows, BLOCK_SIZE),), dict(
+            indices=indices,
+            values=values,
+            representatives=representatives,
+            num_rows=num_rows,
+            BLOCK_SIZE=BLOCK_SIZE,
+        )
+
+
+_SCATTER_MIN_REPRESENTATIVES = ScatterMinRepresentativesKernel()
+
+
+def scatter_min_representatives(
+    representatives: torch.Tensor, indices: torch.Tensor, values: torch.Tensor
+) -> torch.Tensor:
+    """Update an INT64 vector in place with the minimum at each selected index.
+
+    The caller supplies contiguous vectors on the same NPU and indices within
+    the output bounds. The output must not overlap either input.
+    """
+    if any(t.ndim != 1 or t.dtype != torch.int64 or not t.is_contiguous() for t in (representatives, indices, values)):
+        raise ValueError("HiSparse representative selection requires contiguous INT64 vectors")
+    if indices.shape != values.shape:
+        raise ValueError("HiSparse representative indices and values must have matching shapes")
+    num_rows = indices.numel()
+    if num_rows > _MAX_PREFILL_REPRESENTATIVE_ROWS:
+        raise ValueError("HiSparse representative input exceeds the INT32 indexing range")
+    if num_rows:
+        if not representatives.numel():
+            raise ValueError("HiSparse representative output must be nonempty for nonempty input")
+        _SCATTER_MIN_REPRESENTATIVES(indices, values, representatives, num_rows, _PREFILL_REPRESENTATIVE_TILE)
+    return representatives
 
 
 @triton.jit

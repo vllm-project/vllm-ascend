@@ -10,7 +10,12 @@ import torch
 from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    KVCacheGroupSpec,
+    MambaSpec,
+    SparseCacheRole,
+    UniformTypeKVCacheSpecs,
+)
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -22,7 +27,7 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_groups,
     get_glm5_next_pool_bytes_per_block,
 )
-from vllm_ascend.models.glm5next.cache_views import view_kpool_tail_cache
+from vllm_ascend.models.glm5next.cache_views import view_hisparse_kpool_cache, view_kpool_tail_cache
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 from vllm_ascend.worker.v2 import attn_utils
 
@@ -262,6 +267,35 @@ def test_glm_fp8_indexer_keys_and_scales_share_padded_pages_without_overlapping(
     assert torch.count_nonzero(key[2].view(torch.uint8)) == 0
     assert torch.count_nonzero(scale[:2]) == 0
     assert torch.all(key[1].view(torch.uint8) == 23)
+
+
+def test_hisparse_fp8_indexer_views_preserve_slab_offset_and_gap():
+    spec = replace(
+        _make_specs()[INDEXER],
+        cache_role=SparseCacheRole.INDEXER,
+        block_size=128,
+        tokens_per_state=4,
+        head_size=128,
+        dtype=torch.float8_e4m3fn,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+        state_content_bytes=132,
+    )
+    # Core owns one slab. The first key page starts after another layer's
+    # offset, and a larger group determines the shared 8192-byte block stride.
+    raw = torch.zeros(2 * 8192, dtype=torch.int8)
+    core_view = raw.as_strided((2, 1, 32, 132), (8192, 4224, 132, 1), storage_offset=64)
+    keys, scales = view_hisparse_kpool_cache(core_view.view(torch.float8_e4m3fn), spec)
+    assert keys.shape == (2, 32, 1, 128)
+    assert scales.shape == (2, 32, 1, 1)
+    assert keys.data_ptr() == raw.data_ptr() + 64
+    assert scales.data_ptr() == raw.data_ptr() + 4160
+    keys[1].view(torch.int8).fill_(23)
+    scales[1].fill_(2)
+    assert torch.all(raw[8256:12352] == 23)
+    assert torch.all(raw[12352:12480].view(torch.float32) == 2)
+    assert not torch.count_nonzero(raw[:8256])
+    assert not torch.count_nonzero(raw[12480:])
 
 
 def test_cann_tail_views_keep_interleaved_rows_and_shared_page_stride(monkeypatch):

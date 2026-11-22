@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 from copy import deepcopy
-from dataclasses import is_dataclass
+from dataclasses import is_dataclass, replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -26,6 +26,70 @@ def _assert_metadata_equal(actual, expected):
             _assert_metadata_equal(getattr(actual, name), value)
     else:
         assert actual == expected
+
+
+@pytest.mark.parametrize("live_prefix", [False, True])
+def test_grouped_q6_reuses_graph_buffers_and_matches_individual_launches(live_prefix):
+    device = torch.device("npu:0")
+    builders = [
+        _make_builder(
+            device=device,
+            num_heads=32,
+            num_speculative_tokens=5,
+            builder_cls=AscendGDNHostMetadataBuilder,
+            mamba_cache_mode="align",
+            num_speculative_blocks=5,
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        )
+        for _ in range(3)
+    ]
+    for builder in builders:
+        builder.vllm_config.model_config.dtype = torch.bfloat16
+        builder.compilation_config.static_forward_context = {
+            "layer0": SimpleNamespace(
+                use_contiguous_conv_indices=True, use_shared_conv_output=True, local_projection_size=11
+            )
+        }
+    common = create_common_attn_metadata(BatchSpec([15, 32], [6, 6]), 16, device)
+    common.is_prefilling = torch.zeros(2, dtype=torch.bool)
+    common_by_group = [
+        replace(common, block_table_tensor=torch.arange(32, dtype=torch.int32, device=device).view(2, 16) + index)
+        for index in (1, 33, 65)
+    ]
+    accepted = torch.tensor([2, 5], dtype=torch.int32, device=device)
+    drafts = torch.full((2,), 5, dtype=torch.int32)
+    originals = [
+        builder.build(0, group_common, accepted, drafts, num_actual_reqs=2)
+        for builder, group_common in zip(builders, common_by_group, strict=True)
+    ]
+    expected = deepcopy(originals)
+    if live_prefix:
+        for metadata in expected:
+            output = metadata.spec_decode_metadata.spec_causal_conv1d.output_buffer
+            assert output.shape[0] > common.num_actual_tokens
+            output[common.num_actual_tokens :].fill_(1)
+    for builder in builders:
+        builder.spec_state_indices_tensor.fill_(-1)
+        builder._spec_conv_indices.fill_(-1)
+        builder._conv_output_buffer.fill_(1)
+    grouped = builders[0].begin_grouped_spec_gdn()
+    with patch.object(_prepare_gdn_kernel, "run", wraps=_prepare_gdn_kernel.run) as run:
+        actual = [
+            builder.build_grouped_spec_gdn(group_common, accepted, grouped)
+            for builder, group_common in zip(builders, common_by_group, strict=True)
+        ]
+        run.assert_not_called()
+        grouped.launch(clear_conv_tokens=common.num_actual_tokens if live_prefix else None)
+        run.assert_called_once()
+    for before, after, oracle in zip(originals, actual, expected, strict=True):
+        _assert_metadata_equal(after, oracle)
+        assert after.spec_state_indices_tensor.data_ptr() == before.spec_state_indices_tensor.data_ptr()
+        assert after.spec_query_start_loc.data_ptr() == before.spec_query_start_loc.data_ptr()
+        assert after.num_accepted_tokens.data_ptr() == before.num_accepted_tokens.data_ptr()
+        before_conv = before.spec_decode_metadata.spec_causal_conv1d
+        after_conv = after.spec_decode_metadata.spec_causal_conv1d
+        assert after_conv.cache_indices.data_ptr() == before_conv.cache_indices.data_ptr()
+        assert after_conv.output_buffer.data_ptr() == before_conv.output_buffer.data_ptr()
 
 
 @pytest.mark.parametrize("mixed", [False, True])
@@ -223,3 +287,58 @@ def test_fused_metadata_reuses_kernel_across_batch_counts(mode, graph_mode):
     assert len(compiled_kernels) == len(counts)
     assert compiled_kernels[0] is not None
     assert all(kernel is compiled_kernels[0] for kernel in compiled_kernels)
+
+
+def test_grouped_q6_cached_views_follow_current_block_tables_and_accepted_counts():
+    device = torch.device("npu:0")
+    builders = [
+        _make_builder(
+            device=device,
+            num_heads=32,
+            num_speculative_tokens=5,
+            builder_cls=AscendGDNHostMetadataBuilder,
+            mamba_cache_mode="align",
+            num_speculative_blocks=5,
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        )
+        for _ in range(2)
+    ]
+    for builder in builders:
+        builder.vllm_config.model_config.dtype = torch.bfloat16
+        builder.compilation_config.static_forward_context = {
+            "layer0": SimpleNamespace(
+                use_contiguous_conv_indices=True, use_shared_conv_output=True, local_projection_size=11
+            )
+        }
+
+    def step(seq_lens, table_start, accepted_counts):
+        num_reqs = len(seq_lens)
+        common = create_common_attn_metadata(BatchSpec(seq_lens, [6] * num_reqs), 16, device)
+        common.is_prefilling.zero_()
+        table = torch.arange(num_reqs * 16, dtype=torch.int32, device=device).view(num_reqs, 16) + table_start
+        per_group = [replace(common, block_table_tensor=table + 100 * index) for index in range(len(builders))]
+        accepted = torch.tensor(accepted_counts, dtype=torch.int32, device=device)
+        drafts = torch.full((num_reqs,), 5, dtype=torch.int32)
+        expected = [
+            deepcopy(builder.build(0, metadata, accepted, drafts, num_actual_reqs=num_reqs))
+            for builder, metadata in zip(builders, per_group, strict=True)
+        ]
+        for builder in builders:
+            builder.spec_state_indices_tensor.fill_(-1)
+            builder.num_accepted_tokens.fill_(-1)
+        grouped = builders[0].begin_grouped_spec_gdn()
+        actual = [
+            builder.build_grouped_spec_gdn(metadata, accepted, grouped)
+            for builder, metadata in zip(builders, per_group, strict=True)
+        ]
+        grouped.launch()
+        for metadata, oracle in zip(actual, expected, strict=True):
+            _assert_metadata_equal(metadata, oracle)
+        return actual
+
+    first = step([15, 32], 1, [2, 5])
+    second = step([17, 34], 61, [1, 3])
+    assert all(before is after for before, after in zip(first, second, strict=True))
+    assert all(metadata.num_accepted_tokens.cpu().tolist() == [1, 3] for metadata in second)
+    narrower = step([34], 19, [4])
+    assert all(before is not after for before, after in zip(second, narrower, strict=True))

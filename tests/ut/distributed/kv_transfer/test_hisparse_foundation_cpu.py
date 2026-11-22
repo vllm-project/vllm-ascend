@@ -5,7 +5,9 @@
 import math
 from dataclasses import replace
 from types import SimpleNamespace as NS
+from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -25,6 +27,7 @@ from vllm_ascend.attention.sfa_hisparse import (
     AscendHiSparseImpl,
     AscendHiSparseMetadataBuilder,
     finish_hisparse_kv_update,
+    resident_decode_page_table,
 )
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
@@ -42,6 +45,73 @@ from vllm_ascend.hisparse.c8 import (
     pack_c8_components,
 )
 from vllm_ascend.ops.triton import sfa_indexer_store
+
+
+def test_resident_decode_pages_reorder_requests_and_mask_padding():
+    block_ids = torch.tensor([[2, 7, 0], [5, 4, 0], [12, 13, -1]], dtype=torch.int32)
+    states = torch.tensor([2, -1, 0], dtype=torch.int32)
+    pages = resident_decode_page_table(block_ids, states, 9)
+
+    assert pages.tolist() == [[108, 117, 0], [0, 0, 0], [18, 63, 0]]
+    assert block_ids.tolist() == [[2, 7, 0], [5, 4, 0], [12, 13, -1]]
+
+
+@pytest.mark.parametrize(
+    ("widths", "resident", "defer"),
+    [([6, 6], True, True), ([1, 1], True, False), ([5, 7], True, False), ([6, 6], False, False)],
+)
+def test_deferred_mirror_only_on_uniform_resident_q6(widths, resident, defer):
+    from vllm_ascend.hisparse.host_mirror import HostMirrorConnector
+
+    num_tokens = sum(widths)
+    connector = Mock()
+    worker = NS(_group_leaders=[("target", NS(draft_layer=False))])
+    wrapper = HostMirrorConnector(connector, worker, None, None, defer_resident_decode_row_mirror=True)
+    scheduler_output = NS(has_sync_kv_loads=True, kv_connector_metadata=NS(all_context_pages_resident=resident))
+    input_batch = NS(
+        has_prefill=False,
+        num_tokens=num_tokens,
+        num_tokens_after_padding=num_tokens,
+        num_scheduled_tokens=np.array(widths),
+    )
+    metadata = {"target": NS(num_decode_tokens=num_tokens, num_actual_tokens=num_tokens)}
+
+    wrapper.begin_execution(True)
+    wrapper.pre_forward(scheduler_output, input_batch, attn_metadata=metadata)
+
+    extra = {"defer_decode_row_mirror": True} if defer else {}
+    connector.pre_forward.assert_called_once_with(scheduler_output, input_batch, attn_metadata=metadata, **extra)
+
+
+@pytest.mark.parametrize(
+    ("model_type", "hisparse_enabled", "indexer_dtype", "pcp", "a5", "expected"),
+    [
+        ("glm5_next_text", True, "fp8", 1, True, True),
+        ("glm5_next_text", False, "fp8", 1, True, False),
+        ("glm_moe_dsa", True, "fp8", 1, True, False),
+        ("glm5_next_text", True, "int8", 1, True, False),
+        ("glm5_next_text", True, "fp8", 2, True, False),
+        ("glm5_next_text", True, "fp8", 1, False, False),
+    ],
+)
+def test_flash_hisparse_scope(monkeypatch, model_type, hisparse_enabled, indexer_dtype, pcp, a5, expected):
+    from vllm_ascend import hisparse
+    from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
+
+    family = DeviceAdaptorFamily.FP8_OPTIMIZED if a5 else None
+    monkeypatch.setattr(hisparse, "get_current_hardware_profile", lambda: NS(device_adaptor_family=family))
+    config = NS(
+        model_config=NS(hf_text_config=NS(model_type=model_type, index_kpool=4, qk_rope_head_dim=0)),
+        attention_config=NS(hisparse_config=NS() if hisparse_enabled else None, indexer_kv_dtype=indexer_dtype),
+        cache_config=NS(cache_dtype="fp8"),
+        parallel_config=NS(
+            data_parallel_size=1,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=pcp,
+            decode_context_parallel_size=1,
+        ),
+    )
+    assert hisparse.supports_glm5_next_hisparse(config) is expected
 
 
 @pytest.fixture(params=[False, True], ids=["standalone", "profiled"])

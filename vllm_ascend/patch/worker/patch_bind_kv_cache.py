@@ -3,6 +3,7 @@ from collections.abc import Sequence
 import torch
 import vllm.v1.worker.utils as utils
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
@@ -80,6 +81,16 @@ def bind_kv_cache_to_layers(
     for layer_name, kv_cache in kv_caches.items():
         layer = forward_context[layer_name]
         if isinstance(layer, unpacking_layers):
+            layer.bind_kv_cache(kv_cache)
+        elif (
+            isinstance(layer, MambaBase)
+            and isinstance(kv_cache, torch.Tensor)
+            and kv_cache.dtype == torch.int8
+            and kv_cache.ndim == 4
+            and kv_cache.shape[1:3] == (1, 1)
+        ):
+            # Core HiSparse supplies raw KDA pages, while native Ascend cache
+            # allocation has already unpacked the recurrent state tensors.
             layer.bind_kv_cache(kv_cache)
         else:
             layer.kv_cache = kv_cache

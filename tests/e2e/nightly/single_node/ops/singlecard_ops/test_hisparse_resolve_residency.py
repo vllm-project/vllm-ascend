@@ -123,8 +123,10 @@ def run_resolver(
     host_rows=64,
     attention_capacity=0,
     attention_block_stride=0,
+    valid_rows=None,
 ):
     device = torch.device("npu:0")
+    num_valid_rows = None if valid_rows is None else torch.tensor([valid_rows], dtype=torch.int32, device=device)
     tensors = [t.npu() for t in (logical_cpu, hot_table_cpu, requests_cpu, states_cpu, source_cpu, resident_cpu)]
     logical, hot_table, requests, states, source, resident = tensors
     dgi = dgi_cpu.npu()
@@ -152,7 +154,7 @@ def run_resolver(
         states,
         source,
         resident,
-        None,
+        num_valid_rows,
         dgi,
         lru,
         output,
@@ -266,6 +268,50 @@ def test_resolver_matches_torch_reference_all_resident(attention_capacity):
             torch.testing.assert_close(a.cpu(), e, msg=name)
     else:
         assert_matches_reference(actual, expected)
+
+
+@pytest.mark.parametrize("cold", [False, True])
+def test_flash_resident_rows_and_cold_fallback(cold):
+    block, topk, hot_size, stride = 128, 2176, 15232, 1152
+    rows, valid_rows = 7, 6
+    logical = torch.arange(rows * topk, dtype=torch.int32).view(rows, topk) % 4096
+    logical[:, 1::31] = -1
+    requests = torch.zeros(rows, dtype=torch.int32)
+    states = torch.zeros(1, dtype=torch.int32)
+    source = torch.arange(1, 33, dtype=torch.int32)[None]
+    resident = source.clone()
+    if cold:
+        resident[0, 1] = 0
+    hot_table = torch.arange(33, 33 + hot_size // block, dtype=torch.int32)[None]
+    tags = torch.full((1, hot_size), -1, dtype=torch.int32)
+    lru = torch.arange(hot_size, dtype=torch.int16)[None]
+    live_requests = requests.clone()
+    live_requests[valid_rows:] = -1
+    expected = reference(logical, live_requests, states, source, resident, hot_table, tags, lru, block)
+    actual, attention = run_resolver(
+        logical,
+        hot_table,
+        requests,
+        states,
+        source,
+        resident,
+        tags,
+        lru,
+        block=block,
+        union_rows=topk * valid_rows,
+        host_rows=33 * block,
+        attention_capacity=160 * stride,
+        attention_block_stride=stride,
+        valid_rows=valid_rows,
+    )
+    assert_matches_reference(actual, expected)
+    mapped = expected[0].clone()
+    for row in mapped:
+        active = row[row >= 0]
+        row.fill_(-1)
+        row[: active.numel()] = active // block * stride + active % block
+    torch.testing.assert_close(attention.cpu(), mapped)
+    assert bool(actual[-1][1].item()) == cold
 
 
 def test_resolver_matches_torch_reference_single_warp_scan():

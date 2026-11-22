@@ -28,6 +28,21 @@ Host address. Dimensions and strides are nonnegative integer attributes, with
 positive block sizes and row widths. Byte strides and element strides are
 distinguished below; the Python wrappers supply the launch geometry.
 
+### `scatter_min_representatives`
+
+Core prefill staging uses this in-place minimum to pick the first position of
+each unique Host page. It matches
+`scatter_reduce_(0, indices, values, reduce="amin", include_self=True)`.
+The caller supplies three contiguous INT64 vectors on one NPU, with matching
+index/value lengths, valid indices and output storage disjoint from the two
+inputs. Unreferenced entries retain their original values. Empty inputs do not
+launch a kernel.
+
+The metadata builder registers one 256-element Triton variant at initialization.
+The row count and pointer alignment remain dynamic. The Ascend 950 eager and
+ACLGraph contract is covered by `test_hisparse_representatives.py` in the
+Triton operator tests.
+
 ### `gather_rows_kernel`
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |

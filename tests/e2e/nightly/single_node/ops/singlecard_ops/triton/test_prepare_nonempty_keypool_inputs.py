@@ -10,9 +10,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch_npu  # noqa: F401
+from vllm.v1.kv_cache_interface import SparseCacheRole
 
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.models.glm5next.cache_views import view_hisparse_kpool_cache
 from vllm_ascend.ops.cann_keypool import pool_key_indexer_nonempty
 from vllm_ascend.ops.triton.glm5_next_cann_keypool import pack_keypool_indices
 from vllm_ascend.ops.triton.prepare_nonempty_keypool_inputs import prepare_nonempty_keypool_inputs
@@ -50,6 +53,68 @@ def test_prepare_nonempty_keypool_inputs_matches_reference(tokens, requests, col
         torch.testing.assert_close(result.cpu(), reference.cpu(), rtol=0, atol=0)
     for value, original in zip(inputs, originals):
         torch.testing.assert_close(value.cpu(), original.cpu(), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A5, reason="Requires Ascend A5 FP8")
+def test_compact_hisparse_kpool_subpages_on_graph_replay():
+    device = "npu:0"
+    blocks, manager_tokens, pool = 3, 1536, 4
+    manager_rows = manager_tokens // pool
+    spec = AscendMLAAttentionSpec(
+        block_size=manager_tokens,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float8_e4m3fn,
+        model_version="glm5_next",
+        cache_role=SparseCacheRole.INDEXER,
+        tokens_per_state=pool,
+        state_content_bytes=132,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+    )
+    raw = torch.zeros((blocks, 1, manager_rows, 132), dtype=torch.uint8, device=device)
+    keys, scales = view_hisparse_kpool_cache(raw.view(spec.dtype), spec)
+    subpages, kernel_rows = 12, 32
+    assert keys.shape == (blocks * subpages, kernel_rows, 1, 128)
+    assert scales.shape == (blocks * subpages, kernel_rows, 1, 1)
+    assert keys.stride(0) == scales.stride(0) * scales.element_size() == 4224
+    assert scales.data_ptr() - keys.data_ptr() == kernel_rows * spec.head_size
+
+    # The writer consumes scalar pooled slots. This one is the first pooled row
+    # of the second kernel page of manager block 1.
+    slot = manager_rows + kernel_rows
+    page, row = divmod(slot, keys.size(1))
+    keys.view(torch.uint8)[page, row].fill_(33)
+    scales[page, row].fill_(2)
+    offset = (manager_rows + kernel_rows) * spec.state_content_size_bytes
+    assert torch.all(raw.flatten()[offset : offset + 128] == 33)
+    assert raw.flatten()[offset + 4096 : offset + 4100].view(torch.float32).item() == 2
+
+    query = torch.zeros((2, 1, 128), dtype=torch.bfloat16, device=device)
+    weights = torch.ones((2, 1), dtype=query.dtype, device=device)
+    ends = torch.tensor([1, 2], dtype=torch.int64, device=device)
+    lengths = torch.tensor([385, 32], dtype=torch.int64, device=device)
+    tails = torch.zeros_like(lengths)
+    table = torch.tensor([[2, 1], [1, 0]], dtype=torch.int32, device=device)
+
+    def pad():
+        return prepare_nonempty_keypool_inputs(query, weights, ends, lengths, tails, table, subpages)[-1]
+
+    pad()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        expanded = pad()
+    replacement = torch.tensor([[1, 2], [2, 0]], dtype=torch.int32)
+    table.copy_(replacement)
+    graph.replay()
+    expected = torch.cat(
+        (
+            torch.stack((torch.arange(12, 36), torch.cat((torch.arange(24, 36), torch.arange(12))))),
+            torch.zeros(1, 24, dtype=torch.int32),
+        )
+    ).to(torch.int32)
+    torch.testing.assert_close(expanded.cpu(), expected)
 
 
 @pytest.mark.skipif(
