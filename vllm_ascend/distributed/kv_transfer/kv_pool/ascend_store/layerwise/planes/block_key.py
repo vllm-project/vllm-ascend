@@ -280,6 +280,14 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
                 if not request.can_save or not worker._is_layerwise_save_owner(group):
                     continue
                 key_indices = [(key(index), index) for index in range(start, end) if selected(store_mask, index)]
+                # TEMPORARY P11 diagnosis: show the exact save extent per group.
+                print(
+                    f"[p11-diag] save group={group} start={start} end={end} "
+                    f"hashes={len(hashes)} ids={len(ids)} selected={len(key_indices)} "
+                    f"mask={None if store_mask is None else sum(store_mask)} "
+                    f"save_end={request.save_end_token} prompt={request.num_prompt_tokens}",
+                    flush=True,
+                )
                 names = [name for name, _ in key_indices]
                 with worker._put_started_keys_lock:
                     started = set(names) & worker._put_started_keys
