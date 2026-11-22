@@ -402,12 +402,17 @@ class _SwaChunkStageCache:
     call, while every differing geometry still pays its own call.
     """
 
-    __slots__ = ("segments", "segments_key", "smla_cache", "plan_cache")
+    __slots__ = ("segments", "segments_key", "smla_cache", "plan_cache", "inert_key")
 
     def __init__(self):
         self.segments_key: tuple | None = None
         self.segments: list | None = None
         self.smla_cache: dict[tuple, torch.Tensor | bool] = {}
+        # Geometry whose bounded plan produced zero blocks.  The emptiness
+        # depends only on the CPU segment plan and the block-table width, so a
+        # matching key can skip plan/metadata/event work for every later layer
+        # of the same geometry (and any later step with the same geometry).
+        self.inert_key: tuple | None = None
         # One bounded plan (including its dense stage tables) per distinct
         # block-table buffer and geometry within a step.  Layers that share a
         # cache group reuse the gather/cat work instead of rebuilding it.
@@ -683,6 +688,16 @@ def _maybe_stage_owner_cmp_cache(
         _pcp_stage_count("long_kv", "memo_hit")
         return memo[1]
     cache = get_stage_cache(source_cache.device, source_cache, budget_bytes=pcp_config.owner_stage_bytes)
+    if counts is not None:
+        inert_key = (int(source_cache.data_ptr()), tuple(int(count) for count in counts))
+        if getattr(cache, "long_kv_inert_key", None) == inert_key:
+            _pcp_stage_count("long_kv", "inert_skip")
+            return None
+        if not any(counts):
+            # No live compressed blocks: nothing to stage for this source.
+            cache.long_kv_inert_key = inert_key
+            _pcp_stage_count("long_kv", "inert_set")
+            return None
     result = cache.stage(
         source_cache,
         block_table,
@@ -912,6 +927,18 @@ class AscendDSAV41Impl:
             swa_cache,
             budget_bytes=config.owner_stage_swa_chunk_bytes,
         )
+        geometry = (
+            _cpu_prefix(getattr(swa_metadata, "query_start_loc_cpu", None), int(num_reqs) + 1),
+            _cpu_prefix(getattr(swa_metadata, "seq_lens_cpu", None), int(num_reqs)),
+            int(num_reqs),
+            int(swa_metadata.storage_block_size),
+            int(swa_metadata.ori_win_left) + 1,
+            int(swa_cache.shape[0]),
+            int(ori_block_table.shape[1]),
+        )
+        if getattr(stage_cache, "inert_key", None) == geometry:
+            _pcp_stage_count("swa", "inert_skip")
+            return
         # Recorded after ``_preprocess`` issued the SWA/long-KV writes on the
         # main stream (the multistream path joins its side stream before
         # returning), so the copy can never read a half-written cache.
@@ -988,6 +1015,9 @@ class AscendDSAV41Impl:
         if plan is None or plan.total_blocks <= 0:
             _pcp_stage_count("swa", "skipped_plan")
             _pcp_stage_mark_negative(stage_cache, "plan")
+            if stage_cache is not None:
+                stage_cache.inert_key = geometry
+                _pcp_stage_count("swa", "inert_set")
             return
         if rebuilt is None:
             _pcp_stage_count("swa", "skipped_metadata")
@@ -1602,56 +1632,77 @@ class AscendDSAV41Impl:
                     )
 
                     if owner_slab_for_tensor(swa_cache) is not None:
-                        timing = _timing_enter("stage_swa_chunk", self.pcp_config.enable_timing)
                         stage_cache = getattr(metadata, "swa_stage_cache", None)
                         block_size = int(metadata.swa.storage_block_size)
                         window = int(metadata.swa.ori_win_left) + 1
                         num_blocks = int(swa_cache.shape[0])
-                        plan_key = (int(ori_block_table.data_ptr()), int(num_reqs), num_blocks, block_size, window)
-                        plan_cache = getattr(stage_cache, "plan_cache", None)
-                        if isinstance(plan_cache, dict) and plan_key in plan_cache:
-                            plan = plan_cache[plan_key]
-                            _pcp_stage_count("swa", "plan_hit")
+                        # Emptiness of the bounded window depends only on the
+                        # CPU segment plan and the block-table width, so it can
+                        # be recognised before building any tables.
+                        geometry = (
+                            _cpu_prefix(getattr(metadata.swa, "query_start_loc_cpu", None), int(num_reqs) + 1),
+                            _cpu_prefix(getattr(metadata.swa, "seq_lens_cpu", None), int(num_reqs)),
+                            int(num_reqs),
+                            block_size,
+                            window,
+                            num_blocks,
+                            int(ori_block_table.shape[1]),
+                        )
+                        if getattr(stage_cache, "inert_key", None) == geometry:
+                            # Zero live blocks: nothing to stage for this
+                            # geometry.  Skip plan, tiling, event and copy work
+                            # for every layer (and step) that shares it.
+                            _pcp_stage_count("swa", "inert_skip")
                         else:
-                            plan = _build_swa_chunk_plan(
-                                metadata.swa,
-                                ori_block_table,
-                                num_reqs,
-                                block_size,
-                                window,
-                                num_blocks,
-                                stage_cache=stage_cache,
-                            )
-                            if isinstance(plan_cache, dict):
-                                plan_cache[plan_key] = plan
-                            _pcp_stage_count("swa", "plan_miss")
-                        if plan is not None and plan.total_blocks > 0:
-                            rebuilt = _build_swa_chunk_smla_metadata(
-                                attn,
-                                metadata.swa,
-                                operator_metadata,
-                                plan,
-                                stage_cache=stage_cache,
-                                has_compressed=has_compressed,
-                                ratio=ratio,
-                                cmp_seq_lens=cmp_seq_lens,
-                                cmp_residual=cmp_residual,
-                                cmp_topk=cmp_topk,
-                                num_reqs=num_reqs,
-                            )
-                            if rebuilt is not None:
-                                staged = get_swa_chunk_stage_cache(
-                                    swa_cache.device,
-                                    swa_cache,
-                                    budget_bytes=self.pcp_config.owner_stage_swa_chunk_bytes,
-                                ).stage(
-                                    swa_cache,
-                                    plan.window_block_table,
-                                    counts=plan.counts,
-                                    prepared=plan.prepared,
-                                    enable_timing=self.pcp_config.enable_timing,
+                            timing = _timing_enter("stage_swa_chunk", self.pcp_config.enable_timing)
+                            plan_key = (int(ori_block_table.data_ptr()), int(num_reqs), num_blocks, block_size, window)
+                            plan_cache = getattr(stage_cache, "plan_cache", None)
+                            if isinstance(plan_cache, dict) and plan_key in plan_cache:
+                                plan = plan_cache[plan_key]
+                                _pcp_stage_count("swa", "plan_hit")
+                            else:
+                                plan = _build_swa_chunk_plan(
+                                    metadata.swa,
+                                    ori_block_table,
+                                    num_reqs,
+                                    block_size,
+                                    window,
+                                    num_blocks,
+                                    stage_cache=stage_cache,
                                 )
-                        _timing_exit(timing)
+                                if isinstance(plan_cache, dict):
+                                    plan_cache[plan_key] = plan
+                                _pcp_stage_count("swa", "plan_miss")
+                            if plan is not None and plan.total_blocks > 0:
+                                rebuilt = _build_swa_chunk_smla_metadata(
+                                    attn,
+                                    metadata.swa,
+                                    operator_metadata,
+                                    plan,
+                                    stage_cache=stage_cache,
+                                    has_compressed=has_compressed,
+                                    ratio=ratio,
+                                    cmp_seq_lens=cmp_seq_lens,
+                                    cmp_residual=cmp_residual,
+                                    cmp_topk=cmp_topk,
+                                    num_reqs=num_reqs,
+                                )
+                                if rebuilt is not None:
+                                    staged = get_swa_chunk_stage_cache(
+                                        swa_cache.device,
+                                        swa_cache,
+                                        budget_bytes=self.pcp_config.owner_stage_swa_chunk_bytes,
+                                    ).stage(
+                                        swa_cache,
+                                        plan.window_block_table,
+                                        counts=plan.counts,
+                                        prepared=plan.prepared,
+                                        enable_timing=self.pcp_config.enable_timing,
+                                    )
+                            elif stage_cache is not None:
+                                stage_cache.inert_key = geometry
+                                _pcp_stage_count("swa", "inert_set")
+                            _timing_exit(timing)
                 _PCP_STAGE_STEP["swa_sync_host_calls"] += 1
                 _PCP_STAGE_STEP["swa_sync_host_s"] += time.perf_counter() - sync_host_started
             if staged is not None:
