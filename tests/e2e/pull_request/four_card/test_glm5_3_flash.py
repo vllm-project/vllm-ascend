@@ -177,6 +177,63 @@ class FlashWorker:
         assert all(layer.is_sequence_parallel and not layer.self_attn.o_proj.reduce_results for layer in draft_layers)
         return True
 
+    def install_pool_probe(self) -> int:
+        """TEMPORARY: print per-group store PUT/EXISTS activity (P11 diagnosis)."""
+        from collections import Counter
+
+        from vllm.distributed.kv_transfer import get_kv_transfer_group
+
+        connector = get_kv_transfer_group()
+        children = getattr(connector, "connectors", None) or [connector]
+        installed = 0
+        for child in children:
+            worker = getattr(child, "connector_worker", None)
+            store = getattr(worker, "m_store", None) if worker is not None else None
+            if store is None or getattr(store, "_group_probe_installed", False):
+                continue
+
+            def group_of(key: str) -> str:
+                marker = "@group:"
+                start = key.find(marker)
+                if start < 0:
+                    return "?"
+                start += len(marker)
+                end = key.find("@", start)
+                return key[start:end] if end >= 0 else key[start:]
+
+            original_put = getattr(store, "put", None)
+            original_exists = getattr(store, "exists", None)
+            if original_put is None:
+                continue
+
+            def put(keys, *args, _original=original_put, **kwargs):
+                counts = Counter(group_of(key) for key in keys)
+                tail = [key[-40:] for key in keys[-3:]]
+                print(
+                    f"[p11-probe] PUT n={len(keys)} groups={dict(sorted(counts.items()))} tail={tail}",
+                    flush=True,
+                )
+                return _original(keys, *args, **kwargs)
+
+            def exists(keys, *args, _original=original_exists, **kwargs):
+                result = _original(keys, *args, **kwargs)
+                counts = Counter(group_of(key) for key in keys)
+                hits = Counter(group_of(key) for key, value in zip(keys, result) if value)
+                tail = [key[-40:] for key in keys[-3:]]
+                print(
+                    f"[p11-probe] EXISTS n={len(keys)} groups={dict(sorted(counts.items()))} "
+                    f"hits={dict(sorted(hits.items()))} tail={tail}",
+                    flush=True,
+                )
+                return result
+
+            store.put = put
+            if original_exists is not None:
+                store.exists = exists
+            store._group_probe_installed = True
+            installed += 1
+        return installed
+
 
 @pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
 @pytest.mark.parametrize("use_replayssm", [False, True], ids=["no_recover", "recover"])
@@ -328,6 +385,8 @@ def test_glm53flash_tp4_pool(tmp_path, monkeypatch):
         assert runner.model.collective_rpc("check_flash_paths") == [True] * TP_SIZE
 
     def _hit(runner) -> dict:
+        installed = runner.model.collective_rpc("install_pool_probe")
+        print(f"[p11-probe] installed={installed}", flush=True)
         return run_pool_hit_sequence(
             runner,
             block_size=128,
