@@ -1,12 +1,12 @@
-# HiSparse prefix reuse with AscendStore in colocated serving
+# [RFC] Reuse HiSparse prefixes with AscendStore in colocated serving
 
 ## Motivation
 
 An agent often sends the same long system prompt and conversation history on successive requests. If the prefix has left the worker's local cache, the next request has to run Prefill over that history again. HiSparse helps the *running* request fit more KV by keeping historical main KV in local DDR and fetching selected rows for Decode. AscendStore provides a way to reuse KV *across* requests. [Ascend HiSparse RFC](https://github.com/vllm-project/vllm-ascend/issues/19293)
 
-This design combines these features on a single Ascend A5 node that runs both Prefill and Decode. A GLM-5.3 request can restore a previously saved prefix, compute its new suffix, and continue decoding with the existing HiSparse attention path. [HiSparse foundation](https://github.com/vllm-project/vllm-ascend/pull/20926) · [Integration PR](https://github.com/vllm-project/vllm-ascend/pull/21924)
+We propose composing the two connectors on a single Ascend A5 node that runs both Prefill and Decode. A GLM-5.3 request should be able to restore a previously saved prefix, compute its new suffix, and continue decoding with the existing HiSparse attention path. [HiSparse foundation](https://github.com/vllm-project/vllm-ascend/pull/20926) · [Implementation](https://github.com/vllm-project/vllm-ascend/pull/21924)
 
-## Prefix lifecycle
+## Proposed change
 
 ### A prefix shared by two requests
 
@@ -55,9 +55,9 @@ The combined path uses `hisparse-ascendstore-v1:<digest>` as its pool key namesp
 
 For a persistent pool, pin the Hub commit if the resolved revision is unavailable. For local weights, use a new versioned directory when replacing a checkpoint in place. The key records the path and configuration and does not hash the weight files. [Key construction](https://github.com/Esir98/vllm-ascend/blob/8e91a8436508df40b0b57e9aab959b5089739a38/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/hisparse.py)
 
-## Configuration
+### Initial configuration
 
-Use Model Runner V2 on one node with colocated Prefill and Decode, whole-block transfers and `prefill_context_parallel_size=1`. Set `hisparse_config.eager_host_mirror=true` in the attention configuration and `ock.mmc.local_service.protocol = host_tcp` in the MemCache configuration. The following JSON is the value of `--kv-transfer-config`. The 4 GiB Host Source budget is an example **per TP rank**. Size it for the target workload. [HiSparse settings](../../user_guide/feature_guide/hisparse.md) · [MemCache setup](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md)
+Use Model Runner V2 on one node with colocated Prefill and Decode, whole-block transfers and `prefill_context_parallel_size=1`. Set `hisparse_config.eager_host_mirror=true` in the attention configuration and `ock.mmc.local_service.protocol = host_tcp` in the MemCache configuration. The following JSON is the value of `--kv-transfer-config`. The 4 GiB Host Source budget is an example per TP rank. Size it for the target workload. [HiSparse settings and combined configuration](https://github.com/Esir98/vllm-ascend/blob/8e91a8436508df40b0b57e9aab959b5089739a38/docs/source/user_guide/feature_guide/hisparse.md#combining-hisparse-with-ascendstore) · [MemCache setup](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/kv_cache_pool_ascend_store.md)
 
 ```json
 {
@@ -80,7 +80,7 @@ Use Model Runner V2 on one node with colocated Prefill and Decode, whole-block t
 }
 ```
 
-## Design trade-offs
+### Design trade-offs
 
 | Choice | Benefit | Cost or alternative |
 | --- | --- | --- |
@@ -88,19 +88,25 @@ Use Model Runner V2 on one node with colocated Prefill and Decode, whole-block t
 | Reserve headroom and take an aligned view | Core allocates the shared NPU slab once with up to 2 MiB minus one byte of extra space. The runner binds Indexer, Resident and Hot to a 2 MiB-aligned slice of the same storage, with no KV copy. | Ascend must coordinate reservation before allocation and view binding afterwards. Native alignment support in the upstream allocator could replace both steps. |
 | Require eager Host mirroring and fence each save | The sender waits for the Host-write event before the first PUT. Even a one-token Prefill chunk or MTP draft write is visible in DDR when the pool reads it. | Eager mirroring adds copy work. Draining queued PUTs can stall the worker, but removing the drain would let Core recycle slots while the sender still reads them. |
 
-## Validation
+### Validation and acceptance criteria
 
-The implementation was exercised with GLM-5.3 on one A5 TP8 node. Two comparisons illustrate the scope.
+For a forced external hit, compare three runs with the same weights, prompt, cache salt, sampling parameters and actual hit length. A uses HiSparse alone with a local hit. B adds AscendStore and serves the same local hit. C clears only the local cache and must show a completed external GET, zero local hits and zero failed-load recomputes. Compare output token IDs, selected-token logprobs and top-5 logprob maps across A, B and C.
+
+The implementation PR reports these GLM-5.3 results on one A5 TP8 node.
 
 | Case | What was exercised | Observed result |
 | --- | --- | --- |
 | BF16, 128K | Cold request, 65,536-token partial hit and 131,072-token full hit | All completed with matching output tokens and selected-token logprobs. |
 | C8, MTP=3, 16,384-token input | HiSparse alone with a local hit, the combination with a local hit, and the combination with a forced MemCache hit | Each reused 16,256 tokens. The external replay had zero local hits, issued 2,032 GET keys and computed the remaining 128 tokens. All 32 output token IDs, selected logprobs and top-5 logprob maps matched across the three runs. |
 
-The forced replay kept the pool warm and cleared only the local prefix cache. This checks that the restored KV actually served the request. The implementation PR records the tested revisions, byte-level replay checks and four-request performance measurements. [Implementation and results](https://github.com/vllm-project/vllm-ascend/pull/21924) · [Matched-hit accuracy comparison](https://github.com/vllm-project/vllm-ascend/pull/21924#issuecomment-7064234306)
+Two boundary tests check the transfer order directly. A 1 + 128-token Prefill split compares the first saved page byte for byte through PUT and replay. Delaying one rank after a peer fails a GET checks that the scheduler retains the destination until every rank finishes. [Implementation and results](https://github.com/vllm-project/vllm-ascend/pull/21924) · [Matched-hit accuracy comparison](https://github.com/vllm-project/vllm-ascend/pull/21924#issuecomment-7064234306)
 
-## Future work
+### Future work
 
 - A public Core hook for pending draft Host writes and per-slot send-completion tracking could narrow the queue-wide wait while preserving source lifetime. Native allocator alignment could remove the Ascend-specific slab reservation.
 - Enabling Mooncake requires an SDK guarantee that a timed-out PUT has stopped writing before its destination can be reused, followed by an A5 test of unrelated keys after timeout. The current combination accepts MemCache `host_tcp` only. [Mooncake issue](https://github.com/kvcache-ai/Mooncake/issues/4491)
 - P/D disaggregation and layerwise transfer need separate page ownership and completion rules for their respective handoffs.
+
+## Feedback period
+
+Proposed discussion period of one week after the RFC Issue opens. Feedback is welcome on two decisions. Should Host Source and Indexer be the only groups exposed to whole-block pooling? Is all-rank completion the right point to publish an import or release its destination after failure?
