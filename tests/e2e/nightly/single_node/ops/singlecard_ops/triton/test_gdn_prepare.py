@@ -73,7 +73,15 @@ def test_grouped_q6_reuses_graph_buffers_and_matches_individual_launches(live_pr
         builder._spec_conv_indices.fill_(-1)
         builder._conv_output_buffer.fill_(1)
     grouped = builders[0].begin_grouped_spec_gdn()
-    with patch.object(_prepare_gdn_kernel, "run", wraps=_prepare_gdn_kernel.run) as run:
+    kernels = []
+    launch_kernel = _prepare_gdn_kernel.run
+
+    def record_kernel(*args, **kwargs):
+        kernel = launch_kernel(*args, **kwargs)
+        kernels.append(kernel)
+        return kernel
+
+    with patch.object(_prepare_gdn_kernel, "run", side_effect=record_kernel) as run:
         actual = [
             builder.build_grouped_spec_gdn(group_common, accepted, grouped)
             for builder, group_common in zip(builders, common_by_group, strict=True)
@@ -90,6 +98,21 @@ def test_grouped_q6_reuses_graph_buffers_and_matches_individual_launches(live_pr
         after_conv = after.spec_decode_metadata.spec_causal_conv1d
         assert after_conv.cache_indices.data_ptr() == before_conv.cache_indices.data_ptr()
         assert after_conv.output_buffer.data_ptr() == before_conv.output_buffer.data_ptr()
+
+    if live_prefix:
+        for builder in builders:
+            builder._conv_output_buffer.fill_(1)
+        grouped = builders[0].begin_grouped_spec_gdn()
+        for builder, group_common in zip(builders, common_by_group, strict=True):
+            builder.build_grouped_spec_gdn(group_common, accepted, grouped)
+        with patch.object(_prepare_gdn_kernel, "run", side_effect=record_kernel):
+            grouped.launch(clear_conv_tokens=6)
+        for builder in builders:
+            output = builder._conv_output_buffer
+            assert torch.all(output[:6] == 0)
+            assert torch.all(output[6:] == 1)
+        assert len(kernels) == 2 and kernels[0] is not None
+        assert kernels[0] is kernels[1]
 
 
 @pytest.mark.parametrize("mixed", [False, True])

@@ -6,7 +6,7 @@ from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit(do_not_specialize=["NUM_REQS", "NUM_ROWS", "NUM_DECODES", "NUM_DECODE_TOKENS"])
+@triton.jit(do_not_specialize=["NUM_REQS", "NUM_ROWS", "NUM_DECODES", "NUM_DECODE_TOKENS", "LIVE_CONV_NUMEL"])
 def _prepare_gdn_kernel(
     block_table,
     seq_lens,
@@ -32,6 +32,7 @@ def _prepare_gdn_kernel(
     NUM_ROWS,
     NUM_DECODES,
     NUM_DECODE_TOKENS,
+    LIVE_CONV_NUMEL,
     HAS_SPEC: tl.constexpr,
     HAS_PREFILL: tl.constexpr,
     SPEC_WIDTH: tl.constexpr,
@@ -131,7 +132,8 @@ def _prepare_gdn_kernel(
                 tl.store(non_spec_tokens + begin + offsets, tokens, (offsets < length) & ~is_spec)
     elif CONV_NUMEL:
         offsets = (row - NUM_ROWS) * CLEAR_BLOCK + tl.arange(0, CLEAR_BLOCK)
-        tl.store(conv_output + offsets, 0, offsets < CONV_NUMEL)
+        clear_numel = LIVE_CONV_NUMEL if GROUPED else CONV_NUMEL
+        tl.store(conv_output + offsets, 0, offsets < clear_numel)
 
 
 class GroupedSpecGDN:
@@ -165,7 +167,7 @@ class GroupedSpecGDN:
                 scope="process",
             )
             for grid, arguments, geometry, _, _ in pending:
-                _prepare_gdn_kernel[(grid,)](*arguments, None, **geometry, GROUPED=False)
+                _prepare_gdn_kernel[(grid,)](*arguments, None, **geometry, LIVE_CONV_NUMEL=0, GROUPED=False)
             return
         addresses = tuple(tuple(tensor.data_ptr() for tensor in item[3]) for item in pending)
         if self._addresses != addresses:
@@ -179,13 +181,15 @@ class GroupedSpecGDN:
             geometry["SPEC_WIDTH"],
             scope="process",
         )
+        conv_numel = geometry["CONV_NUMEL"]
         if clear_conv_tokens is not None:
             # The unpadded GLM Q6 graph passes only the live projection rows
             # to causal_conv1d_update. Keep full clears on separate launches.
             conv_numel = tensors[-1][:clear_conv_tokens].numel()
-            geometry["CONV_NUMEL"] = conv_numel
             grid = geometry["NUM_ROWS"] + triton.cdiv(conv_numel, geometry["CLEAR_BLOCK"])
-        _prepare_gdn_kernel[(grid, len(pending))](*arguments, self._pointers, **geometry, GROUPED=True)
+        _prepare_gdn_kernel[(grid, len(pending))](
+            *arguments, self._pointers, **geometry, LIVE_CONV_NUMEL=conv_numel, GROUPED=True
+        )
 
 
 def prepare_gdn(
@@ -288,4 +292,4 @@ def prepare_gdn(
         shared_inputs = (seq_lens.data_ptr(), query.data_ptr(), accepted.data_ptr())
         grouped_spec.stage(grid, arguments, geometry, group_tensors, shared_inputs)
     else:
-        _prepare_gdn_kernel[(grid,)](*arguments, None, **geometry, GROUPED=False)
+        _prepare_gdn_kernel[(grid,)](*arguments, None, **geometry, LIVE_CONV_NUMEL=0, GROUPED=False)
