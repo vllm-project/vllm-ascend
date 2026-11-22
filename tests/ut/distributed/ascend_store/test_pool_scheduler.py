@@ -25,8 +25,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -34,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.request import Request
 from zmq.constants import RCVTIMEO, REP
 from zmq.error import ZMQError
 from zmq.sugar.context import Context
@@ -274,6 +279,118 @@ def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config.model_config.get_total_num_kv_heads.return_value = 1
     config.model_config.get_num_layers.return_value = 2
     return config
+
+
+@pytest.mark.parametrize(
+    "mode,discard_partial_chunks",
+    [("bulk", True), ("bulk", False), ("mooncake_layerwise", True), ("memcache_layerwise", True)],
+)
+@pytest.mark.parametrize("family", ["mamba", "swa"])
+@pytest.mark.parametrize(
+    "snapshots,local_tokens,prompt_tokens,expected",
+    [
+        ({3}, 0, 64, 0),
+        ({1, 3}, 0, 64, 32),
+        ({2, 3}, 0, 64, 48),
+        ({0, 3}, 16, 64, 16),
+        ({1, 3}, 16, 64, 32),
+        ({3}, 48, 64, 48),
+        ({3}, 0, 65, 64),
+        ({1}, 0, 64, 32),
+    ],
+)
+def test_draft_replay_loads_only_reachable_prefixes(
+    mode, discard_partial_chunks, family, snapshots, local_tokens, prompt_tokens, expected
+):
+    """A full hit must not turn into a load of a missing predecessor state."""
+    config = make_config(extra_config={"backend": "memcache" if mode == "memcache_layerwise" else "mooncake"})
+    config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    config.speculative_config.use_eagle.return_value = True
+    state_spec = (
+        MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+        if family == "mamba"
+        else SlidingWindowSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=16)
+    )
+    groups = [
+        KVCacheGroupSpec(
+            ["layer.0"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        ),
+        KVCacheGroupSpec(["layer.1"], state_spec),
+    ]
+    scheduler = create_kv_pool_scheduler(
+        config,
+        use_layerwise=mode != "bulk",
+        kv_cache_config=KVCacheConfig(num_blocks=16, kv_cache_tensors=[], kv_cache_groups=groups),
+    )
+    scheduler._discard_partial_chunks = discard_partial_chunks
+    init_none_hash(sha256)
+    request = Request(
+        request_id="sparse-state",
+        prompt_token_ids=list(range(prompt_tokens)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(16, sha256),
+    )
+    hashes = request.block_hashes
+    stored = {0: set(hashes), 1: {hashes[i] for i in snapshots}}
+    coordinator = scheduler.cache_coordinator
+    assert isinstance(coordinator, AscendStoreCoordinator)
+
+    if mode == "bulk":
+        # Replace only the lookup transport; use the production coordinator and
+        # vLLM cache managers to resolve the sparse store's reachable prefixes.
+        def lookup(token_len, block_hashes, group_ids, *, hbm_hit_tokens):
+            assert group_ids == [0, 1]
+            return coordinator.find_reachable_hit_tokens(
+                block_hashes,
+                token_len,
+                lambda group_id, group_hashes, mask: [h for h in group_hashes if h in stored[group_id]],
+                hbm_hit_tokens=hbm_hit_tokens,
+            )
+
+        scheduler.client = MagicMock(closed=False)
+
+        def lookup_with_replay(token_len, block_hashes, group_ids, *, hbm_hit_tokens, replay_token_limit):
+            assert group_ids == [0, 1]
+            return coordinator.find_reachable_hits_with_replay(
+                block_hashes,
+                token_len,
+                lambda group_id, group_hashes, mask: [
+                    h for i, h in enumerate(group_hashes) if h in stored[group_id] and (mask is None or mask[i])
+                ],
+                replay_token_limit=replay_token_limit,
+                hbm_hit_tokens=hbm_hit_tokens,
+            )
+
+        scheduler.client.lookup.side_effect = lookup
+        scheduler.client.lookup_with_replay.side_effect = lookup_with_replay
+    else:
+        readable_keys = {
+            key
+            for group_id, group_hashes in stored.items()
+            for block_hash in group_hashes
+            for key in scheduler._make_layerwise_hit_check_keys(group_id, block_hash.hex())
+        }
+        scheduler.store_scheduler.batch_is_readable.side_effect = lambda keys: [key in readable_keys for key in keys]
+
+    hit, is_async = scheduler.get_num_new_matched_tokens(request, local_tokens)
+    assert hit == expected - local_tokens
+    assert not is_async
+    if hit:
+        load = scheduler.load_specs[request.request_id]
+        assert load.kvpool_cached_tokens == expected
+        assert hashes[expected // 16 - 1] in stored[1]
+        assert load.vllm_cached_tokens == local_tokens
+    if mode == "bulk":
+        # A paired response travels over one RPC, even when replay must move
+        # past a missing state. Interior hits also need only one lookup.
+        assert scheduler.client.lookup.call_count + scheduler.client.lookup_with_replay.call_count == 1
+        if prompt_tokens == 65 and discard_partial_chunks:
+            scheduler.client.lookup_with_replay.assert_not_called()
+        elif hit and snapshots != {1}:
+            assert scheduler.load_specs[request.request_id].kvpool_store_skip_tokens == 64
+    elif mode == "mooncake_layerwise":
+        assert scheduler.store_scheduler.batch_is_readable.call_count == 2
 
 
 @pytest.mark.parametrize("num_speculative_blocks", [None, 0, 3])

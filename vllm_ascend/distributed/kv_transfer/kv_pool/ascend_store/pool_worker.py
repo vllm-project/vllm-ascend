@@ -6,6 +6,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
+from functools import partial
 
 import torch
 import vllm.envs as envs
@@ -53,6 +54,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
+    LookupResult,
     ReqMeta,
     get_block_hashes,
     get_group_cache_family,
@@ -1094,56 +1096,89 @@ class BaseKVPoolWorker(ABC):
             return None
         coordinator = self.cache_coordinator
 
-        def query_group_hits(
-            group_id: int,
-            group_block_hashes: Sequence[BlockHash | str],
-            lookup_mask: Sequence[bool] | None,
-        ) -> list[BlockHash | str]:
-            group_block_size = coordinator.group_effective_block_sizes[group_id]
-            present: list[BlockHash | str] = []
-            lookup_start = hbm_hit_tokens // group_block_size * group_block_size
-
-            keys: list[str] = []
-            chunk_hashes: list[BlockHash | str] = []
-            variant_counts: list[int] = []
-            for _, _, key_string, chunk_hash in self.token_database.process_token_key_strings(
-                token_len,
-                block_hashes,
-                mask_num=lookup_start,
-                kv_cache_group_id=group_id,
-                chunk_mask=lookup_mask,
-            ):
-                variants = self._expand_lookup_key_variants(key_string, group_id, include_all_ranks)
-                keys.extend(variants)
-                chunk_hashes.append(chunk_hash)
-                variant_counts.append(len(variants))
-
-            if keys:
-                res = self.m_store.exists(keys)  # type: ignore[assignment]
-                offset = 0
-                for chunk_hash, count in zip(chunk_hashes, variant_counts, strict=True):
-                    values = res[offset : offset + count]  # type: ignore[index]
-                    if values and all(value == 1 for value in values):
-                        present.append(chunk_hash)
-                    offset += count
-
-            logger.debug(
-                "KV pool coordinator lookup group=%d token_len=%d keys=%d exists_chunks=%d sample_keys=%s",
-                group_id,
-                token_len,
-                len(keys),
-                len(present),
-                keys[:3],
-            )
-            return present
-
         return coordinator.find_reachable_hit_tokens(
             block_hashes,
             token_len,
-            query_group_hits,
+            partial(self._query_lookup_group_hits, token_len, block_hashes, include_all_ranks, hbm_hit_tokens),
             log_context="KV pool coordinator lookup",
             hbm_hit_tokens=hbm_hit_tokens,
         )
+
+    def _query_lookup_group_hits(
+        self,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        include_all_ranks: bool,
+        hbm_hit_tokens: int,
+        group_id: int,
+        group_block_hashes: Sequence[BlockHash | str],
+        lookup_mask: Sequence[bool] | None,
+    ) -> list[BlockHash | str]:
+        coordinator = self.cache_coordinator
+        assert coordinator is not None
+        group_block_size = coordinator.group_effective_block_sizes[group_id]
+        present: list[BlockHash | str] = []
+        lookup_start = hbm_hit_tokens // group_block_size * group_block_size
+
+        keys: list[str] = []
+        chunk_hashes: list[BlockHash | str] = []
+        variant_counts: list[int] = []
+        for _, _, key_string, chunk_hash in self.token_database.process_token_key_strings(
+            token_len,
+            block_hashes,
+            mask_num=lookup_start,
+            kv_cache_group_id=group_id,
+            chunk_mask=lookup_mask,
+        ):
+            variants = self._expand_lookup_key_variants(key_string, group_id, include_all_ranks)
+            keys.extend(variants)
+            chunk_hashes.append(chunk_hash)
+            variant_counts.append(len(variants))
+
+        if keys:
+            res = self.m_store.exists(keys)  # type: ignore[assignment]
+            offset = 0
+            for chunk_hash, count in zip(chunk_hashes, variant_counts, strict=True):
+                values = res[offset : offset + count]  # type: ignore[index]
+                if values and all(value == 1 for value in values):
+                    present.append(chunk_hash)
+                offset += count
+
+        logger.debug(
+            "KV pool coordinator lookup group=%d token_len=%d keys=%d exists_chunks=%d sample_keys=%s",
+            group_id,
+            token_len,
+            len(keys),
+            len(present),
+            keys[:3],
+        )
+        return present
+
+    def lookup_scheduler_with_replay(
+        self,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        kv_cache_group_ids: list[int],
+        *,
+        replay_token_limit: int,
+        hbm_hit_tokens: int = 0,
+    ) -> LookupResult:
+        """Return save and replay boundaries from the same all-rank lookup."""
+        coordinator = self.cache_coordinator
+        if coordinator is None or sorted(kv_cache_group_ids) != list(range(self.num_kv_cache_groups)):
+            raise ValueError("Replay lookup requires the complete hybrid cache layout")
+        try:
+            return coordinator.find_reachable_hits_with_replay(
+                block_hashes,
+                token_len,
+                partial(self._query_lookup_group_hits, token_len, block_hashes, True, hbm_hit_tokens),
+                replay_token_limit=replay_token_limit,
+                log_context="KV pool coordinator lookup",
+                hbm_hit_tokens=hbm_hit_tokens,
+            )
+        except Exception:
+            logger.exception("KV pool replay lookup failed; reporting no external hit")
+            return LookupResult(0, 0)
 
     def lookup_scheduler(
         self,

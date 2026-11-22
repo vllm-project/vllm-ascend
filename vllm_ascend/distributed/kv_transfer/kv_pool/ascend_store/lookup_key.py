@@ -11,7 +11,11 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LookupResult
 from vllm_ascend.utils import vllm_version_is
+
+LOOKUP_REPLAY_MSG = b"lookup_replay"
+_TOKEN_COUNT_BYTES = 4
 
 if vllm_version_is("0.33.0"):
     from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (  # type: ignore[import-not-found]
@@ -74,29 +78,63 @@ class LookupKeyClient:
         kv_cache_group_ids: list[int] | None = None,
         hbm_hit_tokens: int = 0,
     ) -> int:
+        resp = self._lookup(token_len, block_hashes, kv_cache_group_ids, hbm_hit_tokens)
+        return int.from_bytes(resp, "big") if resp is not None else 0
+
+    def lookup_with_replay(
+        self,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        kv_cache_group_ids: list[int],
+        *,
+        replay_token_limit: int,
+        hbm_hit_tokens: int = 0,
+    ) -> LookupResult:
+        resp = self._lookup(token_len, block_hashes, kv_cache_group_ids, hbm_hit_tokens, replay_token_limit)
+        if resp is None:
+            return LookupResult(0, 0)
+        if len(resp) == 2 * _TOKEN_COUNT_BYTES:
+            raw_hit = int.from_bytes(resp[:_TOKEN_COUNT_BYTES], "big")
+            replay_hit = int.from_bytes(resp[_TOKEN_COUNT_BYTES:], "big")
+            if 0 <= replay_hit <= min(raw_hit, replay_token_limit) and raw_hit <= token_len:
+                return LookupResult(raw_hit, replay_hit)
+        logger.error("Invalid KV pool replay lookup response; reporting no external hit")
+        self.close()
+        return LookupResult(0, 0)
+
+    def _lookup(
+        self,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        kv_cache_group_ids: list[int] | None,
+        hbm_hit_tokens: int,
+        replay_token_limit: int | None = None,
+    ) -> bytes | None:
         if self._closed:
-            return 0
+            return None
 
         kv_cache_group_ids = kv_cache_group_ids or [0]
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)
         kv_group_frames = self.encoder.encode(kv_cache_group_ids)
         all_frames = [
-            LOOKUP_MSG,
+            LOOKUP_MSG if replay_token_limit is None else LOOKUP_REPLAY_MSG,
             token_len.to_bytes(4, byteorder="big"),
             *kv_group_frames,
             hbm_hit_tokens.to_bytes(4, byteorder="big"),
             *hash_frames,
         ]
+        if replay_token_limit is not None:
+            all_frames.insert(4, replay_token_limit.to_bytes(_TOKEN_COUNT_BYTES, "big"))
         try:
             self.socket.send_multipart(all_frames, copy=False)
             resp = self.socket.recv()
         except zmq.ZMQError:  # type: ignore[attr-defined]
             logger.exception("KV pool lookup failed; reporting 0 hit tokens")
             self.close()
-            return 0
+            return None
 
-        return int.from_bytes(resp, "big")
+        return bytes(resp)
 
     def reset(self) -> bool:
         """Ask rank 0 to drain queued puts, then ``remove_all(force=True)``."""
@@ -159,25 +197,39 @@ class LookupKeyServer:
 
                     try:
                         msg_type = bytes(all_frames[0])
-                        if msg_type == LOOKUP_MSG:
+                        if msg_type in (LOOKUP_MSG, LOOKUP_REPLAY_MSG):
                             token_len = int.from_bytes(all_frames[1], byteorder="big")
                             kv_group_ids = self.decoder.decode([all_frames[2]])
                             hbm_hit_tokens = int.from_bytes(all_frames[3], byteorder="big")
-                            hashes_str = self.decoder.decode(all_frames[4:])
-                            result = self.pool_worker.lookup_scheduler(
-                                token_len,
-                                hashes_str,
-                                kv_group_ids,
-                                use_layerwise=False,
-                                hbm_hit_tokens=hbm_hit_tokens,
-                            )
-                            logger.debug(
-                                "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
-                                token_len,
-                                kv_group_ids,
-                                result,
-                            )
-                            response = result.to_bytes(4, "big")
+                            if msg_type == LOOKUP_REPLAY_MSG:
+                                replay_token_limit = int.from_bytes(all_frames[4], byteorder="big")
+                                hashes_str = self.decoder.decode(all_frames[5:])
+                                hits = self.pool_worker.lookup_scheduler_with_replay(
+                                    token_len,
+                                    hashes_str,
+                                    kv_group_ids,
+                                    replay_token_limit=replay_token_limit,
+                                    hbm_hit_tokens=hbm_hit_tokens,
+                                )
+                                response = hits.raw_hit_tokens.to_bytes(
+                                    _TOKEN_COUNT_BYTES, "big"
+                                ) + hits.replay_hit_tokens.to_bytes(_TOKEN_COUNT_BYTES, "big")
+                            else:
+                                hashes_str = self.decoder.decode(all_frames[4:])
+                                result = self.pool_worker.lookup_scheduler(
+                                    token_len,
+                                    hashes_str,
+                                    kv_group_ids,
+                                    use_layerwise=False,
+                                    hbm_hit_tokens=hbm_hit_tokens,
+                                )
+                                logger.debug(
+                                    "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
+                                    token_len,
+                                    kv_group_ids,
+                                    result,
+                                )
+                                response = result.to_bytes(4, "big")
                         elif msg_type == RESET_MSG:
                             self.pool_worker.reset_store()
                             logger.info("AscendStore reset via remove_all succeeded.")

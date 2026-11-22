@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from functools import partial
 from typing import Any
 
 from vllm.config import VllmConfig
@@ -16,6 +17,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
+    LookupResult,
     RequestTracker,
     block_hash_to_str,
     get_block_hashes,
@@ -99,7 +101,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
         )
 
-    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
+    def _lookup_external_hit(self, request: Request, num_computed_tokens: int) -> LookupResult | None:
         prompt_token_len = len(request.prompt_token_ids)
         if self.use_block_key_layerwise:
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
@@ -107,10 +109,27 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
                 token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
             if token_len < self.cache_transfer_granularity:
                 return None
-            return self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens)
+            replay_token_limit = self._floor_to_cache_transfer_granularity(
+                (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
+            )
+            if self.block_key_hybrid and self.use_eagle and token_len > replay_token_limit:
+                coordinator = self.cache_coordinator
+                assert coordinator is not None
+                # Block-key layerwise lookup also probes the local prefix, as
+                # before, to preserve its original save boundary.
+                return coordinator.find_reachable_hits_with_replay(
+                    request.block_hashes,
+                    token_len,
+                    partial(self._query_layerwise_group_hits, 0),
+                    replay_token_limit=replay_token_limit,
+                    log_context=f"hit_check: req={request.request_id}",
+                )
+            hit = self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens)
+            return LookupResult(hit, hit)
 
         if self.use_layerwise_transfer:
-            return self._get_layerwise_hit_tokens(request, prompt_token_len, num_computed_tokens)
+            hit = self._get_layerwise_hit_tokens(request, prompt_token_len, num_computed_tokens)
+            return LookupResult(hit, hit)
 
         raise RuntimeError(f"Unsupported layerwise data plane: {self.layerwise_data_plane!r}")
 
@@ -159,31 +178,33 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         coordinator = self.cache_coordinator
         assert coordinator is not None
 
-        def query_group_hits(
-            group_id: int,
-            group_block_hashes: Sequence[BlockHash | str],
-            lookup_mask: Sequence[bool] | None,
-        ) -> list[BlockHash]:
-            keys_by_block: list[list[str]] = []
-            allowed_hashes: list[BlockHash] = []
-            local_blocks = num_computed_tokens // self.grouped_block_size[group_id]
-            for block_idx, block_hash in enumerate(group_block_hashes):
-                if block_idx < local_blocks:
-                    continue
-                if lookup_mask is not None and not (block_idx < len(lookup_mask) and lookup_mask[block_idx]):
-                    continue
-                keys_by_block.append(self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(block_hash)))
-                allowed_hashes.append(block_hash)
-            block_hits = self._query_layerwise_block_hits(keys_by_block)
-            return [block_hash for block_hash, hit in zip(allowed_hashes, block_hits) if hit]
-
         return coordinator.find_reachable_hit_tokens(
             request.block_hashes,
             token_len,
-            query_group_hits,
+            partial(self._query_layerwise_group_hits, num_computed_tokens),
             log_context=f"hit_check: req={request.request_id}",
             hbm_hit_tokens=num_computed_tokens,
         )
+
+    def _query_layerwise_group_hits(
+        self,
+        num_computed_tokens: int,
+        group_id: int,
+        group_block_hashes: Sequence[BlockHash | str],
+        lookup_mask: Sequence[bool] | None,
+    ) -> list[BlockHash]:
+        keys_by_block: list[list[str]] = []
+        allowed_hashes: list[BlockHash] = []
+        local_blocks = num_computed_tokens // self.grouped_block_size[group_id]
+        for block_idx, block_hash in enumerate(group_block_hashes):
+            if block_idx < local_blocks:
+                continue
+            if lookup_mask is not None and not (block_idx < len(lookup_mask) and lookup_mask[block_idx]):
+                continue
+            keys_by_block.append(self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(block_hash)))
+            allowed_hashes.append(block_hash)
+        block_hits = self._query_layerwise_block_hits(keys_by_block)
+        return [block_hash for block_hash, hit in zip(allowed_hashes, block_hits) if hit]
 
     def _query_contiguous_group_hits(
         self,

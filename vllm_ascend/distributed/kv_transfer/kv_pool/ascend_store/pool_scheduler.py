@@ -28,6 +28,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
     LoadSpec,
+    LookupResult,
     ReqMeta,
     RequestTracker,
     infer_cache_transfer_granularity,
@@ -267,11 +268,12 @@ class BaseKVPoolScheduler(ABC):
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
             return 0, False
 
-        num_external_hit_tokens = self._lookup_external_hit_tokens(request, num_computed_tokens)
-        if not num_external_hit_tokens:
+        lookup_result = self._lookup_external_hit(request, num_computed_tokens)
+        if lookup_result is None or not lookup_result.raw_hit_tokens:
             return 0, False
 
-        store_skip_tokens = num_external_hit_tokens
+        num_external_hit_tokens = lookup_result.raw_hit_tokens
+        store_skip_tokens = lookup_result.raw_hit_tokens
         if self.use_eagle:
             # Keep the draft model's recomputation zone intact: the
             # generation-point hidden states must be freshly computed, and the
@@ -293,6 +295,11 @@ class BaseKVPoolScheduler(ABC):
                     num_computed_tokens,
                     num_external_hit_tokens - self.lcm_block_size,
                 )
+                if self.cache_coordinator is not None and num_external_hit_tokens > num_computed_tokens:
+                    # The original hit need not have state at the shorter
+                    # boundary. Reuse the reachable replay hit from the same
+                    # lookup, keeping the original boundary for save skipping.
+                    num_external_hit_tokens = max(num_computed_tokens, lookup_result.replay_hit_tokens)
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
         if len(self.cacheable_group_ids) != len(self.original_block_size):
@@ -349,8 +356,8 @@ class BaseKVPoolScheduler(ABC):
         return None
 
     @abstractmethod
-    def _lookup_external_hit_tokens(self, request: "Request", num_computed_tokens: int) -> int | None:
-        """Return the external cache hit using the selected transfer mode."""
+    def _lookup_external_hit(self, request: "Request", num_computed_tokens: int) -> LookupResult | None:
+        """Return the original save boundary and the reachable replay boundary."""
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         """
@@ -821,7 +828,7 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         """Keep Mamba source blocks alive until bulk save completes."""
         self._in_flight_save_blocks.retain(req_meta, self.num_speculative_blocks_by_group, self._block_pool)
 
-    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
+    def _lookup_external_hit(self, request: Request, num_computed_tokens: int) -> LookupResult | None:
         prompt_token_len = len(request.prompt_token_ids)
         if len(self.cacheable_group_ids) != len(self.original_block_size):
             # Private compressor state is rebuilt from a whole token page.
@@ -836,9 +843,21 @@ class KVPoolScheduler(BaseKVPoolScheduler):
             return None
         if self.client is None or self.client.closed:
             self.client = LookupKeyClient(self.vllm_config)
-        return self.client.lookup(
+        replay_token_limit = self._floor_to_cache_transfer_granularity(
+            (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
+        )
+        if self.use_eagle and self.cache_coordinator is not None and token_len > replay_token_limit:
+            return self.client.lookup_with_replay(
+                token_len,
+                request.block_hashes,
+                self.kv_cache_group_ids,
+                replay_token_limit=replay_token_limit,
+                hbm_hit_tokens=num_computed_tokens,
+            )
+        hit = self.client.lookup(
             token_len,
             request.block_hashes,
             self.kv_cache_group_ids,
             hbm_hit_tokens=num_computed_tokens,
         )
+        return LookupResult(hit, hit)

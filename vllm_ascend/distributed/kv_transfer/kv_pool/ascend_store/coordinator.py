@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    LookupResult,
     block_hash_to_bytes,
     get_block_hashes,
     infer_cacheable_group_ids,
@@ -330,6 +331,72 @@ class AscendStoreCoordinator:
         )
         logger.debug("%s: token_len=%d hit_tokens=%d", log_context, token_len, hit_length)
         return hit_length
+
+    def find_reachable_hits_with_replay(
+        self,
+        block_hashes: list[BlockHash],
+        token_len: int,
+        query_group_hits: GroupHitQuery,
+        *,
+        replay_token_limit: int,
+        log_context: str = "reachable_lookup",
+        hbm_hit_tokens: int = 0,
+    ) -> LookupResult:
+        """Resolve both boundaries with one existence query per cache group.
+
+        Probe the union of the original and replay masks, but give each solve
+        only its own view. Extra replay candidates must not extend the original
+        hit used to skip saves. Existence results live only for this call; they
+        neither reserve pooled objects nor replace load failure handling.
+        """
+        replay_token_limit = max(0, min(replay_token_limit, token_len))
+        replay_masks = self.lookup_mask(cdiv(replay_token_limit, self.lcm_block_size) * self.lcm_block_size)
+        present: set[tuple[int, bytes]] = set()
+
+        def cached_hits(
+            group_id: int, hashes: Sequence[BlockHash | str], mask: Sequence[bool] | None
+        ) -> list[BlockHash | str]:
+            return [
+                h
+                for i, h in enumerate(hashes)
+                if (mask is None or (i < len(mask) and mask[i])) and (group_id, block_hash_to_bytes(h)) in present
+            ]
+
+        def query_once(
+            group_id: int, hashes: Sequence[BlockHash | str], mask: Sequence[bool] | None
+        ) -> list[BlockHash | str]:
+            combined_mask = mask
+            if mask is not None:
+                replay_mask = replay_masks[group_id]
+                replay_blocks = replay_token_limit // self.group_effective_block_sizes[group_id]
+                combined_mask = [
+                    (i < len(mask) and mask[i])
+                    or (i < replay_blocks and (replay_mask is None or (i < len(replay_mask) and replay_mask[i])))
+                    for i in range(len(hashes))
+                ]
+            hits = query_group_hits(group_id, hashes, combined_mask)
+            present.update((group_id, block_hash_to_bytes(h)) for h in hits)
+            return cached_hits(group_id, hashes, mask)
+
+        raw_hit = self.find_reachable_hit_tokens(
+            block_hashes,
+            token_len,
+            query_once,
+            log_context=log_context,
+            hbm_hit_tokens=hbm_hit_tokens,
+        )
+        if raw_hit <= replay_token_limit:
+            return LookupResult(raw_hit, raw_hit)
+        replay_hit = 0
+        if replay_token_limit > hbm_hit_tokens:
+            replay_hit = self.find_reachable_hit_tokens(
+                block_hashes,
+                replay_token_limit,
+                cached_hits,
+                log_context=log_context,
+                hbm_hit_tokens=hbm_hit_tokens,
+            )
+        return LookupResult(raw_hit, replay_hit)
 
     def block_hashes_for_spec(self, block_hashes: Sequence[BlockHash], spec: KVCacheSpec) -> BlockHashList:
         # Managers accept lazy sequences and preserve their terminal hashes
