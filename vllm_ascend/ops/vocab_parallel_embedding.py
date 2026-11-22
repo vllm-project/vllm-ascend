@@ -27,6 +27,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import divide
 from vllm.distributed.parallel_state import get_pcp_group, get_tp_group
 from vllm.forward_context import is_forward_context_available
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -512,6 +513,24 @@ class AscendLogitsProcessor(LogitsProcessor):
         hidden_states: torch.Tensor,
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor:
+        if (
+            getattr(self, "use_npu_fp32_head", False)
+            and self.head_dtype == torch.float32
+            and hidden_states.device.type == "npu"
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.ndim >= 2
+            and hidden_states.numel() > 0
+            and isinstance(lm_head.quant_method, (UnquantizedEmbeddingMethod, UnquantizedLinearMethod))
+            and lm_head.weight.dtype == torch.bfloat16
+            and lm_head.weight.device == hidden_states.device
+            and lm_head.weight.is_contiguous()
+        ):
+            # Preserve FP32 accumulation and output without expanding vocabulary weights every step.
+            flat = hidden_states.reshape(-1, hidden_states.shape[-1])
+            logits = torch.mm(flat, lm_head.weight.t(), out_dtype=torch.float32)
+            if embedding_bias is not None:
+                logits = logits + embedding_bias.to(torch.float32)
+            return logits.reshape(*hidden_states.shape[:-1], -1)
         return super()._apply_head(lm_head, hidden_states, embedding_bias)
 
     def _get_logits(

@@ -205,6 +205,8 @@ def test_full_swa_shared_read_preserves_windows_and_ignores_padding_pages():
     attention.use_fp8_cache = True
     attention.kv_storage_width = C8_ROW_BYTES
     attention.use_triton_mla_logits = False
+    attention.use_cann_prefill = False
+    attention.use_pd_decode = False
     attention.batch_verify_attention = True
     attention.learnable_sink_param = torch.zeros(heads)
     attention.topk_snapshot = torch.empty(query.shape[0], window, dtype=torch.long)

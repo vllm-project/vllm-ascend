@@ -50,14 +50,17 @@ def _read_c8_rows(
     slot = page * PAGE_SIZE + position % PAGE_SIZE
     lane = tl.arange(0, LATENT)
     bits = tl.load(cache + slot[:, None] * ROW_BYTES + lane[None, :], live[:, None], 0)
-    value = _decode_e4m3fn(bits)
+    groups = tl.arange(0, LATENT // SCALE_TILE)
     scale = tl.load(
-        scale_cache + slot[:, None] * (ROW_BYTES // 4) + (LATENT + 2 * ROPE) // 4 + lane[None, :] // SCALE_TILE,
+        scale_cache + slot[:, None] * (ROW_BYTES // 4) + (LATENT + 2 * ROPE) // 4 + groups[None, :],
         live[:, None],
         0.0,
     )
+    # Read each scale once and broadcast it in the vector buffer to its 128 values.
+    value = _decode_e4m3fn(bits).reshape((ROWS, LATENT // SCALE_TILE, SCALE_TILE))
+    latent = (value * scale[:, :, None]).reshape((ROWS, LATENT))
     dst = i[:, None] * (LATENT + ROPE)
-    tl.store(output + dst + lane[None, :], value * scale, in_bounds[:, None])
+    tl.store(output + dst + lane[None, :], latent, in_bounds[:, None])
     r = tl.arange(0, ROPE)
     rope = tl.load(rope_cache + slot[:, None] * (ROW_BYTES // 2) + LATENT // 2 + r[None, :], live[:, None], 0.0).to(
         tl.float32
@@ -65,8 +68,17 @@ def _read_c8_rows(
     tl.store(output + dst + LATENT + r[None, :], rope, in_bounds[:, None])
 
 
-def gather_c8_rows(cache, block_table, block_size, positions):
-    output = torch.empty((*positions.shape, _LATENT + _ROPE), dtype=torch.float32, device=cache.device)
+def gather_c8_rows(cache, block_table, block_size, positions, *, output=None):
+    shape = (*positions.shape, _LATENT + _ROPE)
+    if output is None:
+        output = torch.empty(shape, dtype=torch.float32, device=cache.device)
+    elif (
+        output.shape != shape
+        or output.dtype != torch.float32
+        or output.device != cache.device
+        or not output.is_contiguous()
+    ):
+        raise ValueError("C8 output must be contiguous FP32 with the requested shape and device")
     count = positions.numel()
     if count:
         _read_c8_rows[(triton.cdiv(count, _ROWS_PER_PROGRAM),)](
@@ -140,6 +152,10 @@ def _read_c8_qk(
         acc,
         (head[:, None] < HEADS) & (row[None, :] < TOPK),
     )
+
+
+def supports_c8_qk_heads(heads: int) -> bool:
+    return 0 < heads <= _QK_HEAD_TILE
 
 
 def gather_c8_qk(query, cache, block_table, block_size, positions):

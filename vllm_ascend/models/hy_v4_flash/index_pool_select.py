@@ -92,10 +92,9 @@ def _score_paged_pool(
         )
 
 
-def select_paged_pool(query, weights, cache, table, visible, page_size, max_groups, ratio, budget):
-    """Score six verification queries against the BF16 keys in paged IndexPool."""
+def write_pool_scores(query, weights, cache, table, visible, page_size, max_groups, ratio, budget, scores):
+    """Write one request's scores into a contiguous FP32 destination."""
     cache = cache.view(torch.bfloat16)
-    scores = torch.empty((_QUERIES, max_groups), dtype=torch.float32, device=query.device)
     _score_paged_pool[(triton.cdiv(max_groups, _GROUP_TILE),)](
         query,
         weights,
@@ -117,6 +116,9 @@ def select_paged_pool(query, weights, cache, table, visible, page_size, max_grou
         enable_fp_fusion=False,
         multibuffer=False,
     )
+
+
+def select_pool_candidates(scores, visible, max_groups, ratio, budget):
     cutoff = visible // ratio
     offsets = torch.arange(ratio, device=visible.device)
     values, selected = scores.topk(budget, dim=-1)
@@ -125,3 +127,10 @@ def select_paged_pool(query, weights, cache, table, visible, page_size, max_grou
     history = history.masked_fill(selected >= cutoff[:, None, None], -1).flatten(1)
     tail = cutoff[:, None] * ratio + offsets
     return torch.cat((history, tail.masked_fill(tail > visible[:, None], -1)), dim=-1)
+
+
+def select_paged_pool(query, weights, cache, table, visible, page_size, max_groups, ratio, budget):
+    """Score six verification queries against the BF16 keys in paged IndexPool."""
+    scores = torch.empty((_QUERIES, max_groups), dtype=torch.float32, device=query.device)
+    write_pool_scores(query, weights, cache, table, visible, page_size, max_groups, ratio, budget, scores)
+    return select_pool_candidates(scores, visible, max_groups, ratio, budget)

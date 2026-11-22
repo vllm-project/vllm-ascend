@@ -7,6 +7,7 @@ from weakref import ref
 import torch
 from torch import nn
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear, ReplicatedLinear, RowParallelLinear
@@ -16,7 +17,12 @@ from vllm.models.hy_v4.nvidia.model import HYV4DecoderLayer
 from vllm.models.hy_v4.nvidia.moe import HYV4FeedForward
 from vllm.utils.torch_utils import set_default_torch_dtype
 
+from vllm_ascend.device.device_config import is_950
+from vllm_ascend.hisparse.c8 import C8_ROW_BYTES, dequantize_c8_rows
+
 from .attention import AscendHYV4FlashAttention
+
+logger = init_logger(__name__)
 
 CHECKPOINT_PREFIX = "model.dfly_layers."
 MODEL_PREFIX = "dfly"
@@ -39,6 +45,23 @@ class DFlyAttention(AscendHYV4FlashAttention):
         # part of draft weight traversal and post-processing.
         self.target_attention = ref(source)
 
+    def _shared_draft_rows(self, cache, table, block_size, selected, positions, draft):
+        width = draft.shape[1]
+        # build_reuse_indices repeats history and the local window across all
+        # queries; only the last width indices contain causal draft positions.
+        history = selected[:, 0, :-width].clamp_min(0)
+        # Masked draft positions read logical row zero in the original path.
+        history_and_fallback = torch.cat((history, torch.zeros_like(history[:, :1])), dim=1)
+        packed = self._gather(cache, table, block_size, history_and_fallback, slice(C8_ROW_BYTES))
+        history_and_fallback, draft_decoded = dequantize_c8_rows(torch.cat((packed, draft), dim=1)).split(
+            (packed.shape[1], width), dim=1
+        )
+        history_decoded = history_and_fallback[:, None, :-1].expand(-1, width, -1, -1)
+        fallback = history_and_fallback[:, None, -1:]
+        use_draft = selected[..., -width:] >= positions[:, :1, None]
+        tail = torch.where(use_draft[..., None], draft_decoded[:, None], fallback)
+        return torch.cat((history_decoded, tail), dim=2)
+
     def _forward_paged(self, hidden, q_c, q_nope, q_pe, kv_c, k_pe, positions, out, *, absorbed=False):
         if self.context is None:
             return
@@ -50,9 +73,29 @@ class DFlyAttention(AscendHYV4FlashAttention):
         batch, width = query_positions.shape
         query, wv = self._absorb_query(q_nope, q_pe, absorbed=absorbed)
         query_kv = self._pack_kv(kv_c, k_pe).reshape(batch, width, -1)
+        share_history = (
+            source.use_pd_decode
+            and self.use_fp8_cache
+            and cache.dtype == torch.uint8
+            and source.kv_storage_width == query_kv.shape[-1] == C8_ROW_BYTES
+            and 1 < width < indices.shape[-1]
+        )
         for first in range(0, batch, ATTENTION_BATCH_CHUNK):
             last = min(first + ATTENTION_BATCH_CHUNK, batch)
             selected = indices[first:last]
+            tokens = slice(first * width, last * width)
+            if share_history:
+                logger.info_once("HYV4 DFly reuses each request's packed C8 history across draft positions.")
+                decoded = self._shared_draft_rows(
+                    cache,
+                    block_table[first:last],
+                    block_size,
+                    selected,
+                    query_positions[first:last],
+                    query_kv[first:last],
+                )
+                self._attend_decoded(query[tokens], selected.flatten(0, 1), decoded.flatten(0, 1), wv, out[tokens])
+                continue
             start = query_positions[first:last, :1, None]
             is_query = selected >= start
             # Substitute temporary draft rows for causal queries after reading
@@ -66,7 +109,6 @@ class DFlyAttention(AscendHYV4FlashAttention):
             local = torch.arange(first, last, device=indices.device)[:, None, None] * width + offsets
             draft_rows = query_kv.flatten(0, 1).index_select(0, local.flatten()).reshape_as(rows)
             rows = torch.where(is_query[..., None], draft_rows, rows)
-            tokens = slice(first * width, last * width)
             self._attend(query[tokens], selected.flatten(0, 1), rows.flatten(0, 1), wv, out[tokens])
 
 
@@ -141,6 +183,10 @@ class FlashDFlyDraft(nn.Module):
         self.hidden_correction = DFlyHiddenCorrection(config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.logits_processor.use_all_gather = True
+        transfer = vllm_config.kv_transfer_config
+        self.logits_processor.use_npu_fp32_head = (
+            transfer is not None and transfer.kv_role == "kv_consumer" and is_950()
+        )
         self.ffn_width = None
 
     def forward(self, embeddings, positions):

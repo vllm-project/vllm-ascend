@@ -3,12 +3,15 @@
 
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.logger import init_logger
 from vllm.triton_utils import triton
 
 from vllm_ascend.ops.triton.engram_lookback import _gather_lookback_kernel
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 from .aclgraph import FlashAclGraphManager
+
+logger = init_logger(__name__)
 
 
 class FlashModelState(AscendModelState):
@@ -89,7 +92,31 @@ class FlashModelState(AscendModelState):
                     input_batch.query_start_loc_np[: input_batch.num_reqs + 1],
                     hashes,
                 )
-                for i, (embedding, output) in enumerate(zip(self._engram_embeddings, rows)):
-                    output.copy_(embedding(hashes[i]))
+                self._prepare_engram_rows(hashes, rows)
             return inputs
         return {"lookback_token_ids": history}
+
+    def _prepare_engram_rows(self, hashes, rows):
+        embeddings = self._engram_embeddings
+        if rows and all(
+            output.shape == rows[0].shape
+            and embedding.embedding.weight.device.type == "cpu"
+            and embedding.embedding.weight.dtype == torch.bfloat16
+            and not embedding.fp8
+            for embedding, output in zip(embeddings, rows, strict=True)
+        ):
+            # Each layer keeps its existing shard and clamp rules. Transfer the
+            # hashes and native BF16 rows together to avoid per-layer barriers.
+            host_hashes = hashes.cpu()
+            host_rows = [
+                embedding.gather_rows(layer_hashes)[0]
+                for embedding, layer_hashes in zip(embeddings, host_hashes, strict=True)
+            ]
+            device_rows = torch.stack(host_rows).to(hashes.device)
+            for output, layer_rows in zip(rows, device_rows, strict=True):
+                output.copy_(layer_rows)
+            logger.info_once("HYV4 Decode batches CPU-offloaded BF16 Engram lookups")
+            return
+
+        for embedding, layer_hashes, output in zip(embeddings, hashes, rows, strict=True):
+            output.copy_(embedding(layer_hashes))

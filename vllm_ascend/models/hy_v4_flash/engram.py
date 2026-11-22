@@ -283,15 +283,19 @@ class FlashEmbedding(nn.Module):
             )
             set_weight_attrs(self.embedding.weight_scale_inv, {"weight_loader": self._load_shard})
 
-    def forward(self, hashes):
+    def gather_rows(self, hashes):
         indices = hashes[:, self.head_start : self.head_end].long() - self.vocab_start
         local = indices.clamp(0, self.vocab_end - self.vocab_start - 1)
         weight = self.embedding.weight
         flat_local = local.flatten().to(weight.device)
-        rows = weight.index_select(0, flat_local).view(*indices.shape, self.dim).to(hashes.device)
+        return weight.index_select(0, flat_local).view(*indices.shape, self.dim), flat_local
+
+    def forward(self, hashes):
+        rows, flat_local = self.gather_rows(hashes)
+        rows = rows.to(hashes.device)
         if self.fp8:
             scale = self.embedding.weight_scale_inv
-            scales = scale.index_select(0, flat_local).view_as(indices).to(hashes.device)
+            scales = scale.index_select(0, flat_local).view(rows.shape[:-1]).to(hashes.device)
             rows = decode_e4m3fn(rows) * scales.float().unsqueeze(-1)
         return rows.float()
 

@@ -7,7 +7,7 @@ from vllm.distributed import get_ep_group, get_tp_group
 from vllm.models.hy_v4_flash.model import HYV4FlashDecoderLayer, HYV4FlashForCausalLM, HYV4FlashModel
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.device_config import get_ascend_device_type, is_950
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 
@@ -90,6 +90,12 @@ class AscendHYV4FlashDecoderLayer(HYV4FlashDecoderLayer):
 
     def __init__(self, config, vllm_config, cache_config=None, quant_config=None, prefix="", topk_indices_buffer=None):
         super().__init__(config, vllm_config, cache_config, quant_config, prefix, topk_indices_buffer)
+        if self.self_attn.use_cann_prefill:
+            self.hc_attn_layer.configure_prefill_post()
+            self.hc_mlp_layer.configure_prefill_post()
+        if vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.kv_role == "kv_consumer":
+            self.hc_attn_layer.configure_decode_post()
+            self.hc_mlp_layer.configure_decode_post()
         self.sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe and self.block_type == "moe"
         if self.sequence_parallel:
             layers = config.mlp_layer_types
@@ -178,6 +184,10 @@ class AscendHYV4FlashForCausalLM(HYV4FlashForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         validate_runtime(vllm_config)
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        transfer = vllm_config.kv_transfer_config
+        self.logits_processor.use_npu_fp32_head = (
+            transfer is not None and transfer.kv_role == "kv_consumer" and is_950()
+        )
 
     @staticmethod
     def get_model_state_cls():
