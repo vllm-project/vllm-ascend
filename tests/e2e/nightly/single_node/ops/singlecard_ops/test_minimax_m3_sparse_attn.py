@@ -108,7 +108,13 @@ def _make_prepared_gbsa_builder(kv_dtype):
             }
         ),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=64),
-        speculative_config=SimpleNamespace(num_speculative_tokens=15, parallel_drafting=False),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=15,
+            parallel_drafting=False,
+            # vLLM >= v0.34.0 also accounts for extra drafter slots when it
+            # derives ``max_decode_query_len``; this fixture drafts none.
+            max_num_new_slots_for_drafting=0,
+        ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1, tensor_parallel_size=1),
     )
     spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=kv_dtype)
