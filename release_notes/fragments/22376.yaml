@@ -1,7 +1,0 @@
-pr: 22376
-entries:
-  - category: performance
-    text: >-
-      Pipelined Qwen4Exp QSA Indexer projections with the main QKV path and
-      gathered MRoPE rows inside Triton kernels to reduce Prefill preparation
-      launches.

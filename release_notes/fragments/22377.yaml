@@ -1,6 +1,0 @@
-pr: 22377
-entries:
-  - category: performance
-    text: >-
-      Removed the redundant parameter Cast immediately before recurrent GDN
-      execution for compatible Qwen recurrent-attention interfaces.

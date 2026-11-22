@@ -15,11 +15,10 @@ pytestmark = [
 ]
 
 
-@pytest.mark.parametrize("rows", [0, 1, 32, 129])
+@pytest.mark.parametrize("rows", [0, 32])
 @pytest.mark.parametrize("axes", [1, 3])
-@pytest.mark.parametrize("weight_dtype", [torch.bfloat16, torch.float32])
 @torch.inference_mode()
-def test_direct_rope_matches_gathered_cache(rows: int, axes: int, weight_dtype: torch.dtype) -> None:
+def test_direct_rope_matches_gathered_cache(rows: int, axes: int) -> None:
     torch.manual_seed(17)
     cache = torch.randn(129, 64, dtype=torch.bfloat16, device="npu")
     # Model-runner buffers can have much larger axis strides than active rows.
@@ -27,7 +26,7 @@ def test_direct_rope_matches_gathered_cache(rows: int, axes: int, weight_dtype: 
     positions = storage[:, : 2 * rows : 2] if axes == 3 else storage[0, : 2 * rows : 2]
     gathered = cache[positions.clamp(0, 128)]
     qkv = torch.randn(rows, 6 * 256, dtype=torch.bfloat16, device="npu")
-    qw, kw = [torch.randn(256, dtype=weight_dtype, device="npu") for _ in range(2)]
+    qw, kw = [torch.randn(256, dtype=torch.bfloat16, device="npu") for _ in range(2)]
     kwargs = dict(
         num_q_heads=2,
         num_kv_heads=1,

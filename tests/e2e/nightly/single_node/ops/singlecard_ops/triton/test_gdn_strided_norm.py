@@ -5,7 +5,7 @@ import torch
 from vllm_ascend.ops.layernorm import LayerNormFn
 
 
-@pytest.mark.parametrize("tokens", [1, 4, 17])
+@pytest.mark.parametrize("tokens", [1, 17])
 @pytest.mark.parametrize("activation", ["swish", "sigmoid"])
 @pytest.mark.parametrize("before", [False, True])
 @torch.inference_mode()

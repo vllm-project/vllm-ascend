@@ -1,7 +1,0 @@
-pr: 22373
-entries:
-  - category: performance
-    text: >-
-      Reduced Qwen4Exp QSA preparation overhead by fusing packed group/index
-      preparation, output gating, and split-QKV/RMSNorm/MRoPE work while
-      preserving the upstream positions interface.

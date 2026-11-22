@@ -1,7 +1,0 @@
-pr: 22375
-entries:
-  - category: performance
-    text: >-
-      Removed a Qwen4Exp QSA/GBSA output TensorMove by writing Generic Block
-      Sparse Attention results directly into the caller-owned graph output
-      buffer.
