@@ -14,9 +14,52 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     KVCacheSpec,
     MambaManager,
 )
+from vllm.v1.kv_cache_interface import MambaSpec
 
 
 class AscendMambaManager(MambaManager):
+    @classmethod
+    def reachable_block_mask(
+        cls,
+        start_block: int,
+        end_block: int,
+        alignment_tokens: int | None,
+        kv_cache_spec: KVCacheSpec,
+        use_eagle: bool,
+        retention_interval: int | None = None,
+        reachable_boundaries: Sequence[int] = (),
+        dcp_world_size: int = 1,
+        final_segment_end_block: int | None = None,
+    ) -> list[bool] | None:
+        # TEMPORARY: align the reachable boundary with the checkpoint write
+        # column. MambaManager._checkpoints writes the state at
+        # cdiv(seq_len, block_size) - 2; upstream marks - 1 here, which is the
+        # null post-state block in align mode. The pool save then skips every
+        # mamba group and external hits stay at zero. Remove this override once
+        # the upstream fix lands.
+        if retention_interval is None or alignment_tokens is None:
+            return None
+        assert isinstance(kv_cache_spec, MambaSpec)
+        block_size = kv_cache_spec.block_size
+        mask = [False] * (end_block - start_block)
+
+        segment_tokens = None if retention_interval == 0 else retention_interval
+        if segment_tokens is not None:
+            per_segment = segment_tokens // block_size
+            if per_segment <= 1:
+                return None
+            first_boundary = (start_block + per_segment) // per_segment * per_segment - 1
+            for i in range(first_boundary - start_block, len(mask), per_segment):
+                mask[i] = True
+
+        for boundary_tokens in reachable_boundaries:
+            aligned = boundary_tokens // alignment_tokens * alignment_tokens
+            boundary_block = aligned // block_size - 2
+            if start_block <= boundary_block < end_block:
+                mask[boundary_block - start_block] = True
+
+        return mask
+
     @classmethod
     def find_longest_cache_hit(
         cls,
