@@ -67,13 +67,16 @@ def test_probe_only_accepts_explicit_fused_abi(monkeypatch):
 
 def test_recurrent_parameters_are_materialized_once_in_fp32():
     layer = torch.nn.Module()
+    layer.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    layer.conv1d = torch.nn.Module()
+    layer.conv1d.weight = torch.nn.Parameter(torch.empty(6, 1, 4))
     layer.A_log = torch.nn.Parameter(torch.tensor([1.5], dtype=torch.bfloat16))
     layer.dt_bias = torch.nn.Parameter(torch.tensor([-0.25], dtype=torch.bfloat16))
     a_loader, dt_loader = object(), object()
     layer.A_log.weight_loader = a_loader
     layer.dt_bias.weight_loader = dt_loader
 
-    gdn.initialize_recurrent_fp32_parameters(layer)
+    gdn.initialize_packed_conv_weight(layer)
 
     assert layer.A_log.dtype == layer.dt_bias.dtype == torch.float32
     torch.testing.assert_close(layer.A_log, torch.tensor([1.5]))
