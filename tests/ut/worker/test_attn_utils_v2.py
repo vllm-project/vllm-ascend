@@ -168,8 +168,8 @@ def test_main_allocator_attention_layout(
     }.get(cache_kind, AscendAttentionBackendImpl)
     impl = impl_cls.__new__(impl_cls)
     impl.sliding_window = extra_args.get("sliding_window")
-    has_sink = cache_kind in ("sink", "sink_eager")
-    impl.sinks = torch.zeros(8, dtype=spec.dtype) if has_sink else None
+    if cache_kind in ("sink", "sink_eager"):
+        impl.sinks = torch.zeros(8, dtype=spec.dtype)
     layer = SimpleNamespace(
         get_attn_backend=lambda: SparseAttentionBackend if cache_kind == "full_sparse" else AscendAttentionBackend,
         kv_sharing_target_layer_name=None,
@@ -338,7 +338,6 @@ def test_hybrid_allocator_keeps_shared_backing_with_pa_configured(monkeypatch, p
     )
     impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
     impl.sliding_window = None
-    impl.sinks = None
     layer = SimpleNamespace(impl=impl)
     vllm_config = SimpleNamespace(
         additional_config={},
