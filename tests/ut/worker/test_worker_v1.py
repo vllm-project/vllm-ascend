@@ -6,6 +6,7 @@ from unittest.mock import ANY, MagicMock, patch
 import torch
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
 from vllm.config.attention import AttentionConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -1857,6 +1858,49 @@ class TestNPUWorker(TestBase):
             # Verify atb warm up
             mock_warm_up_atb.assert_called_once()
             mock_kernel_warmup.assert_called_once_with(worker)
+
+    def test_compile_or_warm_up_model_runs_v2_warmup_before_graph_capture(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.use_v2_model_runner = True
+        worker.model_runner = MagicMock()
+        worker.model_config = SimpleNamespace(enforce_eager=False, seed=12345)
+        worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=1024)
+        worker.vllm_config = SimpleNamespace(
+            compilation_config=MagicMock(
+                compile_sizes=[],
+                cudagraph_capture_sizes=[],
+                cudagraph_mode=CUDAGraphMode.FULL,
+                compilation_time=0.0,
+                encoder_compilation_time=0.0,
+            ),
+            kernel_config=SimpleNamespace(enable_jit_warmup=True),
+        )
+        worker.vllm_config.compilation_config.get_compile_ranges.return_value = []
+
+        with (
+            patch.object(kw_module, "kernel_warmup"),
+            patch("vllm.v1.worker.gpu.warmup.warmup_kernels") as warmup_kernels,
+            patch("vllm_ascend.worker.worker.get_current_hardware_profile") as hardware_profile,
+            patch("vllm_ascend.worker.worker.get_ascend_config") as ascend_config,
+            patch("vllm_ascend.worker.worker.set_random_seed"),
+        ):
+            hardware_profile.return_value.supports.return_value = False
+            ascend_config.return_value.enable_cpu_binding = False
+            startup_calls = MagicMock()
+            startup_calls.attach_mock(warmup_kernels, "warmup_kernels")
+            startup_calls.attach_mock(worker.model_runner.capture_model, "capture_model")
+
+            worker.compile_or_warm_up_model()
+
+        self.assertEqual(
+            startup_calls.mock_calls,
+            [
+                unittest.mock.call.warmup_kernels(worker.model_runner, worker.execute_model, worker.sample_tokens),
+                unittest.mock.call.capture_model(),
+            ],
+        )
 
     def test_compile_or_warm_up_model_saves_startup_plan_after_graph_capture(self):
         """The persisted budget must include the measured NPU graph memory."""
