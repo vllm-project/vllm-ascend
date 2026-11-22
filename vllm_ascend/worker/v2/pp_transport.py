@@ -2,36 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 """Common Model Runner V2 pipeline-parallel utilities."""
 
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol
-from unittest.mock import patch
 
 import torch
-import vllm.envs as vllm_envs
 from vllm.config import VllmConfig
+from vllm.forward_context import get_forward_context
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.utils import should_reuse_topk
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 _PP_TRANSPORT_PREFIX = "pp_transport"
-
-
-def use_legacy_spec_pp() -> bool:
-    """Whether Ascend's legacy Spec+PP transport workaround is required.
-
-    The supported release (v0.30.0) and the pinned main commit share the
-    upstream sampled-token protocol, so the Ascend transport and loader
-    bypasses are no longer used.
-    """
-    return False
 
 
 class _PPTransportModel(Protocol):
@@ -50,8 +38,6 @@ class SpecPPSupport:
 
     architectures: frozenset[str] | None = None
     needs_aux_hidden_states: bool = False
-    bypass_upstream_pp_guard: bool = False
-    unsupported_feature: str | None = None
 
 
 _SPEC_PP_SUPPORT_BY_METHOD: Mapping[str, SpecPPSupport] = MappingProxyType(
@@ -65,21 +51,20 @@ _SPEC_PP_SUPPORT_BY_METHOD: Mapping[str, SpecPPSupport] = MappingProxyType(
                 }
             ),
             needs_aux_hidden_states=True,
-            bypass_upstream_pp_guard=True,
-            unsupported_feature="EAGLE3 with pipeline parallelism",
         ),
         "dspark": SpecPPSupport(
             architectures=frozenset(
                 {
                     "DeepseekV4ForCausalLM",
+                    "DeepseekV41ForCausalLM",
                     "GlmMoeDsaForCausalLM",
                     "KimiLinearForCausalLM",
                     "KimiK3ForCausalLM",
                     "KimiK3ForConditionalGeneration",
+                    "KimiK31ForConditionalGeneration",
                 }
             ),
             needs_aux_hidden_states=True,
-            bypass_upstream_pp_guard=True,
         ),
     }
 )
@@ -101,49 +86,6 @@ def resolve_spec_pp_support(vllm_config: VllmConfig) -> SpecPPSupport | None:
     ):
         return None
     return support
-
-
-@contextmanager
-def bypass_upstream_spec_pp_guard(
-    vllm_config: VllmConfig,
-    support: SpecPPSupport | None,
-) -> Iterator[bool]:
-    """Bypass the legacy Spec+PP guard, leaving native PP initialization intact."""
-    bypass_guard = support.bypass_upstream_pp_guard if support is not None else False
-    if not bypass_guard or not use_legacy_spec_pp():
-        yield False
-        return
-
-    parallel_config = vllm_config.parallel_config
-    original_pp_size = parallel_config.pipeline_parallel_size
-    parallel_config.pipeline_parallel_size = 1
-    try:
-        # The unsharded draft must not inherit the target's manual PP split.
-        with patch.object(vllm_envs, "VLLM_PP_LAYER_PARTITION", None):
-            yield True
-    finally:
-        parallel_config.pipeline_parallel_size = original_pp_size
-
-
-def restore_pp_after_upstream_init(
-    model_runner: "GPUModelRunner",
-    vllm_config: VllmConfig,
-) -> None:
-    """Restore PP state skipped while the upstream runner initialized as PP=1."""
-    from vllm.v1.worker.gpu.buffer_utils import set_default_max_concurrency
-    from vllm.v1.worker.gpu.pp_utils import PPHandler
-
-    model_runner.use_pp = vllm_config.parallel_config.pipeline_parallel_size > 1
-    assert model_runner.use_pp and model_runner.pp_handler is None
-
-    # The parent sizes UVA pools before constructing request state and the
-    # speculator. Ascend rebuilds both after this helper returns.
-    set_default_max_concurrency(vllm_config.max_concurrent_batches)
-    model_runner.pp_handler = PPHandler(
-        max_num_reqs=model_runner.max_num_reqs,
-        num_speculative_steps=model_runner.num_speculative_steps,
-        device=model_runner.device,
-    )
 
 
 class PPTransportDataType(str, Enum):
@@ -327,3 +269,181 @@ def pp_stage_requires_topk_indices(config: object, start_layer: int) -> bool:
     )
     uses_index_cache = bool(getattr(config, "use_index_cache", False)) and should_reuse_topk(config, start_layer)
     return uses_shared_indexer or uses_index_cache
+
+
+@dataclass(frozen=True)
+class PPTransportTensorSpec:
+    """A token-major wire buffer; the token count is supplied per forward."""
+
+    name: str
+    shape: tuple[int, ...]
+    dtype: torch.dtype
+    cache: tuple[str, int | None] | None = None
+
+    def allocate(self, num_tokens: int, device: torch.device) -> torch.Tensor:
+        return torch.zeros((num_tokens, *self.shape), dtype=self.dtype, device=device)
+
+
+def gather_pp_cache_rows(cache: torch.Tensor, slots: torch.Tensor, output: torch.Tensor) -> None:
+    """Gather one native cache plane directly into its PP wire buffer."""
+    # Load Triton helpers only when a worker actually exports cache rows.
+    from vllm.triton_utils import triton
+
+    from vllm_ascend.ops.triton.pcp_kv_cache import _copy_pcp_kv_cache_kernel, _get_pcp_kv_cache_rows
+    from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
+
+    if cache.ndim == 3:
+        cache = cache.unsqueeze(2)
+    assert cache.ndim == 4 and cache.shape[2] == 1
+    assert output.shape == (slots.numel(), cache.shape[-1])
+    assert output.dtype == cache.dtype
+    slots = slots.contiguous()
+    if not slots.numel():
+        return
+
+    init_device_properties_triton()
+    num_cores = get_vectorcore_num()
+    block_cols = triton.next_power_of_2(cache.shape[-1])
+    rows = _get_pcp_kv_cache_rows(slots.numel(), num_cores, block_cols, cache.element_size(), 1)
+    _copy_pcp_kv_cache_kernel[(min(triton.cdiv(slots.numel(), rows), num_cores),)](
+        cache,
+        cache,  # Unused RoPE pointer: this transfer copies one complete plane.
+        slots,
+        output,
+        slots.numel(),
+        cache.shape[1],
+        cache.stride(0),
+        cache.stride(1),
+        cache.stride(3),
+        cache.stride(0),
+        cache.stride(1),
+        cache.stride(3),
+        cache.shape[-1],
+        0,
+        block_cols,
+        rows,
+    )
+
+
+def pp_cache_write_metadata(metadata):
+    """PCP queries are local, but replicated cache writes use global slots."""
+    global_metadata = getattr(metadata, "global_metadata", None)
+    return global_metadata if global_metadata is not None else metadata
+
+
+def _export_dependencies(
+    hidden_states: torch.Tensor,
+    cache_rows: list[torch.Tensor],
+    state_inputs: list[torch.Tensor],
+    state_outputs: list[torch.Tensor],
+    transport_name: str,
+) -> None:
+    # Dummy/profile traces have no metadata. Resolve the actual cache and
+    # slots at execution time, so compilation cannot erase the transfer.
+    context = get_forward_context()
+    if cache_rows and context.attn_metadata is not None:
+        context.no_compile_layers[transport_name].copy_cache_rows(context, cache_rows, receive=False)
+    n = hidden_states.shape[0]
+    for source, output in zip(state_inputs, state_outputs):
+        output.copy_(source[:n])
+
+
+def _import_dependencies(
+    hidden_states: torch.Tensor,
+    cache_rows: list[torch.Tensor],
+    state_inputs: list[torch.Tensor],
+    state_outputs: list[torch.Tensor],
+    transport_name: str,
+) -> None:
+    context = get_forward_context()
+    if cache_rows and context.attn_metadata is not None:
+        context.no_compile_layers[transport_name].copy_cache_rows(context, cache_rows, receive=True)
+    n = hidden_states.shape[0]
+    for source, output in zip(state_inputs, state_outputs):
+        output[:n].copy_(source)
+
+
+def _dependency_fake(*args, **kwargs) -> None:
+    return None
+
+
+# hidden_states is an explicit producer/consumer ordering edge. Cache writes
+# live behind the operator, as attention's own cache updates do. Marking the
+# incoming activation as mutated orders downstream attention after import;
+# its values are unchanged. Tensor lists carry the exact boundary manifest.
+direct_register_custom_op(
+    op_name="pp_dependency_export",
+    op_func=_export_dependencies,
+    mutates_args=["cache_rows", "state_outputs"],
+    fake_impl=_dependency_fake,
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="pp_dependency_import",
+    op_func=_import_dependencies,
+    mutates_args=["hidden_states", "state_outputs"],
+    fake_impl=_dependency_fake,
+    dispatch_key="PrivateUse1",
+)
+
+
+class PPDependencyTransport(torch.nn.Module):
+    """PP cache/state copies for model-declared incoming/outgoing manifests.
+
+    The model owns the manifests, cache mirrors and native scatter operation;
+    the same object is registered in static_forward_context for the custom ops.
+    """
+
+    def copy_cache_rows(self, context, rows: Sequence[torch.Tensor], *, receive: bool) -> None:
+        specs = self.incoming_caches if receive else self.outgoing_caches
+        for spec, values in zip(specs, rows):
+            prefix, plane = spec.cache
+            cache = context.no_compile_layers[prefix].kv_cache
+            if plane is not None:
+                cache = cache[plane]
+            metadata = pp_cache_write_metadata(context.attn_metadata[prefix])
+            slots = metadata.slot_mapping if receive else metadata.flat_slot_mapping
+            values = values.view(-1, values.shape[-1])
+            assert slots.shape[0] <= values.shape[0], "PP cache payload cannot hold all cache writes"
+            if receive:
+                self.scatter_cache_rows(cache, slots, values[: slots.shape[0]])
+            else:
+                gather_pp_cache_rows(cache, slots, values[: slots.shape[0]])
+
+    def add_receive_buffers(self, intermediate: IntermediateTensors, num_tokens: int, device: torch.device):
+        for spec in self.incoming_specs:
+            intermediate.tensors[spec.name] = spec.allocate(num_tokens, device)
+        return intermediate
+
+    def receive(self, intermediate: IntermediateTensors, num_tokens: int) -> None:
+        specs = self.incoming_specs
+        if not specs:
+            return
+        for spec in specs:
+            value = intermediate[spec.name]
+            if value.shape != (num_tokens, *spec.shape) or value.dtype != spec.dtype:
+                raise ValueError(f"Invalid PP dependency tensor {spec.name}: {value.shape}, {value.dtype}")
+        torch.ops.vllm.pp_dependency_import(
+            intermediate["hidden_states"],
+            [intermediate[spec.name] for spec in self.incoming_caches],
+            [intermediate[name] for name in self.incoming_states],
+            list(self.incoming_states.values()),
+            self.name,
+        )
+
+    def send(self, intermediate: IntermediateTensors, num_tokens: int):
+        specs = self.outgoing_specs
+        if not specs:
+            return intermediate
+        device = intermediate["hidden_states"].device
+        payload = {spec.name: spec.allocate(num_tokens, device) for spec in specs}
+        torch.ops.vllm.pp_dependency_export(
+            intermediate["hidden_states"],
+            [payload[spec.name] for spec in self.outgoing_caches],
+            list(self.outgoing_states.values()),
+            [payload[name] for name in self.outgoing_states],
+            self.name,
+        )
+        intermediate.tensors.update(payload)
+        return intermediate

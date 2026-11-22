@@ -1,10 +1,11 @@
 import math
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 import torch
 
-from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
+from vllm_ascend.device.device_op import A5DeviceAdaptor, Ascend310PDeviceAdaptor, BaseDeviceAdaptor
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 
@@ -49,7 +50,7 @@ def test_rms_norm_cast_only_uses_supported_fused_operator(device, custom_ops):
         mock.patch.object(torch.ops._C_ascend, "npu_rms_norm_cast", create=True, return_value=outputs) as op,
     ):
         result = BaseDeviceAdaptor.rms_norm_cast(x, weight, 1e-6)
-    if device == AscendDeviceType.A3 and custom_ops:
+    if device in (AscendDeviceType.A2, AscendDeviceType.A3) and custom_ops:
         assert result is outputs
         op.assert_called_once_with(x, weight, 1e-6)
     else:
@@ -228,7 +229,10 @@ def test_kv_cache_load_makes_seq_lens_contiguous():
 
     assert not context_seq_len_npu.is_contiguous()
 
-    with mock.patch("vllm_ascend.device.device_op.torch_npu.npu_gather_pa_kv_cache") as mock_gather:
+    with (
+        mock.patch("vllm_ascend.device.device_op.try_load_strided_mla_cache", return_value=False),
+        mock.patch("vllm_ascend.device.device_op.torch_npu.npu_gather_pa_kv_cache") as mock_gather,
+    ):
         BaseDeviceAdaptor.kv_cache_load(
             cache_kv_c,
             cache_k_pe,
@@ -276,32 +280,92 @@ def test_a5_index_fill_matches_torch_index_fill(shape, dim, indices, value, dtyp
     torch.testing.assert_close(actual, expected)
 
 
-def test_a5_index_fill_uses_scatter():
-    tensor = mock.Mock()
-    tensor.dim.return_value = 1
-    tensor.size.return_value = 8
-    tensor.shape = (8,)
+@pytest.mark.parametrize(
+    ("adaptor", "uses_fused_kernel"),
+    [
+        (BaseDeviceAdaptor, True),
+        (A5DeviceAdaptor, False),
+        (Ascend310PDeviceAdaptor, False),
+    ],
+)
+def test_clipped_swiglu_kernel_selection_per_adaptor(adaptor, uses_fused_kernel):
+    limit, alpha, beta = 7.0, 1.702, 1.0
+    x = torch.randn(2, 8)
 
-    result = A5DeviceAdaptor.index_fill(tensor, 0, torch.tensor([1, 3]), 5)
+    with mock.patch("vllm_ascend.device.device_op.torch_npu.npu_clipped_swiglu") as mock_kernel:
+        out = adaptor.clipped_swiglu(x, swiglu_limit=limit, swiglu_alpha=alpha, swiglu_beta=beta)
 
-    assert result is tensor
-    tensor.scatter_.assert_called_once()
-    tensor.index_fill_.assert_not_called()
+    if uses_fused_kernel:
+        mock_kernel.assert_called_once_with(x, interleaved=False, alpha=alpha, limit=limit, bias=beta)
+        return
+
+    mock_kernel.assert_not_called()
+    d = x.shape[-1] // 2
+    gate = torch.clamp(x[..., :d], max=limit)
+    up = torch.clamp(x[..., d:], min=-limit, max=limit)
+    torch.testing.assert_close(out, gate * torch.sigmoid(alpha * gate) * (up + beta))
 
 
-@pytest.mark.parametrize("packed_cache", [False, True])
-@pytest.mark.parametrize("use_v2", [False, True])
-@pytest.mark.parametrize("architecture", ["DeepseekV41ForCausalLM", "DeepseekV41DSparkModel", "DeepseekV3ForCausalLM"])
-def test_v41_runner_support_is_hardware_scoped(packed_cache, use_v2, architecture):
-    from types import SimpleNamespace
+@pytest.mark.parametrize("compress_ratio", [0, 128])
+def test_a5_forward_unpacks_cache_without_indexer(compress_ratio):
+    from vllm_ascend.ops.dsa import _build_kv_cache
 
-    from vllm_ascend.platform import _validate_model_runner_config
+    compressed, swa, state = (torch.empty(0) for _ in range(3))
+    layer = SimpleNamespace(
+        compress_ratio=compress_ratio,
+        swa_cache_layer=SimpleNamespace(kv_cache=[swa]),
+        compressor=SimpleNamespace(state_cache=SimpleNamespace(kv_cache=[state])),
+        dsa_attn=SimpleNamespace(kv_cache=[compressed]),
+    )
+    with mock.patch(
+        "vllm_ascend.device.hardware_profile._CURRENT_HARDWARE_PROFILE",
+        get_hardware_profile(AscendDeviceType.A5),
+    ):
+        caches = _build_kv_cache(layer, SimpleNamespace())
+    expected = (compressed, swa, state) if compress_ratio == 128 else (None, swa, None)
+    assert A5DeviceAdaptor.unpack_dsa_forward_kv_cache(caches, compress_ratio) == (*expected, None, None, None)
 
-    config = SimpleNamespace(model_config=SimpleNamespace(architecture=architecture), use_v2_model_runner=use_v2)
-    with mock.patch("vllm_ascend.platform.get_current_hardware_profile") as profile:
-        profile.return_value.supports.return_value = packed_cache
-        if packed_cache and not use_v2 and architecture != "DeepseekV3ForCausalLM":
-            with pytest.raises(ValueError, match="requires Model Runner V2"):
-                _validate_model_runner_config(config)
-        else:
-            _validate_model_runner_config(config)
+
+def test_a5_indexer_reconstructs_combined_cache_from_shared_components():
+    from vllm_ascend.ops.dsa import _build_kv_cache
+    from vllm_ascend.worker.v2.attn_utils import create_cache_component_views
+
+    blocks, tokens, width, stride = 2, 4, 128, 768
+    backing = torch.zeros(64 + blocks * stride, dtype=torch.int8)
+    raw = backing[64:]
+    data, scales = create_cache_component_views(
+        raw,
+        [(blocks, tokens, 1, width), (blocks, tokens, 1, 1)],
+        [torch.int8, torch.float32],
+        stride,
+    )
+    state = torch.empty(0)
+    layer = SimpleNamespace(
+        compress_ratio=4,
+        swa_cache_layer=SimpleNamespace(kv_cache=[torch.empty(0)]),
+        compressor=SimpleNamespace(state_cache=SimpleNamespace(kv_cache=[torch.empty(0)])),
+        dsa_attn=SimpleNamespace(kv_cache=[torch.empty(0)]),
+        indexer=SimpleNamespace(
+            compressor=SimpleNamespace(state_cache=SimpleNamespace(kv_cache=[state])),
+            k_cache=SimpleNamespace(kv_cache=[data, scales]),
+        ),
+    )
+    with mock.patch(
+        "vllm_ascend.device.hardware_profile._CURRENT_HARDWARE_PROFILE",
+        get_hardware_profile(AscendDeviceType.A5),
+    ):
+        caches = _build_kv_cache(layer, SimpleNamespace())
+    actual_state, actual_data, actual_scales, full = A5DeviceAdaptor.unpack_dsa_indexer_kv_cache(caches)
+    assert actual_state is state and actual_data is data and actual_scales is scales
+    assert full.shape == (blocks, tokens, 1, 132)
+    assert full.stride(0) == stride
+    assert full.data_ptr() == data.data_ptr()
+    forward = A5DeviceAdaptor.unpack_dsa_forward_kv_cache(caches, 4)
+    assert forward[3] is data and forward[4] is scales
+    assert forward[5].shape == full.shape
+    assert forward[5].stride() == full.stride()
+    assert forward[5].data_ptr() == full.data_ptr()
+    full[1].fill_(3)
+    expected = torch.zeros_like(backing)
+    expected[64 + stride : 64 + stride + tokens * 132].fill_(3)
+    torch.testing.assert_close(backing, expected)

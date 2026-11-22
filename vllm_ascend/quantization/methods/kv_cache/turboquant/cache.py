@@ -11,7 +11,9 @@ import math
 from vllm.logger import logger
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.core.kv_cache_utils import may_override_num_blocks
+
+# Both supported versions expose planning helpers in kv_cache_planning.
+from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -108,11 +110,6 @@ def packed_layout(groups):
 
 def pool_bytes_per_block(groups):
     return sum(size for size, _ in packed_layout(groups))
-
-
-def max_memory_usage(vllm_config, groups):
-    request_blocks = sum(group.kv_cache_spec.max_memory_usage_pages(vllm_config) for group in groups)
-    return pool_bytes_per_block(groups) * request_blocks
 
 
 def cache_config(vllm_config, groups, available_memory):

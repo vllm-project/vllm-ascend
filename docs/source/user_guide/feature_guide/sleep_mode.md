@@ -132,9 +132,10 @@ The following is a simple example of how to use sleep mode.
     ```
 
 - Online serving:
+
     !!! note
 
-            Considering there may be a risk of malicious access, please make sure you are under a dev-mode, and explicitly specify the dev environment `VLLM_SERVER_DEV_MODE` to expose these endpoints (sleep/wake up).
+        Considering there may be a risk of malicious access, please make sure you are under a dev-mode, and explicitly specify the dev environment `VLLM_SERVER_DEV_MODE` to expose these endpoints (sleep/wake up).
 
     ```bash
     export VLLM_SERVER_DEV_MODE="1"

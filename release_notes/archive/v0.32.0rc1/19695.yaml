@@ -1,0 +1,7 @@
+pr: 19695
+entries:
+  - category: bugfix
+    text: >-
+      Fixed incorrect device reads observed with small private host-offloaded
+      Engram buffers on A3 with CANN 9.2 by aligning the registered host payload
+      to 64 KiB while preserving the original allocation for cleanup.

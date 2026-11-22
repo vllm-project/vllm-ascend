@@ -18,26 +18,76 @@
 import queue
 import threading
 import unittest
+from itertools import product
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
 # isort: split
 import torch
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncCalculator
+from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-    AscendConnectorMetadata,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
+    AscendStoreConnector,
+    create_kv_pool_worker,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+    KVCacheStoreSendingThread,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import LayerBatchBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
+    LayerBlockRange,
     LayerTransferTask,
-    LoadSpec,
-    ReqMeta,
     SharedBlockData,
     get_partial_block_index,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendConnectorMetadata,
+    LoadSpec,
+    ReqMeta,
+)
+
+
+class TestDSparkPrefixRegistration(unittest.TestCase):
+    def test_only_final_pipeline_stage_registers_draft_cache(self):
+        for pp_rank in (0, 1):
+            with self.subTest(pp_rank=pp_rank):
+                worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
+                worker._dspark_prefix_keys = MagicMock()
+                worker._dspark_draft_layer_names = {"draft"}
+                worker.pp_rank, worker.pp_size = pp_rank, 2
+                worker.tp_rank = 0
+                worker.block_size = worker.hash_block_size = 16
+                worker.num_blocks = 4
+                worker.original_block_size = [16]
+                worker.m_store = MagicMock()
+                worker.kv_cache_config = SimpleNamespace(
+                    kv_cache_groups=[SimpleNamespace(layer_names=["target", "draft"])]
+                )
+                draft_caches = {"draft": MagicMock()}
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.DSparkPrefixCache"
+                ) as prefix_cache:
+                    worker._register_dspark_prefix_cache(draft_caches)
+                    if pp_rank == 0:
+                        prefix_cache.assert_not_called()
+                    else:
+                        prefix_cache.assert_called_once_with(
+                            worker._dspark_prefix_keys,
+                            worker.m_store,
+                            worker.tp_rank,
+                            worker.block_size,
+                            worker.hash_block_size,
+                            worker._copy_dspark_prefix,
+                        )
+                        prefix_cache.return_value.register.assert_called_once_with(draft_caches, {"draft": 0}, [16], 4)
 
 
 def start_patch(test: unittest.TestCase, *args, **kwargs):
@@ -66,11 +116,14 @@ def make_worker(
     pp_size=1,
     pp_rank=0,
     dcp_size=1,
+    dcp_rank=0,
     kv_cache_config=None,
     prefix_match_unit=None,
     layer_offset=0,
     pp_partition=None,
     cache_block_size=16,
+    use_recoverssm=False,
+    mamba_copy_funcs=None,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
@@ -80,7 +133,7 @@ def make_worker(
     pcp_group.return_value.world_size = pcp_size
     pcp_group.return_value.rank_in_group = pcp_rank
     start_patch(test, f"{module}.get_decode_context_model_parallel_world_size", return_value=dcp_size)
-    start_patch(test, f"{module}.get_decode_context_model_parallel_rank", return_value=0)
+    start_patch(test, f"{module}.get_decode_context_model_parallel_rank", return_value=dcp_rank)
     importlib = start_patch(test, f"{module}.importlib")
     importlib.import_module.return_value = MagicMock()
 
@@ -112,6 +165,10 @@ def make_worker(
         config.model_config.get_total_num_hidden_layers.return_value = sum(pp_partition)
         config.model_config.compute_hash.return_value = "test-model-config"
         config.cache_config.compute_hash.return_value = "test-cache-config"
+        # Exercise main's native hash protocol while retaining the release
+        # fixture's mutable identity used by the topology-isolation assertions.
+        config.model_config.compile_factors.side_effect = lambda: {"identity": config.model_config.compute_hash()}
+        config.cache_config.compile_factors.side_effect = lambda: {"identity": config.cache_config.compute_hash()}
         config.cache_config.cache_dtype = "auto"
         config.speculative_config = None
     config.additional_config = {"enable_kvpp": use_kvpp}
@@ -123,17 +180,149 @@ def make_worker(
     if kv_cache_config is not None:
         config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.block_size = cache_block_size
+    config.cache_config.prefix_cache_retention_interval = 0
     config.cache_config.prefix_match_unit = prefix_match_unit
+    config.cache_config.prefix_cache_retention_interval = None
+    config.cache_config.use_kda_recoverssm = use_recoverssm
+    if use_recoverssm:
+        model_cls = start_patch(test, f"{module}.get_model_cls").return_value
+        if mamba_copy_funcs is None:
+            model_cls.get_mamba_state_copy_funcs.side_effect = lambda mamba_types: {
+                backend: MambaStateCopyFuncCalculator.kda_state_copy_func() for backend in mamba_types
+            }
+        else:
+            model_cls.get_mamba_state_copy_funcs.return_value = mamba_copy_funcs
     config.kv_events_config = None
     if enable_kv_events:
         config.kv_events_config = MagicMock(enable_kv_cache_events=True)
 
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+    return create_kv_pool_worker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
 
-    return KVPoolWorker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
+
+@pytest.mark.parametrize("retention_interval", [None, 0, 4096])
+def test_cache_coordinator_uses_kv_cache_config_retention_interval(retention_interval):
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
+
+    worker = pool_worker.KVPoolWorker.__new__(pool_worker.KVPoolWorker)
+    worker.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[object()], prefix_cache_retention_interval=retention_interval
+    )
+    worker.use_hybrid = True
+    worker.cache_transfer_granularity = 16
+    worker.hash_block_size = 16
+    worker.grouped_block_size = [16]
+    worker.kv_cache_group_families = ["mamba"]
+    config = SimpleNamespace(speculative_config=None)
+    with patch.object(pool_worker, "AscendStoreCoordinator") as coordinator_cls:
+        coordinator = worker._build_cache_coordinator(config)
+    assert coordinator is coordinator_cls.return_value
+    assert coordinator_cls.call_args.kwargs["retention_interval"] == retention_interval
 
 
 class TestPCPPoolWorker(unittest.TestCase):
+    def test_pp_pcp_layer_range_uses_actual_pp_group(self):
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
+        start_patch(self, f"{module}.get_tensor_model_parallel_rank", return_value=0)
+        start_patch(self, f"{module}.get_tensor_model_parallel_world_size", return_value=1)
+        start_patch(self, f"{module}.get_decode_context_model_parallel_world_size", return_value=1)
+        pp_group = start_patch(self, f"{module}.get_pp_group").return_value
+        pcp_group = start_patch(self, f"{module}.get_pcp_group").return_value
+        pcp_group.world_size = 16
+        model = MagicMock(model="test/model", use_mla=False, hf_text_config=SimpleNamespace())
+        model.get_total_num_hidden_layers.return_value = 78
+        parallel = SimpleNamespace(pipeline_parallel_size=2, tensor_parallel_size=1)
+        ranges = [(0, 42), (42, 78)]
+        # Reproduce the PCP-blind v0.33.0 model-config APIs. The worker must
+        # instead use its PP process group and the real partition helper.
+        model.get_layers_start_end_indices.side_effect = lambda config: ranges[config.rank % 2]
+        model.get_num_layers.side_effect = lambda config: (42, 36)[config.rank % 2]
+        with patch.dict("os.environ", {"VLLM_PP_LAYER_PARTITION": "42,36"}):
+            for rank in range(32):
+                with self.subTest(rank=rank):
+                    parallel.rank = rank
+                    pp_group.rank_in_group = rank // 16
+                    pcp_group.rank_in_group = rank % 16
+                    worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
+                    worker._init_parallelism_info(model, parallel)
+                    start, end = ranges[rank // 16]
+                    self.assertEqual((worker.pp_layer_offset, worker.num_layers), (start, end - start))
+                    self.assertEqual(worker.total_layers, 78)
+        model.get_layers_start_end_indices.assert_not_called()
+        model.get_num_layers.assert_not_called()
+
+    def test_nonzero_pcp_rank_keeps_dcp_save_leader(self):
+        for dcp_size, tp_rank, expected in ((1, 0, False), (2, 1, True), (2, 3, False)):
+            with self.subTest(dcp_size=dcp_size, tp_rank=tp_rank):
+                worker = make_worker(
+                    self,
+                    use_layerwise=True,
+                    use_mla=True,
+                    extra_config={"backend": "memcache"},
+                    tp_size=4,
+                    tp_rank=tp_rank,
+                    pcp_size=2,
+                    pcp_rank=1,
+                    dcp_size=dcp_size,
+                )
+                worker.dcp_rank = dcp_size - 1
+                self.assertEqual(worker._is_layerwise_save_owner(0), expected)
+
+    def test_non_align_sharded_mamba_save_ownership_respects_write_role(self):
+        spec = MambaSpec(block_size=16, shapes=((8,),), dtypes=(torch.float32,), mamba_cache_mode="all")
+        plan = SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(["model.layers.0.attn"], spec)])
+        for tp_size, tp_rank, pcp_size, pcp_rank in ((2, 1, 1, 0), (1, 0, 2, 1)):
+            worker = make_worker(
+                self,
+                kv_cache_config=plan,
+                num_layers=1,
+                use_layerwise=True,
+                use_mla=True,
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+                pcp_size=pcp_size,
+                pcp_rank=pcp_rank,
+            )
+            self.assertFalse(worker.group_uses_align_state[0])
+            for kv_role, consumer_is_to_put, expected in (
+                ("kv_producer", False, True),
+                ("kv_both", False, True),
+                ("kv_consumer", False, False),
+                ("kv_consumer", True, True),
+            ):
+                with self.subTest(tp_rank=tp_rank, pcp_rank=pcp_rank, role=kv_role, put=consumer_is_to_put):
+                    worker.kv_role = kv_role
+                    worker.consumer_is_to_put = consumer_is_to_put
+                    self.assertEqual(worker._is_layerwise_save_owner(0), expected)
+
+    def test_single_mamba_group_uses_pcp_state_shards(self):
+        plan = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["model.layers.0.attn"],
+                    MambaSpec(
+                        block_size=16,
+                        shapes=((8,),),
+                        dtypes=(torch.float32,),
+                        mamba_cache_mode="align",
+                    ),
+                )
+            ]
+        )
+        for use_layerwise in (False, True):
+            with self.subTest(use_layerwise=use_layerwise):
+                worker = make_worker(
+                    self,
+                    kv_cache_config=plan,
+                    num_layers=1,
+                    use_layerwise=use_layerwise,
+                    pcp_size=2,
+                    pcp_rank=1,
+                )
+                self.assertFalse(worker.use_hybrid)
+                self.assertEqual(worker.sharded_mamba_group_ids, {0})
+                self.assertEqual(worker.metadata[0].head_or_tp_rank, 0 if use_layerwise else 1)
+                self.assertEqual(worker.get_group_tp_size(0), 2)
+
     def test_dspark_draft_pool_exclusion_requires_layerwise_reuse(self):
         target_names = [f"model.layers.{index}.attn" for index in range(4)]
         draft_names = [f"draft.layers.{index}.attn" for index in range(4, 6)]
@@ -180,6 +369,18 @@ class TestPCPPoolWorker(unittest.TestCase):
         ]
         for use_layerwise, extra_config, reuse in cases:
             with self.subTest(use_layerwise=use_layerwise, extra_config=extra_config):
+                config.kv_transfer_config = None
+                if reuse:
+                    layout = SimpleNamespace(
+                        prefetch_layer_map={2: (1,), 3: (2,)},
+                        has_layer_reuse=True,
+                        num_prefetch_layers=1,
+                        cache_layer_indices={name: layer for layer, name in enumerate(target_names + draft_names)},
+                        reused_cache_names=frozenset(target_names[1:]),
+                    )
+                    config.kv_transfer_config = SimpleNamespace(
+                        kv_connector_extra_config={"_layerwise_reuse_layout": layout}
+                    )
                 worker = make_worker(
                     self,
                     num_layers=4,
@@ -189,16 +390,10 @@ class TestPCPPoolWorker(unittest.TestCase):
                     kv_cache_config=config,
                 )
                 self.assertEqual(worker.cacheable_group_ids, [0])
-                self.assertEqual(worker.layerwise_offload, reuse)
-                self.assertEqual(worker.prefetch_layer_map, {2: 1, 3: 2} if reuse else {})
+                self.assertEqual(getattr(worker, "layerwise_offload", False), reuse)
+                self.assertEqual(getattr(worker, "prefetch_layer_map", {}), {2: (1,), 3: (2,)} if reuse else {})
                 if reuse:
-                    self.assertEqual(set(worker._layerwise_reuse_layout.layer_cache_specs), set(range(4)))
-                    self.assertTrue(
-                        all(
-                            item.main.spec is target
-                            for item in worker._layerwise_reuse_layout.layer_cache_specs.values()
-                        )
-                    )
+                    self.assertEqual(worker._reused_layers_by_group, {0: {1, 2, 3}})
                 worker._transfer_threads_started = True
                 worker.register_kv_caches(caches)
                 self.assertEqual(set(worker.kv_caches), set(target_names) if reuse else set(caches))
@@ -252,6 +447,111 @@ class TestPCPPoolWorker(unittest.TestCase):
                     self.doCleanups()
 
 
+class TestDFlashLayerwiseKV(unittest.TestCase):
+    def make_worker(self, kv_role="kv_both", reuse=False):
+        target_names = [f"model.layers.{layer}.attn" for layer in range(4)]
+        draft_names = [f"draft.layers.{layer}.attn" for layer in range(4, 6)]
+        spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
+        plan = SimpleNamespace(
+            kv_cache_groups=[KVCacheGroupSpec(target_names + draft_names, spec)],
+            prefix_cache_retention_interval=None,
+            dflash_draft_layer_names=tuple(draft_names),
+        )
+        if reuse:
+            layout = SimpleNamespace(
+                prefetch_layer_map={2: (1,), 3: (2,)},
+                has_layer_reuse=True,
+                num_prefetch_layers=1,
+                cache_layer_indices={name: layer for layer, name in enumerate(target_names + draft_names)},
+                reused_cache_names=frozenset(target_names[1:]),
+            )
+            plan.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={"_layerwise_reuse_layout": layout})
+        worker = make_worker(
+            self,
+            num_layers=4,
+            num_hidden_layers=4,
+            use_layerwise=True,
+            kv_role=kv_role,
+            extra_config={"backend": "memcache", "layerwise_num_shared_buffers": 1},
+            kv_cache_config=plan,
+        )
+        worker.kv_recv_thread = MagicMock()
+        worker.kv_send_thread = MagicMock(request_queue=queue.Queue())
+        worker.layer_load_finished_events = [threading.Event() for _ in range(6)]
+        worker.layer_save_finished_events = [threading.Event() for _ in range(6)]
+        worker.sync_save_events = [MagicMock() for _ in range(6)]
+        return worker
+
+    def test_draft_layers_are_persistent_and_outside_target_reuse(self):
+        worker = self.make_worker(reuse=True)
+        self.assertEqual(worker.num_layers, 6)
+        self.assertEqual(worker._dflash_draft_start_layer, 4)
+        self.assertEqual(worker.prefetch_layer_map, {2: (1,), 3: (2,)})
+        self.assertEqual(worker._reused_layers_by_group, {0: {1, 2, 3}})
+        worker.layer_load_tasks = [[object()] for _ in range(6)]
+        worker.current_layer = worker.next_layer_to_submit = 3
+        worker._submit_ready_layer_loads()
+        self.assertEqual([call.args[0].layer_id for call in worker.kv_recv_thread.add_request.call_args_list], [3])
+        worker.current_layer = 4
+        worker._submit_ready_layer_loads()
+        self.assertEqual([call.args[0].layer_id for call in worker.kv_recv_thread.add_request.call_args_list], [3, 4])
+
+    def test_draft_restore_and_save_follow_target_then_speculator(self):
+        worker = self.make_worker()
+        metadata = AscendConnectorMetadata(set())
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.use_layerwise = connector.can_put = True
+        connector.connector_worker = worker
+        connector.has_connector_metadata = lambda: True
+        connector._get_connector_metadata = lambda: metadata
+        # Target hooks advance only through the four target layers.
+        for layer in range(4):
+            connector.save_kv_layer(f"model.layers.{layer}.attn", None, None)
+        self.assertEqual(worker.current_layer, 4)
+        order = []
+        worker.external_slot_release_waiter = lambda layer: order.append(("restore", layer))
+        connector.finish_forward()
+        self.assertEqual(order, [("restore", 4), ("restore", 5)])
+        self.assertEqual(worker.current_layer, 4)
+        self.assertEqual([event.record.call_count for event in worker.sync_save_events], [1, 1, 1, 1, 0, 0])
+        # Draft attention hooks must not transfer context KV a second time.
+        for name in worker.dflash_draft_layer_names:
+            connector.wait_for_layer_load(name)
+            connector.save_kv_layer(name, None, None)
+        self.assertEqual(worker.current_layer, 4)
+        order.append(("speculator", None))
+        with patch.object(
+            worker, "_wait_for_final_layer_save", side_effect=lambda *args: order.append(("drain", None))
+        ):
+            connector.wait_for_save()
+        self.assertEqual(order[-2:], [("speculator", None), ("drain", None)])
+        self.assertEqual([event.record.call_count for event in worker.sync_save_events], [1] * 6)
+        self.assertEqual(worker.current_layer, 6)
+        connector.wait_for_save()
+        self.assertEqual(order.count(("drain", None)), 1)
+
+    def test_load_only_restores_draft_without_saving(self):
+        worker = self.make_worker(kv_role="kv_consumer")
+        worker.current_layer = worker.next_layer_to_submit = 4
+        restored: list[int] = []
+        worker.external_slot_release_waiter = restored.append
+        worker.load_dflash_draft_kv()
+        worker.save_dflash_draft_kv(AscendConnectorMetadata(set()))
+        self.assertEqual(restored, [4, 5])
+        self.assertFalse(worker._dflash_save_pending)
+        self.assertTrue(all(event.record.call_count == 0 for event in worker.sync_save_events))
+
+    def test_no_forward_skips_draft_transfers(self):
+        worker = self.make_worker()
+        with patch.object(worker, "wait_for_layer_load") as load:
+            worker.load_dflash_draft_kv()
+        load.assert_not_called()
+        self.assertFalse(worker._dflash_save_pending)
+        worker.current_layer = 1
+        with self.assertRaisesRegex(RuntimeError, "Target KV hooks"):
+            worker.load_dflash_draft_kv()
+
+
 class TestLayerwiseAttentionSave(unittest.TestCase):
     def make_worker(self):
         plan = SimpleNamespace(
@@ -261,7 +561,8 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                     FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32),
                 )
                 for layer in range(2)
-            ]
+            ],
+            prefix_cache_retention_interval=None,
         )
         worker = make_worker(self, use_layerwise=True, kv_cache_config=plan)
         worker.kv_send_thread = MagicMock(request_queue=queue.Queue())
@@ -282,12 +583,13 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                 )
             ]
         )
+        plan.prefix_cache_retention_interval = None
         worker = make_worker(self, num_layers=1, use_layerwise=True, kv_cache_config=plan)
         worker.kv_recv_thread = MagicMock()
         worker.layer_load_finished_events = [threading.Event()]
         gate = SimpleNamespace(on_start=None, on_finish=None)
         with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.reset_attention_compute_start_gate",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.reset_attention_compute_start_gate",
             return_value=gate,
         ):
             worker.wait_for_layer_load()
@@ -316,7 +618,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                     self,
                     num_layers=2,
                     use_layerwise=True,
-                    kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
+                    kv_cache_config=SimpleNamespace(kv_cache_groups=groups, prefix_cache_retention_interval=None),
                     pp_rank=1,
                     pp_partition=(2, 2),
                 )
@@ -329,7 +631,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
 
                 full_attention_gate = SimpleNamespace(on_start=None, on_finish=None)
                 with patch(
-                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker."
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker."
                     "reset_attention_compute_start_gate",
                     return_value=full_attention_gate,
                 ):
@@ -339,7 +641,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                 worker.current_layer = 1
                 mamba_gate = SimpleNamespace(on_start=None, on_finish=None)
                 with patch(
-                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker."
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker."
                     "reset_attention_compute_start_gate",
                     return_value=mamba_gate,
                 ):
@@ -351,7 +653,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
     def test_backpressure_bounds_send_without_draining_prefetch(self):
         worker = self.make_worker()
         send_queue = worker.kv_send_thread.request_queue
-        limit = worker.layerwise_protocol.send_fence_backlog()
+        limit = worker.layerwise_backend.send_fence_backlog()
         for _ in range(limit + 1):
             send_queue.put(object())
         worker.kv_recv_thread.request_queue.put(object())
@@ -410,6 +712,80 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
 
 
 class TestKVPPPoolWorker(unittest.TestCase):
+    def test_load_completion_is_shared_and_reset_at_step_binding(self):
+        worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
+        worker._global_to_local_layer = {9: 0, 10: 1}
+        worker.layer_load_tasks[0] = [MagicMock()]
+        worker.layer_load_finished_events = [threading.Event(), threading.Event()]
+        worker.layer_load_finished_events[0].set()
+        worker.current_layer = 0
+        worker.kv_recv_thread = MagicMock()
+        worker.external_slot_release_waiter = None
+        worker._submit_ready_layer_loads = MagicMock()
+        worker._data_plane.finish_sessions = MagicMock()
+        worker.wait_for_layer_load()
+        # Both observers can see the same completion, in either order.
+        worker.wait_for_layer_load_ready("model.layers.9.self_attn.attn")
+        worker.wait_for_layer_load_ready("model.layers.9.self_attn.attn")
+        self.assertTrue(worker.layer_load_finished_events[0].is_set())
+        self.assertEqual(worker.current_layer, 0)
+        # Non-owners have no tasks or signal to wait on.
+        worker.wait_for_layer_load_ready("model.layers.10.self_attn.attn")
+        worker.current_layer = 1
+        worker._current_layerwise_last_chunk_req_ids = {"loaded-request"}
+        worker.wait_for_layer_load()
+        worker.kv_recv_thread.set_finished_request.assert_called_once_with("loaded-request")
+        worker.process_layer_data = MagicMock()
+        worker.prepare_layerwise_step(AscendConnectorMetadata(preempted_req_ids=set()))
+        self.assertFalse(worker.layer_load_finished_events[0].is_set())
+        self.assertEqual(worker.next_layer_to_submit, 0)
+
+    def test_load_observer_surfaces_receive_failure(self):
+        worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
+        worker.layer_load_tasks[0] = [MagicMock()]
+        worker.layer_load_finished_events = [threading.Event(), threading.Event()]
+        worker.kv_recv_thread = MagicMock()
+        worker.kv_recv_thread.raise_if_failed.side_effect = RuntimeError("receive failed")
+        with self.assertRaisesRegex(RuntimeError, "receive failed"):
+            worker.wait_for_layer_load_ready("model.layers.0.self_attn.attn")
+
+    def test_load_observer_resolves_local_layer(self):
+        cases: tuple[tuple[dict[int, int], int, bool], ...] = (
+            ({9: 0, 10: 1}, 0, False),
+            ({9: 0, 10: 1}, 11, False),
+            ({}, 2, False),
+            ({9: 2}, 9, False),
+            ({9: -1}, 9, False),
+            ({}, 1, True),
+        )
+        for mapping, physical_layer, local in cases:
+            with self.subTest(mapping=mapping, physical_layer=physical_layer):
+                worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
+                worker._global_to_local_layer = mapping
+                worker.layer_load_tasks = [[MagicMock()], [MagicMock()]]
+                worker.layer_load_finished_events = [threading.Event(), threading.Event()]
+                worker.layer_load_finished_events[1].set()
+                worker.kv_recv_thread = MagicMock()
+                if not local:
+                    worker.kv_recv_thread.raise_if_failed.side_effect = RuntimeError("unexpected receive check")
+                worker.wait_for_layer_load_ready(f"model.layers.{physical_layer}.self_attn.attn")
+                if local:
+                    worker.kv_recv_thread.raise_if_failed.assert_called()
+                    self.assertTrue(worker.layer_load_finished_events[1].is_set())
+                else:
+                    worker.kv_recv_thread.raise_if_failed.assert_not_called()
+
+    def test_load_observer_requires_initialized_dependencies(self):
+        for missing in ("kv_recv_thread", "layer_load_finished_events"):
+            with self.subTest(missing=missing):
+                worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
+                worker._global_to_local_layer = {9: 0}
+                worker.layer_load_tasks[0] = [MagicMock()]
+                worker.kv_recv_thread = MagicMock()
+                setattr(worker, missing, None)
+                with self.assertRaisesRegex(RuntimeError, f"{missing} is not initialized"):
+                    worker.wait_for_layer_load_ready("model.layers.9.self_attn.attn")
+
     def test_pcp_registers_persistent_owner_layers_and_mtp(self):
         import torch
 
@@ -643,8 +1019,9 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         self.assertEqual(result, [])
 
     def test_wait_for_layer_load_fallback_waits_for_reuse(self):
-        cls = self._make_worker_class()
+        cls = LayerwiseKVPoolWorker
         worker = cls.__new__(cls)
+        worker.use_kvpp = False
         worker.current_layer = 0
         worker.num_layers = 1
         worker.layer_load_tasks = [[]]
@@ -731,11 +1108,11 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.m_store = MagicMock()
         worker.token_database = MagicMock()
 
-        def process_token_key_strings(token_len, block_hashes, mask_num, kv_cache_group_id, chunk_filter):
+        def process_token_key_strings(token_len, block_hashes, mask_num, kv_cache_group_id, chunk_mask):
             return [
                 (start, start + 128, f"key{start // 128}", f"h{start // 128}".encode())
                 for start in range(mask_num, token_len, 128)
-                if chunk_filter(start)
+                if chunk_mask is None or (start // 128 < len(chunk_mask) and chunk_mask[start // 128])
             ]
 
         worker.token_database.process_token_key_strings.side_effect = process_token_key_strings
@@ -757,7 +1134,6 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
                 256,
                 [b"h0", b"h1"],
                 [0],
-                use_layerwise=False,
                 include_all_ranks=False,
             )
 
@@ -768,7 +1144,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         store_mask.assert_not_called()
         worker.token_database.process_tokens.assert_not_called()
 
-    def test_external_coordinator_lookup_preseeds_hbm_hits(self):
+    def test_external_coordinator_lookup_preserves_hbm_hits(self):
         cls = self._make_worker_class()
         worker = self._make_lookup_worker(cls, self._make_sparse_swa_coordinator())
         worker.m_store.exists.return_value = [1]
@@ -781,12 +1157,11 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
                 256,
                 [b"h0", b"h1"],
                 [0],
-                use_layerwise=False,
                 include_all_ranks=False,
                 hbm_hit_tokens=128,
             )
 
-        # The locally computed block is preseeded and never queried; only the
+        # The locally computed block is recognized without a query; only the
         # tail block beyond the HBM hit goes to the pool.
         self.assertEqual(hit, 256)
         worker.m_store.exists.assert_called_once_with(["key1"])
@@ -795,7 +1170,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         import torch
         from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-        cls = self._make_worker_class()
+        cls = LayerwiseKVPoolWorker
         worker = object.__new__(cls)
         worker.num_layers = 4
         worker.num_kv_cache_groups = 2
@@ -833,12 +1208,24 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
             ]
         )
 
+        main_names = worker.kv_cache_config.kv_cache_groups[0].layer_names
+        worker.kv_cache_config.kv_transfer_config = SimpleNamespace(
+            kv_connector_extra_config={
+                "_layerwise_reuse_layout": SimpleNamespace(
+                    prefetch_layer_map={3: (1,)},
+                    has_layer_reuse=True,
+                    num_prefetch_layers=2,
+                    cache_layer_indices={name: layer for layer, name in enumerate(main_names)},
+                    reused_cache_names=frozenset((main_names[1], main_names[3])),
+                )
+            }
+        )
         worker._init_layerwise_config()
 
         self.assertEqual(worker.num_layers, 5)
         self.assertEqual(worker.physical_layer_to_group_layers[4], [(0, 4)])
         self.assertTrue(worker.layerwise_offload)
-        self.assertEqual(worker.independent_layers, [0])
+        self.assertEqual(worker._reused_layers_by_group, {0: {1, 3}})
         self.assertEqual(len(worker.layer_load_tasks), 5)
         self.assertEqual(len(worker.layer_save_tasks), 5)
 
@@ -1117,9 +1504,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
     def _make_worker(self, kv_role="kv_producer", extra_config=None, use_layerwise=False):
         self._patch_all()
         config = self._make_config(kv_role=kv_role, extra_config=extra_config)
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
-        worker = KVPoolWorker(config, use_layerwise=use_layerwise)
+        worker = create_kv_pool_worker(config, use_layerwise=use_layerwise)
         return worker
 
     def setUp(self):
@@ -1313,10 +1698,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         kwargs["invalid_block_ids"].add(7)
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
 
-    def test_wait_for_save_submits_batch_without_joining_queue(self):
+    def test_wait_for_save_submits_batch_and_joins_queue(self):
         worker = self._make_worker()
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
-
         worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
         worker.kv_send_thread.request_queue = MagicMock()
         save_batch = MagicMock()
@@ -1334,13 +1717,15 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
         with patch(f"{module}.torch.npu", create=True):
             worker.wait_for_save(meta)
+        worker.kv_send_thread.raise_if_failed.assert_called_once_with()
         worker.kv_send_thread.add_save_batch.assert_called_once_with([req])
-        worker.kv_send_thread.request_queue.join.assert_not_called()
+        worker.kv_send_thread.request_queue.join.assert_called_once_with()
         self.assertIs(worker._previous_save_batch, save_batch)
 
     def test_wait_for_save_skip_non_save(self):
         worker = self._make_worker()
-        worker.kv_send_thread = MagicMock()
+        worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        worker.kv_send_thread.request_queue = MagicMock()
 
         req = ReqMeta(
             req_id="r1",
@@ -1352,33 +1737,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
         worker.wait_for_save(meta)
-        worker.kv_send_thread.add_stored_request.assert_not_called()
-        worker.kv_send_thread.request_queue.join.assert_not_called()
-
-    def test_handle_released_saves_noop_without_send_thread(self):
-        worker = self._make_worker()
-        worker.kv_send_thread = None
-        worker.handle_released_saves({"r1"})
-
-    def test_handle_released_saves_drains_only_released_requests(self):
-        worker = self._make_worker()
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
-
-        worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
-        released = {"r1", "r2"}
-        worker.handle_released_saves(released)
         worker.kv_send_thread.raise_if_failed.assert_called_once_with()
-        worker.kv_send_thread.wait_for_requests_saved.assert_called_once_with(released)
-
-    def test_handle_released_saves_skips_layerwise_thread(self):
-        worker = self._make_worker()
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreLayerSendingThread
-
-        # A spec'd layerwise-thread mock has no wait_for_requests_saved member,
-        # so a wrong dispatch would raise AttributeError here.
-        worker.kv_send_thread = MagicMock(spec=KVCacheStoreLayerSendingThread)
-        worker.handle_released_saves({"r1"})
-        worker.kv_send_thread.raise_if_failed.assert_called_once_with()
+        worker.kv_send_thread.add_save_batch.assert_not_called()
+        worker.kv_send_thread.request_queue.join.assert_called_once_with()
 
     def test_get_finished_producer_clears_synchronous_completions(self):
         worker = self._make_worker(kv_role="kv_producer")
@@ -1436,7 +1797,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(result, 0)
 
     def test_lookup_layerwise(self):
-        worker = self._make_worker()
+        worker = self._make_worker(use_layerwise=True)
         worker.m_store.exists.return_value = [1, 1, 1, 1]
         for method in (worker.lookup, worker.lookup_scheduler):
             with self.subTest(method=method.__name__):
@@ -1588,7 +1949,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
     """Test process_layer_data and related layerwise methods."""
 
     def _make_worker(self):
-        return make_worker(self)
+        return make_worker(self, use_layerwise=True, extra_config={"backend": "memcache"})
 
     def _make_gva_worker(self, num_groups=1):
         worker = make_worker(self, extra_config={"backend": "memcache"}, use_layerwise=True)
@@ -1611,7 +1972,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             # config, so without this the overridden groups would share the
             # legacy single-group key format and collide, which the store
             # never sees in production.
-            worker.layerwise_keys = worker.layerwise_protocol.bind_layerwise_keys(
+            worker.layerwise_keys = worker.layerwise_backend.bind_layerwise_keys(
                 vllm_config=worker.vllm_config,
                 kv_cache_config=worker.kv_cache_config,
                 model_name=worker.model_name,
@@ -1619,6 +1980,9 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 grouped_block_size=worker.grouped_block_size,
             )
         worker.m_store = MagicMock()
+        # Default save-path exists behavior: every key is missing from the
+        # pool, so all candidate blocks are allocated and transferred.
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
         return worker
 
     @staticmethod
@@ -1702,7 +2066,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                     worker.m_store.batch_add_lease.side_effect = lambda keys, ttl: [0] * len(keys)
 
                     save = self._make_gva_request(num_groups=3, can_save=True)
-                    worker._alloc_gvas_for_save([save])
+                    worker._data_plane._alloc_gvas_for_save([save])
                     self.assertEqual(save.save_keys, expected_keys)
                     self.assertEqual(
                         [key for call in worker.m_store.batch_alloc.call_args_list for key in call.args[0]],
@@ -1715,7 +2079,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                     )
 
                     load = self._make_gva_request(num_groups=3, load_spec=LoadSpec(0, 16, True))
-                    worker._prepare_load_gvas([load])
+                    worker._data_plane._prepare_load_gvas([load])
                     self.assertEqual(load.load_keys, expected_keys)
                     self.assertEqual(
                         [key for call in worker.m_store.batch_add_lease.call_args_list for key in call.args[0]],
@@ -1741,7 +2105,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertIs(worker.external_slot_release_waiter, waiter)
 
     def test_set_external_slot_release_waiter_updates_running_recv_thread(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
             KVCacheStoreLayerRecvingThread,
         )
 
@@ -1762,6 +2126,46 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             self.assertEqual(layer_tasks, [])
         for layer_tasks in worker.layer_load_tasks:
             self.assertEqual(layer_tasks, [])
+
+    def test_layerwise_prefetch_window_advances_with_model_layer(self):
+        """load(L) is submitted at model layer max(0, L - P), for every shard.
+
+        A rank owns only part of the layers under KVPP. A window counted in
+        local submissions skips the layers a rank does not own, so a rank that
+        owns a late shard requests its whole partition during the first model
+        layers: the transfer then runs at the front of the forward and competes
+        with compute instead of overlapping the P layers before its consumer.
+        """
+        prefetch = 2
+        for owned in ([0, 1, 2, 3, 4, 5, 6, 7], [5, 6, 7], [0, 1, 2]):
+            with self.subTest(owned=owned):
+                worker = make_worker(self, use_layerwise=True)
+                worker.num_layers = 8
+                worker.num_prefetch_layers = prefetch
+                worker.current_layer = 0
+                worker.next_layer_to_submit = 0
+                worker.prefetch_layer_map = {}
+                worker.layer_load_tasks = [[object()] if layer in owned else [] for layer in range(8)]
+                recv_thread = MagicMock()
+                worker.kv_recv_thread = recv_thread
+
+                submitted_at: dict[int, int] = {}
+                for model_layer in range(8):
+                    worker.current_layer = model_layer
+                    first_new = recv_thread.add_request.call_count
+                    worker._submit_ready_layer_loads()
+                    for call_index in range(first_new, recv_thread.add_request.call_count):
+                        task = recv_thread.add_request.call_args_list[call_index].args[0]
+                        self.assertNotIn(task.layer_id, submitted_at, "layer submitted twice")
+                        submitted_at[task.layer_id] = model_layer
+
+                self.assertEqual(set(submitted_at), set(owned))
+                for layer_id in owned:
+                    self.assertEqual(
+                        submitted_at[layer_id],
+                        max(0, layer_id - prefetch),
+                        f"layer {layer_id} submitted at the wrong model layer",
+                    )
 
     def test_empty_layerwise_step_reowns_task_lists(self):
         worker = self._make_worker()
@@ -1790,7 +2194,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
         worker.prepare_layerwise_step(AscendConnectorMetadata(set(), set()))
 
-        worker._wait_for_final_layer_save.assert_called_once_with(worker.num_layers, worker.kv_send_thread)
+        worker._wait_for_final_layer_save.assert_called_once_with(worker.num_layers)
         self.assertFalse(worker._pending_last_save_drain)
 
     def test_bound_layerwise_state_survives_deferred_start_and_mtp(self):
@@ -1833,6 +2237,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         connector.use_layerwise = True
         connector.kv_role = "kv_producer"
         connector.consumer_is_to_put = False
+        connector.can_put = True
         connector.connector_worker = worker
         connector._mamba_state = None
 
@@ -1871,8 +2276,8 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker = self._make_worker()
         worker.num_layers = 0
         call_order = []
-        worker._prepare_load_gvas = MagicMock(side_effect=lambda requests: call_order.append("load"))
-        worker._alloc_gvas_for_save = MagicMock(side_effect=lambda requests: call_order.append("save"))
+        worker._data_plane._prepare_load_gvas = MagicMock(side_effect=lambda requests: call_order.append("load"))
+        worker._data_plane._alloc_gvas_for_save = MagicMock(side_effect=lambda requests: call_order.append("save"))
         worker._build_shared_save_data = MagicMock()
         worker._build_shared_load_data = MagicMock()
 
@@ -1892,8 +2297,8 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker._process_load_for_layer_batch = MagicMock(
             side_effect=lambda _requests, layer_id, *_args: worker.layer_load_tasks[layer_id].append(load_marker)
         )
-        worker._prepare_load_gvas = MagicMock()
-        worker._alloc_gvas_for_save = MagicMock()
+        worker._data_plane._prepare_load_gvas = MagicMock()
+        worker._data_plane._alloc_gvas_for_save = MagicMock()
         worker._build_shared_save_data = MagicMock()
         worker._build_shared_load_data = MagicMock()
 
@@ -1908,7 +2313,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             self.assertEqual(worker.layer_load_tasks[layer_id], [load_marker])
 
     def test_build_shared_save_data_marks_last_actual_task(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
             KVCacheStoreLayerSendingThread,
         )
 
@@ -1954,6 +2359,31 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker._process_save_for_layer_batch([req], 0)
         self.assertEqual(len(worker.layer_save_tasks[0]), 0)
 
+    def test_masked_block_runs_cached_across_layers(self):
+        worker = self._make_worker()
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=48,
+            block_ids=[0, 1, 2],
+            block_hashes=["h0", "h1", "h2"],
+            can_save=True,
+            save_start_token=0,
+            save_end_token=48,
+        )
+        req.store_masks = ([True, False, True],)
+
+        worker._process_save_for_layer_batch([req], 0)
+        worker._process_save_for_layer_batch([req], 1)
+
+        expected_runs = [(0, 1), (2, 3)]
+        for layer in (0, 1):
+            runs = [(r.start_block, r.end_block) for r in worker.layer_save_tasks[layer][0].block_ranges]
+            self.assertEqual(runs, expected_runs)
+        self.assertEqual(len(worker._masked_runs_cache), 1)
+
+        worker.process_layer_data([])
+        self.assertEqual(worker._masked_runs_cache, {})
+
     def test_process_load_for_layer_batch_skips(self):
         for load_spec in (None, LoadSpec(0, 0, can_load=False, token_len=0)):
             with self.subTest(load_spec=load_spec):
@@ -1971,7 +2401,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
     def test_reused_layer_loads_full_cached_prefix(self):
         worker = self._make_worker()
         worker.layerwise_offload = True
-        worker.independent_layers = [0]
+        worker._reused_layers_by_group = {0: {1}}
         request = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
@@ -1992,6 +2422,134 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         reused_range = worker.layer_load_tasks[1][0].block_ranges[0]
         self.assertEqual((independent_range.start_block, independent_range.end_block), (1, 2))
         self.assertEqual((reused_range.start_block, reused_range.end_block), (0, 2))
+
+    def test_shared_load_data_preserves_layer_specific_blocks(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
+            KVCacheStoreLayerRecvingThread,
+            LayerBatchBuilder,
+        )
+
+        for case in ("prefix", "partial", "request", "group", "empty"):
+            with self.subTest(case=case):
+                worker = self._make_worker()
+                worker.layerwise_offload = True
+                worker.num_layers = 3
+                worker.num_kv_cache_groups = 2
+                request = ReqMeta(
+                    req_id="r1",
+                    token_len_chunk=32,
+                    block_ids=[10, 11],
+                    block_ids_np=np.asarray([10, 11]),
+                    load_block_gvas_np=np.asarray([100, 200]),
+                )
+                request.partial_load_gva_per_group = [300, 400]
+                other_request = ReqMeta(
+                    req_id="r2",
+                    token_len_chunk=32,
+                    block_ids=[20, 21],
+                    block_ids_np=np.asarray([20, 21]),
+                    load_block_gvas_np=np.asarray([500, 600]),
+                )
+                # Start with the wider selection so subsequent builder calls
+                # reuse scratch storage rather than allocate larger arrays.
+                first = LayerTransferTask(0, [LayerBlockRange(request, 0, 2)])
+                selected_request = other_request if case == "request" else request
+                second = LayerTransferTask(
+                    1,
+                    [LayerBlockRange(selected_request, 1 if case == "prefix" else 0, 2)],
+                    group_id=1 if case == "group" else 0,
+                )
+                if case == "partial":
+                    first.block_ranges[0].end_block = 1
+                    second.block_ranges[0].end_block = 1
+                    second.block_ranges[0].partial_block_index = 1
+                if case == "empty":
+                    first.block_ranges = []
+                third = LayerTransferTask(
+                    2,
+                    [
+                        LayerBlockRange(r.request, r.start_block, r.end_block, r.partial_block_index)
+                        for r in second.block_ranges
+                    ],
+                    group_id=second.group_id,
+                )
+                worker.layer_load_tasks = [[first], [second], [third]]
+                database = SimpleNamespace(
+                    group_block_len={0: [8, 8, 8], 1: [8, 8, 8]},
+                    group_kv_caches_base_addr={0: [1000, 2000, 3000], 1: [4000, 5000, 6000]},
+                    group_block_stride={},
+                    group_layer_cache_entry_offsets={},
+                )
+                receiver = object.__new__(KVCacheStoreLayerRecvingThread)
+                receiver.group_builders = {
+                    group: LayerBatchBuilder(database, page_size_bytes=24, num_layers=3, group_id=group)
+                    for group in range(2)
+                }
+                receiver.build_shared_data = MagicMock(wraps=receiver.build_shared_data)
+                worker.kv_recv_thread = receiver
+
+                worker._build_shared_load_data()
+
+                expected_ids = [11] if case == "prefix" else [20, 21] if case == "request" else [10, 11]
+                expected_gvas = [200] if case == "prefix" else [500, 600] if case == "request" else [100, 200]
+                if case == "partial":
+                    expected_gvas = [100, 300]
+                np.testing.assert_array_equal(second.shared_block_data.block_ids_arr, expected_ids)
+                np.testing.assert_array_equal(second.shared_block_data.block_gvas_arr, expected_gvas)
+                self.assertIs(second.shared_block_data, third.shared_block_data)
+                self.assertEqual(receiver.build_shared_data.call_count, 2)
+                if case == "empty":
+                    self.assertIsNone(first.shared_block_data)
+                else:
+                    self.assertIsNot(first.shared_block_data, second.shared_block_data)
+                    np.testing.assert_array_equal(
+                        first.shared_block_data.block_ids_arr, [10] if case == "partial" else [10, 11]
+                    )
+                    np.testing.assert_array_equal(
+                        first.shared_block_data.block_gvas_arr, [100] if case == "partial" else [100, 200]
+                    )
+
+    def test_shared_load_data_without_reuse_keeps_single_build_per_group(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
+            KVCacheStoreLayerRecvingThread,
+        )
+
+        for has_shared_data in (False, True):
+            with self.subTest(has_shared_data=has_shared_data):
+                worker = self._make_worker()
+                worker.layerwise_offload = False
+                worker.num_layers = 2
+                worker.num_kv_cache_groups = 3
+                worker.layer_load_tasks = [
+                    [LayerTransferTask(layer, [], group_id=group) for group in range(2)] for layer in range(2)
+                ]
+                shared = [
+                    SharedBlockData(
+                        block_ids_arr=np.asarray([group]),
+                        block_gvas_arr=np.asarray([100 + group]),
+                        req_ids=["r1"],
+                        is_last_chunks=[True],
+                    )
+                    for group in range(2)
+                ]
+                original_ids = [data.block_ids_arr for data in shared]
+                original_gvas = [data.block_gvas_arr for data in shared]
+                receiver = object.__new__(KVCacheStoreLayerRecvingThread)
+                receiver.build_shared_data = MagicMock(side_effect=shared if has_shared_data else [None, None])
+                worker.kv_recv_thread = receiver
+
+                worker._build_shared_load_data()
+
+                self.assertEqual(receiver.build_shared_data.call_count, 2)
+                for layer in range(2):
+                    for group in range(2):
+                        self.assertIs(
+                            worker.layer_load_tasks[layer][group].shared_block_data,
+                            shared[group] if has_shared_data else None,
+                        )
+                for group in range(2):
+                    self.assertIs(shared[group].block_ids_arr, original_ids[group])
+                    self.assertIs(shared[group].block_gvas_arr, original_gvas[group])
 
     def test_mtp_load_uses_safe_extent_not_store_skip_extent(self):
         worker = self._make_worker()
@@ -2037,10 +2595,98 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             ),
         )
 
-        worker._prepare_load_gvas([request])
+        worker._data_plane._prepare_load_gvas([request])
 
         queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
         self.assertEqual(len(queried_keys), 1)
+
+    def test_save_range_clamps_to_allocated_blocks(self):
+        for offload in (False, True):
+            for start_token in (768, 12288):
+                with self.subTest(offload=offload, start_token=start_token):
+                    worker = self._make_gva_worker()
+                    worker.layerwise_offload = offload
+                    worker.hash_block_size = 768
+                    worker.grouped_block_size = [768]
+                    worker.m_store.batch_alloc.side_effect = lambda keys, *args: [201] * len(keys)
+                    request = ReqMeta(
+                        req_id="save-clamp",
+                        token_len_chunk=6144,
+                        target_token_len=12672,
+                        save_start_token=start_token,
+                        save_end_token=12288,
+                        can_save=True,
+                        block_ids=list(range(1, 9)),
+                        block_ids_by_group=[list(range(1, 9))],
+                        block_ids_by_group_np=[np.arange(1, 9, dtype=np.int64)],
+                        block_hashes=[b"h" + bytes([i]) for i in range(16)],
+                        partial_block_index=16,
+                    )
+                    worker._data_plane._alloc_gvas_for_save([request])
+                    worker._process_save_for_layer_batch([request], 0)
+                    if start_token == 12288:
+                        worker.m_store.batch_alloc.assert_not_called()
+                        self.assertEqual(worker.layer_save_tasks[0], [])
+                    else:
+                        self.assertEqual(len(worker.m_store.batch_alloc.call_args.args[0]), 7)
+                        ranges = worker.layer_save_tasks[0][0].block_ranges
+                        self.assertEqual([(r.start_block, r.end_block) for r in ranges], [(1, 8)])
+                        self.assertTrue(all(r.partial_block_index is None for r in ranges))
+                        self.assertEqual(request.block_gvas_by_group_np[0].shape, (8,))
+                        database = SimpleNamespace(
+                            group_block_len={0: [64]},
+                            group_kv_caches_base_addr={0: [1024]},
+                            group_block_stride={0: [64]},
+                            group_layer_cache_entry_offsets={0: [0, 1]},
+                        )
+                        builder = LayerBatchBuilder(database, page_size_bytes=64, num_layers=1)
+                        task = worker.layer_save_tasks[0][0]
+                        actual_ids, _ = builder._require_request_arrays(task.block_ranges[0], is_save=True)
+                        self.assertIs(actual_ids, request.block_ids_by_group_np[0])
+                        shared = builder.build_shared(task, is_save=True)
+                        self.assertEqual(shared.block_ids_arr.tolist(), list(range(2, 9)))
+                    self.assertEqual(request.partial_save_gva_per_group, [0])
+
+    def test_oversized_load_plan_fails_only_affected_request(self):
+        worker = self._make_gva_worker()
+        worker.layerwise_offload = False
+        worker.hash_block_size = 768
+        worker.grouped_block_size = [768]
+        bad = ReqMeta(
+            req_id="stale-plan",
+            token_len_chunk=5376,
+            target_token_len=19000,
+            block_ids=list(range(1, 9)),
+            block_ids_by_group=[list(range(1, 9))],
+            block_ids_by_group_np=[np.arange(1, 9, dtype=np.int64)],
+            block_hashes=[b"h" + bytes([i]) for i in range(25)],
+            load_spec=LoadSpec(768, 12288, True),
+        )
+        worker._data_plane._prepare_load_gvas([bad])
+        self.assertFalse(bad.load_spec.can_load)
+        self.assertFalse(bad.can_save)
+        self.assertEqual(worker.get_block_ids_with_load_errors(), set(range(1, 9)))
+        worker.m_store.batch_get_key_info.assert_not_called()
+        worker._process_load_for_layer_batch([bad], 0)
+        self.assertEqual(worker.layer_load_tasks[0], [])
+
+        good = ReqMeta(
+            req_id="healthy",
+            token_len_chunk=768,
+            target_token_len=768,
+            block_ids=[777],
+            block_ids_by_group=[[777]],
+            block_ids_by_group_np=[np.asarray([777], dtype=np.int64)],
+            block_hashes=[b"healthy"],
+            load_spec=LoadSpec(0, 768, True),
+        )
+        info = SimpleNamespace(size=lambda: 64, gva_list=lambda: [201])
+        worker.m_store.batch_get_key_info.return_value = [info]
+        worker.m_store.batch_add_lease.return_value = [0]
+        worker._data_plane._prepare_load_gvas([good])
+        self.assertTrue(good.load_spec.can_load)
+        self.assertEqual(good.load_block_gvas_by_group_np[0].tolist(), [201])
+        self.assertNotIn(777, worker.get_block_ids_with_load_errors())
 
     def test_layerwise_load_uses_resident_gva_queried_under_lease(self):
         worker = self._make_gva_worker()
@@ -2050,11 +2696,139 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.m_store.batch_add_lease.return_value = [0]
         request = self._make_gva_request(load_spec=LoadSpec(0, 16, True))
 
-        worker._prepare_load_gvas([request])
+        worker._data_plane._prepare_load_gvas([request])
 
         self.assertIn(301, request.load_block_gvas_by_group_np[0])
         self.assertNotIn(201, request.load_block_gvas_by_group_np[0])
         self.assertEqual(worker.get_block_ids_with_load_errors(), set())
+
+    @staticmethod
+    def _make_multi_block_gva_request(block_hashes):
+        block_ids = list(range(7, 7 + len(block_hashes)))
+        return ReqMeta(
+            req_id="indexed-load",
+            token_len_chunk=16 * len(block_hashes),
+            target_token_len=16 * len(block_hashes),
+            block_ids=block_ids,
+            block_ids_by_group=[block_ids],
+            block_ids_np=np.asarray(block_ids, dtype=np.int64),
+            block_ids_by_group_np=[np.asarray(block_ids, dtype=np.int64)],
+            block_hashes=block_hashes,
+            load_spec=LoadSpec(0, 16 * len(block_hashes), True),
+        )
+
+    def test_layerwise_lease_refresh_refreshes_all_duplicate_key_indices(self):
+        worker = self._make_gva_worker()
+        request = self._make_multi_block_gva_request(["h0", "h1", "h0"])
+        before = [SimpleNamespace(size=lambda: 64, gva_list=lambda gva=gva: [gva]) for gva in (201, 202, 203)]
+        pinned = [SimpleNamespace(gva_list=lambda gva=gva: [gva]) for gva in (301, 302, 303)]
+        worker.m_store.batch_get_key_info.side_effect = [before, pinned]
+        worker.m_store.batch_add_lease.return_value = [0, 0]
+
+        self.assertIsNone(worker._data_plane._prepare_load_gvas_for_request([request]))
+
+        # Every occurrence must use the pinned GVA, never the pre-lease address.
+        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [303, 302, 303])
+        queried = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
+        self.assertEqual(queried[0], queried[2])
+        self.assertEqual(worker.m_store.batch_add_lease.call_args.args[0], queried[:2])
+        self.assertEqual(request.load_keys, queried)
+        self.assertEqual(worker._step_load_keys, set(queried))
+
+    def test_layerwise_lease_refresh_has_linear_key_lookup_work(self):
+        operations = {"eq": 0, "hash": 0}
+
+        class CountedKey(str):
+            def __eq__(self, other: object) -> bool:
+                operations["eq"] += 1
+                return str.__eq__(self, other)
+
+            def __hash__(self) -> int:
+                operations["hash"] += 1
+                return str.__hash__(self)
+
+        count = 128
+        worker = self._make_gva_worker()
+        request = self._make_multi_block_gva_request([f"h{index}" for index in range(count)])
+        worker._make_layerwise_full_key = lambda group, block_hash: CountedKey(f"full@{group}@{block_hash}")
+        before = [SimpleNamespace(size=lambda: 64, gva_list=lambda gva=gva: [gva]) for gva in range(1000, 1000 + count)]
+        refreshed = [SimpleNamespace(gva_list=lambda gva=gva: [gva]) for gva in range(2000, 2000 + count)]
+        worker.m_store.batch_get_key_info.side_effect = [before, refreshed]
+        worker.m_store.batch_add_lease.return_value = [0] * count
+        operations["eq"] = operations["hash"] = 0
+
+        self.assertIsNone(worker._data_plane._prepare_load_gvas_for_request([request]))
+        lookup_work = sum(operations.values())
+
+        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), list(range(2000, 2000 + count)))
+        self.assertEqual(request.load_keys, [f"full@0@h{index}" for index in range(count)])
+        self.assertEqual(worker._step_load_keys, set(request.load_keys))
+        self.assertEqual(worker.m_store.batch_get_key_info.call_count, 2)
+        worker.m_store.batch_add_lease.assert_called_once()
+        # Bound key operations rather than elapsed time or implementation details;
+        # a separate linear scan for every refreshed block must fail this guard.
+        self.assertLessEqual(lookup_work, 16 * count)
+
+    def test_layerwise_lease_refresh_keeps_sparse_success_indices(self):
+        worker = self._make_gva_worker()
+        request = self._make_multi_block_gva_request(["h0", "h1", "h2"])
+        before = [SimpleNamespace(size=lambda: 64, gva_list=lambda gva=gva: [gva]) for gva in (201, 202, 203)]
+        pinned = [SimpleNamespace(gva_list=lambda gva=gva: [gva]) for gva in (301, 303)]
+        worker.m_store.batch_get_key_info.side_effect = [before, pinned]
+        worker.m_store.batch_add_lease.return_value = [0, -1, 0]
+
+        self.assertFalse(worker._data_plane._prepare_load_gvas_for_request([request]))
+
+        queried = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
+        refreshed = worker.m_store.batch_get_key_info.call_args_list[1].args[0]
+        self.assertEqual(refreshed, [queried[0], queried[2]])
+        self.assertEqual(worker._step_load_keys, set(refreshed))
+        self.assertIsNone(request.load_block_gvas_by_group_np)
+
+    def test_layerwise_lease_refresh_rejects_malformed_metadata(self):
+        for stage in ("before_lease", "under_lease"):
+            for malformed in (None, [], [SimpleNamespace(gva_list=lambda: [301])]):
+                with self.subTest(stage=stage, malformed=malformed):
+                    worker = self._make_gva_worker()
+                    request = self._make_multi_block_gva_request(["h0", "h1"])
+                    before = [SimpleNamespace(size=lambda: 64, gva_list=lambda: [201])] * 2
+                    worker.m_store.batch_get_key_info.side_effect = (
+                        [malformed] if stage == "before_lease" else [before, malformed]
+                    )
+                    worker.m_store.batch_add_lease.return_value = [0, 0]
+
+                    self.assertFalse(worker._data_plane._prepare_load_gvas_for_request([request]))
+
+                    self.assertIsNone(request.load_block_gvas_by_group_np)
+                    if stage == "before_lease":
+                        worker.m_store.batch_add_lease.assert_not_called()
+                        self.assertEqual(worker._step_load_keys, set())
+                    else:
+                        queried = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
+                        self.assertEqual(worker._step_load_keys, set(queried))
+
+    def test_layerwise_lease_refresh_keeps_partial_retry_index(self):
+        worker = self._make_gva_worker()
+        request = self._make_multi_block_gva_request(["h0", "h1", "unused"])
+        request.block_hashes = ["h0", "h1"]
+        request.target_token_len = 56
+        request.load_spec = LoadSpec(40, 40, True, layerwise_previous_step=True)
+        worker._reused_layers_by_group = {0: {1}}
+        worker._snapshot_keys[request.req_id] = {0: {2: worker._make_layerwise_partial_key(request, 0, 2, 40)}}
+        before = [SimpleNamespace(size=lambda: 64, gva_list=lambda gva=gva: [gva]) for gva in (201, 202, 203)]
+        pinned = [SimpleNamespace(gva_list=lambda gva=gva: [gva]) for gva in (301, 302, 303)]
+        worker.m_store.batch_get_key_info.side_effect = [before, pinned]
+        worker.m_store.batch_add_lease.side_effect = [[0, 0, -3101], [0]]
+
+        with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.gva.time.sleep") as sleep:
+            self.assertIsNone(worker._data_plane._prepare_load_gvas_for_request([request]))
+
+        queried = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
+        self.assertEqual(worker.m_store.batch_add_lease.call_args_list[1].args[0], [queried[2]])
+        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [301, 302, 0])
+        self.assertEqual(request.partial_load_gva_per_group, [303])
+        self.assertEqual(worker._step_load_keys, set(queried))
+        sleep.assert_called_once()
 
     def test_full_pool_hit_uses_verified_extent(self):
         worker = self._make_gva_worker()
@@ -2074,8 +2848,8 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             can_save=True,
         )
 
-        worker._prepare_load_gvas([request])
-        worker._alloc_gvas_for_save([request])
+        worker._data_plane._prepare_load_gvas([request])
+        worker._data_plane._alloc_gvas_for_save([request])
         worker._process_load_for_layer_batch([request], 1)
         worker._process_save_for_layer_batch([request], 1)
 
@@ -2096,7 +2870,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertIsNotNone(_pool_worker)
         worker = make_worker(self, extra_config={"backend": "memcache"}, use_layerwise=True)
         worker.layerwise_offload = True
-        worker.independent_layers = [0]
+        worker._reused_layers_by_group = {0: {1}}
         worker.num_kv_cache_groups = 1
         worker.grouped_block_size = [16]
         worker.kv_cache_group_families = ["default"]
@@ -2105,7 +2879,6 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.hash_block_size = 16
         worker.page_size_bytes = 64
         worker.head_or_tp_rank = 0
-        worker._allocated_gvas = {}
         worker.m_store = MagicMock()
         worker.m_store.batch_alloc.return_value = [101]
 
@@ -2122,7 +2895,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             block_ids_np=np.asarray([0, 1], dtype=np.int64),
             block_ids_by_group_np=[np.asarray([0, 1], dtype=np.int64)],
         )
-        worker._alloc_gvas_for_save([save_request])
+        worker._data_plane._alloc_gvas_for_save([save_request])
         worker._process_save_for_layer_batch([save_request], 1)
 
         self.assertIsNotNone(save_request.save_keys)
@@ -2156,17 +2929,17 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 vllm_cached_tokens=20,
                 kvpool_cached_tokens=20,
                 can_load=True,
+                layerwise_previous_step=True,
             ),
             block_ids_np=np.asarray([0, 1], dtype=np.int64),
             block_ids_by_group_np=[np.asarray([0, 1], dtype=np.int64)],
         )
-        worker._prepare_load_gvas([load_request])
+        worker._data_plane._prepare_load_gvas([load_request])
         worker._process_load_for_layer_batch([load_request], 0)
         worker._process_load_for_layer_batch([load_request], 1)
 
         queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
         self.assertIn(partial_key, queried_keys)
-        self.assertNotIn(partial_key, worker._allocated_gvas)
         self.assertEqual(load_request.partial_load_gva_per_group, [202])
         self.assertEqual(worker.layer_load_tasks[0], [])
         block_range = worker.layer_load_tasks[1][0].block_ranges[0]
@@ -2194,9 +2967,9 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             ),
         )
 
-        worker._prepare_load_gvas([request])
+        worker._data_plane._prepare_load_gvas([request])
 
-        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [0])
+        self.assertFalse(request.load_spec.can_load)
         self.assertEqual(request.load_keys, [])
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
 
@@ -2226,15 +2999,18 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 vllm_cached_tokens=20,
                 kvpool_cached_tokens=20,
                 can_load=True,
+                layerwise_previous_step=True,
             ),
             block_ids_np=np.asarray([7, 8], dtype=np.int64),
             block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
         )
 
-        with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.time.sleep") as sleep:
-            worker._prepare_load_gvas([request])
-
         partial_key = worker._make_layerwise_partial_key(request, 0, 1, 20)
+        worker._reused_layers_by_group = {0: {1}}
+        worker._snapshot_keys[request.req_id] = {0: {1: partial_key}}
+        with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.gva.time.sleep") as sleep:
+            worker._data_plane._prepare_load_gvas([request])
+
         self.assertEqual(
             worker.m_store.batch_add_lease.call_args_list[1].args[0],
             [partial_key],
@@ -2244,7 +3020,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual(request.partial_load_gva_per_group, [202])
         self.assertEqual(worker.get_block_ids_with_load_errors(), set())
 
-    def test_multi_group_load_failure_stops_before_forward(self):
+    def test_multi_group_load_failure_reports_request_and_releases_leases(self):
         worker = self._make_gva_worker(2)
         valid_info = MagicMock()
         valid_info.size.return_value = 64
@@ -2267,14 +3043,26 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             ),
         )
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "multi-group KV load failed",
-        ):
-            worker._prepare_load_gvas([request])
-
+        worker._data_plane._prepare_load_gvas([request])
+        self.assertFalse(request.load_spec.can_load)
+        self.assertFalse(request.can_save)
+        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
+        self.assertEqual(worker.get_failed_requests(), {request.req_id})
+        self.assertEqual(worker.get_failed_requests(), set())
         group0_key = worker._make_layerwise_full_key(0, "h0")
+        self.assertIn(group0_key, worker._step_load_keys)
+        worker.kv_recv_thread = MagicMock()
+        with patch.object(worker, "_drain_attention_transfers") as drain:
+
+            def release(keys):
+                drain.assert_called_once_with(full=True)
+                return -1
+
+            worker.m_store.batch_remove_lease.side_effect = release
+            worker.get_finished(set(), AscendConnectorMetadata(set()))
+            worker.get_finished(set(), AscendConnectorMetadata(set()))
         worker.m_store.batch_remove_lease.assert_called_once_with([group0_key])
+        worker.m_store.batch_write_finish.assert_not_called()
 
     def test_worker_physical_layer_index_supports_mtp_layers_namespace(self):
         worker = self._make_worker()
@@ -2286,35 +3074,164 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             worker.num_layers,
         )
 
-    def test_evicted_allocated_gva_is_reallocated(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
+    def test_committed_blocks_are_skipped_and_missing_blocks_allocated(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.gva import (
             LAYERWISE_READ_LEASE_TTL_MS,
         )
 
         worker = self._make_gva_worker()
-        key = worker._make_layerwise_full_key(0, "h0")
-        worker._allocated_gvas[key] = 101
-        worker.m_store.batch_is_exist.return_value = [0]
+        fresh_key = worker._make_layerwise_full_key(0, "h0")
+        committed_key = worker._make_layerwise_full_key(0, "h1")
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [0 if key == fresh_key else 1 for key in keys]
         worker.m_store.batch_alloc.return_value = [202]
-        request = self._make_gva_request(can_save=True)
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            save_start_token=0,
+            save_end_token=32,
+            target_token_len=32,
+            num_prompt_tokens=32,
+            block_ids=[7, 8],
+            block_ids_by_group=[[7, 8]],
+            block_hashes=["h0", "h1"],
+            can_save=True,
+            block_ids_np=np.asarray([7, 8], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
+        )
 
-        worker._alloc_gvas_for_save([request])
+        worker._data_plane._alloc_gvas_for_save([request])
 
-        worker.m_store.batch_alloc.assert_called_once_with([key], [64], LAYERWISE_READ_LEASE_TTL_MS)
-        self.assertEqual(worker._allocated_gvas[key], 202)
-        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202])
+        # The committed block is skipped regardless of medium; only the
+        # missing block is allocated fresh within this step and transferred.
+        worker.m_store.batch_alloc.assert_called_once_with([fresh_key], [64], LAYERWISE_READ_LEASE_TTL_MS)
+        self.assertEqual(request.save_keys, [fresh_key])
+        self.assertNotIn(committed_key, request.save_keys)
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202, 0])
 
-    def test_partial_decode_is_saved_and_loaded_for_reused_layer(self):
+    def test_exists_check_failure_fails_open_and_transfers_all(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.gva import (
+            LAYERWISE_READ_LEASE_TTL_MS,
+        )
+
+        worker = self._make_gva_worker()
+        key0 = worker._make_layerwise_full_key(0, "h0")
+        key1 = worker._make_layerwise_full_key(0, "h1")
+        worker.m_store.batch_is_exist.side_effect = RuntimeError("store unreachable")
+        worker.m_store.batch_alloc.return_value = [202, 203]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            save_start_token=0,
+            save_end_token=32,
+            target_token_len=32,
+            num_prompt_tokens=32,
+            block_ids=[7, 8],
+            block_ids_by_group=[[7, 8]],
+            block_hashes=["h0", "h1"],
+            can_save=True,
+            block_ids_np=np.asarray([7, 8], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
+        )
+
+        worker._data_plane._alloc_gvas_for_save([request])
+
+        # Fail open: an unreadable pool costs bandwidth, never the blocks.
+        worker.m_store.batch_alloc.assert_called_once_with([key0, key1], [64, 64], LAYERWISE_READ_LEASE_TTL_MS)
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202, 203])
+
+    def test_allocation_sentinels_are_filtered_before_int64_conversion(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.gva import MEMCACHE_SSD_HIT_GVA
+
+        cases = (
+            ([-3102, 0], [0, 0], True),
+            ([202, 0], [202, 0], True),
+            ([0, MEMCACHE_SSD_HIT_GVA], [0, 0], True),
+            ([MEMCACHE_SSD_HIT_GVA, MEMCACHE_SSD_HIT_GVA], [0, 0], False),
+            ([202, MEMCACHE_SSD_HIT_GVA], [202, 0], False),
+            ([MEMCACHE_SSD_HIT_GVA, 203], [0, 203], False),
+        )
+        for gvas, expected, has_failure in cases:
+            with self.subTest(gvas=gvas):
+                worker = self._make_gva_worker()
+                worker.m_store.batch_alloc.return_value = gvas
+                request = ReqMeta(
+                    req_id="r1",
+                    token_len_chunk=32,
+                    save_start_token=0,
+                    save_end_token=32,
+                    target_token_len=32,
+                    num_prompt_tokens=32,
+                    block_ids=[7, 8],
+                    block_ids_by_group=[[7, 8]],
+                    block_hashes=["h0", "h1"],
+                    can_save=True,
+                    block_ids_np=np.asarray([7, 8], dtype=np.int64),
+                    block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
+                )
+
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.gva.logger"
+                ) as logger:
+                    worker._data_plane._alloc_gvas_for_save([request])
+
+                if has_failure:
+                    worker.m_store.batch_write_finish.assert_not_called()
+                    self.assertFalse(request.can_save)
+                    self.assertEqual(worker.get_block_ids_with_load_errors(), {7, 8})
+                    continue
+                self.assertEqual(request.block_gvas_by_group_np[0].dtype, np.dtype(np.int64))
+                self.assertEqual(request.block_gvas_by_group_np[0].tolist(), expected)
+                expected_keys = [
+                    worker._make_layerwise_full_key(0, f"h{index}") for index, gva in enumerate(expected) if gva
+                ]
+                self.assertEqual(request.save_keys, expected_keys)
+                self.assertEqual(logger.error.called, has_failure)
+
+    def test_partial_allocation_sentinels_are_filtered(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.gva import MEMCACHE_SSD_HIT_GVA
+
+        for gva in (-3102, 0, MEMCACHE_SSD_HIT_GVA):
+            with self.subTest(gva=gva):
+                worker = self._make_gva_worker()
+                worker.m_store.batch_alloc.return_value = [gva]
+                request = ReqMeta(
+                    req_id="r1",
+                    token_len_chunk=16,
+                    save_start_token=16,
+                    save_end_token=16,
+                    target_token_len=20,
+                    num_prompt_tokens=32,
+                    block_ids=[0, 1],
+                    block_ids_by_group=[[0, 1]],
+                    block_hashes=["h0"],
+                    can_save=True,
+                    block_ids_np=np.asarray([0, 1], dtype=np.int64),
+                    block_ids_by_group_np=[np.asarray([0, 1], dtype=np.int64)],
+                )
+
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.gva.logger"
+                ) as logger:
+                    worker._data_plane._alloc_gvas_for_save([request])
+
+                if gva <= 0:
+                    self.assertFalse(request.can_save)
+                    self.assertEqual(worker.get_block_ids_with_load_errors(), {1})
+                self.assertEqual(request.partial_save_gva_per_group, [0])
+                self.assertEqual(logger.error.called, gva <= 0)
+                self.assertEqual(request.save_keys, [])
+
+    def test_partial_prefill_tail_is_selected_for_reused_layer(self):
         worker = self._make_worker()
         worker.layerwise_offload = True
-        worker.independent_layers = [0]
+        worker._reused_layers_by_group = {0: {1}}
         request = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
             save_start_token=32,
             save_end_token=32,
             target_token_len=34,
-            num_prompt_tokens=32,
+            num_prompt_tokens=48,
             block_ids=[0, 1, 2],
             block_hashes=["h0", "h1"],
             can_save=True,
@@ -2322,6 +3239,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 vllm_cached_tokens=33,
                 kvpool_cached_tokens=33,
                 can_load=True,
+                layerwise_previous_step=True,
             ),
             partial_save_gva_per_group=[301],
             partial_load_gva_per_group=[302],
@@ -2360,6 +3278,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         config.parallel_config.data_parallel_rank = 0
         config.parallel_config.rank = 0
         config.parallel_config.pipeline_parallel_size = 1
+        config.parallel_config.prefill_context_parallel_size = 1
         config.kv_transfer_config.kv_role = kv_role
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {"backend": "mooncake"}
         config.cache_config.block_size = 16
@@ -2415,9 +3334,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                 kv_role=kv_role, extra_config=extra_config, num_kv_heads=num_kv_heads, use_sparse=use_sparse
             )
             cfg.model_config.use_mla = use_mla
-            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
-            return KVPoolWorker(cfg, use_layerwise=use_layerwise)
+            return create_kv_pool_worker(cfg, use_layerwise=use_layerwise)
         finally:
             for p in patches:
                 p.stop()
@@ -2537,7 +3454,8 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         fake_cache.shape = [100, 16, 4, 64]
         fake_cache.__getitem__.return_value.numel.return_value = 16 * 4 * 64
         fake_cache.element_size.return_value = 2
-        fake_cache.stride.return_value = 16 * 4 * 64
+        strides = (16 * 4 * 64, 4 * 64, 64, 1)
+        fake_cache.stride.side_effect = lambda dim=None: strides if dim is None else strides[dim]
         fake_cache.data_ptr.return_value = 10000
         fake_cache.untyped_storage.return_value.data_ptr.return_value = 10000
         worker._transfer_threads_started = True
@@ -2605,38 +3523,59 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         self.assertTrue(keys[0].endswith(f"@{b'h1'.hex()}"))
 
     def test_tp_mismatch_pcp_write_ownership(self):
-        for pcp_size in (1, 2, 4):
+        for pcp_size, saved_offset in product((1, 2, 4), (0, 4)):
             for tp_rank in (0, 1):
-                with self.subTest(pcp_size=pcp_size, tp_rank=tp_rank):
+                with self.subTest(pcp_size=pcp_size, tp_rank=tp_rank, saved_offset=saved_offset):
                     written = []
                     for pcp_rank in range(pcp_size):
                         worker = self._make_strided_worker(tp_rank=tp_rank)
                         worker.pcp_rank, worker.pcp_size = pcp_rank, pcp_size
                         worker.enable_kv_events = True
-                        worker.kv_send_thread = MagicMock()
-                        worker.kv_send_thread.lookup.side_effect = lambda keys: [False] * len(keys)
+                        send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+                        send_thread.is_live_store_job.return_value = True
+                        send_thread.get_saved_offset.return_value = saved_offset
+                        send_thread.lookup.side_effect = lambda keys: [False] * len(keys)
+                        send_thread.get_event_token_ids.side_effect = lambda req, start, end: req.get_event_token_ids(
+                            start, end
+                        )
+                        worker.kv_send_thread = send_thread
                         worker.m_store = MagicMock()
+                        worker.m_store.put.side_effect = lambda keys, addrs, sizes: [True] * len(keys)
                         req = ReqMeta(
                             req_id="r1",
                             token_len_chunk=8,
                             block_ids=[10, 11],
                             block_hashes=[b"h0", b"h1"],
+                            token_ids=list(range(saved_offset, 8)),
+                            save_start_token=saved_offset,
                             original_block_size=4,
                         )
                         worker._store_kv_tp_mismatch(req)
-                        expected_blocks = [i for i in range(2) if i % pcp_size == pcp_rank]
+                        expected_blocks = [
+                            i for i in range(2) if i % pcp_size == pcp_rank and (i + 1) * 4 > saved_offset
+                        ]
                         if expected_blocks:
                             keys = worker.m_store.put.call_args.args[0]
                             self.assertEqual(len(keys), 2 * len(expected_blocks))
                             written.extend(keys)
                             events = worker.kv_send_thread.update_kv_event.call_args.args[0]
-                            self.assertEqual(len(events), len(req.block_hashes))
+                            self.assertEqual(len(events), len(expected_blocks))
+                            for event, block_idx in zip(events, expected_blocks, strict=True):
+                                self.assertEqual(
+                                    event.block_hashes, [maybe_convert_block_hash(req.block_hashes[block_idx])]
+                                )
+                                self.assertEqual(
+                                    event.parent_block_hash,
+                                    maybe_convert_block_hash(req.block_hashes[block_idx - 1]) if block_idx else None,
+                                )
+                                self.assertEqual(event.token_ids, list(range(block_idx * 4, (block_idx + 1) * 4)))
                         else:
                             worker.m_store.put.assert_not_called()
                             worker.kv_send_thread.update_kv_event.assert_not_called()
-                        worker.kv_send_thread.dec_stored_request.assert_called_once_with("r1")
-                    self.assertEqual(len(written), 4)
-                    self.assertEqual(len(set(written)), 4)
+                        send_thread.finish_store_job.assert_not_called()
+                    expected_key_count = 2 * (2 - saved_offset // 4)
+                    self.assertEqual(len(written), expected_key_count)
+                    self.assertEqual(len(set(written)), expected_key_count)
 
     def test_load_kv_tp_mismatch_calls_backend_get(self):
         worker = self._make_strided_worker()
@@ -2651,23 +3590,25 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
 
     def test_store_kv_tp_mismatch_skips_when_not_stored(self):
         worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
-        worker.kv_send_thread = MagicMock()
-        worker.kv_send_thread.is_stored_request.return_value = False
+        worker.m_store = MagicMock()
+        worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        worker.kv_send_thread.is_live_store_job.return_value = False
         req = ReqMeta(
             req_id="r1", token_len_chunk=4, block_ids_by_group=[[5]], block_hashes=[b"h0"], current_event=None
         )
         worker._store_kv_tp_mismatch(req)
-        worker.kv_send_thread.dec_stored_request.assert_not_called()
+        worker.m_store.put.assert_not_called()
 
-    def test_store_kv_tp_mismatch_decrements_on_success_and_error(self):
+    def test_store_kv_tp_mismatch_leaves_lifecycle_to_sending_thread(self):
         for put_error in (None, RuntimeError("put failed")):
             with self.subTest(put_error=put_error):
                 worker = self._make_strided_worker()
                 worker.m_store = MagicMock()
                 worker.m_store.put.side_effect = put_error
                 worker.enable_kv_events = False
-                send_thread = MagicMock()
-                send_thread.is_stored_request.return_value = True
+                send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+                send_thread.is_live_store_job.return_value = True
+                send_thread.get_saved_offset.return_value = 0
                 send_thread.lookup.return_value = [False, True]
                 worker.kv_send_thread = send_thread
                 req = ReqMeta(
@@ -2684,7 +3625,66 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                 else:
                     worker._store_kv_tp_mismatch(req)
                     self.assertEqual(len(worker.m_store.put.call_args.args[0]), 1)
-                send_thread.dec_stored_request.assert_called_once_with("r1")
+                send_thread.finish_store_job.assert_not_called()
+
+    def test_store_kv_tp_mismatch_events_follow_missing_blocks(self):
+        worker = self._make_strided_worker()
+        worker.m_store = MagicMock()
+        worker.m_store.put.return_value = [True, True]
+        worker.enable_kv_events = True
+        send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        send_thread.is_live_store_job.return_value = True
+        send_thread.get_saved_offset.return_value = 0
+        # Two sub-keys per block: block 0 exists, block 1 is missing.
+        send_thread.lookup.return_value = [True, True, False, False]
+        send_thread.get_event_token_ids.side_effect = lambda req, start, end: req.get_event_token_ids(start, end)
+        worker.kv_send_thread = send_thread
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=8,
+            block_ids_by_group=[[5, 6]],
+            block_hashes=[b"h0", b"h1"],
+            token_ids=list(range(8)),
+            original_block_size=4,
+            store_job_id=1,
+        )
+
+        worker._store_kv_tp_mismatch(req)
+
+        events = send_thread.update_kv_event.call_args.args[0]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].block_hashes, [maybe_convert_block_hash(b"h1")])
+        self.assertEqual(events[0].parent_block_hash, maybe_convert_block_hash(b"h0"))
+        self.assertEqual(events[0].token_ids, list(range(4, 8)))
+
+    def test_store_kv_tp_mismatch_partial_put_emits_only_complete_blocks(self):
+        worker = self._make_strided_worker()
+        worker.m_store = MagicMock()
+        worker.m_store.put.return_value = [True, False]
+        worker.enable_kv_events = True
+        send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        send_thread.is_live_store_job.return_value = True
+        send_thread.get_saved_offset.return_value = 0
+        # One missing sub-key in each block; only block 0 is repaired.
+        send_thread.lookup.return_value = [False, True, False, True]
+        send_thread.get_event_token_ids.side_effect = lambda req, start, end: req.get_event_token_ids(start, end)
+        worker.kv_send_thread = send_thread
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=8,
+            block_ids_by_group=[[5, 6]],
+            block_hashes=[b"h0", b"h1"],
+            token_ids=list(range(8)),
+            original_block_size=4,
+            store_job_id=1,
+        )
+
+        with self.assertLogs("vllm", level="ERROR"):
+            self.assertFalse(worker._store_kv_tp_mismatch(req))
+
+        events = send_thread.update_kv_event.call_args.args[0]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].block_hashes, [maybe_convert_block_hash(b"h0")])
 
 
 class TestKVPoolWorkerReachableMasks(unittest.TestCase):
@@ -2701,8 +3701,8 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
         worker.hash_block_size = 16
         worker.page_size_bytes = 64
         worker.head_or_tp_rank = 0
-        worker._allocated_gvas = {}
         worker.m_store = MagicMock()
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
         return worker
 
     @staticmethod
@@ -2775,7 +3775,7 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
         worker.m_store.batch_alloc.return_value = [101, 103]
         request = self._make_request(store_masks=([False, True, False, True],))
 
-        worker._alloc_gvas_for_save([request])
+        worker._data_plane._alloc_gvas_for_save([request])
 
         keys = worker.m_store.batch_alloc.call_args.args[0]
         self.assertEqual(keys, ["llama-7b@h1@0", "llama-7b@h3@0"])
@@ -2787,7 +3787,7 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
         worker.m_store.batch_alloc.return_value = [101, 102, 103, 104]
         request = self._make_request()
 
-        worker._alloc_gvas_for_save([request])
+        worker._data_plane._alloc_gvas_for_save([request])
 
         keys = worker.m_store.batch_alloc.call_args.args[0]
         self.assertEqual(len(keys), 4)
@@ -2848,12 +3848,56 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
             ),
         )
 
-        worker._prepare_load_gvas([request])
+        worker._data_plane._prepare_load_gvas([request])
 
         queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
         self.assertEqual(queried_keys, ["llama-7b@h1@0", "llama-7b@h3@0"])
         self.assertEqual(request.load_masks, ([False, True, False, True],))
         self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [0, 201, 0, 201])
+
+    def test_restore_rotating_recurrent_state_from_previous_prefill_chunk(self):
+        for cached_tokens, lookup_keys in (
+            (31, ["private"]),
+            (32, ["public"]),
+            (32, ["public", "private"]),
+        ):
+            with self.subTest(cached_tokens=cached_tokens, lookup_keys=lookup_keys):
+                worker = self._make_worker()
+                worker.num_kv_cache_groups = 2
+                worker.grouped_block_size = [16, 16]
+                worker.group_uses_align_state = [False, True]
+                worker.cacheable_group_ids = {0, 1}
+                worker._reused_layers_by_group = {1: {0}}
+                worker._make_layerwise_full_key = MagicMock(return_value="public")
+                block_ids = [[10, 11], [20, 21]]
+                request = self._make_request(
+                    block_hashes=["h0", "h1"][: cached_tokens // 16],
+                    block_ids_by_group=block_ids,
+                    block_ids_by_group_np=[np.asarray(ids, dtype=np.int64) for ids in block_ids],
+                    load_spec=LoadSpec(cached_tokens, cached_tokens, True, layerwise_previous_step=True),
+                )
+                worker._snapshot_keys[request.req_id] = {1: {1: "private"}}
+                selected_key = lookup_keys[-1]
+                available = {selected_key: SimpleNamespace(size=lambda: 64, gva_list=lambda: [201])}
+                queries: list[list[str]] = []
+
+                def lookup(keys, available=available, queries=queries, **_):
+                    queries.append(list(keys))
+                    return [available.get(key) for key in keys]
+
+                worker.m_store.batch_get_key_info.side_effect = lookup
+                worker.m_store.batch_add_lease.return_value = [0]
+
+                worker._data_plane._prepare_load_gvas([request])
+
+                self.assertTrue(request.load_spec.can_load)
+                self.assertEqual(queries, [[key] for key in [*lookup_keys, selected_key]])
+                self.assertEqual(request.load_keys, [selected_key])
+                self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [])
+                self.assertEqual(
+                    request.load_block_gvas_by_group_np[1].tolist(), [0, 201 if cached_tokens == 32 else 0]
+                )
+                self.assertEqual(request.partial_load_gva_per_group, [0, 201 if cached_tokens == 31 else 0])
 
     def test_process_load_for_layer_batch_respects_load_mask(self):
         worker = self._make_worker()
@@ -2875,6 +3919,90 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
             [(r.start_block, r.end_block, r.partial_block_index) for r in ranges],
             [(1, 2, None), (3, 4, None)],
         )
+
+
+class TestKVPoolWorkerResetStore(unittest.TestCase):
+    def test_joins_send_queue_before_remove_all(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = KVPoolWorker.__new__(KVPoolWorker)
+        order: list[str] = []
+        send_queue = MagicMock()
+        send_queue.join.side_effect = lambda: order.append("join")
+        send_thread = MagicMock()
+        send_thread.request_queue = send_queue
+        worker.kv_send_thread = send_thread
+        worker.m_store = MagicMock()
+        worker.m_store.remove_all.side_effect = lambda: order.append("remove_all")
+
+        worker.reset_store()
+
+        self.assertEqual(order, ["join", "remove_all"])
+
+    def test_remove_all_without_send_thread(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = KVPoolWorker.__new__(KVPoolWorker)
+        worker.kv_send_thread = None
+        worker.m_store = MagicMock()
+
+        worker.reset_store()
+
+        worker.m_store.remove_all.assert_called_once_with()
+
+
+class TestLazyInitGate(unittest.TestCase):
+    """lazy_init must be requested for models that run the packed C8 pool path.
+
+    Compressed models keep the #9771 request. Sparse-indexer models get it
+    only when the packed C8 cache path is active (sparse + fp8/int8
+    cache_dtype, the dtype-derived successor of v0.26's c8_enable_reshape_optim
+    knob): that path plus an eager store setup is the fabric-memory hang, and
+    deferring the store setup to the first put() is the remedy. Sparse models
+    with other cache dtypes keep eager init, since the trigger does not
+    reproduce there (v0.26: c8_enable_reshape_optim off -> no failure).
+    """
+
+    PW = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
+
+    def _run_init_backend(self, use_compress: bool, use_sparse: bool, cache_dtype: str) -> MagicMock:
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = KVPoolWorker.__new__(KVPoolWorker)
+        worker.backend = "mooncake"
+        worker.use_compress = use_compress
+        worker.use_sparse = use_sparse
+        worker.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype=cache_dtype))
+        backend_cls = MagicMock()
+        fake_module = SimpleNamespace(Backend=backend_cls)
+        with (
+            patch(self.PW + ".backend_map", {"mooncake": {"path": "fake_backend", "name": "Backend"}}),
+            patch(self.PW + ".importlib", SimpleNamespace(import_module=lambda _path: fake_module)),
+        ):
+            worker._init_backend(parallel_config=object(), extra_config={})
+        return backend_cls
+
+    def test_dense_model_requests_eager_init(self):
+        backend_cls = self._run_init_backend(use_compress=False, use_sparse=False, cache_dtype="auto")
+        self.assertFalse(backend_cls.call_args.kwargs["lazy_init"])
+
+    def test_compress_model_requests_lazy_init(self):
+        backend_cls = self._run_init_backend(use_compress=True, use_sparse=False, cache_dtype="auto")
+        self.assertTrue(backend_cls.call_args.kwargs["lazy_init"])
+
+    def test_sparse_c8_model_requests_lazy_init(self):
+        backend_cls = self._run_init_backend(use_compress=False, use_sparse=True, cache_dtype="int8")
+        self.assertTrue(backend_cls.call_args.kwargs["lazy_init"])
+
+    def test_sparse_fp8_model_requests_lazy_init(self):
+        backend_cls = self._run_init_backend(use_compress=False, use_sparse=True, cache_dtype="fp8")
+        self.assertTrue(backend_cls.call_args.kwargs["lazy_init"])
+
+    def test_sparse_non_c8_model_keeps_eager_init(self):
+        # Narrow gate: sparse alone (e.g. bf16 KV) does not reproduce the
+        # eager-setup failure, so it must not request the deferral.
+        backend_cls = self._run_init_backend(use_compress=False, use_sparse=True, cache_dtype="auto")
+        self.assertFalse(backend_cls.call_args.kwargs["lazy_init"])
 
 
 if __name__ == "__main__":

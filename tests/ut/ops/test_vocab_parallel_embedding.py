@@ -14,11 +14,15 @@
 # Adapted from vllm/tests/lora/test_layers.py
 
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
+from torch._dynamo.backends.common import aot_autograd
 from vllm.config.vllm import set_current_vllm_config
+from vllm.forward_context import ForwardContext, override_forward_context
 
 from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops.vocab_parallel_embedding import (
@@ -303,96 +307,204 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.assertEqual(layer.num_org_embeddings_per_partition, layer.org_vocab_size_padded)
         self.assertEqual(layer.num_added_embeddings_per_partition, layer.num_added_embeddings)
 
-    def test_pcp_embedding_communication_order(self):
-        layer = self._create_layer()
-        pcp_group = MagicMock(world_size=2, device_group="pcp")
-        tp_group = MagicMock(world_size=2, unique_name="tp")
-        layer.token_exchange_group = pcp_group
-        layer.output_reduce_group = tp_group
-        layer.embedding_tp_capacity = 2
-        layer.params_dtype = torch.float32
+
+def _exchange_embedding(monkeypatch, mode, tp_rank=0, tp_size=1, exchange_rank=0):
+    """Keep real planning, weight loading and lookup; replace only runtime topology."""
+    module = "vllm_ascend.ops.vocab_parallel_embedding"
+    tp_group = SimpleNamespace(rank_in_group=tp_rank, world_size=tp_size, unique_name="tp")
+    exchange_group = SimpleNamespace(rank_in_group=exchange_rank, world_size=2)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=2 if mode is VocabParallelMode.PCP_X_TP else 1),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+    )
+    for name, value in (
+        ("get_tp_group", tp_group),
+        ("get_pcp_group", exchange_group),
+        ("get_embed_tp_group", exchange_group),
+        ("get_current_vllm_config", config),
+        ("get_potential_max_tokens", 8),
+        ("enable_pcp_embedding_lmhead_weight_sharding", mode is VocabParallelMode.PCP_X_TP),
+        ("embedding_tp_enable", mode is VocabParallelMode.FINE_GRAINED),
+        ("lmhead_tp_enable", False),
+    ):
+        monkeypatch.setattr(f"{module}.{name}", lambda value=value: value)
+    layer = AscendVocabParallelEmbedding(8, 2, padding_size=4, prefix="model.embed_tokens")
+    weight = torch.arange(16, dtype=torch.float32).reshape(8, 2) + 1
+    layer.weight_loader(layer.weight, weight)
+    assert layer.parallel_mode is mode
+    return layer, weight
+
+
+@pytest.mark.parametrize(
+    "mode,tp_size",
+    [
+        (VocabParallelMode.PCP_X_TP, 1),
+        (VocabParallelMode.PCP_X_TP, 2),
+        (VocabParallelMode.FINE_GRAINED, 1),
+        # Fine-grained embedding TP composed with standard TP.
+        (VocabParallelMode.FINE_GRAINED, 2),
+    ],
+)
+def test_embedding_exchange_batch_lifecycle(monkeypatch, mode, tp_size):
+    def run_batch(layer, weight, ids, span, tp_rank, rank):
+        padded_ids = torch.zeros(2, span, dtype=torch.long)
+        for peer in range(2):
+            padded_ids[peer, : ids[peer].numel()] = ids[peer]
+        gathered = padded_ids.flatten()
+        expected = weight[gathered]
+        local_contribution = expected * (gathered // layer.num_embeddings_per_partition == layer.tp_rank).unsqueeze(-1)
+        tp_contribution = expected * (gathered // (8 // tp_size) == tp_rank).unsqueeze(-1)
         events = []
 
-        def all_gather(output, input_, *, group):
-            events.append(("pcp_all_gather", group))
-            output.copy_(input_.repeat(2))
+        def all_gather(input_, dim):
+            events.append("gather")
+            assert dim == 0
+            torch.testing.assert_close(input_, padded_ids[rank])
+            return gathered.clone()
 
-        def embedding(_, input_):
-            events.append(("embedding", None))
-            return input_.unsqueeze(-1).expand(-1, layer.embedding_dim).float()
-
-        def reduce_scatter(output, input_, *, group):
-            events.append(("pcp_reduce_scatter", group))
-            output.copy_(input_[: output.shape[0]])
+        def reduce_scatter(input_, dim):
+            events.append("scatter")
+            assert dim == 0
+            torch.testing.assert_close(input_, local_contribution)
+            return tp_contribution.reshape(2, span, 2)[rank].clone()
 
         def all_reduce(output, group_name):
-            events.append(("tp_all_reduce", group_name))
-            return output
+            events.append("reduce")
+            assert group_name == "tp"
+            torch.testing.assert_close(output, tp_contribution.reshape(2, span, 2)[rank, : ids[rank].numel()])
+            return weight[ids[rank]]
 
-        layer.quant_method.embedding = MagicMock(side_effect=embedding)
-        with (
-            patch("vllm_ascend.ops.vocab_parallel_embedding.dist.all_gather_into_tensor", side_effect=all_gather),
-            patch("vllm_ascend.ops.vocab_parallel_embedding.dist.reduce_scatter_tensor", side_effect=reduce_scatter),
-            patch("torch.ops.vllm.all_reduce", side_effect=all_reduce),
-        ):
-            output = layer(torch.tensor([15, 16]))
+        monkeypatch.setattr(layer.token_exchange_group, "all_gather", all_gather, raising=False)
+        monkeypatch.setattr(layer.token_exchange_group, "reduce_scatter", reduce_scatter, raising=False)
+        monkeypatch.setattr(torch.ops.vllm, "all_reduce", all_reduce)
+        output = layer(ids[rank])
+        torch.testing.assert_close(output, weight[ids[rank]])
+        assert events == ["gather", "scatter"] + (["reduce"] if tp_size > 1 else [])
 
-        self.assertEqual(
-            events,
-            [
-                ("pcp_all_gather", "pcp"),
-                ("embedding", None),
-                ("pcp_reduce_scatter", "pcp"),
-                ("tp_all_reduce", "tp"),
-            ],
-        )
-        self.assertEqual(output.shape, (2, self.embedding_dim))
+    # One lifecycle covers fallback, unequal MM rows, graph-padded model input,
+    # shrinking batches and idle ranks. Fine-grained DP must keep fixed capacity.
+    batches = [
+        ([1, 5], [2, 6, 7], None, False, 8),
+        ([1, 5], [2, 6, 7], 3, False, 3),
+        ([1, 5, 0, 0], [2, 6, 7, 0], None, True, 4),
+        ([7], [1, 6], 2, False, 2),
+        ([], [2, 5], 2, False, 2),
+        ([], [], 0, False, 1),
+    ]
+    for tp_rank in range(tp_size):
+        for rank in range(2):
+            layer, weight = _exchange_embedding(monkeypatch, mode, tp_rank, tp_size, rank)
+            for first_ids, second_ids, published_span, in_forward, pcp_span in batches:
+                ids = [torch.tensor(first_ids, dtype=torch.long), torch.tensor(second_ids, dtype=torch.long)]
+                span = pcp_span if mode is VocabParallelMode.PCP_X_TP else 8
+                if published_span is not None:
+                    layer.set_embedding_num_tokens_padded(published_span)
+                with override_forward_context(ForwardContext({}, {}, {}) if in_forward else None):
+                    run_batch(layer, weight, ids, span, tp_rank, rank)
 
-    def test_pcp_embedding_exchanges_local_span_with_static_buffers(self):
-        layer = self._create_layer()
-        layer.token_exchange_group = MagicMock(world_size=2, device_group="pcp")
-        layer.output_reduce_group = None
-        layer.parallel_mode = VocabParallelMode.PCP_X_TP
-        layer.embedding_tp_capacity = 8
-        layer.params_dtype = torch.float32
-        shapes: list[tuple[str, int] | tuple[str, int, int]] = []
-        addresses = []
 
-        def all_gather(output, input_, *, group):
-            shapes.append(("all_gather", input_.shape[0], output.shape[0]))
-            addresses.append((input_.data_ptr(), output.data_ptr()))
-            output.copy_(input_.repeat(2))
+@pytest.mark.parametrize("num_tokens,padded_tokens", [(3, 2), (1, 9)])
+def test_embedding_exchange_rejects_invalid_batch_before_communication(monkeypatch, num_tokens, padded_tokens):
+    layer, _ = _exchange_embedding(monkeypatch, VocabParallelMode.PCP_X_TP)
+    layer.set_embedding_num_tokens_padded(padded_tokens)
+    with (
+        override_forward_context(None),
+        patch.object(layer.token_exchange_group, "all_gather", create=True) as gather,
+        pytest.raises(ValueError, match="must cover .* tokens and fit the static capacity"),
+    ):
+        layer(torch.ones(num_tokens, dtype=torch.long))
+    gather.assert_not_called()
 
-        def embedding(_, input_):
-            shapes.append(("embedding", input_.shape[0]))
-            return input_.unsqueeze(-1).expand(-1, layer.embedding_dim).float()
 
-        def reduce_scatter(output, input_, *, group):
-            shapes.append(("reduce_scatter", input_.shape[0], output.shape[0]))
-            output.copy_(input_[: output.shape[0]])
+def test_embedding_exchange_compilation(monkeypatch):
+    """AOT must keep scratch batch-sized and preserve outputs across calls."""
+    # CPU UTs mock NPU APIs; Dynamo must not query a real accelerator stream.
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
+    layer, weight = _exchange_embedding(monkeypatch, VocabParallelMode.PCP_X_TP)
+    monkeypatch.setattr(layer.token_exchange_group, "all_gather", lambda x, dim: x.repeat(2), raising=False)
+    monkeypatch.setattr(
+        layer.token_exchange_group, "reduce_scatter", lambda x, dim: x[: x.shape[0] // 2].clone(), raising=False
+    )
+    graphs = []
 
-        layer.quant_method.embedding = MagicMock(side_effect=embedding)
-        with (
-            patch("vllm_ascend.ops.vocab_parallel_embedding.dist.all_gather_into_tensor", side_effect=all_gather),
-            patch("vllm_ascend.ops.vocab_parallel_embedding.dist.reduce_scatter_tensor", side_effect=reduce_scatter),
-        ):
-            first = layer(torch.tensor([15, 16]))
-            second = layer(torch.tensor([15]))
+    def compiler(graph, inputs):
+        graphs.append(graph)
+        return graph.forward
 
-        self.assertEqual(first.shape, (2, self.embedding_dim))
-        self.assertEqual(second.shape, (1, self.embedding_dim))
-        self.assertEqual(
-            shapes,
-            [
-                ("all_gather", 2, 4),
-                ("embedding", 4),
-                ("reduce_scatter", 4, 2),
-                ("all_gather", 1, 2),
-                ("embedding", 2),
-                ("reduce_scatter", 2, 1),
-            ],
-        )
-        self.assertEqual(addresses[0], addresses[1])
+    torch._dynamo.reset()
+    compiled = torch.compile(layer.forward, backend=aot_autograd(fw_compiler=compiler), fullgraph=True, dynamic=True)
+    outputs = []
+    with override_forward_context(ForwardContext({}, {}, {})):
+        for ids in [[1, 2], [3], [2, 1, 3, 2], [], [1, 3]]:
+            ids = torch.tensor(ids, dtype=torch.long)
+            output = compiled(ids)
+            outputs.append((output, weight[ids]))
+        for output, expected in outputs:
+            torch.testing.assert_close(output, expected)
+    assert graphs
+    assert all("slice_scatter" not in str(node.target) for graph in graphs for node in graph.graph.nodes)
+    assert not any(name.startswith("_embed_") for name in vars(layer))
+
+
+def _composed_lmhead(monkeypatch, lmtp_rank, lmtp_world, tp_rank, tp_world):
+    """Build an LM head under a composed finegrained x standard-TP topology."""
+    module = "vllm_ascend.ops.vocab_parallel_embedding"
+    lmtp_group = SimpleNamespace(rank_in_group=lmtp_rank, world_size=lmtp_world)
+    tp_group = SimpleNamespace(rank_in_group=tp_rank, world_size=tp_world)
+    for name, value in (
+        ("get_tp_group", tp_group),
+        ("get_lmhead_tp_group", lmtp_group),
+        ("enable_pcp_embedding_lmhead_weight_sharding", False),
+        ("embedding_tp_enable", False),
+        ("lmhead_tp_enable", True),
+    ):
+        monkeypatch.setattr(f"{module}.{name}", lambda value=value: value)
+    return AscendParallelLMHead(
+        num_embeddings=50,
+        embedding_dim=8,
+        org_num_embeddings=40,
+        padding_size=8,
+        prefix="lm_head",
+    )
+
+
+def test_composed_lmhead_shards_tile_padded_vocabulary(monkeypatch):
+    """The composed (finegrained x TP) encoding shards the vocabulary over the
+    TP-outer / fine-grained-inner grid: every tp_rank x lmtp_rank combination
+    gets a unique shard that tiles the padded vocabulary evenly."""
+    heads = [_composed_lmhead(monkeypatch, lmtp_rank, 2, tp_rank, 2) for tp_rank in range(2) for lmtp_rank in range(2)]
+
+    # shard ranks are unique, consecutive, and drive an even vocab split.
+    assert sorted(h.tp_rank for h in heads) == list(range(4))
+    for head in heads:
+        assert head.tp_size == 4
+        assert head.output_gather_group is not None
+        assert head.num_embeddings_per_partition == head.num_embeddings_padded // 4
+        assert head.shard_indices.org_vocab_start_index == head.org_vocab_size_padded * head.tp_rank // head.tp_size
+    # Org spans, concatenated in shard order, tile [0, org_vocab_size_padded).
+    org_spans = sorted((h.shard_indices.org_vocab_start_index, h.shard_indices.org_vocab_end_index) for h in heads)
+    assert org_spans[0][0] == 0
+    assert all(org_spans[i][1] == org_spans[i + 1][0] for i in range(len(org_spans) - 1))
+    assert org_spans[-1][1] == heads[0].org_vocab_size_padded
+
+
+@pytest.mark.parametrize(
+    "lmtp_world,tp_world,expected_padding",
+    [(2, 2, 8), (4, 4, 16), (8, 3, 24)],
+)
+def test_composed_lmhead_padding_covers_shard_count(monkeypatch, lmtp_world, tp_world, expected_padding):
+    """The padding granularity grows to the lcm with the shard count so the
+    padded vocabulary always divides evenly across the composed grid."""
+    head = _composed_lmhead(monkeypatch, 0, lmtp_world, 0, tp_world)
+
+    assert head.tp_size == lmtp_world * tp_world
+    assert head.padding_size == expected_padding
+    assert head.num_embeddings_padded % head.tp_size == 0
+    assert head.output_gather_group is not None
+    # tp_world == 1 keeps the legacy padding untouched (backwards compatible).
+    pure_dp = _composed_lmhead(monkeypatch, 1, lmtp_world, 0, 1)
+    assert pure_dp.padding_size == 8
+    assert pure_dp.output_gather_group is None
 
 
 class TestVocabParallelPlan(unittest.TestCase):
@@ -402,36 +514,68 @@ class TestVocabParallelPlan(unittest.TestCase):
         def group(rank, world_size):
             return MagicMock(rank_in_group=rank, world_size=world_size)
 
-        tp_group = group(1, 2)
         pcp_group = group(1, 2)
         embed_group = group(2, 4)
         lmhead_group = group(3, 4)
         pcp_config = MagicMock()
         pcp_config.parallel_config.prefill_context_parallel_size = 2
-        cases: tuple[tuple[str, str, bool, bool, bool, bool, VocabParallelMode, int, int], ...] = (
-            ("replicated", "layers.0.markov_head", True, False, False, False, VocabParallelMode.REPLICATED, 0, 1),
-            ("standard", "model.norm", False, False, False, False, VocabParallelMode.STANDARD, 1, 2),
+        cases: tuple[
+            tuple[str, str, bool, bool, bool, bool, int, int, VocabParallelMode, int, int],
+            ...,
+        ] = (
+            ("replicated", "layers.0.markov_head", True, False, False, False, 0, 1, VocabParallelMode.REPLICATED, 0, 1),
+            ("standard", "model.norm", False, False, False, False, 1, 2, VocabParallelMode.STANDARD, 1, 2),
             (
-                "fine-grained embedding",
+                "fine-grained embedding (pure dp)",
                 "model.embed_tokens",
                 False,
                 False,
                 True,
                 False,
+                0,
+                1,
                 VocabParallelMode.FINE_GRAINED,
                 2,
                 4,
             ),
             (
-                "fine-grained lm head",
+                "composed embedding (finegrained x tp)",
+                "model.embed_tokens",
+                False,
+                False,
+                True,
+                False,
+                1,
+                2,
+                VocabParallelMode.FINE_GRAINED,
+                1 * 4 + 2,
+                4 * 2,
+            ),
+            (
+                "fine-grained lm head (pure dp)",
                 "lm_head",
                 False,
                 False,
                 False,
                 True,
+                0,
+                1,
                 VocabParallelMode.FINE_GRAINED,
                 3,
                 4,
+            ),
+            (
+                "composed lm head (finegrained x tp)",
+                "lm_head",
+                False,
+                False,
+                False,
+                True,
+                1,
+                2,
+                VocabParallelMode.FINE_GRAINED,
+                1 * 4 + 3,
+                4 * 2,
             ),
             (
                 "pcp embedding",
@@ -440,6 +584,8 @@ class TestVocabParallelPlan(unittest.TestCase):
                 True,
                 False,
                 False,
+                1,
+                2,
                 VocabParallelMode.PCP_X_TP,
                 3,
                 4,
@@ -451,13 +597,16 @@ class TestVocabParallelPlan(unittest.TestCase):
                 True,
                 False,
                 False,
+                1,
+                2,
                 VocabParallelMode.PCP_X_TP,
                 3,
                 4,
             ),
         )
 
-        for name, prefix, disable_tp, pcp, embed_tp, lmhead_tp, mode, rank, world_size in cases:
+        for name, prefix, disable_tp, pcp, embed_tp, lmhead_tp, tp_rank, tp_world, mode, rank, world_size in cases:
+            tp_group = group(tp_rank, tp_world)
             with (
                 self.subTest(name=name),
                 patch(
@@ -479,12 +628,17 @@ class TestVocabParallelPlan(unittest.TestCase):
 
             self.assertIs(plan.mode, mode)
             self.assertEqual((plan.shard_rank, plan.shard_world_size), (rank, world_size))
+            expected_tp_gather = tp_group if name == "composed lm head (finegrained x tp)" else None
+            self.assertIs(plan.output_gather_group, expected_tp_gather)
             if name == "pcp embedding":
                 self.assertIs(plan.token_exchange_group, pcp_group)
                 self.assertIs(plan.output_reduce_group, tp_group)
-            elif name == "fine-grained embedding":
+            elif name == "fine-grained embedding (pure dp)":
                 self.assertIs(plan.token_exchange_group, embed_group)
                 self.assertIsNone(plan.output_reduce_group)
+            elif name == "composed embedding (finegrained x tp)":
+                self.assertIs(plan.token_exchange_group, embed_group)
+                self.assertIs(plan.output_reduce_group, tp_group)
             elif mode is VocabParallelMode.STANDARD:
                 self.assertIsNone(plan.token_exchange_group)
                 self.assertIs(plan.output_reduce_group, tp_group)
@@ -494,6 +648,7 @@ class TestVocabParallelPlan(unittest.TestCase):
 
         non_pcp_config = MagicMock()
         non_pcp_config.parallel_config.prefill_context_parallel_size = 1
+        tp_group = group(1, 2)
         with (
             patch(
                 "vllm_ascend.ops.vocab_parallel_embedding.enable_pcp_embedding_lmhead_weight_sharding",
@@ -556,6 +711,8 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_group.world_size = 2
         self.mock_group.rank_in_group = 0
         self.mock_pcp_group = MagicMock(world_size=1, rank_in_group=0)
+        # Trivial TP group keeps the pure-DP (pre-composition) semantics.
+        self.mock_tp_group = MagicMock(world_size=1, rank_in_group=0)
         self.mock_ascend_config = MagicMock()
 
         self.mock_quant_method = MagicMock()
@@ -565,6 +722,7 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.patches = [
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group", return_value=self.mock_group),
             patch("vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable", return_value=True),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=self.mock_tp_group),
             patch(
                 "vllm_ascend.ops.vocab_parallel_embedding.get_pcp_group",
                 return_value=self.mock_pcp_group,
@@ -609,6 +767,8 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_all_to_all_single.assert_called_once()
         # [N/P, V] after redistribution, then truncated to org_vocab_size.
         self.assertEqual(logits.shape, (1, self.vocab_size))
+        # Pure fine-grained TP (tp == 1) must not touch TP state at all.
+        self.mock_tp_group.all_gather.assert_not_called()
 
     def test_get_logits_replicated_head_takes_normal_path(self):
         """A replicated head (tp_size==1, e.g. the DSpark Markov w2) must not
@@ -646,6 +806,42 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.assertEqual(result, "lmheadtp")
         mock_lmheadtp.assert_called_once_with(hidden_states, sharded_head, None)
         mock_normal.assert_not_called()
+
+    def test_get_logits_lmheadtp_composes_tp_gather(self):
+        """With standard TP composed in, the LM-head path reconstructs the
+        fine-grained spans first (all-to-all) and only then gathers the
+        remaining vocabulary spans over the TP group, so the TP collective
+        carries the local token rows rather than the whole group's."""
+        processor = AscendLogitsProcessor(vocab_size=self.vocab_size)
+        # Composed layout: fine-grained group of 2 x standard TP of 2. The
+        # setUp patches keep the fine-grained exchange; retarget the TP group.
+        self.mock_tp_group.configure_mock(world_size=2, rank_in_group=1)
+        events = []
+
+        def tp_all_gather(logits, *, dim):
+            events.append(("tp", dim, tuple(logits.shape)))
+            return torch.cat((logits, logits + 20), dim=dim)
+
+        self.mock_tp_group.all_gather.side_effect = tp_all_gather
+        lmhead = AscendParallelLMHead(
+            num_embeddings=self.num_embeddings, embedding_dim=self.embedding_dim, prefix="lm_head"
+        )
+        # The head itself must have resolved the composed layout.
+        self.assertEqual((lmhead.tp_rank, lmhead.tp_size), (1 * 2 + 0, 4))
+        # Emit the real per-partition width so the gathered shape is meaningful:
+        # P fine-grained shards of one TP column add up to V / T.
+        shard_width = lmhead.num_embeddings_per_partition
+        self.mock_quant_method.apply.return_value = torch.randn(2, shard_width)
+        lmhead.quant_method = self.mock_quant_method
+        lmhead.quant_method.apply = self.mock_quant_method.apply
+
+        logits = processor._get_logits(torch.randn(1, self.org_num_embeddings), lmhead, None)
+
+        # The TP gather runs after the all-to-all and carries the redistributed
+        # [N/P, P * V/(P*T)] shape; the truncated result is the org vocabulary.
+        self.assertEqual(events, [("tp", -1, (1, 2 * shard_width))])
+        self.assertEqual(logits.shape, (1, self.vocab_size))
+        self.mock_all_to_all_single.assert_called_once()
 
     def test_get_logits_pcp_reconstructs_vocab_in_group_order(self):
         processor = AscendLogitsProcessor(vocab_size=7)

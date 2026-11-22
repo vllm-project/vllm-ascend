@@ -75,7 +75,7 @@ class MemoryBackend(Backend):
             for addr, size in zip(row, lengths, strict=True):
                 self.check_address(addr, size)
             self.payloads[key] = [ctypes.string_at(addr, size) for addr, size in zip(row, lengths, strict=True)]
-        return [0] * len(keys)
+        return [True] * len(keys)
 
     def get(self, keys, addrs, sizes):
         for key, row, lengths in zip(keys, addrs, sizes, strict=True):
@@ -239,6 +239,8 @@ def test_raw_sequence_lifecycle(
     )
     config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.prefix_match_unit = prefix_unit
+    # The hit-boundary assertions below exercise dense prefix retention.
+    config.cache_config.prefix_cache_retention_interval = None
     config.cache_config.num_gpu_blocks = plan.num_blocks
     # Match the planner's role annotation so kv_both keeps the EAGLE safety drop.
     plan.kv_transfer_config = config.kv_transfer_config
@@ -262,6 +264,10 @@ def test_raw_sequence_lifecycle(
         block_size=block_size,
         hash_block_size=hash_size,
     )
+    # #65448 makes core lookahead hashing opt-out. AscendStore's masks still
+    # use the legacy EAGLE drop, so both hashing and local lookup must agree.
+    assert config.num_hash_lookahead_tokens == scheduler.num_hash_lookahead_tokens == 0
+    assert scheduler.use_eagle_block_drop == (speculative_method == "mtp")
     producer_tokens = list(range(512))
 
     def run_request(req_id, tokens, expected_hit, expected_local=0):
@@ -328,9 +334,7 @@ def test_raw_sequence_lifecycle(
                         if bid and start < (index + 1) * 128 <= end:
                             tensor[bid].fill_(payload_value(input_tokens, (index + 1) * 128, name, plane))
             worker.wait_for_save()
-            # Same fence the connector applies at the start of the next step:
-            # drain the saves of requests whose blocks this output released.
-            pool.handle_released_saves(meta.released_req_ids)
+            pool.wait_for_previous_save()
             sending, recving = worker.get_finished(output.finished_req_ids)
             result = create_model_runner_output([request] if scheduled else [])
             if scheduled and request.num_computed_tokens < len(tokens):
@@ -347,9 +351,15 @@ def test_raw_sequence_lifecycle(
                 kv_connector_worker_meta=worker.build_connector_worker_meta(),
             )
             computed_before_update = request.num_computed_tokens
+            output_tokens_before_update = request.num_output_tokens
             scheduler.update_from_output(output, result)
             if drafts:
-                assert request.num_computed_tokens == computed_before_update - len(drafts) + accepted
+                expected_computed = computed_before_update - len(drafts) + accepted
+                # vLLM main trims ``num_computed_tokens`` to cover only the
+                # tokens actually kept when a request stops mid token-list.
+                appended = request.num_output_tokens - output_tokens_before_update
+                expected_computed -= (accepted + 1) - appended
+                assert request.num_computed_tokens == expected_computed
             if speculative_method:
                 scheduler.update_draft_token_ids(
                     DraftTokenIds([req_id], [[1000 + request.num_tokens + i for i in range(3)]])
@@ -358,9 +368,6 @@ def test_raw_sequence_lifecycle(
             if req_id not in scheduler.requests:
                 # Consume the finished-ID notification and release Store references.
                 output = scheduler.schedule()
-                # The connector fences this output like any other: drain the
-                # finished request's final saves before its blocks are reused.
-                worker.handle_preemptions(output.kv_connector_metadata)
                 worker.bind_connector_metadata(output.kv_connector_metadata)
                 worker.get_finished(output.finished_req_ids)
                 worker.clear_connector_metadata()
@@ -427,7 +434,13 @@ def test_raw_sequence_lifecycle(
         seed_length = 256 if speculative_method else 128
         seed_hit = 128 if speculative_method else (0 if has_private_state else 127)
         run_request("local-prefix", producer_tokens[:seed_length], seed_hit)
-        run_request("mixed-local-remote", list(range(513)), 512, expected_local=128)
+        # vLLM main caches speculative blocks in the base Scheduler; only the
+        # pure full-attention dspark layout sees the doubled local prefix hit.
+        only_full_attention = isinstance(plan.kv_cache_groups[0].kv_cache_spec, FullAttentionSpec)
+        mixed_local = 128
+        if speculative_method == "dspark" and only_full_attention:
+            mixed_local = 256
+        run_request("mixed-local-remote", list(range(513)), 512, expected_local=mixed_local)
         assert scheduler.reset_prefix_cache()
         missing_group = len(plan.kv_cache_groups) - 1
         MemoryBackend.payloads = {key: value for key, value in saved.items() if f"@group:{missing_group}@" not in key}

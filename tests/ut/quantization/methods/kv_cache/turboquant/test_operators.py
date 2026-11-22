@@ -6,8 +6,8 @@ import torch
 
 import vllm_ascend.attention.mixed_quant_sparse_flash_mla as adapter
 from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
-    mixed_quant_sparse_flash_mla,
-    mixed_quant_sparse_flash_mla_metadata,
+    mixed_quant_sparse_flash_mla_metadata_turboquant,
+    mixed_quant_sparse_flash_mla_turboquant,
 )
 
 
@@ -15,7 +15,7 @@ def test_metadata_maps_paged_lengths_and_quant_mode():
     lengths = torch.tensor([7, 128, 513], dtype=torch.int32)
     op = Mock()
     with patch.object(adapter, "_get_mixed_quant_sparse_flash_mla_ops", return_value=(None, op)):
-        mixed_quant_sparse_flash_mla_metadata(
+        mixed_quant_sparse_flash_mla_metadata_turboquant(
             seqused_kv=lengths,
             max_seqlen_kv=513,
             cmp_ratio=4,
@@ -40,7 +40,7 @@ def test_attention_retains_caller_owned_cache_and_sinks():
     sinks = torch.zeros(4)
     op = Mock()
     with patch.object(adapter, "_get_mixed_quant_sparse_flash_mla_ops", return_value=(op, None)):
-        mixed_quant_sparse_flash_mla(
+        mixed_quant_sparse_flash_mla_turboquant(
             q, cmp_kv=cache, sinks=sinks, cmp_ratio=4, seqused_kv=torch.tensor([132], dtype=torch.int32)
         )
     assert "seqused_cmp_kv" not in op.call_args.kwargs
@@ -49,12 +49,14 @@ def test_attention_retains_caller_owned_cache_and_sinks():
     assert op.call_args.kwargs["cmp_kv"] is cache
     assert op.call_args.kwargs["sinks"] is sinks
     with pytest.raises(ValueError, match="caller-owned"):
-        mixed_quant_sparse_flash_mla(q, sinks=None)
+        mixed_quant_sparse_flash_mla_turboquant(q, sinks=None)
 
 
 def test_attention_defaults_to_c4_compression_ratio():
     q = torch.zeros(1, 4, 512, dtype=torch.bfloat16)
     op = Mock()
     with patch.object(adapter, "_get_mixed_quant_sparse_flash_mla_ops", return_value=(op, None)):
-        mixed_quant_sparse_flash_mla(q, cmp_kv=torch.zeros(1, 1, 1, 258, dtype=torch.uint8), sinks=torch.zeros(4))
+        mixed_quant_sparse_flash_mla_turboquant(
+            q, cmp_kv=torch.zeros(1, 1, 1, 258, dtype=torch.uint8), sinks=torch.zeros(4)
+        )
     assert op.call_args.kwargs["cmp_ratio"] == 4

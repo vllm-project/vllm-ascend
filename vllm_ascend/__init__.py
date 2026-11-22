@@ -63,8 +63,10 @@ def _ensure_global_patch():
     if _GLOBAL_PATCH_APPLIED:
         return
 
+    from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
     from vllm_ascend.utils import adapt_patch
 
+    apply_v2_model_runner_config_patch()
     adapt_patch(is_global_patch=True)
     _GLOBAL_PATCH_APPLIED = True
 
@@ -78,19 +80,27 @@ def register():
 def register_connector():
     _ensure_global_patch()
 
-    from vllm_ascend.distributed.kv_transfer import register_connector
+    from vllm_ascend.distributed.ec_transfer import (
+        register_connector as register_ec_connector,
+    )
+    from vllm_ascend.distributed.kv_transfer import (
+        register_connector as register_kv_connector,
+    )
     from vllm_ascend.distributed.weight_transfer import register_engine
 
-    register_connector()
+    register_kv_connector()
+    register_ec_connector()
     register_engine()
 
 
 def register_model_loader():
     _ensure_global_patch()
 
+    from .model_loader.bigtensorloader import register_bigtensor_loader
     from .model_loader.netloader import register_netloader
     from .model_loader.rfork import register_rforkloader
 
+    register_bigtensor_loader()
     register_netloader()
     register_rforkloader()
 

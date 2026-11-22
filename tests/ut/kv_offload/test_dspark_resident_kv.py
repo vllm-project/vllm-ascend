@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.config import CUDAGraphMode, KVTransferConfig
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import LayerwiseCachePlanner
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
@@ -60,6 +63,10 @@ def _prefill_runner(
     connector="SfaRemoteD2HConnector",
 ):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.debugger = None
+    runner.model_state = SimpleNamespace()
+    runner.prompt_logprobs_worker = None
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE if eager else CUDAGraphMode.FULL)
     extra = {} if ids is None else {"dspark_aux_hidden_state_layer_ids": ids}
     runner.vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
@@ -205,7 +212,7 @@ def test_worker_registers_draft_ownership_before_sfa_or_layerwise_connector_cons
     worker.vllm_config = SimpleNamespace(
         speculative_config=SimpleNamespace(method=method),
         kv_transfer_config=transfer,
-        model_config=SimpleNamespace(enable_sleep_mode=False),
+        model_config=SimpleNamespace(enable_sleep_mode=False, hf_config=SimpleNamespace()),
     )
     worker.model_runner = SimpleNamespace(
         speculator=SimpleNamespace(draft_attn_layer_names={"draft.attn"}), initialize_kv_cache=Mock()
@@ -229,7 +236,7 @@ def test_worker_registers_draft_ownership_before_sfa_or_layerwise_connector_cons
 
 @pytest.mark.parametrize("pd_connector", ["SfaRemoteD2HConnector", "MooncakeConnector"])
 @pytest.mark.parametrize("method", ["dspark", "mtp", "eagle3"])
-def test_worker_excludes_persistent_draft_from_layerwise_budget_for_any_dspark_connector(pd_connector, method):
+def test_worker_reports_draft_specs_to_core_for_budget(pd_connector, method):
     from vllm_ascend.worker import worker as module
 
     worker = module.NPUWorker.__new__(module.NPUWorker)
@@ -247,9 +254,7 @@ def test_worker_excludes_persistent_draft_from_layerwise_budget_for_any_dspark_c
         speculator=SimpleNamespace(draft_attn_layer_names={"draft.attn"}),
         get_kv_cache_spec=Mock(return_value=specs),
     )
-    worker._get_layerwise_kv_cache_memory_info = Mock(return_value=(1, 1, 1.0))
     with (
-        patch.object(module, "get_layerwise_reuse_config", return_value={}),
         patch.object(module.KVPPConfig, "from_vllm_config", return_value=SimpleNamespace(size=1)),
         patch.object(
             module,
@@ -257,9 +262,9 @@ def test_worker_excludes_persistent_draft_from_layerwise_budget_for_any_dspark_c
             return_value=SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False)),
         ),
     ):
-        assert worker.get_kv_cache_spec() is specs
-    excluded = {"draft.attn"} if method == "dspark" else set()
-    worker._get_layerwise_kv_cache_memory_info.assert_called_once_with(specs, {}, excluded_layer_names=excluded)
+        result = worker.get_kv_cache_spec()
+    assert result is specs
+    assert set(result) == {"target.attn", "draft.attn"}
 
 
 def test_prefill_aux_config_delegates_to_backend_before_loading():
@@ -436,7 +441,9 @@ def test_hot_cache_rows_follow_request_slots_not_query_width(monkeypatch, width,
     k, v = allocate_kv_offload_topk_buffer_pair(runtime, config)
     query_rows = min(64, 4 * width)
     request_rows = 2 * (4 + 2)
-    expected_rows = (max(query_rows, request_rows) if keep_device else request_rows) if fused else query_rows
+    # Mixed debug batches attend the retained device KV, so Copy-SFA hot
+    # buffers need only request-slot rows even with keep_device_kv_cache.
+    expected_rows = request_rows if fused else query_rows
     stride = 512 if fused else 256
     assert k.shape == (expected_rows, stride, 1, 4)
     assert v.shape == (expected_rows, stride, 1, 2)
@@ -458,12 +465,10 @@ def test_real_allocator_separates_host_target_and_persistent_mla_draft(monkeypat
         )
         for name, spec in specs.items()
     ]
-    runtime = SimpleNamespace(kv_transfer_config=None)
+    runtime = SimpleNamespace(kv_transfer_config=None, compilation_config=SimpleNamespace(static_forward_context={}))
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
     monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
-    monkeypatch.setattr(attn_utils, "is_deepseek_v41_cache", lambda _: False)
-    monkeypatch.setattr(attn_utils, "get_layerwise_reuse_config", lambda _: None)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: True)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _: False)
     monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *_: (512, 64))
@@ -493,12 +498,16 @@ def test_real_allocator_separates_host_target_and_persistent_mla_draft(monkeypat
 def test_layerwise_reuse_retains_independent_draft_descriptors():
     target_names = [f"model.layers.{index}.attn" for index in range(5)]
     draft_names = [f"draft.layers.{index}.attn" for index in range(2)]
-    names = target_names + draft_names
     spec = _mla_spec(host=False)
+    draft_spec = replace(spec, is_draft=True)
+    names = target_names + draft_names
     layer_bytes = 3 * spec.page_size_bytes
     config = KVCacheConfig(
         num_blocks=3,
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=target_names, kv_cache_spec=spec),
+            KVCacheGroupSpec(layer_names=draft_names, kv_cache_spec=draft_spec),
+        ],
         kv_cache_tensors=[
             KVCacheTensor(
                 size=len(names) * layer_bytes,
@@ -509,18 +518,25 @@ def test_layerwise_reuse_retains_independent_draft_descriptors():
             )
         ],
     )
-    runtime = SimpleNamespace(
-        model_config=SimpleNamespace(get_num_layers=lambda _: 5),
-        parallel_config=None,
-        kv_transfer_config=SimpleNamespace(
-            kv_connector="AscendStoreConnector",
-            kv_connector_extra_config={"backend": "memcache", "use_layerwise": True, "layerwise_num_shared_buffers": 1},
-        ),
+    runtime = SimpleNamespace(model_config=SimpleNamespace(get_total_num_hidden_layers=lambda: 5))
+    transfer = KVTransferConfig(
+        kv_connector="AscendStoreConnector",
+        kv_role="kv_producer",
+        kv_connector_extra_config={"backend": "memcache", "use_layerwise": True, "layerwise_num_shared_buffers": 1},
     )
-    apply_layerwise_kv_cache_plan(config, runtime, excluded_layer_names=set(draft_names))
-    assert len(config.kv_cache_tensors) == 4  # Independent target 0, shared targets 1..4, two draft layers.
-    for name in draft_names:
-        descriptor = next(tensor for tensor in config.kv_cache_tensors if name in tensor.layers)
-        assert descriptor.layers == [name]
-        assert descriptor.size == layer_bytes
-    assert sorted(name for tensor in config.kv_cache_tensors for name in tensor.layers) == sorted(names)
+    layout = LayerwiseCachePlanner(
+        config, runtime, transfer.kv_connector_extra_config, spec_reuse_rules={AscendMLAAttentionSpec: True}
+    ).build()
+    worker_config = apply_layerwise_kv_cache_plan(config, transfer, layout)
+    assert layout.draft_entry_names == frozenset(draft_names)
+    assert layout.reused_cache_names == frozenset(target_names[1:])
+    assert sorted(name for tensor in worker_config.kv_cache_tensors for name in tensor.layers) == sorted(names)
+    assert len(worker_config.kv_cache_tensors) == 3  # Disjoint group IDs can share one fixed slot.
+    draft_descriptors = [
+        next(tensor for tensor in worker_config.kv_cache_tensors if name in tensor.layers) for name in draft_names
+    ]
+    assert len({tensor.offset for tensor in draft_descriptors}) == len(draft_names)
+    assert all(set(tensor.layers).isdisjoint(layout.reused_cache_names) for tensor in draft_descriptors)
+    assert all(
+        tensor.block_stride == spec.page_size_bytes and tensor.size == 3 * layer_bytes for tensor in draft_descriptors
+    )

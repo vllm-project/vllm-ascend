@@ -83,6 +83,28 @@ def test_prepare_uses_engine_output_and_exports_environment(tmp_path: Path, monk
     assert f"VLLM_ASCEND_BUILD_CACHE_EVENT_LOG={runner_temp / 'csrc-l1-selected_a2.jsonl'}" in exported
 
 
+def test_prepare_relative_cache_dir_across_workspaces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    helper = _load_helper("prepare_csrc_l1_restore_relative")
+    monkeypatch.setattr(
+        helper.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, stdout="primary\nsame\ncompat\n"),
+    )
+    for name in ("producer", "consumer"):
+        workspace = tmp_path / name
+        workspace.mkdir()
+        source_root = _source_root(workspace)
+        environment = workspace / "github-env"
+        monkeypatch.chdir(workspace)
+        monkeypatch.setenv("GITHUB_ENV", str(environment))
+        args = _args(workspace, source_root)
+        args.cache_dir = "csrc/build_cache"
+
+        assert helper.prepare(args)["supported"] == "true"
+        assert (workspace / args.cache_dir).is_dir()
+        assert f"VLLM_ASCEND_BUILD_CACHE_DIR={workspace / args.cache_dir}\n" in environment.read_text()
+
+
 @pytest.mark.parametrize("entrypoint", ["engine", "restore-helper"])
 def test_snapshot_key_before_build_dependencies(tmp_path: Path, entrypoint: str):
     # Restore runs before project dependencies are installed. Exercise the real

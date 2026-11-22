@@ -14,7 +14,12 @@ from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManag
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dflash.aclgraph as aclgraph_module
+import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as speculator_module
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
@@ -25,9 +30,25 @@ class _BackendA:
         return object
 
 
+def test_flash_attn_graph_replay_uses_device_metadata_without_host_updates(monkeypatch):
+    manager = DFlashAclGraphManager.__new__(DFlashAclGraphManager)
+    manager.speculator = SimpleNamespace(
+        attn_backends={f"draft.{i}": AscendFlashAttentionBackend for i in range(6)},
+        build_draft_attn_metadatas=MagicMock(side_effect=AssertionError("unexpected host metadata rebuild")),
+    )
+    replay = MagicMock(return_value=object())
+    monkeypatch.setattr(DFlashCudaGraphManager, "run_fullgraph", replay)
+    desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=24, num_reqs=3)
+
+    assert manager.run_fullgraph(desc) is replay.return_value
+    replay.assert_called_once_with(desc)
+    manager.speculator.build_draft_attn_metadatas.assert_not_called()
+
+
 def _speculator(**attributes):
     speculator = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     speculator.attn_architecture = None
+    speculator.attn_backends = {name: AscendAttentionBackend for name in ("draft.0", "draft.2")}
     for name, value in attributes.items():
         setattr(speculator, name, value)
     return speculator
@@ -73,7 +94,15 @@ def test_set_attn_preserves_cache_group_order(monkeypatch):
 @pytest.mark.parametrize("architecture", ["GQA", "MLA"])
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE])
 def test_draft_metadata_matches_full_or_actual_query_shape(monkeypatch, architecture, graph_mode):
-    metadata = SimpleNamespace(actual_seq_lengths_q=[8, 16, 24, 24])
+    row_count = 5 if graph_mode == CUDAGraphMode.FULL else 4
+    metadata = SimpleNamespace(
+        actual_seq_lengths_q=[8, 16, 24, 24, 32][:row_count],
+        seq_lens_list=[10, 20, 30, 0, 0][:row_count],
+        seq_lens=torch.tensor([10, 20, 30, 0, 0][:row_count], dtype=torch.int32),
+        seq_lens_cpu=torch.tensor([10, 20, 30, 0, 0][:row_count], dtype=torch.int32),
+        block_tables=torch.arange(row_count * 2, dtype=torch.int32).reshape(row_count, 2),
+        block_table=torch.arange(row_count * 2, dtype=torch.int32).reshape(row_count, 2),
+    )
     layer_metadata = SimpleNamespace(decode=metadata) if architecture == "MLA" else metadata
     parent_build = MagicMock(return_value={"draft.0": layer_metadata})
     metadata_factory = MagicMock(return_value=nullcontext())
@@ -84,6 +113,7 @@ def test_draft_metadata_matches_full_or_actual_query_shape(monkeypatch, architec
 
     speculator = _speculator(
         attn_architecture=architecture,
+        attn_backends={"draft.0": AscendMLABackend if architecture == "MLA" else AscendAttentionBackend},
         num_query_per_req=8,
         arange_np=np.arange(5, dtype=np.int32),
         input_buffers=SimpleNamespace(positions=object()),
@@ -105,6 +135,11 @@ def test_draft_metadata_matches_full_or_actual_query_shape(monkeypatch, architec
     np.testing.assert_array_equal(parent_build.call_args.kwargs["query_start_loc_np"], [0, 8, 16, 24])
     assert metadata_factory.call_args.args[1] == (32 if graph_mode == CUDAGraphMode.FULL else 24)
     assert metadata.actual_seq_lengths_q == ([8, 16, 24, 32] if graph_mode == CUDAGraphMode.FULL else [8, 16, 24, 24])
+    expected_rows = row_count if architecture == "MLA" else 4
+    assert metadata.seq_lens_list == [10, 20, 30, 0, 0][:expected_rows]
+    torch.testing.assert_close(metadata.seq_lens, torch.tensor(metadata.seq_lens_list, dtype=torch.int32))
+    table = metadata.block_table if architecture == "MLA" else metadata.block_tables
+    torch.testing.assert_close(table, torch.arange(expected_rows * 2, dtype=torch.int32).reshape(expected_rows, 2))
 
 
 def test_sfa_draft_metadata_passes_through_upstream(monkeypatch):
@@ -132,14 +167,24 @@ def test_sfa_draft_metadata_passes_through_upstream(monkeypatch):
 def test_update_draft_metadata_refreshes_all_padded_query_lengths(query_count, num_reqs_padded):
     speculator = _speculator(num_query_per_req=query_count)
     metadata = {
-        name: SimpleNamespace(actual_seq_lengths_q=[query_count], seq_lens=object()) for name in ("draft.2", "draft.0")
+        name: SimpleNamespace(
+            actual_seq_lengths_q=[query_count],
+            seq_lens_list=list(range(num_reqs_padded)),
+            seq_lens=torch.arange(num_reqs_padded, dtype=torch.int32),
+            seq_lens_cpu=torch.arange(num_reqs_padded, dtype=torch.int32),
+            block_tables=None,
+        )
+        for name in ("draft.2", "draft.0")
     }
-    seq_lens = {name: value.seq_lens for name, value in metadata.items()}
+    original_lengths = {name: value.seq_lens.clone() for name, value in metadata.items()}
 
     assert speculator._update_draft_attn_metadata(metadata, num_reqs_padded) is metadata
     for name, value in metadata.items():
         assert value.actual_seq_lengths_q == [query_count * (i + 1) for i in range(num_reqs_padded)]
-        assert value.seq_lens is seq_lens[name]
+        torch.testing.assert_close(value.seq_lens, original_lengths[name])
+        torch.testing.assert_close(value.seq_lens_cpu, original_lengths[name])
+        assert value.seq_lens_list == original_lengths[name].tolist()
+        assert value.block_tables is None
 
 
 def test_replay_installs_forward_context_before_accessing_extra_ctx(monkeypatch):
@@ -202,8 +247,14 @@ def test_dispatcher_pads_uniform_draft_descriptors(query_count):
     manager.compilation_config = SimpleNamespace(
         cudagraph_capture_sizes=[16, 32, 48, 64, 80, 96, 112, 128],
         max_cudagraph_capture_size=128,
+        prefill_cudagraph_capture_token_sizes=[16, 32, 48, 64, 80, 96, 112, 128],
+        decode_cudagraph_capture_request_sizes=list(range(1, 17)),
+        max_decode_cudagraph_capture_tokens=None,
     )
-    manager.vllm_config = SimpleNamespace(speculative_config=None)
+    manager.vllm_config = SimpleNamespace(speculative_config=None, uniform_decode_query_len=query_count)
+    manager.decode_request_sizes = None
+    manager.decode_max_reqs = {query_count: 16}
+    manager._decode_descs = {}
     manager.max_num_reqs = 16
     manager.decode_query_len = query_count
     manager.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
@@ -223,3 +274,90 @@ def test_dispatcher_pads_uniform_draft_descriptors(query_count):
         assert desc.num_reqs >= num_reqs
         assert desc.num_tokens == desc.num_reqs * query_count
         assert desc.uniform_token_count == query_count
+
+
+@pytest.mark.parametrize("module", [speculator_module, dflash_module], ids=["dspark", "dflash"])
+@pytest.mark.parametrize("enforce_eager", [False, True])
+def test_draft_graph_manager_binds_speculator_and_update_stream(monkeypatch, module, enforce_eager):
+    cls = module.AscendDSparkSpeculator if module is speculator_module else module.AscendDFlashSpeculator
+    parent = DSparkSpeculator if module is speculator_module else dflash_module.DFlashSpeculator
+    speculator = cls.__new__(cls)
+    speculator.speculative_config = SimpleNamespace(enforce_eager=enforce_eager)
+    speculator.update_stream = object()
+    modes = []
+
+    def init_manager(self, mode):
+        modes.append(mode)
+        self.query_cudagraph_manager = SimpleNamespace()
+
+    monkeypatch.setattr(parent, "init_cudagraph_manager", init_manager)
+    speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
+
+    assert modes == [CUDAGraphMode.NONE if enforce_eager else CUDAGraphMode.FULL_DECODE_ONLY]
+    assert speculator.query_cudagraph_manager.speculator is speculator
+    assert speculator.query_cudagraph_manager.update_stream is speculator.update_stream
+
+
+@pytest.mark.parametrize("needs_capture", [False, True])
+def test_dflash_graph_params_use_actual_captured_token_sizes(monkeypatch, needs_capture):
+    def initialize(self, *args):
+        sizes = (21, 14, 21) if needs_capture else ()
+        self._capture_descs = {CUDAGraphMode.FULL: [SimpleNamespace(num_tokens=size) for size in sizes]}
+
+    monkeypatch.setattr(DFlashCudaGraphManager, "__init__", initialize)
+    monkeypatch.setattr(DFlashCudaGraphManager, "needs_capture", lambda self: needs_capture)
+    set_params = MagicMock()
+    monkeypatch.setattr(aclgraph_module, "set_draft_graph_params", set_params)
+
+    manager = DFlashAclGraphManager(object(), torch.device("cpu"), CUDAGraphMode.FULL_DECODE_ONLY, 7)
+
+    assert manager.capture_sizes == ([14, 21] if needs_capture else [])
+    if needs_capture:
+        set_params.assert_called_once_with([14, 21])
+    else:
+        set_params.assert_not_called()
+
+
+@pytest.mark.parametrize("valid_graph", [False, True])
+def test_dflash_updatable_replay_resolves_current_metadata_before_replay(monkeypatch, valid_graph):
+    events = []
+    metadata, tasks, result, stream = object(), object(), object(), object()
+    desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=14, num_reqs=2)
+    graph = MagicMock(spec=UpdatableGraph)
+    manager = DFlashAclGraphManager.__new__(DFlashAclGraphManager)
+    manager.speculator = SimpleNamespace(
+        attn_backends={"draft.0": _BackendA},
+        input_batch=SimpleNamespace(seq_lens_cpu_upper_bound=torch.tensor([8])),
+        build_draft_attn_metadatas=MagicMock(return_value=[metadata]),
+    )
+    manager.graphs = {desc: graph if valid_graph else object()}
+    manager.update_stream = SimpleNamespace(wait_stream=lambda current: events.append(("wait", current)))
+    monkeypatch.setattr(aclgraph_module, "use_updatable_graph", lambda backend: True)
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: stream)
+    context_source = MagicMock(return_value=metadata)
+    monkeypatch.setattr(aclgraph_module, "ContextSource", context_source)
+
+    def replay(self, batch_desc):
+        assert batch_desc is desc
+        events.append(("replay", desc))
+        return result
+
+    def resolve_tasks(source):
+        events.append(("resolve", source))
+        return tasks
+
+    monkeypatch.setattr(DFlashCudaGraphManager, "run_fullgraph", replay)
+    if not valid_graph:
+        with pytest.raises(AssertionError):
+            manager.run_fullgraph(desc)
+        assert events == []
+    else:
+        graph.resolve_tasks.side_effect = resolve_tasks
+        graph.update.side_effect = lambda update_stream, resolved: events.append(("update", resolved))
+        assert manager.run_fullgraph(desc) is result
+        assert events == [("resolve", metadata), ("wait", stream), ("replay", desc), ("update", tasks)]
+        context_source.assert_called_once_with(metadata)
+        graph.update.assert_called_once_with(manager.update_stream, tasks)
+    manager.speculator.build_draft_attn_metadatas.assert_called_once_with(
+        2, manager.speculator.input_batch.seq_lens_cpu_upper_bound
+    )

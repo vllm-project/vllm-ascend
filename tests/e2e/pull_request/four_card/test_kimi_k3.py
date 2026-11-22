@@ -301,9 +301,9 @@ def _write_w4a8_description(path: Path) -> None:
     (path / "quant_model_description.json").write_text(json.dumps(description), encoding="utf-8")
 
 
-@pytest.fixture(scope="module")
-def k3_models(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
-    tmp_path = tmp_path_factory.mktemp("k3-dummy")
+def build_k3_models(tmp_path: Path) -> dict[str, str]:
+    """Build reduced local models for both Model Runner versions."""
+
     models = {"target": _write_target(tmp_path / "target")}
     models["w4a8"] = _write_target(tmp_path / "w4a8")
     _write_w4a8_description(tmp_path / "w4a8")
@@ -313,9 +313,13 @@ def k3_models(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
     return models
 
 
+@pytest.fixture(scope="module")
+def k3_models(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
+    return build_k3_models(tmp_path_factory.mktemp("k3-dummy"))
+
+
 @pytest.fixture(autouse=True)
 def k3_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     monkeypatch.setenv("HCCL_OP_EXPANSION_MODE", "AIV")
     monkeypatch.setenv("HCCL_BUFFSIZE", "512")
@@ -384,7 +388,7 @@ def _generate(llm, prompts: list[dict]):
     return outputs
 
 
-def test_k3_mla_block5_tp4(k3_models: dict[str, str]) -> None:
+def run_k3_mla_block5_tp4(k3_models: dict[str, str]) -> None:
     args = _engine_args(k3_models, "mla_block5")
     args["max_model_len"] = PREFIX_CACHE_MODEL_LEN
     # Exercise hybrid-cache page creation with dense checkpoint retention.
@@ -404,6 +408,42 @@ def test_k3_mla_block5_tp4(k3_models: dict[str, str]) -> None:
         created = _generate(llm, [prefix])[0]
         assert created.num_cached_tokens == 0
         assert created.num_cache_creation_tokens > 0, "Request did not create an aligned hybrid-cache page"
+
+        drafts = [m for m in llm.get_metrics() if m.name == "vllm:spec_decode_num_drafts"]
+        assert drafts and all(isinstance(m, Counter) for m in drafts)
+        assert sum(m.value for m in drafts) > 0, "Requests bypassed speculative decoding"
+
+
+@pytest.mark.parametrize("dcp_size", [1, 2])
+@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "full-decode-only"])
+def test_k3_gqa_tp2_dcp_replicated_draft_kv(
+    k3_models: dict[str, str], dcp_size: int, enforce_eager: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    args = _engine_args(k3_models, "gqa", tp=2)
+    args["decode_context_parallel_size"] = dcp_size
+    args["max_model_len"] = PREFIX_CACHE_MODEL_LEN
+    args["enforce_eager"] = enforce_eager
+    if enforce_eager:
+        args.pop("compilation_config")
+    with VllmRunner(k3_models["target"], **args) as runner:
+        llm = runner.model
+        # Exercise the first token, block boundaries, chunked prefill, and the
+        # last block-table columns while the target cache is DCP-sharded and
+        # every draft-DCP lane addresses a replicated physical cache range.
+        _generate(llm, [_prompt(length, salt=i * 137) for i, length in enumerate((1, 127, 128, 129, 769))])
+        # Three live requests pad to four in the 32-token graph. Hybrid K3
+        # pages give MLA a non-contiguous block stride; exercise graph task
+        # updates after cached history crosses several kernel blocks.
+        _generate(llm, [_prompt(length, salt=i * 17) for i, length in enumerate((129, 769, 1537))])
+        _generate(llm, [_prompt(MAX_MODEL_LEN - OUTPUT_TOKENS, salt=911)])
+
+        prefix = _prompt(PREFIX_CACHE_TOKENS, salt=421)
+        assert llm.reset_prefix_cache()
+        cold = _generate(llm, [prefix])[0]
+        warm = _generate(llm, [prefix])[0]
+        assert cold.num_cached_tokens == 0
+        assert warm.finished
 
         drafts = [m for m in llm.get_metrics() if m.name == "vllm:spec_decode_num_drafts"]
         assert drafts and all(isinstance(m, Counter) for m in drafts)
@@ -462,7 +502,7 @@ def _draft_counts(url: str) -> dict[str, float]:
     }
 
 
-def test_k3_gqa_w4a8_dp2_tp2(k3_models: dict[str, str]) -> None:
+def run_k3_gqa_w4a8_dp2_tp2(k3_models: dict[str, str]) -> None:
     args = _engine_args(k3_models, "gqa", tp=2)
     args["data_parallel_size"] = 2
     args["quantization"] = "ascend"
@@ -487,7 +527,7 @@ def test_k3_gqa_w4a8_dp2_tp2(k3_models: dict[str, str]) -> None:
         assert len(counts) == 2 and all(count > 0 for count in counts.values()), counts
 
 
-def test_k3_mtp_image_tp4(k3_models: dict[str, str]) -> None:
+def run_k3_mtp_image_tp4(k3_models: dict[str, str]) -> None:
     args = _engine_args(k3_models, "gqa")
     args["speculative_config"] = {
         "method": "mtp",
@@ -506,7 +546,7 @@ def test_k3_mtp_image_tp4(k3_models: dict[str, str]) -> None:
         assert drafts and sum(m.value for m in drafts) > 0, "Requests bypassed MTP"
 
 
-def test_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
+def run_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
     prefill_port, decode_port = get_open_port(), get_open_port()
     transfer_config = {
         "kv_connector": "MooncakeConnectorV1",
@@ -543,9 +583,30 @@ def test_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
         assert transfer["do_remote_prefill"]
         assert any(transfer["remote_block_ids"])
         decoded = _completion(decode_url, prompt, kv_transfer_params=transfer)
-        assert decoded["usage"]["prompt_tokens_details"]["cached_tokens"] > 0
+        # vLLM #54222: the D worker now reports the P worker's prefix-cache
+        # hits via kv_transfer_params instead of its own ~100% hit rate from
+        # the transferred KV. A fresh prompt has no P-side hit, so the value
+        # is 0; assert it is propagated rather than positive.
+        assert transfer.get("remote_prefill_cached_tokens") is not None
+        assert decoded["usage"]["prompt_tokens_details"]["cached_tokens"] == transfer["remote_prefill_cached_tokens"]
         # A D worker can also receive a request without remote KV. Its MLA
         # prefill weights must remain usable (the previous P/D fallback bug).
         _completion(decode_url, _prompt(257, salt=911)["prompt_token_ids"])
         counts = _draft_counts(f"http://127.0.0.1:{decode_port}/metrics")
         assert counts and sum(counts.values()) > 0
+
+
+def test_k3_mla_block5_tp4(k3_models: dict[str, str]) -> None:
+    run_k3_mla_block5_tp4(k3_models)
+
+
+def test_k3_gqa_w4a8_dp2_tp2(k3_models: dict[str, str]) -> None:
+    run_k3_gqa_w4a8_dp2_tp2(k3_models)
+
+
+def test_k3_mtp_image_tp4(k3_models: dict[str, str]) -> None:
+    run_k3_mtp_image_tp4(k3_models)
+
+
+def test_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
+    run_k3_mla_pd_tp2(k3_models)

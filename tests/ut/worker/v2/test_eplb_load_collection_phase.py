@@ -83,50 +83,29 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
 
     def test_setup_from_mapping_uses_current_upstream_contract(self):
         controller = self._make_controller()
-        model = MagicMock()
         model_config = object()
         mapping = torch.zeros((1, 1), dtype=torch.int32)
         state = MagicMock()
 
-        with (
-            patch("vllm_ascend.worker.v2.eplb.is_mixture_of_experts", return_value=True),
-            patch.object(AscendEplbState, "from_mapping", return_value=state) as from_mapping,
-        ):
-            controller.setup_from_mapping(model, model_config, mapping)
-
-        from_mapping.assert_called_once_with(
-            model=model,
-            model_config=model_config,
-            device=controller.device,
-            parallel_config=controller.parallel_config,
-            expanded_physical_to_logical=mapping,
-            policy=controller.eplb_policy,
-        )
+        controller.state = state
+        with patch.object(AscendEplbState, "from_mapping") as from_mapping:
+            controller.setup_from_mapping(model_config, mapping)
+        state.update_mapping.assert_called_once_with(model_config, mapping)
+        from_mapping.assert_not_called()
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
 
-    def test_setup_from_mapping_accepts_release_upstream_contract(self):
+    def test_setup_from_mapping_preserves_registered_state(self):
         controller = self._make_controller()
-        model = MagicMock()
+        state = MagicMock()
+        controller.state = state
+        controller._has_registered_models = True
         model_config = object()
         mapping = torch.zeros((1, 2), dtype=torch.int32)
-        state = MagicMock()
-
-        with (
-            patch("vllm_ascend.worker.v2.eplb.is_mixture_of_experts", return_value=True),
-            patch.object(AscendEplbState, "from_mapping", return_value=state) as from_mapping,
-        ):
-            controller.setup_from_mapping(model, model_config, mapping, 1)
-
-        from_mapping.assert_called_once_with(
-            model=model,
-            model_config=model_config,
-            device=controller.device,
-            parallel_config=controller.parallel_config,
-            expanded_physical_to_logical=mapping,
-            num_valid_physical_experts=1,
-            policy=controller.eplb_policy,
-        )
+        with patch.object(AscendEplbState, "from_mapping") as from_mapping:
+            controller.setup_from_mapping(model_config, mapping)
+        state.update_mapping.assert_called_once_with(model_config, mapping)
+        from_mapping.assert_not_called()
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
 
@@ -155,6 +134,9 @@ class TestAscendEplbFreshLoadGate(unittest.TestCase):
     @staticmethod
     def _make_state(*, rearrangement_step=1):
         state = object.__new__(AscendEplbState)
+        state._hixl_session = None
+        state._close_error = None
+        state._suspended = False
         state.parallel_config = SimpleNamespace(
             enable_elastic_ep=False,
             eplb_config=SimpleNamespace(log_balancedness_interval=1),

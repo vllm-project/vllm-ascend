@@ -65,6 +65,7 @@ def fetch_seed_transfer_info(
             f"{seed_url}/get_rfork_transfer_engine_info",
             params={"seed_key": seed_key},
             timeout=request_timeout_sec,
+            allow_redirects=False,
         )
         if response.status_code != HTTPStatus.OK:
             logger.error("RFork seed metadata request returned status=%s", response.status_code)

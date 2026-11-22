@@ -100,7 +100,9 @@ def test_ascend_encoder_decoder_state_builds_ascend_attention_metadata(
     expected_num_input_tokens,
 ):
     state = AscendEncoderDecoderModelState.__new__(AscendEncoderDecoderModelState)
-    state.max_model_len = 32
+    # Since vLLM 0.31 (#58149), max_model_len is exposed as a read-only property backed by
+    # model_config.
+    state.model_config = SimpleNamespace(max_model_len=32)
     parallel_config = SimpleNamespace(
         decode_context_parallel_size=2,
         cp_kv_cache_interleave_size=1,

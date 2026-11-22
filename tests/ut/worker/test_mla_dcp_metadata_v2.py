@@ -1,3 +1,4 @@
+# mypy: disable-error-code="annotation-unchecked, assignment, method-assign, union-attr"
 # SPDX-License-Identifier: Apache-2.0
 """CPU metadata contracts for MLA DCP producers and graph updates."""
 
@@ -10,7 +11,7 @@ import torch
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMLADCPDecodeMetadata
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2 import attn_utils
-from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import AscendAutoRegressiveSpeculator
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import AscendTargetDependentARSpeculator
 
 
 def _local_lengths(lengths, size, rank, interleave):
@@ -19,36 +20,21 @@ def _local_lengths(lengths, size, rank, interleave):
 
 
 def _manager(size, rank, interleave):
-    manager = object.__new__(DCPManager)
-    manager.dcp_world_size = size
-    manager.dcp_world_rank = rank
-    manager.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave))
-    return manager
+    config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave))
+    return DCPManager(size, rank, config)
 
 
 @pytest.mark.parametrize("size,interleave", [(2, 1), (8, 4), (16, 128)])
-@pytest.mark.parametrize("use_internal_cpu", [False, True])
-def test_common_lengths_cover_all_ranks_and_preserve_global(size, interleave, use_internal_cpu):
+def test_cpu_lengths_cover_all_ranks_and_preserve_global(size, interleave):
     cycle = size * interleave
     expected_global = [0, 1, interleave - 1, interleave, interleave + 1, cycle - 1, cycle, cycle + 1]
     lengths = torch.tensor(expected_global, dtype=torch.int32)
     rank_lengths = []
     for rank in range(size):
-        common = SimpleNamespace(
-            _seq_lens_cpu=lengths if use_internal_cpu else None,
-            seq_lens_cpu=lengths + 100 if use_internal_cpu else lengths,
-            num_reqs=len(lengths),
-            seq_lens=lengths + 3,
-            dcp_local_seq_lens=torch.full_like(lengths, -2),
-            dcp_local_seq_lens_cpu=torch.full_like(lengths, -1),
-        )
-        _manager(size, rank, interleave).prepare_common_attn_metadata(common)
-        assert common.dcp_local_seq_lens.tolist() == _local_lengths((lengths + 3).tolist(), size, rank, interleave)
-        local = common.dcp_local_seq_lens_cpu
+        local = _manager(size, rank, interleave).prepare_dcp_local_seq_lens_cpu(lengths)
         assert local.tolist() == _local_lengths(lengths.tolist(), size, rank, interleave)
         rank_lengths.append(local)
         assert lengths.tolist() == expected_global
-        assert common.seq_lens.tolist() == [length + 3 for length in expected_global]
     assert torch.equal(torch.stack(rank_lengths).sum(0), lengths)
 
 
@@ -111,10 +97,11 @@ def test_v2_common_lengths_are_shared_by_groups(monkeypatch, for_capture, use_dc
 
 @pytest.mark.parametrize("size,rank,interleave", [(2, 0, 4), (2, 1, 4), (8, 7, 1)])
 def test_full_draft_steps_refresh_local_lengths_without_aliasing(size, rank, interleave):
-    speculator = object.__new__(AscendAutoRegressiveSpeculator)
+    speculator = object.__new__(AscendTargetDependentARSpeculator)
     speculator.attn_architecture = "MLA"
     speculator.use_dcp = True
-    speculator.max_model_len = 128
+    # vLLM main exposes max_model_len as a read-only view of vllm_config.
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=128))
     speculator.dcp_manager = _manager(size, rank, interleave)
     speculator.draft_vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=size, cp_kv_cache_interleave_size=interleave)

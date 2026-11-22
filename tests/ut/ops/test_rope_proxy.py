@@ -216,36 +216,50 @@ def test_dspark_context_rope_reuses_all_layer_configs(monkeypatch, shared_config
     layers = {
         name: SimpleNamespace(self_attn=SimpleNamespace(rotary_emb=SimpleNamespace(layername=name))) for name in names
     }
+    head_dim = 4
+    stacked_kv = torch.arange(
+        states.shape[0] * len(layers) * head_dim,
+        dtype=torch.float32,
+        device="cpu",
+    ).view(states.shape[0], -1)
+    per_layer_kv = stacked_kv.view(states.shape[0], len(layers), head_dim)
     lookup = Mock(wraps=get_cos_and_sin_dsa)
     monkeypatch.setattr(dspark, "get_cos_and_sin_dsa", lookup)
     seen = []
 
-    def project(hidden_states, input_positions, attn, rope):
-        assert hidden_states is states
+    def project(kv, input_positions, attn, rope):
         assert input_positions is positions
         cos, sin = rope
         assert set(cos._data) == set(configs)
         assert set(sin._data) == set(configs)
         name = attn.rotary_emb.layername
-        table = tables[configs[names.index(name)]]
+        layer_idx = names.index(name)
+        torch.testing.assert_close(kv, per_layer_kv[:, layer_idx])
+        table = tables[configs[layer_idx]]
         assert torch.equal(cos[name], table[positions])
         assert torch.equal(sin[name], -table[positions])
         seen.append(rope)
-        return hidden_states
+        return kv
 
     model = SimpleNamespace(
+        context_wkv_proj=Mock(return_value=stacked_kv),
+        num_dspark_layers=len(layers),
+        config=SimpleNamespace(head_dim=head_dim),
         layers=layers,
         _project_shared_kv=Mock(side_effect=project),
         _store_standard_swa_kv=Mock(),
     )
     dspark.DeepseekV4DSparkModel.precompute_and_store_context_kv(model, states, positions, slots)
 
+    model.context_wkv_proj.assert_called_once_with(states)
     lookup.assert_called_once_with(positions, layer_names=names)
     assert len(seen) == len(layers)
     assert all(rope is seen[0] for rope in seen)
     assert model._store_standard_swa_kv.call_count == len(layers)
-    for call, slot, layer in zip(model._store_standard_swa_kv.call_args_list, slots, layers.values()):
-        assert call.args[0] is states
+    for layer_idx, (call, slot, layer) in enumerate(
+        zip(model._store_standard_swa_kv.call_args_list, slots, layers.values())
+    ):
+        torch.testing.assert_close(call.args[0], per_layer_kv[:, layer_idx])
         assert call.args[1] is slot
         assert call.args[2] is layer.self_attn
 

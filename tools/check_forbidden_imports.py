@@ -50,12 +50,18 @@ CHECK_IMPORTS = {
         tip="Replace 'import re' with 'import regex as re' or 'import regex'.",
         allowed_pattern=re.compile(r"^\s*import\s+regex(\s*|\s+as\s+re\s*)$"),
         allowed_files={
+            # Profiling indexes run in minimal CPU jobs without third-party dependencies.
+            "tools/profiling/artifacts.py",
             # Cache key preparation and native build wrappers must work before
             # third-party Python build dependencies are installed.
             "csrc/scripts/build_cache.py",
             # The doctest selector runs in a minimal CPU workflow before
             # project dependencies are installed.
             "tests/e2e/doctests/scripts/doctest_helper.py",
+            # Daily Issue updates run in a standalone, standard-library-only CPU job.
+            ".github/workflows/scripts/update_daily_issue.py",
+            # Artifact naming also runs in minimal CPU jobs without regex installed.
+            "tools/profiling/__init__.py",
         },
     ),
     "triton": ForbiddenImport(

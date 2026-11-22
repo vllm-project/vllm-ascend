@@ -1,0 +1,32 @@
+name: Recipes
+
+# Validate Huawei-scoped overlays with the upstream renderer workflow and
+# renderer code from main, matching the renderer that publishes recipes.vllm.ai.
+
+on:
+  pull_request:
+    paths:
+      - 'recipes/**'
+      - '.github/workflows/recipes.yml'
+      - '.github/workflows/_recipes_validate_ascend.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Recipes
+    if: github.repository_owner == 'vllm-project'
+    uses: vllm-project/recipes/.github/workflows/validate-recipes.yml@main
+    with:
+      source: vllm-ascend
+      path: recipes
+
+  ascend-validation:
+    name: Ascend configuration
+    needs: validate
+    uses: ./.github/workflows/_recipes_validate_ascend.yaml

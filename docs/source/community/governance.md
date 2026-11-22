@@ -6,7 +6,7 @@ As a vital component of vLLM, the vLLM Ascend project is dedicated to providing 
 
 ## Principles
 
-vLLM Ascend follows the vLLM community's code of conduct: [vLLM - CODE OF CONDUCT](https://github.com/vllm-project/vllm/blob/main/CODE_OF_CONDUCT.md)
+vLLM Ascend follows the vLLM community's code of conduct: [vLLM - CODE OF CONDUCT](https://github.com/vllm-project/vllm/blob/main/.github/CODE_OF_CONDUCT.md)
 
 ## Governance - Mechanics
 

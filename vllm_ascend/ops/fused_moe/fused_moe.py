@@ -33,6 +33,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
+from vllm_ascend.ops.fused_moe.moe_mlp import maybe_record_event
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.ops.fused_moe.shared_experts import (
     AscendSharedExperts,
@@ -40,6 +41,7 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
     SharedExpertParallelMode,
     SubmittedSharedExpertGateUp,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def _ascend_moe_forward_shared_sp_fake(
@@ -95,7 +97,18 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         routed_input_transform=None,
         routed_output_transform=None,
         routed_scaling_factor=1,
+        divide_shared_output_in_fp16=False,
+        routed_scale_mode=None,
     ):
+        scaling_kwargs = {}
+        if not vllm_version_is("0.33.0"):
+            from vllm.model_executor.layers.fused_moe.config import RoutedScaleMode
+
+            if routed_scale_mode is None:
+                routed_scale_mode = (
+                    RoutedScaleMode.OUTPUT_FP16_GUARD if divide_shared_output_in_fp16 else RoutedScaleMode.ROUTER
+                )
+            scaling_kwargs["routed_scale_mode"] = routed_scale_mode
         super().__init__(
             layer_name,
             moe_config,
@@ -108,6 +121,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             routed_input_transform,
             routed_output_transform,
             routed_scaling_factor,
+            **scaling_kwargs,
         )
         self._gate = gate
         self.hidden_size = moe_config.hidden_dim
@@ -130,6 +144,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self.quant_type,
                 self._quant_method,
             )
+            # Weight loading runs after construction, so the shared expert
+            # hands out a live payload that it fills in once both shared
+            # linears are rebuilt. Install it explicitly here: the routed
+            # layer is the only module the quant methods
+            # (``get_fused_mc2_weights``) and the MegaMoe communicator see.
+            self.routed_experts.ascend_megamoe_shared_fusion = self.ascend_shared_experts.megamoe_shared_fusion()
             if self._can_overlap_sp_shared_with(self.routed_input_transform):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
@@ -180,6 +200,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if shared_experts_input is None:
             hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
 
+        if self._megamoe_shared_expert_fused:
+            # The runner owns the effective routed_scaling_factor (with
+            # apply_routed_scale_to_output=True the router and the
+            # routed-experts layer both hold 1.0). MegaMoe combines routed +
+            # shared inside the operator, so the factor must be folded into
+            # the topk weights by the comm implementation; plumb it down
+            # through the routed-experts layer, which is the only module the
+            # comm implementation sees.
+            self.routed_experts.ascend_megamoe_fold_scale = self.routed_scaling_factor
+
         # Record before `_maybe_pad_hidden_states` pads activations to match
         # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
         # so routed output can be trimmed before
@@ -210,6 +240,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # Extract outputs from result
         shared_output, fused_output = _unpack(result)
 
+        if self._megamoe_shared_expert_fused:
+            # MegaMoe already combined the shared contribution into
+            # fused_output, and the forward_impl returned shared_out=None.
+            # Force None here too so Dynamo specializes the skip-branch:
+            # the _forward_entry custom op's fake impl declares a tensor
+            # output, so without this the compiled graph bakes in the
+            # combine add, which then receives None at replay time and
+            # fails the aten schema check (List[Tensor]).
+            shared_output = None
+
         if og_hidden_dim_pre_xform is not None:
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]
 
@@ -226,7 +266,14 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # See note above re: the two all-reduce points.
         shared_output = self._maybe_reduce_shared_expert_output(shared_output, fused_output_is_reduced)
 
-        shared_output, fused_output = self._maybe_apply_routed_scale_to_output(shared_output, fused_output)
+        if self._megamoe_shared_expert_fused:
+            # MegaMoe folded routed_scaling_factor into the topk weights for
+            # the fused shared-expert call (see FusedMC2CommImpl), so its
+            # output already is the final MoE result. Scaling here would
+            # wrongly scale the shared-expert contribution too.
+            pass
+        else:
+            shared_output, fused_output = self._maybe_apply_routed_scale_to_output(shared_output, fused_output)
 
         # Apply output transform (e.g. latent -> full dim)
         fused_output = self.apply_routed_output_transform(fused_output)
@@ -287,6 +334,21 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if shared_experts is None or not hasattr(shared_experts, "parallel_mode"):
             return SharedExpertParallelMode.TENSOR_PARALLEL
         return shared_experts.parallel_mode()
+
+    @property
+    def _megamoe_shared_expert_fused(self) -> bool:
+        """True when this step's routed experts run the shared expert inside MegaMoe."""
+        # Every sub-attribute is read via getattr with a default: an
+        # AttributeError raised inside a property getter is swallowed by
+        # CPython and falls back to nn.Module.__getattr__, which reports a
+        # misleading "no attribute '_megamoe_shared_expert_fused'" error.
+        shared_experts = getattr(self, "ascend_shared_experts", None)
+        return (
+            shared_experts is not None
+            and getattr(shared_experts, "megamoe_shared_weights_ready", False)
+            and not getattr(shared_experts, "_megamoe_shared_fusion_disabled", False)
+            and _EXTRA_CTX.moe_comm_type is MoECommType.FUSED_MC2
+        )
 
     @property
     def local_num_experts(self) -> int:
@@ -448,24 +510,27 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         router_logits: torch.Tensor,
     ) -> tuple[
         torch.Tensor,
-        torch.npu.Event,
-        torch.npu.Event,
+        torch.npu.Event | None,
+        torch.npu.Event | None,
         SubmittedSharedExpertGateUp | None,
     ]:
+        # The milestones are consumed only by the shared-expert side stream,
+        # which runs only when multistream overlap is enabled; skip the record
+        # (notably slow host-side) when it is off.
         if self.is_internal_router:
             router_input = self._prepare_router_input(shared_hidden_states, router_logits)
             # Release shared Vector/AIV preparation only after the router input
             # Cast. It then overlaps the Cube-heavy gate matmul instead of
             # competing with another Vector/AIV operation.
-            shared_input_ready = torch.npu.current_stream().record_event()
+            shared_input_ready = maybe_record_event()
             prepared_execution = self._prepare_shared_for_router_overlap(
                 prepared_shared_input,
                 shared_input_ready,
             )
             router_logits = self._apply_router_linear(router_input)
-            router_output_ready = torch.npu.current_stream().record_event()
+            router_output_ready = maybe_record_event()
         else:
-            shared_input_ready = torch.npu.current_stream().record_event()
+            shared_input_ready = maybe_record_event()
             prepared_execution = self._prepare_shared_for_router_overlap(
                 prepared_shared_input,
                 shared_input_ready,
@@ -528,7 +593,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if prepared_shared_input.is_gathered:
                 milestones.routed_finalize_done = torch.npu.current_stream().record_event()
 
-            if submitted_gate_up is None:
+            if self._megamoe_shared_expert_fused:
+                # The shared expert GMM1 + activation + GMM2 runs inside the
+                # MegaMoe operator on the routed stream, so its contribution
+                # is already contained in routed_out. Skip the standalone
+                # forward to avoid computing it twice.
+                shared_out = None
+            elif submitted_gate_up is None:
                 shared_out = self.ascend_shared_experts.forward(
                     prepared_shared_input,
                     milestones,

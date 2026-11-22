@@ -67,10 +67,10 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Build docs and generate PO files
+      - name: Generate PO files
         working-directory: ./docs
         run: |
-          pip install -r requirements-docs.txt
+          pip install -r requirements-translate.txt
           cd ..
           FORCE_FLAG=""
           if [ "${{ inputs.force }}" = "true" ]; then FORCE_FLAG="--force"; fi

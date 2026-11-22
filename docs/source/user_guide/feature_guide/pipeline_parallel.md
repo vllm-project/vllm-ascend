@@ -132,33 +132,23 @@ PP is useful in the following situations:
 - A Prefill node in a P/D-disaggregated deployment needs more devices for model
   capacity or long-context prefill.
 
-PP also introduces activation transfers between stages and pipeline bubbles.
-Use a TP-only deployment as the baseline when the model fits in one node, then
-add PP when model capacity or the network topology requires it.
+PP also introduces activation transfers between stages and pipeline bubbles. Use a TP-only deployment as the baseline when the model fits in one node, then add PP when model capacity or the network topology requires it.
 
 | Deployment goal | Recommended starting point |
 | --- | --- |
 | The model fits in one node | Start with TP only and benchmark before adding PP. |
 | The model spans multiple nodes | Use TP within a node and PP across nodes. |
 | Multiple serving replicas are required | Build one TP/PP replica first, then add DP only on a supported model, operator, and network topology. |
-| Long-context Prefill needs PP tuning | Start with PP, then evaluate [Dynamic Chunked Pipeline Parallel](dynamic_chunk_pipeline_parallel.md). |
 
 ## Model Support for PP
 
-A model can run with `--pipeline-parallel-size > 1` only when its
-implementation exposes the `SupportsPP` interface (the upstream marker in
-`vllm.model_executor.models.interfaces`). The interface declares that the
-model implementation can:
+A model can run with `--pipeline-parallel-size > 1` only when its implementation exposes the `SupportsPP` interface (the upstream marker in `vllm.model_executor.models.interfaces`). The interface declares that the model implementation can:
 
 - Split its Transformer decoder layers into per-stage `[start_layer, end_layer)` ranges.
 - Skip layers that fall outside its own range.
 - Send and receive the intermediate activations exchanged at stage boundaries.
 
-Models without this marker reject PP at startup, so checking support is
-mechanical: inspect the model class (or one of its parents) for
-`SupportsPP`, or check the **Pipeline Parallel** column in
-[Supported Models](../support_matrix/supported_models.md) for the validated
-per-model status on Ascend.
+Models without this marker reject PP at startup, so checking support is mechanical: inspect the model class (or one of its parents) for `SupportsPP`, or check the **Pipeline Parallel** column in [Supported Models](../support_matrix/supported_models.md) for the validated per-model status on Ascend.
 
 Model families with `SupportsPP` implementations on Ascend:
 
@@ -271,7 +261,7 @@ do not select a partition using memory capacity alone.
 
 ## Advanced Scenarios
 
-### PP with Speculative Decoding
+### PP with Speculative Decoding {: #pp-with-speculative-decoding}
 
 `VLLM_PP_LAYER_PARTITION` partitions only the target model. Draft-model layers
 are not included in its layer sum, and their weight naming and layer layout
@@ -287,28 +277,36 @@ If the last rank is constrained by memory or latency, reduce its target hidden
 layers with a custom partition. `draft_tensor_parallel_size` controls only the
 draft model's TP size; it does not define a draft-model PP partition.
 
-The following matrix lists the features that can be stacked with PP on
-Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). Unless noted otherwise,
-"supported" means the combination is enabled in code and exercised by CI.
+The following matrix lists the features that can be stacked with PP. Support
+describes each individual feature combination with PP and remains subject to
+the model and hardware requirements in the relevant feature guide.
 
 | Feature stacked with PP | Support |
 | --- | --- |
-| Graph mode (ACL graph) | Supported with `FULL_DECODE_ONLY`; validated with MTP stacks. |
+| Graph mode (ACL graph) | Supported with `FULL_DECODE_ONLY` and `PIECEWISE`; `FULL_DECODE_ONLY` is validated with MTP stacks. |
 | MTP | Supported. |
-| EAGLE3 | Supported only for MiniMax-M3 sparse models; the upstream Model Runner V2 restriction is lifted for these architectures. |
+| EAGLE3 | Supported only for MiniMax-M3 sparse models; the upstream restriction is lifted for these architectures. |
 | DFlash | Not supported. |
 | DSpark | Supported only for DeepSeek-V4 and GLM-5.2 MoE-DSA models. The drafter taps intermediate target layers, and the tapped hidden states are relayed across PP stages. |
-| PCP (Prefill Context Parallel) | Not supported. |
+| PCP (Prefill Context Parallel) | Supported. |
 | DCP (Decode Context Parallel) | Supported; use `MooncakeConnectorV2` for KV transfer. |
-| LayerSplit (KVPP) | Supported. An intermittent output-mismatch issue in the e2e test is under investigation. |
+| LayerSplit (KVPP) | Supported with eager or `PIECEWISE` execution; full graph modes cannot be combined with KVPP. An intermittent output-mismatch issue in the e2e test is under investigation. See the [KVPP guide](kvpp.md). |
 | KV offloading (Sparse KV Cache Offload) | Supported with the layerwise connector. |
 | Prefix caching | Supported. |
 | Pooling | Supported. |
+| KV Cache Pool | Supported. |
+| Lmhead TP | Supported. |
+| MLAPO | Supported. |
+| Multimodal inputs (mm) | Supported. |
+| Multistream MoE | Supported. |
+| Shared Expert DP | Supported. |
+| Quantization | Supported for all quantization methods available for the model and hardware, including W4A4, W4A8, and W8A8. |
+| Weight NZ | Supported. |
 | P/D disaggregation | Supported with PP on the Prefill node only; the Decode node must use `PP1`. |
 | Async scheduling | Supported. |
 | Sequence parallelism | Supported. |
 
-Notes for speculative decoding with PP on Model Runner V2:
+Notes for speculative decoding with PP:
 
 - DSpark drafts from taps on intermediate target layers
   (`dspark_target_layer_ids`). Taps that fall on an earlier PP stage are
@@ -366,8 +364,6 @@ or equal to the Decode TP size and to be an integer multiple of it.
 
 For complete P/D startup commands, see
 [PD Disaggregation with Mooncake](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md).
-For long-context Prefill optimization, see
-[Dynamic Chunked Pipeline Parallel](dynamic_chunk_pipeline_parallel.md).
 
 ## Performance Characteristics: PP Compared with TP
 
@@ -417,14 +413,8 @@ the pipeline occupied. TP remains the preferred baseline when the model fits in
 one node, low-concurrency latency is the primary objective, or the stages cannot
 be balanced.
 
-For long-context Prefill workloads, consider
-[Dynamic Chunked Pipeline Parallel](dynamic_chunk_pipeline_parallel.md), which
-adjusts chunk sizes using measured execution time to reduce stage idle time.
-
 ## Compatibility and Limitations
 
-- PP cannot be combined with Prefill Context Parallelism (PCP). See
-  [Context Parallel](context_parallel.md).
 - Xlite graph mode is not compatible with PP.
 - Sparse KV Cache Offload supports PP with the layerwise connector.
 - `MooncakeConnectorV1` currently requires the Decode-side PP size to be `1`.
@@ -451,7 +441,6 @@ adjusts chunk sizes using measured execution time to reduce stage idle time.
 
 - [Supported Models](../support_matrix/supported_models.md)
 - [Ray Distributed](../../tutorials/features/ray.md)
-- [Dynamic Chunked Pipeline Parallel](dynamic_chunk_pipeline_parallel.md)
 - [Speculative Decoding](speculative_decoding.md)
 - [PD Disaggregation with Mooncake](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md)
 - [Performance Benchmark](../../developer_guide/performance_and_debug/performance_benchmark.md)
