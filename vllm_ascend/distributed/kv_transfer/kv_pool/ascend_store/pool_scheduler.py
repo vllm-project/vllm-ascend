@@ -441,7 +441,7 @@ class BaseKVPoolScheduler(ABC):
             kv_cache_group_families=self.kv_cache_group_families,
             save_partial_block=self.layerwise_offload,
             hash_block_size=self.hash_block_size,
-            save_unaligned_tail=self.use_hybrid,
+            save_unaligned_tail=self.use_hybrid and not self.use_layerwise,
         )
 
     def _process_new_request(
