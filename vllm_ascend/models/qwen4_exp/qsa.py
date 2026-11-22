@@ -49,6 +49,9 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_store_cache_rows as qsa_store_cache_rows_fused,
 )
+from vllm_ascend.ops.triton.qwen4_exp.split_qkv_rmsnorm_mrope import (
+    qwen4_exp_split_qkv_rmsnorm_mrope_out,
+)
 from vllm_ascend.utils import current_stream, npu_stream_switch, vllm_version_is
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
@@ -57,9 +60,6 @@ from .lightning_indexer import (
     QSACompressedIndexerMetadataProtocol,
     QSAIndexerMetadataProtocol,
     qsa_select_paged_tokens_lightning_v2,
-)
-from vllm_ascend.ops.triton.qwen4_exp.split_qkv_rmsnorm_mrope import (
-    qwen4_exp_split_qkv_rmsnorm_mrope_out,
 )
 from .qsa_prepare import (
     prepare_qsa_gbsa_shared,

@@ -89,5 +89,3 @@ def test_compressed_builder_owns_decode_step_preparation():
     torch.testing.assert_close(metadata.qsa_gbsa_row_block_table[:3], table[[0, 1, 0]])
     assert metadata.qsa_score_weights.shape == (8, 3)
     assert metadata.qsa_gbsa_cu_query.tolist() == list(range(9))
-
-

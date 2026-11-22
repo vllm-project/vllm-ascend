@@ -5,10 +5,10 @@ import torch
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.models.qwen4_exp.qsa_prepare import prepare_qsa_rope_cache
 from vllm_ascend.ops.triton.qwen4_exp.split_qkv_rmsnorm_mrope import (
     qwen4_exp_split_qkv_rmsnorm_mrope_out,
 )
-from vllm_ascend.models.qwen4_exp.qsa_prepare import prepare_qsa_rope_cache
 
 STRUCTURAL_CASES = [
     (1, 2, 1, 128, [24, 20, 20]),
@@ -122,12 +122,10 @@ def test_qwen4_exp_split_qkv_writes_final_gate_buffer(use_prepared_cache: bool):
         positions=rope_positions,
     )
 
-    expected_q, expected_k, expected_v, expected_gate = (
-        torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
-            has_gate=True,
-            weight_offset=1.0,
-            **kwargs,
-        )
+    expected_q, expected_k, expected_v, expected_gate = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
+        has_gate=True,
+        weight_offset=1.0,
+        **kwargs,
     )
     gate = torch.empty_like(expected_gate)
     gate_data_ptr = gate.data_ptr()
