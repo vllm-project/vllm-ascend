@@ -2230,6 +2230,47 @@ def test_shutdown_retries_failed_engram_and_closes_other_clients():
         runner.shutdown()
         parent.assert_called_once()
     assert failing.close_host_offload.call_count == 2
+    other.close_host_offload.assert_called_once()
+
+
+@pytest.mark.parametrize("parent_fails", [False, True])
+def test_shutdown_retries_fsa_ipc_after_parent_drops_graphs(parent_fails):
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner._c8_mxfp_v_scale_caches = [object()]
+    runner.cudagraph_manager = target = object()
+    draft = object()
+    runner.speculator = SimpleNamespace(decode_cudagraph_manager=draft)
+    events = []
+    embedding = SimpleNamespace(local_vmm=True, close_host_offload=lambda: events.append("embedding"))
+    runner.model = SimpleNamespace(modules=lambda: [embedding])
+    ipc_error = RuntimeError("IPC drain failed")
+    parent_error = RuntimeError("parent failed")
+
+    def close_ipc(graph_owner):
+        assert graph_owner.cudagraph_manager is target
+        assert graph_owner.speculator.decode_cudagraph_manager is draft
+        events.append("ipc")
+        if events.count("ipc") == 1:
+            raise ipc_error
+
+    def parent():
+        assert runner._c8_mxfp_v_scale_caches == []
+        runner.cudagraph_manager = runner.speculator = runner.model = None
+        events.append("parent")
+        if parent_fails and events.count("parent") == 1:
+            raise parent_error
+
+    runner.sparse_kv_offload_manager = SimpleNamespace(close_fsa_plan_ipc=close_ipc)
+    with patch.object(GPUModelRunner, "shutdown", side_effect=parent):
+        with pytest.raises(RuntimeError) as caught:
+            runner.shutdown()
+        assert caught.value is ipc_error
+        assert caught.value.__cause__ is (parent_error if parent_fails else None)
+        first_events = ["ipc", "parent"] if parent_fails else ["ipc", "parent", "embedding"]
+        assert events == first_events
+        runner.shutdown()
+    assert events == first_events + (["ipc", "parent", "embedding"] if parent_fails else ["ipc"])
+    assert runner._fsa_plan_ipc_shutdown_graphs is None
 
 
 def test_shutdown_retains_engram_when_parent_fails_after_deleting_model():

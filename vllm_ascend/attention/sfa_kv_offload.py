@@ -1078,6 +1078,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         cache_blocks_per_row: int,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        manager = get_sparse_kv_offload_manager()
         cache_token_capacity = max(self.max_num_topk_rows, token_count)
         cache_topk_head_capacity = max(topk_head_count, 1)
         cache_topk_capacity = max(self.sfa_sparse_topk, topk)
@@ -1101,7 +1102,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             or self._fused_overlap_selection_capacity[3] < cache_blocks_per_row
             or self.selection_kv_block_table.device != device
             or self.selection_kv_block_status.device != device
-            or self.selection_membership_map.device.type != "cpu"
+            or self.selection_membership_map is not manager.fused_overlap_membership_map
             or self.fused_overlap_last_req_ids.device != device
         )
         if needs_realloc:
@@ -1127,9 +1128,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                 dtype=torch.int32,
                 device=device,
             )
-            self.selection_membership_map = get_sparse_kv_offload_manager().allocate_fused_overlap_membership_map(
-                row_capacity
-            )
+            self.selection_membership_map = manager.allocate_fused_overlap_membership_map(row_capacity)
             self.fused_overlap_last_req_ids = torch.full(
                 (cache_token_capacity,),
                 -1,
@@ -1564,9 +1563,11 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             selection_kv_cache=selection_kv_cache,
             selection_k_rope=selection_k_rope,
             capturing=bool(_EXTRA_CTX.capturing),
+            multi_token_decode=num_tokens != num_reqs,
         )
         attn_output = fused_op(**fused_inputs)
         attn_output = attn_output[..., : ql_nope_decode.shape[-1]].contiguous()
+        manager.join_fsa_plan_ipc_if_needed(layer_name, bool(_EXTRA_CTX.capturing))
         manager.wait_for_current_kv_writeback(bool(_EXTRA_CTX.capturing))
         return attn_output
 

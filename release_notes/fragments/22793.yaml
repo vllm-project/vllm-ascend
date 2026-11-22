@@ -1,0 +1,7 @@
+pr: 22793
+entries:
+  - category: feature
+    text: >-
+      On Ascend A3, set `sparse_kv_offload_config.fsa_planner_mode` to `notify`
+      to share fused sparse attention KV plans over host memory within a
+      host-local tensor-parallel group. CPU planning remains the default.

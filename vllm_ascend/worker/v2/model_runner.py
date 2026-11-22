@@ -22,6 +22,7 @@ import logging
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -618,14 +619,33 @@ class NPUModelRunner(GPUModelRunner):
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
 
     def shutdown(self) -> None:
-        from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
-
         expert_offload.shutdown(self)
+        manager = getattr(self, "sparse_kv_offload_manager", None)
+        if manager is not None:
+            graphs = getattr(self, "_fsa_plan_ipc_shutdown_graphs", None)
+            try:
+                manager.close_fsa_plan_ipc(graphs or self)
+            except Exception as ipc_error:
+                # Parent shutdown drops the graph owners. A later IPC drain must
+                # still retire their graphs before it can release the Notifies.
+                self._fsa_plan_ipc_shutdown_graphs = graphs or SimpleNamespace(
+                    cudagraph_manager=getattr(self, "cudagraph_manager", None),
+                    speculator=getattr(self, "speculator", None),
+                )
+                try:
+                    self._shutdown_model_resources()
+                except Exception as cleanup_error:
+                    raise ipc_error from cleanup_error
+                raise
+            self._fsa_plan_ipc_shutdown_graphs = None
+        self._shutdown_model_resources()
 
+    def _shutdown_model_resources(self) -> None:
+        parent_stopped = getattr(self, "_shared_engram_parent_stopped", False)
         model = getattr(self, "model", None)
         # Include private/shared UVA owners, which have no MemFabric client.
         shared_embeddings = list(getattr(self, "_shared_engram_shutdown_pending", None) or [])
-        if model is not None:
+        if model is not None and not parent_stopped:
             owner_ids = {id(owner) for owner in shared_embeddings}
             shared_embeddings.extend(
                 module
@@ -642,22 +662,24 @@ class NPUModelRunner(GPUModelRunner):
             zeroer.entries.clear()
             self.kv_block_zeroer = zeroer.delegate
         self._shared_engram_shutdown_pending = shared_embeddings
-        if not getattr(self, "_shared_engram_parent_stopped", False):
+        if not parent_stopped:
             super().shutdown()
             self._shared_engram_parent_stopped = True
         first_error = None
+        pending = []
         for embedding in shared_embeddings:
             if getattr(embedding, "local_vmm", False) is True:
+                pending.append(embedding)
                 continue
             try:
                 embedding.close_host_offload()
             except Exception as exc:
+                pending.append(embedding)
                 if first_error is None:
                     first_error = exc
+        self._shared_engram_shutdown_pending = pending
         if first_error is not None:
             raise first_error
-        pending = [owner for owner in shared_embeddings if getattr(owner, "local_vmm", False) is True]
-        self._shared_engram_shutdown_pending = pending
         if pending:
             from vllm_ascend.models.deepseek_v41.engram.local_shared_vmm import EngramSharedReleaseError
 
@@ -677,8 +699,12 @@ class NPUModelRunner(GPUModelRunner):
         manager = self.sparse_kv_offload_manager
         if manager is None:
             return
-        manager.register_kv_caches(kv_caches)
-        if not self.ascend_config.sparse_kv_offload_config.use_fused_copy_sfa:
+        config = self.ascend_config.sparse_kv_offload_config
+        if getattr(config, "fsa_planner_mode", "cpu") == "cpu":
+            manager.register_kv_caches(kv_caches)
+        else:
+            manager.register_kv_caches(kv_caches, model_runner=self)
+        if not config.use_fused_copy_sfa:
             return
 
         from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl

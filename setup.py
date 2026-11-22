@@ -22,6 +22,7 @@ import logging
 import os
 import subprocess
 import sys
+from pathlib import Path
 from sysconfig import get_paths
 
 from setuptools import Command, Extension, find_packages, setup
@@ -154,6 +155,22 @@ if not envs.SOC_VERSION:
     envs.SOC_VERSION = soc_version
 
 
+FSA_DEVICE_PLANNER_LIBRARY = "libfsa_mapped_recurrent_planner.so"
+BUILD_FSA_DEVICE_PLANNER = (
+    envs.COMPILE_CUSTOM_KERNELS
+    and hardware.device_type_from_soc_version(envs.SOC_VERSION) is hardware.AscendDeviceType.A3
+)
+
+
+def remove_disabled_fsa_planner(build_lib: str) -> None:
+    if BUILD_FSA_DEVICE_PLANNER:
+        return
+    # A previous native A3 build can leave a planner in an editable install
+    # or in a reused setuptools build directory.
+    for root in (ROOT_DIR, build_lib):
+        (Path(root) / "vllm_ascend" / FSA_DEVICE_PLANNER_LIBRARY).unlink(missing_ok=True)
+
+
 def gen_build_info():
     soc_version = envs.SOC_VERSION
     device_type = hardware.device_type_from_soc_version(soc_version).name
@@ -179,6 +196,7 @@ class custom_develop(develop):
 
 class custom_build_info(build_py):
     def run(self):
+        remove_disabled_fsa_planner(self.build_lib)
         gen_build_info()
         super().run()
 
@@ -380,6 +398,8 @@ class cmake_build_ext(build_ext):
             for root, _, files in os.walk(self.build_temp):
                 for file in files:
                     if file.endswith(".so"):
+                        if file == FSA_DEVICE_PLANNER_LIBRARY and not BUILD_FSA_DEVICE_PLANNER:
+                            continue
                         src_path = os.path.join(root, file)
                         dst_path = os.path.join(self.build_lib, "vllm_ascend", file)
                         shutil.copy(src_path, dst_path)
@@ -397,6 +417,7 @@ class cmake_build_ext(build_ext):
             print(f"Copy: {src_cann_ops_custom} -> {dst_cann_ops_custom}")
 
     def run(self):
+        remove_disabled_fsa_planner(self.build_lib)
         if envs.COMPILE_CUSTOM_KERNELS:
             # First, ensure ACLNN custom-ops is built and installed.
             self.run_command("build_aclnn")

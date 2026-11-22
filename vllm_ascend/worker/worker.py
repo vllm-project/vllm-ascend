@@ -106,6 +106,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     apply_layerwise_kv_cache_plan,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    fsa_device_planner_hbm_bytes,
+    fsa_plan_ipc_reserve_bytes,
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
@@ -753,6 +755,22 @@ class NPUWorker(GPUWorker):
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
 
+    def _adjust_kv_cache_memory_budget(self, physical_bytes: int) -> int:
+        config = get_ascend_config().sparse_kv_offload_config
+        if config.enabled and config.fsa_planner_mode in ("hccl", "notify"):
+            specs = getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec()
+            num_layers = sum(bool(getattr(spec, "store_on_host", False)) for spec in specs.values())
+            tp = get_tp_group()
+            reserve = fsa_device_planner_hbm_bytes(
+                self.vllm_config, config, num_layers, tp.rank_in_group, tp.world_size
+            )
+            logger.info(
+                "Reserving %.2f MiB of HBM for the FSA device planner on TP%d.", reserve / (1 << 20), tp.rank_in_group
+            )
+            physical_bytes = max(physical_bytes - reserve, 0)
+        scaled_bytes = self._scale_kv_cache_memory_for_multi_group(physical_bytes)
+        return self._apply_kv_offload_decode_memory_constraints(scaled_bytes)
+
     def _apply_kv_offload_decode_memory_constraints(
         self,
         available_device_memory_bytes: int,
@@ -764,12 +782,18 @@ class NPUWorker(GPUWorker):
 
         kv_cache_spec = getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec()
         dram_limit_bytes = int(sparse_kv_offload_config.dram_size_per_dp_GB * GiB_bytes)
+        ipc_options = {}
+        if getattr(sparse_kv_offload_config, "fsa_planner_mode", "cpu") == "notify":
+            ipc_options["planner_ipc_reserve_bytes"] = fsa_plan_ipc_reserve_bytes(
+                self.vllm_config, sparse_kv_offload_config, self.parallel_config.tensor_parallel_size
+            )
         budget = plan_sparse_kv_offload_memory(
             kv_cache_spec=kv_cache_spec,
             vllm_config=self.vllm_config,
             available_device_memory_bytes=available_device_memory_bytes,
             dram_limit_bytes=dram_limit_bytes,
             keep_device_kv_cache=sparse_kv_offload_config.keep_device_kv_cache,
+            **ipc_options,
         )
         logger.info_once(
             "Sparse KV offload memory plan: npu_limit=%d blocks, "
@@ -837,10 +861,7 @@ class NPUWorker(GPUWorker):
             # Explicit and startup-plan budgets are physical bytes too. Apply
             # the same private multi-group allocation correction as profiling
             # before the offload and KVPP budget conversions.
-            kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(kv_cache_memory_bytes)
-            return self._apply_kvpp_memory_budget(
-                self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
-            )
+            return self._apply_kvpp_memory_budget(self._adjust_kv_cache_memory_budget(kv_cache_memory_bytes))
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -886,17 +907,14 @@ class NPUWorker(GPUWorker):
             "isolate vLLM in its own container."
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
-        self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
-            self.available_kv_cache_memory_bytes,
-        )
 
         logger.debug(profile_result)
         logger.info_once(
-            "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
+            "Available physical memory before KV cache adjustments: %.2f GiB",
+            GiB(self.available_kv_cache_memory_bytes),
+            scope="local",
         )
-        self.available_kv_cache_memory_bytes = self._apply_kv_offload_decode_memory_constraints(
-            self.available_kv_cache_memory_bytes
-        )
+        self.available_kv_cache_memory_bytes = self._adjust_kv_cache_memory_budget(self.available_kv_cache_memory_bytes)
         return self._apply_kvpp_memory_budget(self.available_kv_cache_memory_bytes)
 
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:

@@ -1102,7 +1102,50 @@ class TestNPUWorker(TestBase):
 
         worker.get_kv_cache_spec.assert_called_once_with()
 
-    def test_explicit_kv_cache_memory_applies_sparse_offload_constraints(self):
+    def test_device_planner_hbm_matches_allocated_tensor_storage(self):
+        from torch.utils._pytree import tree_leaves
+
+        from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+            SparseKVOffloadManager,
+            _fsa_plan_ipc_bytes,
+            fsa_device_planner_hbm_bytes,
+        )
+
+        for draft_steps, token_limit, rows, topk, capacity, layers in ((0, 12, 3, 16, 128, 1), (3, 7, 7, 33, 256, 2)):
+            vllm_config = SimpleNamespace(
+                scheduler_config=SimpleNamespace(max_num_seqs=3, max_num_batched_tokens=token_limit),
+                speculative_config=SimpleNamespace(num_speculative_tokens=draft_steps) if draft_steps else None,
+            )
+            for mode in ("hccl", "notify"):
+                config = SimpleNamespace(fsa_planner_mode=mode, topk=topk, topk_buffer_size=capacity)
+                for rank, size in ((0, 1), (0, 2), (1, 2)):
+                    with self.subTest(rows=rows, topk=topk, mode=mode, rank=rank, size=size):
+                        manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+                        manager.topk, manager.topk_buffer_size = topk, capacity
+                        manager.tp_rank = rank
+                        manager.max_num_topk_rows = rows
+                        manager.use_fused_overlap = True
+                        manager._fused_device_plan_library = object()
+                        manager._fsa_plan_ipc_bytes = _fsa_plan_ipc_bytes(vllm_config, config, size)
+                        if manager._fsa_plan_ipc_bytes:
+                            manager.fsa_plan_ipc = object()  # represent an established shared host transport
+                        manager._init_fused_device_planner(torch.device("cpu"))
+                        manager.allocate_fused_overlap_membership_map(rows)
+                        if rank == 0:
+                            for layer in range(layers):
+                                manager._get_fused_device_planner_layer_state(layer, capturing=False)
+
+                        self.assertEqual(hasattr(manager, "fused_device_planner_payload"), mode == "hccl" or size == 1)
+                        buffers = [t for t in tree_leaves(vars(manager)) if isinstance(t, torch.Tensor)]
+                        allocated_bytes = sum(t.nbytes for t in buffers)
+                        self.assertEqual(
+                            fsa_device_planner_hbm_bytes(vllm_config, config, layers, rank, size), allocated_bytes
+                        )
+
+    @patch("vllm_ascend.worker.worker.fsa_device_planner_hbm_bytes", return_value=512)
+    @patch("vllm_ascend.worker.worker.get_tp_group")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_explicit_kv_cache_memory_applies_sparse_offload_constraints(self, get_config, get_tp, planner_hbm):
         from vllm.config import get_current_vllm_config
 
         from vllm_ascend.worker.worker import NPUWorker
@@ -1114,6 +1157,15 @@ class TestNPUWorker(TestBase):
         worker.init_snapshot = SimpleNamespace(free_memory=16384)
         worker._scale_kv_cache_memory_for_multi_group = MagicMock(return_value=6144)
         worker._apply_kv_offload_decode_memory_constraints = MagicMock(return_value=4096)
+
+        sparse = SimpleNamespace(enabled=True, fsa_planner_mode="notify")
+        get_config.return_value.sparse_kv_offload_config = sparse
+        get_tp.return_value = SimpleNamespace(rank_in_group=0, world_size=2)
+        worker.kv_cache_spec = {
+            "host0": SimpleNamespace(store_on_host=True),
+            "host1": SimpleNamespace(store_on_host=True),
+            "resident": SimpleNamespace(store_on_host=False),
+        }
 
         # Capture the active vLLM config while profile_run() executes, so we can
         # verify the fast path runs it inside set_current_vllm_config().
@@ -1129,13 +1181,17 @@ class TestNPUWorker(TestBase):
 
         self.assertEqual(result, 4096)
         worker.model_runner.profile_run.assert_called_once_with(randomize_inputs=False)
-        worker._scale_kv_cache_memory_for_multi_group.assert_called_once_with(8192)
+        planner_hbm.assert_called_once_with(worker.vllm_config, sparse, 2, 0, 2)
+        worker._scale_kv_cache_memory_for_multi_group.assert_called_once_with(8192 - 512)
         worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(6144)
         self.assertEqual(profile_run_configs, [worker.vllm_config])
 
-    def test_explicit_kv_cache_memory_converts_kvpp_budget_after_offload(self):
+    @patch("vllm_ascend.worker.worker.fsa_device_planner_hbm_bytes")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_explicit_kv_cache_memory_converts_kvpp_budget_after_offload(self, get_config, planner_hbm):
         from vllm_ascend.worker.worker import NPUWorker
 
+        get_config.return_value.sparse_kv_offload_config = SimpleNamespace(enabled=True, fsa_planner_mode="cpu")
         worker = NPUWorker.__new__(NPUWorker)
         worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=8192)
         worker.vllm_config = MagicMock(attention_config=AttentionConfig(), kv_transfer_config=None)
@@ -1159,6 +1215,7 @@ class TestNPUWorker(TestBase):
         worker._scale_kv_cache_memory_for_multi_group.assert_called_once_with(8192)
         worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(6144)
         plan.get_num_blocks.assert_called_once_with(4096)
+        planner_hbm.assert_not_called()
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
@@ -1218,6 +1275,7 @@ class TestNPUWorker(TestBase):
                 wraps=worker._apply_kv_offload_decode_memory_constraints
             )
 
+            worker._adjust_kv_cache_memory_budget = MagicMock(wraps=worker._adjust_kv_cache_memory_budget)
             # Mock torch.npu.memory_stats for profile_torch_peak
             # profile_torch_peak = memory_stats()["allocated_bytes.all.peak"] = 2000
             mock_torch_memory_stats.return_value = {"allocated_bytes.all.peak": 2000}
@@ -1230,6 +1288,7 @@ class TestNPUWorker(TestBase):
             # result = requested_memory(8000) - non_kv_cache_memory(3500) = 4500
             expected_result = int(10000 * 0.8 - 3500)
             self.assertEqual(result, expected_result)
+            worker._adjust_kv_cache_memory_budget.assert_called_once_with(expected_result)
             worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(expected_result)
 
     @patch("vllm_ascend.worker.worker.maybe_apply_startup_plan")

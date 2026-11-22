@@ -33,6 +33,7 @@ from vllm_ascend.compilation.acl_graph import (
     get_graph_params,
     weak_ref_workspaces,
 )
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import guard_fsa_plan_ipc
 
 
 class BreakableACLGraphWrapper(BreakableCUDAGraphWrapper):
@@ -64,7 +65,8 @@ class BreakableACLGraphWrapper(BreakableCUDAGraphWrapper):
             # mutable graph parameters only while this flag is set.
             forward_context.capturing = True
 
-        output = super()._capture(entry, args, kwargs)
+        with guard_fsa_plan_ipc():
+            output = super()._capture(entry, args, kwargs)
 
         if is_full_capture:
             # Keep the same workspace lifetime contract as ACLGraphWrapper.
@@ -81,11 +83,12 @@ class BreakableACLGraphWrapper(BreakableCUDAGraphWrapper):
         kwargs: dict[str, Any],
     ) -> Any:
         forward_context = get_forward_context()
-        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            # Match ACLGraphWrapper's ordering between async attention
-            # parameter updates and the previous/current FULL graph replay.
-            is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
-            if not self.enable_enpu and not is_draft_eagle:
-                torch.npu.current_stream().synchronize()
-        super()._replay(entry, args, kwargs)
+        with guard_fsa_plan_ipc():
+            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
+                # Match ACLGraphWrapper's ordering between async attention
+                # parameter updates and the previous/current FULL graph replay.
+                is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
+                if not self.enable_enpu and not is_draft_eagle:
+                    torch.npu.current_stream().synchronize()
+            super()._replay(entry, args, kwargs)
         return entry.output

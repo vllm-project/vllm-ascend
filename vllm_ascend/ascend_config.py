@@ -1822,6 +1822,7 @@ class SparseKVOffloadConfig:
     store_port_base: int = 8500
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
+    fsa_planner_mode: Literal["cpu", "hccl", "notify"] = "cpu"
 
     @property
     def use_fused_copy_sfa(self) -> bool:
@@ -1836,6 +1837,8 @@ class SparseKVOffloadConfig:
             raise ValueError("sparse_kv_offload_config.dram_size_per_dp_GB must be positive")
         if not 1 <= self.store_port_base <= 65535:
             raise ValueError("sparse_kv_offload_config.store_port_base must be a valid TCP port")
+        if self.fsa_planner_mode != "cpu" and not (self.enabled and self.use_fused_overlap):
+            raise ValueError("sparse_kv_offload_config.fsa_planner_mode requires enabled fused overlap")
         return self
 
     @classmethod
