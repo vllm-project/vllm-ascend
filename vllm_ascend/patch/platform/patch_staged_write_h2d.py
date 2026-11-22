@@ -55,3 +55,34 @@ if _non_uva_buffer is not None:
         return self._uva[:n].copy_(self.cpu[:n])
 
     _non_uva_buffer.uva = _uva_copy_blocking
+
+
+def _tag_staged_pools(obj, names: tuple[str, ...]) -> None:
+    for name in names:
+        pool = getattr(obj, name, None)
+        if pool is not None:
+            pool.blocking_upload = True
+
+
+# Newer vLLM stages request metadata through UvaBufferPool / UvaBufferWrapper.
+# Tag only the staged-write pools so their dirty rows are uploaded synchronously
+# by patch_uva; block tables and sampler buffers keep the async path.
+_staged_write_tensor = getattr(buffer_utils, "StagedWriteTensor", None)
+if _staged_write_tensor is not None:
+    _original_staged_init = _staged_write_tensor.__init__
+
+    def _staged_init(self, *args, _original=_original_staged_init, **kwargs):
+        _original(self, *args, **kwargs)
+        _tag_staged_pools(self, ("write_indices", "write_starts", "write_cu_lens", "write_contents"))
+
+    _staged_write_tensor.__init__ = _staged_init
+
+_fused_staged_writer = getattr(buffer_utils, "FusedStagedWriter", None)
+if _fused_staged_writer is not None:
+    _original_fused_init = _fused_staged_writer.__init__
+
+    def _fused_init(self, *args, _original=_original_fused_init, **kwargs):
+        _original(self, *args, **kwargs)
+        _tag_staged_pools(self, ("group_ids", "indices", "starts", "cu_lens", "contents"))
+
+    _fused_staged_writer.__init__ = _fused_init

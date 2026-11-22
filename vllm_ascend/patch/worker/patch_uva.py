@@ -202,12 +202,14 @@ class UvaBufferWrapper:
             else MonitoredNumPyArray(self._np, self._mark_cpu_modified, self._mark_prefix_modified)
         )
 
-    def _sync_dirty_rows(self) -> None:
+    def _sync_dirty_rows(self, blocking: bool = False) -> None:
         if self._use_real_uva:
             return
         prefix_end = self._dirty_prefix_end
         if prefix_end:
-            _int64_storage(self._uva[:prefix_end]).copy_(_int64_storage(self._cpu[:prefix_end]), non_blocking=True)
+            _int64_storage(self._uva[:prefix_end]).copy_(
+                _int64_storage(self._cpu[:prefix_end]), non_blocking=not blocking
+            )
         # Sparse writes can precede or follow a prefix write. Only copy rows
         # outside the prefix, and retire both markers after successful enqueue.
         dirty_rows = sorted(row for row in self._modified_indices if row >= prefix_end)
@@ -218,7 +220,7 @@ class UvaBufferWrapper:
                 # Individual row marks can cover any contiguous range.
                 # Slice copy_ preserves the pinned source for async DMA.
                 _int64_storage(self._uva[start_row : start_row + n_dirty]).copy_(
-                    _int64_storage(self._cpu[start_row : start_row + n_dirty]), non_blocking=True
+                    _int64_storage(self._cpu[start_row : start_row + n_dirty]), non_blocking=not blocking
                 )
             else:
                 # Sparse modification pattern — fall back to indexed copy.
@@ -227,10 +229,10 @@ class UvaBufferWrapper:
                 # storage because NPU rejects DT_UINT64 in the copy kernel.
                 src = self._cpu[dirty_rows].pin_memory()
                 if src.dtype == torch.uint64:
-                    copied = _int64_storage(src).to(device="npu", non_blocking=True)
+                    copied = _int64_storage(src).to(device="npu", non_blocking=not blocking)
                     _int64_storage(self._uva)[dirty_rows] = copied
                 else:
-                    self._uva[dirty_rows] = src.to(device="npu", non_blocking=True)
+                    self._uva[dirty_rows] = src.to(device="npu", non_blocking=not blocking)
         self._modified_indices.clear()
         self._dirty_prefix_end = 0
 
@@ -240,7 +242,9 @@ class UvaBufferWrapper:
         vLLM main (#56908) turned UvaBuffer.uva into a method taking an
         optional row count; the pool and StagedWriteTensor call it.
         """
-        self._sync_dirty_rows()
+        # Staged request metadata must be ordered with the following
+        # apply-write kernel; the pool tags those buffers with blocking_upload.
+        self._sync_dirty_rows(blocking=getattr(self, "blocking_upload", False))
         return self._uva if n is None else self._uva[:n]
 
     def copy_chunks_to_uva(self, chunks: Sequence, n: int) -> torch.Tensor:
@@ -269,3 +273,15 @@ if not vllm_version_is("0.33.0"):
         return buf.uva(n)
 
     vllm.v1.worker.gpu.buffer_utils.UvaBufferPool.copy_chunks_to_uva = _copy_chunks_to_uva  # type: ignore
+
+    _original_next_buf = vllm.v1.worker.gpu.buffer_utils.UvaBufferPool._next_buf
+
+    def _next_buf_with_blocking_flag(self, n: int):
+        buf = _original_next_buf(self, n)
+        if isinstance(buf, UvaBufferWrapper):
+            # Staged-write pools are tagged by patch_staged_write_h2d so their
+            # dirty rows are uploaded before the apply-write kernel is launched.
+            buf.blocking_upload = getattr(self, "blocking_upload", False)
+        return buf
+
+    vllm.v1.worker.gpu.buffer_utils.UvaBufferPool._next_buf = _next_buf_with_blocking_flag  # type: ignore
