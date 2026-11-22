@@ -1,0 +1,208 @@
+guide_sections:
+  ascend: |-
+    ## Single-node A3 release retest
+
+    Hy3-preview is Tencent's sparse MoE model for reasoning, coding and tool use. It has 295B total parameters, 21B active parameters and 3.8B parameters in the MTP layer.
+
+    The A3 deployment uses BF16 weights, TP16, expert parallelism and one MTP draft token on a single 16-device node. Start the Guide's Docker container and use its Python serving command. The automatic cards above describe the GPU configuration.
+
+    The tested image is vLLM Ascend v0.30.0, with a serving limit of 32,768 tokens. The draft step runs eagerly because full decode graph capture failed in an earlier test. The target model still uses ACLGraph.
+
+    See the [historical deployment tutorial](https://github.com/vllm-project/vllm-ascend/blob/5cb98caaadeff42b5b62b996e34bb2aaa29d20fd/docs/source/tutorials/models/Hy3-preview.md) and the [v0.30.0 support notice](https://docs.vllm.ai/projects/ascend/en/v0.30.0/tutorials/models/Hy3-preview.html).
+
+    ### Prepare the pinned BF16 checkpoint
+
+    Download the [BF16 checkpoint from ModelScope](https://modelscope.cn/models/Tencent-Hunyuan/Hy3-preview) on the A3 host. Use Git with Git LFS and an empty destination. Allow about 1.2 TB of free space under `/models` for the LFS cache and checkout. If LFS download is interrupted after checkout, repeat the last two commands. The release retest verified all 112 shards plus the index, tokenizer and configuration for revision `bc124022a73e3556246dd5c15ffc2da8250225f7`.
+
+    ```bash
+    CHECKPOINT=/models/tencent/Hy3-preview
+    REVISION=bc124022a73e3556246dd5c15ffc2da8250225f7
+    mkdir -p /models/tencent &&
+    GIT_LFS_SKIP_SMUDGE=1 git clone --no-checkout \
+      https://www.modelscope.cn/Tencent-Hunyuan/Hy3-preview.git "$CHECKPOINT" &&
+    git -C "$CHECKPOINT" lfs install --local &&
+    GIT_LFS_SKIP_SMUDGE=1 git -C "$CHECKPOINT" checkout --detach "$REVISION" &&
+    git -C "$CHECKPOINT" lfs pull origin &&
+    git -C "$CHECKPOINT" lfs fsck --objects HEAD
+    ```
+
+    ### 1. A3 host terminal · Open the release container
+
+    Run on the A3 host with 16 visible devices, port 8000 free and the verified BF16 checkpoint under `/models/tencent/Hy3-preview`. Docker opens a shell using the release image entrypoint.
+
+    ```bash
+    IMAGE=quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
+    CHECKPOINT=/models/tencent/Hy3-preview
+    CONTAINER_NAME=${HY3_CONTAINER_NAME:-hy3-preview-a3-release}
+    test -s "$CHECKPOINT/config.json" &&
+    docker run --rm -it --name "$CONTAINER_NAME" --net=host --ipc=host \
+      --device /dev/davinci0 --device /dev/davinci1 --device /dev/davinci2 --device /dev/davinci3 \
+      --device /dev/davinci4 --device /dev/davinci5 --device /dev/davinci6 --device /dev/davinci7 \
+      --device /dev/davinci8 --device /dev/davinci9 --device /dev/davinci10 --device /dev/davinci11 \
+      --device /dev/davinci12 --device /dev/davinci13 --device /dev/davinci14 --device /dev/davinci15 \
+      --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
+      -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /models:/models -v "$CHECKPOINT:$CHECKPOINT:ro" -w /models \
+      "$IMAGE" bash
+    ```
+
+    ### 2. Container terminal · Start the server
+
+    Run in the release container. The service binds to loopback. Wait for the server to report that startup has completed.
+
+    ```bash
+    export VLLM_USE_RUST_FRONTEND=0
+    export HCCL_OP_EXPANSION_MODE=AIV
+    vllm serve tencent/Hy3-preview \
+      --served-model-name hy3-preview \
+      --tensor-parallel-size 16 \
+      --speculative-config.method mtp \
+      --speculative-config.num_speculative_tokens 1 \
+      --speculative-config.enforce_eager true \
+      --enable-expert-parallel \
+      --enable-ep-weight-filter \
+      --tool-call-parser hy_v3 \
+      --reasoning-parser hy_v3 \
+      --enable-auto-tool-choice \
+      --max-model-len 32768 \
+      --max-num-seqs 8 \
+      --host 127.0.0.1 \
+      --port 8000
+    ```
+
+    ### 3. Second A3 host terminal · Check readiness and run inference
+
+    Leave the service running. After it is ready, run the following in a second terminal on the same A3 host. The model list should include `hy3-preview` and the no-think request should return `Hi`.
+
+    ```bash
+    models=$(curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 --max-time 15 \
+      http://127.0.0.1:8000/v1/models) &&
+    python3 -c 'import json,sys; data=json.load(sys.stdin); print(json.dumps(data)); assert any(m["id"] == "hy3-preview" for m in data["data"])' <<<"$models" &&
+    response=$(curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 --max-time 120 \
+      http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' \
+      -d '{"model":"hy3-preview","max_tokens":16,"temperature":0,"messages":[{"role":"user","content":"Say hi in one word."}],"top_p":1,"chat_template_kwargs":{"reasoning_effort":"no_think"}}') &&
+    python3 -c 'import json,sys; r=json.load(sys.stdin); print(json.dumps(r, ensure_ascii=False, indent=2)); assert r["model"] == "hy3-preview"; assert (r["choices"][0]["message"].get("content") or "").strip()' <<<"$response"
+    ```
+
+    ### 4. A3 host terminal · Set up AISBench and GSM8K-lite
+
+    Use a second A3 host terminal with writable space under `/models` and access to GitHub, PyPI and ModelScope. The Linux arm64 release image supplies CPU Torch. This step installs [AISBench](https://github.com/AISBench/benchmark/tree/e968d1bd7f48404bd913b95560f33938072336fa) and stages [GSM8K-lite](https://modelscope.cn/datasets/vllm-ascend/gsm8k-lite) at revision `622a6f3dba062a8e5fe057254c5f02f702d0f39e`. The setup verifies both JSONL files and the 32 scored rows.
+
+    ```bash
+    (
+      set -euo pipefail
+      IMAGE=quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
+      BENCH=/models/tools/hy3-recipe/aisbench
+      COMMIT=e968d1bd7f48404bd913b95560f33938072336fa
+      ARCHIVE="benchmark-$COMMIT.tar.gz"
+      mkdir -p "$BENCH"
+      cd "$BENCH"
+      curl -fSL --retry 2 --connect-timeout 10 --max-time 180 \
+        "https://codeload.github.com/AISBench/benchmark/tar.gz/$COMMIT" -o "$ARCHIVE"
+      printf '%s  %s\n' 93715c21b94c3ba86d9f660dc3cfdf25be670dc2b7aca035750ca832a26e3680 \
+        "$ARCHIVE" | sha256sum --check --strict
+      tar -xzf "$ARCHIVE" --no-same-owner --no-same-permissions
+      docker run --rm -i -v /models:/models -w "$BENCH" \
+        "$IMAGE" bash -s -- "$COMMIT" <<'BASH'
+    set -euo pipefail
+    test "$(uname -m)" = aarch64
+    SOURCE="$PWD/benchmark-$1"
+    VENV="$PWD/venv-v030"
+    python3 -m venv --system-site-packages "$VENV"
+    printf '%s\n' 'torch==2.10.0+cpu' 'datasets==3.6.0' 'mmengine-lite==0.10.7' > aisbench-v030.constraints.txt
+    "$VENV/bin/python" -m pip --disable-pip-version-check --timeout 30 --retries 2 install \
+      --constraint aisbench-v030.constraints.txt -e "$SOURCE" -r "$SOURCE/requirements/api.txt"
+    "$VENV/bin/python" - <<'PY'
+    from importlib.metadata import distributions, version
+    from pathlib import Path
+    from modelscope.hub.snapshot_download import dataset_snapshot_download
+    assert version("ais_bench_benchmark") == "3.1.0"
+    assert version("torch") == "2.10.0+cpu"
+    assert not any(
+        (item.metadata["Name"] or "").lower().startswith(("cuda-", "nvidia-"))
+        for item in distributions()
+    )
+    dataset_id = "vllm-ascend/gsm8k-lite"
+    revision = "622a6f3dba062a8e5fe057254c5f02f702d0f39e"
+    splits = ["test.jsonl", "train.jsonl"]
+    target = str(Path("gsm8k-lite").resolve())
+    dataset_snapshot_download(dataset_id, revision=revision, allow_patterns=splits, local_dir=target)
+    PY
+    for split in train test; do
+      printf '%s  %s\n' 6b1b25e3c772d87e36c01839e3b91e910793caae412785024700e2c270176bb9 \
+        "gsm8k-lite/$split.jsonl" | sha256sum --check --strict
+    done
+    test "$(wc -l < gsm8k-lite/test.jsonl)" -eq 32
+    "$VENV/bin/ais_bench" --help >/dev/null
+    BASH
+    )
+    ```
+
+    ### 5. A3 host terminal · Evaluate GSM8K-lite accuracy
+
+    After the setup above, run in the second A3 host terminal while the service stays up. Set and export `HY3_EVIDENCE_DIR` as a fresh absolute directory under `/models`. The test uses 32 scored rows, a four-shot chat prompt, batch size 8, temperature 0.6 and at most 4096 generated tokens.
+
+    ```bash
+    IMAGE=quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
+    BENCH=/models/tools/hy3-recipe/aisbench
+    COMMIT=e968d1bd7f48404bd913b95560f33938072336fa
+    SOURCE="$BENCH/benchmark-$COMMIT"
+    VENV="$BENCH/venv-v030"
+    OUT=${HY3_EVIDENCE_DIR:-}
+    [[ "$OUT" == /models/* ]] &&
+    mkdir -p "$OUT" &&
+    printf '%s  %s\n' 6b1b25e3c772d87e36c01839e3b91e910793caae412785024700e2c270176bb9 \
+      "$BENCH/gsm8k-lite/test.jsonl" | sha256sum --check --strict &&
+    test "$(wc -l < "$BENCH/gsm8k-lite/test.jsonl")" -eq 32 &&
+    cat > "$OUT/08-gsm8k-lite.py" <<PY &&
+    from mmengine.config import read_base
+    with read_base():
+        from ais_bench.benchmark.configs.datasets.gsm8k.gsm8k_gen_4_shot_cot_chat_prompt import gsm8k_datasets as datasets
+        from ais_bench.benchmark.configs.models.vllm_api.vllm_api_general_chat import models
+    datasets[0]["path"] = "$BENCH/gsm8k-lite"
+    models[0]["model"] = "hy3-preview"
+    models[0]["host_ip"] = "127.0.0.1"
+    models[0]["host_port"] = 8000
+    models[0]["batch_size"] = 8
+    models[0]["max_out_len"] = 4096
+    models[0]["trust_remote_code"] = True
+    models[0]["generation_kwargs"]["temperature"] = 0.6
+    work_dir = "$OUT/08-aisbench-results"
+    PY
+    docker run --rm --net=host -v /models:/models -w "$SOURCE" \
+      -e NO_PROXY=127.0.0.1,localhost -e no_proxy=127.0.0.1,localhost \
+      "$IMAGE" "$VENV/bin/ais_bench" "$OUT/08-gsm8k-lite.py" --debug --dump-eval-details
+    ```
+
+    ### 6. Measure lightweight online performance
+
+    Set `HY3_EVIDENCE_DIR` to a fresh absolute directory under `/models` and export it before running this step on the same host. [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) sends four requests per input length (1024, 4096 and 16384 tokens), 128 output tokens, concurrency 1 and seed 0. The command saves per-request JSON for each input length.
+
+    ```bash
+    IMAGE=quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
+    OUT=${HY3_EVIDENCE_DIR:-}
+    RESULTS="$OUT/07-vllm-bench"
+    [[ "$OUT" == /models/* ]] &&
+    mkdir -p "$RESULTS" &&
+    (
+      for input_length in 1024 4096 16384; do
+        docker run --rm --net=host -v /models:/models -w /models "$IMAGE" \
+          vllm bench serve \
+            --backend openai-chat --base-url http://127.0.0.1:8000 \
+            --endpoint /v1/chat/completions --model /models/tencent/Hy3-preview \
+            --served-model-name hy3-preview --dataset-name random \
+            --random-input-len "$input_length" --random-output-len 128 \
+            --num-prompts 4 --request-rate inf --max-concurrency 1 \
+            --temperature 0 --top-p 1 --seed 0 \
+            --save-result --save-detailed --result-dir "$RESULTS" \
+            --result-filename "random-$input_length.json" || exit $?
+      done
+    )
+    ```
+
+    The [official GSM8K-lite case](https://github.com/vllm-project/vllm-ascend/blob/128f35ed1461ecb34bc8b87583a67a66bc4bd1d6/tests/e2e/cases/models/configs/Hunyuan/Hy3-preview.yaml) records the accuracy reference. The historical tutorial also reports GSM8K and C-Eval reference scores; the release retest measures the 32-row GSM8K-lite case.
+
+    On November 21, 2026 (China Standard Time), the A3 run answered all 32 questions correctly. On November 22, all 32 requests returned and 31 answers were correct (96.875%). Both runs used temperature 0.6. The recorded performance figures come from the November 21 run.
