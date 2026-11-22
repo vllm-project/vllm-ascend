@@ -41,6 +41,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
@@ -70,6 +71,7 @@ from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
+from vllm_ascend.attention.tree_spec import tree_spec_enabled
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     requires_contiguous_pa_kv_cache,
@@ -193,6 +195,57 @@ def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec], m
             )
 
 
+_TREE_KERNEL_BLOCK_SIZE = 128
+
+
+def _align_tree_mamba_page_size(page_size: int, spec: MambaSpec, vllm_config: VllmConfig) -> int:
+    """Round a tree-expanded GDN page to the attention kernel block stride.
+
+    The Ascend CUSTOM attention path uses 128-token kernel blocks. The
+    scheduler block may contain several such kernel blocks (for Qwen3.8 it is
+    896 tokens, i.e. seven blocks), and the combined Attention view divides
+    every padded page by that count. Tree-only GDN columns are appended after
+    the platform has selected the scheduler block, so round the expanded page
+    here before it is shared with the Attention cache.
+    """
+    scheduler_block_size = getattr(getattr(vllm_config, "cache_config", None), "block_size", None)
+    if not isinstance(scheduler_block_size, int) or scheduler_block_size <= 0:
+        scheduler_block_size = _TREE_KERNEL_BLOCK_SIZE
+    num_kernel_blocks = max(1, scheduler_block_size // _TREE_KERNEL_BLOCK_SIZE)
+    alignment_bytes = math.lcm(num_kernel_blocks * get_dtype_size(spec.dtypes[0]), 4)
+    return math.ceil(page_size / alignment_bytes) * alignment_bytes
+
+
+def _widen_mamba_spec_for_tree(spec: MambaSpec, vllm_config: VllmConfig) -> MambaSpec:
+    """Allocate one recurrent state page and conv column per tree node."""
+    from vllm_ascend.worker.v2.spec_decode.tree.state_rollback import (
+        tree_conv_width,
+        tree_state_slot_count,
+        validate_tree_state_slots,
+    )
+
+    slots = tree_state_slot_count(vllm_config)
+    if slots is None:
+        return spec
+    validate_tree_state_slots(slots, spec.mamba_type)
+    num_spec = vllm_config.speculative_config.num_speculative_tokens
+    if slots > spec.num_speculative_blocks + 1:
+        spec = replace(spec, num_speculative_blocks=slots - 1)
+    conv_shape = tuple(spec.shapes[0])
+    width = tree_conv_width(spec.mamba_type, conv_shape, num_spec)
+    extra_columns = slots - num_spec
+    if width is None or extra_columns <= 0:
+        return spec
+    conv_dim = max(conv_shape)
+    expected_columns = width - 1 + slots
+    conv_shape = (conv_dim, expected_columns) if is_conv_state_dim_first() else (expected_columns, conv_dim)
+    expanded = replace(spec, shapes=(conv_shape, *spec.shapes[1:]), page_size_padded=None)
+    # New conv columns can occupy padding already reserved for shared attention
+    # pages. Charge only the bytes beyond that floor, then align the block stride.
+    page_size = max(spec.page_size_bytes, expanded.page_size_bytes)
+    return replace(expanded, page_size_padded=_align_tree_mamba_page_size(page_size, expanded, vllm_config))
+
+
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     kv_cache_spec: dict[str, KVCacheSpec] = {}
@@ -226,6 +279,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             spec = replace(spec, is_draft=True)
 
         if isinstance(spec, MambaSpec):
+            spec = _widen_mamba_spec_for_tree(spec, vllm_config)
             # Keep Mamba groups after attention groups. Ascend graph parameter
             # updates rely on this stable backend ordering.
             mamba_specs[layer_name] = spec
@@ -362,6 +416,9 @@ def build_attn_metadata(
     copy_sfa_restore_tails: bool = False,
     draft_layer_names: set[str] | None = None,
     common_metadata_callback=None,
+    tree_visibility: torch.Tensor | None = None,
+    seq_lens_host_exact: bool = False,
+    refresh_tree_group: Callable[[int, torch.Tensor], Any] | None = None,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     if skip_ring_state_update is None:
@@ -453,6 +510,12 @@ def build_attn_metadata(
         if not attn_groups[i]:
             continue
         block_table = block_tables[i]
+        if refresh_tree_group is not None and common_metadata_callback is None:
+            cached = refresh_tree_group(i, block_table)
+            if cached is not None:
+                for layer_name in attn_groups[i][0].layer_names:
+                    attn_metadata[layer_name] = cached
+                continue
         slot_mapping = slot_mappings[i]
         # Hybrid drafters can configure causality per KV cache group.
         group_causal = causal if isinstance(causal, bool) else causal.get(i, True)
@@ -497,6 +560,9 @@ def build_attn_metadata(
             dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
             pcp_context=pcp_context,
             pcp_cache_group_idx=i if pcp_context is not None else None,
+            tree_visibility=tree_visibility,
+            for_cudagraph_capture=for_cudagraph_capture,
+            seq_lens_host_exact=seq_lens_host_exact,
             **common_attn_metadata_extra_kwargs,
         )
         if common_metadata_callback is not None:
@@ -1325,6 +1391,10 @@ def _allocate_kv_cache(
                     (backend is None or not backend.is_sparse())
                     and not use_dcp
                     and not requires_contiguous_pa_kv_cache(layer, vllm_config, layer_spec)
+                    # Tree verification uses FIA BSND with a custom mask.
+                    # That ABI requires contiguous K/V on Ascend 910B;
+                    # interleaving K and V within each page violates it.
+                    and not tree_spec_enabled(vllm_config)
                 ):
                     kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
                     continue

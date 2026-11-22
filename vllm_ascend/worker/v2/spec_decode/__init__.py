@@ -75,6 +75,12 @@ def init_speculator(
 
             return AscendLiLiCorrSpeculator(vllm_config, device)
         if "DFlash2DraftModel" in speculative_config.draft_model_config.architectures:
+            from vllm_ascend.ascend_config import get_tree_spec_config
+
+            if get_tree_spec_config(vllm_config) is not None:
+                from vllm_ascend.worker.v2.spec_decode.tree.speculator import AscendDFlash2TreeSpeculator
+
+                return AscendDFlash2TreeSpeculator(vllm_config, device)
             from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
                 AscendDFlash2Speculator,
             )

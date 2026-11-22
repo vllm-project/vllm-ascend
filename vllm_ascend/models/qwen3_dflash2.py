@@ -348,11 +348,13 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
             raise ValueError("DFlash2 with a QuaRot target requires auxiliary hidden states.")
         align_draft_weights(self, self.model.fc, vllm_config)
 
-    def compute_candidates(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def compute_candidates(
+        self, hidden_states: torch.Tensor, *, top_k: int | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if not isinstance(self.lm_head.quant_method, UnquantizedEmbeddingMethod):
             raise ValueError("DFlash2 requires an unquantized target LM head for candidate TopK.")
 
-        selector = self.model.candidate_selector
+        candidate_count = self.model.candidate_selector.top_k if top_k is None else top_k
         num_rows = hidden_states.shape[0]
         hidden_states = _maybe_gather_lm_head_hidden_states(
             hidden_states, self.lm_head, self.lmhead_tp_candidate_capacity
@@ -361,7 +363,7 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
         num_pad = self.lm_head.shard_indices.num_org_vocab_padding
         if num_pad > 0:
             logits[..., -num_pad:] = -float("inf")
-        values, ids = torch.topk(logits, selector.top_k, dim=-1)
+        values, ids = torch.topk(logits, candidate_count, dim=-1)
         ids = ids.to(torch.int64) + self.lm_head.shard_indices.org_vocab_start_index
 
         values, ids = _gather_lm_head_candidates(values, ids, self.lm_head, num_rows)

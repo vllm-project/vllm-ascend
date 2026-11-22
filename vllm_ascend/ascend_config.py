@@ -519,6 +519,41 @@ class ExpertOffloadConfig:
         return self
 
 
+@config(config=ConfigDict(frozen=True))
+class TreeSpecConfig:
+    """Configure MegaTree's fixed-width DFlash2 candidate lattice."""
+
+    budget: int = Field(ge=1, le=128, strict=True)
+    candidate_size: Literal[64] = 64
+
+    def validate_runtime(self, vllm_config: VllmConfig) -> None:
+        spec = vllm_config.speculative_config
+        draft = spec.draft_model_config if spec is not None else None
+        if spec is None or not spec.use_dflash() or draft is None or "DFlash2DraftModel" not in draft.architectures:
+            raise ValueError("MegaTree requires a DFlash2 draft model")
+        import torch
+
+        target = vllm_config.model_config
+        if "Qwen3_5ForConditionalGeneration" not in target.architectures or target.dtype != torch.bfloat16:
+            raise ValueError("MegaTree requires a BF16 Qwen3.x hybrid target")
+        if spec.num_speculative_tokens != 15:
+            raise ValueError("MegaTree requires num_speculative_tokens=15")
+        if (
+            spec.enable_adaptive_verification
+            or spec.uses_dynamic_speculative_decoding()
+            or spec.prefill_context_kv_only
+        ):
+            raise ValueError("MegaTree requires fixed-depth speculative decoding on the target")
+        parallel = vllm_config.parallel_config
+        if parallel.pipeline_parallel_size != 1 or parallel.prefill_context_parallel_size != 1:
+            raise ValueError("MegaTree does not support pipeline or prefill context parallelism")
+        if parallel.decode_context_parallel_size != 1 or spec.draft_decode_context_parallel_size not in (None, 1):
+            raise ValueError("MegaTree does not support decode context parallelism")
+
+
+_TREE_SPEC_CONFIG_ADAPTER = TypeAdapter(TreeSpecConfig)
+
+
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -757,6 +792,7 @@ class AscendConfig:
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
     quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
+    tree_spec_config: TreeSpecConfig | None = None
 
     # ---- sub-configs declared later in this module ----
     # Lambdas defer class lookup until construction, after module initialization.
@@ -2021,6 +2057,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "scheduler_config",
         "sparse_kv_offload_config",
+        "tree_spec_config",
         # Factory-injected: derived from additional_config.enable_kvpp + TP.
         "enable_kvpp",
         "kvpp_config",
@@ -2067,6 +2104,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     new_config = AscendConfig(  # type: ignore[call-arg]
         scheduler_config=sched,
         sparse_kv_offload_config=sparse_kv,
+        tree_spec_config=get_tree_spec_config(vllm_config),
         kvpp_config=kvpp_config,
         dump_config_path=dump_config_path,
         runtime_config_path=runtime_boot.path,
@@ -2086,6 +2124,8 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     new_config.xlite_graph_config._validate_preconditions(vllm_config)
     if is_draft:
         return new_config
+    if new_config.tree_spec_config is not None:
+        new_config.tree_spec_config.validate_runtime(vllm_config)
     if _is_ascend_config_initialized(new_config):
         _ASCEND_CONFIG = new_config
         _INIT_VLLM_CONFIG = vllm_config
@@ -2115,3 +2155,20 @@ def get_ascend_config():
     if _ASCEND_CONFIG is None or not _is_ascend_config_initialized(_ASCEND_CONFIG):
         raise RuntimeError("Ascend config is not initialized. Please call init_ascend_config first.")
     return _ASCEND_CONFIG
+
+
+def get_tree_spec_config(vllm_config: VllmConfig | None = None) -> TreeSpecConfig | None:
+    """Read the Tree option before platform initialization or from the active config."""
+    if vllm_config is None:
+        try:
+            return get_ascend_config().tree_spec_config
+        except RuntimeError:
+            return None
+
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    if "tree_spec_config" not in additional_config:
+        return None
+    try:
+        return _TREE_SPEC_CONFIG_ADAPTER.validate_python(additional_config["tree_spec_config"])
+    except ValueError as exc:
+        raise ValueError(f"Invalid additional_config.tree_spec_config: {exc}") from exc

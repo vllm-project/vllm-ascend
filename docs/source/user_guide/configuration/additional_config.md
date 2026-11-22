@@ -407,3 +407,33 @@ convolution allocates its output separately.
 Small prefix match units can increase checkpoint traffic.
 
 Validate correctness, quality and performance on the deployment hardware before deploying in production.
+
+## DFlash2 MegaTree
+
+MegaTree adds tree verification for BF16 Qwen3.x hybrid models with a DFlash2
+draft model on Model Runner V2. It scores transitions across 64 candidates at
+each of the 15 draft steps and uses a best-first search to fill the tree on
+device.
+
+To enable MegaTree, set `num_speculative_tokens` to 15 in the `dflash`
+speculative configuration and add the following to `additional_config`.
+
+```json
+{
+  "tree_spec_config": {
+    "budget": 32
+  }
+}
+```
+
+Omit `tree_spec_config` to keep the standard decoding path. When supplied, it
+must be an object with an integer `budget` from 1 through 128. Its only optional
+field is `candidate_size`, which defaults to 64 and must be 64. A null value,
+an empty object, or an `enabled` field raises a configuration error.
+
+The budget counts non-root nodes per request. With budget 32, the target
+verifies up to 33 rows per request and the draft runs 16 query rows.
+Asynchronous scheduling reserves space for every proposed tree node.
+
+MegaTree uses greedy verification and a draft checkpoint with contiguous
+rank-256 BF16 codebooks. Keep the pipeline and context parallel sizes at 1.

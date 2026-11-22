@@ -18,6 +18,7 @@
 #
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Any
 
 import torch
@@ -113,6 +114,32 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
         if super().needs_capture():
             set_graph_params(self.capture_sizes)
+
+    def _init_candidates(self) -> None:
+        super()._init_candidates()
+        from vllm_ascend.worker.v2.spec_decode.tree.shape import TreeShape
+
+        tree_shape = TreeShape.from_config(self.vllm_config)
+        if tree_shape is None:
+            return
+
+        # Pure FULL graphs are keyed by tokens. Capture each eligible gear
+        # with the uniform target topology so the correct Tree mask is fixed
+        # in the graph. Separate decode routines are already request-shaped.
+        query_len = tree_shape.target_verification_width
+        remap = {}
+        for desc in self._capture_descs.get(CUDAGraphMode.FULL, ()):
+            if desc.uniform_token_count == query_len:
+                remap[desc] = desc
+            elif desc.uniform_token_count is None and desc.num_tokens % query_len == 0:
+                num_reqs = desc.num_tokens // query_len
+                if 0 < num_reqs <= self.max_num_reqs:
+                    remap[desc] = replace(desc, num_reqs=num_reqs, uniform_token_count=query_len)
+        self._capture_descs.pop(CUDAGraphMode.PIECEWISE, None)
+        if CUDAGraphMode.FULL in self._capture_descs:
+            self._capture_descs[CUDAGraphMode.FULL] = list(remap.values())
+        for key, candidates in self._candidates.items():
+            self._candidates[key] = [remap[desc] for desc in candidates if desc in remap]
 
     def init_breakable_cg_runner(self, model: nn.Module) -> None:
         if self.breakable_cg_runner is None:

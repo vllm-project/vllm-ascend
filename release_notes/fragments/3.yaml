@@ -1,0 +1,5 @@
+pr: 3
+entries:
+  - category: feature
+    text: Added opt-in MegaTree speculative decoding for BF16 Qwen3.x hybrid targets with DFlash2 drafts and configurable budgets of 1 to 128 tree nodes per request.
+    hardware: [A2]

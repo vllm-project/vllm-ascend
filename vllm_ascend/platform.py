@@ -36,6 +36,7 @@ from vllm_ascend.ascend_config import (
     KVPPConfig,
     StairConfig,
     get_ascend_config,
+    get_tree_spec_config,
     init_ascend_config,
     is_draft_config_context,
 )
@@ -280,6 +281,15 @@ class NPUPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
         backend = cls._select_attn_backend_cls(attn_selector_config)
+        # Keep existing backend choices. An eligible local Tree draft can use
+        # device-side tiling when the standard choice would be dense FIA.
+        if (
+            backend == "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
+            and not attn_selector_config.use_pcp
+            and _validate_draft_fa3_backend(attn_selector_config)
+        ):
+            backend = "vllm_ascend.attention.tree_draft_attention.AscendTreeDraftFA3AttentionBackend"
+
         # Upstream rejects a dtype the selected backend cannot store from
         # get_valid_backends, which get_attn_backend_cls calls
         # (vllm/platforms/rocm.py:594). Ascend selects its backend with a lookup
@@ -443,6 +453,27 @@ class NPUPlatform(Platform):
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         """Apply Ascend-specific defaults."""
+        from vllm.config.compilation import CUDAGraphMode
+
+        from vllm_ascend.worker.v2.spec_decode.tree.shape import TreeShape
+
+        compilation = vllm_config.compilation_config
+        shape = TreeShape.from_config(vllm_config)
+        if (
+            shape is not None
+            and compilation.cudagraph_capture_sizes
+            and compilation.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            # The target verifies B+1 rows and the parallel draft runs D+1.
+            # Keep both gears when a deployment reuses its previous size list.
+            # An explicitly configured ceiling and the scheduler limit still apply.
+            limit = vllm_config.scheduler_config.max_num_batched_tokens
+            if compilation.max_cudagraph_capture_size is not None:
+                limit = min(limit, compilation.max_cudagraph_capture_size)
+            widths = (shape.target_verification_width, shape.draft_depth + 1)
+            compilation.cudagraph_capture_sizes = sorted(
+                set(compilation.cudagraph_capture_sizes).union(w for w in widths if w <= limit)
+            )
 
         # TODO: Remove this memory-saving capture-size override and its ceiling
         # restoration once MC2 is no longer used.
@@ -1622,6 +1653,16 @@ def _setup_worker_and_scheduler(
 
     _downgrade_swa_bounded_replay(vllm_config, ascend_config)
 
+    if get_tree_spec_config(vllm_config) is not None:
+        runtime_scheduler = vllm_config.scheduler_config
+        tree_schedulers = (
+            "vllm_ascend.core.tree_scheduler.TreeScheduler",
+            "vllm_ascend.core.tree_scheduler.TreeAsyncScheduler",
+        )
+        if runtime_scheduler.scheduler_cls is not None and runtime_scheduler.scheduler_cls not in tree_schedulers:
+            raise ValueError("MegaTree requires the standard scheduler")
+        runtime_scheduler.scheduler_cls = tree_schedulers[bool(runtime_scheduler.async_scheduling)]
+
 
 def _swa_bounded_replay_unsupported_mode(ascend_config) -> str | None:
     """Name the Ascend mode that cannot honor SWA bounded replay.
@@ -1810,6 +1851,33 @@ def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str | Non
             and "Qwen3DSparkModel" in (spec.draft_model_config.architectures or ())
         )
     return False
+
+
+def _validate_draft_fa3_backend(selector) -> bool:
+    """Select the device-tiling FA3 backend for DFlash2 draft attention."""
+    from importlib.util import find_spec
+
+    from vllm.compilation import backends
+    from vllm.config import get_current_vllm_config_or_none
+
+    config = get_current_vllm_config_or_none()
+    if config is None or get_tree_spec_config(config) is None:
+        return False
+    # The loader tag distinguishes draft attention from target verification.
+    if backends.model_tag != "dflash_head" or find_spec("flash_attn_npu_3") is None:
+        return False
+    return (
+        # FA3 requires FP16/BF16 Q and unquantized KV.
+        selector.dtype in (torch.float16, torch.bfloat16)
+        and selector.kv_cache_dtype in (None, "auto", "float16", "bfloat16")
+        and not (
+            selector.use_dcp
+            or selector.use_mm_prefix
+            or selector.use_rswa
+            or selector.use_batch_invariant
+            or selector.use_per_head_quant_scales
+        )
+    )
 
 
 def _validate_flash_attn_backend(backend_key, selector) -> bool:
@@ -2040,7 +2108,14 @@ def _get_reduced_cg_cap(vllm_config: VllmConfig) -> int | None:
     decode_query_len = 1
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config and speculative_config.num_speculative_tokens:
-        decode_query_len += speculative_config.num_speculative_tokens
+        from vllm_ascend.worker.v2.spec_decode.tree.shape import TreeShape
+
+        # Platform defaults precede AscendConfig initialization. Shape resolution
+        # reads this VllmConfig directly, so capture and runtime use one rule.
+        tree_shape = TreeShape.from_config(vllm_config)
+        decode_query_len = 1 + speculative_config.num_speculative_tokens
+        if tree_shape is not None:
+            decode_query_len = max(decode_query_len, tree_shape.target_verification_width)
 
     return min(max_num_seqs * decode_query_len, 512)
 

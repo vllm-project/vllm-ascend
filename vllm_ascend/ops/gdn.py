@@ -16,6 +16,7 @@
 #
 
 from functools import lru_cache, wraps
+from typing import TYPE_CHECKING
 
 import torch
 import torch_npu
@@ -32,7 +33,7 @@ from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.utils import replace_parameter
 from vllm.third_party.flash_linear_attention.ops.fused_recurrent import fused_recurrent_gated_delta_rule
-from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
+from vllm.third_party.flash_linear_attention.ops.l2norm import USE_DEFAULT_FLA_NORM, l2norm_fwd
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -52,6 +53,9 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_varlen, extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.spec_decode.tree.state_rollback import TreeVerifyPlan
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
@@ -223,6 +227,74 @@ def _rearrange_decode_qkv(
         key.contiguous().view(1, num_tokens, key_dim // head_k_dim, head_k_dim),
         value.contiguous().view(1, num_tokens, value_dim // head_v_dim, head_v_dim),
     )
+
+
+def _verify_gdn_tree_indexed(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    ssm_state: torch.Tensor,
+    state_indices: torch.Tensor,
+    scale: float,
+    plan: "TreeVerifyPlan",
+    num_actual_tokens: int,
+) -> torch.Tensor:
+    """Verify a draft tree through one whole-tree indexed Triton call.
+
+    The plan supplies node, parent-state and output mappings over fixed-width
+    rows. Zero-length graph padding is skipped via ``actual_seq_lengths``.
+
+    The kernel indexes packed q/k/v/g/beta and outputs directly, without
+    materializing the padded grid.
+
+    Args:
+        query: ``[1, tokens, nk, dk]`` in the packed token order of the step (the
+            same for ``key``), ``value`` ``[1, tokens, nv, dv]``, ``g``/``beta``
+            ``[1, tokens, nv]``.
+        state_indices: ``[rows, slots]`` packed ssm state table of this step,
+            used to check that ``plan`` belongs to this step.
+        num_actual_tokens: first scratch row in the output after the real tokens.
+
+    Returns:
+        ``[tokens, nv, dv]``, in the packed token order of ``query``.
+    """
+    from vllm_ascend.ops.gdn_tree_triton import npu_recurrent_gated_delta_rule_tree_triton
+
+    if state_indices.shape[0] != plan.rows:
+        raise RuntimeError(
+            f"the indexed plan was built for {plan.rows} rows but this step has "
+            f"{state_indices.shape[0]} speculative rows; the plan has to be "
+            "rebuilt on every step."
+        )
+    tokens = query.shape[1]
+    # The padding cells point past the layer's real tokens, so the
+    # undefined output of a skipped row can never reach a verified token: the
+    # plan is built with ``scratch_base == num_actual_tokens``, so this buffer
+    # spans every row its ``out_indices`` names.
+    out = torch.empty(
+        (num_actual_tokens + plan.rows * plan.slots, *value.shape[2:]),
+        dtype=value.dtype,
+        device=value.device,
+    )
+    verify_out = npu_recurrent_gated_delta_rule_tree_triton(
+        query=query.squeeze(0),
+        key=key.squeeze(0),
+        value=value.squeeze(0),
+        g=g.squeeze(0),
+        beta=beta.squeeze(0),
+        state=ssm_state,
+        scale=scale,
+        actual_seq_lengths=plan.actual_seq_lengths,
+        metadata_row_stride=plan.slots,
+        ssm_state_indices=plan.state_indices,
+        init_state_indices=plan.init_state_indices,
+        token_indices=plan.token_indices,
+        out_indices=plan.out_indices,
+        out=out,
+    )
+    return verify_out[:tokens]
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -531,26 +603,45 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         if spec_sequence_masks is not None:
             spec_causal_conv1d_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
             spec_query_start_loc_device = spec_causal_conv1d_meta.query_start_loc
-            output_spec = torch.empty_like(mixed_qkv_spec)
-            conv_update = (
-                causal_conv1d_update_varlen
-                if attn_metadata.spec_decode_metadata.use_upstream_conv
-                else causal_conv1d_update
-            )
-            output_spec = conv_update(
-                mixed_qkv_spec,
-                self_kv_cache[0],
-                conv_weights_T,
-                bias=self.conv1d.bias,
-                activation="silu" if self.activation else None,
-                conv_state_indices=_normalize_causal_cache_indices(spec_causal_conv1d_meta.cache_indices),
-                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
-                query_start_loc=spec_query_start_loc_device,
-                max_query_len=self.num_spec + 1,
-                null_block_id=0,
-                out=output_spec,
-            )
-            mixed_qkv_spec = output_spec
+            spec_meta = attn_metadata.spec_decode_metadata
+            if spec_meta.conv_window_rows is not None:
+                # Tree verification needs an independent causal window for every
+                # node; the fused update op assumes a single linear sequence.
+                assert spec_meta.conv_prefix_src is not None
+                from vllm_ascend.ops.triton.spec_decode.tree.tree_conv import tree_causal_conv1d_triton
+
+                mixed_qkv_spec = tree_causal_conv1d_triton(
+                    mixed_qkv_spec,
+                    conv_weights_T.transpose(0, 1),
+                    self_kv_cache[0],
+                    spec_causal_conv1d_meta.cache_indices,
+                    spec_query_start_loc_device,
+                    spec_meta.conv_window_rows[: mixed_qkv_spec.shape[0]],
+                    spec_meta.conv_prefix_src,
+                    self.conv1d.bias,
+                    self.activation,
+                )
+            else:
+                output_spec = torch.empty_like(mixed_qkv_spec)
+                conv_update = (
+                    causal_conv1d_update_varlen
+                    if attn_metadata.spec_decode_metadata.use_upstream_conv
+                    else causal_conv1d_update
+                )
+                output_spec = conv_update(
+                    mixed_qkv_spec,
+                    self_kv_cache[0],
+                    conv_weights_T,
+                    bias=self.conv1d.bias,
+                    activation="silu" if self.activation else None,
+                    conv_state_indices=_normalize_causal_cache_indices(spec_causal_conv1d_meta.cache_indices),
+                    num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
+                    query_start_loc=spec_query_start_loc_device,
+                    max_query_len=self.num_spec + 1,
+                    null_block_id=0,
+                    out=output_spec,
+                )
+                mixed_qkv_spec = output_spec
 
         # Ordinary mixed batches keep decode token-major while prefill can
         # use head-first convolution output. PCP retains its collective path.
@@ -677,14 +768,32 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
+        tree_qkv_prepared = False
         if mixed_qkv_spec is not None:
-            query_spec, key_spec, value_spec = _rearrange_decode_qkv(
-                mixed_qkv_spec,
-                self.key_dim // self.tp_size,
-                self.value_dim // self.tp_size,
-                self.head_k_dim,
-                self.head_v_dim,
+            tree_qkv_prepared = (
+                attn_metadata.spec_decode_metadata.init_state_indices is not None
+                and mixed_qkv_spec.dtype == torch.bfloat16
+                and mixed_qkv_spec.device.type == "npu"
+                and not USE_DEFAULT_FLA_NORM
             )
+            if tree_qkv_prepared:
+                from vllm_ascend.ops.triton.mamba.gdn_tree_qkv import prepare_tree_qkv
+
+                query_spec, key_spec, value_spec = prepare_tree_qkv(
+                    mixed_qkv_spec,
+                    self.key_dim // self.tp_size // self.head_k_dim,
+                    self.value_dim // self.tp_size // self.head_v_dim,
+                    self.head_k_dim,
+                    self.head_v_dim,
+                )
+            else:
+                query_spec, key_spec, value_spec = _rearrange_decode_qkv(
+                    mixed_qkv_spec,
+                    self.key_dim // self.tp_size,
+                    self.value_dim // self.tp_size,
+                    self.head_k_dim,
+                    self.head_v_dim,
+                )
         else:
             query_spec, key_spec, value_spec = None, None, None
         if attn_metadata.num_prefills > 0 and mixed_qkv_non_spec is not None and conv_head_num:
@@ -730,12 +839,48 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            query_spec = l2norm_fwd(query_spec)
-            key_spec = l2norm_fwd(key_spec)
+            if not tree_qkv_prepared:
+                query_spec = l2norm_fwd(query_spec)
+                key_spec = l2norm_fwd(key_spec)
             use_upstream_recurrent = attn_metadata.spec_decode_metadata.use_upstream_recurrent or (
                 spec_state_indices_tensor.ndim == 2 and spec_state_indices_tensor.shape[1] > _MAX_RECURRENT_GDN_TOKENS
             )
-            if use_upstream_recurrent:
+            actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
+            init_state_indices = attn_metadata.spec_decode_metadata.init_state_indices
+            verify_plan = attn_metadata.spec_decode_metadata.verify_plan
+            if verify_plan is not None:
+                core_attn_out_spec = _verify_gdn_tree_indexed(
+                    query_spec,
+                    key_spec,
+                    value_spec,
+                    g_spec,
+                    beta_spec,
+                    ssm_state,
+                    spec_state_indices_tensor,
+                    scale=key_spec.shape[-1] ** -0.5,
+                    plan=verify_plan,
+                    num_actual_tokens=num_actual_tokens,
+                ).unsqueeze(0)
+            elif init_state_indices is not None:
+                from vllm_ascend.ops.gdn_tree_triton import npu_recurrent_gated_delta_rule_tree_triton
+
+                core_attn_out_spec = npu_recurrent_gated_delta_rule_tree_triton(
+                    query=query_spec.squeeze(0),
+                    key=key_spec.squeeze(0),
+                    value=value_spec.squeeze(0),
+                    state=ssm_state,
+                    g=g_spec.squeeze(0),
+                    beta=beta_spec.squeeze(0),
+                    scale=key_spec.shape[-1] ** -0.5,
+                    actual_seq_lengths=actual_seq_lengths,
+                    ssm_state_indices=_flatten_recurrent_state_indices(
+                        spec_state_indices_tensor,
+                        query_spec.shape[1],
+                        spec_causal_conv1d_meta.query_start_loc,
+                    ),
+                    init_state_indices=init_state_indices.reshape(-1),
+                ).unsqueeze(0)
+            elif use_upstream_recurrent:
                 # The native packed-index API bounds accepted_prev by the
                 # current query length. Reuse vLLM's strided state-table API
                 # for adaptive graphs and windows wider than the AscendC cap.
