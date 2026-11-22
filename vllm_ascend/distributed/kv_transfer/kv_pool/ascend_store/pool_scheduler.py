@@ -166,7 +166,11 @@ class BaseKVPoolScheduler(ABC):
 
         if backend_class is None:
             raise ValueError(f"Unsupported KV pool backend: {self.backend_name}")
-        self.store_scheduler = backend_class.create_scheduler_client(vllm_config.parallel_config)
+        # Lookups use the worker-owned LookupKeyClient IPC server. The
+        # scheduler does not move KV and never reads this client, so creating
+        # one here would allocate an extra HIXL/device endpoint per DP rank for
+        # nothing (a DP16 A2 start exhausts the per-device RoCE endpoints).
+        self.store_scheduler = None
 
         model_config = vllm_config.model_config
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
