@@ -1,0 +1,7 @@
+pr: 22769
+entries:
+  - category: performance
+    text: >-
+      With `gdn_internal_prefill_checkpoints` enabled and a vLLM build that
+      supports dedicated checkpoint pages, Model Runner V2 can preserve warm
+      GDN prefill checkpoints in a single model forward.
