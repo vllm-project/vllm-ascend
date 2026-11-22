@@ -38,6 +38,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     normalize_block_ids_by_group,
     uses_hybrid_kv_cache,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.timing import (
+    kvpd_timing_enabled,
+    log_kvpd_timing,
+)
 
 
 def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
@@ -93,6 +97,7 @@ class BaseKVPoolScheduler(ABC):
             "save_decode_cache", False
         )
         self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
+        self._kvpd_timing = kvpd_timing_enabled(vllm_config)
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
@@ -363,7 +368,18 @@ class BaseKVPoolScheduler(ABC):
         if num_external_tokens > 0:
             local_block_ids = normalize_block_ids_by_group(blocks.get_block_ids())
 
+        is_new_request = request.request_id not in self._unfinished_requests
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
+        if is_new_request and self._kvpd_timing:
+            event = "p_scheduler_alloc" if self.kv_role in ("kv_producer", "kv_both") else "d_scheduler_alloc"
+            log_kvpd_timing(
+                True,
+                event,
+                request.request_id,
+                num_tokens=getattr(request, "num_tokens", None),
+                num_computed_tokens=getattr(request, "num_computed_tokens", None),
+                num_external_tokens=num_external_tokens,
+            )
         if request.request_id not in self.load_specs:
             # No KV tokens from external KV cache, return
             logger.debug(

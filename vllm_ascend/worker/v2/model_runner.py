@@ -91,6 +91,11 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_kv import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.timing import (
+    KVPD_FIRST_TOKEN_TRACK_LIMIT,
+    kvpd_timing_enabled,
+    log_kvpd_timing,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_offload_topk_profile_buffers,
     init_sparse_kv_offload_manager,
@@ -251,6 +256,11 @@ class NPUModelRunner(GPUModelRunner):
 
         self.pd_dspark_aux_layer_ids: tuple[int, ...] = ()
         self._dspark_prefill_progress: dict[str, tuple[str, int]] = {}
+        # Opt-in PD diagnostics from kv_connector_extra_config.enable_timing.
+        self._kvpd_timing = kvpd_timing_enabled(vllm_config)
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        self._kvpd_is_consumer = getattr(kv_transfer_config, "kv_role", None) == "kv_consumer"
+        self._kvpd_first_token_reqs: set[str] = set()
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
@@ -1213,12 +1223,38 @@ class NPUModelRunner(GPUModelRunner):
                 pad_size = min(pad_size, int(dp_sync.num_tokens_across_dp.max().item()))
         return pad_size
 
+    def _kvpd_note_sample(self, input_batch) -> None:
+        """Log the first sampled Decode token per request.
+
+        DSpark acceptance is counted in the speculator, where the target
+        verification counts arrive; this hook only marks the Decode admission
+        boundary that separates load time from first-token latency.
+        """
+        if not self._kvpd_timing or getattr(input_batch, "is_dummy", False):
+            return
+        try:
+            num_draft = int(getattr(input_batch, "num_draft_tokens", 0) or 0)
+            req_ids = list(getattr(input_batch, "req_ids", ()) or ())
+            if self._kvpd_is_consumer and req_ids:
+                if len(self._kvpd_first_token_reqs) > KVPD_FIRST_TOKEN_TRACK_LIMIT:
+                    self._kvpd_first_token_reqs.clear()
+                for req_id in req_ids:
+                    if req_id in self._kvpd_first_token_reqs:
+                        continue
+                    self._kvpd_first_token_reqs.add(req_id)
+                    log_kvpd_timing(True, "d_first_token", req_id, num_draft=num_draft)
+        except Exception:
+            logger.exception("KVPD timing instrumentation failed; disabling it")
+            self._kvpd_timing = False
+
     def sample(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP: every rank must feed
         compute_logits the same row count — pad up to ``_lmhead_tp_max_num_logits()``
         and trim back; prompt_logprobs stays unsupported (same as V1)."""
         if not lmhead_tp_enable():
-            return super().sample(hidden_states, input_batch, grammar_output)
+            sampler_result = super().sample(hidden_states, input_batch, grammar_output)
+            self._kvpd_note_sample(input_batch)
+            return sampler_result
 
         num_logits = input_batch.logits_indices.shape[0]
         capacity = getattr(self, "_lmhead_pad_size", None) or self._lmhead_tp_max_num_logits()
@@ -1279,7 +1315,9 @@ class NPUModelRunner(GPUModelRunner):
                     self.speculator.draft_logits,
                 )
 
-        return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
+        sampler_result = (sampler_output, sampler_output.num_sampled, sampler_output.num_rejected)
+        self._kvpd_note_sample(input_batch)
+        return sampler_result
 
     @contextmanager
     def _preserve_dummy_query_tokens(self, num_tokens: int, uniform_decode: bool):

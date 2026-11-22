@@ -23,6 +23,7 @@ import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -38,6 +39,10 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextChunk,
     initialize_draft_context_chunk,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.timing import (
+    kvpd_timing_enabled,
+    log_kvpd_timing,
 )
 from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits, vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
@@ -56,6 +61,8 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     build_dspark_draft_config,
 )
 
+KVPD_ACCEPT_LOG_INTERVAL = 100
+
 
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
@@ -73,6 +80,12 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             return False
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        # The timing switch lives on the engine (target) config; keep it before
+        # build_dspark_draft_config replaces vllm_config with the draft view.
+        self._kvpd_timing = kvpd_timing_enabled(vllm_config)
+        self._kvpd_accept_steps = 0
+        self._kvpd_accepted_tokens = 0
+        self._kvpd_proposed_tokens = 0
         vllm_config = build_dspark_draft_config(vllm_config)
         super().__init__(vllm_config, device)
         self._lmhead_tp_validate_draft_sampling()
@@ -81,6 +94,54 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self.attn_architecture: str | None = None
         self.use_flashmla: bool = False
         self._init_dcp()
+
+    @staticmethod
+    def _kvpd_tensor_sum(value: torch.Tensor | Sequence[int] | int) -> int:
+        if torch.is_tensor(value):
+            return int(value.detach().sum().item())
+        if isinstance(value, Sequence):
+            return int(sum(value))
+        return int(value)
+
+    def _kvpd_note_acceptance(self, input_batch: InputBatch, num_sampled, num_rejected) -> None:
+        """Accumulate measured DSpark acceptance from target verification.
+
+        ``num_sampled`` counts accepted draft tokens plus one bonus token per
+        request, so accepted drafts are ``sum(num_sampled) - num_reqs`` and the
+        proposed draft count is accepted plus rejected. Logging is periodic to
+        keep the Decode hot path quiet; the counters themselves are exact.
+        """
+        if not self._kvpd_timing:
+            return
+        try:
+            num_reqs = int(input_batch.num_reqs)
+            sampled = self._kvpd_tensor_sum(num_sampled)
+            rejected = self._kvpd_tensor_sum(num_rejected)
+            accepted = max(sampled - num_reqs, 0)
+            proposed = accepted + rejected
+            self._kvpd_accept_steps += 1
+            self._kvpd_accepted_tokens += accepted
+            self._kvpd_proposed_tokens += proposed
+            if self._kvpd_accept_steps % KVPD_ACCEPT_LOG_INTERVAL == 0:
+                log_kvpd_timing(
+                    True,
+                    "dspark_accept",
+                    steps=self._kvpd_accept_steps,
+                    num_reqs=num_reqs,
+                    step_accepted=accepted,
+                    step_proposed=proposed,
+                    step_acceptance=round(accepted / proposed, 4) if proposed else 0.0,
+                    total_accepted=self._kvpd_accepted_tokens,
+                    total_proposed=self._kvpd_proposed_tokens,
+                    total_acceptance=(
+                        round(self._kvpd_accepted_tokens / self._kvpd_proposed_tokens, 4)
+                        if self._kvpd_proposed_tokens
+                        else 0.0
+                    ),
+                )
+        except Exception:
+            logger.exception("KVPD DSpark acceptance instrumentation failed; disabling it")
+            self._kvpd_timing = False
 
     def _init_dcp(self) -> None:
         self.use_dcp = self.attn_vllm_config.parallel_config.decode_context_parallel_size > 1
@@ -438,6 +499,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     ) -> torch.Tensor:
         self.input_batch = input_batch
         assert self.input_batch is not None
+        if not dummy_run and not is_profile:
+            self._kvpd_note_acceptance(input_batch, num_sampled, num_rejected)
         # PCP restores global requests for the replicated draft, whereas the
         # target DP sync describes its rank-local batch. Negotiate draft
         # capacity independently for PCP.
