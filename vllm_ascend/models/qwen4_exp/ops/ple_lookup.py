@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Gather BF16 PLE rows from registered host memory."""
+"""Model-local gather of BF16 PLE rows from registered host memory."""
 
 from vllm.triton_utils import tl, triton
 

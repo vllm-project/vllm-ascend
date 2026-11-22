@@ -67,8 +67,8 @@ fixed tile size and does not use those properties to select its grid or tile.
 ## Origin and Differences
 
 - **Origin**: Based on the existing Ascend BF16 `_lookup` implementation in
-  `ops/triton/qwen4_exp/ple_lookup.py`. The quantized kernel and its public
-  wrapper live independently in `ops/triton/qwen4_exp/ple_lookup_quantized.py`;
+  `models/qwen4_exp/ops/ple_lookup.py`. The quantized kernel and its public
+  wrapper live independently in `models/qwen4_exp/ops/ple_lookup_quantized.py`;
   the model caller selects the operator before invocation. `is_mxfp8` selects
   the INT8 or MXFP8 quantized format at compile time, not BF16 versus quantized
   lookup at runtime.

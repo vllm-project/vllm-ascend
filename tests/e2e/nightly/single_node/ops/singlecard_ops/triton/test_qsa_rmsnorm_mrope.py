@@ -4,7 +4,7 @@ import torch_npu
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.linearnorm.qsa_rmsnorm_mrope import (
+from vllm_ascend.models.qwen4_exp.ops.qsa_rmsnorm_mrope import (
     triton_qsa_rmsnorm_mrope,
 )
 

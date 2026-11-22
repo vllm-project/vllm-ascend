@@ -7,8 +7,8 @@ from vllm.triton_utils import HAS_TRITON, triton
 
 from tests.e2e.nightly.single_node.ops.singlecard_ops.triton.dcp_test_utils import assert_dcp_close
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.ops.triton.qwen4_exp import hc as hc_module
-from vllm_ascend.ops.triton.qwen4_exp.hc import (
+from vllm_ascend.models.qwen4_exp.ops import hc as hc_module
+from vllm_ascend.models.qwen4_exp.ops.hc import (
     _HC_GATE_MIX_BLOCK_SIZE,
     _HC_GATE_MIX_ROWS_PER_BLOCK,
     _hc_gate_mix_kernel,
