@@ -447,6 +447,9 @@ def _collect_perf(
 ) -> float:
     """Return input throughput for 32 requests at concurrency 16."""
     prompt, _ = build_pool_prompts(prompt_tokens)
+    # Seed the pool at the target concurrency once; otherwise the first timed
+    # wave can measure an under-populated hybrid align tail block.
+    runner.generate_greedy([prompt] * AB_CONCURRENCY, 1)
     for _ in range(AB_WARMUP_ROUNDS):
         runner.generate_greedy([prompt] * AB_WARMUP_REQUESTS, 1)
     # Let scheduling and in-flight async writes settle before timing.

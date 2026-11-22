@@ -31,11 +31,9 @@ NUM_REQUESTS = 8
 # `kv lcm block sizes 896`; 16,388 = 18 x 896 + 260 -> 16,128 hit tokens.
 POOL_LCM_BLOCK_SIZE = 896
 POOL_PROMPT_TOKENS = 16388
-# Mamba checkpoints write the state at cdiv(seq_len, block_size) - 2, so the
-# pool can reuse one block less than the local prefix cache: 16,128 - 896.
-POOL_EXPECTED_HIT_TOKENS = (
-    POOL_PROMPT_TOKENS // POOL_LCM_BLOCK_SIZE * POOL_LCM_BLOCK_SIZE - POOL_LCM_BLOCK_SIZE
-)
+# With the trailing checkpoint published, the pool reuses all 18 blocks:
+# 18 x 896 = 16,128 hit tokens.
+POOL_EXPECTED_HIT_TOKENS = POOL_PROMPT_TOKENS // POOL_LCM_BLOCK_SIZE * POOL_LCM_BLOCK_SIZE
 # Perf prompt: 32 lcm blocks plus a tail -> 28,672 / 31,857 = 90% hit.
 POOL_PERF_PROMPT_TOKENS = 32 * POOL_LCM_BLOCK_SIZE + 32 * POOL_LCM_BLOCK_SIZE // 9
 POOL_MAX_MODEL_LEN = max(POOL_PROMPT_TOKENS, POOL_PERF_PROMPT_TOKENS) + 128

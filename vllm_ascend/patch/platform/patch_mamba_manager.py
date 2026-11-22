@@ -53,8 +53,10 @@ class AscendMambaManager(MambaManager):
                 mask[i] = True
 
         for boundary_tokens in reachable_boundaries:
-            aligned = boundary_tokens // alignment_tokens * alignment_tokens
-            boundary_block = aligned // block_size - 2
+            # Match the checkpoint write column: the runner writes the state
+            # for a chunk ending at E into cdiv(E, block_size) - 2. Aligned
+            # boundaries keep the previous column.
+            boundary_block = (boundary_tokens + block_size - 1) // block_size - 2
             if start_block <= boundary_block < end_block:
                 mask[boundary_block - start_block] = True
 

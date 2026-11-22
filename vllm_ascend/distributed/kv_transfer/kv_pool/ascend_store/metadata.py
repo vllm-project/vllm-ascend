@@ -1125,6 +1125,7 @@ class ReqMeta:
         kv_cache_group_families: list[str] | None = None,
         save_partial_block: bool = False,
         hash_block_size: int | None = None,
+        save_unaligned_tail: bool = False,
     ) -> ReqMeta | None:
         """Create the request metadata from a request tracker."""
         if block_hashes is None:
@@ -1161,6 +1162,11 @@ class ReqMeta:
         # committed request hash. Do not mark an unsent page as saved.
         if full_block_count > available_full_block_count:
             num_tokens_to_save = available_full_block_count * cache_transfer_granularity
+        if save_unaligned_tail and is_last_chunk and target_token_len > previous_saved_tokens:
+            # Hybrid align-state checkpoints land on the trailing unaligned
+            # prefill chunk; publish it instead of dropping to the floored
+            # boundary. The store mask uses cdiv to name the written column.
+            num_tokens_to_save = target_token_len
         if tracker.last_block_gva is not None and (
             target_token_len % cache_transfer_granularity != 0 or boundary_without_hash
         ):
