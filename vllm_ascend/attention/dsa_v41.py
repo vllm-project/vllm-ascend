@@ -722,6 +722,7 @@ _PCP_STAGE_STEP: dict[str, Any] = {
     # step must not re-run their table/metadata work in every layer.
     "negative": None,
     "steps": 0,
+    "visits": 0,
     "smla_ops": 0,
     "step_smla_ops": 0,
     "swa_max_blocks": 0,
@@ -766,6 +767,45 @@ def _pcp_stage_negative(stage_cache) -> str | None:
     return None
 
 
+def _pcp_stage_log() -> None:
+    state = _PCP_STAGE_STEP
+    from vllm.logger import logger
+
+    cache = state["stage_cache"]
+    entries = len(getattr(cache, "smla_cache", {}) or {})
+    logger.info(
+        "PCP stage counters: steps=%d visits=%d swa=%s long_kv=%s smla_ops=%d step_smla_ops=%d "
+        "step_smla_entries=%d swa_blocks=%d/%d long_kv_blocks=%d/%d "
+        "swa_host_us=%.1f long_kv_host_us=%.1f smla_host_us=%.1f "
+        "swa_sync_us=%.1f long_kv_sync_us=%.1f",
+        state["steps"],
+        state["visits"],
+        dict(sorted(_PCP_STAGE_STATS.get("swa", {}).items())),
+        dict(sorted(_PCP_STAGE_STATS.get("long_kv", {}).items())),
+        state["smla_ops"],
+        state["step_smla_ops"],
+        entries,
+        state["swa_max_blocks"],
+        state["swa_capacity"],
+        state["long_kv_max_blocks"],
+        state["long_kv_capacity"],
+        1e6 * state["swa_host_s"] / max(1, state["swa_host_calls"]),
+        1e6 * state["long_kv_host_s"] / max(1, state["long_kv_host_calls"]),
+        1e6 * state["smla_host_s"] / max(1, state["smla_host_calls"]),
+        1e6 * state["swa_sync_host_s"] / max(1, state["swa_sync_host_calls"]),
+        1e6 * state["long_kv_sync_host_s"] / max(1, state["long_kv_sync_host_calls"]),
+    )
+
+
+def _pcp_stage_touch(stage_cache) -> None:
+    """Tick a layer visit for the sync path (no step token available)."""
+    state = _PCP_STAGE_STEP
+    state["stage_cache"] = stage_cache
+    state["visits"] += 1
+    if state["visits"] in (512,) or state["visits"] % (32 * _PCP_STAGE_REPORT_EVERY) == 0:
+        _pcp_stage_log()
+
+
 def _pcp_stage_note_step(step_token, stage_cache) -> None:
     """Report the previous forward step once the step metadata object changes."""
     state = _PCP_STAGE_STEP
@@ -777,32 +817,9 @@ def _pcp_stage_note_step(step_token, stage_cache) -> None:
         return
     if token is not None:
         cache = state["stage_cache"]
-        entries = len(getattr(cache, "smla_cache", {}) or {})
         state["steps"] += 1
         if state["steps"] % _PCP_STAGE_REPORT_EVERY == 0:
-            from vllm.logger import logger
-
-            logger.info(
-                "PCP stage counters: steps=%d swa=%s long_kv=%s smla_ops=%d step_smla_ops=%d "
-                "step_smla_entries=%d swa_blocks=%d/%d long_kv_blocks=%d/%d "
-                "swa_host_us=%.1f long_kv_host_us=%.1f smla_host_us=%.1f "
-                "swa_sync_us=%.1f long_kv_sync_us=%.1f",
-                state["steps"],
-                dict(sorted(_PCP_STAGE_STATS.get("swa", {}).items())),
-                dict(sorted(_PCP_STAGE_STATS.get("long_kv", {}).items())),
-                state["smla_ops"],
-                state["step_smla_ops"],
-                entries,
-                state["swa_max_blocks"],
-                state["swa_capacity"],
-                state["long_kv_max_blocks"],
-                state["long_kv_capacity"],
-                1e6 * state["swa_host_s"] / max(1, state["swa_host_calls"]),
-                1e6 * state["long_kv_host_s"] / max(1, state["long_kv_host_calls"]),
-                1e6 * state["smla_host_s"] / max(1, state["smla_host_calls"]),
-                1e6 * state["swa_sync_host_s"] / max(1, state["swa_sync_host_calls"]),
-                1e6 * state["long_kv_sync_host_s"] / max(1, state["long_kv_sync_host_calls"]),
-            )
+            _pcp_stage_log()
         # The operator tiling cache survives in the builder's batch dictionary
         # across steps, while its signature cannot see the per-request
         # compressed lengths (only max_cache_seq_len).  Drop it every step so
@@ -1562,6 +1579,7 @@ class AscendDSAV41Impl:
             if staged is None:
                 sync_host_started = time.perf_counter()
                 fallback_stage_cache = getattr(metadata, "swa_stage_cache", None)
+                _pcp_stage_touch(fallback_stage_cache)
                 eligible = (
                     # A negative from the overlapped path means this step's
                     # plan/metadata/overflow already failed; retrying the same
