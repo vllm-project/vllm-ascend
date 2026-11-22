@@ -65,7 +65,7 @@ def separate_gdn_checkpoint_spec(layer, spec):
     policy = getattr(layer, "_ascend_checkpoint_policy", "all")
     if policy == "prefix_only":
         if (
-            not envs.VLLM_USE_V2_MODEL_RUNNER
+            not layer.vllm_config.use_v2_model_runner
             or layer.vllm_config.speculative_config is not None
             or getattr(layer.vllm_config, "kv_transfer_config", None) is not None
             or spec.mamba_cache_mode != "align"
