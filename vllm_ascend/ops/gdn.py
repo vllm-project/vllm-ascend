@@ -58,7 +58,7 @@ _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
 
 @torch.no_grad()
-def initialize_recurrent_fp32_parameters(layer: nn.Module) -> None:
+def _initialize_recurrent_fp32_parameters(layer: nn.Module) -> None:
     """Keep recurrent-only scalar weights in their native FP32 ABI dtype.
 
     Qwen creates ``dt_bias`` without an explicit dtype, so model construction
@@ -118,7 +118,13 @@ def _pack_conv_weights(conv1d: nn.Module) -> None:
 
 
 def initialize_packed_conv_weight(layer: nn.Module) -> None:
-    """Register the packed weight and repack it after every source load."""
+    """Initialize persistent GDN parameters used by the fused hot path.
+
+    The standard Qwen GDN construction hook already calls this function
+    before checkpoint loading. Keep the recurrent operator's FP32 ABI setup
+    here as well so model patching does not need to know operator details.
+    """
+    _initialize_recurrent_fp32_parameters(layer)
     conv1d = _get_base_conv1d(layer)
     source_weight = conv1d.weight
     if _PACKED_CONV_WEIGHT_NAME not in conv1d._parameters:
@@ -391,10 +397,6 @@ def _rearrange_decode_qkv(
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        initialize_recurrent_fp32_parameters(self)
-
     @torch.no_grad()
     def _pack_conv_weights(self) -> None:
         """Refresh the kernel-layout convolution parameter in place."""
