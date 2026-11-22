@@ -1,0 +1,6 @@
+pr: 22774
+entries:
+  - category: bugfix
+    text: Fixed an ACLGraph startup failure for Granite Swash 3B on Ascend A2.
+    model: Granite Swash 3B
+    hardware: [A2]
