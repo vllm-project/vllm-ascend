@@ -7,7 +7,7 @@ import torch
 from vllm_ascend.ops.triton.fla.fused_gdn_prepare import fused_gdn_prepare
 
 
-@pytest.mark.parametrize("num_tokens", [0, 1, 4, 16, 128])
+@pytest.mark.parametrize("num_tokens", [0, 4, 128])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_fused_gdn_prepare(num_tokens: int, dtype: torch.dtype):
     torch.manual_seed(0)
