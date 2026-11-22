@@ -17,13 +17,16 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from safetensors.torch import save_file
 from torch import nn
+from vllm.config.load import LoadConfig
 from vllm.distributed import parallel_state
 from vllm.model_executor.layers import vocab_parallel_embedding
+from vllm.model_executor.model_loader.sharded_state_loader import ShardedStateLoader
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 
-from vllm_ascend.models.kimi_k3 import kimi_k3
+from vllm_ascend.models.kimi_k3 import kimi_k3, kimi_k3_dspark
 from vllm_ascend.models.qwen3_dspark import AscendQwen3DSparkForCausalLM
 from vllm_ascend.ops import vocab_parallel_embedding as ascend_vocab
 from vllm_ascend.patch.worker import patch_dspark
@@ -40,6 +43,7 @@ def _vllm_config(
     uses_target_hidden_states=True,
     tp=1,
     may_use_target_embed=True,
+    load_format="auto",
 ):
     hf_config = SimpleNamespace(
         vocab_size=VOCAB_SIZE,
@@ -88,6 +92,7 @@ def _vllm_config(
         ),
         use_v2_model_runner=True,
         quant_config=None,
+        load_config=SimpleNamespace(load_format=load_format),
     )
 
 
@@ -103,6 +108,7 @@ def _make_target(
     uses_target_hidden_states=True,
     may_use_target_embed=True,
     rotation_path=None,
+    load_format="auto",
 ):
     group = SimpleNamespace(
         world_size=pp_size,
@@ -145,6 +151,7 @@ def _make_target(
             draft_vocab_size,
             uses_target_hidden_states,
             may_use_target_embed=may_use_target_embed,
+            load_format=load_format,
         ),
         prefix="model",
     )
@@ -281,9 +288,10 @@ def test_last_stage_embedding_uses_normal_loader_and_draft_shares_it(monkeypatch
     assert draft.has_own_embed_tokens is False
     patch_dspark._pp_safe_maybe_share_target_embed(draft, draft_inner, target)
     assert draft_inner.embed_tokens is target.embed_tokens
-    # The wrapper records the share on the draft so align_draft_weights
-    # keeps the shared shard instead of reloading a private copy over it.
-    assert draft.has_own_embed_tokens is True
+    # The wrapper records the shared module for align without changing the
+    # checkpoint-ownership flag.
+    assert draft.has_own_embed_tokens is False
+    assert draft._shared_target_embed is target.embed_tokens
     torch.testing.assert_close(draft_inner.embed_tokens.weight, expected)
 
 
@@ -299,6 +307,43 @@ def test_last_stage_embed_loads_through_real_load_weights(monkeypatch):
     assert "embed_tokens.weight" in loaded
     expected = _expected_shard(target.embed_tokens, checkpoint_weight)
     torch.testing.assert_close(target.embed_tokens.weight, expected)
+
+
+def test_sharded_state_loader_valid_shard_shares_without_fill_tracking(monkeypatch, tmp_path):
+    _stub_vocab_parallel_groups(monkeypatch, 0)
+    target, _ = _make_target(
+        monkeypatch,
+        2,
+        1,
+        "dspark",
+        ["Qwen3DSparkModel"],
+        real_embedding=True,
+        load_format="sharded_state",
+    )
+    assert target._draft_embed_provisioned is True
+    assert target._embed_fill_check_required is False
+
+    checkpoint_weight = torch.arange(VOCAB_SIZE * HIDDEN_SIZE, dtype=torch.float32).reshape(VOCAB_SIZE, HIDDEN_SIZE)
+    expected = _expected_shard(target.embed_tokens, checkpoint_weight)
+    save_file({"embed_tokens.weight": expected}, tmp_path / "model-rank-0-part-0.safetensors")
+    loader = ShardedStateLoader(LoadConfig(load_format="sharded_state"))
+    monkeypatch.setattr(
+        ShardedStateLoader,
+        "_render_default_pattern",
+        staticmethod(lambda *args, **kwargs: "model-rank-0-part-*.safetensors"),
+    )
+    config = SimpleNamespace(model=str(tmp_path), model_weights=None, revision=None)
+    loader.load_weights(target, config)
+
+    # This loader writes parameters directly and never calls model.load_weights.
+    assert getattr(target, "_embed_shard_filled", False) is False
+    torch.testing.assert_close(target.embed_tokens.weight, expected)
+
+    draft, draft_inner = _make_draft()
+    patch_dspark._pp_safe_maybe_share_target_embed(draft, draft_inner, target)
+    assert draft_inner.embed_tokens is target.embed_tokens
+    assert draft._shared_target_embed is target.embed_tokens
+    assert draft.has_own_embed_tokens is False
 
 
 def test_predicate_provisions_even_when_draft_tp_differs(monkeypatch):
@@ -369,6 +414,24 @@ def test_mla_draft_keeps_own_embedding_without_target_provisioning(monkeypatch):
     torch.testing.assert_close(draft_inner.embed_tokens.weight, own_weight)
 
 
+@pytest.mark.parametrize(
+    "world_size,in_single_pp_stage,expected",
+    [(2, False, True), (1, True, True), (1, False, False), (2, None, True), (1, None, False)],
+)
+def test_mla_checkpoint_embedding_ownership_topology(monkeypatch, world_size, in_single_pp_stage, expected):
+    monkeypatch.setattr(kimi_k3_dspark, "get_pp_group", lambda: SimpleNamespace(world_size=world_size))
+    if in_single_pp_stage is None:
+        monkeypatch.delattr(kimi_k3_dspark.parallel_state, "in_single_pp_stage", raising=False)
+    else:
+        monkeypatch.setattr(
+            kimi_k3_dspark.parallel_state,
+            "in_single_pp_stage",
+            lambda: in_single_pp_stage,
+            raising=False,
+        )
+    assert kimi_k3_dspark._should_own_checkpoint_embedding() is expected
+
+
 def test_missing_shared_embedding_raises_without_provisioning(monkeypatch):
     # Without a provisioning trigger the last stage keeps PPMissingLayer; a
     # draft that needs the shared embedding must fail the upstream check
@@ -381,12 +444,16 @@ def test_missing_shared_embedding_raises_without_provisioning(monkeypatch):
         eagle_utils.maybe_share_target_embed(draft, draft_inner, target)
 
 
-def test_pp_safe_wrapper_defers_to_fallback_without_provisioned_shard(monkeypatch):
+@pytest.mark.parametrize("single_pp_stage", [False, True])
+def test_pp_safe_wrapper_defers_to_fallback_without_provisioned_shard(monkeypatch, single_pp_stage):
     # No provisioning: the last stage keeps PPMissingLayer and the wrapper
-    # must keep deferring to the draft post_process fallback instead of
-    # letting the upstream check raise (fallback removal is follow-up PR 2).
+    # must defer to post_process both with the v0.34 PP group and with vLLM
+    # main's single_pp_stage draft context.
     target, _ = _make_target(monkeypatch, 2, 1, None, real_embedding=False)
     assert isinstance(target.embed_tokens, PPMissingLayer)
+    if single_pp_stage:
+        monkeypatch.setattr(patch_dspark, "get_pp_group", lambda: SimpleNamespace(world_size=1))
+        monkeypatch.setattr(eagle_utils, "in_single_pp_stage", lambda: True, raising=False)
 
     draft, draft_inner = _make_draft()
     draft.post_process = lambda vllm_config: None
@@ -396,14 +463,37 @@ def test_pp_safe_wrapper_defers_to_fallback_without_provisioned_shard(monkeypatc
     assert draft.has_own_embed_tokens is False
 
 
-@pytest.mark.parametrize("scenario", ["unrotated_pp2", "quarot_pp1", "quarot_pp2"])
+def test_pp_safe_wrapper_does_not_defer_for_real_pp1(monkeypatch):
+    target, _ = _make_target(monkeypatch, 2, 1, None, real_embedding=False)
+    group = SimpleNamespace(world_size=1)
+    monkeypatch.setattr(patch_dspark, "get_pp_group", lambda: group)
+    monkeypatch.setattr(eagle_utils, "get_pp_group", lambda: group, raising=False)
+    monkeypatch.setattr(eagle_utils, "in_single_pp_stage", lambda: False, raising=False)
+    draft, draft_inner = _make_draft()
+    draft.post_process = lambda vllm_config: None
+    with pytest.raises(RuntimeError, match="needs the target input embedding"):
+        patch_dspark._pp_safe_maybe_share_target_embed(draft, draft_inner, target)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "unrotated_pp2",
+        "unrotated_single_pp",
+        "unrotated_single_pp_shared",
+        "quarot_pp1",
+        "quarot_pp2",
+        "quarot_single_pp",
+    ],
+)
 def test_post_process_share_and_rotation_paths(monkeypatch, scenario):
-    # Cover unrotated PP sharing, QuaRot sharing without a flag on PP=1, and
-    # the QuaRot PP>1 fallback without target provisioning.
+    # Cover unrotated sharing and QuaRot on PP=1, PP>1, and main's
+    # single_pp_stage draft context.
     from vllm_ascend.models import quarot_utils
 
     rotated = scenario.startswith("quarot")
-    shares_target = scenario != "quarot_pp2"
+    single_pp_stage = scenario in ("unrotated_single_pp", "unrotated_single_pp_shared", "quarot_single_pp")
+    shares_target = scenario not in ("unrotated_single_pp", "quarot_pp2", "quarot_single_pp")
     pp_size = 1 if scenario == "quarot_pp1" else 2
     pp_rank = pp_size - 1
 
@@ -412,11 +502,15 @@ def test_post_process_share_and_rotation_paths(monkeypatch, scenario):
         monkeypatch,
         pp_size,
         pp_rank,
-        "dspark",
+        None if scenario == "unrotated_single_pp" else "dspark",
         ["Qwen3DSparkModel"],
         real_embedding=True,
         rotation_path="/rotation" if rotated else None,
     )
+    if single_pp_stage:
+        monkeypatch.setattr(patch_dspark, "get_pp_group", lambda: SimpleNamespace(world_size=1))
+        monkeypatch.setattr(eagle_utils, "in_single_pp_stage", lambda: True, raising=False)
+        monkeypatch.setattr(quarot_utils.parallel_state, "in_single_pp_stage", lambda: True, raising=False)
     checkpoint_weight = torch.arange(VOCAB_SIZE * HIDDEN_SIZE, dtype=torch.float32).reshape(VOCAB_SIZE, HIDDEN_SIZE)
     if shares_target:
         # Fill through the real target loader so the cross-invocation fill
@@ -438,7 +532,11 @@ def test_post_process_share_and_rotation_paths(monkeypatch, scenario):
     rotation = torch.eye(HIDDEN_SIZE).roll(1, dims=1)
     monkeypatch.setattr(quarot_utils, "get_rotation_path", lambda _: "/rotation" if rotated else None)
     monkeypatch.setattr(quarot_utils, "get_rotation_matrix", lambda _: rotation)
-    monkeypatch.setattr(quarot_utils, "get_pp_group", lambda: SimpleNamespace(world_size=pp_size))
+    monkeypatch.setattr(
+        quarot_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(world_size=1 if single_pp_stage else pp_size),
+    )
 
     def make_layer(vocab, hidden, params_dtype, **_kwargs):
         layer = nn.Embedding(vocab, hidden, dtype=params_dtype)
@@ -460,8 +558,13 @@ def test_post_process_share_and_rotation_paths(monkeypatch, scenario):
     if rotated:
         assert draft.model.embed_tokens is not target.embed_tokens
         torch.testing.assert_close(draft.model.embed_tokens.weight, checkpoint_weight @ rotation.T)
-    else:
+    elif shares_target:
         assert draft.model.embed_tokens is target.embed_tokens
+        assert draft.has_own_embed_tokens is False
+        assert draft._shared_target_embed is target.embed_tokens
+    else:
+        assert draft.model.embed_tokens is not target.embed_tokens
+        torch.testing.assert_close(draft.model.embed_tokens.weight, checkpoint_weight)
 
 
 @pytest.mark.parametrize("rotated", [False, True])
@@ -494,7 +597,9 @@ def test_load_wrapper_marks_shared_only_when_unrotated(monkeypatch, rotated):
     target_like = SimpleNamespace(embed_tokens=nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE))
     share_check(draft, draft_inner, target_like)
     assert draft_inner.embed_tokens is target_like.embed_tokens
-    assert draft.has_own_embed_tokens is (not rotated)
+    assert draft.has_own_embed_tokens is False
+    expected_shared = target_like.embed_tokens if not rotated else None
+    assert getattr(draft, "_shared_target_embed", None) is expected_shared
     # The wrapper is restored for the next load.
     assert patch_dspark.eagle_utils.maybe_share_target_embed is patch_dspark._original_maybe_share_target_embed
 
@@ -519,6 +624,7 @@ def test_wrapper_leaves_checkpoint_owned_gqa_embed_untouched(monkeypatch):
     patch_dspark._pp_safe_maybe_share_target_embed(draft, draft_inner, target)
     assert draft_inner.embed_tokens is own_embed
     assert draft.has_own_embed_tokens is True
+    assert getattr(draft, "_shared_target_embed", None) is None
 
 
 def test_load_wrapper_restores_globals_when_load_raises(monkeypatch):
@@ -572,6 +678,7 @@ def test_load_wrapper_probes_rotation_before_overriding_globals(monkeypatch):
             id="multimodal-prefix",
         ),
         pytest.param({"model.embed_tokens.weight_scale"}, False, id="quant-sidecar-alone"),
+        pytest.param({"model.layers.4.embed_tokens.weight"}, False, id="mtp-layer-embed-not-target"),
         pytest.param({"model.lm_head.weight", "model.layers.0.weight"}, False, id="missing-embed"),
         pytest.param(set(), False, id="nothing-loaded"),
     ],
@@ -610,18 +717,19 @@ def test_embed_fill_recorded_across_multiple_load_invocations(monkeypatch):
     draft, draft_inner = _make_draft()
     patch_dspark._pp_safe_maybe_share_target_embed(draft, draft_inner, target)
     assert draft_inner.embed_tokens is target.embed_tokens
-    assert draft.has_own_embed_tokens is True
+    assert draft.has_own_embed_tokens is False
+    assert draft._shared_target_embed is target.embed_tokens
 
 
 def test_share_time_check_raises_when_shard_never_filled(monkeypatch):
     # The DSpark draft load follows target loading, so the share-time wrapper
-    # sees the final cross-invocation fill state (RFC validation item 2): a provisioned shard that no invocation ever filled
-    # must fail at share time instead of letting the draft alias
-    # uninitialized memory.
+    # sees the final cross-invocation fill state (RFC validation item 2). A
+    # provisioned shard that no invocation ever filled must fail at share time
+    # instead of letting the draft alias uninitialized memory.
     _stub_vocab_parallel_groups(monkeypatch, 0)
     target, _ = _make_target(monkeypatch, 2, 1, "dspark", ["Qwen3DSparkModel"], real_embedding=True)
     assert target._draft_embed_provisioned is True
-    checkpoint_weight = torch.arange(VOCAB_SIZE * HIDDEN_SIZE, dtype=torch.float32).reshape(VOCAB_SIZE, HIDDEN_SIZE)
+    assert target._embed_fill_check_required is True
 
     # Several invocations, none carrying the embed shard (e.g. prefix groups
     # for ranks that hold none of their weights).
@@ -632,6 +740,8 @@ def test_share_time_check_raises_when_shard_never_filled(monkeypatch):
     draft, draft_inner = _make_draft()
     with pytest.raises(RuntimeError, match="never loaded any \\*embed_tokens\\.weight"):
         patch_dspark._pp_safe_maybe_share_target_embed(draft, draft_inner, target)
+    assert draft.has_own_embed_tokens is False
+    assert getattr(draft, "_shared_target_embed", None) is None
 
 
 def test_load_weights_skips_embed_check_when_not_provisioned(monkeypatch):

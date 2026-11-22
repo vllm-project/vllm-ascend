@@ -1372,9 +1372,15 @@
 #       shared module.
 #    How:
 #       Wrap every DSpark draft load with a PP-safe check that defers to the
-#       draft post_process when no target shard exists, and flags a
-#       successful unrotated share so the align step keeps the shared shard.
-#       QuaRot loads skip the flag: the align step must rebuild the rotated
+#       draft post_process when no target shard exists, recognizing both the
+#       v0.34 target PP group and vLLM main's single_pp_stage draft context,
+#       and records the exact module of a successful unrotated share so the
+#       align step keeps the shared shard without changing the draft's
+#       checkpoint-ownership flag.
+#       The model.load_weights path tracks the provisioned shard across loader
+#       invocations and raises before an unfilled share; ShardedStateLoader's
+#       own missing-key check remains authoritative for its direct-write path.
+#       QuaRot loads skip the marker: the align step must rebuild the rotated
 #       copy there.
 #    Related PR:
 #       https://github.com/vllm-project/vllm-ascend/pull/21687

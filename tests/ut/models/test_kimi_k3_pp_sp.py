@@ -76,6 +76,7 @@ def config(tp=2, pp=2, dp=1, ep=True, architecture="KimiLinearForCausalLM"):
             # The provisioning predicate's vocab gate reads get_vocab_size().
             get_vocab_size=lambda: 16,
         ),
+        load_config=SimpleNamespace(load_format="auto"),
         parallel_config=SimpleNamespace(
             tensor_parallel_size=tp,
             pipeline_parallel_size=pp,

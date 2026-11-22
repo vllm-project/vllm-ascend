@@ -137,41 +137,31 @@ def _dspark_init(self, vllm_config, device):
 def _make_pp_safe_maybe_share_target_embed(mark_shared: bool):
     """Build the PP-safe share check for one draft-load invocation.
 
-    ``mark_shared`` is False for QuaRot targets: there the draft's
-    post_process must rebuild the rotated embedding over the shared one, so
-    flagging the share would skip that rebuild and leave the draft with the
-    unrotated table.
+    QuaRot uses mark_shared=False so post_process still rebuilds the rotated
+    private embedding over the shared one.
     """
 
     def _pp_safe_maybe_share_target_embed(draft_model, draft_inner, target_inner):
-        # PP stages past the first have no target embedding to alias. Drafts
-        # whose post_process loads this stage's own vocab shard (e.g. the
-        # Ascend DSpark align step) run after the share check, so skip the
-        # share here instead of letting upstream raise; every other case
-        # keeps the original behavior.
+        # A later PP stage may have no target shard; drafts with post_process
+        # supply their own after this check, so defer instead of raising.
         target_embed = getattr(target_inner, "embed_tokens", None) or getattr(target_inner, "embedding", None)
         if isinstance(target_embed, model_utils.PPMissingLayer):
             target_embed = None
-        if target_embed is None and get_pp_group().world_size > 1 and hasattr(draft_model, "post_process"):
+        in_single_pp_stage = getattr(eagle_utils, "in_single_pp_stage", None)
+        target_pp_active = get_pp_group().world_size > 1 or (in_single_pp_stage is not None and in_single_pp_stage())
+        if target_embed is None and target_pp_active and hasattr(draft_model, "post_process"):
             return
         _original_maybe_share_target_embed(draft_model, draft_inner, target_inner)
         if not mark_shared:
             return
-        # The upstream check swaps draft_inner.embed_tokens for the target's
-        # module without recording it, so align_draft_weights would reload a
-        # private copy over the shared one. Flag the draft to keep the shard.
-        # The positive identity check pins the exact post-condition; inferring
-        # it from "the draft's module changed" would silently mislabel any
-        # future upstream change to the swap mechanics. Upstream unwraps LoRA
-        # layers before sharing, so compare against the unwrapped module.
+        # Record the exact shared module for align_draft_weights without
+        # changing has_own_embed_tokens' checkpoint-ownership meaning. Upstream
+        # unwraps LoRA before sharing, so compare against base_layer.
         shared_embed = getattr(target_embed, "base_layer", target_embed)
         if getattr(draft_inner, "embed_tokens", None) is shared_embed:
-            draft_model.has_own_embed_tokens = True
-            # Fail fast when a provisioned last-stage shard was never filled:
-            # The DSpark draft load follows target loading, so the fill state
-            # accumulated across target load_weights invocations is final here
-            # and the draft is about to alias the shard.
-            if getattr(target_inner, "_draft_embed_provisioned", False) and not getattr(
+            # Target loading has finished; never alias a provisioned shard
+            # that no load_weights invocation filled.
+            if getattr(target_inner, "_embed_fill_check_required", False) and not getattr(
                 target_inner, "_embed_shard_filled", False
             ):
                 raise RuntimeError(
@@ -180,6 +170,7 @@ def _make_pp_safe_maybe_share_target_embed(mark_shared: bool):
                     "*embed_tokens.weight tensor across all load invocations on "
                     "this stage; the draft would alias uninitialized memory."
                 )
+            draft_model._shared_target_embed = shared_embed
 
     return _pp_safe_maybe_share_target_embed
 
@@ -197,13 +188,10 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
     draft_model_config = speculative_config.draft_model_config
     inherits_target_quant = draft_model_config.model == vllm_config.model_config.model
     spec_pp_support = resolve_spec_pp_support(vllm_config)
-    # Resolve the rotation state before mutating module globals so a failure
-    # here cannot leak the quant-config override below.
+    # Resolve rotation before mutating globals so failures cannot leak overrides.
     mark_shared = get_rotation_path(vllm_config) is None
     if inherits_target_quant:
         model_utils.get_draft_quant_config = lambda _vllm_config: vllm_config.quant_config
-    # The PP-safe share check wraps every DSpark draft load (not only
-    # same-checkpoint ones); only the flag-on-share is rotation-dependent.
     eagle_utils.maybe_share_target_embed = _make_pp_safe_maybe_share_target_embed(mark_shared=mark_shared)
     try:
         # Native draft loading already sets PP=1, but still reads the target's

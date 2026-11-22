@@ -6,12 +6,8 @@ from vllm_ascend.models.quarot_utils import align_draft_weights
 
 
 class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
-    # Explicit declaration mirroring every other upstream drafter class.
-    # SupportsEagleBase already provides this attribute through the Qwen3
-    # MRO; restating it here keeps the class self-documenting and guards
-    # against upstream MRO changes. A checkpoint-owned embedding still sets
-    # the instance flag during loading and keeps its own copy (see
-    # _should_share).
+    # SupportsEagleBase supplies this via the Qwen3 MRO; restate the sharing
+    # contract explicitly. A checkpoint-owned embedding sets the instance flag.
     has_own_embed_tokens = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
