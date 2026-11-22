@@ -58,9 +58,6 @@ class FlashPDLoader(FlashDummyLoader):
                 for child_name, dim in (
                     ("f_b_proj", 0),
                     ("g_b_proj", 0),
-                    ("q_conv1d", 0),
-                    ("k_conv1d", 0),
-                    ("v_conv1d", 0),
                     ("o_proj", 1),
                 ):
                     weight = getattr(layer, child_name).weight
@@ -68,6 +65,19 @@ class FlashPDLoader(FlashDummyLoader):
                     shape[dim] *= size
                     full = global_weight(f"{name}.{child_name}.weight", shape, weight.dtype, weight.device)
                     weight.copy_(full.chunk(size, dim=dim)[rank])
+                conv_names = ("q_conv1d", "k_conv1d", "v_conv1d")
+                # New vLLM packs [Q_local, K_local, V_local] in one parameter;
+                # v0.33.0 still exposes the three separate convs. Shard each
+                # component before packing, retaining the same canonical seeds.
+                if hasattr(layer, "conv1d"):
+                    conv_weights = layer.conv1d.weight.chunk(3, dim=0)
+                else:
+                    conv_weights = [getattr(layer, child).weight for child in conv_names]
+                for child_name, weight in zip(conv_names, conv_weights):
+                    shape = list(weight.shape)
+                    shape[0] *= size
+                    full = global_weight(f"{name}.{child_name}.weight", shape, weight.dtype, weight.device)
+                    weight.copy_(full.chunk(size, dim=0)[rank])
 
 
 class FlashPDWorker:
