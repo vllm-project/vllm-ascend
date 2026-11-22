@@ -39,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeTransferMetadataGroups,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import zmq_ctx
+from vllm_ascend.distributed.kv_transfer.utils.utils import truncate_block_hashes_fallback
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -534,16 +535,14 @@ class MooncakeBaseConnectorScheduler:
         request._all_token_ids.pop()
         request.num_prompt_tokens -= 1
         request.max_tokens = 1
+        hash_block_size = self.kv_cache_config.hash_block_size
+        assert hash_block_size is not None
+        lookahead = self.vllm_config.num_hash_lookahead_tokens
         truncate_hashes = getattr(request, "truncate_block_hashes", None)
         if callable(truncate_hashes):
-            # The engine resolves hash geometry before creating the connector.
-            hash_block_size = self.kv_cache_config.hash_block_size
-            assert hash_block_size is not None
-            truncate_hashes(hash_block_size, self.vllm_config.num_hash_lookahead_tokens)
+            truncate_hashes(hash_block_size, lookahead)
         else:
-            # Older vLLM versions do not provide incremental hash truncation.
-            request.block_hashes.clear()
-        request.update_block_hashes()
+            truncate_block_hashes_fallback(request, hash_block_size, lookahead)
         params["_p_side_truncated"] = True
 
     def on_new_request(self, request: "Request") -> None:

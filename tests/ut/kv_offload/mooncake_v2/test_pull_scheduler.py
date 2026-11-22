@@ -12,6 +12,9 @@ import torch
 import zmq
 from cachetools import TTLCache
 from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core import kv_cache_utils
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher
 from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import heartbeat as heartbeat_module
@@ -728,47 +731,6 @@ def test_base_scheduler_detects_state_and_compressed_prefill_truncation() -> Non
     assert scheduler._needs_prefill_token_truncation() is False
 
 
-def test_truncate_request_for_prefill_is_idempotent_for_token_ids() -> None:
-    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
-    scheduler.need_truncate = True
-    request = make_request(
-        prompt_token_ids=[1, 2, 3],
-        num_prompt_tokens=3,
-        _all_token_ids=[1, 2, 3],
-        kv_transfer_params={},
-        max_tokens=8,
-    )
-
-    request.block_hashes = ["full-prompt-hash"]
-    scheduler._truncate_request_for_prefill(request)
-    scheduler._truncate_request_for_prefill(request)
-
-    assert request.prompt_token_ids == [1, 2]
-    assert request._all_token_ids == [1, 2]
-    assert request.num_prompt_tokens == 2
-    assert request.max_tokens == 1
-    assert request.kv_transfer_params["_p_side_truncated"] is True
-    assert request.block_hashes == [(1, 2)]
-
-
-def test_truncate_request_for_prefill_supports_prompt_embeddings() -> None:
-    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
-    scheduler.need_truncate = True
-    prompt_embeds = torch.arange(12).reshape(3, 4)
-    request = make_request(
-        prompt_token_ids=None,
-        prompt_embeds=prompt_embeds,
-        num_prompt_tokens=3,
-        _all_token_ids=[1, 2, 3],
-        kv_transfer_params={},
-    )
-
-    scheduler._truncate_request_for_prefill(request)
-
-    assert torch.equal(request.prompt_embeds, prompt_embeds[:2])
-    assert request.num_prompt_tokens == 2
-
-
 def test_sending_busy_loop_serves_metadata_and_completion_ack() -> None:
     thread = make_sending_thread()
     thread._handle_finished_request = MagicMock()  # type: ignore[method-assign]
@@ -866,9 +828,10 @@ def prefix_connector():
     return result
 
 
-def make_prefix_request(num_tokens, params, use_embeds=False):
+def make_prefix_request(num_tokens, params, use_embeds=False, block_hasher=None):
     request = Request(
         request_id="prefill",
+        block_hasher=block_hasher,
         prompt_token_ids=None if use_embeds else list(range(num_tokens)),
         prompt_embeds=torch.zeros(num_tokens, 4) if use_embeds else None,
         sampling_params=SamplingParams(max_tokens=8),
@@ -905,6 +868,34 @@ def test_truncation_precedes_prefix_lookup(prefix_connector, num_tokens, use_emb
     prefix_connector.on_new_request(request)
     assert prefix_connector.get_num_new_matched_tokens(request, local_hit) == (0, False)
     assert request.num_prompt_tokens == num_tokens - 1
+
+
+@pytest.mark.parametrize(("lookahead", "tail", "use_embeds"), [(2, 0, True), (0, 1, False)])
+@pytest.mark.parametrize("disable_native_api", [False, True])
+def test_prefill_keeps_valid_prefix_hashes_without_rehashing(
+    prefix_connector, lookahead, tail, use_embeds, disable_native_api, monkeypatch
+):
+    scheduler = prefix_connector.connector_scheduler
+    scheduler.vllm_config.num_hash_lookahead_tokens = lookahead
+    hash_size = scheduler.kv_cache_config.hash_block_size
+    length = 2 * hash_size + lookahead + tail
+    monkeypatch.setattr(kv_cache_utils, "NONE_HASH", sha256("test-seed"), raising=False)
+    hash_prompt = get_request_block_hasher(hash_size, sha256, lookahead)
+    counted_hasher = MagicMock(wraps=hash_prompt)
+    request = make_prefix_request(length, {"do_remote_decode": True}, use_embeds, counted_hasher)
+    expected = make_prefix_request(length - 1, {}, use_embeds, hash_prompt)
+    assert len(request.block_hashes) == 2
+    if disable_native_api:
+        monkeypatch.setattr(request, "truncate_block_hashes", None, raising=False)
+    counted_hasher.reset_mock()
+
+    prefix_connector.on_new_request(request)
+    prefix_connector.on_new_request(request)
+
+    assert request.num_prompt_tokens == length - 1
+    assert request.block_hashes == expected.block_hashes
+    assert not request._prompt_embeds_per_block_hashes
+    counted_hasher.assert_not_called()
 
 
 @pytest.mark.parametrize("params", [None, {}, {"do_remote_prefill": True}, {"do_remote_decode": False}])
