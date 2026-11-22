@@ -1,0 +1,358 @@
+meta:
+  title: InternVL3_5-241B-A28B
+  slug: internvl3-5-241b-a28b
+  provider: OpenGVLab
+  description: InternVL3.5 241B-A28B visual-language serving on Atlas 800I A3 with W8A8 and TP4 × DP2 + EP.
+  date_added: 2026-11-20
+  date_updated: 2026-11-21
+  tasks:
+    - multimodal
+  default_hardware: ascend_910c
+  hardware:
+    ascend_910c: supported
+model:
+  model_id: OpenGVLab/InternVL3_5-241B-A28B
+  architecture: moe
+  parameter_count: 240.7B
+  active_parameters: 28B
+  context_length: 40960
+  default_frontend: python
+  base_args:
+    - --host
+    - 127.0.0.1
+    - --port
+    - "2001"
+    - --served-model-name
+    - internvl3_5
+    - --trust-remote-code
+    - --max-model-len
+    - "40960"
+    - --max-num-batched-tokens
+    - "4096"
+    - --data-parallel-size
+    - "2"
+    - --max-num-seqs
+    - "70"
+    - --gpu-memory-utilization
+    - "0.9"
+    - --compilation-config
+    - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    - --additional-config
+    - '{"weight_nz_mode":1,"enable_cpu_binding":true,"enable_fused_mc2":1}'
+    - --mm-processor-cache-gb
+    - "0"
+    - --enable-chunked-prefill
+    - --enable-expert-parallel
+    - --safetensors-load-strategy
+    - prefetch
+    - --allowed-local-media-path
+    - /models/evidence/internvl-release-retest
+  base_env:
+    PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+    TASK_QUEUE_ENABLE: "1"
+    HCCL_OP_EXPANSION_MODE: AIV
+    OMP_PROC_BIND: "false"
+    OMP_NUM_THREADS: "1"
+    HCCL_BUFFSIZE: "1536"
+    ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+  install:
+    pip: false
+    docker: false
+variants:
+  default:
+    model_id: Eco-Tech/InternVL3_5-241B-A28B-w8a8
+    precision: int8
+    label: W8A8
+    vram_minimum_gb: 296
+    supported_hardware:
+      - ascend_910c
+    tp: 4
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend@sha256:0b8bf5b484d49c667ceab717347eb3a8695388429aebd9084b79fa0f57a545c0
+compatible_strategies:
+  - single_node_tp
+strategy_min_gpus: 8
+hardware_overrides: {}
+strategy_overrides: {}
+notes:
+  - title: A3 release deployment
+    when:
+      hardware:
+        - ascend_910c
+    body: >-
+      For this release retest, launch the Docker command in the Guide on the host. It mounts /models, starts in /models and maps devices 0–7. The generated Serve command assumes that container and working directory. Use [Check readiness and run image inference](#check-readiness-and-run-image-inference) in the Guide for 127.0.0.1:2001.
+guide: |-
+  ## Atlas 800I A3 / W8A8 / TP4 DP2 EP
+
+  InternVL3.5 241B-A28B pairs an InternViT vision encoder with a Qwen3 language model for image understanding and multimodal dialogue. This sparse MoE checkpoint has 240.7B total parameters and about 28B active parameters.
+
+  This guide serves the W8A8 checkpoint on one A3 node with TP4 × DP2 + EP across eight logical devices. It covers an image request, an eight-question GSM8K check, the full 900-example MMMU validation set and a text benchmark. The runs used vLLM Ascend v0.30.0. The historical tutorial documents single-node serving and lists multi-node PD separation as unsupported.
+
+  Start the Guide's Docker container on the host. It maps devices 0–7, mounts the host's /models and uses /models as the working directory. Start the service in that container and use the Guide's verification commands on port 2001.
+
+  ### Prepare the checkpoint
+
+  Before starting the container, use Git and Git LFS on the host to download the exact W8A8 checkpoint into a new directory under /models.
+
+  ```shell
+  CHECKPOINT=/models/Eco-Tech/InternVL3_5-241B-A28B-w8a8
+  REVISION=14f6db45aad1fcc208903a1507285baa30ab0583
+  git lfs version &&
+  mkdir -p /models/Eco-Tech &&
+  GIT_LFS_SKIP_SMUDGE=1 git clone --no-checkout \
+    https://www.modelscope.cn/Eco-Tech/InternVL3_5-241B-A28B-w8a8.git "$CHECKPOINT" &&
+  git -C "$CHECKPOINT" lfs install --local &&
+  GIT_LFS_SKIP_SMUDGE=1 git -C "$CHECKPOINT" checkout --detach "$REVISION" &&
+  git -C "$CHECKPOINT" lfs pull origin &&
+  git -C "$CHECKPOINT" lfs fsck --objects HEAD
+  ```
+
+  ### Original tiger photo
+
+  Run on the host. This command also verifies an original JPEG already staged at the destination.
+
+  ```shell
+  (
+    set -euo pipefail
+    asset_dir=/models/evidence/internvl-release-retest
+    mkdir -p "$asset_dir"
+    if [ ! -f "$asset_dir/tiger.jpeg" ]; then
+      curl -fL --retry 3 --connect-timeout 10 --max-time 60 \
+        https://modelscope.oss-cn-beijing.aliyuncs.com/resource/tiger.jpeg \
+        -o "$asset_dir/tiger.jpeg.download"
+      cd "$asset_dir"
+      echo '303d9137e3f494f2fb83dc2fafa05c4143eab2316a0438a8335fe661ee8b97bf  tiger.jpeg.download' | sha256sum -c -
+      mv tiger.jpeg.download tiger.jpeg
+    fi
+    cd "$asset_dir"
+    echo '303d9137e3f494f2fb83dc2fafa05c4143eab2316a0438a8335fe661ee8b97bf  tiger.jpeg' | sha256sum -c -
+  )
+  ```
+
+  ### A3 release container
+
+  Run the container command on the host. Run the serve and evaluation commands in separate shells inside the release container. Stage the original tiger image and pinned evaluator files before evaluation.
+
+  ```bash
+  # A3 release container
+  # quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
+  IMAGE=quay.io/ascend/vllm-ascend@sha256:0b8bf5b484d49c667ceab717347eb3a8695388429aebd9084b79fa0f57a545c0
+  docker run --rm -it --name internvl241-release --net=host --ipc=host \
+    --device /dev/davinci0 --device /dev/davinci1 --device /dev/davinci2 --device /dev/davinci3 \
+    --device /dev/davinci4 --device /dev/davinci5 --device /dev/davinci6 --device /dev/davinci7 \
+    --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /models:/models -w /models "$IMAGE" bash
+  ```
+
+  ### Start the server
+
+  The service listens on the loopback interface.
+
+  ```bash
+  # A3 release serve
+  cd /models
+  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+  export TASK_QUEUE_ENABLE=1
+  export HCCL_OP_EXPANSION_MODE=AIV
+  export OMP_PROC_BIND=false
+  export OMP_NUM_THREADS=1
+  export HCCL_BUFFSIZE=1536
+  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  vllm serve Eco-Tech/InternVL3_5-241B-A28B-w8a8 \
+    --host 127.0.0.1 \
+    --port 2001 \
+    --served-model-name internvl3_5 \
+    --trust-remote-code \
+    --max-model-len 40960 \
+    --max-num-batched-tokens 4096 \
+    --tensor-parallel-size 4 \
+    --data-parallel-size 2 \
+    --max-num-seqs 70 \
+    --gpu-memory-utilization 0.9 \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"weight_nz_mode":1,"enable_cpu_binding":true,"enable_fused_mc2":1}' \
+    --mm-processor-cache-gb 0 \
+    --enable-chunked-prefill \
+    --enable-expert-parallel \
+    --safetensors-load-strategy prefetch \
+    --allowed-local-media-path /models/evidence/internvl-release-retest
+  ```
+
+  ### Check readiness and run image inference
+
+  Place the original tutorial photo at `/models/evidence/internvl-release-retest/tiger.jpeg` before running this block. Confirm that the response describes a tiger lying on grass.
+
+  ```bash
+  # A3 release image inference
+  curl --noproxy '*' -fsS --connect-timeout 5 --max-time 15 http://127.0.0.1:2001/health -w 'Health HTTP %{http_code}\n' &&
+  curl --noproxy '*' -fsS --connect-timeout 5 --max-time 15 http://127.0.0.1:2001/v1/models -w '\nModels HTTP %{http_code}\n' &&
+  curl --noproxy '*' --fail-with-body --silent --show-error --connect-timeout 5 --max-time 120 \
+    http://127.0.0.1:2001/v1/chat/completions -H 'Content-Type: application/json' \
+    --data-binary '{"model":"internvl3_5","temperature":0,"max_tokens":64,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"file:///models/evidence/internvl-release-retest/tiger.jpeg"}},{"type":"text","text":"What animal is shown in the image, and what is it doing?"}]}]}' \
+    --write-out "\nImage request HTTP %{http_code}\n"
+  ```
+
+  ### AISBench GSM8K demo setup
+
+  Run in the verification shell inside the release container. Verify the OpenCompass GSM8K train and test files before running the demo.
+
+  ```shell
+  (
+    set -euo pipefail
+    bench=/models/tools/aisbench-38b
+    revision=e968d1bd7f48404bd913b95560f33938072336fa
+    git init -q "$bench/benchmark"
+    git -C "$bench/benchmark" fetch --depth=1 https://gitee.com/aisbench/benchmark.git "$revision" \
+      || git -C "$bench/benchmark" fetch --depth=1 https://github.com/AISBench/benchmark.git "$revision"
+    git -C "$bench/benchmark" checkout --detach "$revision"
+    python3 -m venv "$bench/venv"
+    "$bench/venv/bin/python" -m pip install -e "$bench/benchmark" --use-pep517
+    "$bench/venv/bin/python" -m pip install \
+      -r "$bench/benchmark/requirements/api.txt" -r "$bench/benchmark/requirements/extra.txt"
+    cd "$bench/benchmark/ais_bench/datasets"
+    curl -fL --retry 3 https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gsm8k.zip -o "$bench/gsm8k.zip"
+    unzip -oq "$bench/gsm8k.zip"
+    sha256sum -c <<'SHA'
+  17f347dc51477c50d4efb83959dbb7c56297aba886e5544ee2aaed3024813465  gsm8k/train.jsonl
+  3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14  gsm8k/test.jsonl
+  SHA
+  )
+  ```
+
+  ### Run the AISBench GSM8K demo
+
+  Use the pinned AISBench checkout and eight-example GSM8K demo. Preserve the predictions and scores.
+
+  ```bash
+  # A3 release AISBench GSM8K demo
+  out=/models/evidence/internvl-release-retest/internvl241
+  mkdir -p "$out"
+  cat > "$out/gsm8k-demo.py" <<'PY'
+  from mmengine.config import read_base
+  with read_base():
+      from ais_bench.benchmark.configs.models.vllm_api.vllm_api_general_chat import models
+      from ais_bench.benchmark.configs.datasets.demo.demo_gsm8k_gen_4_shot_cot_chat_prompt import gsm8k_datasets as datasets
+  models[0]["model"] = "internvl3_5"
+  models[0]["host_ip"] = "127.0.0.1"
+  models[0]["host_port"] = 2001
+  models[0]["batch_size"] = 1
+  models[0]["max_out_len"] = 512
+  models[0]["generation_kwargs"]["temperature"] = 0
+  work_dir = "/models/evidence/internvl-release-retest/internvl241/aisbench-results"
+  PY
+  (cd /models/tools/aisbench-38b/benchmark && /models/tools/aisbench-38b/venv/bin/ais_bench "$out/gsm8k-demo.py")
+  ```
+
+  ### MMMU evaluator and dataset setup
+
+  Run in the verification shell inside the release container. This prepares all four task files from the locked lmms-eval commit and verifies the pinned MMMU validation Parquet and its 900 rows. Set HF_ENDPOINT if you need a different Hugging Face endpoint.
+
+  ```shell
+  (
+    set -euo pipefail
+    vision=/models/tools/internvl-mmmu-21eff4c
+    task_dir=/models/evidence/internvl-release-retest/mmmu-task
+    revision=21eff4c82912300f5213114afe67bee4c0e0a31c
+    data_revision=364f2e2eb107b36e07ff4c5a15f5947a759cef47
+    mkdir -p "$task_dir"
+    git init -q "$vision/lmms-eval"
+    git -C "$vision/lmms-eval" fetch --depth=1 https://github.com/EvolvingLMMs-Lab/lmms-eval.git "$revision"
+    git -C "$vision/lmms-eval" checkout --detach "$revision"
+    python3 -m venv --system-site-packages "$vision/venv"
+    "$vision/venv/bin/python" -m pip install -e "$vision/lmms-eval"
+    for helper in _default_template_yaml arial.ttf utils.py; do
+      git -C "$vision/lmms-eval" show "$revision:lmms_eval/tasks/mmmu/$helper" > "$task_dir/$helper"
+    done
+    git -C "$vision/lmms-eval" show "$revision:lmms_eval/tasks/mmmu/mmmu_val.yaml" |
+      sed -e "/^dataset_path:/a dataset_kwargs:\n  revision: $data_revision\n  data_files:\n    validation: data/validation-00000-of-00001.parquet" \
+        -e 's/^task: "mmmu_val"$/task: "mmmu_val_pinned"/' > "$task_dir/mmmu_val_pinned.yaml"
+    cd "$task_dir"
+    sha256sum -c <<'SHA'
+  f7877d5a314f6b94d15f906188f2c7f189edc8b5058faf0f87942a9174fbb481  _default_template_yaml
+  35c0f3559d8db569e36c31095b8a60d441643d95f59139de40e23fada819b833  arial.ttf
+  af694572294100a7d2cec604812a8bfcd910bae9ed0ed870735624f10ebe75b0  mmmu_val_pinned.yaml
+  b15aab0b4002a463969b1ece0049b5435179092c4b7f9c42f747b19128c32672  utils.py
+  SHA
+    export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+    export HF_HOME="$vision/hf-cache" HF_HUB_DISABLE_XET=1
+    "$vision/venv/bin/python" - <<'PY'
+  from hashlib import file_digest
+  from datasets import load_dataset
+  from huggingface_hub import hf_hub_download
+
+  repo = "lmms-lab-encoder/MMMU"
+  rev = "364f2e2eb107b36e07ff4c5a15f5947a759cef47"
+  name = "data/validation-00000-of-00001.parquet"
+  with open(hf_hub_download(repo, name, revision=rev, repo_type="dataset"), "rb") as stream:
+      assert file_digest(stream, "sha256").hexdigest() == "18e0e97776217e7b5fc992dc9594014e7adc0cc0473f624ea957c18702e16681"
+  assert len(load_dataset(repo, revision=rev, data_files={"validation": name}, split="validation")) == 900
+  PY
+  )
+  ```
+
+  ### Run the MMMU diagnostic trial
+
+  Check the API and evaluator with six samples.
+
+  ```bash
+  # A3 release pinned MMMU trial
+  out=/models/evidence/internvl-release-retest/internvl241
+  mkdir -p "$out"
+  export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+  export HF_HOME=/models/tools/internvl-mmmu-21eff4c/hf-cache HF_HUB_DISABLE_XET=1
+  export OPENAI_API_KEY=EMPTY PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false
+  task_dir=/models/evidence/internvl-release-retest/mmmu-task
+  /models/tools/internvl-mmmu-21eff4c/venv/bin/python -m lmms_eval --model openai \
+    --model_args model_version=internvl3_5,base_url=http://127.0.0.1:2001/v1,num_concurrent=1,timeout=120,max_retries=1 \
+    --include_path "$task_dir" --tasks mmmu_val_pinned --batch_size 1 --seed 0 \
+    --gen_kwargs temperature=0,max_new_tokens=128 --log_samples \
+    --output_path "$out/mmmu-trial" --limit 6
+  ```
+
+  ### Run the full MMMU validation
+
+  Use all 900 validation examples from the pinned MMMU revision at temperature 0 and a 128-token cap.
+
+  ```bash
+  # A3 release pinned MMMU full
+  out=/models/evidence/internvl-release-retest/internvl241
+  mkdir -p "$out"
+  export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+  export HF_HOME=/models/tools/internvl-mmmu-21eff4c/hf-cache HF_HUB_DISABLE_XET=1
+  export OPENAI_API_KEY=EMPTY PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false
+  task_dir=/models/evidence/internvl-release-retest/mmmu-task
+  /models/tools/internvl-mmmu-21eff4c/venv/bin/python -m lmms_eval --model openai \
+    --model_args model_version=internvl3_5,base_url=http://127.0.0.1:2001/v1,num_concurrent=1,timeout=120,max_retries=1 \
+    --include_path "$task_dir" --tasks mmmu_val_pinned --batch_size 1 --seed 0 \
+    --gen_kwargs temperature=0,max_new_tokens=128 --log_samples \
+    --output_path "$out/mmmu-full"
+  ```
+
+  ### Run the text benchmark
+
+  Run three seeds, each with five warm-ups and 100 measured text requests. Record TTFT, TPOT, ITL and token throughput.
+
+  ```bash
+  # A3 release text benchmark
+  out=/models/evidence/internvl-release-retest/internvl241/text-benchmark
+  mkdir -p "$out"
+  for seed in 0 1 2; do
+    vllm bench serve --backend vllm \
+      --model /models/Eco-Tech/InternVL3_5-241B-A28B-w8a8 --served-model-name internvl3_5 \
+      --base-url http://127.0.0.1:2001 --endpoint /v1/completions --dataset-name random \
+      --random-input-len 2048 --random-output-len 128 --random-range-ratio 0 --random-prefix-len 0 \
+      --seed "$seed" --num-prompts 100 --num-warmups 5 --max-concurrency 1 --request-rate inf --ignore-eos \
+      --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,99 \
+      --save-result --save-detailed --result-dir "$out" --result-filename "seed-$seed.json"
+  done
+  ```
+
+  ### Sources
+
+  - [Historical tutorial](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/InternVL3.5.html)
+  - [v0.30.0 release support status](https://docs.vllm.ai/projects/ascend/en/v0.30.0/tutorials/models/InternVL3.5.html)
