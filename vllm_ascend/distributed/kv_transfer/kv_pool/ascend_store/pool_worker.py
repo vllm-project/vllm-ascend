@@ -74,6 +74,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.timing import (
+    kvpd_timing_enabled,
+    log_kvpd_timing,
+    sum_transfer_bytes,
+)
 from vllm_ascend.distributed.kv_transfer.utils.owner_transfer import (
     OwnerTransferStager,
     owner_backed_tensor,
@@ -129,6 +134,7 @@ class BaseKVPoolWorker(ABC):
         self._transfer_threads_started = False
         self._kv_stats = AscendStoreKVConnectorStats()
         self._kv_stats_lock = threading.Lock()
+        self._kvpd_timing = kvpd_timing_enabled(vllm_config)
 
     @abstractmethod
     def _start_kv_transfer_threads(self) -> None:
@@ -865,9 +871,22 @@ class BaseKVPoolWorker(ABC):
         self.m_store.register_buffer(ptrs, lengths)
         self._start_kv_transfer_threads()
 
-    def _record_kv_connector_operation(self, operation: str, duration_seconds: float, num_keys: int) -> None:
+    def _record_kv_connector_operation(
+        self,
+        operation: str,
+        duration_seconds: float,
+        num_keys: int,
+        num_bytes: int = 0,
+        queue_wait_seconds: float | None = None,
+    ) -> None:
         with self._kv_stats_lock:
-            self._kv_stats.record_operation(operation, duration_seconds, num_keys)
+            self._kv_stats.record_operation(
+                operation,
+                duration_seconds,
+                num_keys,
+                num_bytes=num_bytes,
+                queue_wait_seconds=queue_wait_seconds,
+            )
 
     def get_stats(self) -> AscendStoreKVConnectorStats | None:
         with self._kv_stats_lock:
@@ -875,7 +894,11 @@ class BaseKVPoolWorker(ABC):
                 return None
             stats = self._kv_stats
             self._kv_stats = AscendStoreKVConnectorStats()
-            return stats
+        if self._kvpd_timing:
+            logger.info("[KVPD_STATS] %s", stats.reduce())
+        else:
+            logger.debug("AscendStore connector stats: %s", stats.reduce())
+        return stats
 
     def _record_invalid_blocks_ids(self, block_ids: list[int]) -> None:
         if not block_ids:
@@ -1478,6 +1501,8 @@ class KVPoolWorker(BaseKVPoolWorker):
                 worker=self if self.tp_mismatch else None,
                 sharded_mamba_group_ids=self.sharded_mamba_group_ids,
                 owner_stager=self.owner_transfer_stager,
+                record_operation=self._record_kv_connector_operation,
+                enable_timing=self._kvpd_timing,
             )
             self.kv_send_thread.start()
             ready_event_sending.wait()
@@ -1496,6 +1521,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 worker=self if self.tp_mismatch else None,
                 record_operation=self._record_kv_connector_operation,
                 owner_stager=self.owner_transfer_stager,
+                enable_timing=self._kvpd_timing,
             )
             self.kv_recv_thread.start()
             ready_event.wait()
@@ -1536,6 +1562,16 @@ class KVPoolWorker(BaseKVPoolWorker):
                 load_group_ids,
                 self.load_async,
             )
+            if self._kvpd_timing:
+                request.load_enqueue_perf = time.perf_counter()
+                log_kvpd_timing(
+                    True,
+                    "d_load_enqueue",
+                    request.req_id,
+                    token_len=token_len,
+                    groups=load_group_ids,
+                    load_async=self.load_async,
+                )
             if self.load_async:
                 self.kv_recv_thread.add_request(  # type: ignore[union-attr]
                     request,
@@ -1614,15 +1650,43 @@ class KVPoolWorker(BaseKVPoolWorker):
                 len(key_list_c),
                 key_list_c[:3],
             )
+            load_bytes = sum_transfer_bytes(size_list_c)
+            if self._kvpd_timing:
+                log_kvpd_timing(
+                    True,
+                    "d_load_start",
+                    request.req_id,
+                    token_len=token_len,
+                    groups=load_group_ids,
+                    keys=len(key_list_c),
+                    bytes=load_bytes,
+                )
             load_get_start = time.perf_counter()
             if self.owner_transfer_stager is not None:
                 ret = self.owner_transfer_stager.get(self.m_store, key_list_c, addr_list_c, size_list_c)
             else:
                 ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            load_get_duration = time.perf_counter() - load_get_start
+            queue_wait = (
+                load_get_start - getattr(request, "load_enqueue_perf", load_get_start) if self._kvpd_timing else None
+            )
+            if self._kvpd_timing:
+                log_kvpd_timing(
+                    True,
+                    "d_load_done",
+                    request.req_id,
+                    duration_ms=round(load_get_duration * 1e3, 3),
+                    queue_wait_ms=round(queue_wait * 1e3, 3),
+                    keys=len(key_list_c),
+                    bytes=load_bytes,
+                    success=not (ret is None or (isinstance(ret, list) and any(r != 0 for r in ret))),
+                )
             self._record_kv_connector_operation(
                 "load_get",
-                time.perf_counter() - load_get_start,
+                load_get_duration,
                 len(key_list_c),
+                num_bytes=load_bytes,
+                queue_wait_seconds=queue_wait,
             )
             if (self.backend_name == "memcache" or self.enable_partial_hash_hits) and (
                 ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)
@@ -1679,6 +1743,15 @@ class KVPoolWorker(BaseKVPoolWorker):
 
         for request in connector_metadata.requests:
             can_save = request.can_save
+            if self._kvpd_timing:
+                log_kvpd_timing(
+                    True,
+                    "p_prefill_done",
+                    request.req_id,
+                    token_len=request.token_len_chunk,
+                    can_save=can_save,
+                    is_last_chunk=request.is_last_chunk,
+                )
             if can_save is None or not can_save:
                 continue
             if current_event is None:
@@ -1790,15 +1863,18 @@ class KVPoolWorker(BaseKVPoolWorker):
             len(keys_c),
             keys_c[:3],
         )
+        load_bytes = sum_transfer_bytes(sizes_c)
         load_get_start = time.perf_counter()
         if self.owner_transfer_stager is not None:
             ret = self.owner_transfer_stager.get(self.m_store, keys_c, addrs_c, sizes_c)
         else:
             ret = self.m_store.get(keys_c, addrs_c, sizes_c)
+        load_get_duration = time.perf_counter() - load_get_start
         self._record_kv_connector_operation(
             "load_get",
-            time.perf_counter() - load_get_start,
+            load_get_duration,
             len(keys_c),
+            num_bytes=load_bytes,
         )
         if self.backend_name == "memcache" and (ret is None or len(ret) != len(keys_c) or any(r != 0 for r in ret)):
             return False
