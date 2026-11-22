@@ -79,7 +79,9 @@ def check_file(path: str) -> int:
         with open(path, encoding="utf-8") as f:
             content = f.read()
     except (OSError, UnicodeDecodeError):
-        return []
+        # Non-UTF-8 sources stay unjudged: reporting "no violation" keeps the
+        # hook's int result contract that ``main()`` combines with ``|=``.
+        return 0
 
     return_code = 0
     for import_name, forbidden_import in CHECK_IMPORTS.items():
