@@ -262,6 +262,8 @@ public:
         yGm.SetGlobalBuffer((__gm__ T *)y);
         postGm.SetGlobalBuffer((__gm__ float *)post);
         combFragGm.SetGlobalBuffer((__gm__ float *)combFrag);
+        preMixGm.SetGlobalBuffer((__gm__ float *)preMix);
+        preGm.SetGlobalBuffer((__gm__ float *)pre);
         workspaceGm.SetGlobalBuffer((__gm__ float *)workspace);
     }
 
@@ -308,7 +310,10 @@ public:
         pipe->InitBuffer(xCastBuf, xQueSize * sizeof(float));
         pipe->InitBuffer(yCastBuf,
             yRowFactor * RoundUp<T>(tilingData->dFactor) * sizeof(float));
+        pipe->InitBuffer(preMixBuf,
+            rowFactor * tilingData->hcMultAlign * sizeof(float));
 
+        preMixLocal = preMixBuf.Get<float>();
         hcBase0Local = hcBaseBuf0.Get<float>();
         hcBase1Local = hcBaseBuf1.Get<float>();
         hcBrcbLocal1 = hcBrcbBuf1.Get<float>();
@@ -698,12 +703,34 @@ public:
         mixesQue01.template FreeTensor(mixes01Local);
         squareSumQue.template FreeTensor(squareSumOutLocal);
 
+        // UB rows are padded to hcMultAlign; the GM pre buffers use hcMult,
+        // so copy row by row instead of as one contiguous block.
+        if (tilingData->hasPreOut != 0) {
+            event_t evPreOut = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+            SetFlag<HardEvent::V_MTE3>(evPreOut);
+            WaitFlag<HardEvent::V_MTE3>(evPreOut);
+            for (int64_t r = 0; r < curRowFactor; r++) {
+                CopyOut(mixes01ReduceLocal[r * tilingData->hcMultAlign],
+                    preGm[(globalRowOffset + r) * tilingData->hcMult], 1, tilingData->hcMult);
+            }
+        }
+        if (tilingData->hasPreMix != 0) {
+            for (int64_t r = 0; r < curRowFactor; r++) {
+                CopyIn(preMixGm[(globalRowOffset + r) * tilingData->hcMult],
+                    preMixLocal[r * tilingData->hcMultAlign], 1, tilingData->hcMult);
+            }
+            event_t evPreMix = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+            SetFlag<HardEvent::MTE2_V>(evPreMix);
+            WaitFlag<HardEvent::MTE2_V>(evPreMix);
+        }
+
         // Keep the D tile resident for each row. This lets the row-only
         // pre/post transforms run in a larger batch without inflating the
         // x/y UB buffers that are sized for one full-D row.
         for (int64_t rowIdx = 0; rowIdx < curRowFactor; rowIdx++) {
             int64_t rowOffset = globalRowOffset + rowIdx;
-            const LocalTensor<float> preRow =
+            const LocalTensor<float> preRow = tilingData->hasPreMix != 0 ?
+                preMixLocal[rowIdx * tilingData->hcMultAlign] :
                 mixes01ReduceLocal[rowIdx * tilingData->hcMultAlign];
             for (int64_t dLoopIdx = 0; dLoopIdx < tilingData->dLoop; dLoopIdx++) {
                 int64_t curDFactor = dLoopIdx == tilingData->dLoop - 1 ?
@@ -1027,6 +1054,8 @@ private:
     GlobalTensor<T> yGm;
     GlobalTensor<float> postGm;
     GlobalTensor<float> combFragGm;
+    GlobalTensor<float> preMixGm;
+    GlobalTensor<float> preGm;
 
     TQue<QuePosition::VECIN, 1> mixesQue01;
     TQue<QuePosition::VECIN, 1> mixesQue2;
@@ -1053,7 +1082,9 @@ private:
     TBuf<QuePosition::VECCALC> xCastBuf;
     TBuf<QuePosition::VECCALC> yCastBuf;
     TBuf<QuePosition::VECCALC> maskPatternBuf;
+    TBuf<QuePosition::VECCALC> preMixBuf;
 
+    LocalTensor<float> preMixLocal;
     LocalTensor<float> mixes01Local;
     LocalTensor<float> mixes2Local;
     LocalTensor<float> rsqrtLocal;

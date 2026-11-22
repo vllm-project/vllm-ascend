@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include <cstdlib>
 #include <sstream>
 #include "hc_pre_tiling.h"
 #include "hc_pre_tiling_arch35.h"
@@ -63,6 +64,14 @@ constexpr int64_t SMALL_BS_THRESHOLD = 32;
 constexpr uint64_t MPMD_TILING_KEY = 0;
 constexpr uint64_t ORIGINAL_TILING_KEY = 1;
 constexpr uint64_t PREMIX_TILING_KEY = 2;
+constexpr uint64_t PREMIX_MPMD_TILING_KEY = 3;
+// Default off: the premix MPMD tiling is bit-identical to the legacy premix
+// path and ~1.9x faster at T>=512, but is only selected when this env is "1".
+bool PremixMpmdEnabled()
+{
+    const char *v = std::getenv("VLLM_ASCEND_HC_PREMIX_MPMD");
+    return v != nullptr && v[0] == '1' && v[1] == '\0';
+}
 }
 
 ge::graphStatus HcPreTiling::GetPlatformInfo()
@@ -206,8 +215,12 @@ void HcPreTiling::CalcVectorCoreNum()
 
 ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
 {
-    // preMix 场景使用独立的 tilingKey=2 和按行分配策略。
-    if (tilingData_.get_hasPreMix() != 0) {
+    // preMix: small batches keep the dedicated premix kernel; large batches use
+    // the MPMD (pre/post + sinkhorn core split) tiling with a premix-capable
+    // kernel. The premix tiling was measured ~2x slower at T=1536 (300 us vs
+    // 155 us without pre_mix) because it runs everything serially per row.
+    if (tilingData_.get_hasPreMix() != 0 &&
+        (bs_ <= SMALL_BS_THRESHOLD || !PremixMpmdEnabled())) {
         return CalcPremixPart2Tiling();
     }
     bool useOriginal = bs_ <= SMALL_BS_THRESHOLD;
