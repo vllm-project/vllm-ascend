@@ -1537,7 +1537,21 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                 cum_query_lens=actual_seq_lengths_query_decode,
             )
 
-        fused_query = torch.cat([ql_nope_decode, q_pe_decode], dim=-1).contiguous()
+        split_query_op = getattr(fused_op, "split_query", None)
+        use_split_query = (
+            split_query_op is not None
+            and ql_nope_decode.is_contiguous()
+            and q_pe_decode.is_contiguous()
+            and ql_nope_decode.dtype == q_pe_decode.dtype
+            and ql_nope_decode.device == q_pe_decode.device
+            and ql_nope_decode.shape[:-1] == q_pe_decode.shape[:-1]
+            and ql_nope_decode.size(-1) == full_kv_cache.size(-1)
+            and full_k_rope.numel() > 0
+            and q_pe_decode.size(-1) == full_k_rope.size(-1)
+        )
+        fused_query = (
+            ql_nope_decode if use_split_query else torch.cat([ql_nope_decode, q_pe_decode], dim=-1).contiguous()
+        )
         fused_inputs = {
             "query": fused_query,
             "selection_k_rope": selection_k_rope,
@@ -1558,6 +1572,9 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             "layout_kv": "PA_BSND",
             "sparse_mode": 3,
         }
+        if use_split_query:
+            fused_op = split_query_op
+            fused_inputs["query_rope"] = q_pe_decode
         manager.inject_current_kv_into_selection(
             layer_name=layer_name,
             num_tokens=num_tokens,

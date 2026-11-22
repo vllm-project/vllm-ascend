@@ -171,9 +171,14 @@ def _make_case(dtype: torch.dtype, topk: int) -> FusedSparseAttentionOverlapCase
     )
 
 
-def _call_fused(case: FusedSparseAttentionOverlapCase) -> torch.Tensor:
-    return torch.ops._C_ascend.npu_fused_sparse_attention_overlap(
-        query=case.query,
+def _call_fused(case: FusedSparseAttentionOverlapCase, split_query: bool) -> torch.Tensor:
+    fused_op = torch.ops._C_ascend.npu_fused_sparse_attention_overlap
+    query_args = {"query": case.query}
+    if split_query:
+        query_nope, query_rope = case.query.split((KV_HEAD_DIM, ROPE_HEAD_DIM), dim=-1)
+        query_args = {"query": query_nope.contiguous(), "query_rope": query_rope.contiguous()}
+        fused_op = fused_op.split_query
+    return fused_op(
         selection_k_rope=case.selection_k_rope,
         selection_kv_cache=case.selection_kv_cache,
         selection_kv_block_table=case.selection_block_table,
@@ -191,6 +196,7 @@ def _call_fused(case: FusedSparseAttentionOverlapCase) -> torch.Tensor:
         layout_query="TND",
         layout_kv="PA_BSND",
         sparse_mode=3,
+        **query_args,
     )
 
 
@@ -277,6 +283,7 @@ def _assert_selection_state_matches_full_cache(case: FusedSparseAttentionOverlap
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("topk", [32, 128])
+@pytest.mark.parametrize("split_query", [False, True], ids=["packed", "split"])
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
     reason="Internal-planner overlap regression targets Ascend A2/A3",
@@ -285,11 +292,12 @@ def _assert_selection_state_matches_full_cache(case: FusedSparseAttentionOverlap
 def test_fused_sparse_attention_overlap_internal_planner_miss_then_all_hit_precision(
     dtype: torch.dtype,
     topk: int,
+    split_query: bool,
 ) -> None:
     assert hasattr(torch.ops._C_ascend, "npu_fused_sparse_attention_overlap")
     case = _make_case(dtype, topk)
 
-    miss_output = _call_fused(case)
+    miss_output = _call_fused(case, split_query)
     torch.npu.synchronize()
     _assert_attention_matches_reference(case, miss_output)
     _assert_selection_state_matches_full_cache(case)
@@ -298,7 +306,7 @@ def test_fused_sparse_attention_overlap_internal_planner_miss_then_all_hit_preci
     kv_after_miss = case.selection_kv_cache.clone()
     rope_after_miss = case.selection_k_rope.clone()
 
-    all_hit_output = _call_fused(case)
+    all_hit_output = _call_fused(case, split_query)
     torch.npu.synchronize()
     _assert_attention_matches_reference(case, all_hit_output)
     _assert_selection_state_matches_full_cache(case)

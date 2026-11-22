@@ -542,6 +542,30 @@ at::Tensor npu_fused_sparse_attention_overlap_meta(
     return at::empty_symint(out_sizes, query.options().dtype(query.dtype()));
 }
 
+at::Tensor npu_fused_sparse_attention_overlap_split_query_meta(
+    const at::Tensor &query,
+    const at::Tensor & /*selection_k_rope*/,
+    const at::Tensor & /*selection_kv_cache*/,
+    const at::Tensor & /*selection_kv_block_table*/,
+    const at::Tensor & /*selection_kv_block_status*/,
+    const at::Tensor & /*selection_membership_map*/,
+    const at::Tensor & /*selection_topk_indices*/,
+    const at::Tensor & /*full_k_rope*/,
+    const at::Tensor & /*full_kv_cache*/,
+    const at::Tensor & /*full_kv_block_table*/,
+    const at::Tensor & /*full_kv_actual_seq*/,
+    const at::Tensor & /*full_q_actual_seq*/,
+    double /*scale_value*/,
+    int64_t /*sparse_block_size*/,
+    int64_t /*selection_topk_block_size*/,
+    const at::Tensor & /*query_rope*/,
+    c10::string_view /*layout_query*/,
+    c10::string_view /*layout_kv*/,
+    int64_t /*sparse_mode*/)
+{
+    return at::empty_symint(query.sym_sizes(), query.options());
+}
+
 void npu_fused_lightning_indexer_manage_meta(
     const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
     const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
@@ -1877,6 +1901,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_vllm_meta);
     // Fused sparse attention overlap
     ops.impl("npu_fused_sparse_attention_overlap", &vllm_ascend::meta::npu_fused_sparse_attention_overlap_meta);
+    ops.impl("npu_fused_sparse_attention_overlap.split_query",
+             &vllm_ascend::meta::npu_fused_sparse_attention_overlap_split_query_meta);
     // Fused lightning indexer manage
     ops.impl("npu_fused_lightning_indexer_manage",
              &vllm_ascend::meta::npu_fused_lightning_indexer_manage_meta);
