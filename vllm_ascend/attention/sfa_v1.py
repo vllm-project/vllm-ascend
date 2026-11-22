@@ -87,7 +87,9 @@ from vllm_ascend.utils import (
 from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
 
 # NoPE sparse MLA operator helpers.
-SMLA_METADATA_SIZE = 1024
+# CANN 9.2 uses 1024 int32 values; CANN 9.3 uses 2048. Reserve the
+# larger capacity once so both contracts retain a stable graph address.
+SMLA_METADATA_SIZE = 2048
 # GLM5Next's SFA path carries no learnable attention sink, but SparseFlashMla
 # still requires a per-head float32 sinks tensor. This is the placeholder value
 # the path has always used; whether -inf is the correct "no sink" value is a
@@ -149,12 +151,13 @@ def generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_l
 
 def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk, cu_seqlens_q, topk_length):
     generated = generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length)
-    if generated.numel() != buffer.numel():
-        # The persistent buffer is sized by the operator's fixed [1024] contract.
-        # A generated plan of any other size means this build does not match the
-        # operator this buffer was allocated for; say so here rather than letting
-        # copy_ decide.
-        raise ValueError(f"Sparse MLA plan must contain {buffer.numel()} int32 values, got {generated.numel()}.")
+    if generated.numel() not in (1024, 2048) or generated.numel() > buffer.numel():
+        raise ValueError(
+            f"Sparse MLA plan must contain 1024 or 2048 int32 values within capacity {buffer.numel()}, "
+            f"got {generated.numel()}."
+        )
+    # Pass the complete plan at its actual size, without padding or truncation.
+    buffer = buffer[: generated.numel()]
     buffer.copy_(generated)
     metadata.smla_metadata = buffer
 

@@ -300,7 +300,7 @@ def test_nope_operator_returns_kernel_output_with_unwritten_graph_rows(monkeypat
     query = torch.ones(3, 2, 128)
     cache = torch.zeros(2, 128, 1, 128)
     metadata = SimpleNamespace(
-        smla_metadata=torch.empty(1024, dtype=torch.int32) if a5 else None,
+        smla_metadata=torch.empty(sparse_mla.SMLA_METADATA_SIZE, dtype=torch.int32) if a5 else None,
         smla_topk_length=torch.tensor([[1], [1], [0]], dtype=torch.int32),
         smla_valid_mask=torch.tensor([[True], [True], [False]]),
         smla_sinks=torch.ones(2, dtype=torch.float32),
@@ -373,7 +373,8 @@ def test_a5_smla_uses_original_cache_sorted_indices_and_stable_metadata(monkeypa
         assert kwargs["ori_kv"] is cache
         assert kwargs["sinks"] is metadata.smla_sinks
         assert kwargs.get("cmp_kv") is None
-        assert kwargs["metadata"] is buffer
+        assert kwargs["metadata"].data_ptr() == buffer.data_ptr()
+        assert kwargs["metadata"].shape == buffer.shape
         assert kwargs["layout_kv"] == "PA_BBND" and kwargs["topk_value_mode"] == 1
         assert kwargs["ori_mask_mode"] == 0 and kwargs["cmp_mask_mode"] == 0
         assert kwargs["ori_win_left"] == -1 and kwargs["ori_win_right"] == -1
@@ -532,6 +533,19 @@ def test_a5_smla_plans_from_reused_indices_for_the_target(monkeypatch):
         torch.testing.assert_close(planned[-1], torch.tensor(expected, dtype=torch.int32))
         indices[0, 0, 2048] = 4096
         indices[1, 0, 2048:] = -1
+
+
+@pytest.mark.parametrize("plan_size", [1024, 2048])
+def test_build_smla_metadata_preserves_plan_size_and_storage(monkeypatch, plan_size):
+    metadata = SimpleNamespace()
+    generated = torch.arange(plan_size, dtype=torch.int32)
+    monkeypatch.setattr(sparse_mla, "generate_smla_plan", lambda *args: generated)
+    buffer = torch.empty(sparse_mla.SMLA_METADATA_SIZE, dtype=torch.int32)
+    for _ in range(2):
+        sparse_mla.build_smla_metadata(metadata, buffer, 64, 512, 128, None, None)
+        assert metadata.smla_metadata.data_ptr() == buffer.data_ptr()
+        torch.testing.assert_close(metadata.smla_metadata, generated)
+        generated.add_(1)
 
 
 def test_build_smla_metadata_rejects_a_plan_of_the_wrong_size(monkeypatch):

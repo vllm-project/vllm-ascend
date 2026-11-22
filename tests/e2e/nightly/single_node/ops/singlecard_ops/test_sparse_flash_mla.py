@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch_npu  # noqa: F401
@@ -8,6 +10,53 @@ import torch_npu  # noqa: F401
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.utils import enable_custom_op
+
+
+@pytest.mark.parametrize("graph", [False, True])
+def test_a5_nope_sparse_indices_and_metadata_replay(graph):
+    if get_ascend_device_type() != AscendDeviceType.A5:
+        pytest.skip("SparseFlashMla NoPE uses the A5 CANN operator")
+    from vllm_ascend.attention.sfa_v1 import SMLA_METADATA_SIZE, sparse_mla
+
+    enable_custom_op()
+    query = torch.zeros((1, 64, 512), dtype=torch.bfloat16, device="npu")
+    cache = torch.ones((1, 128, 1, 512), dtype=torch.bfloat16, device="npu")
+    cache[:, 64:] = 3
+    indices = torch.arange(64, dtype=torch.int32, device="npu").view(1, 1, 64)
+    metadata = SimpleNamespace(
+        block_size=128,
+        block_table=torch.tensor([[0]], dtype=torch.int32, device="npu"),
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32, device="npu"),
+        seq_lens=torch.tensor([128], dtype=torch.int32, device="npu"),
+        max_query_len=1,
+        max_seq_len=128,
+        smla_metadata=torch.empty(SMLA_METADATA_SIZE, dtype=torch.int32, device="npu"),
+        smla_topk_length=torch.empty((1, 1), dtype=torch.int32, device="npu"),
+        smla_valid_mask=torch.ones((1, 1), dtype=torch.bool, device="npu"),
+        smla_sinks=torch.zeros(64, dtype=torch.float32, device="npu"),
+    )
+    address = metadata.smla_metadata.data_ptr()
+    output = sparse_mla(query, cache, indices, metadata, 512**-0.5)
+    torch.npu.synchronize()
+    # Equal logits over 64 selected values and the zero sink. Dropping the
+    # indices would include the other half of the cache and change the result.
+    torch.testing.assert_close(output, torch.full_like(output, 64 / 65))
+    if graph:
+        captured = torch.npu.NPUGraph()
+        with torch.npu.graph(captured):
+            output = sparse_mla(query, cache, indices, metadata, 512**-0.5)
+    for valid, value in ((64, 3), (32, 1)):
+        indices.copy_(torch.arange(64, dtype=torch.int32, device="npu").view_as(indices))
+        if value == 3:
+            indices.add_(64)
+        indices[..., valid:] = -1
+        if graph:
+            captured.replay()
+        else:
+            output = sparse_mla(query, cache, indices, metadata, 512**-0.5)
+        torch.npu.synchronize()
+        torch.testing.assert_close(output, torch.full_like(output, value * valid / (valid + 1)))
+        assert metadata.smla_metadata.data_ptr() == address
 
 
 def test_band_visible_lengths_require_one_row_per_query():
