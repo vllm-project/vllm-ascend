@@ -17,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheSpec,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -244,7 +245,16 @@ class AscendStoreCoordinator:
             if not _uses_reachable_mask(self.group_cache_families[group_id]):
                 masks.append((num_chunks, None))
                 continue
-            manager_cls = _get_manager_class(_unwrap_spec(self.kv_cache_groups[group_id].kv_cache_spec))
+            unwrapped_spec = _unwrap_spec(self.kv_cache_groups[group_id].kv_cache_spec)
+            manager_cls = _get_manager_class(unwrapped_spec)
+            if isinstance(unwrapped_spec, MambaSpec):
+                # The spec registry binds the upstream class at import time, so
+                # the module-level MambaManager patch never reaches this lookup.
+                # Use the patched manager so align-mode boundaries stay inside
+                # the group-effective mask.
+                from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+
+                manager_cls = AscendMambaManager
             mask = _reachable_block_mask(
                 manager_cls,
                 start_block=0,
