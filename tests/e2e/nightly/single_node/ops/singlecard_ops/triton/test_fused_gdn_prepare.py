@@ -62,9 +62,10 @@ def test_fullgraph_compile_preserves_values_and_alias():
         _check(outputs, qkvz, ba, width, heads, dim)
 
 
-def test_aclgraph_replay_reinitializes_padding():
-    qkvz, ba, width, heads, dim = _inputs(4, 2, torch.bfloat16)
-    supplied = torch.empty((4, heads, dim), dtype=qkvz.dtype, device=qkvz.device)
+@pytest.mark.parametrize("tokens", [4, 1025])
+def test_aclgraph_replay_reinitializes_padding(tokens):
+    qkvz, ba, width, heads, dim = _inputs(tokens, 2, torch.bfloat16)
+    supplied = torch.empty((tokens, heads, dim), dtype=qkvz.dtype, device=qkvz.device)
 
     def step():
         outputs = fused_gdn_prepare(qkvz, ba, width, heads, dim, supplied)
@@ -92,6 +93,52 @@ def test_aclgraph_replay_reinitializes_padding():
         torch.testing.assert_close(qkv, qkvz[:, :width], rtol=0, atol=0)
         torch.testing.assert_close(b, ba[:, :heads], rtol=0, atol=0)
         torch.testing.assert_close(a, ba[:, heads:], rtol=0, atol=0)
-        torch.testing.assert_close(z, qkvz[:, width:].reshape(4, heads, dim), rtol=0, atol=0)
+        torch.testing.assert_close(z, qkvz[:, width:].reshape(tokens, heads, dim), rtol=0, atol=0)
         assert torch.all(core[:2] == 3)
         assert torch.count_nonzero(core[2:]) == 0
+
+
+@pytest.mark.parametrize("tokens", [4, 16393])
+def test_aot_prefill_avoids_cloning_fresh_outputs(tokens):
+    from torch._dynamo.backends.common import aot_autograd
+
+    qkvz, ba, width, heads, dim = _inputs(tokens, 1, torch.bfloat16)
+    backend = aot_autograd(fw_compiler=lambda graph, _: graph.forward)
+    compiled = torch.compile(fused_gdn_prepare, backend=backend, fullgraph=True)
+    outputs = compiled(qkvz, ba, width, heads, dim)
+    torch.npu.synchronize()
+    _check(outputs, qkvz, ba, width, heads, dim)
+
+    qkvz.add_(1)
+    ba.add_(1)
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as prof:
+        outputs = compiled(qkvz, ba, width, heads, dim)
+        torch.npu.synchronize()
+    _check(outputs, qkvz, ba, width, heads, dim)
+    clone_count = sum(event.count for event in prof.key_averages() if event.key == "aten::clone")
+    assert clone_count == 0, f"AOT cloned {clone_count} fresh prepare outputs"
+
+
+@pytest.mark.parametrize("tokens", [1023, 1024, 1025, 32768])
+def test_large_prefill_boundary_and_tail(tokens):
+    qkvz, ba, width, heads, dim = _inputs(tokens, 1, torch.bfloat16, True)
+    ba = ba.float()
+    supplied = torch.full((tokens, heads, dim), float("nan"), dtype=qkvz.dtype, device=qkvz.device)
+    outputs = fused_gdn_prepare(qkvz, ba, width, heads, dim, supplied)
+    assert outputs[-1].data_ptr() == supplied.data_ptr()
+    _check(outputs, qkvz, ba, width, heads, dim)
+
+
+@pytest.mark.parametrize("tp_size", [1, 2, 4, 8, 16])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_large_prefill_strided_tokens(tp_size, dtype):
+    qkvz, ba, width, heads, dim = _inputs(2051, tp_size, dtype, True)
+    qkvz, ba = qkvz[1::2], ba.float()[1::2]
+    _check(fused_gdn_prepare(qkvz, ba, width, heads, dim), qkvz, ba, width, heads, dim)
+
+
+def test_large_prefill_non_power_of_two_dimensions():
+    tokens, width, heads, dim = 1025, 1277, 7, 33
+    qkvz = torch.randn((tokens, width + heads * dim), dtype=torch.bfloat16, device="npu:0")
+    ba = torch.randn((tokens, 2 * heads), dtype=torch.float32, device=qkvz.device)
+    _check(fused_gdn_prepare(qkvz, ba, width, heads, dim), qkvz, ba, width, heads, dim)

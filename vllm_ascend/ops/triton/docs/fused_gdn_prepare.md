@@ -42,3 +42,11 @@ The source PR reports A5 captured-device improvements; these are not an A3 or wh
 - CPU dispatch and validation: `tests/ut/ops/test_gdn_prepare_dispatch.py`, `tests/ut/ops/test_fused_gdn_prepare_validation.py`.
 - Existing prefill regression: `tests/ut/ops/test_gdn_layout.py`.
 - Hardware equality, row strides, TP shapes, aliasing, compile and ACLGraph padding: `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fused_gdn_prepare.py`.
+
+## AOT compilation boundary
+
+The default allocation path uses `vllm::ascend_fused_gdn_prepare`, a functional custom operator returning four fresh tensors. Allocations and Triton writes stay inside the operator so AOT functionalization does not clone four fresh output buffers before launch. Z remains a view computed outside the operator. The explicit `core_attn_out` path preserves caller-owned storage and mutation semantics. The Triton numerical computation and grid are unchanged.
+
+## Large prefill batches
+
+For at least 1024 tokens, FP16/BF16 QKVZ and QKV/core widths no greater than 8192, preparation uses four full rows per Triton program. This reduces the TP1 32768-token grid from 262144 programs to 8192 and avoids repeating BA handling for each QKV column tile. The four-row limit fits the measured A3 UB capacity; the eight-row fused variant exceeded UB during compilation. Other cases retain the original kernel. All rows, including padding and supplied output storage, are initialized. Row offsets use int64 before multiplying input strides. The functional custom-op boundary remains in place to avoid AOT output clones.

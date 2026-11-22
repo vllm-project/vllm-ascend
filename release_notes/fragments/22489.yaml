@@ -9,3 +9,10 @@ entries:
       contract checks and compatibility fallbacks. Rebuilds npugraph_ex cached
       callables to preserve AOT runtime semantics.
     hardware: [A3]
+  - category: performance
+    text: >-
+      Avoided redundant output clones around fused GDN preparation in
+      AOT-compiled prefill by using a functional custom operator. Added bounded
+      full-row Triton tiles for large preparation batches while preserving
+      the small-batch and caller-supplied output-buffer paths.
+    hardware: [A3]
