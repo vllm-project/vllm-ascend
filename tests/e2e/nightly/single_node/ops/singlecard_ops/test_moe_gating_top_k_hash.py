@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -18,6 +19,7 @@ def _reference(
     top_k: int,
     routed_scaling_factor: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    input_ids = torch.where(input_ids == -1, 0, input_ids)
     scores = torch.nn.functional.softplus(logits.float()).sqrt()
     image_mask = (input_ids >= IMAGE_SENTINEL_LO) & (input_ids < IMAGE_SENTINEL_LO + IMAGE_SENTINEL_COUNT)
     row_bias = torch.where(
@@ -37,10 +39,12 @@ def _reference(
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("id_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("with_hash", [False, True])
 @pytest.mark.parametrize("execution_mode", ["eager", "graph"])
 def test_v41_vision_bias_and_image_sentinel(
     dtype: torch.dtype,
+    id_dtype: torch.dtype,
     with_hash: bool,
     execution_mode: str,
 ):
@@ -50,9 +54,12 @@ def test_v41_vision_bias_and_image_sentinel(
     text_bias = torch.randn(experts, dtype=dtype) * 0.2
     bias_vl = torch.randn(experts, dtype=dtype) * 0.2
     input_ids = torch.tensor(
-        [11, IMAGE_SENTINEL_LO, 22, IMAGE_SENTINEL_LO + 2, 33, IMAGE_SENTINEL_LO + 4, 44, 55],
-        dtype=torch.int64,
+        [-1, IMAGE_SENTINEL_LO, 22, IMAGE_SENTINEL_LO + 2, 33, IMAGE_SENTINEL_LO + 4, 44, -1],
+        dtype=id_dtype,
     )
+    if not get_current_hardware_profile().supports(HardwareCapability.MOE_GATING_TOP_K_HASH_RAW_IDS):
+        # Match the router's normalization on devices without raw padding support.
+        input_ids = torch.where(input_ids == -1, 0, input_ids).to(torch.int64)
     tid2eid = None
     if with_hash:
         tid2eid = torch.empty(64, top_k, dtype=torch.int32)
