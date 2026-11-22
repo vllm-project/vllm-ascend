@@ -1,0 +1,4 @@
+pr: 22773
+entries:
+  - category: hardware
+    text: Added a vLLM-Ascend hardware overlay for qwen3-5-397b-a17b — measured launch configuration (launch arguments, environment, image pin) captured from a live deployment via the platform collection flow.
