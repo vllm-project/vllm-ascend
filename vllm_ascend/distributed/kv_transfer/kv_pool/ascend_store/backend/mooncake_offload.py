@@ -60,7 +60,11 @@ def _load_entries(worker, request, group, hashes, mask):
     if spec.layerwise_previous_step and recurrent and not worker._group_reuses_buffer(group):
         return []
     tokens = spec.kvpool_cached_tokens
-    if not worker.use_eagle and spec.kvpool_store_skip_tokens is not None:
+    if (
+        not worker.use_eagle
+        and spec.kvpool_store_skip_tokens is not None
+        and getattr(getattr(worker, "kv_cache_config", None), "dsv4_component_identity", None) is None
+    ):
         tokens = spec.kvpool_store_skip_tokens
     size = worker.grouped_block_size[group]
     end = (tokens + size - 1) // size

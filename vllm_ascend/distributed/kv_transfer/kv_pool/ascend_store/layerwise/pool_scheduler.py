@@ -154,12 +154,8 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             # Never admit a local hit whose overwritten payload is unavailable.
             if restored_tokens < num_computed_tokens:
                 raise RuntimeError("Layerwise reuse local prefix has no complete external restore point")
-            if load_spec is not None and (
-                self.num_speculative_blocks_by_group
-                or getattr(self.kv_cache_config, "dsv4_component_identity", None) is not None
-            ):
-                # Private tail reconstruction can shorten a full external hit.
-                # Restore recurrent state at that exact endpoint.
+            if load_spec is not None and self.num_speculative_blocks_by_group:
+                # Restore recurrent state at the scheduler-selected endpoint.
                 load_spec.kvpool_store_skip_tokens = restored_tokens
         return result
 
