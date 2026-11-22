@@ -32,7 +32,7 @@ it is stubbed out when the package is missing, the same way
 
 import os
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -85,10 +85,9 @@ for _name in _installed_stub_names:
 def _reset_static_kernel_cache_patch():
     """Keep the tests independent of each other and of their order.
 
-    The patch replaces torch_npu's compiler functions and sets a module-level
-    flag, so both have to be restored after every test.
+    The patch replaces torch_npu's compiler functions, so they have to be
+    restored after every test.
     """
-    original_flag = compiler_interface._STATIC_KERNEL_CACHE_PATCHED
     if npugraph_ex_available:
         from npugraph_ex._acl_concrete_graph import acl_graph, static_kernel
         from npugraph_ex._acl_concrete_graph.fx2acl_converter import AclConcreteGraph
@@ -102,7 +101,6 @@ def _reset_static_kernel_cache_patch():
             static_kernel.compile_static_kernel = original_compile_static_kernel
             acl_graph.compile_static_kernel = original_compile_static_kernel
             AclConcreteGraph.normalize_config = original_normalize_config
-        compiler_interface._STATIC_KERNEL_CACHE_PATCHED = original_flag
 
 
 class _StubConfig:
@@ -120,23 +118,39 @@ def _enable_cache():
     compiler_interface._enable_static_kernel_run_package_cache()
 
 
-def _cache_dir():
-    return compiler_interface._static_kernel_cache_dir()
+def _cache_root():
+    return compiler_interface._static_kernel_cache_root()
 
 
 def _cache_options():
     return compiler_interface._static_kernel_cache_options()
 
 
-def test_cache_dir_follows_vllm_cache_root(monkeypatch):
+def _cache_config(**overrides):
+    """Return a runtime config that carries the torch_npu cache keys."""
+    config = {
+        "force_eager": True,
+        "static_kernel_compile": True,
+        "static_kernel_compile.use_cache_compile": True,
+        "static_kernel_compile.cann_version": "9.1.0",
+        "static_kernel_compile.compile_cache_dir": "/tmp/ascend_static_kernel",
+        "static_kernel_compile.deterministic": False,
+        "static_kernel_compile.deterministic_level": 0,
+    }
+    config.update(overrides)
+    return config
+
+
+def test_cache_root_follows_vllm_cache_root(monkeypatch):
     monkeypatch.setenv("VLLM_CACHE_ROOT", "/data/vllm_cache")
-    assert _cache_dir() == os.path.join("/data/vllm_cache", "ascend_static_kernel")
+    assert _cache_root() == os.path.join("/data/vllm_cache", "ascend_static_kernel")
 
 
-def test_cache_dir_falls_back_to_the_user_cache(monkeypatch):
+def test_cache_root_falls_back_to_the_user_cache(monkeypatch):
     monkeypatch.delenv("VLLM_CACHE_ROOT", raising=False)
     monkeypatch.setenv("HOME", "/home/tester")
-    assert _cache_dir() == os.path.join("/home/tester", ".cache", "vllm", "ascend_static_kernel")
+    monkeypatch.setenv("USERPROFILE", "/home/tester")
+    assert _cache_root() == os.path.join("/home/tester", ".cache", "vllm", "ascend_static_kernel")
 
 
 def test_cache_options_carry_the_torch_npu_cache_keys(monkeypatch):
@@ -145,14 +159,106 @@ def test_cache_options_carry_the_torch_npu_cache_keys(monkeypatch):
 
     assert options["static_kernel_compile.use_cache_compile"] is True
     assert options["static_kernel_compile.cann_version"]
-    assert options["static_kernel_compile.compile_cache_dir"] == _cache_dir()
+    assert options["static_kernel_compile.compile_cache_dir"] == _cache_root()
     assert options["static_kernel_compile.deterministic"] == torch.are_deterministic_algorithms_enabled()
+    assert "static_kernel_compile.deterministic_level" in options
 
 
 def test_cache_options_track_the_deterministic_setting(monkeypatch):
     monkeypatch.setenv("VLLM_CACHE_ROOT", "/data/vllm_cache")
     with patch.object(torch, "are_deterministic_algorithms_enabled", return_value=True):
         assert _cache_options()["static_kernel_compile.deterministic"] is True
+
+
+def test_the_cache_dir_is_isolated_per_graph_and_shape(tmp_path):
+    """Every compiled piece needs its own cache directory.
+
+    torch_npu installs the first run package it finds under the cache
+    directory without checking which graph it belongs to, so a shared
+    directory would let the first compiled piece short-circuit all the
+    others.
+    """
+    graph_a = _cache_config(**{"static_kernel_compile.compile_cache_dir": str(tmp_path)})
+    graph_a["static_kernel_compile.graph_id"] = "graph_a"
+    graph_b = _cache_config(**{"static_kernel_compile.compile_cache_dir": str(tmp_path)})
+    graph_b["static_kernel_compile.graph_id"] = "graph_b"
+
+    args_a = (torch.zeros(1, 8),)
+    args_b = (torch.zeros(1, 16),)
+
+    dir_a = compiler_interface._static_kernel_piece_cache_dir(graph_a, None, args_a)
+    dir_b = compiler_interface._static_kernel_piece_cache_dir(graph_b, None, args_a)
+    dir_c = compiler_interface._static_kernel_piece_cache_dir(graph_a, None, args_b)
+
+    assert dir_a != dir_b, "different graphs must not share a cache directory"
+    assert dir_a != dir_c, "different shapes must not share a cache directory"
+    assert os.path.dirname(dir_a) == str(tmp_path)
+    assert dir_a == compiler_interface._static_kernel_piece_cache_dir(graph_a, None, args_a)
+
+
+def test_the_cache_dir_is_isolated_per_runtime_version(tmp_path):
+    """A CANN upgrade must not reuse the run packages of the old version."""
+    config = _cache_config(**{"static_kernel_compile.compile_cache_dir": str(tmp_path)})
+    args = (torch.zeros(1, 8),)
+
+    old = compiler_interface._static_kernel_piece_cache_dir(config, None, args)
+    new_properties = dict(compiler_interface._static_kernel_runtime_properties())
+    new_properties["cann_version"] = "9.2.1"
+    with patch.object(compiler_interface, "_static_kernel_runtime_properties", return_value=new_properties):
+        new = compiler_interface._static_kernel_piece_cache_dir(config, None, args)
+
+    assert old != new
+
+
+def test_the_cache_dir_is_isolated_per_deterministic_setting(tmp_path):
+    config = _cache_config(**{"static_kernel_compile.compile_cache_dir": str(tmp_path)})
+    args = (torch.zeros(1, 8),)
+
+    default = compiler_interface._static_kernel_piece_cache_dir(config, None, args)
+    new_properties = dict(compiler_interface._static_kernel_runtime_properties())
+    new_properties["deterministic"] = True
+    with patch.object(compiler_interface, "_static_kernel_runtime_properties", return_value=new_properties):
+        deterministic = compiler_interface._static_kernel_piece_cache_dir(config, None, args)
+
+    assert default != deterministic
+
+
+def test_the_graph_id_identifies_the_graph():
+    """The cache keys carry the identity of the graph they belong to."""
+    graph_a = SimpleNamespace(code="def forward(self):\n    return 1\n")
+    graph_b = SimpleNamespace(code="def forward(self):\n    return 2\n")
+
+    id_a = compiler_interface._static_kernel_graph_id(SimpleNamespace(_fx_graph=graph_a))
+    id_b = compiler_interface._static_kernel_graph_id(SimpleNamespace(_fx_graph=graph_b))
+
+    assert id_a
+    assert id_a != id_b
+    assert id_a == compiler_interface._static_kernel_graph_id(SimpleNamespace(_fx_graph=graph_a))
+
+    # A graph that is not available must not produce an identifier.
+    assert compiler_interface._static_kernel_graph_id(SimpleNamespace()) == ""
+
+    options = compiler_interface._static_kernel_cache_options(SimpleNamespace(_fx_graph=graph_a))
+    assert options["static_kernel_compile.graph_id"] == id_a
+
+
+def test_the_cache_metadata_is_persisted_and_read_back(tmp_path):
+    """The runtime properties of a cached package are read from the disk.
+
+    torch_npu compares the properties the cached run packages were built
+    with against the current runtime, so they have to come from the metadata
+    that was written when the packages were compiled.
+    """
+    cache_dir = str(tmp_path / "piece")
+    meta = {"cann_version": "9.1.0", "deterministic": False, "deterministic_level": 0}
+    compiler_interface._write_static_kernel_cache_meta(cache_dir, meta)
+
+    assert compiler_interface._read_static_kernel_cache_meta(cache_dir) == meta
+
+    # A truncated metadata file must not be used.
+    with open(compiler_interface._static_kernel_cache_meta_path(cache_dir), "w") as f:
+        f.write("{not json")
+    assert compiler_interface._read_static_kernel_cache_meta(cache_dir) is None
 
 
 @needs_npugraph_ex
@@ -175,9 +281,10 @@ def test_cache_keys_reach_the_runtime_config():
         AclConcreteGraph.normalize_config = original_normalize_config
 
     assert configs["static_kernel_compile.use_cache_compile"] is True
-    assert configs["static_kernel_compile.compile_cache_dir"] == _cache_dir()
+    assert configs["static_kernel_compile.compile_cache_dir"] == _cache_root()
     assert "static_kernel_compile.cann_version" in configs
     assert "static_kernel_compile.deterministic" in configs
+    assert "static_kernel_compile.deterministic_level" in configs
 
 
 @needs_npugraph_ex
@@ -212,14 +319,7 @@ def test_static_kernel_compiler_takes_the_cache_path_under_force_eager():
     _enable_cache()
     try:
         calls = []
-        config = {
-            "force_eager": True,
-            "static_kernel_compile": True,
-            "static_kernel_compile.use_cache_compile": True,
-            "static_kernel_compile.cann_version": "9.1.0",
-            "static_kernel_compile.compile_cache_dir": "/tmp/ascend_static_kernel",
-            "static_kernel_compile.deterministic": False,
-        }
+        config = _cache_config()
         with (
             patch.object(static_kernel, "_install_or_compile_static_kernel", lambda *a, **k: calls.append("cache")),
             patch.object(static_kernel, "_compile_static_kernel", lambda *a, **k: calls.append("compile")),
@@ -243,6 +343,124 @@ def test_static_kernel_compiler_without_cache_keys_still_compiles():
         calls = []
         config = {"force_eager": True, "static_kernel_compile": True}
         with (
+            patch.object(static_kernel, "_install_or_compile_static_kernel", lambda *a, **k: calls.append("cache")),
+            patch.object(static_kernel, "_compile_static_kernel", lambda *a, **k: calls.append("compile")),
+        ):
+            acl_graph.compile_static_kernel(lambda *a, **k: None, config=config, build_dir="/tmp")
+    finally:
+        static_kernel.compile_static_kernel = original_compile_static_kernel
+        acl_graph.compile_static_kernel = original_compile_static_kernel
+
+    assert calls == ["compile"]
+
+
+@needs_npugraph_ex
+def test_the_cache_directory_is_created_before_it_is_used(tmp_path):
+    """A missing cache directory makes torch_npu skip the compilation.
+
+    ``_check_for_load_run_pkg`` refuses a directory that does not exist and
+    the caller then returns without compiling anything, so the directory has
+    to be created before torch_npu sees it.
+    """
+    from npugraph_ex._acl_concrete_graph import acl_graph, static_kernel
+
+    original_compile_static_kernel = static_kernel.compile_static_kernel
+    _enable_cache()
+    seen = {}
+
+    def fake_install(*args, **kwargs):
+        seen["compile_cache_dir"] = kwargs["compile_cache_dir"]
+        seen["exists"] = os.path.isdir(kwargs["compile_cache_dir"])
+
+    try:
+        config = _cache_config(**{"static_kernel_compile.compile_cache_dir": str(tmp_path)})
+        with patch.object(static_kernel, "_install_or_compile_static_kernel", fake_install):
+            acl_graph.compile_static_kernel(lambda *a, **k: None, config=config, build_dir="/tmp")
+    finally:
+        static_kernel.compile_static_kernel = original_compile_static_kernel
+        acl_graph.compile_static_kernel = original_compile_static_kernel
+
+    assert seen["exists"], "the cache directory must exist before torch_npu uses it"
+    assert seen["compile_cache_dir"].startswith(str(tmp_path))
+
+
+@needs_npugraph_ex
+def test_the_cached_properties_are_read_from_the_metadata(tmp_path):
+    """The properties handed to torch_npu come from the persisted metadata.
+
+    Comparing the live runtime values against themselves never invalidates
+    anything, so the values recorded when the run packages were compiled are
+    the ones that are checked.
+    """
+    from npugraph_ex._acl_concrete_graph import acl_graph, static_kernel
+
+    original_compile_static_kernel = static_kernel.compile_static_kernel
+    _enable_cache()
+    seen = {}
+
+    def fake_install(*args, **kwargs):
+        seen.update(kwargs)
+
+    try:
+        config = _cache_config(**{"static_kernel_compile.compile_cache_dir": str(tmp_path)})
+        with patch.object(static_kernel, "_install_or_compile_static_kernel", fake_install):
+            acl_graph.compile_static_kernel(lambda *a, **k: None, config=config, build_dir="/tmp")
+
+            cache_dir = seen["compile_cache_dir"]
+            # Pretend the packages were built with another CANN version.
+            meta = {
+                "cann_version": "8.0.0",
+                "deterministic": True,
+                "deterministic_level": 3,
+            }
+            compiler_interface._write_static_kernel_cache_meta(cache_dir, meta)
+
+            seen.clear()
+            acl_graph.compile_static_kernel(lambda *a, **k: None, config=config, build_dir="/tmp")
+    finally:
+        static_kernel.compile_static_kernel = original_compile_static_kernel
+        acl_graph.compile_static_kernel = original_compile_static_kernel
+
+    assert seen["cached_cann_version"] == "8.0.0"
+    assert seen["cached_deterministic"] is True
+    assert seen["cached_deterministic_level"] == 3
+
+
+@needs_npugraph_ex
+def test_the_deterministic_level_is_handed_over(tmp_path):
+    """torch_npu checks the CANN deterministic level, so it has to be passed."""
+    from npugraph_ex._acl_concrete_graph import acl_graph, static_kernel
+
+    original_compile_static_kernel = static_kernel.compile_static_kernel
+    _enable_cache()
+    seen = {}
+
+    def fake_install(*args, **kwargs):
+        seen.update(kwargs)
+
+    try:
+        config = _cache_config(**{"static_kernel_compile.compile_cache_dir": str(tmp_path)})
+        with patch.object(static_kernel, "_install_or_compile_static_kernel", fake_install):
+            acl_graph.compile_static_kernel(lambda *a, **k: None, config=config, build_dir="/tmp")
+    finally:
+        static_kernel.compile_static_kernel = original_compile_static_kernel
+        acl_graph.compile_static_kernel = original_compile_static_kernel
+
+    assert seen["cached_deterministic_level"] == 0
+
+
+@needs_npugraph_ex
+def test_an_invalid_multicard_environment_falls_back_to_compiling(tmp_path):
+    """torch_npu disables the static kernel feature in that case."""
+    from npugraph_ex._acl_concrete_graph import acl_graph, static_kernel
+
+    original_compile_static_kernel = static_kernel.compile_static_kernel
+    _enable_cache()
+    try:
+        calls = []
+        config = _cache_config(**{"static_kernel_compile.compile_cache_dir": str(tmp_path)})
+        with (
+            patch.object(static_kernel, "_is_multicard_env_valid", return_value=False),
             patch.object(static_kernel, "_install_or_compile_static_kernel", lambda *a, **k: calls.append("cache")),
             patch.object(static_kernel, "_compile_static_kernel", lambda *a, **k: calls.append("compile")),
         ):
@@ -330,14 +548,7 @@ def test_the_compiler_falls_back_when_the_install_path_fails():
     _enable_cache()
     try:
         calls = []
-        config = {
-            "force_eager": True,
-            "static_kernel_compile": True,
-            "static_kernel_compile.use_cache_compile": True,
-            "static_kernel_compile.cann_version": "9.1.0",
-            "static_kernel_compile.compile_cache_dir": "/tmp/ascend_static_kernel",
-            "static_kernel_compile.deterministic": False,
-        }
+        config = _cache_config()
 
         def failing_install(*args, **kwargs):
             raise RuntimeError("the private install API changed")
@@ -356,3 +567,28 @@ def test_the_compiler_falls_back_when_the_install_path_fails():
         acl_graph.compile_static_kernel = original_compile_static_kernel
 
     assert calls == ["compile"]
+
+
+@needs_npugraph_ex
+def test_the_run_package_cache_is_not_enabled_when_the_cache_is_disabled(tmp_path):
+    """``disable_cache`` must disable the run-package cache as well."""
+    from npugraph_ex._acl_concrete_graph import acl_graph, static_kernel
+
+    original_compile_static_kernel = static_kernel.compile_static_kernel
+    original_normalize_config = static_kernel.compile_static_kernel
+    ascend_config = SimpleNamespace(
+        ascend_compilation_config=SimpleNamespace(enable_npugraph_ex=True, enable_static_kernel=True)
+    )
+    compiler = compiler_interface.AscendCompiler()
+    compiler.vllm_config = SimpleNamespace()
+    try:
+        with (
+            patch.object(compiler_interface, "get_ascend_config", return_value=ascend_config),
+            patch.object(compiler_interface, "_initialize_static_kernel_runtime"),
+        ):
+            compiler.initialize_cache(str(tmp_path), disable_cache=True)
+    finally:
+        static_kernel.compile_static_kernel = original_compile_static_kernel
+        acl_graph.compile_static_kernel = original_compile_static_kernel
+
+    assert static_kernel.compile_static_kernel is original_normalize_config

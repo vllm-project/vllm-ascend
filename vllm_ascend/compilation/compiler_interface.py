@@ -17,6 +17,8 @@
 #
 import copy
 import functools
+import hashlib
+import json
 import os
 from collections.abc import Callable
 from typing import Any, cast
@@ -38,13 +40,14 @@ from vllm.utils.math_utils import round_up
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY, vllm_version_is
 
-# Whether the static kernel run-package cache patch has been applied to
-# torch_npu. The patch wraps torch_npu's compiler functions, so it must run
-# at most once per process: initialize_cache() can be called more than once,
-# and stacking the wrappers would nest the decisions. The flag lives for the
-# lifetime of the process and is only written by
-# _enable_static_kernel_run_package_cache().
-_STATIC_KERNEL_CACHE_PATCHED = False
+# Marker attribute used to detect that the static kernel run-package cache
+# patch is already installed. The state is tracked on the patched target
+# itself, so it disappears together with the patch.
+_STATIC_KERNEL_CACHE_PATCH_FLAG = "_vllm_ascend_static_kernel_run_package_cache"
+
+# Name of the metadata file that records the runtime properties a cached run
+# package was built with.
+_STATIC_KERNEL_CACHE_META_FILE = "static_kernel_cache_meta.json"
 
 
 def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:
@@ -144,8 +147,8 @@ def _initialize_static_kernel_runtime(vllm_config: VllmConfig) -> None:
     _set_static_kernel_blacklist(incompatible_ops)
 
 
-def _static_kernel_cache_dir() -> str:
-    """Return the directory that holds the cached static kernel run packages.
+def _static_kernel_cache_root() -> str:
+    """Return the root directory that holds the cached static kernel run packages.
 
     torch_npu looks the run packages up under this directory, so it has to
     survive a restart to be worth anything. It therefore lives under
@@ -159,25 +162,188 @@ def _static_kernel_cache_dir() -> str:
     return os.path.join(cache_root, "ascend_static_kernel")
 
 
-def _static_kernel_cache_options() -> dict[str, Any]:
+def _static_kernel_deterministic_level() -> int:
+    """Return the CANN deterministic level of the current runtime."""
+    try:
+        return int(torch_npu.npu._get_deterministic_level())
+    except Exception:  # noqa: BLE001
+        # The level is only available on the NPU images; treat an unknown
+        # level as the default one.
+        return 0
+
+
+def _static_kernel_runtime_properties() -> dict[str, Any]:
+    """Return the runtime properties a cached run package is bound to.
+
+    A run package is only valid for the CANN version, the device and the
+    deterministic settings it was compiled with, so all of them are recorded
+    next to the packages and checked before a package is installed.
+    """
+    try:
+        device_name = torch_npu.npu.get_device_name()
+    except Exception:  # noqa: BLE001
+        # The device name is only available on the NPU images.
+        device_name = ""
+    return {
+        "cann_version": torch_npu.npu.utils.get_cann_version(),
+        "device_name": device_name,
+        "deterministic": torch.are_deterministic_algorithms_enabled(),
+        "deterministic_level": _static_kernel_deterministic_level(),
+    }
+
+
+def _static_kernel_graph_id(converter: Any = None) -> str:
+    """Return a stable identifier of the graph that is being compiled.
+
+    The identifier has to survive a restart, so it is derived from the
+    generated code of the fx graph instead of from the object identity.
+    """
+    graph = getattr(converter, "_fx_graph", None)
+    code = getattr(graph, "code", None)
+    if not isinstance(code, str):
+        return ""
+    return hashlib.sha256(code.encode("utf-8", "replace")).hexdigest()[:32]
+
+
+def _static_kernel_function_id(fx_func: Any = None) -> str:
+    """Return a stable identifier of the compiled function.
+
+    It is the fallback for the cases where the identifier of the graph is
+    not available, e.g. when the cache keys are not built by
+    ``AclConcreteGraph.normalize_config``.
+    """
+    code = getattr(fx_func, "__code__", None)
+    if code is None:
+        return ""
+    return hashlib.sha256(code.co_code).hexdigest()[:32]
+
+
+def _static_kernel_input_signature(args: tuple) -> str:
+    """Return a signature of the inputs the static kernels are compiled for.
+
+    The static kernels are compiled for concrete shapes, so the shapes are
+    part of the identity of a compiled piece.
+    """
+    parts = []
+    for arg in args:
+        if isinstance(arg, torch.Tensor):
+            parts.append(f"{arg.dtype}:{tuple(arg.shape)}")
+        else:
+            parts.append(type(arg).__name__)
+    return "|".join(parts)
+
+
+def _static_kernel_world_size() -> int:
+    """Return the number of ranks that take part in the compilation."""
+    try:
+        return torch.distributed.get_world_size()
+    except Exception:  # noqa: BLE001
+        return 1
+
+
+def _static_kernel_piece_cache_dir(config: dict[str, Any], fx_func: Any, args: tuple) -> str:
+    """Return the cache directory of the piece that is being compiled.
+
+    torch_npu installs the first run package it finds under
+    ``<compile_cache_dir>/static_kernel_compile_outputs`` without checking
+    which graph it belongs to, so a directory shared by several graphs would
+    let the first compiled piece short-circuit all the others. Every piece
+    therefore gets its own directory.
+
+    The directory name is keyed by the graph, the input shapes, the topology
+    and the runtime versions, so a piece is only ever reused for the very
+    same graph and shapes, and a CANN upgrade or a change of the
+    deterministic settings selects a fresh directory instead of reusing stale
+    run packages.
+    """
+    root = config.get("static_kernel_compile.compile_cache_dir") or _static_kernel_cache_root()
+    graph_id = config.get("static_kernel_compile.graph_id") or _static_kernel_function_id(fx_func)
+    digest = hashlib.sha256()
+    digest.update(str(graph_id).encode())
+    digest.update(_static_kernel_input_signature(args).encode())
+    digest.update(f"world_size={_static_kernel_world_size()}".encode())
+    digest.update(f"local_world_size={os.environ.get('LOCAL_WORLD_SIZE', '')}".encode())
+    for name, value in sorted(_static_kernel_runtime_properties().items()):
+        digest.update(f"{name}={value}".encode())
+    return os.path.join(root, digest.hexdigest()[:32])
+
+
+def _static_kernel_cache_meta_path(cache_dir: str) -> str:
+    return os.path.join(cache_dir, _STATIC_KERNEL_CACHE_META_FILE)
+
+
+def _read_static_kernel_cache_meta(cache_dir: str) -> dict[str, Any] | None:
+    """Return the runtime properties the cached run packages were built with."""
+    try:
+        with open(_static_kernel_cache_meta_path(cache_dir)) as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    required = ("cann_version", "deterministic", "deterministic_level")
+    if any(key not in meta for key in required):
+        return None
+    return meta
+
+
+def _write_static_kernel_cache_meta(cache_dir: str, meta: dict[str, Any]) -> None:
+    """Record the runtime properties the run packages are built with."""
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        with open(_static_kernel_cache_meta_path(cache_dir), "w") as f:
+            json.dump(meta, f, indent=2)
+    except OSError as exc:
+        logger.warning("Failed to record the static kernel cache metadata in %s: %s", cache_dir, exc)
+
+
+def _static_kernel_cache_options(converter: Any = None) -> dict[str, Any]:
     """Return the torch_npu static kernel cache keys for the current runtime.
 
-    These are the same three keys that torch_npu's ``ModelCacheSaver`` injects
-    for ``npugraph_ex.inference.cache_compile``:
+    These are the same keys that torch_npu's ``ModelCacheSaver`` injects for
+    ``npugraph_ex.inference.cache_compile``:
 
     * ``use_cache_compile`` selects the "look the run package up, install it"
       path instead of recompiling from scratch,
     * ``cann_version`` invalidates the cache when the CANN version changes,
     * ``compile_cache_dir`` is where the run packages are looked up,
     * ``deterministic`` invalidates the cache when the deterministic-algorithms
-      setting changes.
+      setting changes,
+    * ``deterministic_level`` invalidates the cache when the CANN
+      deterministic level changes.
+
+    ``graph_id`` is added on top of them: it identifies the graph the cache
+    keys belong to, so the run packages of one graph are never reused for
+    another one.
     """
-    return {
+    options = {
         "static_kernel_compile.use_cache_compile": True,
         "static_kernel_compile.cann_version": torch_npu.npu.utils.get_cann_version(),
-        "static_kernel_compile.compile_cache_dir": _static_kernel_cache_dir(),
+        "static_kernel_compile.compile_cache_dir": _static_kernel_cache_root(),
         "static_kernel_compile.deterministic": torch.are_deterministic_algorithms_enabled(),
+        "static_kernel_compile.deterministic_level": _static_kernel_deterministic_level(),
     }
+    graph_id = _static_kernel_graph_id(converter)
+    if graph_id:
+        options["static_kernel_compile.graph_id"] = graph_id
+    return options
+
+
+def _static_kernel_multicard_env_valid(static_kernel: Any) -> bool:
+    """Return whether the static kernel feature may run in this environment.
+
+    torch_npu disables the static kernel feature when the multi-card
+    environment is not set up, so the same check is done before the cache
+    path is taken.
+    """
+    is_valid = getattr(static_kernel, "_is_multicard_env_valid", None)
+    if is_valid is None:
+        return True
+    try:
+        return bool(is_valid())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to check the static kernel multi-card environment: %s", exc)
+        return False
 
 
 def _enable_static_kernel_run_package_cache() -> None:
@@ -208,9 +374,10 @@ def _enable_static_kernel_run_package_cache() -> None:
 
     # The patch is applied once per process; initialize_cache() can be
     # called more than once, and stacking the wrappers would nest the
-    # decisions.
-    global _STATIC_KERNEL_CACHE_PATCHED
-    if _STATIC_KERNEL_CACHE_PATCHED:
+    # decisions. The state is tracked on the patched targets themselves.
+    if getattr(AclConcreteGraph.normalize_config, _STATIC_KERNEL_CACHE_PATCH_FLAG, False) and getattr(
+        static_kernel.compile_static_kernel, _STATIC_KERNEL_CACHE_PATCH_FLAG, False
+    ):
         return
 
     original_normalize_config = AclConcreteGraph.normalize_config
@@ -222,50 +389,67 @@ def _enable_static_kernel_run_package_cache() -> None:
         if config_obj is None or not getattr(config_obj, "static_kernel_compile", False):
             return original_normalize_config(self)
         configs = original_normalize_config(self)
-        configs.update(_static_kernel_cache_options())
+        configs.update(_static_kernel_cache_options(self))
         return configs
 
-    AclConcreteGraph.normalize_config = normalize_config
-
-    logger.info_once(
-        "Static kernel run packages will be cached in %s and reused across restarts.",
-        _static_kernel_cache_dir(),
-        scope="global",
-    )
-
-    # The cache keys are now in the config, but torch_npu's own decision
-    # still skips them for the force_eager + static_kernel_compile
-    # combination. Take the cache path whenever the keys are present.
     original_compile_static_kernel = static_kernel.compile_static_kernel
 
     def compile_static_kernel(fx_func, *args, config=None, build_dir=None, **kwargs):
-        if config is not None and config.get("static_kernel_compile.use_cache_compile", False):
-            try:
-                static_kernel._install_or_compile_static_kernel(
-                    fx_func,
-                    *args,
-                    cached_cann_version=config.get("static_kernel_compile.cann_version", None),
-                    compile_cache_dir=config.get("static_kernel_compile.compile_cache_dir", None),
-                    cached_deterministic=config.get("static_kernel_compile.deterministic", False),
-                    config=config,
-                    **kwargs,
-                )
-                return
-            except Exception as exc:  # noqa: BLE001
-                # The install path is a private npugraph_ex API. If it is
-                # gone or changed, fall back to compiling instead of failing
-                # the whole compilation.
-                logger.warning(
-                    "Failed to install the cached static kernel run package, falling back to compiling it: %s",
-                    exc,
-                )
+        if config is None or not config.get("static_kernel_compile.use_cache_compile", False):
+            return original_compile_static_kernel(fx_func, *args, config=config, build_dir=build_dir, **kwargs)
+
+        if not _static_kernel_multicard_env_valid(static_kernel):
+            # torch_npu disables the static kernel feature in that case, so
+            # let it take the decision.
+            return original_compile_static_kernel(fx_func, *args, config=config, build_dir=build_dir, **kwargs)
+
+        try:
+            cache_dir = _static_kernel_piece_cache_dir(config, fx_func, args)
+            # torch_npu refuses to use a cache directory that does not exist,
+            # and it skips the compilation entirely in that case, so the
+            # directory has to be created before it is handed over.
+            os.makedirs(cache_dir, exist_ok=True)
+            # The runtime properties the cached run packages were built with
+            # are read back from the metadata that was written when they
+            # were compiled, so that torch_npu compares them against the
+            # current runtime instead of comparing the runtime with itself.
+            meta = _read_static_kernel_cache_meta(cache_dir)
+            if meta is None:
+                meta = _static_kernel_runtime_properties()
+                _write_static_kernel_cache_meta(cache_dir, meta)
+            static_kernel._install_or_compile_static_kernel(
+                fx_func,
+                *args,
+                cached_cann_version=meta["cann_version"],
+                compile_cache_dir=cache_dir,
+                cached_deterministic=meta["deterministic"],
+                cached_deterministic_level=meta["deterministic_level"],
+                config=config,
+                **kwargs,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            # The install path is a private npugraph_ex API. If it is
+            # gone or changed, fall back to compiling instead of failing
+            # the whole compilation.
+            logger.warning(
+                "Failed to install the cached static kernel run package, falling back to compiling it: %s",
+                exc,
+            )
         return original_compile_static_kernel(fx_func, *args, config=config, build_dir=build_dir, **kwargs)
 
+    setattr(normalize_config, _STATIC_KERNEL_CACHE_PATCH_FLAG, True)
+    setattr(compile_static_kernel, _STATIC_KERNEL_CACHE_PATCH_FLAG, True)
+    AclConcreteGraph.normalize_config = normalize_config
     static_kernel.compile_static_kernel = compile_static_kernel
     # acl_graph.py imported the symbol directly, so rebind it there too.
     acl_graph.compile_static_kernel = compile_static_kernel
 
-    _STATIC_KERNEL_CACHE_PATCHED = True
+    logger.info_once(
+        "Static kernel run packages will be cached in %s and reused across restarts.",
+        _static_kernel_cache_root(),
+        scope="global",
+    )
 
 
 def _configure_backend(
@@ -450,7 +634,15 @@ class AscendCompiler(CompilerInterface):
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
             _initialize_static_kernel_runtime(self.vllm_config)
-            _enable_static_kernel_run_package_cache()
+            if disable_cache:
+                # The compile caches are disabled, so the static kernel run
+                # packages must not be cached either.
+                logger.info_once(
+                    "The compilation cache is disabled, the static kernel run packages will not be reused.",
+                    scope="global",
+                )
+            else:
+                _enable_static_kernel_run_package_cache()
 
     def compile(
         self,
