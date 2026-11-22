@@ -1,0 +1,5 @@
+pr: 22375
+entries:
+  - category: performance
+    text: Allowed Qwen3.8-Flash-Next GBSA to write directly into the caller-owned attention output buffer, avoiding a same-shape post-attention copy.
+    model: qwen3.8-flash-next
