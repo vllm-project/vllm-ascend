@@ -8,6 +8,7 @@ before running the compressor, indexer and sparse-attention operators without
 moving cache or scheduler knowledge back into the model.
 """
 
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any
@@ -726,6 +727,11 @@ _PCP_STAGE_STEP: dict[str, Any] = {
     "swa_capacity": 0,
     "long_kv_max_blocks": 0,
     "long_kv_capacity": 0,
+    # Real host time of the issue window (perf_counter, not device events).
+    "swa_host_s": 0.0,
+    "swa_host_calls": 0,
+    "long_kv_host_s": 0.0,
+    "long_kv_host_calls": 0,
 }
 _PCP_STAGE_REPORT_EVERY = 128
 
@@ -765,7 +771,8 @@ def _pcp_stage_note_step(step_token, stage_cache) -> None:
 
             logger.info(
                 "PCP stage counters: steps=%d swa=%s long_kv=%s smla_ops=%d step_smla_ops=%d "
-                "step_smla_entries=%d swa_blocks=%d/%d long_kv_blocks=%d/%d",
+                "step_smla_entries=%d swa_blocks=%d/%d long_kv_blocks=%d/%d "
+                "swa_host_us=%.1f long_kv_host_us=%.1f",
                 state["steps"],
                 dict(sorted(_PCP_STAGE_STATS.get("swa", {}).items())),
                 dict(sorted(_PCP_STAGE_STATS.get("long_kv", {}).items())),
@@ -776,6 +783,8 @@ def _pcp_stage_note_step(step_token, stage_cache) -> None:
                 state["swa_capacity"],
                 state["long_kv_max_blocks"],
                 state["long_kv_capacity"],
+                1e6 * state["swa_host_s"] / max(1, state["swa_host_calls"]),
+                1e6 * state["long_kv_host_s"] / max(1, state["long_kv_host_calls"]),
             )
         # The operator tiling cache survives in the builder's batch dictionary
         # across steps, while its signature cannot see the per-request
@@ -872,7 +881,9 @@ class AscendDSAV41Impl:
         # Recorded after ``_preprocess`` issued the SWA/long-KV writes on the
         # main stream (the multistream path joins its side stream before
         # returning), so the copy can never read a half-written cache.
-        start = torch.npu.current_stream().record_event()
+        start, done_event = cache.next_events()
+        start.record()
+        host_started = time.perf_counter()
         stream = cache.staging_stream()
         issue = _timing_enter("stage_swa_chunk_issue", config.enable_timing)
         staged = None
@@ -932,8 +943,11 @@ class AscendDSAV41Impl:
                         prepared=plan.prepared,
                         enable_timing=config.enable_timing,
                         start_event=start,
+                        done_event=done_event,
                     )
         _timing_exit(issue)
+        _PCP_STAGE_STEP["swa_host_calls"] += 1
+        _PCP_STAGE_STEP["swa_host_s"] += time.perf_counter() - host_started
         if plan is None or plan.total_blocks <= 0:
             _pcp_stage_count("swa", "skipped_plan")
             _pcp_stage_mark_negative(stage_cache, "plan")
@@ -1023,7 +1037,9 @@ class AscendDSAV41Impl:
         seq_lens = cmp_metadata.cache_seq_lens[:num_reqs]
         counts = self._cmp_stage_counts(cmp_metadata, num_reqs)
         cache = get_stage_cache(source_cache.device, source_cache, budget_bytes=config.owner_stage_bytes)
-        start = torch.npu.current_stream().record_event()
+        start, done_event = cache.next_events()
+        start.record()
+        host_started = time.perf_counter()
         timing = _timing_enter("stage_long_kv_issue", config.enable_timing)
         staged = cache.stage_async(
             source_cache,
@@ -1033,8 +1049,11 @@ class AscendDSAV41Impl:
             counts=counts,
             enable_timing=config.enable_timing,
             start_event=start,
+            done_event=done_event,
         )
         _timing_exit(timing)
+        _PCP_STAGE_STEP["long_kv_host_calls"] += 1
+        _PCP_STAGE_STEP["long_kv_host_s"] += time.perf_counter() - host_started
         if staged is None:
             _pcp_stage_count("long_kv", "async_skipped_overflow")
             return

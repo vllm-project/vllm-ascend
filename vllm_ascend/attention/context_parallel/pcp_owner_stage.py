@@ -23,11 +23,15 @@ direct peer reads.  Results are identical either way.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
 from vllm.logger import logger
+
+from .pcp_owner_timing import enter as timing_enter
+from .pcp_owner_timing import exit as timing_exit
 
 if TYPE_CHECKING:
     from vllm_ascend.ascend_config import PcpConfig
@@ -228,6 +232,47 @@ class PcpOwnerStageCache:
         self.overflow_fallbacks = 0
         self.last_total_blocks = 0
         self.max_total_blocks = 0
+        self._start_events: list[torch.npu.Event] | None = None
+        self._done_events: list[torch.npu.Event] | None = None
+        self._event_cursor = 0
+        self._source_view_key: tuple | None = None
+        self._source_view: torch.Tensor | None = None
+        self.host_issue_calls = 0
+        self.host_issue_seconds = 0.0
+
+    def next_events(self) -> tuple[torch.npu.Event, torch.npu.Event]:
+        """Reusable (start, done) event pair for one overlapped staging call.
+
+        A two-slot ring is enough: the consumer enqueues ``wait_event(done)``
+        in the same layer before the next layer calls ``stage_async``, and a
+        re-recorded event does not affect waits already enqueued.  Reusing
+        events removes two allocations per layer.
+        """
+        if self._start_events is None:
+            self._start_events = [torch.npu.Event() for _ in range(2)]
+            self._done_events = [torch.npu.Event() for _ in range(2)]
+        index = self._event_cursor
+        self._event_cursor = (index + 1) % 2
+        return self._start_events[index], self._done_events[index]
+
+    def _source_slots(self, source_cache: torch.Tensor) -> torch.Tensor:
+        """Cache the full-slot 2-D view of one source cache buffer."""
+        key = (
+            int(source_cache.data_ptr()),
+            tuple(source_cache.shape),
+            tuple(source_cache.stride()),
+            int(source_cache.storage_offset()),
+            self.slot_elements,
+        )
+        if self._source_view_key != key:
+            self._source_view = torch.as_strided(
+                source_cache,
+                (source_cache.shape[0], self.slot_elements),
+                (self.slot_elements, 1),
+                source_cache.storage_offset(),
+            )
+            self._source_view_key = key
+        return self._source_view
 
     def staging_stream(self) -> torch.npu.Stream:
         """Dedicated copy stream, kept apart from the DSA overlap stream.
@@ -287,10 +332,7 @@ class PcpOwnerStageCache:
         per-chunk SWA plan).  Layers in one SWA group share the same rows, so
         rebuilding the dense table per layer would be pure overhead.
         """
-        from .pcp_owner_timing import enter as timing_enter
-        from .pcp_owner_timing import exit as timing_exit
-
-        timing = timing_enter("stage_tables", enable_timing)
+        timing = timing_enter("stage_tables", enable_timing) if enable_timing else None
         if prepared is not None:
             staged_table, flat, total = prepared
         elif counts is not None:
@@ -317,14 +359,8 @@ class PcpOwnerStageCache:
                 )
             return None
         slot_rows = scratch[:total]
-        timing = timing_enter("stage_copy", enable_timing)
-        source_slots = torch.as_strided(
-            source_cache,
-            (source_cache.shape[0], self.slot_elements),
-            (self.slot_elements, 1),
-            source_cache.storage_offset(),
-        )
-        torch.index_select(source_slots, 0, flat, out=slot_rows)
+        timing = timing_enter("stage_copy", enable_timing) if enable_timing else None
+        torch.index_select(self._source_slots(source_cache), 0, flat, out=slot_rows)
         timing_exit(timing)
         # Present the staged blocks with the same strided layout as the slab.
         view = torch.as_strided(
@@ -357,6 +393,7 @@ class PcpOwnerStageCache:
         prepared: tuple[torch.Tensor, torch.Tensor, int] | None = None,
         enable_timing: bool = False,
         start_event: torch.npu.Event | None = None,
+        done_event: torch.npu.Event | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.npu.Event] | None:
         """Issue the staging copy on a side stream and return its done event.
 
@@ -364,26 +401,37 @@ class PcpOwnerStageCache:
         writes that the copy reads.  The caller consumes the returned event
         with ``main_stream.wait_event(done)`` immediately before the attention
         kernel, so the table build and copy overlap the indexer selection.
-        Returns ``None`` on overflow, keeping the synchronous peer-read path.
+        ``start_event``/``done_event`` may come from ``next_events()``; when
+        omitted they are allocated per call.  Returns ``None`` on overflow,
+        keeping the synchronous peer-read path.
         """
-        if start_event is None:
-            start_event = torch.npu.current_stream().record_event()
-        stream = self.staging_stream()
-        stream.wait_event(start_event)
-        with torch.npu.stream(stream):
-            result = self.stage(
-                source_cache,
-                block_table,
-                seq_lens=seq_lens,
-                block_size=block_size,
-                counts=counts,
-                prepared=prepared,
-                enable_timing=enable_timing,
-            )
-            if result is None:
-                return None
-            done = stream.record_event()
-        return result[0], result[1], done
+        started = time.perf_counter()
+        try:
+            if start_event is None:
+                start_event = torch.npu.current_stream().record_event()
+            stream = self.staging_stream()
+            stream.wait_event(start_event)
+            with torch.npu.stream(stream):
+                result = self.stage(
+                    source_cache,
+                    block_table,
+                    seq_lens=seq_lens,
+                    block_size=block_size,
+                    counts=counts,
+                    prepared=prepared,
+                    enable_timing=enable_timing,
+                )
+                if result is None:
+                    return None
+                if done_event is None:
+                    done = stream.record_event()
+                else:
+                    done_event.record(stream)
+                    done = done_event
+            return result[0], result[1], done
+        finally:
+            self.host_issue_calls += 1
+            self.host_issue_seconds += time.perf_counter() - started
 
 
 _stage_caches: dict[tuple, PcpOwnerStageCache] = {}
