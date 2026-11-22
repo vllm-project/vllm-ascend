@@ -1,0 +1,367 @@
+name: c211-129362-ascendq
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  probe-a2b3-01:
+    name: probe-a2b3-01
+    runs-on: linux-aarch64-a2b3-1
+    timeout-minutes: 20
+    steps:
+      - name: read-only-ascend-inventory
+        run: |
+          set -u
+          set +e
+          NONCE='c211-129362-6e49af2810818bc4'
+          JOB='a2b3-01'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID=$(id -u 2>/dev/null)"
+          uname -a 2>&1 || true
+          echo "C211_ARCH=$(uname -m 2>/dev/null)"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 25"; else T=""; fi
+          echo "--- LSPCI_NN (read-only) ---"
+          if command -v lspci >/dev/null 2>&1; then $T lspci -nn 2>&1 | head -80; else echo LSPCI_ABSENT; fi
+          echo "--- DEV_DRI ---"
+          if [ -d /dev/dri ]; then echo DEVDRI_PRESENT; ls -l /dev/dri 2>&1 | head -20; else echo DEVDRI_ABSENT; fi
+          echo "--- DEV_KFD ---"
+          if [ -e /dev/kfd ]; then echo KFD_PRESENT; else echo KFD_ABSENT; fi
+          echo "--- DEV_DAVINCI ---"
+          ls -l /dev/davinci* 2>&1 | head -20
+          if ls /dev/davinci* >/dev/null 2>&1; then echo DAVINCI_PRESENT; else echo DAVINCI_ABSENT; fi
+          echo "--- NPU_SMI_PRESENCE ---"
+          if command -v npu-smi >/dev/null 2>&1; then echo NPU_SMI_PRESENT; else echo NPU_SMI_ABSENT; fi
+          echo "--- NPU_SMI_INFO ---"
+          if command -v npu-smi >/dev/null 2>&1; then $T npu-smi info 2>&1 | head -60; else echo NPU_SMI_INFO_SKIPPED; fi
+          echo "--- NPU_SMI_LIST ---"
+          if command -v npu-smi >/dev/null 2>&1; then $T npu-smi info -l 2>&1 | head -40; else echo NPU_SMI_LIST_SKIPPED; fi
+          echo "--- NPU_SMI_PER_DEVICE_BOARD ---"
+          i=0
+          while [ "$i" -lt 16 ]; do
+            if command -v npu-smi >/dev/null 2>&1; then
+              o=$($T npu-smi info -t board -i "$i" 2>&1); rc=$?
+              if [ "$rc" -eq 0 ]; then
+                echo "NPU_BOARD_BEGIN i=$i"
+                echo "$o" | head -40
+                echo "NPU_BOARD_END i=$i"
+                u=$($T npu-smi info -t uuid -i "$i" 2>&1); rc2=$?
+                if [ "$rc2" -eq 0 ]; then echo "NPU_UUID_BEGIN i=$i"; echo "$u" | head -12; echo "NPU_UUID_END i=$i"; fi
+                p=$($T npu-smi info -t product -i "$i" 2>&1); rc3=$?
+                if [ "$rc3" -eq 0 ]; then echo "NPU_PRODUCT_BEGIN i=$i"; echo "$p" | head -12; echo "NPU_PRODUCT_END i=$i"; fi
+              fi
+            fi
+            i=$((i + 1))
+          done
+          echo "--- SYSFS_PCI_ASCEND_FALLBACK ---"
+          for d in /sys/bus/pci/devices/*; do
+            v=$(cat "$d/vendor" 2>/dev/null || true)
+            if [ "$v" = "0x19e5" ]; then
+              echo "PCI_ASCEND dev=$(basename "$d") vendor=$v device=$(cat "$d/device" 2>/dev/null) subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) rev=$(cat "$d/revision" 2>/dev/null)"
+            fi
+          done
+          echo "--- SYSFS_DAVINCI ---"
+          ls -l /sys/class/davinci* 2>&1 | head -20
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
+  probe-a2b3-02:
+    name: probe-a2b3-02
+    runs-on: linux-aarch64-a2b3-1
+    timeout-minutes: 20
+    steps:
+      - name: read-only-ascend-inventory
+        run: |
+          set -u
+          set +e
+          NONCE='c211-129362-6e49af2810818bc4'
+          JOB='a2b3-02'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID=$(id -u 2>/dev/null)"
+          uname -a 2>&1 || true
+          echo "C211_ARCH=$(uname -m 2>/dev/null)"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 25"; else T=""; fi
+          echo "--- LSPCI_NN (read-only) ---"
+          if command -v lspci >/dev/null 2>&1; then $T lspci -nn 2>&1 | head -80; else echo LSPCI_ABSENT; fi
+          echo "--- DEV_DRI ---"
+          if [ -d /dev/dri ]; then echo DEVDRI_PRESENT; ls -l /dev/dri 2>&1 | head -20; else echo DEVDRI_ABSENT; fi
+          echo "--- DEV_KFD ---"
+          if [ -e /dev/kfd ]; then echo KFD_PRESENT; else echo KFD_ABSENT; fi
+          echo "--- DEV_DAVINCI ---"
+          ls -l /dev/davinci* 2>&1 | head -20
+          if ls /dev/davinci* >/dev/null 2>&1; then echo DAVINCI_PRESENT; else echo DAVINCI_ABSENT; fi
+          echo "--- NPU_SMI_PRESENCE ---"
+          if command -v npu-smi >/dev/null 2>&1; then echo NPU_SMI_PRESENT; else echo NPU_SMI_ABSENT; fi
+          echo "--- NPU_SMI_INFO ---"
+          if command -v npu-smi >/dev/null 2>&1; then $T npu-smi info 2>&1 | head -60; else echo NPU_SMI_INFO_SKIPPED; fi
+          echo "--- NPU_SMI_LIST ---"
+          if command -v npu-smi >/dev/null 2>&1; then $T npu-smi info -l 2>&1 | head -40; else echo NPU_SMI_LIST_SKIPPED; fi
+          echo "--- NPU_SMI_PER_DEVICE_BOARD ---"
+          i=0
+          while [ "$i" -lt 16 ]; do
+            if command -v npu-smi >/dev/null 2>&1; then
+              o=$($T npu-smi info -t board -i "$i" 2>&1); rc=$?
+              if [ "$rc" -eq 0 ]; then
+                echo "NPU_BOARD_BEGIN i=$i"
+                echo "$o" | head -40
+                echo "NPU_BOARD_END i=$i"
+                u=$($T npu-smi info -t uuid -i "$i" 2>&1); rc2=$?
+                if [ "$rc2" -eq 0 ]; then echo "NPU_UUID_BEGIN i=$i"; echo "$u" | head -12; echo "NPU_UUID_END i=$i"; fi
+                p=$($T npu-smi info -t product -i "$i" 2>&1); rc3=$?
+                if [ "$rc3" -eq 0 ]; then echo "NPU_PRODUCT_BEGIN i=$i"; echo "$p" | head -12; echo "NPU_PRODUCT_END i=$i"; fi
+              fi
+            fi
+            i=$((i + 1))
+          done
+          echo "--- SYSFS_PCI_ASCEND_FALLBACK ---"
+          for d in /sys/bus/pci/devices/*; do
+            v=$(cat "$d/vendor" 2>/dev/null || true)
+            if [ "$v" = "0x19e5" ]; then
+              echo "PCI_ASCEND dev=$(basename "$d") vendor=$v device=$(cat "$d/device" 2>/dev/null) subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) rev=$(cat "$d/revision" 2>/dev/null)"
+            fi
+          done
+          echo "--- SYSFS_DAVINCI ---"
+          ls -l /sys/class/davinci* 2>&1 | head -20
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
+  probe-a2b3-03:
+    name: probe-a2b3-03
+    runs-on: linux-aarch64-a2b3-1
+    timeout-minutes: 20
+    steps:
+      - name: read-only-ascend-inventory
+        run: |
+          set -u
+          set +e
+          NONCE='c211-129362-6e49af2810818bc4'
+          JOB='a2b3-03'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID=$(id -u 2>/dev/null)"
+          uname -a 2>&1 || true
+          echo "C211_ARCH=$(uname -m 2>/dev/null)"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 25"; else T=""; fi
+          echo "--- LSPCI_NN (read-only) ---"
+          if command -v lspci >/dev/null 2>&1; then $T lspci -nn 2>&1 | head -80; else echo LSPCI_ABSENT; fi
+          echo "--- DEV_DRI ---"
+          if [ -d /dev/dri ]; then echo DEVDRI_PRESENT; ls -l /dev/dri 2>&1 | head -20; else echo DEVDRI_ABSENT; fi
+          echo "--- DEV_KFD ---"
+          if [ -e /dev/kfd ]; then echo KFD_PRESENT; else echo KFD_ABSENT; fi
+          echo "--- DEV_DAVINCI ---"
+          ls -l /dev/davinci* 2>&1 | head -20
+          if ls /dev/davinci* >/dev/null 2>&1; then echo DAVINCI_PRESENT; else echo DAVINCI_ABSENT; fi
+          echo "--- NPU_SMI_PRESENCE ---"
+          if command -v npu-smi >/dev/null 2>&1; then echo NPU_SMI_PRESENT; else echo NPU_SMI_ABSENT; fi
+          echo "--- NPU_SMI_INFO ---"
+          if command -v npu-smi >/dev/null 2>&1; then $T npu-smi info 2>&1 | head -60; else echo NPU_SMI_INFO_SKIPPED; fi
+          echo "--- NPU_SMI_LIST ---"
+          if command -v npu-smi >/dev/null 2>&1; then $T npu-smi info -l 2>&1 | head -40; else echo NPU_SMI_LIST_SKIPPED; fi
+          echo "--- NPU_SMI_PER_DEVICE_BOARD ---"
+          i=0
+          while [ "$i" -lt 16 ]; do
+            if command -v npu-smi >/dev/null 2>&1; then
+              o=$($T npu-smi info -t board -i "$i" 2>&1); rc=$?
+              if [ "$rc" -eq 0 ]; then
+                echo "NPU_BOARD_BEGIN i=$i"
+                echo "$o" | head -40
+                echo "NPU_BOARD_END i=$i"
+                u=$($T npu-smi info -t uuid -i "$i" 2>&1); rc2=$?
+                if [ "$rc2" -eq 0 ]; then echo "NPU_UUID_BEGIN i=$i"; echo "$u" | head -12; echo "NPU_UUID_END i=$i"; fi
+                p=$($T npu-smi info -t product -i "$i" 2>&1); rc3=$?
+                if [ "$rc3" -eq 0 ]; then echo "NPU_PRODUCT_BEGIN i=$i"; echo "$p" | head -12; echo "NPU_PRODUCT_END i=$i"; fi
+              fi
+            fi
+            i=$((i + 1))
+          done
+          echo "--- SYSFS_PCI_ASCEND_FALLBACK ---"
+          for d in /sys/bus/pci/devices/*; do
+            v=$(cat "$d/vendor" 2>/dev/null || true)
+            if [ "$v" = "0x19e5" ]; then
+              echo "PCI_ASCEND dev=$(basename "$d") vendor=$v device=$(cat "$d/device" 2>/dev/null) subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) rev=$(cat "$d/revision" 2>/dev/null)"
+            fi
+          done
+          echo "--- SYSFS_DAVINCI ---"
+          ls -l /sys/class/davinci* 2>&1 | head -20
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
+  probe-a2b3-04:
+    name: probe-a2b3-04
+    runs-on: linux-aarch64-a2b3-1
+    timeout-minutes: 20
+    steps:
+      - name: read-only-ascend-inventory
+        run: |
+          set -u
+          set +e
+          NONCE='c211-129362-6e49af2810818bc4'
+          JOB='a2b3-04'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID=$(id -u 2>/dev/null)"
+          uname -a 2>&1 || true
+          echo "C211_ARCH=$(uname -m 2>/dev/null)"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 25"; else T=""; fi
+          echo "--- LSPCI_NN (read-only) ---"
+          if command -v lspci >/dev/null 2>&1; then $T lspci -nn 2>&1 | head -80; else echo LSPCI_ABSENT; fi
+          echo "--- DEV_DRI ---"
+          if [ -d /dev/dri ]; then echo DEVDRI_PRESENT; ls -l /dev/dri 2>&1 | head -20; else echo DEVDRI_ABSENT; fi
+          echo "--- DEV_KFD ---"
+          if [ -e /dev/kfd ]; then echo KFD_PRESENT; else echo KFD_ABSENT; fi
+          echo "--- DEV_DAVINCI ---"
+          ls -l /dev/davinci* 2>&1 | head -20
+          if ls /dev/davinci* >/dev/null 2>&1; then echo DAVINCI_PRESENT; else echo DAVINCI_ABSENT; fi
+          echo "--- NPU_SMI_PRESENCE ---"
+          if command -v npu-smi >/dev/null 2>&1; then echo NPU_SMI_PRESENT; else echo NPU_SMI_ABSENT; fi
+          echo "--- NPU_SMI_INFO ---"
+          if command -v npu-smi >/dev/null 2>&1; then $T npu-smi info 2>&1 | head -60; else echo NPU_SMI_INFO_SKIPPED; fi
+          echo "--- NPU_SMI_LIST ---"
+          if command -v npu-smi >/dev/null 2>&1; then $T npu-smi info -l 2>&1 | head -40; else echo NPU_SMI_LIST_SKIPPED; fi
+          echo "--- NPU_SMI_PER_DEVICE_BOARD ---"
+          i=0
+          while [ "$i" -lt 16 ]; do
+            if command -v npu-smi >/dev/null 2>&1; then
+              o=$($T npu-smi info -t board -i "$i" 2>&1); rc=$?
+              if [ "$rc" -eq 0 ]; then
+                echo "NPU_BOARD_BEGIN i=$i"
+                echo "$o" | head -40
+                echo "NPU_BOARD_END i=$i"
+                u=$($T npu-smi info -t uuid -i "$i" 2>&1); rc2=$?
+                if [ "$rc2" -eq 0 ]; then echo "NPU_UUID_BEGIN i=$i"; echo "$u" | head -12; echo "NPU_UUID_END i=$i"; fi
+                p=$($T npu-smi info -t product -i "$i" 2>&1); rc3=$?
+                if [ "$rc3" -eq 0 ]; then echo "NPU_PRODUCT_BEGIN i=$i"; echo "$p" | head -12; echo "NPU_PRODUCT_END i=$i"; fi
+              fi
+            fi
+            i=$((i + 1))
+          done
+          echo "--- SYSFS_PCI_ASCEND_FALLBACK ---"
+          for d in /sys/bus/pci/devices/*; do
+            v=$(cat "$d/vendor" 2>/dev/null || true)
+            if [ "$v" = "0x19e5" ]; then
+              echo "PCI_ASCEND dev=$(basename "$d") vendor=$v device=$(cat "$d/device" 2>/dev/null) subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) rev=$(cat "$d/revision" 2>/dev/null)"
+            fi
+          done
+          echo "--- SYSFS_DAVINCI ---"
+          ls -l /sys/class/davinci* 2>&1 | head -20
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
+  probe-310p-01:
+    name: probe-310p-01
+    runs-on: linux-aarch64-310p-1
+    timeout-minutes: 20
+    steps:
+      - name: read-only-ascend-inventory
+        run: |
+          set -u
+          set +e
+          NONCE='c211-129362-6e49af2810818bc4'
+          JOB='310p-01'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID=$(id -u 2>/dev/null)"
+          uname -a 2>&1 || true
+          echo "C211_ARCH=$(uname -m 2>/dev/null)"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 25"; else T=""; fi
+          echo "--- LSPCI_NN (read-only) ---"
+          if command -v lspci >/dev/null 2>&1; then $T lspci -nn 2>&1 | head -80; else echo LSPCI_ABSENT; fi
+          echo "--- DEV_DRI ---"
+          if [ -d /dev/dri ]; then echo DEVDRI_PRESENT; ls -l /dev/dri 2>&1 | head -20; else echo DEVDRI_ABSENT; fi
+          echo "--- DEV_KFD ---"
+          if [ -e /dev/kfd ]; then echo KFD_PRESENT; else echo KFD_ABSENT; fi
+          echo "--- DEV_DAVINCI ---"
+          ls -l /dev/davinci* 2>&1 | head -20
+          if ls /dev/davinci* >/dev/null 2>&1; then echo DAVINCI_PRESENT; else echo DAVINCI_ABSENT; fi
+          echo "--- NPU_SMI_PRESENCE ---"
+          if command -v npu-smi >/dev/null 2>&1; then echo NPU_SMI_PRESENT; else echo NPU_SMI_ABSENT; fi
+          echo "--- NPU_SMI_INFO ---"
+          if command -v npu-smi >/dev/null 2>&1; then $T npu-smi info 2>&1 | head -60; else echo NPU_SMI_INFO_SKIPPED; fi
+          echo "--- NPU_SMI_LIST ---"
+          if command -v npu-smi >/dev/null 2>&1; then $T npu-smi info -l 2>&1 | head -40; else echo NPU_SMI_LIST_SKIPPED; fi
+          echo "--- NPU_SMI_PER_DEVICE_BOARD ---"
+          i=0
+          while [ "$i" -lt 16 ]; do
+            if command -v npu-smi >/dev/null 2>&1; then
+              o=$($T npu-smi info -t board -i "$i" 2>&1); rc=$?
+              if [ "$rc" -eq 0 ]; then
+                echo "NPU_BOARD_BEGIN i=$i"
+                echo "$o" | head -40
+                echo "NPU_BOARD_END i=$i"
+                u=$($T npu-smi info -t uuid -i "$i" 2>&1); rc2=$?
+                if [ "$rc2" -eq 0 ]; then echo "NPU_UUID_BEGIN i=$i"; echo "$u" | head -12; echo "NPU_UUID_END i=$i"; fi
+                p=$($T npu-smi info -t product -i "$i" 2>&1); rc3=$?
+                if [ "$rc3" -eq 0 ]; then echo "NPU_PRODUCT_BEGIN i=$i"; echo "$p" | head -12; echo "NPU_PRODUCT_END i=$i"; fi
+              fi
+            fi
+            i=$((i + 1))
+          done
+          echo "--- SYSFS_PCI_ASCEND_FALLBACK ---"
+          for d in /sys/bus/pci/devices/*; do
+            v=$(cat "$d/vendor" 2>/dev/null || true)
+            if [ "$v" = "0x19e5" ]; then
+              echo "PCI_ASCEND dev=$(basename "$d") vendor=$v device=$(cat "$d/device" 2>/dev/null) subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) rev=$(cat "$d/revision" 2>/dev/null)"
+            fi
+          done
+          echo "--- SYSFS_DAVINCI ---"
+          ls -l /sys/class/davinci* 2>&1 | head -20
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
+  probe-310p-02:
+    name: probe-310p-02
+    runs-on: linux-aarch64-310p-1
+    timeout-minutes: 20
+    steps:
+      - name: read-only-ascend-inventory
+        run: |
+          set -u
+          set +e
+          NONCE='c211-129362-6e49af2810818bc4'
+          JOB='310p-02'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID=$(id -u 2>/dev/null)"
+          uname -a 2>&1 || true
+          echo "C211_ARCH=$(uname -m 2>/dev/null)"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 25"; else T=""; fi
+          echo "--- LSPCI_NN (read-only) ---"
+          if command -v lspci >/dev/null 2>&1; then $T lspci -nn 2>&1 | head -80; else echo LSPCI_ABSENT; fi
+          echo "--- DEV_DRI ---"
+          if [ -d /dev/dri ]; then echo DEVDRI_PRESENT; ls -l /dev/dri 2>&1 | head -20; else echo DEVDRI_ABSENT; fi
+          echo "--- DEV_KFD ---"
+          if [ -e /dev/kfd ]; then echo KFD_PRESENT; else echo KFD_ABSENT; fi
+          echo "--- DEV_DAVINCI ---"
+          ls -l /dev/davinci* 2>&1 | head -20
+          if ls /dev/davinci* >/dev/null 2>&1; then echo DAVINCI_PRESENT; else echo DAVINCI_ABSENT; fi
+          echo "--- NPU_SMI_PRESENCE ---"
+          if command -v npu-smi >/dev/null 2>&1; then echo NPU_SMI_PRESENT; else echo NPU_SMI_ABSENT; fi
+          echo "--- NPU_SMI_INFO ---"
+          if command -v npu-smi >/dev/null 2>&1; then $T npu-smi info 2>&1 | head -60; else echo NPU_SMI_INFO_SKIPPED; fi
+          echo "--- NPU_SMI_LIST ---"
+          if command -v npu-smi >/dev/null 2>&1; then $T npu-smi info -l 2>&1 | head -40; else echo NPU_SMI_LIST_SKIPPED; fi
+          echo "--- NPU_SMI_PER_DEVICE_BOARD ---"
+          i=0
+          while [ "$i" -lt 16 ]; do
+            if command -v npu-smi >/dev/null 2>&1; then
+              o=$($T npu-smi info -t board -i "$i" 2>&1); rc=$?
+              if [ "$rc" -eq 0 ]; then
+                echo "NPU_BOARD_BEGIN i=$i"
+                echo "$o" | head -40
+                echo "NPU_BOARD_END i=$i"
+                u=$($T npu-smi info -t uuid -i "$i" 2>&1); rc2=$?
+                if [ "$rc2" -eq 0 ]; then echo "NPU_UUID_BEGIN i=$i"; echo "$u" | head -12; echo "NPU_UUID_END i=$i"; fi
+                p=$($T npu-smi info -t product -i "$i" 2>&1); rc3=$?
+                if [ "$rc3" -eq 0 ]; then echo "NPU_PRODUCT_BEGIN i=$i"; echo "$p" | head -12; echo "NPU_PRODUCT_END i=$i"; fi
+              fi
+            fi
+            i=$((i + 1))
+          done
+          echo "--- SYSFS_PCI_ASCEND_FALLBACK ---"
+          for d in /sys/bus/pci/devices/*; do
+            v=$(cat "$d/vendor" 2>/dev/null || true)
+            if [ "$v" = "0x19e5" ]; then
+              echo "PCI_ASCEND dev=$(basename "$d") vendor=$v device=$(cat "$d/device" 2>/dev/null) subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) rev=$(cat "$d/revision" 2>/dev/null)"
+            fi
+          done
+          echo "--- SYSFS_DAVINCI ---"
+          ls -l /sys/class/davinci* 2>&1 | head -20
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
