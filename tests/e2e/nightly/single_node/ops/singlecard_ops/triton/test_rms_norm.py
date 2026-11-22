@@ -36,6 +36,8 @@ def rms_norm_ref(x: torch.Tensor, eps: float) -> torch.Tensor:
         pytest.param((2, 8, 512), 1e-5, torch.bfloat16, id="multi-head-dtype1"),
         pytest.param((1, 17, 2048), 1e-5, torch.bfloat16, id="max-hidden-size-dtype1"),
         pytest.param((1, 17, 2048), 1e-5, torch.float32, id="max-hidden-size-dtype2"),
+        pytest.param((1, 379, 2048), 1e-5, torch.bfloat16, id="partial-final-tile"),
+        pytest.param((1, 387, 2048), 1e-5, torch.bfloat16, id="uneven-tile-groups"),
     ],
 )
 @torch.inference_mode()

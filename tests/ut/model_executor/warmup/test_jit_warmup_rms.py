@@ -12,15 +12,13 @@ from tests.ut.model_executor.warmup.helpers import (
 from vllm_ascend.ops.triton import rms_norm
 
 
-def test_block_m_enumeration_covers_every_power_of_two():
-    """BLOCK_M = pow2floor(min(ceiling, cdiv(batch, cores))) with the batch
-    spanning every runtime size, so every power of two up to the UB-derived
-    ceiling is a distinct JIT key."""
+def test_warmup_covers_single_tiles_and_groups_at_the_ub_limit():
     config = make_mock_vllm_config(head_size=128, dtype=torch.float16)
     with patch.object(rms_norm, "_rms_row_block_size", return_value=16):
         keys = rms_norm._TRITON_Q_RMS_KERNEL.get_warmup_keys(config)
 
-    assert [key.block_m for key in keys] == [1, 2, 4, 8, 16]
+    assert [key.block_m for key in keys if not key.grouped] == [1, 2, 4, 8, 16]
+    assert [key.block_m for key in keys if key.grouped] == [16]
     assert all(key.dim == 128 and key.dtype == torch.float16 for key in keys)
 
 

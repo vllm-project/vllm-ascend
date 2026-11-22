@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import cache
 from typing import Any
 
 import torch
@@ -8,9 +9,35 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ops.triton.ascend_jit_warmup import AscendTritonJitKernel
 from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes
+
+
+@triton.jit
+def _rms_tile(
+    hidden_state_ptr,
+    hidden_state_stride_bs,
+    norm_output_ptr,
+    variance_epsilon,
+    total_batch,
+    row_start,
+    DIM: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+):
+    offset_d = tl.arange(0, DIM)
+    offset_row = row_start + tl.arange(0, BLOCK_M)
+    mask_r = offset_row < total_batch
+    mask_row = mask_r[:, None]
+    offset_hidden = offset_row[:, None] * hidden_state_stride_bs + offset_d[None, :]
+
+    x = tl.load(hidden_state_ptr + offset_hidden, mask=mask_row)
+
+    variance = tl.sum(x * x, axis=-1) / DIM
+    output = x * tl.rsqrt(variance[:, None] + variance_epsilon)
+
+    tl.store(norm_output_ptr + offset_hidden, output, mask=mask_row)
 
 
 @triton.jit(
@@ -26,33 +53,45 @@ def triton_rms_kernel(
     total_batch,
     DIM: tl.constexpr,
     BLOCK_M: tl.constexpr,
+    GROUPED: tl.constexpr,
 ):
-    core_id = tl.program_id(0)
-    core_num = tl.num_programs(0)
-    batch_per_core = tl.cdiv(total_batch, core_num)
-    start_batch = core_id * batch_per_core
-    end_batch = tl.minimum(start_batch + batch_per_core, total_batch)
-    offset_d = tl.arange(0, DIM)
-
-    for row_start in tl.range(start_batch, end_batch, BLOCK_M):
-        offset_row = row_start + tl.arange(0, BLOCK_M)
-        mask_r = offset_row < total_batch
-        mask_row = mask_r[:, None]
-        offset_hidden = offset_row[:, None] * hidden_state_stride_bs + offset_d[None, :]
-
-        x = tl.load(hidden_state_ptr + offset_hidden, mask=mask_row)
-
-        variance = tl.sum(x * x, axis=-1) / DIM
-        output = x * tl.rsqrt(variance[:, None] + variance_epsilon)
-
-        tl.store(norm_output_ptr + offset_hidden, output, mask=mask_row)
+    pid = tl.program_id(0)
+    if GROUPED:
+        programs = tl.num_programs(0)
+        tiles = tl.cdiv(total_batch, BLOCK_M)
+        per_program = tiles // programs
+        extra = tiles % programs
+        first = pid * per_program + tl.minimum(pid, extra)
+        last = first + per_program + (pid < extra).to(tl.int32)
+        for tile in tl.range(first, last):
+            _rms_tile(
+                hidden_state_ptr,
+                hidden_state_stride_bs,
+                norm_output_ptr,
+                variance_epsilon,
+                total_batch,
+                tile * BLOCK_M,
+                DIM,
+                BLOCK_M,
+            )
+    else:
+        _rms_tile(
+            hidden_state_ptr,
+            hidden_state_stride_bs,
+            norm_output_ptr,
+            variance_epsilon,
+            total_batch,
+            pid * BLOCK_M,
+            DIM,
+            BLOCK_M,
+        )
 
 
 def _rms_row_block_size(dim: int, dtype: torch.dtype) -> int:
     """UB-derived ceiling on ``BLOCK_M`` before the power-of-two floor."""
     resv_buffer = 6144  # reserve 6 KB to prevent UB overflow
     available_ub_size = get_ub_size_bytes() - resv_buffer
-    element_size = torch.empty(1, dtype=dtype).element_size()
+    element_size = dtype.itemsize
     if element_size == 4:
         data_multiplier = 5  # input + offsets + mid_out + output + others
     elif element_size == 2:
@@ -67,14 +106,14 @@ def _rms_block_m(total_batch: int, num_vectorcore: int, dim: int, dtype) -> int:
 
     Derived adaptively from the runtime Unified Buffer (UB) size so small
     hidden dims get larger tiles (fewer loop iterations) while large hidden
-    dims shrink the tile to avoid UB overflow. ``BLOCK_M`` is floored to a
-    power of two (leftover rows are already masked), which keeps the JIT
-    constexpr set small.
+    dims shrink the tile to avoid UB overflow. Round the per-core row target
+    up to a power of two so a single wave covers the rows when UB allows.
     """
     row_block_size = _rms_row_block_size(dim, dtype)
-    batch_per_core = triton.cdiv(total_batch, num_vectorcore)
-    raw = min(row_block_size, int(batch_per_core))
-    return 1 << (max(raw, 1).bit_length() - 1)
+    batch_per_core = cdiv(total_batch, num_vectorcore)
+    max_block = 1 << (max(row_block_size, 1).bit_length() - 1)
+    target_block = 1 << (max(int(batch_per_core) - 1, 0).bit_length())
+    return min(target_block, max_block)
 
 
 class TritonQRmsKernel(AscendTritonJitKernel["TritonQRmsKernel.CompileKey"]):
@@ -85,6 +124,7 @@ class TritonQRmsKernel(AscendTritonJitKernel["TritonQRmsKernel.CompileKey"]):
         dim: int
         block_m: int
         dtype: torch.dtype
+        grouped: bool
 
     def dispatch(
         self,
@@ -92,28 +132,31 @@ class TritonQRmsKernel(AscendTritonJitKernel["TritonQRmsKernel.CompileKey"]):
         dim: int,
         block_m: int,
         dtype: torch.dtype,
+        grouped: bool,
     ) -> "TritonQRmsKernel.CompileKey":
-        return self.CompileKey(dim=dim, block_m=block_m, dtype=dtype)
+        return self.CompileKey(dim=dim, block_m=block_m, dtype=dtype, grouped=grouped)
 
     def get_warmup_keys(self, vllm_config: Any) -> list["TritonQRmsKernel.CompileKey"]:
         model_config = vllm_config.model_config
         dim = model_config.get_head_size()
         if dim > 2048:
             return []
-        # Every power of two up to the UB-derived ceiling is reachable:
-        # BLOCK_M = pow2floor(min(ceiling, cdiv(total_batch, cores))) and
-        # total_batch spans all runtime batch sizes.
+        # Each power of two through the UB-derived ceiling can occur at runtime.
         row_block_size = max(_rms_row_block_size(dim, model_config.dtype), 1)
         block_m_values = []
         block_m = 1
         while block_m <= row_block_size:
             block_m_values.append(block_m)
             block_m *= 2
-        return self._trace_dispatch(self.dispatch)(
+        keys = self._trace_dispatch(self.dispatch)(
             dim=dim,
             dtype=model_config.dtype,
             block_m=tuple(block_m_values),
+            grouped=False,
         )
+        # Multiple full waves are possible only once the UB cap is reached.
+        keys.append(self.CompileKey(dim, block_m_values[-1], model_config.dtype, True))
+        return keys
 
     def warmup_inputs(self, compile_key: "TritonQRmsKernel.CompileKey") -> dict[str, Any]:
         return dict(
@@ -131,7 +174,8 @@ class TritonQRmsKernel(AscendTritonJitKernel["TritonQRmsKernel.CompileKey"]):
             total_batch=1,
             DIM=compile_key.dim,
             BLOCK_M=compile_key.block_m,
-            num_vectorcore=1,
+            num_programs=1,
+            GROUPED=compile_key.grouped,
         )
 
     @kernel_launcher
@@ -143,14 +187,20 @@ class TritonQRmsKernel(AscendTritonJitKernel["TritonQRmsKernel.CompileKey"]):
         total_batch: int,
         DIM: int,
         BLOCK_M: int,
-        num_vectorcore: int,
+        num_programs: int,
+        GROUPED: bool,
     ) -> LaunchSpec:
-        return (num_vectorcore,), {
+        return (num_programs,), {
             "hidden_state_stride_bs": hidden_state.stride(0),
         }
 
 
 _TRITON_Q_RMS_KERNEL = TritonQRmsKernel()
+
+
+@cache
+def _vector_cores(device: torch.device) -> int:
+    return triton.runtime.driver.active.utils.get_device_properties(device).get("num_vectorcore", -1)
 
 
 def triton_q_rms(
@@ -164,11 +214,13 @@ def triton_q_rms(
     if dim > 2048:
         raise NotImplementedError(f"triton_q_rms: dim > 2048 not supported, got {dim}")
 
-    device_properties = triton.runtime.driver.active.utils.get_device_properties(q.device)
-    num_vectorcore = device_properties.get("num_vectorcore", -1)
+    num_vectorcore = _vector_cores(q.device)
 
     BLOCK_M = _rms_block_m(total_batch, num_vectorcore, dim, q.dtype)
 
+    num_tiles = max(1, cdiv(total_batch, BLOCK_M))
+    # Group tiles only when every program can handle at least two.
+    grouped = num_vectorcore > 0 and num_tiles >= 2 * num_vectorcore
     norm_output = torch.empty_like(q)
 
     _TRITON_Q_RMS_KERNEL(
@@ -178,6 +230,7 @@ def triton_q_rms(
         total_batch=total_batch,
         DIM=dim,
         BLOCK_M=BLOCK_M,
-        num_vectorcore=num_vectorcore,
+        num_programs=num_vectorcore if grouped else num_tiles,
+        GROUPED=grouped,
     )
     return norm_output.view(bs, head_num, dim)

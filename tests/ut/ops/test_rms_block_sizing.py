@@ -17,8 +17,8 @@
 ``BLOCK_M`` is a Triton constexpr, so every distinct value is one JIT
 compile. ``_rms_block_m`` derives the per-core row budget adaptively from the
 runtime Unified Buffer (UB) size, the hidden ``dim`` and the element width
-(``dtype``), then floors ``BLOCK_M`` to a power of two; leftover rows stay
-masked either way.
+(``dtype``). Round the per-core row target up to a power of two, bounded
+by the largest power of two that fits the UB budget.
 """
 
 from unittest.mock import patch
@@ -81,17 +81,17 @@ def test_block_m_caps_at_adaptive_row_block_size(dim, dtype, row_block_size, exp
         (8, 8, 1),
         (9, 8, 2),
         (16, 8, 2),
-        (24, 8, 2),
+        (24, 8, 4),
         (32, 8, 4),
-        (48, 8, 4),
+        (48, 8, 8),
         (64, 8, 8),
         (128, 8, 16),
         (4096, 8, 64),
-        (3, 1, 2),
+        (3, 1, 4),
         (16, 1, 16),
     ],
 )
-def test_block_m_floors_to_power_of_two(total_batch, num_vectorcore, expected):
+def test_block_m_rounds_up_within_ub_limit(total_batch, num_vectorcore, expected):
     # dim=128 / bf16 gives row_block_size=106, so the cap is 64.
     assert _block_m(total_batch, num_vectorcore, 128, torch.bfloat16) == expected
 
