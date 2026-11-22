@@ -9,6 +9,7 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 _BLOCK_SIZE = 256  # One program writes a 256-element tile (1 KiB).
 _POINTERS_PER_GROUP = 3  # Source, destination and optional clear table per group.
+_POINTERS_PER_GROUP_TL = tl.constexpr(_POINTERS_PER_GROUP)
 
 
 @triton.jit(do_not_specialize=["actual_rows", "graph_rows"])
@@ -25,14 +26,14 @@ def _graph_state_kernel(
     BLOCK: tl.constexpr,
 ):
     group = tl.program_id(0)
-    destination = tl.load(pointers + group * _POINTERS_PER_GROUP + 1).to(tl.pointer_type(tl.int32))
+    destination = tl.load(pointers + group * _POINTERS_PER_GROUP_TL + 1).to(tl.pointer_type(tl.int32))
     if actual_rows == 0:
         # An empty source tensor may have a null data pointer; masked lanes
         # still carry that base through pointer arithmetic, so use the valid
         # destination as a dummy base. No source lane is read in this branch.
         source = destination
     else:
-        source = tl.load(pointers + group * _POINTERS_PER_GROUP).to(tl.pointer_type(tl.int32))
+        source = tl.load(pointers + group * _POINTERS_PER_GROUP_TL).to(tl.pointer_type(tl.int32))
     for tile in range(tl.cdiv(graph_rows * WIDTH, BLOCK)):
         offsets = tile * BLOCK + tl.arange(0, BLOCK)
         rows = offsets // WIDTH
@@ -45,7 +46,7 @@ def _graph_state_kernel(
         # One program owns each allocation, including its partial 32-byte tail.
         tl.store(destination + offsets, values, offsets < graph_rows * WIDTH)
     if CLEAR_WIDTH:
-        clear = tl.load(pointers + group * _POINTERS_PER_GROUP + 2).to(tl.pointer_type(tl.int32))
+        clear = tl.load(pointers + group * _POINTERS_PER_GROUP_TL + 2).to(tl.pointer_type(tl.int32))
         for tile in range(tl.cdiv(graph_rows * CLEAR_WIDTH, BLOCK)):
             offsets = tile * BLOCK + tl.arange(0, BLOCK)
             tl.store(clear + offsets, CLEAR_VALUE, offsets < graph_rows * CLEAR_WIDTH)
