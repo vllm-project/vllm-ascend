@@ -48,7 +48,7 @@ def dspark_config(tmp_path, monkeypatch, phase, draft_supports_eplb):
     monkeypatch.setattr(VllmConfig, "use_v2_model_runner", VllmConfig.use_v2_model_runner)
     validator = "_validate_v2_model_runner" if vllm_version_is("0.33.0") else "_validate_model_runner"
     monkeypatch.setattr(VllmConfig, validator, getattr(VllmConfig, validator))
-    monkeypatch.setattr(ascend_logger, "configure_ascend_file_logging", lambda: None)
+    monkeypatch.setattr(ascend_logger, "configure_ascend_file_logging", lambda log_dir: None)
     monkeypatch.setenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
     # Config reconstruction runs before distributed worker initialization.
     if vllm_version_is("0.33.0"):

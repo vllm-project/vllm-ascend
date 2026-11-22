@@ -373,7 +373,7 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
 
 
 @pytest.mark.parametrize("use_dcp", [False, True])
-def test_propose_uses_draft_decode_flags_for_dcp(monkeypatch, use_dcp):
+def test_propose_defers_dcp_host_lengths_until_inputs_are_prepared(monkeypatch, use_dcp):
     spec = make_speculator()
     spec.use_dcp = use_dcp
     spec.max_num_reqs = 4
@@ -396,14 +396,9 @@ def test_propose_uses_draft_decode_flags_for_dcp(monkeypatch, use_dcp):
     result = spec.propose(input_batch, None, None, None, None, None, None, None, None, None, None)
 
     assert result == "draft"
-    if use_dcp:
-        prepare.assert_called_once_with(1, 4, 5)
-        assert captured["seq_lens_cpu"] is prepared_lengths
-        assert captured["is_prefilling"] is prepared_flags
-    else:
-        prepare.assert_not_called()
-        assert captured["seq_lens_cpu"] is None
-        assert captured["is_prefilling"].tolist() == [True] * 4
+    prepare.assert_not_called()
+    assert captured["seq_lens_cpu"] is None
+    assert captured["is_prefilling"].tolist() == [True] * 4
 
 
 @pytest.mark.parametrize("architecture", [None, "GQA", "MLA"])
@@ -424,7 +419,7 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
 
     @contextmanager
     def factory(positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None):
-        if architecture == "MLA":
+        if architecture == "MLA" and seq_lens_cpu is not None:
             assert seq_lens_cpu.tolist() == [5, 0]
         else:
             assert seq_lens_cpu is None
