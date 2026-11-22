@@ -28,12 +28,14 @@ if TYPE_CHECKING:
     from .configs.fp8_config import AscendFp8Config
     from .configs.modelopt_mxfp8_config import AscendModelOptMxFp8Config
     from .configs.modelslim_config import AscendModelSlimConfig
+    from .configs.mxfp4_config import AscendMxfp4Config
 
 __all__ = [
     "AscendModelSlimConfig",
     "AscendCompressedTensorsConfig",
     "AscendFp8Config",
     "AscendModelOptMxFp8Config",
+    "AscendMxfp4Config",
 ]
 
 
@@ -54,4 +56,8 @@ def __getattr__(name: str) -> Any:
         from .configs.modelopt_mxfp8_config import AscendModelOptMxFp8Config
 
         return AscendModelOptMxFp8Config
+    if name == "AscendMxfp4Config":
+        from .configs.mxfp4_config import AscendMxfp4Config
+
+        return AscendMxfp4Config
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
