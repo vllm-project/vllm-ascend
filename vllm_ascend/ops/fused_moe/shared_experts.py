@@ -577,11 +577,13 @@ class AscendSharedExperts:
         if is_int8:
             # A3 INT8 shared GMM: feed exactly the routed-expert contract -- a
             # per-expert list of 2-D int8 weights in the (in, out) FRACTAL_NZ
-            # layout plus a 1-D per-output-channel scale packed as one fp32
-            # value in a uint64 (mega_moe_arch22.h:
-            # ScaleType = GemmType<uint64_t, VectorLayout>). ``weight`` already
-            # holds the processed (in, out) buffer, so only the NZ cast is
-            # needed; a bf16/fp32 scale would be silently misread.
+            # layout plus a 1-D per-output-channel scale whose fp32 bits are
+            # packed in an int64 (mega_moe_arch22.h: ScaleType =
+            # GemmType<uint64_t, VectorLayout>). ``weight`` already holds the
+            # processed (in, out) buffer, so only the NZ cast is needed; the
+            # int64 container matches the routed fused scale lists
+            # (scale_from_float_to_int64), because a bf16/fp32 scale would be
+            # silently misread.
             weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
             base_scale = linear.weight_scale.data
             scale = (
@@ -590,7 +592,6 @@ class AscendSharedExperts:
                 .contiguous()
                 .view(torch.int32)
                 .to(torch.int64)
-                .view(torch.uint64)
             )
             # The arch22 epilogue reads one scale per output channel. A
             # per-group W8A8 checkpoint would flatten to out * groups values and

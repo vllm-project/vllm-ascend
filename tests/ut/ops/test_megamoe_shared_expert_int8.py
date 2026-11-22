@@ -93,3 +93,19 @@ def test_collect_rejects_mxfp_shared_on_a3_int8() -> None:
 
     assert runner._megamoe_shared_fusion_disabled is True
     assert runner._megamoe_shared_parts == {}
+
+
+def test_collect_int8_payload_matches_routed_scale_dtype() -> None:
+    """The A3 INT8 payload must carry the same int64 scale container as routed."""
+    runner = _make_runner(QuantType.W8A8)
+    linear = SimpleNamespace(
+        weight=SimpleNamespace(data=torch.zeros(4096, 4096, dtype=torch.int8)),
+        weight_scale=SimpleNamespace(data=torch.full((4096,), 0.0078125)),
+        quant_method=SimpleNamespace(quant_type=QuantType.W8A8),
+    )
+    runner._collect_megamoe_shared_weight("w1", linear)
+
+    scale = runner._megamoe_shared_parts["w1_scale"]
+    assert scale.dtype is torch.int64
+    assert int(scale[0]) == 1006632960
+    assert tuple(runner._megamoe_shared_parts["w1"].shape) == (4096, 4096)
