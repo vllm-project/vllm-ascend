@@ -1,7 +1,0 @@
-pr: 22761
-entries:
-  - category: bugfix
-    text: >-
-      Fixed an MTP startup cache-shape error when using a quantized SFA target
-      with an auto-dtype draft cache. Draft caches now consistently honor their
-      own dtype configuration.
