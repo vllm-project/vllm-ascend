@@ -97,6 +97,69 @@ variants:
     hardware_overrides:
       ascend_950dt:
         docker_image: quay.io/ascend/vllm-ascend:v0.23.0-950DT
+  default:
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+  ascend_w8a8:
+    model_id: Qwen/Qwen3.5-397B-A17B-w8a8-mtp
+    label: W8A8 (Ascend A2)
+    precision: int8
+    vram_minimum_gb: 477
+    description: ModelSlim INT8 W8A8 checkpoint for one Atlas 800I A2 (Ascend 910B) node, using TP1. Requires --quantization ascend.
+    supported_hardware: [ascend_910b]
+    supported_frontends: [python]
+    tp:
+      ascend_910b: 1
+    min_vllm_version: 0.17.0
+    extra_args:
+      - '--quantization'
+      - ascend
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0
+        docker_serve_command: vllm serve
+        install:
+          pip: false
 meta:
   hardware:
     ascend_950dt: verified
+    ascend_910b: verified
+strategy_overrides:
+  single_node_dep:
+    hardware_overrides:
+      # The single-node 950DT deployment uses one TP8 replica with EP.
+      # DEP ignores variant.tp and would replace the variants' DP1 with DP8.
+      ascend_950dt:
+        extra_args:
+          - '--tensor-parallel-size'
+          - '8'
+          - '--data-parallel-size'
+          - '1'
+
+hardware_notes:
+  ascend_910b:
+    title: vLLM Ascend A2 image required
+    body: |-
+      Pin quay.io/ascend/vllm-ascend:v0.30.0 - the NVIDIA pip wheel cannot run on Ascend NPU.
+      PD roles = prefill + decode; total NPUs = 16.
+      Before declaring PD ready: every backend process healthy, requests via the router/proxy succeed, KV transfer completes.
+      stop/cleanup: stop prefill/decode processes and the proxy on every node before restart.
+strategy_hardware:
+  pd_cluster:
+    npu: unsupported
+    ascend_910b: supported
+strategy_min_gpus:
+  ascend_910b: 16
+guide_sections:
+  ascend: |-
+    ### Huawei Atlas 800I A2 (Ascend 910B) w8a8 (vLLM Ascend)
+
+    Verified with `quay.io/ascend/vllm-ascend:v0.30.0` on Atlas 800I A2 (Ascend 910B), as a prefill/decode PD cluster (topology per hardware notes).
+
+    ```bash
+    vllm serve Qwen/Qwen3.5-397B-A17B-w8a8-mtp \
+    ```
