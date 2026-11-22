@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -8,6 +12,10 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend.ascend_config import init_ascend_config
+
+if TYPE_CHECKING:
+    from vllm.v1.engine import EngineCoreOutputs
+    from vllm.v1.outputs import ModelRunnerOutput
 
 
 class MixedBatchScheduler(Scheduler):
@@ -22,6 +30,7 @@ class MixedBatchScheduler(Scheduler):
             raise ValueError("Mixed-batch decode limiting requires vLLM's prefill lookahead scheduling hook.")
         self._remaining_mixed_decodes: int | None = None
         self._drain_decodes = False
+        self._pending_decode_step: SchedulerOutput | None = None
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         if self._decode_cap is None and not self._decode_after_prefill:
@@ -31,7 +40,8 @@ class MixedBatchScheduler(Scheduler):
         has_decode = any(not req.is_prefill_chunk for req in self.running)
         drain = self._drain_decodes and has_decode
         self._drain_decodes = False
-        defer_prefills = has_decode and (drain or (throttle_prefills and not capacity_bound))
+        protect_decode = drain or (has_decode and self._pending_decode_step is not None)
+        defer_prefills = protect_decode or (has_decode and throttle_prefills and not capacity_bound)
         waiting_can_prefill = (
             bool(self.waiting) and len(self.running) + self.num_waiting_for_streaming_input < self.max_num_active_reqs
         )
@@ -46,22 +56,39 @@ class MixedBatchScheduler(Scheduler):
         ):
             self._remaining_mixed_decodes = self._decode_cap
 
-        if drain:
+        if protect_decode:
             # The upstream throttle normally releases when the previous prefill
             # was capacity-bound. Keep the one-step decode hold in that case and
             # preserve the saturation state for the next ordinary step.
             self.prefill_capacity_bound = False
         try:
-            output = super().schedule(throttle_prefills=throttle_prefills or drain)
+            output = super().schedule(throttle_prefills=throttle_prefills or protect_decode)
             if self._decode_after_prefill and (
                 output.scheduled_new_reqs or running_prefills.intersection(output.num_scheduled_tokens)
             ):
                 self._drain_decodes = True
+            if (
+                drain
+                and self._decode_after_prefill
+                and self.scheduler_config.async_scheduling
+                and output.total_num_scheduled_tokens
+            ):
+                # The async engine may submit the next prefill before consuming
+                # this decode's result. Let it collect the result first.
+                self._pending_decode_step = output
             return output
         finally:
             self._remaining_mixed_decodes = None
-            if drain:
+            if protect_decode:
                 self.prefill_capacity_bound = capacity_bound
+
+    def update_from_output(
+        self, scheduler_output: SchedulerOutput, model_runner_output: ModelRunnerOutput
+    ) -> dict[int, EngineCoreOutputs]:
+        outputs = super().update_from_output(scheduler_output, model_runner_output)
+        if scheduler_output is self._pending_decode_step:
+            self._pending_decode_step = None
+        return outputs
 
     def _reserve_prefill_lookahead(self, request: Request, num_computed_tokens: int, num_new_tokens: int) -> int:
         num_new_tokens = super()._reserve_prefill_lookahead(request, num_computed_tokens, num_new_tokens)

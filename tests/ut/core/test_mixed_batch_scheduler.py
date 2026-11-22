@@ -117,6 +117,23 @@ def test_prefill_step_drains_decodes_even_without_a_deferred_row(async_schedulin
     assert second.request_id in scheduler.schedule().num_scheduled_tokens
 
 
+def test_async_prefill_waits_for_drained_decode_result():
+    scheduler = _make_scheduler(True, decode_after_prefill=True)
+    first = create_request(1, num_tokens=8, max_tokens=2)
+    scheduler.add_request(first)
+    prefill = scheduler.schedule()
+    decode = scheduler.schedule()
+    assert decode.num_scheduled_tokens == {first.request_id: 1}
+    _retire(scheduler, prefill)
+
+    second = create_request(2, num_tokens=8, max_tokens=1)
+    scheduler.add_request(second)
+    assert scheduler.schedule().total_num_scheduled_tokens == 0
+
+    _retire(scheduler, decode)
+    assert second.request_id in scheduler.schedule().num_scheduled_tokens
+
+
 @pytest.mark.parametrize("async_scheduling", [False, True])
 @pytest.mark.parametrize("max_num_seqs", [4, 5], ids=["full", "insufficient-budget"])
 def test_decodes_advance_when_waiting_prefill_cannot_run(async_scheduling, max_num_seqs):
