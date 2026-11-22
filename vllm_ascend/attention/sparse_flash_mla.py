@@ -115,13 +115,7 @@ def sparse_flash_mla(q: torch.Tensor, **kwargs):
     # passes indices, but always as a prefill call (cu_seqlens_ori_kv set by
     # the prefill extra kwargs), and its span-level bidirectionality genuinely
     # needs them, so those pass through unchanged.
-    # NoPE SFA supplies explicit per-row sparse lengths; those indices are the
-    # attention mask and must survive, unlike DSpark's window-derived indices.
-    if (
-        kwargs.get("ori_sparse_indices") is not None
-        and kwargs.get("cu_seqlens_ori_kv") is None
-        and kwargs.get("ori_topk_length") is None
-    ):
+    if kwargs.get("ori_sparse_indices") is not None and kwargs.get("cu_seqlens_ori_kv") is None:
         draft_indices = kwargs.pop("ori_sparse_indices")
         max_kv = kwargs.get("max_seqlen_kv")
         if max_kv is not None and _fullcov_sparse_indices(draft_indices, int(max_kv)):

@@ -84,25 +84,6 @@ def test_adapter_drops_dspark_draft_indices_but_keeps_vision():
         assert attention_op.call_args.kwargs["ori_sparse_indices"] is indices
 
 
-def test_adapter_preserves_explicit_sparse_lengths_and_indices():
-    attention_op = mock.Mock(return_value=torch.empty(0))
-    indices = torch.tensor([[[1, 7, -1]]], dtype=torch.int32)
-    lengths = torch.tensor([[2]], dtype=torch.int32)
-    with mock.patch(
-        "vllm_ascend.attention.sparse_flash_mla._get_sparse_flash_mla_ops",
-        return_value=(attention_op, mock.Mock()),
-    ):
-        sparse_flash_mla(
-            torch.empty(1, 64, 512),
-            ori_sparse_indices=indices,
-            ori_topk_length=lengths,
-            ori_mask_mode=0,
-            sinks=torch.ones(64),
-        )
-    assert attention_op.call_args.kwargs["ori_sparse_indices"] is indices
-    assert attention_op.call_args.kwargs["ori_topk_length"] is lengths
-
-
 def test_adapter_passes_caller_window_and_widens_on_full_coverage():
     """Window assignment mirrors the FP8 mixed-quant adapter of #18808: the
     caller's win_left/win_right pass through unchanged; a full-coverage index
