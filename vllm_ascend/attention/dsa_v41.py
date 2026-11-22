@@ -44,7 +44,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
+from vllm_ascend.models.deepseek_v41.cache_config import MAX_MAIN_BLOCK_SIZE, STATE_RING_ROWS, is_split_main_spec
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
@@ -1851,7 +1851,7 @@ class DeepseekV41CacheBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec):
-        return [kv_cache_spec.block_size]
+        return [MAX_MAIN_BLOCK_SIZE if is_split_main_spec(kv_cache_spec) else kv_cache_spec.block_size]
 
     @staticmethod
     def get_name():

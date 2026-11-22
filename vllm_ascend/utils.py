@@ -1552,6 +1552,11 @@ def refresh_block_size(vllm_config):
     if not scheduler_config or not model_config:
         return
 
+    if model_config.hf_config.model_type in ("deepseek_v41", "deepseek_v41_text") and cache_config.block_size == 512:
+        # Each V4.1 manager block binds four 128-token pages on A5 MRV2.
+        # Platform validation checks the supported runtime before allocation.
+        return
+
     if model_config.hf_config.model_type == "deepseek_v4":
         # CacheConfig resolves an omitted --block-size on its own default above, so
         # block_size cannot be None here.

@@ -99,6 +99,8 @@ from vllm_ascend.worker.v2.pp_transport import (
 )
 
 from .cache_config import (
+    MAX_MAIN_BLOCK_SIZE,
+    PACKED_MAIN_BLOCK_SIZE,
     SWA_BLOCK_SIZE,
     make_folded_index_cache_spec,
     make_index_cache_spec,
@@ -771,8 +773,15 @@ def make_pp_cache_transport(vllm_config, config, prefix, start_layer, end_layer,
 class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
     """Ascend SWA cache registered with the V4.1 allocator."""
 
-    def __init__(self, head_dim, window_size, dtype, prefix, cache_config, bounded_replay=False, *, pipeline_parallel=False):
-        block_size = cache_config.block_size if pipeline_parallel else min(cache_config.block_size, SWA_BLOCK_SIZE)
+    def __init__(
+        self, head_dim, window_size, dtype, prefix, cache_config, bounded_replay=False, *, pipeline_parallel=False
+    ):
+        if pipeline_parallel:
+            block_size = cache_config.block_size
+        elif cache_config.block_size == PACKED_MAIN_BLOCK_SIZE:
+            block_size = MAX_MAIN_BLOCK_SIZE
+        else:
+            block_size = min(cache_config.block_size, SWA_BLOCK_SIZE)
         spec = make_swa_cache_spec(
             block_size=block_size,
             window_size=window_size,

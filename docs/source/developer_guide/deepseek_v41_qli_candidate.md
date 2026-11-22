@@ -11,8 +11,12 @@ Its companion `QuantLightningIndexerV2Metadata` is built and registered too.
 
 The current candidate uses unmodified vLLM at Ascend's verified main pin. All implementation changes stay in vllm-ascend. Main KV and
 indexer manager blocks are 128 tokens; SWA pages are capped at 32 tokens,
-matching upstream V4.1. Each manager block is one kernel page. Main block sizes
-above 128 are rejected.
+matching upstream V4.1. Each 128-token manager block is one kernel page.
+
+A5 MRV2 on vLLM main also supports 512-token main KV and index manager
+blocks with four 128-token kernel stripes, SWA128, and one DSpark draft
+cache group. This configuration requires one pipeline stage and disables
+context parallelism and KV transfer.
 
 With one pipeline stage, V4.1 delegates grouping, placement, and capacity
 accounting to the upstream planner through the Ascend platform builder.
@@ -20,8 +24,9 @@ Pipeline parallelism keeps Ascend's stage-local placement and uses the
 configured block size for SWA.
 The upstream scheduler owns block IDs, prefix caching, and recycling.
 Ascend supplies storage specs, component views, strided C2 ring access, and
-Mooncake registration of complete shared pool pages. Block tables and writer
-slots retain the manager IDs without kernel-stripe remapping.
+Mooncake registration of complete shared pool pages. For 512/128, each
+attention group expands its manager block table into kernel block IDs.
+Flat writer slots retain manager-block arithmetic.
 
 Runtime validation of this planner integration is pending. The regression
 coverage exercises cache placement, component isolation, recycling, C1/C2 slot

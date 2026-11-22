@@ -48,8 +48,9 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
     group_cache_specs,
-    make_cache_groups,
     is_deepseek_v41_cache,
+    is_split_main_spec,
+    make_cache_groups,
 )
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
@@ -114,6 +115,15 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         if is_deepseek_v41_cache(kv_cache_spec):
             if vllm_config.parallel_config.pipeline_parallel_size > 1:
                 return make_cache_groups(group_cache_specs(kv_cache_spec))
+            if any(is_split_main_spec(spec) for spec in kv_cache_spec.values()):
+                draft = {name: spec for name, spec in kv_cache_spec.items() if spec.is_draft}
+                if draft:
+                    target = {name: spec for name, spec in kv_cache_spec.items() if not spec.is_draft}
+                    draft_spec = UniformTypeKVCacheSpecs.from_specs(draft)
+                    if draft_spec is None:
+                        raise ValueError("V4.1 packed DSpark pages must share one sliding-window specification.")
+                    groups = super().get_kv_cache_groups(vllm_config, target)
+                    return [*groups, KVCacheGroupSpec(list(draft), draft_spec)]
             return super().get_kv_cache_groups(vllm_config, kv_cache_spec)
 
         grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)

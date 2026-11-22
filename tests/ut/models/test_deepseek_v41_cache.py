@@ -1927,3 +1927,124 @@ def test_platform_builder_uses_upstream_main128_placement(runtime, swa_block_siz
         )
         if isinstance(cache, tuple):
             assert cache[1].data_ptr() - cache[0].data_ptr() == cache[0][0].numel() * cache[0].element_size()
+
+
+def test_packed_512_main_pages_and_draft_group(runtime, monkeypatch):
+    """Verify reader and writer addresses across page boundaries and draft layer isolation."""
+    from vllm.v1.worker.utils import AttentionGroup
+
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+    from vllm_ascend.models.deepseek_v41 import cache_config
+    from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
+    from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, create_kv_cache_runtime_views
+    from vllm_ascend.worker.v2.block_table import AscendBlockTables
+
+    monkeypatch.setattr(cache_config, "uses_a5_packed_cache", lambda: True)
+    runtime.cache_config.block_size = 512
+    runtime.model_config.supports_kv_cache_grouping = False
+    swa = make_swa_cache_spec(block_size=128, window_size=128, head_size=512, dtype=torch.bfloat16, cache_dtype="auto")
+    main = {
+        f"model.layers.{i}.long_kv": make_mla_cache_spec(block_size=512, head_size=512, compress_ratio=ratio)
+        for i, ratio in enumerate((1, 2))
+    }
+    main.update(
+        {
+            f"model.layers.{i}.indexer": make_index_cache_spec(block_size=512, head_size=128, compress_ratio=ratio)
+            for i, ratio in enumerate((1, 2))
+        }
+    )
+    draft = {f"mtp.{i}.swa": replace(swa, is_draft=True) for i in range(3)}
+    specs = {**main, **{f"model.layers.{i}.swa": swa for i in range(8)}, **draft}
+    builder = AscendKVCacheConfigBuilder()
+    groups = builder.get_kv_cache_groups(runtime, specs)
+    assert [group.layer_names for group in groups if draft.keys() & set(group.layer_names)] == [list(draft)]
+    plan = builder.get_kv_cache_config_from_groups(runtime, groups, 8)
+    backend = dsa_v41.DeepseekV41CacheBackend
+    attn_groups = [
+        [AttentionGroup(backend, [name], specs[name], gid) for name in group.layer_names]
+        for gid, group in enumerate(groups)
+    ]
+    kernel_sizes = prepare_ascend_kernel_block_sizes(plan, attn_groups)
+    assert all(size == 128 for size in kernel_sizes)
+    backing = torch.zeros(max(d.size for d in plan.kv_cache_tensors), dtype=torch.int8)
+    views = create_kv_cache_runtime_views(
+        plan,
+        backing,
+        [g for group in attn_groups for g in group],
+        kernel_sizes,
+        {},
+        runtime.cache_config.get_resolved_kv_cache_layout(),
+    )
+
+    positions = torch.tensor([127, 128, 129, 511, 512, 513])
+    tables = AscendBlockTables.__new__(AscendBlockTables)
+    tables.num_kv_cache_groups = 1
+    tables.redirect_writes_to_null_block = False
+    stage_write = Mock()
+    tables.block_tables = [SimpleNamespace(gpu=torch.empty(1, 8), stage_write=stage_write)]
+    tables.num_blocks = SimpleNamespace(np=torch.zeros(1, 1, dtype=torch.int32))
+    tables.append_block_ids(0, ([3, 7],), overwrite=True)
+    manager_table = torch.tensor([stage_write.call_args.args[2]], dtype=torch.int32)
+    assert manager_table.tolist() == [[3, 7]]
+    slots = manager_table[0, positions // 512] * 512 + positions % 512
+    expanded = torch.tensor([[12, 13, 14, 15, 28, 29, 30, 31]], dtype=torch.int32)
+    page_ids = slots // 128
+    assert page_ids.tolist() == [12, 13, 13, 15, 28, 28]
+    main_gid = next(i for i, group in enumerate(groups) if main.keys() & set(group.layer_names))
+    main_groups = [[] for _ in groups]
+    main_groups[main_gid] = attn_groups[main_gid]
+    for group in main_groups[main_gid]:
+        group.kernel_block_size = 128
+        group.kernel_block_offsets = torch.arange(4, dtype=torch.int32)
+        group.kernel_block_table = torch.zeros(1, 1, 8, dtype=torch.int32)
+        group.metadata_builders = [
+            AscendDSAV41MetadataBuilder(
+                group.kv_cache_spec.copy_with_new_block_size(128),
+                group.layer_names,
+                runtime,
+                torch.device("cpu"),
+                build_query_metadata=False,
+            )
+        ]
+    boundaries = torch.tensor([0, len(positions)], dtype=torch.int32)
+    metadata = build_attn_metadata(
+        attn_groups=main_groups,
+        num_reqs=1,
+        num_tokens=len(positions),
+        query_start_loc_gpu=boundaries,
+        query_start_loc_cpu=boundaries,
+        max_query_len=len(positions),
+        seq_lens=torch.tensor([514], dtype=torch.int32),
+        max_seq_len=514,
+        block_tables=[manager_table] * len(groups),
+        slot_mappings=slots.repeat(len(groups), 1),
+        kv_cache_config=plan,
+        positions=positions,
+        is_prefilling=torch.tensor([True]),
+    )
+    for name, spec in main.items():
+        actual = metadata[name]
+        torch.testing.assert_close(actual.block_table, expanded)
+        valid = positions % spec.tokens_per_state == spec.tokens_per_state - 1
+        assert actual.slot_mapping[valid, 0].tolist() == page_ids[valid].tolist()
+        assert actual.slot_mapping[valid, 1].tolist() == (positions[valid] % 128 // spec.tokens_per_state).tolist()
+    descriptors = {name: (desc, i) for desc in plan.kv_cache_tensors for i, name in enumerate(desc.layers)}
+    for name, spec in main.items():
+        desc, i = descriptors[name]
+        stripe = desc.block_stride // 4
+        layer_offset = (desc.offset + i * desc.layer_stride) // 4
+        components = views[name] if isinstance(views[name], tuple) else (views[name],)
+        for plane in components:
+            assert plane.shape[:2] == (32, 128 // spec.tokens_per_state)
+            assert plane.stride(0) * plane.element_size() == stripe
+            for page, pos in zip(page_ids.tolist(), positions.tolist()):
+                row = pos % 128 // spec.tokens_per_state
+                element = plane[page, row, 0, 0:1]
+                assert element.storage_offset() * plane.element_size() == (
+                    page * stripe + layer_offset + row * plane.stride(1) * plane.element_size()
+                )
+            layer_offset += plane[0].numel() * plane.element_size()
+    for sentinel, name in enumerate(draft, 1):
+        views[name][7, 127].fill_(sentinel)
+    for sentinel, name in enumerate(draft, 1):
+        assert torch.all(views[name][7, 127] == sentinel)

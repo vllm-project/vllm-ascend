@@ -9,6 +9,7 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.v1.attention.backend import CommonAttentionMetadata
 
 from vllm_ascend.attention.indexer import AscendHiSparseIndexerBackend, AscendSFAIndexerBackend
+from vllm_ascend.models.deepseek_v41.cache_config import is_split_main_spec
 from vllm_ascend.patch.worker.patch_bind_kv_cache import (
     bind_kv_cache,
     bind_kv_cache_to_layers,
@@ -96,6 +97,17 @@ vllm.v1.worker.gpu.attn_utils.allocate_kv_cache = allocate_kv_cache_main
 # (`layer_stride == 0`) as block-outermost packing and drops the kernel-block
 # split, so correct the selection before `init_attn_backend` consumes it.
 vllm.v1.worker.gpu.attn_utils.prepare_kernel_block_sizes = prepare_ascend_kernel_block_sizes
+
+
+def _map_ascend_kv_caches_to_kernel_blocks(kv_caches, attn_groups):
+    # V4.1's packed allocation already exposes kernel pages, including tuples.
+    return v1_worker_utils.map_kv_caches_to_kernel_blocks(
+        kv_caches, (group for group in attn_groups if not is_split_main_spec(group.kv_cache_spec))
+    )
+
+
+if hasattr(v1_worker_utils, "map_kv_caches_to_kernel_blocks"):
+    vllm.v1.worker.gpu.attn_utils.map_kv_caches_to_kernel_blocks = _map_ascend_kv_caches_to_kernel_blocks
 
 # vLLM main (#53781) routes init_kv_cache through bind_kv_cache_to_layers,
 # which Ascend overrides with direct raw-allocation binding.
