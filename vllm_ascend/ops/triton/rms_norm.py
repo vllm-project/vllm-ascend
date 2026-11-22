@@ -200,7 +200,10 @@ _TRITON_Q_RMS_KERNEL = TritonQRmsKernel()
 
 @cache
 def _vector_cores(device: torch.device) -> int:
-    return triton.runtime.driver.active.utils.get_device_properties(device).get("num_vectorcore", -1)
+    count = triton.runtime.driver.active.utils.get_device_properties(device).get("num_vectorcore", -1)
+    if count <= 0:
+        raise RuntimeError(f"Invalid num_vectorcore for {device}: {count}")
+    return count
 
 
 def triton_q_rms(
@@ -220,7 +223,7 @@ def triton_q_rms(
 
     num_tiles = max(1, cdiv(total_batch, BLOCK_M))
     # Group tiles only when every program can handle at least two.
-    grouped = num_vectorcore > 0 and num_tiles >= 2 * num_vectorcore
+    grouped = num_tiles >= 2 * num_vectorcore
     norm_output = torch.empty_like(q)
 
     _TRITON_Q_RMS_KERNEL(

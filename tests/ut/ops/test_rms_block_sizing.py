@@ -26,7 +26,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.rms_norm import _rms_block_m
+from vllm_ascend.ops.triton.rms_norm import _rms_block_m, _vector_cores
 
 # 192 KB, matching ``get_ub_size_bytes()``'s documented fallback for 910B/A3.
 _UB_FALLBACK_BYTES = 192 * 1024
@@ -118,3 +118,12 @@ def test_block_m_scales_down_for_large_dim():
     """Larger hidden dims must shrink the tile to stay within UB."""
     assert _row_block_size(128, torch.bfloat16) > _row_block_size(2048, torch.bfloat16)
     assert _block_m(10**6, 1, 128, torch.bfloat16) > _block_m(10**6, 1, 2048, torch.bfloat16)
+
+
+@pytest.mark.parametrize("properties", [{}, {"num_vectorcore": 0}, {"num_vectorcore": -1}])
+def test_invalid_vector_core_count(properties):
+    device = torch.device("cpu")
+    with patch("vllm_ascend.ops.triton.rms_norm.triton") as triton:
+        triton.runtime.driver.active.utils.get_device_properties.return_value = properties
+        with pytest.raises(RuntimeError, match="Invalid num_vectorcore"):
+            _vector_cores(device)
