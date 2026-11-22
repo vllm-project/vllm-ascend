@@ -694,9 +694,7 @@ def _maybe_stage_owner_cmp_cache(
         return None
     metadata._pcp_stage_memo = (source_cache.data_ptr(), result)
     _pcp_stage_count("long_kv", "ok")
-    _PCP_STAGE_STEP["long_kv_max_blocks"] = max(
-        _PCP_STAGE_STEP["long_kv_max_blocks"], int(cache.last_total_blocks)
-    )
+    _PCP_STAGE_STEP["long_kv_max_blocks"] = max(_PCP_STAGE_STEP["long_kv_max_blocks"], int(cache.last_total_blocks))
     _PCP_STAGE_STEP["long_kv_capacity"] = int(cache.capacity_blocks)
     return result
 
@@ -1040,9 +1038,7 @@ class AscendDSAV41Impl:
             return
         cmp_metadata._pcp_stage_async = (pointer, (staged[0], staged[1]), staged[2])
         _pcp_stage_count("long_kv", "async_ok")
-        _PCP_STAGE_STEP["long_kv_max_blocks"] = max(
-            _PCP_STAGE_STEP["long_kv_max_blocks"], int(cache.last_total_blocks)
-        )
+        _PCP_STAGE_STEP["long_kv_max_blocks"] = max(_PCP_STAGE_STEP["long_kv_max_blocks"], int(cache.last_total_blocks))
         _PCP_STAGE_STEP["long_kv_capacity"] = int(cache.capacity_blocks)
 
     def __init__(self, prefix, role, topology, long_kv_source_prefix, index_k_source_prefix):
@@ -2235,9 +2231,9 @@ class AscendDSAV41StateMetadataBuilder(AscendDSAV41MetadataBuilder):
             ring_meta = self._c2_ring_metadata[: 5 * req.num_reqs].view(5, req.num_reqs)
             input_positions = req.positions
             if self._supports_device_ops:
-                assert (
-                    self._c2_full_source_rope is not None
-                ), "Enable device metadata before building compressor metadata"
+                assert self._c2_full_source_rope is not None, (
+                    "Enable device metadata before building compressor metadata"
+                )
                 full_source_cos, full_source_sin = self._c2_full_source_rope
             else:
                 full_source_cos = full_source_sin = None
