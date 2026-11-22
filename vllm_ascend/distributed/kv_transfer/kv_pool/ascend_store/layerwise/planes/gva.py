@@ -173,6 +173,17 @@ class GvaDataPlane(LayerwiseDataPlane):
                     for block_idx in range(save_start_block, end_limit)
                     if group_store_mask is None or block_idx >= len(group_store_mask) or group_store_mask[block_idx]
                 ]
+                # TEMPORARY P11 diagnosis: GVA save extent and candidate blocks.
+                print(
+                    f"[p11-diag] gva group={group_id} start={save_start_block} "
+                    f"save_end={save_end_block} limit={end_limit} hashes={len(group_block_hashes)} "
+                    f"ids={len(block_ids_by_group)} cand={len(candidate_blocks)} "
+                    f"last={candidate_blocks[-3:] if candidate_blocks else []} "
+                    f"mask={None if group_store_mask is None else sum(group_store_mask)} "
+                    f"save_end_token={request.save_end_token} target={request.target_token_len} "
+                    f"prompt={request.num_prompt_tokens}",
+                    flush=True,
+                )
                 candidate_keys = [
                     worker._make_layerwise_full_key(
                         group_id,
