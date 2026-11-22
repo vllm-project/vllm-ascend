@@ -74,3 +74,22 @@ def test_collect_rejects_w4a8_shared_quant_type() -> None:
 
     assert runner._megamoe_shared_fusion_disabled is True
     assert runner._megamoe_shared_parts == {}
+
+
+def test_collect_rejects_int8_shared_on_a5_mxfp() -> None:
+    """An int8 shared linear cannot ride the A5 MXFP-only MegaMoe payload family."""
+    runner = _make_runner(QuantType.W8A8MXFP)
+    runner._megamoe_shared_fusion_platform = "A5/MXFP"
+    runner._collect_megamoe_shared_weight("w1", _shared_linear(torch.int8, QuantType.W8A8))
+
+    assert runner._megamoe_shared_fusion_disabled is True
+    assert runner._megamoe_shared_parts == {}
+
+
+def test_collect_rejects_mxfp_shared_on_a3_int8() -> None:
+    """An MXFP shared linear cannot ride the arch22 INT8 MegaMoe payload family."""
+    runner = _make_runner(QuantType.W8A8)
+    runner._collect_megamoe_shared_weight("w1", _shared_linear(torch.float8_e4m3fn, QuantType.W8A8MXFP))
+
+    assert runner._megamoe_shared_fusion_disabled is True
+    assert runner._megamoe_shared_parts == {}

@@ -411,6 +411,25 @@ class AscendSharedExperts:
         weight_dtype = linear.weight.data.dtype
         is_int8 = weight_dtype == torch.int8
         self._megamoe_shared_weight_dtype = weight_dtype
+        # The routed layer already fixed this machine's MegaMoe payload family:
+        # A5 accepts the MXFP layouts only, arch22 (A3) accepts the INT8 one. A
+        # checkpoint that quantizes the shared expert into the other family
+        # cannot be expressed by the operator, and publishing it would also
+        # skip the standalone forward, so fall back before rebuilding anything.
+        platform = getattr(self, "_megamoe_shared_fusion_platform", "A5/MXFP")
+        is_mxfp_platform = platform != "A3/INT8"
+        if weight_dtype in (torch.uint8, torch.float8_e4m3fn) and not is_mxfp_platform:
+            self._disable_megamoe_shared_fusion(
+                f"shared-expert weight dtype {weight_dtype} is an MXFP payload, but the "
+                f"routed MegaMoe layer on {platform} consumes the arch22 INT8 family",
+            )
+            return
+        if is_int8 and is_mxfp_platform:
+            self._disable_megamoe_shared_fusion(
+                f"shared-expert weight dtype {weight_dtype} is an arch22 INT8 payload, but "
+                f"the routed MegaMoe layer on {platform} consumes the MXFP family",
+            )
+            return
         # The MXFP padding attributes describe block_128/block_32 shard
         # padding. INT8 weights keep the plain (in, out) shape, so skip the
         # block_128-based inference there; a stale hint would otherwise
