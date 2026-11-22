@@ -13,22 +13,19 @@ from vllm_ascend.utils import enable_custom_op
 
 
 @pytest.mark.parametrize("graph", [False, True])
-@pytest.mark.parametrize("padded", [False, True])
-def test_a5_nope_sparse_indices_and_metadata_replay(graph, padded):
+def test_a5_nope_sparse_indices_and_metadata_replay(graph):
     if get_ascend_device_type() != AscendDeviceType.A5:
         pytest.skip("SparseFlashMla NoPE uses the A5 CANN operator")
     from vllm_ascend.attention.sfa_v1 import SMLA_METADATA_SIZE, sparse_mla
 
     enable_custom_op()
     query = torch.zeros((1, 64, 512), dtype=torch.bfloat16, device="npu")
-    raw = torch.zeros((2, 128, 1024 if padded else 512), dtype=torch.bfloat16, device="npu")
-    cache = torch.as_strided(raw, (2, 128, 1, 512), (raw.stride(0), 512, 512, 1))
-    cache[1, :64] = 1
-    cache[1, 64:] = 3
+    cache = torch.ones((1, 128, 1, 512), dtype=torch.bfloat16, device="npu")
+    cache[:, 64:] = 3
     indices = torch.arange(64, dtype=torch.int32, device="npu").view(1, 1, 64)
     metadata = SimpleNamespace(
         block_size=128,
-        block_table=torch.tensor([[1]], dtype=torch.int32, device="npu"),
+        block_table=torch.tensor([[0]], dtype=torch.int32, device="npu"),
         query_start_loc=torch.tensor([0, 1], dtype=torch.int32, device="npu"),
         seq_lens=torch.tensor([128], dtype=torch.int32, device="npu"),
         max_query_len=1,
@@ -60,29 +57,6 @@ def test_a5_nope_sparse_indices_and_metadata_replay(graph, padded):
         torch.npu.synchronize()
         torch.testing.assert_close(output, torch.full_like(output, value * valid / (valid + 1)))
         assert metadata.smla_metadata.data_ptr() == address
-
-
-@pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
-def test_a5_packed_cache_store_preserves_page_padding(dtype):
-    if get_ascend_device_type() != AscendDeviceType.A5:
-        pytest.skip("Packed FP8 cache requires A5")
-    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
-
-    enable_custom_op()
-    raw = torch.zeros(2 * 128 * 1024, dtype=dtype, device="npu")
-    cache = torch.as_strided(raw, (2, 128, 1, 528), (128 * 1024, 528, 528, 1))
-    values = torch.ones((3, 1, 512), dtype=torch.bfloat16, device="npu").to(dtype)
-    scales = torch.ones((3, 1, 16), dtype=torch.bfloat16, device="npu").to(dtype)
-    rope = torch.empty((3, 1, 0), dtype=dtype, device="npu")
-    slots = torch.tensor([0, 128, -1], dtype=torch.int32, device="npu")
-    impl = SimpleNamespace(pcp_enabled=False, sfa_qsfa_packed_kv_head_dim=528)
-    AscendSFAImpl._store_packed_kv_cache(impl, rope, values, scales, (cache,), slots, None)
-    torch.npu.synchronize()
-    actual = raw.cpu().float()
-    expected = torch.zeros_like(actual)
-    expected[:528] = 1
-    expected[128 * 1024 : 128 * 1024 + 528] = 1
-    torch.testing.assert_close(actual, expected)
 
 
 def test_band_visible_lengths_require_one_row_per_query():

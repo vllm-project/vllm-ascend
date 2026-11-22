@@ -1427,11 +1427,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.kv_a_layernorm is not None
             values = self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank))
             cache = kv_cache[0]
-            if not cache.is_contiguous():
-                # Hybrid pages can carry padding between physical blocks.
-                values = values.to(cache.dtype).unsqueeze(1)
-                DeviceOperator.reshape_and_cache(values, values, cache, cache, slots[: values.shape[0]])
-                return None, None
             # The hybrid cache configuration keeps NoPE main KV pages packed.
             torch_npu.npu_scatter_nd_update_(
                 cache.view(-1, self.kv_lora_rank),
@@ -1895,16 +1890,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         packed_head_dim = self.sfa_qsfa_packed_kv_head_dim
         assert packed_kv.shape[-1] == packed_head_dim
         packed_kv = packed_kv.view(-1, packed_head_dim)
-        if not kv_cache[0].is_contiguous():
-            packed_kv = packed_kv.unsqueeze(1)
-            DeviceOperator.reshape_and_cache(
-                packed_kv,
-                packed_kv,
-                kv_cache[0],
-                kv_cache[0],
-                slot_mapping_sfa[: packed_kv.shape[0]],
-            )
-            return
         DeviceOperator.scatter_cache(
             kv_cache[0].view(-1, packed_head_dim),
             slot_mapping_sfa[: packed_kv.shape[0]].view(-1, 1),

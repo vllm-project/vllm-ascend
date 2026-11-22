@@ -2048,9 +2048,7 @@ def _reshape_kv_cache_v2(
                 raw_k_tensor = raw_cache
                 # Allocation and the layer's reader/writer share this spec.
                 k_dtype = kv_cache_spec.dtype
-                k_cache, _ = _reshape_combined_mla_kv_cache(
-                    raw_k_tensor, k_shape, v_shape, k_dtype, page_stride_bytes, num_blocks_per_kv_block
-                )
+                k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)
             elif isinstance(raw_cache, tuple):
                 raw_k_tensor, raw_v_tensor = raw_cache

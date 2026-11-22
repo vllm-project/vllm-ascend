@@ -3430,8 +3430,7 @@ def test_step5_reshape_rejects_non_tensor_step_aux_raw(monkeypatch) -> None:
         ("int8", torch.float8_e4m3fn, True),
     ],
 )
-@pytest.mark.parametrize("padding_bytes", [0, 512])
-def test_sfa_reshape_uses_each_layer_storage_format(monkeypatch, target_dtype, layer_dtype, packed, padding_bytes):
+def test_sfa_reshape_uses_each_layer_storage_format(monkeypatch, target_dtype, layer_dtype, packed):
     layer_name = "model.layers.78.self_attn.attn"
     num_blocks, block_size = 2, 128
     spec = AscendMLAAttentionSpec(
@@ -3442,8 +3441,6 @@ def test_sfa_reshape_uses_each_layer_storage_format(monkeypatch, target_dtype, l
         is_draft=True,
         cache_sparse_sfa_c8=packed,
     )
-    if padding_bytes:
-        spec = replace(spec, page_size_padded=spec.page_size_bytes + padding_bytes)
     config = SimpleNamespace(
         cache_config=SimpleNamespace(cache_dtype=target_dtype),
         model_config=SimpleNamespace(dtype=torch.bfloat16),
@@ -3475,8 +3472,7 @@ def test_sfa_reshape_uses_each_layer_storage_format(monkeypatch, target_dtype, l
     assert len(caches) == (1 if packed else 2)
     assert all(cache.dtype == layer_dtype for cache in caches)
     assert all(cache.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr() for cache in caches)
-    assert sum(cache.numel() * cache.element_size() for cache in caches) == raw.numel() - num_blocks * padding_bytes
-    assert caches[0].stride(0) * caches[0].element_size() == spec.page_size_bytes
+    assert sum(cache.numel() * cache.element_size() for cache in caches) == raw.numel()
     assert caches[0].shape == (num_blocks, block_size, 1, 656 if packed else 512)
     if not packed:
         assert caches[1].shape == (num_blocks, block_size, 1, 64)
