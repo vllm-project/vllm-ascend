@@ -114,6 +114,139 @@ def test_flash_hisparse_scope(monkeypatch, model_type, hisparse_enabled, indexer
     assert hisparse.supports_glm5_next_hisparse(config) is expected
 
 
+@pytest.mark.parametrize(
+    ("resident", "padded"),
+    [(True, False), (False, False), (True, True)],
+    ids=["resident", "cold", "padded"],
+)
+def test_resident_mixed_attention_preserves_native_paged_metadata(monkeypatch, resident, padded):
+    from vllm.config.compilation import CUDAGraphMode
+    from vllm.v1.hisparse.runtime import PagedCacheView
+
+    from vllm_ascend import hisparse
+    from vllm_ascend.attention import sfa_hisparse
+    from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
+
+    num_decode, num_live = 6, 15
+    query = torch.arange(num_live, dtype=torch.bfloat16).view(num_live, 1, 1)
+    logical_topk = torch.full((num_live, 1, 2176), -1, dtype=torch.int32)
+    logical_topk[:, 0, 0] = torch.arange(num_live)
+    logical_topk[:, 0, 2050] = 9
+    query_ends = torch.tensor([num_decode, num_live], dtype=torch.int32)
+    key_lengths = torch.tensor([130, 255], dtype=torch.int32)
+    resident_table = torch.tensor([[1, 3, 0], [4, 3 if resident else 0, 2]], dtype=torch.int32)
+    source_table = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.int32)
+    metadata = NS(
+        num_reqs=2,
+        num_decodes=1,
+        num_prefills=1,
+        num_decode_tokens=num_decode,
+        num_actual_tokens=num_live,
+        num_input_tokens=num_live + int(padded),
+        block_size=128,
+        hisparse_for_capture=False,
+        req_id_per_token=torch.tensor([0] * num_decode + [1] * (num_live - num_decode), dtype=torch.int32),
+        query_start_loc=torch.cat((query_ends.new_zeros(1), query_ends)),
+    )
+    raw = torch.empty(5 * 9 * 128 * 528, dtype=torch.int8)
+    view = PagedCacheView.bind(
+        raw,
+        dtype=torch.float8_e4m3fn,
+        row_width=528,
+        byte_offset=0,
+        block_stride=9 * 128 * 528,
+        num_blocks=5,
+        block_size=128,
+    )
+    calls = []
+    impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
+    impl.enable_sparse_sfa_c8 = True
+    impl.c8_cache_dtype = torch.float8_e4m3fn
+    impl.qk_rope_head_dim = 0
+    impl.vllm_config = NS(
+        attention_config=NS(hisparse_config=NS(), indexer_kv_dtype="fp8"),
+        compilation_config=NS(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY),
+        cache_config=NS(cache_dtype="fp8"),
+        model_config=NS(hf_text_config=NS(model_type="glm5_next_text", index_topk=2048, index_kpool=4, qk_rope_head_dim=0)),
+        parallel_config=NS(
+            data_parallel_size=1,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+        ),
+    )
+    impl.index_group_index = 0
+    impl.index_group = NS(
+        set_logical_topk_ready=lambda _: calls.append("ready"),
+        physical_kv_cache=lambda _: view.cache,
+    )
+
+    def resolve(rows, *, block_table, logical_topk_indices, block_size, num_valid_rows):
+        calls.append("resolve")
+        assert block_table is source_table and block_size == 128
+        assert rows.tolist() == [0] * num_decode
+        assert num_valid_rows.tolist() == [num_live]
+        torch.testing.assert_close(logical_topk_indices, logical_topk[:num_decode, 0])
+        return logical_topk_indices
+
+    impl.hisparse_cache = NS(
+        view=view,
+        block_table=resident_table,
+        runtime=NS(
+            request_state_indices=torch.tensor([1, 0], dtype=torch.int32),
+            cache_ops=NS(attention_lengths=(torch.arange(num_live), torch.ones(1)), attention_capacity=1),
+        ),
+        all_context_pages_resident=resident,
+        dummy_batch=False,
+        draft_layer=False,
+        source_block_table=source_table,
+        swap_in=resolve,
+    )
+    monkeypatch.setattr(
+        hisparse, "get_current_hardware_profile", lambda: NS(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED)
+    )
+    monkeypatch.setattr(sfa_hisparse, "get_forward_context", lambda: NS(cudagraph_runtime_mode=CUDAGraphMode.NONE))
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
+
+    def paged(_self, q, q_rope, kv, indices, meta, ends, lengths, *, block_table):
+        calls.append("paged")
+        assert q is query and q_rope is None and meta is metadata
+        assert ends is query_ends and lengths is key_lengths
+        assert kv[0].data_ptr() == raw.data_ptr()
+        assert kv[0].shape == (37, 128, 1, 528)
+        assert block_table.tolist() == [[36, 27, 18], [9, 27, 0]]
+        assert indices.shape == (num_live, 1, 2051) and indices.is_contiguous()
+        torch.testing.assert_close(indices, logical_topk[:, :, :2051])
+        return query + 1
+
+    def physical(q, *args, **kwargs):
+        calls.append("physical")
+        torch.testing.assert_close(q, query[:num_decode])
+        return q - 1
+
+    def prefill(q, q_rope, indices, meta, ends, lengths):
+        calls.append("prefill")
+        assert q_rope is None and meta is metadata
+        assert ends is query_ends and lengths is key_lengths
+        torch.testing.assert_close(q, query[num_decode:])
+        torch.testing.assert_close(indices, logical_topk[num_decode:, 0])
+        return q - 2
+
+    monkeypatch.setattr(sfa_hisparse.AscendSFAImpl, "_execute_sparse_flash_attention_process", paged)
+    monkeypatch.setattr(impl, "_attention_physical", physical)
+    monkeypatch.setattr(impl, "_try_c8_resident_prefill", prefill)
+    actual = impl._execute_sparse_flash_attention_process(
+        query, None, (view.cache,), logical_topk, metadata, query_ends, key_lengths
+    )
+
+    if resident and not padded:
+        assert calls == ["ready", "paged"]
+        torch.testing.assert_close(actual, query + 1)
+    else:
+        assert calls == ["ready", "resolve", "physical", "prefill"]
+        torch.testing.assert_close(actual, torch.cat((query[:num_decode] - 1, query[num_decode:] - 2)))
+
+
 @pytest.fixture(params=[False, True], ids=["standalone", "profiled"])
 def prepare_workspaces(request):
     from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager

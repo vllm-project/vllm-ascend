@@ -733,6 +733,55 @@ class AscendHiSparseImpl(AscendSFAImpl):
             block_table=table,
         )
 
+    def _try_c8_resident_mixed(self, query, query_rope, logical_topk, metadata, query_ends, key_lengths):
+        cache = self.hisparse_cache
+        if (
+            not self.enable_sparse_sfa_c8
+            or self.c8_cache_dtype != torch.float8_e4m3fn
+            or self.qk_rope_head_dim != 0
+            or metadata.hisparse_for_capture
+            or not cache.all_context_pages_resident
+            or cache.dummy_batch
+            or cache.draft_layer
+            or metadata.num_reqs != metadata.num_decodes + metadata.num_prefills
+            or not (metadata.num_actual_tokens == metadata.num_input_tokens == query.shape[0] == logical_topk.shape[0])
+            or query_ends.shape != (metadata.num_reqs,)
+            or key_lengths.shape != (metadata.num_reqs,)
+            or not supports_flash_resident_decode_graph(self.vllm_config)
+            or get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE
+            or torch.npu.is_current_stream_capturing()
+        ):
+            return None
+
+        states = cache.runtime.request_state_indices
+        if (
+            cache.view is None
+            or cache.view.block_size != metadata.block_size
+            or cache.block_table is None
+            or states is None
+            or states.numel() < metadata.num_reqs
+        ):
+            return None
+        paged = self._resident_c8_paged_view()
+        if paged is None:
+            return None
+        storage, page_stride = paged
+        table = resident_decode_page_table(cache.block_table, states[: metadata.num_reqs], page_stride)
+        config = self.vllm_config.model_config.hf_text_config
+        topk = config.index_topk + config.index_kpool - 1
+        self.index_group.set_logical_topk_ready(self.index_group_index)
+        logger.info_once("[hisparse] Resident paged target mixed batch active", scope="process")
+        return super()._execute_sparse_flash_attention_process(
+            query,
+            query_rope,
+            (storage.unsqueeze(2),),
+            logical_topk[:, :topk].contiguous().unsqueeze(1),
+            metadata,
+            query_ends,
+            key_lengths,
+            block_table=table,
+        )
+
     def _try_c8_resident_prefill(self, query, query_rope, logical_topk, metadata, query_ends, key_lengths):
         num_decodes = metadata.num_decodes
         num_decode_tokens = metadata.num_decode_tokens
@@ -804,6 +853,12 @@ class AscendHiSparseImpl(AscendSFAImpl):
         logical = topk_indices.squeeze(1) if topk_indices.ndim == 3 else topk_indices
         assert metadata.req_id_per_token is not None
         assert metadata.query_start_loc is not None
+        if metadata.num_decodes and metadata.num_prefills:
+            resident_output = self._try_c8_resident_mixed(
+                ql_nope, q_pe, logical, metadata, actual_seq_lengths_query, actual_seq_lengths_key
+            )
+            if resident_output is not None:
+                return resident_output
         if metadata.num_prefills:
             rows = torch.arange(logical.shape[0], dtype=torch.int32, device=logical.device)
             logical = torch.where(rows[:, None] < metadata.query_start_loc[-1], logical, -1)
