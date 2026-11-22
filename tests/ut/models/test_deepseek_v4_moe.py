@@ -38,30 +38,28 @@ class _FakeMoERunner(nn.Module):
 
 
 @pytest.mark.parametrize("moe_cls", [deepseek_v4_module.DeepseekV4MoE, DeepseekV41MoE])
-@pytest.mark.parametrize("fast_gate,has_fused_input", [(True, False), (False, False), (False, True)])
-def test_external_router_keeps_fp32_logits(moe_cls, fast_gate, has_fused_input):
+@pytest.mark.parametrize("internal_router", [True, False])
+def test_moe_routes_normalized_bf16_input(moe_cls, internal_router):
     hidden = torch.rand(3, 8, dtype=torch.bfloat16)
-    gate_weight = torch.rand(4, 8, dtype=torch.bfloat16)
+    logits = torch.rand(3, 4, dtype=torch.float32)
     moe = moe_cls.__new__(moe_cls)
     nn.Module.__init__(moe)
-    moe.use_bf16_gate = fast_gate
     moe.is_sequence_parallel = False
     moe.tp_size = 1
-    moe.gate = MagicMock(weight=gate_weight, weight_fp32=gate_weight.float(), tid2eid=None)
-    moe.gate.side_effect = lambda x: torch.nn.functional.linear(x.float(), gate_weight.float())
-    moe.experts = MagicMock(is_internal_router=False, return_value=hidden)
-    norm_fp32 = hidden.float() + 0.001 if has_fused_input else None
+    moe.gate = MagicMock(return_value=logits, tid2eid=None)
+    moe.experts = MagicMock(is_internal_router=internal_router, return_value=hidden)
 
-    moe(hidden, hidden_states_fp32=norm_fp32)
+    moe(hidden)
 
-    logits = moe.experts.call_args.kwargs["router_logits"]
-    torch.testing.assert_close(
-        logits, torch.nn.functional.linear(hidden.float() if norm_fp32 is None else norm_fp32, gate_weight.float())
-    )
-    if fast_gate:
-        assert moe.gate.call_args.args[0].dtype == torch.bfloat16
-    else:
+    expert_args = moe.experts.call_args.kwargs
+    if internal_router:
         moe.gate.assert_not_called()
+        assert expert_args["router_logits"] is expert_args["hidden_states"]
+        torch.testing.assert_close(expert_args["router_logits"], hidden)
+    else:
+        assert moe.gate.call_args.args[0] is expert_args["hidden_states"]
+        assert moe.gate.call_args.args[0].dtype == torch.bfloat16
+        assert expert_args["router_logits"] is logits
 
 
 def test_deepseek_v4_hash_layer_uses_upstream_hash_router(monkeypatch):
@@ -108,7 +106,7 @@ def test_deepseek_v4_hash_layer_uses_upstream_hash_router(monkeypatch):
     )
 
     monkeypatch.setattr(deepseek_v4_module, "FusedMoEFactory", fused_moe)
-    monkeypatch.setattr(deepseek_v4_module, "ReplicatedLinear", lambda *args, **kwargs: gate)
+    monkeypatch.setattr(deepseek_v4_module, "GateLinear", lambda *args, **kwargs: gate)
     monkeypatch.setattr(deepseek_v4_module, "get_ep_group", lambda: ep_group)
     monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_world_size", lambda: 1)
@@ -174,7 +172,7 @@ def test_deepseek_v4_hash_tid2eid_has_unique_experts_per_row(monkeypatch):
     )
 
     monkeypatch.setattr(deepseek_v4_module, "FusedMoEFactory", fused_moe)
-    monkeypatch.setattr(deepseek_v4_module, "ReplicatedLinear", lambda *args, **kwargs: gate)
+    monkeypatch.setattr(deepseek_v4_module, "GateLinear", lambda *args, **kwargs: gate)
     monkeypatch.setattr(deepseek_v4_module, "get_ep_group", lambda: ep_group)
     monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_world_size", lambda: 1)
@@ -266,7 +264,7 @@ def test_deepseek_v4_hash_vision_layer_exposes_bias_vl(monkeypatch):
     )
 
     monkeypatch.setattr(deepseek_v4_module, "FusedMoEFactory", fused_moe)
-    monkeypatch.setattr(deepseek_v4_module, "ReplicatedLinear", lambda *args, **kwargs: gate)
+    monkeypatch.setattr(deepseek_v4_module, "GateLinear", lambda *args, **kwargs: gate)
     monkeypatch.setattr(deepseek_v4_module, "get_ep_group", lambda: ep_group)
     monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_world_size", lambda: 1)

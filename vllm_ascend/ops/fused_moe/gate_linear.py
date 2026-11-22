@@ -49,9 +49,7 @@ class AscendGateLinear(GateLinear):
     take tier 4 directly.
 
     A forced fp32 router stays fp32: models opt in explicitly via
-    params_dtype=torch.float32 / force_fp32_compute (e.g. MiniMax-M3), or
-    via the Ascend-specific precast_fp32_weight path (DSV4), which the MoE
-    runner routes around this forward entirely.
+    params_dtype=torch.float32 or force_fp32_compute (e.g. MiniMax-M3).
     """
 
     def __init__(

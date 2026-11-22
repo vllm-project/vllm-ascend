@@ -86,8 +86,7 @@ def test_v41_forward_threads_pre_mix_through_fused_hc_pre():
     )
     layer.input_layernorm = MagicMock(side_effect=lambda value: value)
     normalized = torch.randn_like(collapsed)
-    normalized_fp32 = normalized.float()
-    layer.rms_norm_cast = MagicMock(return_value=(normalized, normalized_fp32))
+    layer.post_attention_layernorm = MagicMock(return_value=normalized)
     layer.self_attn = MagicMock(side_effect=lambda _positions, value, _scaling: value)
     layer.mlp = MagicMock(side_effect=lambda value, **_kwargs: value)
     layer.hc_post = MagicMock(side_effect=lambda _x, residual, _post, _comb: residual)
@@ -99,11 +98,10 @@ def test_v41_forward_threads_pre_mix_through_fused_hc_pre():
     assert next_pre is ffn_pre
     assert layer.hc_pre.call_args_list[0].args[-1] is incoming_pre
     assert layer.hc_pre.call_args_list[1].args[-1] is attn_pre
-    layer.rms_norm_cast.assert_called_once_with(collapsed)
+    layer.post_attention_layernorm.assert_called_once_with(collapsed)
     layer.mlp.assert_called_once_with(
         normalized,
         input_ids=input_ids,
-        hidden_states_fp32=normalized_fp32,
         already_sequence_parallel=False,
     )
 
@@ -124,7 +122,7 @@ def test_v41_forward_gathers_attention_and_keeps_moe_sharded(monkeypatch):
     layer.hc_ffn_base = torch.nn.Parameter(torch.empty(24))
     layer.hc_pre = MagicMock(side_effect=[(collapsed, post, comb, pre)] * 2)
     layer.input_layernorm = MagicMock(side_effect=lambda value: value)
-    layer.rms_norm_cast = MagicMock(return_value=(collapsed, collapsed.float()))
+    layer.post_attention_layernorm = MagicMock(return_value=collapsed)
     layer.self_attn = MagicMock(side_effect=lambda _positions, value, _scaling: value)
     layer.mlp = MagicMock(side_effect=lambda value, **_kwargs: value)
     layer.hc_post = MagicMock(side_effect=lambda _x, residual, _post, _comb: residual)
@@ -139,37 +137,6 @@ def test_v41_forward_gathers_attention_and_keeps_moe_sharded(monkeypatch):
     reduce_scatter.assert_called_once()
     torch.testing.assert_close(reduce_scatter.call_args.args[0], collapsed)
     assert layer.mlp.call_args.kwargs["already_sequence_parallel"] is True
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_v41_rms_norm_cast_preserves_rounded_routing_input(dtype):
-    layer = _layer()
-    x = torch.randn(2, 8, dtype=dtype)
-    normalized = torch.randn_like(x)
-    normalized_fp32 = normalized.float()
-    norm = MagicMock(return_value=normalized)
-    norm.weight = torch.ones(8, dtype=dtype)
-    norm.variance_epsilon = 1e-6
-    layer.post_attention_layernorm = norm
-
-    with (
-        patch("vllm_ascend.utils.enable_custom_op", return_value=True),
-        patch("vllm_ascend.device.device_op.get_current_hardware_profile") as profile,
-        patch.object(
-            torch.ops._C_ascend,
-            "npu_rms_norm_cast",
-            create=True,
-            return_value=(normalized, normalized_fp32),
-        ) as op,
-    ):
-        profile.return_value.supports.return_value = True
-        actual, actual_fp32 = layer.rms_norm_cast(x)
-
-    assert actual is normalized
-    torch.testing.assert_close(actual_fp32, normalized.float(), rtol=0, atol=0)
-    op.assert_called_once_with(x, norm.weight, norm.variance_epsilon)
-    assert actual_fp32 is normalized_fp32
-    norm.assert_not_called()
 
 
 def test_v41_hc_reference_supports_hidden_size_5120():

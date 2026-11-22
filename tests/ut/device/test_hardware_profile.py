@@ -95,7 +95,6 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A5: frozenset(
         {
             HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
-            HardwareCapability.BF16_ROUTER_FP32_OUTPUT,
             HardwareCapability.SCATTER_ND_CACHE_STORE,
             HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,
             HardwareCapability.CANN_MEGAMOE,
