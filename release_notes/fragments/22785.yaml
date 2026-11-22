@@ -1,0 +1,4 @@
+pr: 22785
+entries:
+  - category: performance
+    text: DeepSeek V4.1 Flash prefill workers on Atlas A2 can limit Host-UVA Engram lookup parallelism with `engram_prefill_uva_core_percentage` when `multistream_engram_overlap` is enabled. The default is `null`, which leaves the lookup grid uncapped.
