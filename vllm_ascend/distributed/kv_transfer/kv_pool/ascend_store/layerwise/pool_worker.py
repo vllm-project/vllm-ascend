@@ -1186,6 +1186,16 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 )
                 for index in range(num_blocks)
             ]
+            # TEMPORARY P11 diagnosis: align-group mask inputs and result.
+            print(
+                f"[p11-align] g={group_id} n={num_blocks} ids={len(block_ids)} "
+                f"tail={list(block_ids[max(0, num_blocks - 3):num_blocks + 3])} "
+                f"orig={None if original_mask is None else sum(original_mask)} "
+                f"orig_first={None if original_mask is None or not any(original_mask) else original_mask.index(True)} "
+                f"result={sum(1 for value in result[group_id] if value)} "
+                f"chunk_ckpt={chunk_checkpoint} save_end={request.save_end_token} target={request.target_token_len}",
+                flush=True,
+            )
         return tuple(result)
 
     def _process_load_for_layer_batch(

@@ -911,6 +911,14 @@ class RequestTracker:
         for group_id, ids in enumerate(normalized):
             self.update_mamba_spec_blocks(ids, group_id, num_computed_tokens)
             self.allocated_block_ids_by_group[group_id].extend(ids)
+            # TEMPORARY P11 diagnosis: tracker growth and positional tail.
+            if group_id in (self.num_speculative_blocks_by_group or {}) and num_computed_tokens >= 13000:
+                tracker = self.allocated_block_ids_by_group[group_id]
+                print(
+                    f"[p11-track] g={group_id} nct={num_computed_tokens} delta={list(ids)} "
+                    f"len={len(tracker)} tail={list(tracker[max(0, len(tracker) - 6):])}",
+                    flush=True,
+                )
 
     def update_mamba_spec_blocks(self, block_ids: list[int], kv_cache_group_id: int, num_computed_tokens: int):
         """
