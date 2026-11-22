@@ -586,13 +586,7 @@ class AscendSharedExperts:
             # silently misread.
             weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
             base_scale = linear.weight_scale.data
-            scale = (
-                base_scale.reshape(-1)
-                .to(torch.float32)
-                .contiguous()
-                .view(torch.int32)
-                .to(torch.int64)
-            )
+            scale = base_scale.reshape(-1).to(torch.float32).contiguous().view(torch.int32).to(torch.int64)
             # The arch22 epilogue reads one scale per output channel. A
             # per-group W8A8 checkpoint would flatten to out * groups values and
             # be silently misread, so reject anything but the exact length.
