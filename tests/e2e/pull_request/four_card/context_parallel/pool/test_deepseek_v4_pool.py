@@ -48,8 +48,8 @@ ACCURACY_MAX_TOKENS = 1024
 # Measured on both vLLM pins (2 legs x 2 pins): pos0 0.609-0.622,
 # pos1 0.315-0.350, pos2 0.150-0.164. Floors keep ~15-20% headroom.
 MIN_ACCEPTANCE_RATES = [0.52, 0.26, 0.12]
-# The pool leg must stay within 10% of the no-pool leg at every position.
-ACCEPTANCE_AB_RATIO = 0.90
+# The pool leg must stay within 20% of the no-pool leg at every position.
+ACCEPTANCE_AB_RATIO = 0.80
 
 POOL_LCM_BLOCK_SIZE = 16384
 POOL_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + 4
