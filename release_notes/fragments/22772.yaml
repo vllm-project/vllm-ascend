@@ -1,0 +1,4 @@
+pr: 22772
+entries:
+  - category: feature
+    text: Added opt-in HiSparse for single-node GLM-5.3-Flash inference on Ascend 950DT with FP8 KV cache.
