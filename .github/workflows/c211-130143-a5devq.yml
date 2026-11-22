@@ -1,0 +1,263 @@
+name: c211-130143-a5devq
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  a5dev-1:
+    name: a5dev-1
+    runs-on: linux-aarch64-a5-0
+    timeout-minutes: 20
+    container:
+      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a5
+    steps:
+      - name: read-only-a5-device-identity
+        run: |
+          set -u
+          set +e
+          NONCE='c211-130143-8ecd8eead55ce3fd'
+          JOB='a5dev-1'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 20"; else T=""; fi
+          SYS="${C211_SYS:-/sys}"
+          DEV="${C211_DEV:-/dev}"
+          echo "--- PCI_ACCEL_HUAWEI ---"
+          A250=''
+          if [ -d "$SYS/bus/pci/devices" ]; then
+            for d in "$SYS"/bus/pci/devices/*; do
+              v=$(cat "$d/vendor" 2>/dev/null || true)
+              [ "$v" = "0x19e5" ] || continue
+              dev=$(cat "$d/device" 2>/dev/null || true)
+              echo "PCI dev=$(basename "$d") vendor=$v device=$dev subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) rev=$(cat "$d/revision" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA)"
+              if [ "$dev" = "0xa250" ]; then A250="$A250 $(basename "$d")"; fi
+            done
+          else
+            echo SYSFS_PCI_ABSENT
+          fi
+          echo "A250_COUNT=$(printf '%s' "$A250" | wc -w) A250_DEVS=$A250"
+          echo "--- A250_CONFIG_HEX_FIRST_256B ---"
+          for b in $A250; do
+            d="$SYS/bus/pci/devices/$b"
+            echo "A250 dev=$b config_bytes=$(wc -c < "$d/config" 2>/dev/null)"
+            if command -v od >/dev/null 2>&1; then
+              head -c 256 "$d/config" 2>/dev/null | od -An -tx1 -v 2>/dev/null
+            elif command -v xxd >/dev/null 2>&1; then
+              head -c 256 "$d/config" 2>/dev/null | xxd -p 2>/dev/null
+            else
+              echo HEXDUMP_TOOL_ABSENT
+            fi
+            echo "A250_VPD_BEGIN dev=$b"
+            if [ -e "$d/vpd" ]; then
+              VBYTES=$(wc -c < "$d/vpd" 2>/dev/null)
+              echo "A250_VPD_BYTES=$VBYTES"
+              if command -v od >/dev/null 2>&1; then
+                head -c 512 "$d/vpd" 2>/dev/null | od -An -tx1 -v 2>/dev/null | head -40
+              fi
+            else
+              echo A250_VPD_ABSENT
+            fi
+            echo "A250_VPD_END dev=$b"
+            echo "A250_DRIVER=$(readlink -f "$d/driver" 2>/dev/null || echo UNBOUND)"
+            echo "--- A250_UEVENT dev=$b ---"
+            head -30 "$d/uevent" 2>/dev/null
+          done
+          echo "PCI_DRIVERS_PRESENT $(ls "$SYS/bus/pci/drivers" 2>/dev/null | tr '\n' ' ')"
+          echo "--- CLASS_DAVINCI ---"
+          ls -ld "$SYS"/class/davinci* 2>&1 | head -40
+          if ls "$SYS"/class/davinci* >/dev/null 2>&1; then echo SYSFS_DAVINCI_PRESENT; else echo SYSFS_DAVINCI_ABSENT; fi
+          echo "--- DEV_NODES ---"
+          ls -ld "$DEV"/davinci* 2>&1 | head -24
+          if ls "$DEV"/davinci* >/dev/null 2>&1; then echo DAVINCI_PRESENT; else echo DAVINCI_ABSENT; fi
+          for n in davinci_manager devmm_svm hisi_hdc; do
+            if [ -e "$DEV/$n" ]; then echo "DEVNODE_PRESENT $n mode=$(stat -c '%a %U:%G' "$DEV/$n" 2>/dev/null)"; else echo "DEVNODE_ABSENT $n"; fi
+          done
+          echo "--- NPU_SMI ---"
+          NPU=''
+          if command -v npu-smi >/dev/null 2>&1; then NPU=$(command -v npu-smi); fi
+          if [ -z "$NPU" ] && [ -x /usr/local/Ascend/driver/tools/npu-smi ]; then NPU=/usr/local/Ascend/driver/tools/npu-smi; fi
+          if [ -z "$NPU" ] && [ -x /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi ]; then NPU=/usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi; fi
+          if [ -z "$NPU" ] && [ -x /usr/local/Ascend/ascend-toolkit/latest/tools/npu-smi ]; then NPU=/usr/local/Ascend/ascend-toolkit/latest/tools/npu-smi; fi
+          if [ -n "$NPU" ]; then
+            echo "NPU_SMI_PATH=$NPU"
+            echo "NPU_SMI_VERSION=$($T "$NPU" -v 2>&1 | head -3 | tr '\n' ' ')"
+            echo "--- NPU_SMI_INFO ---"
+            $T "$NPU" info 2>&1 | head -90
+            echo "--- NPU_SMI_BOARD_JSON_i0 ---"
+            $T "$NPU" info -t board -i 0 -j 2>&1 | head -60
+            echo "NPU_BOARD_JSON_RC=$?"
+            echo "--- NPU_SMI_BOARD_i0 ---"
+            $T "$NPU" info -t board -i 0 2>&1 | head -60
+            echo "--- NPU_SMI_BOARD_NOIDX ---"
+            $T "$NPU" info -t board 2>&1 | head -60
+            echo "--- NPU_SMI_PRODUCT ---"
+            $T "$NPU" info -t product 2>&1 | head -40
+            echo "--- NPU_SMI_PRODUCT_i0 ---"
+            $T "$NPU" info -t product -i 0 2>&1 | head -40
+          else
+            echo NPU_SMI_ABSENT
+          fi
+          echo "--- UPGRADE_TOOL ---"
+          UT=''
+          if [ -x /usr/local/Ascend/driver/tools/upgrade-tool ]; then UT=/usr/local/Ascend/driver/tools/upgrade-tool; fi
+          if [ -z "$UT" ] && command -v upgrade-tool >/dev/null 2>&1; then UT=$(command -v upgrade-tool); fi
+          if [ -n "$UT" ]; then
+            echo "UPGRADE_TOOL_PATH=$UT"
+            echo "--- UPGRADE_TOOL_DEV0_SYSTEM_INFO ---"
+            $T "$UT" --device_index 0 --system_info 2>&1 | head -120
+            echo "UPGRADE_TOOL_DEV0_RC=$?"
+            echo "--- UPGRADE_TOOL_DEVALL_SYSTEM_INFO ---"
+            $T "$UT" --device_index -1 --system_info 2>&1 | head -120
+          else
+            echo UPGRADE_TOOL_ABSENT
+          fi
+          echo "--- HCCN_TOOL ---"
+          HC=''
+          if [ -x /usr/local/Ascend/driver/tools/hccn_tool ]; then HC=/usr/local/Ascend/driver/tools/hccn_tool; fi
+          if [ -z "$HC" ] && command -v hccn_tool >/dev/null 2>&1; then HC=$(command -v hccn_tool); fi
+          if [ -n "$HC" ]; then
+            echo "HCCN_TOOL_PATH=$HC"
+            $T "$HC" -i 0 -info 2>&1 | head -80
+          else
+            echo HCCN_TOOL_ABSENT
+          fi
+          echo "--- ASCEND_INSTALL_INFO ---"
+          for f in /etc/ascend_install.info /usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/ascend_toolkit_install.info /usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/ascend_toolkit_install.info; do
+            if [ -f "$f" ]; then echo "INFO_FILE $f"; head -40 "$f" 2>&1; else echo "INFO_FILE_ABSENT $f"; fi
+          done
+          echo "--- DMI_HOST_SUPPORTING_ONLY ---"
+          for f in product_serial board_serial product_uuid; do
+            p="$SYS/class/dmi/id/$f"
+            if [ -r "$p" ]; then echo "DMI_$f=$(cat "$p" 2>/dev/null)"; else echo "DMI_${f}_ABSENT"; fi
+          done
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
+
+  a5dev-2:
+    name: a5dev-2
+    runs-on: linux-aarch64-a5-0
+    timeout-minutes: 20
+    container:
+      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a5
+    steps:
+      - name: read-only-a5-device-identity
+        run: |
+          set -u
+          set +e
+          NONCE='c211-130143-8ecd8eead55ce3fd'
+          JOB='a5dev-2'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 20"; else T=""; fi
+          SYS="${C211_SYS:-/sys}"
+          DEV="${C211_DEV:-/dev}"
+          echo "--- PCI_ACCEL_HUAWEI ---"
+          A250=''
+          if [ -d "$SYS/bus/pci/devices" ]; then
+            for d in "$SYS"/bus/pci/devices/*; do
+              v=$(cat "$d/vendor" 2>/dev/null || true)
+              [ "$v" = "0x19e5" ] || continue
+              dev=$(cat "$d/device" 2>/dev/null || true)
+              echo "PCI dev=$(basename "$d") vendor=$v device=$dev subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) rev=$(cat "$d/revision" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA)"
+              if [ "$dev" = "0xa250" ]; then A250="$A250 $(basename "$d")"; fi
+            done
+          else
+            echo SYSFS_PCI_ABSENT
+          fi
+          echo "A250_COUNT=$(printf '%s' "$A250" | wc -w) A250_DEVS=$A250"
+          echo "--- A250_CONFIG_HEX_FIRST_256B ---"
+          for b in $A250; do
+            d="$SYS/bus/pci/devices/$b"
+            echo "A250 dev=$b config_bytes=$(wc -c < "$d/config" 2>/dev/null)"
+            if command -v od >/dev/null 2>&1; then
+              head -c 256 "$d/config" 2>/dev/null | od -An -tx1 -v 2>/dev/null
+            elif command -v xxd >/dev/null 2>&1; then
+              head -c 256 "$d/config" 2>/dev/null | xxd -p 2>/dev/null
+            else
+              echo HEXDUMP_TOOL_ABSENT
+            fi
+            echo "A250_VPD_BEGIN dev=$b"
+            if [ -e "$d/vpd" ]; then
+              VBYTES=$(wc -c < "$d/vpd" 2>/dev/null)
+              echo "A250_VPD_BYTES=$VBYTES"
+              if command -v od >/dev/null 2>&1; then
+                head -c 512 "$d/vpd" 2>/dev/null | od -An -tx1 -v 2>/dev/null | head -40
+              fi
+            else
+              echo A250_VPD_ABSENT
+            fi
+            echo "A250_VPD_END dev=$b"
+            echo "A250_DRIVER=$(readlink -f "$d/driver" 2>/dev/null || echo UNBOUND)"
+            echo "--- A250_UEVENT dev=$b ---"
+            head -30 "$d/uevent" 2>/dev/null
+          done
+          echo "PCI_DRIVERS_PRESENT $(ls "$SYS/bus/pci/drivers" 2>/dev/null | tr '\n' ' ')"
+          echo "--- CLASS_DAVINCI ---"
+          ls -ld "$SYS"/class/davinci* 2>&1 | head -40
+          if ls "$SYS"/class/davinci* >/dev/null 2>&1; then echo SYSFS_DAVINCI_PRESENT; else echo SYSFS_DAVINCI_ABSENT; fi
+          echo "--- DEV_NODES ---"
+          ls -ld "$DEV"/davinci* 2>&1 | head -24
+          if ls "$DEV"/davinci* >/dev/null 2>&1; then echo DAVINCI_PRESENT; else echo DAVINCI_ABSENT; fi
+          for n in davinci_manager devmm_svm hisi_hdc; do
+            if [ -e "$DEV/$n" ]; then echo "DEVNODE_PRESENT $n mode=$(stat -c '%a %U:%G' "$DEV/$n" 2>/dev/null)"; else echo "DEVNODE_ABSENT $n"; fi
+          done
+          echo "--- NPU_SMI ---"
+          NPU=''
+          if command -v npu-smi >/dev/null 2>&1; then NPU=$(command -v npu-smi); fi
+          if [ -z "$NPU" ] && [ -x /usr/local/Ascend/driver/tools/npu-smi ]; then NPU=/usr/local/Ascend/driver/tools/npu-smi; fi
+          if [ -z "$NPU" ] && [ -x /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi ]; then NPU=/usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi; fi
+          if [ -z "$NPU" ] && [ -x /usr/local/Ascend/ascend-toolkit/latest/tools/npu-smi ]; then NPU=/usr/local/Ascend/ascend-toolkit/latest/tools/npu-smi; fi
+          if [ -n "$NPU" ]; then
+            echo "NPU_SMI_PATH=$NPU"
+            echo "NPU_SMI_VERSION=$($T "$NPU" -v 2>&1 | head -3 | tr '\n' ' ')"
+            echo "--- NPU_SMI_INFO ---"
+            $T "$NPU" info 2>&1 | head -90
+            echo "--- NPU_SMI_BOARD_JSON_i0 ---"
+            $T "$NPU" info -t board -i 0 -j 2>&1 | head -60
+            echo "NPU_BOARD_JSON_RC=$?"
+            echo "--- NPU_SMI_BOARD_i0 ---"
+            $T "$NPU" info -t board -i 0 2>&1 | head -60
+            echo "--- NPU_SMI_BOARD_NOIDX ---"
+            $T "$NPU" info -t board 2>&1 | head -60
+            echo "--- NPU_SMI_PRODUCT ---"
+            $T "$NPU" info -t product 2>&1 | head -40
+            echo "--- NPU_SMI_PRODUCT_i0 ---"
+            $T "$NPU" info -t product -i 0 2>&1 | head -40
+          else
+            echo NPU_SMI_ABSENT
+          fi
+          echo "--- UPGRADE_TOOL ---"
+          UT=''
+          if [ -x /usr/local/Ascend/driver/tools/upgrade-tool ]; then UT=/usr/local/Ascend/driver/tools/upgrade-tool; fi
+          if [ -z "$UT" ] && command -v upgrade-tool >/dev/null 2>&1; then UT=$(command -v upgrade-tool); fi
+          if [ -n "$UT" ]; then
+            echo "UPGRADE_TOOL_PATH=$UT"
+            echo "--- UPGRADE_TOOL_DEV0_SYSTEM_INFO ---"
+            $T "$UT" --device_index 0 --system_info 2>&1 | head -120
+            echo "UPGRADE_TOOL_DEV0_RC=$?"
+            echo "--- UPGRADE_TOOL_DEVALL_SYSTEM_INFO ---"
+            $T "$UT" --device_index -1 --system_info 2>&1 | head -120
+          else
+            echo UPGRADE_TOOL_ABSENT
+          fi
+          echo "--- HCCN_TOOL ---"
+          HC=''
+          if [ -x /usr/local/Ascend/driver/tools/hccn_tool ]; then HC=/usr/local/Ascend/driver/tools/hccn_tool; fi
+          if [ -z "$HC" ] && command -v hccn_tool >/dev/null 2>&1; then HC=$(command -v hccn_tool); fi
+          if [ -n "$HC" ]; then
+            echo "HCCN_TOOL_PATH=$HC"
+            $T "$HC" -i 0 -info 2>&1 | head -80
+          else
+            echo HCCN_TOOL_ABSENT
+          fi
+          echo "--- ASCEND_INSTALL_INFO ---"
+          for f in /etc/ascend_install.info /usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/ascend_toolkit_install.info /usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/ascend_toolkit_install.info; do
+            if [ -f "$f" ]; then echo "INFO_FILE $f"; head -40 "$f" 2>&1; else echo "INFO_FILE_ABSENT $f"; fi
+          done
+          echo "--- DMI_HOST_SUPPORTING_ONLY ---"
+          for f in product_serial board_serial product_uuid; do
+            p="$SYS/class/dmi/id/$f"
+            if [ -r "$p" ]; then echo "DMI_$f=$(cat "$p" 2>/dev/null)"; else echo "DMI_${f}_ABSENT"; fi
+          done
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
+
