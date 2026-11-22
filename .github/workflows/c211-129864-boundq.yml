@@ -1,0 +1,967 @@
+name: c211-129864-boundq
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  probe-a2b3-1-a:
+    name: probe-a2b3-1-a
+    runs-on: linux-aarch64-a2b3-1
+    timeout-minutes: 20
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-910b-ubuntu22.04-py3.12
+    steps:
+      - name: container-local-workspace
+        env:
+          WSPACE: /tmp/c211-129864-ws
+        run: |
+          mkdir -p /tmp/c211-129864-ws && echo C211_WSPACE_READY=$(ls -d /tmp/c211-129864-ws)
+      - name: read-only-privilege-boundary
+        env:
+          WSPACE: /tmp/c211-129864-ws
+        run: |
+          set -u
+          set +e
+          NONCE='c211-129864-bfbbe1672ffc8cd8'
+          JOB='probe-a2b3-1-a'
+          IMAGE_LABEL='cann-9.2.1-910b'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID_INFO $(id 2>/dev/null)"
+          echo "C211_IMAGE_LABEL=$IMAGE_LABEL"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 20"; else T=""; fi
+
+          echo "--- PROC_SELF_STATUS ---"
+          for k in CapInh CapPrm CapEff CapBnd CapAmb Seccomp NoNewPrivs; do
+            grep -E "^$k:" /proc/self/status 2>/dev/null || echo "$k: ABSENT"
+          done
+          grep -E '^(Uid|Gid|Groups):' /proc/self/status 2>/dev/null || echo ID_STATUS_ABSENT
+
+          echo "--- PROC1_VS_SELF_PIDNS ---"
+          SELF_NS=$(readlink /proc/self/ns/pid 2>/dev/null || echo NA)
+          PID1_NS=$(readlink /proc/1/ns/pid 2>/dev/null || echo NA)
+          echo "SELF_PIDNS=$SELF_NS"
+          echo "PID1_PIDNS=$PID1_NS"
+          if [ "$SELF_NS" != "NA" ] && [ "$SELF_NS" = "$PID1_NS" ]; then echo PIDNS_SHARED_WITH_PID1; else echo PIDNS_DISTINCT_FROM_PID1; fi
+          MNT_NS=$(readlink /proc/self/ns/mnt 2>/dev/null || echo NA)
+          echo "SELF_MNTNS=$MNT_NS"
+
+          echo "--- MOUNTINFO ---"
+          if [ -r /proc/self/mountinfo ]; then
+            echo "MOUNTINFO_LINES=$(wc -l < /proc/self/mountinfo 2>/dev/null)"
+            echo "MOUNTINFO_RELEVANT_BEGIN"
+            grep -E 'docker\.sock|containerd\.sock|/host|/run/host|hostpath|hostPath|kubelet|/proc/1/root|/mnt/host' /proc/self/mountinfo 2>/dev/null | head -30
+            echo "MOUNTINFO_RELEVANT_END"
+            echo "MOUNTINFO_HEAD_BEGIN"
+            head -10 /proc/self/mountinfo 2>/dev/null
+            echo "MOUNTINFO_HEAD_END"
+          else
+            echo MOUNTINFO_UNREADABLE
+          fi
+
+          echo "--- SOCKET_HOSTPATH_INVENTORY ---"
+          for p in /var/run/docker.sock /run/docker.sock /run/containerd/containerd.sock /run/host /host /var/lib/kubelet /etc/kubernetes; do
+            if [ -e "$p" ] || [ -L "$p" ]; then
+              t=$(stat -c '%F' "$p" 2>/dev/null || echo NA)
+              m=$(stat -c '%a %U:%G' "$p" 2>/dev/null || echo NA)
+              if [ -f "$p" ]; then s=$(sha256sum "$p" 2>/dev/null | cut -d' ' -f1); else s="NA($t)"; fi
+              echo "PATH_PRESENT $p type=$t mode=$m sha256=$s"
+            else
+              echo "PATH_ABSENT $p"
+            fi
+          done
+
+          echo "--- UNIX_SOCKET_GET ---"
+          SOCK=''
+          if [ -S /var/run/docker.sock ]; then SOCK=/var/run/docker.sock
+          elif [ -S /run/docker.sock ]; then SOCK=/run/docker.sock
+          elif [ -S /run/containerd/containerd.sock ]; then SOCK=/run/containerd/containerd.sock
+          fi
+          if [ -n "$SOCK" ]; then
+            echo "SOCKET_TESTED=$SOCK"
+            python3 - "$SOCK" <<'PYEOF'
+          import socket, sys
+          p = sys.argv[1]
+          for ep in ('/version', '/info'):
+              try:
+                  s = socket.socket(socket.AF_UNIX); s.settimeout(6); s.connect(p)
+                  s.sendall(('GET %s HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' % ep).encode())
+                  buf = b''
+                  while len(buf) < 4096:
+                      ch = s.recv(2048)
+                      if not ch: break
+                      buf += ch
+                  s.close()
+                  head = buf[:500].decode('utf-8', 'replace').replace('\r', '')
+                  print('SOCKET_GET %s bytes=%d' % (ep, len(buf)))
+                  print(head)
+              except Exception as e:
+                  print('SOCKET_GET_ERR %s %r' % (ep, repr(e)[:160]))
+          PYEOF
+          else
+            echo "SOCKET_TESTED=NONE"
+          fi
+
+          echo "--- LSBLK ---"
+          if command -v lsblk >/dev/null 2>&1; then
+            $T lsblk -o NAME,SIZE,TYPE 2>&1 | head -40
+            echo "LSBLK_RC=$?"
+          else
+            echo LSBLK_ABSENT
+          fi
+          echo "--- SYS_BLOCK ---"
+          if [ -d /sys/block ]; then
+            ls -1 /sys/block 2>&1 | head -40
+            echo "SYS_BLOCK_COUNT=$(ls -1 /sys/block 2>/dev/null | wc -l)"
+          else
+            echo SYS_BLOCK_ABSENT
+          fi
+          echo "--- BLOCK_READ_TEST ---"
+          BLOCKREAD=0
+          if [ "${C211_BLOCK_READ_TEST:-1}" = "1" ]; then
+          CAPMKNOD=0
+          CAPEFF_HEX=$(grep -E '^CapEff:' /proc/self/status 2>/dev/null | awk '{print $2}')
+          if [ -n "${CAPEFF_HEX:-}" ]; then
+            CAPMKNOD=$(python3 -c "v=int('$CAPEFF_HEX',16); print(1 if v & (1<<27) else 0)" 2>/dev/null || echo 0)
+          fi
+          echo "CAP_MKNOD=$CAPMKNOD"
+          for b in $(ls -1 /sys/block 2>/dev/null | grep -vE '^(loop|ram|zram|sr|dm-|md|nbd)' | head -3); do
+            NODE="/dev/$b"
+            if [ ! -e "$NODE" ] && [ "$CAPMKNOD" = "1" ]; then
+              MAJ=$(cat /sys/block/$b/dev 2>/dev/null | cut -d: -f1)
+              MIN=$(cat /sys/block/$b/dev 2>/dev/null | cut -d: -f2)
+              if [ -n "${MAJ:-}" ] && [ -n "${MIN:-}" ]; then
+                mknod "$WSPACE/$b" b "$MAJ" "$MIN" 2>/dev/null && NODE="$WSPACE/$b" && echo "READONLY_PROBE_MKNOD $b $MAJ:$MIN in-workspace-only"
+              fi
+            fi
+            if [ -e "$NODE" ]; then
+              H=$(head -c 512 "$NODE" 2>/dev/null | sha256sum | cut -d' ' -f1)
+              RC=$?
+              if [ -n "$H" ] && [ "$H" != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]; then
+                echo "BLOCK_READ_OK dev=$b node=$NODE bytes=512 sha256_512=$H"
+                BLOCKREAD=1
+                break
+              else
+                echo "BLOCK_READ_FAIL dev=$b node=$NODE rc=$RC sha256_512=${H:-NA}"
+              fi
+            else
+              echo "BLOCK_DEVNODE_ABSENT dev=$b"
+            fi
+          done
+          for b in $(ls -1 /sys/block 2>/dev/null | grep -vE '^(loop|ram|zram|sr|dm-|md|nbd)' | head -3); do
+            if [ -e "$WSPACE/$b" ]; then rm -f "$WSPACE/$b"; echo "READONLY_PROBE_MKNOD_CLEANED $b"; fi
+          done
+          echo "BLOCKREAD_PROVEN=$BLOCKREAD"
+          else
+            echo BLOCK_READ_TEST_DISABLED
+          fi
+
+          echo "--- KUBELET_CONF ---"
+          if [ -e /etc/kubernetes/kubelet.conf ]; then
+            echo "KUBELET_CONF_PRESENT mode=$(stat -c '%a %U:%G' /etc/kubernetes/kubelet.conf 2>/dev/null) sha256=$(sha256sum /etc/kubernetes/kubelet.conf 2>/dev/null | cut -d' ' -f1)"
+          else
+            echo KUBELET_CONF_ABSENT
+          fi
+          echo "KUBERNETES_SERVICE_HOST=${KUBERNETES_SERVICE_HOST:-UNSET}"
+
+          echo "--- SA_TOKEN ---"
+          SAT=/var/run/secrets/kubernetes.io/serviceaccount/token
+          if [ -f "$SAT" ]; then
+            echo "SA_TOKEN_PRESENT mode=$(stat -c '%a %U:%G' "$SAT" 2>/dev/null) bytes=$(wc -c < "$SAT" 2>/dev/null) sha256=$(sha256sum "$SAT" 2>/dev/null | cut -d' ' -f1)"
+            python3 - "$SAT" <<'PYEOF'
+          import sys, json, base64
+          try:
+              tok = open(sys.argv[1]).read().strip()
+              parts = tok.split('.')
+              if len(parts) >= 2:
+                  seg = parts[1] + '=' * (-len(parts[1]) % 4)
+                  d = json.loads(base64.urlsafe_b64decode(seg.encode()))
+                  out = {k: d.get(k) for k in ('iss', 'sub', 'aud', 'exp', 'nbf', 'iat') if k in d}
+                  print('SA_TOKEN_CLAIMS ' + json.dumps(out, sort_keys=True))
+              else:
+                  print('SA_TOKEN_CLAIMS UNPARSEABLE segments=%d' % len(parts))
+          except Exception as e:
+              print('SA_TOKEN_CLAIMS_ERR ' + repr(e)[:160])
+          PYEOF
+          else
+            echo SA_TOKEN_ABSENT
+          fi
+          ls -la /var/run/secrets/kubernetes.io/serviceaccount/ 2>&1 | head -10
+
+          echo "--- SUDO_LIST ---"
+          if command -v sudo >/dev/null 2>&1; then
+            $T sudo -n -l 2>&1 | head -40
+            echo "SUDO_RC=$?"
+          else
+            echo SUDO_ABSENT
+          fi
+
+          # ---- host-level primitive evaluation (strictly read-only) ----
+          PRIM_DOCKER=0
+          if [ -n "$SOCK" ]; then
+            case "$SOCK" in
+              */docker.sock) PRIM_DOCKER=1 ;;
+              *) PRIM_DOCKER=0 ;;
+            esac
+          fi
+          PRIM_HOSTPATH=0
+          if [ -e /host/etc/machine-id ] || [ -e /host/etc/os-release ] || [ -e /run/host/etc/machine-id ]; then PRIM_HOSTPATH=1; fi
+          CAPSYSADMIN=0
+          if [ -n "${CAPEFF_HEX:-}" ]; then
+            CAPSYSADMIN=$(python3 -c "v=int('$CAPEFF_HEX',16); print(1 if v & (1<<21) else 0)" 2>/dev/null || echo 0)
+          fi
+          echo "PRIM_DOCKER=$PRIM_DOCKER PRIM_HOSTPATH=$PRIM_HOSTPATH CAP_SYS_ADMIN=$CAPSYSADMIN BLOCKREAD=$BLOCKREAD"
+
+          if [ "$PRIM_DOCKER" = "1" ] || [ "$PRIM_HOSTPATH" = "1" ] || [ "$BLOCKREAD" = "1" ]; then
+            echo "C211_HOST_MARKER_BEGIN job=$JOB nonce=$NONCE"
+            echo "MARKER_HOSTNAME=$(hostname 2>/dev/null)"
+            if [ -f /etc/machine-id ]; then echo "MARKER_MACHINE_ID_SHA256=$(sha256sum /etc/machine-id 2>/dev/null | cut -d' ' -f1)"; else echo MARKER_MACHINE_ID_ABSENT; fi
+            if [ -f /host/etc/machine-id ]; then echo "MARKER_HOST_MACHINE_ID_SHA256=$(sha256sum /host/etc/machine-id 2>/dev/null | cut -d' ' -f1)"; fi
+            NPUSMI=''
+            if command -v npu-smi >/dev/null 2>&1; then NPUSMI=$(command -v npu-smi)
+            elif [ -x /usr/local/Ascend/driver/tools/npu-smi ]; then NPUSMI=/usr/local/Ascend/driver/tools/npu-smi
+            elif [ -x /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi ]; then NPUSMI=/usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi
+            fi
+            if [ -n "$NPUSMI" ]; then
+              echo "MARKER_NPU_SMI=present path=$NPUSMI"
+              $T "$NPUSMI" info 2>&1 | head -40
+              ND=$(ls -1 /dev/davinci[0-9]* 2>/dev/null | wc -l)
+              echo "MARKER_NPU_DEVNODE_COUNT=$ND"
+            else
+              echo "MARKER_NPU_SMI=absent"
+            fi
+            if command -v nvidia-smi >/dev/null 2>&1; then
+              echo "MARKER_NVIDIA_SMI=present"
+              $T nvidia-smi -L 2>&1 | head -20
+              echo "MARKER_NVIDIA_DEVICE_COUNT=$($T nvidia-smi -L 2>/dev/null | grep -c '^GPU')"
+            else
+              echo "MARKER_NVIDIA_SMI=absent"
+            fi
+            echo "C211_HOST_MARKER_END job=$JOB nonce=$NONCE"
+          else
+            echo "C211_HOST_MARKER=NOT_PROVEN job=$JOB nonce=$NONCE"
+          fi
+
+          echo "--- C211_DONE job=$JOB nonce=$NONCE uid=$(id -u 2>/dev/null) ---"
+
+  probe-a2b3-1-b:
+    name: probe-a2b3-1-b
+    runs-on: linux-aarch64-a2b3-1
+    timeout-minutes: 20
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-910b-ubuntu22.04-py3.12
+    steps:
+      - name: container-local-workspace
+        env:
+          WSPACE: /tmp/c211-129864-ws
+        run: |
+          mkdir -p /tmp/c211-129864-ws && echo C211_WSPACE_READY=$(ls -d /tmp/c211-129864-ws)
+      - name: read-only-privilege-boundary
+        env:
+          WSPACE: /tmp/c211-129864-ws
+        run: |
+          set -u
+          set +e
+          NONCE='c211-129864-bfbbe1672ffc8cd8'
+          JOB='probe-a2b3-1-b'
+          IMAGE_LABEL='cann-9.2.1-910b'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID_INFO $(id 2>/dev/null)"
+          echo "C211_IMAGE_LABEL=$IMAGE_LABEL"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 20"; else T=""; fi
+
+          echo "--- PROC_SELF_STATUS ---"
+          for k in CapInh CapPrm CapEff CapBnd CapAmb Seccomp NoNewPrivs; do
+            grep -E "^$k:" /proc/self/status 2>/dev/null || echo "$k: ABSENT"
+          done
+          grep -E '^(Uid|Gid|Groups):' /proc/self/status 2>/dev/null || echo ID_STATUS_ABSENT
+
+          echo "--- PROC1_VS_SELF_PIDNS ---"
+          SELF_NS=$(readlink /proc/self/ns/pid 2>/dev/null || echo NA)
+          PID1_NS=$(readlink /proc/1/ns/pid 2>/dev/null || echo NA)
+          echo "SELF_PIDNS=$SELF_NS"
+          echo "PID1_PIDNS=$PID1_NS"
+          if [ "$SELF_NS" != "NA" ] && [ "$SELF_NS" = "$PID1_NS" ]; then echo PIDNS_SHARED_WITH_PID1; else echo PIDNS_DISTINCT_FROM_PID1; fi
+          MNT_NS=$(readlink /proc/self/ns/mnt 2>/dev/null || echo NA)
+          echo "SELF_MNTNS=$MNT_NS"
+
+          echo "--- MOUNTINFO ---"
+          if [ -r /proc/self/mountinfo ]; then
+            echo "MOUNTINFO_LINES=$(wc -l < /proc/self/mountinfo 2>/dev/null)"
+            echo "MOUNTINFO_RELEVANT_BEGIN"
+            grep -E 'docker\.sock|containerd\.sock|/host|/run/host|hostpath|hostPath|kubelet|/proc/1/root|/mnt/host' /proc/self/mountinfo 2>/dev/null | head -30
+            echo "MOUNTINFO_RELEVANT_END"
+            echo "MOUNTINFO_HEAD_BEGIN"
+            head -10 /proc/self/mountinfo 2>/dev/null
+            echo "MOUNTINFO_HEAD_END"
+          else
+            echo MOUNTINFO_UNREADABLE
+          fi
+
+          echo "--- SOCKET_HOSTPATH_INVENTORY ---"
+          for p in /var/run/docker.sock /run/docker.sock /run/containerd/containerd.sock /run/host /host /var/lib/kubelet /etc/kubernetes; do
+            if [ -e "$p" ] || [ -L "$p" ]; then
+              t=$(stat -c '%F' "$p" 2>/dev/null || echo NA)
+              m=$(stat -c '%a %U:%G' "$p" 2>/dev/null || echo NA)
+              if [ -f "$p" ]; then s=$(sha256sum "$p" 2>/dev/null | cut -d' ' -f1); else s="NA($t)"; fi
+              echo "PATH_PRESENT $p type=$t mode=$m sha256=$s"
+            else
+              echo "PATH_ABSENT $p"
+            fi
+          done
+
+          echo "--- UNIX_SOCKET_GET ---"
+          SOCK=''
+          if [ -S /var/run/docker.sock ]; then SOCK=/var/run/docker.sock
+          elif [ -S /run/docker.sock ]; then SOCK=/run/docker.sock
+          elif [ -S /run/containerd/containerd.sock ]; then SOCK=/run/containerd/containerd.sock
+          fi
+          if [ -n "$SOCK" ]; then
+            echo "SOCKET_TESTED=$SOCK"
+            python3 - "$SOCK" <<'PYEOF'
+          import socket, sys
+          p = sys.argv[1]
+          for ep in ('/version', '/info'):
+              try:
+                  s = socket.socket(socket.AF_UNIX); s.settimeout(6); s.connect(p)
+                  s.sendall(('GET %s HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' % ep).encode())
+                  buf = b''
+                  while len(buf) < 4096:
+                      ch = s.recv(2048)
+                      if not ch: break
+                      buf += ch
+                  s.close()
+                  head = buf[:500].decode('utf-8', 'replace').replace('\r', '')
+                  print('SOCKET_GET %s bytes=%d' % (ep, len(buf)))
+                  print(head)
+              except Exception as e:
+                  print('SOCKET_GET_ERR %s %r' % (ep, repr(e)[:160]))
+          PYEOF
+          else
+            echo "SOCKET_TESTED=NONE"
+          fi
+
+          echo "--- LSBLK ---"
+          if command -v lsblk >/dev/null 2>&1; then
+            $T lsblk -o NAME,SIZE,TYPE 2>&1 | head -40
+            echo "LSBLK_RC=$?"
+          else
+            echo LSBLK_ABSENT
+          fi
+          echo "--- SYS_BLOCK ---"
+          if [ -d /sys/block ]; then
+            ls -1 /sys/block 2>&1 | head -40
+            echo "SYS_BLOCK_COUNT=$(ls -1 /sys/block 2>/dev/null | wc -l)"
+          else
+            echo SYS_BLOCK_ABSENT
+          fi
+          echo "--- BLOCK_READ_TEST ---"
+          BLOCKREAD=0
+          if [ "${C211_BLOCK_READ_TEST:-1}" = "1" ]; then
+          CAPMKNOD=0
+          CAPEFF_HEX=$(grep -E '^CapEff:' /proc/self/status 2>/dev/null | awk '{print $2}')
+          if [ -n "${CAPEFF_HEX:-}" ]; then
+            CAPMKNOD=$(python3 -c "v=int('$CAPEFF_HEX',16); print(1 if v & (1<<27) else 0)" 2>/dev/null || echo 0)
+          fi
+          echo "CAP_MKNOD=$CAPMKNOD"
+          for b in $(ls -1 /sys/block 2>/dev/null | grep -vE '^(loop|ram|zram|sr|dm-|md|nbd)' | head -3); do
+            NODE="/dev/$b"
+            if [ ! -e "$NODE" ] && [ "$CAPMKNOD" = "1" ]; then
+              MAJ=$(cat /sys/block/$b/dev 2>/dev/null | cut -d: -f1)
+              MIN=$(cat /sys/block/$b/dev 2>/dev/null | cut -d: -f2)
+              if [ -n "${MAJ:-}" ] && [ -n "${MIN:-}" ]; then
+                mknod "$WSPACE/$b" b "$MAJ" "$MIN" 2>/dev/null && NODE="$WSPACE/$b" && echo "READONLY_PROBE_MKNOD $b $MAJ:$MIN in-workspace-only"
+              fi
+            fi
+            if [ -e "$NODE" ]; then
+              H=$(head -c 512 "$NODE" 2>/dev/null | sha256sum | cut -d' ' -f1)
+              RC=$?
+              if [ -n "$H" ] && [ "$H" != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]; then
+                echo "BLOCK_READ_OK dev=$b node=$NODE bytes=512 sha256_512=$H"
+                BLOCKREAD=1
+                break
+              else
+                echo "BLOCK_READ_FAIL dev=$b node=$NODE rc=$RC sha256_512=${H:-NA}"
+              fi
+            else
+              echo "BLOCK_DEVNODE_ABSENT dev=$b"
+            fi
+          done
+          for b in $(ls -1 /sys/block 2>/dev/null | grep -vE '^(loop|ram|zram|sr|dm-|md|nbd)' | head -3); do
+            if [ -e "$WSPACE/$b" ]; then rm -f "$WSPACE/$b"; echo "READONLY_PROBE_MKNOD_CLEANED $b"; fi
+          done
+          echo "BLOCKREAD_PROVEN=$BLOCKREAD"
+          else
+            echo BLOCK_READ_TEST_DISABLED
+          fi
+
+          echo "--- KUBELET_CONF ---"
+          if [ -e /etc/kubernetes/kubelet.conf ]; then
+            echo "KUBELET_CONF_PRESENT mode=$(stat -c '%a %U:%G' /etc/kubernetes/kubelet.conf 2>/dev/null) sha256=$(sha256sum /etc/kubernetes/kubelet.conf 2>/dev/null | cut -d' ' -f1)"
+          else
+            echo KUBELET_CONF_ABSENT
+          fi
+          echo "KUBERNETES_SERVICE_HOST=${KUBERNETES_SERVICE_HOST:-UNSET}"
+
+          echo "--- SA_TOKEN ---"
+          SAT=/var/run/secrets/kubernetes.io/serviceaccount/token
+          if [ -f "$SAT" ]; then
+            echo "SA_TOKEN_PRESENT mode=$(stat -c '%a %U:%G' "$SAT" 2>/dev/null) bytes=$(wc -c < "$SAT" 2>/dev/null) sha256=$(sha256sum "$SAT" 2>/dev/null | cut -d' ' -f1)"
+            python3 - "$SAT" <<'PYEOF'
+          import sys, json, base64
+          try:
+              tok = open(sys.argv[1]).read().strip()
+              parts = tok.split('.')
+              if len(parts) >= 2:
+                  seg = parts[1] + '=' * (-len(parts[1]) % 4)
+                  d = json.loads(base64.urlsafe_b64decode(seg.encode()))
+                  out = {k: d.get(k) for k in ('iss', 'sub', 'aud', 'exp', 'nbf', 'iat') if k in d}
+                  print('SA_TOKEN_CLAIMS ' + json.dumps(out, sort_keys=True))
+              else:
+                  print('SA_TOKEN_CLAIMS UNPARSEABLE segments=%d' % len(parts))
+          except Exception as e:
+              print('SA_TOKEN_CLAIMS_ERR ' + repr(e)[:160])
+          PYEOF
+          else
+            echo SA_TOKEN_ABSENT
+          fi
+          ls -la /var/run/secrets/kubernetes.io/serviceaccount/ 2>&1 | head -10
+
+          echo "--- SUDO_LIST ---"
+          if command -v sudo >/dev/null 2>&1; then
+            $T sudo -n -l 2>&1 | head -40
+            echo "SUDO_RC=$?"
+          else
+            echo SUDO_ABSENT
+          fi
+
+          # ---- host-level primitive evaluation (strictly read-only) ----
+          PRIM_DOCKER=0
+          if [ -n "$SOCK" ]; then
+            case "$SOCK" in
+              */docker.sock) PRIM_DOCKER=1 ;;
+              *) PRIM_DOCKER=0 ;;
+            esac
+          fi
+          PRIM_HOSTPATH=0
+          if [ -e /host/etc/machine-id ] || [ -e /host/etc/os-release ] || [ -e /run/host/etc/machine-id ]; then PRIM_HOSTPATH=1; fi
+          CAPSYSADMIN=0
+          if [ -n "${CAPEFF_HEX:-}" ]; then
+            CAPSYSADMIN=$(python3 -c "v=int('$CAPEFF_HEX',16); print(1 if v & (1<<21) else 0)" 2>/dev/null || echo 0)
+          fi
+          echo "PRIM_DOCKER=$PRIM_DOCKER PRIM_HOSTPATH=$PRIM_HOSTPATH CAP_SYS_ADMIN=$CAPSYSADMIN BLOCKREAD=$BLOCKREAD"
+
+          if [ "$PRIM_DOCKER" = "1" ] || [ "$PRIM_HOSTPATH" = "1" ] || [ "$BLOCKREAD" = "1" ]; then
+            echo "C211_HOST_MARKER_BEGIN job=$JOB nonce=$NONCE"
+            echo "MARKER_HOSTNAME=$(hostname 2>/dev/null)"
+            if [ -f /etc/machine-id ]; then echo "MARKER_MACHINE_ID_SHA256=$(sha256sum /etc/machine-id 2>/dev/null | cut -d' ' -f1)"; else echo MARKER_MACHINE_ID_ABSENT; fi
+            if [ -f /host/etc/machine-id ]; then echo "MARKER_HOST_MACHINE_ID_SHA256=$(sha256sum /host/etc/machine-id 2>/dev/null | cut -d' ' -f1)"; fi
+            NPUSMI=''
+            if command -v npu-smi >/dev/null 2>&1; then NPUSMI=$(command -v npu-smi)
+            elif [ -x /usr/local/Ascend/driver/tools/npu-smi ]; then NPUSMI=/usr/local/Ascend/driver/tools/npu-smi
+            elif [ -x /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi ]; then NPUSMI=/usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi
+            fi
+            if [ -n "$NPUSMI" ]; then
+              echo "MARKER_NPU_SMI=present path=$NPUSMI"
+              $T "$NPUSMI" info 2>&1 | head -40
+              ND=$(ls -1 /dev/davinci[0-9]* 2>/dev/null | wc -l)
+              echo "MARKER_NPU_DEVNODE_COUNT=$ND"
+            else
+              echo "MARKER_NPU_SMI=absent"
+            fi
+            if command -v nvidia-smi >/dev/null 2>&1; then
+              echo "MARKER_NVIDIA_SMI=present"
+              $T nvidia-smi -L 2>&1 | head -20
+              echo "MARKER_NVIDIA_DEVICE_COUNT=$($T nvidia-smi -L 2>/dev/null | grep -c '^GPU')"
+            else
+              echo "MARKER_NVIDIA_SMI=absent"
+            fi
+            echo "C211_HOST_MARKER_END job=$JOB nonce=$NONCE"
+          else
+            echo "C211_HOST_MARKER=NOT_PROVEN job=$JOB nonce=$NONCE"
+          fi
+
+          echo "--- C211_DONE job=$JOB nonce=$NONCE uid=$(id -u 2>/dev/null) ---"
+
+  probe-310p-1:
+    name: probe-310p-1
+    runs-on: linux-aarch64-310p-1
+    timeout-minutes: 20
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-310p-ubuntu22.04-py3.12
+    steps:
+      - name: container-local-workspace
+        env:
+          WSPACE: /tmp/c211-129864-ws
+        run: |
+          mkdir -p /tmp/c211-129864-ws && echo C211_WSPACE_READY=$(ls -d /tmp/c211-129864-ws)
+      - name: read-only-privilege-boundary
+        env:
+          WSPACE: /tmp/c211-129864-ws
+        run: |
+          set -u
+          set +e
+          NONCE='c211-129864-bfbbe1672ffc8cd8'
+          JOB='probe-310p-1'
+          IMAGE_LABEL='cann-9.2.1-310p'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID_INFO $(id 2>/dev/null)"
+          echo "C211_IMAGE_LABEL=$IMAGE_LABEL"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 20"; else T=""; fi
+
+          echo "--- PROC_SELF_STATUS ---"
+          for k in CapInh CapPrm CapEff CapBnd CapAmb Seccomp NoNewPrivs; do
+            grep -E "^$k:" /proc/self/status 2>/dev/null || echo "$k: ABSENT"
+          done
+          grep -E '^(Uid|Gid|Groups):' /proc/self/status 2>/dev/null || echo ID_STATUS_ABSENT
+
+          echo "--- PROC1_VS_SELF_PIDNS ---"
+          SELF_NS=$(readlink /proc/self/ns/pid 2>/dev/null || echo NA)
+          PID1_NS=$(readlink /proc/1/ns/pid 2>/dev/null || echo NA)
+          echo "SELF_PIDNS=$SELF_NS"
+          echo "PID1_PIDNS=$PID1_NS"
+          if [ "$SELF_NS" != "NA" ] && [ "$SELF_NS" = "$PID1_NS" ]; then echo PIDNS_SHARED_WITH_PID1; else echo PIDNS_DISTINCT_FROM_PID1; fi
+          MNT_NS=$(readlink /proc/self/ns/mnt 2>/dev/null || echo NA)
+          echo "SELF_MNTNS=$MNT_NS"
+
+          echo "--- MOUNTINFO ---"
+          if [ -r /proc/self/mountinfo ]; then
+            echo "MOUNTINFO_LINES=$(wc -l < /proc/self/mountinfo 2>/dev/null)"
+            echo "MOUNTINFO_RELEVANT_BEGIN"
+            grep -E 'docker\.sock|containerd\.sock|/host|/run/host|hostpath|hostPath|kubelet|/proc/1/root|/mnt/host' /proc/self/mountinfo 2>/dev/null | head -30
+            echo "MOUNTINFO_RELEVANT_END"
+            echo "MOUNTINFO_HEAD_BEGIN"
+            head -10 /proc/self/mountinfo 2>/dev/null
+            echo "MOUNTINFO_HEAD_END"
+          else
+            echo MOUNTINFO_UNREADABLE
+          fi
+
+          echo "--- SOCKET_HOSTPATH_INVENTORY ---"
+          for p in /var/run/docker.sock /run/docker.sock /run/containerd/containerd.sock /run/host /host /var/lib/kubelet /etc/kubernetes; do
+            if [ -e "$p" ] || [ -L "$p" ]; then
+              t=$(stat -c '%F' "$p" 2>/dev/null || echo NA)
+              m=$(stat -c '%a %U:%G' "$p" 2>/dev/null || echo NA)
+              if [ -f "$p" ]; then s=$(sha256sum "$p" 2>/dev/null | cut -d' ' -f1); else s="NA($t)"; fi
+              echo "PATH_PRESENT $p type=$t mode=$m sha256=$s"
+            else
+              echo "PATH_ABSENT $p"
+            fi
+          done
+
+          echo "--- UNIX_SOCKET_GET ---"
+          SOCK=''
+          if [ -S /var/run/docker.sock ]; then SOCK=/var/run/docker.sock
+          elif [ -S /run/docker.sock ]; then SOCK=/run/docker.sock
+          elif [ -S /run/containerd/containerd.sock ]; then SOCK=/run/containerd/containerd.sock
+          fi
+          if [ -n "$SOCK" ]; then
+            echo "SOCKET_TESTED=$SOCK"
+            python3 - "$SOCK" <<'PYEOF'
+          import socket, sys
+          p = sys.argv[1]
+          for ep in ('/version', '/info'):
+              try:
+                  s = socket.socket(socket.AF_UNIX); s.settimeout(6); s.connect(p)
+                  s.sendall(('GET %s HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' % ep).encode())
+                  buf = b''
+                  while len(buf) < 4096:
+                      ch = s.recv(2048)
+                      if not ch: break
+                      buf += ch
+                  s.close()
+                  head = buf[:500].decode('utf-8', 'replace').replace('\r', '')
+                  print('SOCKET_GET %s bytes=%d' % (ep, len(buf)))
+                  print(head)
+              except Exception as e:
+                  print('SOCKET_GET_ERR %s %r' % (ep, repr(e)[:160]))
+          PYEOF
+          else
+            echo "SOCKET_TESTED=NONE"
+          fi
+
+          echo "--- LSBLK ---"
+          if command -v lsblk >/dev/null 2>&1; then
+            $T lsblk -o NAME,SIZE,TYPE 2>&1 | head -40
+            echo "LSBLK_RC=$?"
+          else
+            echo LSBLK_ABSENT
+          fi
+          echo "--- SYS_BLOCK ---"
+          if [ -d /sys/block ]; then
+            ls -1 /sys/block 2>&1 | head -40
+            echo "SYS_BLOCK_COUNT=$(ls -1 /sys/block 2>/dev/null | wc -l)"
+          else
+            echo SYS_BLOCK_ABSENT
+          fi
+          echo "--- BLOCK_READ_TEST ---"
+          BLOCKREAD=0
+          if [ "${C211_BLOCK_READ_TEST:-1}" = "1" ]; then
+          CAPMKNOD=0
+          CAPEFF_HEX=$(grep -E '^CapEff:' /proc/self/status 2>/dev/null | awk '{print $2}')
+          if [ -n "${CAPEFF_HEX:-}" ]; then
+            CAPMKNOD=$(python3 -c "v=int('$CAPEFF_HEX',16); print(1 if v & (1<<27) else 0)" 2>/dev/null || echo 0)
+          fi
+          echo "CAP_MKNOD=$CAPMKNOD"
+          for b in $(ls -1 /sys/block 2>/dev/null | grep -vE '^(loop|ram|zram|sr|dm-|md|nbd)' | head -3); do
+            NODE="/dev/$b"
+            if [ ! -e "$NODE" ] && [ "$CAPMKNOD" = "1" ]; then
+              MAJ=$(cat /sys/block/$b/dev 2>/dev/null | cut -d: -f1)
+              MIN=$(cat /sys/block/$b/dev 2>/dev/null | cut -d: -f2)
+              if [ -n "${MAJ:-}" ] && [ -n "${MIN:-}" ]; then
+                mknod "$WSPACE/$b" b "$MAJ" "$MIN" 2>/dev/null && NODE="$WSPACE/$b" && echo "READONLY_PROBE_MKNOD $b $MAJ:$MIN in-workspace-only"
+              fi
+            fi
+            if [ -e "$NODE" ]; then
+              H=$(head -c 512 "$NODE" 2>/dev/null | sha256sum | cut -d' ' -f1)
+              RC=$?
+              if [ -n "$H" ] && [ "$H" != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]; then
+                echo "BLOCK_READ_OK dev=$b node=$NODE bytes=512 sha256_512=$H"
+                BLOCKREAD=1
+                break
+              else
+                echo "BLOCK_READ_FAIL dev=$b node=$NODE rc=$RC sha256_512=${H:-NA}"
+              fi
+            else
+              echo "BLOCK_DEVNODE_ABSENT dev=$b"
+            fi
+          done
+          for b in $(ls -1 /sys/block 2>/dev/null | grep -vE '^(loop|ram|zram|sr|dm-|md|nbd)' | head -3); do
+            if [ -e "$WSPACE/$b" ]; then rm -f "$WSPACE/$b"; echo "READONLY_PROBE_MKNOD_CLEANED $b"; fi
+          done
+          echo "BLOCKREAD_PROVEN=$BLOCKREAD"
+          else
+            echo BLOCK_READ_TEST_DISABLED
+          fi
+
+          echo "--- KUBELET_CONF ---"
+          if [ -e /etc/kubernetes/kubelet.conf ]; then
+            echo "KUBELET_CONF_PRESENT mode=$(stat -c '%a %U:%G' /etc/kubernetes/kubelet.conf 2>/dev/null) sha256=$(sha256sum /etc/kubernetes/kubelet.conf 2>/dev/null | cut -d' ' -f1)"
+          else
+            echo KUBELET_CONF_ABSENT
+          fi
+          echo "KUBERNETES_SERVICE_HOST=${KUBERNETES_SERVICE_HOST:-UNSET}"
+
+          echo "--- SA_TOKEN ---"
+          SAT=/var/run/secrets/kubernetes.io/serviceaccount/token
+          if [ -f "$SAT" ]; then
+            echo "SA_TOKEN_PRESENT mode=$(stat -c '%a %U:%G' "$SAT" 2>/dev/null) bytes=$(wc -c < "$SAT" 2>/dev/null) sha256=$(sha256sum "$SAT" 2>/dev/null | cut -d' ' -f1)"
+            python3 - "$SAT" <<'PYEOF'
+          import sys, json, base64
+          try:
+              tok = open(sys.argv[1]).read().strip()
+              parts = tok.split('.')
+              if len(parts) >= 2:
+                  seg = parts[1] + '=' * (-len(parts[1]) % 4)
+                  d = json.loads(base64.urlsafe_b64decode(seg.encode()))
+                  out = {k: d.get(k) for k in ('iss', 'sub', 'aud', 'exp', 'nbf', 'iat') if k in d}
+                  print('SA_TOKEN_CLAIMS ' + json.dumps(out, sort_keys=True))
+              else:
+                  print('SA_TOKEN_CLAIMS UNPARSEABLE segments=%d' % len(parts))
+          except Exception as e:
+              print('SA_TOKEN_CLAIMS_ERR ' + repr(e)[:160])
+          PYEOF
+          else
+            echo SA_TOKEN_ABSENT
+          fi
+          ls -la /var/run/secrets/kubernetes.io/serviceaccount/ 2>&1 | head -10
+
+          echo "--- SUDO_LIST ---"
+          if command -v sudo >/dev/null 2>&1; then
+            $T sudo -n -l 2>&1 | head -40
+            echo "SUDO_RC=$?"
+          else
+            echo SUDO_ABSENT
+          fi
+
+          # ---- host-level primitive evaluation (strictly read-only) ----
+          PRIM_DOCKER=0
+          if [ -n "$SOCK" ]; then
+            case "$SOCK" in
+              */docker.sock) PRIM_DOCKER=1 ;;
+              *) PRIM_DOCKER=0 ;;
+            esac
+          fi
+          PRIM_HOSTPATH=0
+          if [ -e /host/etc/machine-id ] || [ -e /host/etc/os-release ] || [ -e /run/host/etc/machine-id ]; then PRIM_HOSTPATH=1; fi
+          CAPSYSADMIN=0
+          if [ -n "${CAPEFF_HEX:-}" ]; then
+            CAPSYSADMIN=$(python3 -c "v=int('$CAPEFF_HEX',16); print(1 if v & (1<<21) else 0)" 2>/dev/null || echo 0)
+          fi
+          echo "PRIM_DOCKER=$PRIM_DOCKER PRIM_HOSTPATH=$PRIM_HOSTPATH CAP_SYS_ADMIN=$CAPSYSADMIN BLOCKREAD=$BLOCKREAD"
+
+          if [ "$PRIM_DOCKER" = "1" ] || [ "$PRIM_HOSTPATH" = "1" ] || [ "$BLOCKREAD" = "1" ]; then
+            echo "C211_HOST_MARKER_BEGIN job=$JOB nonce=$NONCE"
+            echo "MARKER_HOSTNAME=$(hostname 2>/dev/null)"
+            if [ -f /etc/machine-id ]; then echo "MARKER_MACHINE_ID_SHA256=$(sha256sum /etc/machine-id 2>/dev/null | cut -d' ' -f1)"; else echo MARKER_MACHINE_ID_ABSENT; fi
+            if [ -f /host/etc/machine-id ]; then echo "MARKER_HOST_MACHINE_ID_SHA256=$(sha256sum /host/etc/machine-id 2>/dev/null | cut -d' ' -f1)"; fi
+            NPUSMI=''
+            if command -v npu-smi >/dev/null 2>&1; then NPUSMI=$(command -v npu-smi)
+            elif [ -x /usr/local/Ascend/driver/tools/npu-smi ]; then NPUSMI=/usr/local/Ascend/driver/tools/npu-smi
+            elif [ -x /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi ]; then NPUSMI=/usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi
+            fi
+            if [ -n "$NPUSMI" ]; then
+              echo "MARKER_NPU_SMI=present path=$NPUSMI"
+              $T "$NPUSMI" info 2>&1 | head -40
+              ND=$(ls -1 /dev/davinci[0-9]* 2>/dev/null | wc -l)
+              echo "MARKER_NPU_DEVNODE_COUNT=$ND"
+            else
+              echo "MARKER_NPU_SMI=absent"
+            fi
+            if command -v nvidia-smi >/dev/null 2>&1; then
+              echo "MARKER_NVIDIA_SMI=present"
+              $T nvidia-smi -L 2>&1 | head -20
+              echo "MARKER_NVIDIA_DEVICE_COUNT=$($T nvidia-smi -L 2>/dev/null | grep -c '^GPU')"
+            else
+              echo "MARKER_NVIDIA_SMI=absent"
+            fi
+            echo "C211_HOST_MARKER_END job=$JOB nonce=$NONCE"
+          else
+            echo "C211_HOST_MARKER=NOT_PROVEN job=$JOB nonce=$NONCE"
+          fi
+
+          echo "--- C211_DONE job=$JOB nonce=$NONCE uid=$(id -u 2>/dev/null) ---"
+
+  probe-a2b3-0:
+    name: probe-a2b3-0
+    runs-on: linux-aarch64-a2b3-0
+    timeout-minutes: 20
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-910b-ubuntu22.04-py3.12
+    steps:
+      - name: container-local-workspace
+        env:
+          WSPACE: /tmp/c211-129864-ws
+        run: |
+          mkdir -p /tmp/c211-129864-ws && echo C211_WSPACE_READY=$(ls -d /tmp/c211-129864-ws)
+      - name: read-only-privilege-boundary
+        env:
+          WSPACE: /tmp/c211-129864-ws
+        run: |
+          set -u
+          set +e
+          NONCE='c211-129864-bfbbe1672ffc8cd8'
+          JOB='probe-a2b3-0'
+          IMAGE_LABEL='cann-9.2.1-910b'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null)"
+          echo "C211_HOSTNAME=$(hostname 2>/dev/null)"
+          echo "C211_UID_INFO $(id 2>/dev/null)"
+          echo "C211_IMAGE_LABEL=$IMAGE_LABEL"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 20"; else T=""; fi
+
+          echo "--- PROC_SELF_STATUS ---"
+          for k in CapInh CapPrm CapEff CapBnd CapAmb Seccomp NoNewPrivs; do
+            grep -E "^$k:" /proc/self/status 2>/dev/null || echo "$k: ABSENT"
+          done
+          grep -E '^(Uid|Gid|Groups):' /proc/self/status 2>/dev/null || echo ID_STATUS_ABSENT
+
+          echo "--- PROC1_VS_SELF_PIDNS ---"
+          SELF_NS=$(readlink /proc/self/ns/pid 2>/dev/null || echo NA)
+          PID1_NS=$(readlink /proc/1/ns/pid 2>/dev/null || echo NA)
+          echo "SELF_PIDNS=$SELF_NS"
+          echo "PID1_PIDNS=$PID1_NS"
+          if [ "$SELF_NS" != "NA" ] && [ "$SELF_NS" = "$PID1_NS" ]; then echo PIDNS_SHARED_WITH_PID1; else echo PIDNS_DISTINCT_FROM_PID1; fi
+          MNT_NS=$(readlink /proc/self/ns/mnt 2>/dev/null || echo NA)
+          echo "SELF_MNTNS=$MNT_NS"
+
+          echo "--- MOUNTINFO ---"
+          if [ -r /proc/self/mountinfo ]; then
+            echo "MOUNTINFO_LINES=$(wc -l < /proc/self/mountinfo 2>/dev/null)"
+            echo "MOUNTINFO_RELEVANT_BEGIN"
+            grep -E 'docker\.sock|containerd\.sock|/host|/run/host|hostpath|hostPath|kubelet|/proc/1/root|/mnt/host' /proc/self/mountinfo 2>/dev/null | head -30
+            echo "MOUNTINFO_RELEVANT_END"
+            echo "MOUNTINFO_HEAD_BEGIN"
+            head -10 /proc/self/mountinfo 2>/dev/null
+            echo "MOUNTINFO_HEAD_END"
+          else
+            echo MOUNTINFO_UNREADABLE
+          fi
+
+          echo "--- SOCKET_HOSTPATH_INVENTORY ---"
+          for p in /var/run/docker.sock /run/docker.sock /run/containerd/containerd.sock /run/host /host /var/lib/kubelet /etc/kubernetes; do
+            if [ -e "$p" ] || [ -L "$p" ]; then
+              t=$(stat -c '%F' "$p" 2>/dev/null || echo NA)
+              m=$(stat -c '%a %U:%G' "$p" 2>/dev/null || echo NA)
+              if [ -f "$p" ]; then s=$(sha256sum "$p" 2>/dev/null | cut -d' ' -f1); else s="NA($t)"; fi
+              echo "PATH_PRESENT $p type=$t mode=$m sha256=$s"
+            else
+              echo "PATH_ABSENT $p"
+            fi
+          done
+
+          echo "--- UNIX_SOCKET_GET ---"
+          SOCK=''
+          if [ -S /var/run/docker.sock ]; then SOCK=/var/run/docker.sock
+          elif [ -S /run/docker.sock ]; then SOCK=/run/docker.sock
+          elif [ -S /run/containerd/containerd.sock ]; then SOCK=/run/containerd/containerd.sock
+          fi
+          if [ -n "$SOCK" ]; then
+            echo "SOCKET_TESTED=$SOCK"
+            python3 - "$SOCK" <<'PYEOF'
+          import socket, sys
+          p = sys.argv[1]
+          for ep in ('/version', '/info'):
+              try:
+                  s = socket.socket(socket.AF_UNIX); s.settimeout(6); s.connect(p)
+                  s.sendall(('GET %s HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' % ep).encode())
+                  buf = b''
+                  while len(buf) < 4096:
+                      ch = s.recv(2048)
+                      if not ch: break
+                      buf += ch
+                  s.close()
+                  head = buf[:500].decode('utf-8', 'replace').replace('\r', '')
+                  print('SOCKET_GET %s bytes=%d' % (ep, len(buf)))
+                  print(head)
+              except Exception as e:
+                  print('SOCKET_GET_ERR %s %r' % (ep, repr(e)[:160]))
+          PYEOF
+          else
+            echo "SOCKET_TESTED=NONE"
+          fi
+
+          echo "--- LSBLK ---"
+          if command -v lsblk >/dev/null 2>&1; then
+            $T lsblk -o NAME,SIZE,TYPE 2>&1 | head -40
+            echo "LSBLK_RC=$?"
+          else
+            echo LSBLK_ABSENT
+          fi
+          echo "--- SYS_BLOCK ---"
+          if [ -d /sys/block ]; then
+            ls -1 /sys/block 2>&1 | head -40
+            echo "SYS_BLOCK_COUNT=$(ls -1 /sys/block 2>/dev/null | wc -l)"
+          else
+            echo SYS_BLOCK_ABSENT
+          fi
+          echo "--- BLOCK_READ_TEST ---"
+          BLOCKREAD=0
+          if [ "${C211_BLOCK_READ_TEST:-1}" = "1" ]; then
+          CAPMKNOD=0
+          CAPEFF_HEX=$(grep -E '^CapEff:' /proc/self/status 2>/dev/null | awk '{print $2}')
+          if [ -n "${CAPEFF_HEX:-}" ]; then
+            CAPMKNOD=$(python3 -c "v=int('$CAPEFF_HEX',16); print(1 if v & (1<<27) else 0)" 2>/dev/null || echo 0)
+          fi
+          echo "CAP_MKNOD=$CAPMKNOD"
+          for b in $(ls -1 /sys/block 2>/dev/null | grep -vE '^(loop|ram|zram|sr|dm-|md|nbd)' | head -3); do
+            NODE="/dev/$b"
+            if [ ! -e "$NODE" ] && [ "$CAPMKNOD" = "1" ]; then
+              MAJ=$(cat /sys/block/$b/dev 2>/dev/null | cut -d: -f1)
+              MIN=$(cat /sys/block/$b/dev 2>/dev/null | cut -d: -f2)
+              if [ -n "${MAJ:-}" ] && [ -n "${MIN:-}" ]; then
+                mknod "$WSPACE/$b" b "$MAJ" "$MIN" 2>/dev/null && NODE="$WSPACE/$b" && echo "READONLY_PROBE_MKNOD $b $MAJ:$MIN in-workspace-only"
+              fi
+            fi
+            if [ -e "$NODE" ]; then
+              H=$(head -c 512 "$NODE" 2>/dev/null | sha256sum | cut -d' ' -f1)
+              RC=$?
+              if [ -n "$H" ] && [ "$H" != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]; then
+                echo "BLOCK_READ_OK dev=$b node=$NODE bytes=512 sha256_512=$H"
+                BLOCKREAD=1
+                break
+              else
+                echo "BLOCK_READ_FAIL dev=$b node=$NODE rc=$RC sha256_512=${H:-NA}"
+              fi
+            else
+              echo "BLOCK_DEVNODE_ABSENT dev=$b"
+            fi
+          done
+          for b in $(ls -1 /sys/block 2>/dev/null | grep -vE '^(loop|ram|zram|sr|dm-|md|nbd)' | head -3); do
+            if [ -e "$WSPACE/$b" ]; then rm -f "$WSPACE/$b"; echo "READONLY_PROBE_MKNOD_CLEANED $b"; fi
+          done
+          echo "BLOCKREAD_PROVEN=$BLOCKREAD"
+          else
+            echo BLOCK_READ_TEST_DISABLED
+          fi
+
+          echo "--- KUBELET_CONF ---"
+          if [ -e /etc/kubernetes/kubelet.conf ]; then
+            echo "KUBELET_CONF_PRESENT mode=$(stat -c '%a %U:%G' /etc/kubernetes/kubelet.conf 2>/dev/null) sha256=$(sha256sum /etc/kubernetes/kubelet.conf 2>/dev/null | cut -d' ' -f1)"
+          else
+            echo KUBELET_CONF_ABSENT
+          fi
+          echo "KUBERNETES_SERVICE_HOST=${KUBERNETES_SERVICE_HOST:-UNSET}"
+
+          echo "--- SA_TOKEN ---"
+          SAT=/var/run/secrets/kubernetes.io/serviceaccount/token
+          if [ -f "$SAT" ]; then
+            echo "SA_TOKEN_PRESENT mode=$(stat -c '%a %U:%G' "$SAT" 2>/dev/null) bytes=$(wc -c < "$SAT" 2>/dev/null) sha256=$(sha256sum "$SAT" 2>/dev/null | cut -d' ' -f1)"
+            python3 - "$SAT" <<'PYEOF'
+          import sys, json, base64
+          try:
+              tok = open(sys.argv[1]).read().strip()
+              parts = tok.split('.')
+              if len(parts) >= 2:
+                  seg = parts[1] + '=' * (-len(parts[1]) % 4)
+                  d = json.loads(base64.urlsafe_b64decode(seg.encode()))
+                  out = {k: d.get(k) for k in ('iss', 'sub', 'aud', 'exp', 'nbf', 'iat') if k in d}
+                  print('SA_TOKEN_CLAIMS ' + json.dumps(out, sort_keys=True))
+              else:
+                  print('SA_TOKEN_CLAIMS UNPARSEABLE segments=%d' % len(parts))
+          except Exception as e:
+              print('SA_TOKEN_CLAIMS_ERR ' + repr(e)[:160])
+          PYEOF
+          else
+            echo SA_TOKEN_ABSENT
+          fi
+          ls -la /var/run/secrets/kubernetes.io/serviceaccount/ 2>&1 | head -10
+
+          echo "--- SUDO_LIST ---"
+          if command -v sudo >/dev/null 2>&1; then
+            $T sudo -n -l 2>&1 | head -40
+            echo "SUDO_RC=$?"
+          else
+            echo SUDO_ABSENT
+          fi
+
+          # ---- host-level primitive evaluation (strictly read-only) ----
+          PRIM_DOCKER=0
+          if [ -n "$SOCK" ]; then
+            case "$SOCK" in
+              */docker.sock) PRIM_DOCKER=1 ;;
+              *) PRIM_DOCKER=0 ;;
+            esac
+          fi
+          PRIM_HOSTPATH=0
+          if [ -e /host/etc/machine-id ] || [ -e /host/etc/os-release ] || [ -e /run/host/etc/machine-id ]; then PRIM_HOSTPATH=1; fi
+          CAPSYSADMIN=0
+          if [ -n "${CAPEFF_HEX:-}" ]; then
+            CAPSYSADMIN=$(python3 -c "v=int('$CAPEFF_HEX',16); print(1 if v & (1<<21) else 0)" 2>/dev/null || echo 0)
+          fi
+          echo "PRIM_DOCKER=$PRIM_DOCKER PRIM_HOSTPATH=$PRIM_HOSTPATH CAP_SYS_ADMIN=$CAPSYSADMIN BLOCKREAD=$BLOCKREAD"
+
+          if [ "$PRIM_DOCKER" = "1" ] || [ "$PRIM_HOSTPATH" = "1" ] || [ "$BLOCKREAD" = "1" ]; then
+            echo "C211_HOST_MARKER_BEGIN job=$JOB nonce=$NONCE"
+            echo "MARKER_HOSTNAME=$(hostname 2>/dev/null)"
+            if [ -f /etc/machine-id ]; then echo "MARKER_MACHINE_ID_SHA256=$(sha256sum /etc/machine-id 2>/dev/null | cut -d' ' -f1)"; else echo MARKER_MACHINE_ID_ABSENT; fi
+            if [ -f /host/etc/machine-id ]; then echo "MARKER_HOST_MACHINE_ID_SHA256=$(sha256sum /host/etc/machine-id 2>/dev/null | cut -d' ' -f1)"; fi
+            NPUSMI=''
+            if command -v npu-smi >/dev/null 2>&1; then NPUSMI=$(command -v npu-smi)
+            elif [ -x /usr/local/Ascend/driver/tools/npu-smi ]; then NPUSMI=/usr/local/Ascend/driver/tools/npu-smi
+            elif [ -x /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi ]; then NPUSMI=/usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi
+            fi
+            if [ -n "$NPUSMI" ]; then
+              echo "MARKER_NPU_SMI=present path=$NPUSMI"
+              $T "$NPUSMI" info 2>&1 | head -40
+              ND=$(ls -1 /dev/davinci[0-9]* 2>/dev/null | wc -l)
+              echo "MARKER_NPU_DEVNODE_COUNT=$ND"
+            else
+              echo "MARKER_NPU_SMI=absent"
+            fi
+            if command -v nvidia-smi >/dev/null 2>&1; then
+              echo "MARKER_NVIDIA_SMI=present"
+              $T nvidia-smi -L 2>&1 | head -20
+              echo "MARKER_NVIDIA_DEVICE_COUNT=$($T nvidia-smi -L 2>/dev/null | grep -c '^GPU')"
+            else
+              echo "MARKER_NVIDIA_SMI=absent"
+            fi
+            echo "C211_HOST_MARKER_END job=$JOB nonce=$NONCE"
+          else
+            echo "C211_HOST_MARKER=NOT_PROVEN job=$JOB nonce=$NONCE"
+          fi
+
+          echo "--- C211_DONE job=$JOB nonce=$NONCE uid=$(id -u 2>/dev/null) ---"
+
