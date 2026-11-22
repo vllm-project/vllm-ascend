@@ -230,6 +230,31 @@ class FlashWorker:
             store.put = put
             if original_exists is not None:
                 store.exists = exists
+
+            # Layerwise stores bypass put(); trace the batch API instead.
+            original_put_start = getattr(store, "batch_put_start", None)
+            original_copy_put = getattr(store, "batch_copy_put", None)
+            original_commit = getattr(store, "batch_commit", None)
+
+            def traced_batch(name: str, original) -> Any:
+                def wrapper(*args, **kwargs):
+                    keys = args[0] if args else kwargs.get("keys", [])
+                    if isinstance(keys, (list, tuple)):
+                        print(
+                            f"[p11-probe] {name} n={len(keys)} tail={[key[-40:] for key in keys[-3:]]}",
+                            flush=True,
+                        )
+                    return original(*args, **kwargs)
+
+                return wrapper
+
+            if original_put_start is not None:
+                store.batch_put_start = traced_batch("PUT_START", original_put_start)
+            if original_copy_put is not None:
+                store.batch_copy_put = traced_batch("COPY_PUT", original_copy_put)
+            if original_commit is not None:
+                store.batch_commit = traced_batch("COMMIT", original_commit)
+
             store._group_probe_installed = True
             installed += 1
         return installed
