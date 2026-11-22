@@ -157,34 +157,44 @@ def test_hisparse_caps_kda_layers_per_physical_group_at_six():
     assert all(group.kv_cache_spec == state for group in recurrent)
 
 
-def test_fp8_hisparse_kpool_preserves_native_manager_page(monkeypatch):
+@pytest.mark.parametrize(
+    ("main_dtype", "indexer_dtype", "dtype", "scale_dim", "scale_dtype", "page_bytes"),
+    [
+        ("fp8", "fp8", torch.float8_e4m3fn, 1, torch.float32, 38016),
+        ("int8", "auto", torch.bfloat16, 0, torch.int8, 73728),
+    ],
+)
+def test_hisparse_kpool_preserves_native_manager_page(
+    monkeypatch, main_dtype, indexer_dtype, dtype, scale_dim, scale_dtype, page_bytes
+):
     from vllm.v1.kv_cache_interface import KVCacheGroupRole, UniformTypeKVCacheSpecs
 
     from vllm_ascend import hisparse
     from vllm_ascend.core import kv_cache_config_builder as builder
-    from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
+    from vllm_ascend.device.hardware import AscendDeviceType
+    from vllm_ascend.device.hardware_profile import get_hardware_profile
 
     name = "model.layers.3.indexer.k_cache"
     kpool = AscendMLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
         head_size=128,
-        dtype=torch.float8_e4m3fn,
+        dtype=dtype,
         model_version="glm5_next",
         tokens_per_state=4,
-        scale_dim=1,
-        scale_dtype=torch.float32,
+        scale_dim=scale_dim,
+        scale_dtype=scale_dtype,
     )
     specs = {name: kpool}
     expanded = UniformTypeKVCacheSpecs.from_specs({name: replace(kpool, block_size=1536)})
     group = KVCacheGroupSpec([name], expanded, role=KVCacheGroupRole.HISPARSE_INDEXER)
     monkeypatch.setattr(builder, "_upstream_get_kv_cache_groups", lambda *_: [group])
     config = make_config()
-    config.attention_config = SimpleNamespace(hisparse_config=object(), indexer_kv_dtype="fp8")
+    config.attention_config = SimpleNamespace(hisparse_config=object(), indexer_kv_dtype=indexer_dtype)
     config.parallel_config.data_parallel_size = 1
     config.parallel_config.pipeline_parallel_size = 1
     config.cache_config.block_size = 128
-    config.cache_config.cache_dtype = "fp8"
+    config.cache_config.cache_dtype = main_dtype
     config.cache_config.mamba_page_size_padded = 608256
     config.model_config.hf_text_config = SimpleNamespace(
         model_type="glm5_next_text", index_kpool=4, kv_lora_rank=512, qk_rope_head_dim=0
@@ -192,7 +202,7 @@ def test_fp8_hisparse_kpool_preserves_native_manager_page(monkeypatch):
     monkeypatch.setattr(
         hisparse,
         "get_current_hardware_profile",
-        lambda: SimpleNamespace(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED),
+        lambda: get_hardware_profile(AscendDeviceType.A3 if main_dtype == "int8" else AscendDeviceType.A5),
     )
 
     [planned] = builder.AscendKVCacheConfigBuilder().get_kv_cache_groups(config, specs)
@@ -200,7 +210,7 @@ def test_fp8_hisparse_kpool_preserves_native_manager_page(monkeypatch):
     assert planned.layer_names == [name]
     assert planned.role == KVCacheGroupRole.HISPARSE_INDEXER
     assert planned.kv_cache_spec.block_size == 1152
-    assert builder._compact_hisparse_kpool_pages([planned]) == {name: 38016}
+    assert builder._compact_hisparse_kpool_pages([planned]) == {name: page_bytes}
 
 
 @pytest.fixture(autouse=True)

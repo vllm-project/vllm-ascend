@@ -3,9 +3,11 @@
 """CPU boundary checks using the installed Core and Ascend implementations."""
 
 import math
+import mmap
+import sys
 from dataclasses import replace
 from types import SimpleNamespace as NS
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import numpy as np
 import pytest
@@ -45,6 +47,44 @@ from vllm_ascend.hisparse.c8 import (
     pack_c8_components,
 )
 from vllm_ascend.ops.triton import sfa_indexer_store
+
+
+@pytest.mark.parametrize(
+    ("a5", "rows", "expected"),
+    [
+        (False, 64, "batched"),
+        (False, 65, "sorted"),
+        (False, 32768, "sorted"),
+        (False, 32769, "direct"),
+        (True, 128, "direct"),
+        (True, 8064, "sorted"),
+    ],
+)
+def test_written_slot_invalidation_dispatch(monkeypatch, a5, rows, expected):
+    monkeypatch.setattr(hisparse_ops, "is_950", lambda: a5)
+    monkeypatch.setattr(hisparse_ops, "_check_tensor", Mock())
+    monkeypatch.setattr(hisparse_ops, "triton", NS(cdiv=lambda size, tile: (size + tile - 1) // tile))
+    monkeypatch.setattr(
+        hisparse_ops,
+        "torch",
+        NS(int32=torch.int32, int64=torch.int64, empty=Mock(), empty_like=Mock(), sort=Mock()),
+    )
+    batched, sorted_search, direct = MagicMock(), MagicMock(), MagicMock()
+    monkeypatch.setattr(hisparse_ops, "invalidate_written_slots_batched", batched)
+    monkeypatch.setattr(hisparse_ops, "invalidate_written_slots_sorted", sorted_search)
+    monkeypatch.setattr(hisparse_ops, "invalidate_kernel", direct)
+    monkeypatch.setattr(hisparse_ops, "pack_written_slot_keys", MagicMock())
+    group_table = NS(device=NS(type="npu"), numel=lambda: 6)
+    writes = NS(numel=lambda: rows, shape=(rows,))
+
+    hisparse_ops.HiSparseNPUOps.hisparse_invalidate_written_slots(
+        group_table, NS(numel=lambda: 1), writes, writes, 32, 32768
+    )
+
+    kernels = {"batched": batched, "sorted": sorted_search, "direct": direct}
+    assert [name for name, kernel in kernels.items() if kernel.__getitem__.called] == [expected]
+    if expected == "sorted":
+        assert sorted_search.__getitem__.return_value.call_args.kwargs["UNROLL_SEARCH"] == a5
 
 
 def test_resident_decode_pages_reorder_requests_and_mask_padding():
@@ -114,18 +154,17 @@ def test_flash_hisparse_scope(monkeypatch, model_type, hisparse_enabled, indexer
     assert hisparse.supports_glm5_next_hisparse(config) is expected
 
 
+@pytest.mark.parametrize("cache_dtype", (torch.float8_e4m3fn, torch.int8), ids=("fp8", "int8"))
 @pytest.mark.parametrize(
     ("resident", "padded"),
     [(True, False), (False, False), (True, True)],
     ids=["resident", "cold", "padded"],
 )
-def test_resident_mixed_attention_preserves_native_paged_metadata(monkeypatch, resident, padded):
+def test_resident_mixed_attention_preserves_native_paged_metadata(monkeypatch, cache_dtype, resident, padded):
     from vllm.config.compilation import CUDAGraphMode
     from vllm.v1.hisparse.runtime import HiSparseCacheHandle, HiSparseRuntime
 
-    from vllm_ascend import hisparse
     from vllm_ascend.attention import sfa_hisparse
-    from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
     from vllm_ascend.hisparse.flash_compat import install_flash_layer_view_bounds
 
     num_decode, num_live = 6, 15
@@ -151,7 +190,7 @@ def test_resident_mixed_attention_preserves_native_paged_metadata(monkeypatch, r
     )
     raw = torch.empty(5 * 9 * 128 * 528, dtype=torch.int8)
     layer_runtime = object.__new__(HiSparseRuntime)
-    layer_runtime.kv_dtype = torch.float8_e4m3fn
+    layer_runtime.kv_dtype = cache_dtype
     layer_runtime.row_width = 528
     handle = HiSparseCacheHandle(layer_runtime)
     install_flash_layer_view_bounds(handle)
@@ -168,12 +207,12 @@ def test_resident_mixed_attention_preserves_native_paged_metadata(monkeypatch, r
     calls = []
     impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
     impl.enable_sparse_sfa_c8 = True
-    impl.c8_cache_dtype = torch.float8_e4m3fn
+    impl.c8_cache_dtype = cache_dtype
     impl.qk_rope_head_dim = 0
     impl.vllm_config = NS(
-        attention_config=NS(hisparse_config=NS(), indexer_kv_dtype="fp8"),
+        attention_config=NS(hisparse_config=NS(), indexer_kv_dtype="auto" if cache_dtype is torch.int8 else "fp8"),
         compilation_config=NS(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY),
-        cache_config=NS(cache_dtype="fp8"),
+        cache_config=NS(cache_dtype="int8" if cache_dtype is torch.int8 else "fp8"),
         model_config=NS(
             hf_text_config=NS(model_type="glm5_next_text", index_topk=2048, index_kpool=4, qk_rope_head_dim=0)
         ),
@@ -211,9 +250,7 @@ def test_resident_mixed_attention_preserves_native_paged_metadata(monkeypatch, r
         source_block_table=source_table,
         swap_in=resolve,
     )
-    monkeypatch.setattr(
-        hisparse, "get_current_hardware_profile", lambda: NS(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED)
-    )
+    monkeypatch.setattr(sfa_hisparse, "_supports_flash_hisparse", lambda config: config is impl.vllm_config)
     monkeypatch.setattr(sfa_hisparse, "get_forward_context", lambda: NS(cudagraph_runtime_mode=CUDAGraphMode.NONE))
     monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
 
@@ -222,7 +259,7 @@ def test_resident_mixed_attention_preserves_native_paged_metadata(monkeypatch, r
         assert q is query and q_rope is None and meta is metadata
         assert ends is query_ends and lengths is key_lengths
         assert kv[0].data_ptr() == raw.data_ptr()
-        assert kv[0].shape == (37, 128, 1, 528)
+        assert kv[0].shape == (37, 128, 1, 528) and kv[0].dtype == cache_dtype
         assert block_table.tolist() == [[36, 27, 18], [9, 27, 0]]
         assert indices.shape == (num_live, 1, 2051) and indices.is_contiguous()
         torch.testing.assert_close(indices, logical_topk[:, :, :2051])
@@ -407,6 +444,93 @@ def test_private_host_allocator_keeps_other_backends_on_core_path(monkeypatch):
     assert payload.numel() == 1001 and registered.data_ptr() % 4096 == 0
     payload.fill_(17)
     torch.testing.assert_close(registered[:1001], payload)
+
+
+@pytest.mark.parametrize(
+    "connector, transfer_backend, active_config, nested, expected",
+    [
+        ("HiSparseConnector", "memfabric", True, False, True),
+        ("HiSparseConnector", "memfabric", False, False, True),
+        ("HiSparseConnector", "memfabric", False, True, True),
+        ("HiSparseConnector", None, False, False, False),
+        ("MooncakeConnectorV2", "memfabric", False, True, False),
+        ("MooncakeConnectorV2", "memfabric", False, False, False),
+    ],
+)
+def test_private_host_allocator_selects_explicit_memfabric(
+    monkeypatch, connector, transfer_backend, active_config, nested, expected
+):
+    from vllm import config
+    from vllm.v1.hisparse import backend as core_backend
+    from vllm.v1.hisparse import runtime
+
+    from vllm_ascend import ascend_config
+
+    transfer = NS(
+        kv_connector=connector,
+        kv_connector_extra_config={"transfer_backend": transfer_backend},
+    )
+    if nested:
+        transfer = NS(kv_connector="MultiConnector", kv_connector_extra_config={"connectors": [vars(transfer)]})
+    vllm_config = NS(kv_transfer_config=transfer)
+    monkeypatch.setattr(config, "get_current_vllm_config_or_none", lambda: vllm_config if active_config else None)
+    monkeypatch.setattr(ascend_config, "_INIT_VLLM_CONFIG", None if active_config else vllm_config)
+    monkeypatch.setattr(core_backend, "get_hisparse_backend", AscendHiSparseBackend)
+    monkeypatch.setattr(runtime, "allocate_pinned_host_pool", runtime.allocate_pinned_host_pool)
+    allocation = torch.empty(32, dtype=torch.int8)
+    registration = NS(tensor=allocation)
+    allocation._hisparse_registration = registration
+
+    def allocate_mapped_host(shape, dtype, *, memfabric=False):
+        assert (shape, dtype) == ((17,), torch.int8)
+        assert memfabric is expected
+        return allocation
+
+    monkeypatch.setattr(host_pool, "allocate_mapped_host", allocate_mapped_host)
+    host_pool.install()
+    payload, registered = runtime.allocate_pinned_host_pool(17)
+    payload.fill_(7)
+    assert registered.numel() == 32
+    assert registered._hisparse_registration is registration
+    torch.testing.assert_close(registered[:17], torch.full((17,), 7, dtype=torch.int8))
+
+
+@pytest.mark.parametrize("device_address", [0, 4096])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_memfabric_host_pool_releases_arena(monkeypatch, device_address, legacy):
+    released = []
+    backing = torch.empty(2 * mmap.PAGESIZE, dtype=torch.uint8)
+    offset = -backing.data_ptr() % mmap.PAGESIZE
+    arena = NS(
+        initialize=lambda config: 0,
+        empty=lambda size, **kwargs: backing[offset : offset + size[0]],
+        get_dva=lambda addr: device_address,
+        uninitialize=lambda: released.append(True),
+    )
+    offload = NS(OffloadConfig=NS, Scene=NS(LOCAL=0))
+    if legacy:
+        vars(offload).update(vars(arena))
+    else:
+        offload.Offload = lambda: arena
+    monkeypatch.setitem(sys.modules, "memfabric_hybrid", NS(offload=offload))
+    monkeypatch.setattr(torch, "npu", NS(current_device=lambda: 0), raising=False)
+
+    if not device_address:
+        with pytest.raises(RuntimeError, match="device address"):
+            host_pool.allocate_mapped_host((128,), torch.uint8, memfabric=True)
+    else:
+        tensor = host_pool.allocate_mapped_host((128,), torch.uint8, memfabric=True)
+        mapping = tensor._hisparse_registration
+        assert mapping.address_of(tensor[16:]) == device_address + 16
+        if legacy:
+            with pytest.raises(RuntimeError, match="one HiSparse Host pool"):
+                host_pool.allocate_mapped_host((128,), torch.uint8, memfabric=True)
+        mapping.close()
+        mapping.close()
+        assert mapping.closed
+
+    assert released == [True]
+    assert not host_pool._LEGACY_MEMFABRIC_POOL.locked()
 
 
 def test_mapped_addresses_retain_offsets_and_reject_expired_or_external_views():

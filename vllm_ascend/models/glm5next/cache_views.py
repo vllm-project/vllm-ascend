@@ -127,15 +127,11 @@ def view_hisparse_kpool_cache(cache: torch.Tensor, spec: AscendMLAAttentionSpec)
         or cache.stride(0) < rows * row_elements
     ):
         raise ValueError("Invalid HiSparse KPool cache geometry.")
-    if not spec.scale_dim:
-        return (cache.transpose(1, 2),)
-
-    # Compact FP8 layers have no gap between manager blocks. Store each
-    # kernel page as its contiguous keys followed by its contiguous scales,
-    # with the same 128-token page geometry as ordinary KPool.
+    # Compact layers have no gap between manager blocks. Keep the same
+    # 128-token kernel page geometry as ordinary KPool.
     pages = cache.shape[0]
     stride = cache.stride(0)
-    if spec.dtype == torch.float8_e4m3fn and stride == rows * row_elements:
+    if spec.dtype in (torch.bfloat16, torch.float8_e4m3fn) and stride == rows * row_elements:
         compression_ratio = get_kv_cache_compression_ratio(spec)
         kernel_rows = GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE // compression_ratio
         if kernel_rows < rows and kernel_rows > 0 and rows % kernel_rows == 0:
@@ -143,6 +139,8 @@ def view_hisparse_kpool_cache(cache: torch.Tensor, spec: AscendMLAAttentionSpec)
             pages *= subpages
             stride //= subpages
             rows = kernel_rows
+    if not spec.scale_dim:
+        return (cache.as_strided((pages, rows, 1, width), (stride, width, width, 1)),)
     key_bytes = rows * width
     scale_size = get_dtype_size(spec.scale_dtype)
     scale_offset = cache.storage_offset() + key_bytes

@@ -55,6 +55,36 @@ def test_prepare_nonempty_keypool_inputs_matches_reference(tokens, requests, col
         torch.testing.assert_close(value.cpu(), original.cpu(), rtol=0, atol=0)
 
 
+@pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A3, reason="Requires Ascend A3 BF16")
+@pytest.mark.parametrize("requests", [1, 8])
+def test_a3_expands_hisparse_manager_pages_on_graph_replay(requests):
+    device = "npu:0"
+    tokens = 6 * requests
+    query = torch.zeros(tokens, 32, 128, dtype=torch.bfloat16, device=device)
+    weights = torch.ones(tokens, 32, dtype=query.dtype, device=device)
+    ends = torch.arange(1, requests + 1, dtype=torch.int64, device=device) * 6
+    lengths = torch.full_like(ends, 32768)
+    tails = torch.zeros_like(ends)
+    manager_pages = torch.arange(requests * 2731, dtype=torch.int32).reshape(requests, 2731)
+    table = manager_pages.to(device)
+
+    def pad_table():
+        return prepare_nonempty_keypool_inputs(query, weights, ends, lengths, tails, table, 3)[-1]
+
+    pad_table()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        expanded = pad_table()
+
+    replacement = manager_pages.flip(1)
+    table.copy_(replacement)
+    graph.replay()
+    expected = (replacement.unsqueeze(-1) * 3 + torch.arange(3, dtype=torch.int32)).flatten(1)
+    expected = torch.cat((expected, torch.zeros_like(expected[:1])))
+    torch.testing.assert_close(expanded.cpu(), expected, atol=0, rtol=0)
+
+
 @pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A5, reason="Requires Ascend A5 FP8")
 def test_compact_hisparse_kpool_subpages_on_graph_replay():
     device = "npu:0"

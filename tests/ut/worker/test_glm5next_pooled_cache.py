@@ -298,6 +298,31 @@ def test_hisparse_fp8_indexer_views_preserve_slab_offset_and_gap():
     assert not torch.count_nonzero(raw[12480:])
 
 
+def test_hisparse_bf16_indexer_uses_dense_kernel_subpages():
+    spec = replace(
+        _make_specs()[INDEXER],
+        cache_role=SparseCacheRole.INDEXER,
+        block_size=256,
+        tokens_per_state=4,
+        head_size=128,
+        dtype=torch.bfloat16,
+        scale_dim=0,
+        state_content_bytes=256,
+    )
+    raw = torch.zeros(32 + 2 * 64 * 128, dtype=torch.bfloat16)
+    core_view = raw.as_strided((2, 1, 64, 128), (8192, 8192, 128, 1), storage_offset=32)
+
+    (keys,) = view_hisparse_kpool_cache(core_view, spec)
+
+    assert keys.shape == (4, 32, 1, 128)
+    assert keys.is_contiguous()
+    assert keys.data_ptr() == core_view.data_ptr()
+    keys[2].fill_(1)
+    assert torch.equal(core_view[1, 0, :32], torch.ones((32, 128), dtype=torch.bfloat16))
+    assert torch.count_nonzero(core_view[0]) == 0
+    assert torch.count_nonzero(core_view[1, 0, 32:]) == 0
+
+
 def test_cann_tail_views_keep_interleaved_rows_and_shared_page_stride(monkeypatch):
     config, _, plan = _make_plan()
     config.model_config.get_num_layers = lambda _: 2

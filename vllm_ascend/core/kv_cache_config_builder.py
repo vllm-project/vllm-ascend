@@ -49,7 +49,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     LAYERWISE_REUSE_BACKING_BYTES,
     get_layerwise_reuse_backing_bytes,
 )
-from vllm_ascend.hisparse import supports_glm5_next_hisparse
+from vllm_ascend.hisparse import validate_glm5_next_hisparse
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -88,7 +88,7 @@ from vllm_ascend.utils import vllm_version_is
 
 
 def _compact_hisparse_kpool_pages(groups: list[KVCacheGroupSpec]) -> dict[str, int]:
-    """Return the unpadded FP8 KPool bytes per layer and global block ID."""
+    """Return the unpadded KPool bytes per layer and global block ID."""
     return {
         name: spec.real_page_size_bytes
         for group in groups
@@ -96,9 +96,10 @@ def _compact_hisparse_kpool_pages(groups: list[KVCacheGroupSpec]) -> dict[str, i
         for name, spec in group.kv_cache_spec.kv_cache_specs.items()
         if isinstance(spec, AscendMLAAttentionSpec)
         and spec.model_version == "glm5_next"
-        and spec.dtype == torch.float8_e4m3fn
-        and spec.scale_dim == 1
-        and spec.scale_dtype == torch.float32
+        and (
+            (spec.dtype == torch.bfloat16 and spec.scale_dim == 0)
+            or (spec.dtype == torch.float8_e4m3fn and spec.scale_dim == 1 and spec.scale_dtype == torch.float32)
+        )
     }
 
 
@@ -121,7 +122,7 @@ def _place_compact_hisparse_kpool(config: KVCacheConfig, pages: dict[str, int]) 
         # PoolKeyIndexer indexes from the layer's tensor base with a 32-bit
         # byte offset. The key/scale views below fit inside this layer region.
         if layer_size > 2**32:
-            raise ValueError(f"FP8 HiSparse KPool layer {layer} exceeds the 4 GiB indexer address range.")
+            raise ValueError(f"HiSparse KPool layer {layer} exceeds the 4 GiB indexer address range.")
         tensors.append(
             KVCacheTensor(
                 size=total_size,
@@ -164,10 +165,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return step5_groups
         is_glm5_next = any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values())
         if is_glm5_next and vllm_config.attention_config.hisparse_config is not None:
-            if not supports_glm5_next_hisparse(vllm_config):
-                raise ValueError(
-                    "GLM-5.3-Flash HiSparse requires A5 FP8 main and indexer KV with DP, PP, PCP and DCP set to 1."
-                )
+            validate_glm5_next_hisparse(vllm_config)
             if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
                 raise ValueError("GLM-Next HiSparse requires the hybrid KV cache manager.")
             # Core separates the host-backed MLA sources from the device-only
@@ -241,7 +239,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             if vllm_config.cache_config.enable_extensible_kv_cache:
                 # These layer offsets depend on block count. The extensible
                 # cache shrinks storage after capture without moving views.
-                raise ValueError("FP8 HiSparse compact KPool requires a fixed-size KV allocation.")
+                raise ValueError("HiSparse compact KPool requires a fixed-size KV allocation.")
             config = super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
             _place_compact_hisparse_kpool(config, pages)
             return _attach_transfer_and_speculation_metadata(vllm_config, config)

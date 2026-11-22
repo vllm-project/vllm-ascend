@@ -1172,11 +1172,6 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             indexer_op = partial(self._pool_key_indexer_fp8, k_descale=indexer_scale_cache[..., 0])
             select = partial(self._pool_key_indexer, indexer_op)
             extra = {}
-            if self.use_hisparse_topk and indexer_metadata.block_size != indexer_cache.size(1):
-                page_ratio, remainder = divmod(indexer_metadata.block_size, indexer_cache.size(1))
-                if remainder or page_ratio < 1:
-                    raise ValueError("HiSparse KPool subpages must exactly divide the manager page.")
-                extra["block_table_page_ratio"] = page_ratio
         elif int8:
             assert indexer_scale_cache is not None
             query, q_descale = self._symmetric_int8(q_values)
@@ -1186,6 +1181,11 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             query = q_values.to(indexer_cache.dtype)
             select = partial(self._pool_key_indexer, self._cann_pool_key_indexer)
             extra = {}
+        if not int8 and self.use_hisparse_topk and indexer_metadata.block_size != indexer_cache.size(1):
+            page_ratio, remainder = divmod(indexer_metadata.block_size, indexer_cache.size(1))
+            if remainder or page_ratio < 1:
+                raise ValueError("HiSparse KPool subpages must exactly divide the manager page.")
+            extra["block_table_page_ratio"] = page_ratio
         indices, _ = select(
             query,
             indexer_cache,

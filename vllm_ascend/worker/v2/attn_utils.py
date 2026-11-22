@@ -94,7 +94,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     reshape_kv_cache_tensors_for_sparse_kv_offload,
 )
-from vllm_ascend.hisparse import FLASH_MTP_QUERY_LEN, is_glm5_next_hisparse, supports_glm5_next_hisparse
+from vllm_ascend.hisparse import FLASH_MTP_QUERY_LEN, is_glm5_next_hisparse, validate_glm5_next_hisparse
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
@@ -203,10 +203,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     mamba_specs: dict[str, MambaSpec] = {}
     hisparse_enabled = vllm_config.attention_config.hisparse_config is not None
     flash_hisparse = is_glm5_next_hisparse(vllm_config)
-    if flash_hisparse and not supports_glm5_next_hisparse(vllm_config):
-        raise ValueError(
-            "GLM-5.3-Flash HiSparse requires A5 FP8 main and indexer KV with DP, PP, PCP and DCP set to 1."
-        )
+    if flash_hisparse:
+        validate_glm5_next_hisparse(vllm_config)
     flash_packed_sources: set[str] = set()
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
@@ -324,7 +322,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             packed_row_bytes = C8_ROW_BYTES
         specs = resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers)
         for name in flash_packed_sources:
-            # Preserve a zero-copy paged view for the all-resident FP8 prefill.
+            # Preserve a zero-copy paged view for all-resident C8 attention.
             source = specs[name]
             specs[name] = replace(source, block_stride_alignment=source.page_size_bytes)
         if flash_hisparse:

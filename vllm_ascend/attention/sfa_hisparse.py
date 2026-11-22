@@ -27,7 +27,7 @@ from vllm_ascend.attention.sfa_v1 import (
     needs_pcp_kv_gather,
 )
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.hisparse import cache_ops, supports_glm5_next_hisparse
+from vllm_ascend.hisparse import cache_ops, supports_glm5_next_hisparse, supports_glm5_next_int8_hisparse
 from vllm_ascend.hisparse.flash_compat import install_flash_layer_view_bounds
 from vllm_ascend.hisparse.pcp import hisparse_write_target, prepare_pcp_query_metadata, prepare_pcp_query_states
 from vllm_ascend.ops.triton.hisparse import _SCATTER_MIN_REPRESENTATIVES, scatter_min_representatives
@@ -36,9 +36,13 @@ from vllm_ascend.ops.triton.hisparse import _SCATTER_MIN_REPRESENTATIVES, scatte
 _ATTENTION_CHUNK_ROWS = 32
 
 
+def _supports_flash_hisparse(vllm_config: VllmConfig) -> bool:
+    return supports_glm5_next_hisparse(vllm_config) or supports_glm5_next_int8_hisparse(vllm_config)
+
+
 def supports_flash_resident_decode_graph(vllm_config: VllmConfig) -> bool:
     return (
-        supports_glm5_next_hisparse(vllm_config)
+        _supports_flash_hisparse(vllm_config)
         and vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
     )
 
@@ -164,7 +168,7 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device, **kwargs):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls=AscendHiSparseMetadata, **kwargs)
-        self._use_npu_representatives = supports_glm5_next_hisparse(vllm_config)
+        self._use_npu_representatives = _supports_flash_hisparse(vllm_config)
         if self._use_npu_representatives:
             _SCATTER_MIN_REPRESENTATIVES.register_warmup(vllm_config)
         self._request_row_buffers: dict[int | None, torch.Tensor] = {}
@@ -268,7 +272,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         if not isinstance(self.index_group, HiSparseMLAIndexGroup):
             raise RuntimeError("Ascend HiSparse was initialized without a HiSparse index group")
         self.hisparse_cache = self.index_group.cache(self.index_group_index)
-        if supports_glm5_next_hisparse(self.vllm_config):
+        if _supports_flash_hisparse(self.vllm_config):
             install_flash_layer_view_bounds(self.hisparse_cache)
         self.topk = self.index_group.logical_topk_indices.shape[-1]
         if self.topk % 128:
@@ -703,7 +707,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             not metadata.hisparse_for_capture
             or cache.draft_layer
             or not self.enable_sparse_sfa_c8
-            or self.c8_cache_dtype != torch.float8_e4m3fn
+            or self.c8_cache_dtype not in (torch.int8, torch.float8_e4m3fn)
             or self.qk_rope_head_dim != 0
             or metadata.num_prefills
             or metadata.num_decode_tokens != query.shape[0]
@@ -740,7 +744,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         cache = self.hisparse_cache
         if (
             not self.enable_sparse_sfa_c8
-            or self.c8_cache_dtype != torch.float8_e4m3fn
+            or self.c8_cache_dtype not in (torch.int8, torch.float8_e4m3fn)
             or self.qk_rope_head_dim != 0
             or metadata.hisparse_for_capture
             or not cache.all_context_pages_resident

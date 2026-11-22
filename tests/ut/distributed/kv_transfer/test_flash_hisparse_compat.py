@@ -18,10 +18,10 @@ pytestmark = pytest.mark.skipif(vllm_version_is("0.33.0"), reason="Flash HiSpars
 
 
 @pytest.mark.parametrize(
-    ("supports_flash", "declared_budget", "expected"),
-    [(True, 1168, 1168), (True, None, 1024), (False, 1168, 1024)],
+    ("mode", "declared_budget", "expected"),
+    [("fp8", 1168, 1168), ("int8", 1168, 1168), ("fp8", None, 1024), (None, 1168, 1024)],
 )
-def test_flash_pool_budget_preserves_generic_fallback(monkeypatch, supports_flash, declared_budget, expected):
+def test_flash_pool_budget_preserves_generic_fallback(monkeypatch, mode, declared_budget, expected):
     from vllm.v1.core import kv_cache_planning
 
     from vllm_ascend.patch.platform import patch_flash_hisparse
@@ -30,15 +30,16 @@ def test_flash_pool_budget_preserves_generic_fallback(monkeypatch, supports_flas
     groups = [object()]
     builder = Mock()
     builder._get_pool_bytes_per_block.return_value = declared_budget
-    monkeypatch.setattr(patch_flash_hisparse, "supports_glm5_next_hisparse", lambda _: supports_flash)
+    monkeypatch.setattr(patch_flash_hisparse, "supports_glm5_next_hisparse", lambda _: mode == "fp8")
+    monkeypatch.setattr(patch_flash_hisparse, "supports_glm5_next_int8_hisparse", lambda _: mode == "int8")
     monkeypatch.setattr(kv_cache_planning, "_pool_bytes_per_block", lambda *_: 1024)
 
     assert kv_cache_planning._pool_bytes_per_block_from_builder(builder, config, groups) == expected
-    assert builder._get_pool_bytes_per_block.call_count == int(supports_flash)
+    assert builder._get_pool_bytes_per_block.call_count == int(mode is not None)
 
 
-@pytest.mark.parametrize("supports_flash", [False, True])
-def test_connector_uses_terminal_compat_only_for_flash(monkeypatch, supports_flash):
+@pytest.mark.parametrize("mode", [None, "fp8", "int8"])
+def test_connector_uses_terminal_compat_only_for_flash(monkeypatch, mode):
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
 
     from vllm_ascend.patch.platform import patch_flash_hisparse
@@ -54,11 +55,12 @@ def test_connector_uses_terminal_compat_only_for_flash(monkeypatch, supports_fla
         instance.connector_scheduler = SimpleNamespace(coordinator=coordinator)
 
     monkeypatch.setattr(patch_flash_hisparse, "_ORIGINAL_BIND_KV_CACHE_MANAGER", bind)
-    monkeypatch.setattr(patch_flash_hisparse, "supports_glm5_next_hisparse", lambda _: supports_flash)
+    monkeypatch.setattr(patch_flash_hisparse, "supports_glm5_next_hisparse", lambda _: mode == "fp8")
+    monkeypatch.setattr(patch_flash_hisparse, "supports_glm5_next_int8_hisparse", lambda _: mode == "int8")
     monkeypatch.setattr(patch_flash_hisparse, "install_flash_terminal_spill_compat", install)
 
     HiSparseConnector.bind_kv_cache_manager(connector, manager)
-    if supports_flash:
+    if mode is not None:
         install.assert_called_once_with(coordinator)
     else:
         install.assert_not_called()

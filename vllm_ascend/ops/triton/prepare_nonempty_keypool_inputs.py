@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Prepare nonempty inputs for the CANN pooled key indexer."""
 
+import torch
 from vllm.triton_utils import tl, triton
+
+from vllm_ascend.device.device_config import is_950
 
 
 @triton.jit(do_not_specialize=["tokens", "requests", "table_rows"])
@@ -69,6 +72,12 @@ def prepare_nonempty_keypool_inputs(query, weights, ends, lengths, tails, table,
     first to avoid scalar gather lowering on A3; contiguous() is a no-op on the
     ordinary backend inputs. All operator inputs returned here are contiguous.
     """
+    if table_page_ratio != 1 and not is_950():
+        # arch22 lowers the repeated gathers for subpage expansion to scalar
+        # work. Broadcast the manager pages before the contiguous padding copy.
+        subpages = torch.arange(table_page_ratio, dtype=table.dtype, device=table.device)
+        table = (table.unsqueeze(-1) * table_page_ratio + subpages).flatten(1)
+        table_page_ratio = 1
     tokens, heads, dim = query.shape
     requests = ends.numel()
     table_rows, manager_cols = table.shape

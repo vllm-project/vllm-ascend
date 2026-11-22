@@ -18,18 +18,19 @@ from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.utils import bootstrap_custom_op_env, vllm_version_is
 
+DEVICE_TYPE = get_ascend_device_type()
 pytestmark = [
     pytest.mark.skipif(vllm_version_is("0.33.0"), reason="HiSparse e2e is not supported on vLLM v0.33.0"),
     pytest.mark.skipif(
-        get_ascend_device_type() != AscendDeviceType.A5,
-        reason="The HiSparse resolver is a SIMT-only op targeting Ascend A5",
+        DEVICE_TYPE not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+        reason="The HiSparse resolver requires Ascend A2, A3 or A5",
     ),
     pytest.mark.e2e_coverage(
         arch="",
         feature="",
         parallel="",
         deploy="",
-        hardware="A5",
+        hardware="A2,A3,A5",
         quantization="",
         graph_mode="eager",
     ),
@@ -274,6 +275,8 @@ def test_resolver_matches_torch_reference_all_resident(attention_capacity):
 def test_flash_resident_rows_and_cold_fallback(cold):
     block, topk, hot_size, stride = 128, 2176, 15232, 1152
     rows, valid_rows = 7, 6
+    # The validator and the kernel tiling must both accept Flash's MTP5 union.
+    torch.ops._C_ascend.hisparse_resolver_validate_scratch(hot_size, topk * valid_rows)
     logical = torch.arange(rows * topk, dtype=torch.int32).view(rows, topk) % 4096
     logical[:, 1::31] = -1
     requests = torch.zeros(rows, dtype=torch.int32)
@@ -314,6 +317,7 @@ def test_flash_resident_rows_and_cold_fallback(cold):
     assert bool(actual[-1][1].item()) == cold
 
 
+@pytest.mark.skipif(DEVICE_TYPE != AscendDeviceType.A5, reason="SIMT warp scan requires A5")
 def test_resolver_matches_torch_reference_single_warp_scan():
     """One state, a full LRU turn and duplicates; tiles<=32 register scan."""
     block = 16
@@ -352,6 +356,7 @@ def test_resolver_matches_torch_reference_single_warp_scan():
     assert_matches_reference(actual, expected)
 
 
+@pytest.mark.skipif(DEVICE_TYPE != AscendDeviceType.A5, reason="SIMT iterative scan requires A5")
 def test_resolver_matches_torch_reference_iterative_scan():
     """A union spanning 64 tiles exercises the multi-batch prefix path."""
     block = 128

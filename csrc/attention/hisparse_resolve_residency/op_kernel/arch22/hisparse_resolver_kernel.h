@@ -13,6 +13,8 @@
 #include "kernel_operator.h"
 #include <cstdint>
 
+#include "../resolver_scratch.h"
+
 struct HiSparseArch22Descriptor {
     uint64_t pointers[19];
     uint64_t geometry[25];
@@ -20,11 +22,11 @@ struct HiSparseArch22Descriptor {
 
 namespace {
 using namespace AscendC;
-constexpr int32_t kHit = int32_t(0x80000000U);
-constexpr int32_t kMiss = 0x40000000;
-constexpr int32_t kSlotMask = 0xFFFF;
-constexpr int32_t kTile = 256;
-constexpr int32_t kMaxResidentColumns = 1024;
+using namespace vllm_ascend::hisparse;
+constexpr int32_t kMissKey = int32_t(0x80000000U);
+constexpr int32_t kHostMask = 0x7FFFFFFF;
+constexpr int32_t kTile = kResolverArch22Tile;
+constexpr int32_t kMaxResidentColumns = kResolverArch22MaxResidentColumns;
 
 
 template <typename T>
@@ -63,15 +65,15 @@ public:
         topk = d.geometry[1];
         hot = d.geometry[2];
         hashSize = d.geometry[22];
-        pipe.InitBuffer(keysBuffer, hashSize * sizeof(int32_t));
-        pipe.InitBuffer(valuesBuffer, hashSize * sizeof(int32_t));
-        pipe.InitBuffer(tagsBuffer, hot * sizeof(int32_t));
-        pipe.InitBuffer(orderBuffer, hot * sizeof(int32_t));
+        pipe.InitBuffer(keysBuffer, resolver_arch22_align(hashSize * sizeof(int32_t)));
+        pipe.InitBuffer(valuesBuffer, resolver_arch22_values_bytes(hot, hashSize));
+        pipe.InitBuffer(tagsBuffer, resolver_arch22_align(hot * sizeof(int32_t)));
+        pipe.InitBuffer(orderBuffer, resolver_arch22_order_bytes(hot));
         pipe.InitBuffer(ioBuffer, 2 * kTile * sizeof(int32_t));
         keys = keysBuffer.Get<int32_t>();
-        values = valuesBuffer.Get<int32_t>();
+        values = valuesBuffer.Get<int16_t>();
         tags = tagsBuffer.Get<int32_t>();
-        order = orderBuffer.Get<int32_t>();
+        order = orderBuffer.Get<int16_t>();
         io = ioBuffer.Get<int32_t>();
     }
 
@@ -132,20 +134,20 @@ public:
         if (host < 0 || host >= d.geometry[3]) host = -1;
     }
 
-    __aicore__ inline int32_t Lookup(int32_t host, bool insert = false, int32_t position = 0)
+    __aicore__ inline int32_t Lookup(int32_t host, bool insert = false)
     {
         const int32_t size = hashSize;
         uint32_t mixed = uint32_t(host) * 2654435761U;
         int32_t h = uint64_t(mixed) * uint32_t(size) >> 32;
         for (int32_t probe = 0; probe < size; ++probe) {
             int32_t key = keys.GetValue(h);
-            if (key == host) return h;
             if (key == -1) {
                 if (!insert) return -1;
                 keys.SetValue(h, host);
-                values.SetValue(h, position);
+                values.SetValue(h, -1);
                 return h;
             }
+            if ((key & kHostMask) == host) return h;
             if (++h == size) h = 0;
         }
         return -1;
@@ -180,8 +182,10 @@ public:
         const int32_t cols = d.geometry[8];
         if (!d.pointers[3] || !d.pointers[4] || request < 0 || request >= d.geometry[7] ||
             state >= d.geometry[11] || cols <= 0 || cols > kMaxResidentColumns || cols != d.geometry[12] ||
-            cols > hashSize || hot < 3072 || topk < kTile || topk > 2048 || topk % kTile ||
+            cols > hashSize || hot < kResolverArch22MinResidentHot || topk < kTile || topk > 2048 || topk % kTile ||
             d.geometry[10] != 128 || d.geometry[14] != 128 || d.geometry[16] != 128) return false;
+        auto residentValues = valuesBuffer.Get<int32_t>();
+        auto residentScratch = orderBuffer.Get<int32_t>();
         GlobalTensor<int32_t> source, resident, logical;
         source.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(d.pointers[3]));
         resident.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(d.pointers[4]));
@@ -189,14 +193,14 @@ public:
         DataCopyPad(keys, source[int64_t(request) * d.geometry[9]],
                     DataCopyExtParams{1, uint32_t(cols * 4), 0, 0, 0},
                     DataCopyPadExtParams<int32_t>{false, 0, 0, 0});
-        DataCopyPad(values, resident[int64_t(state) * d.geometry[13]],
+        DataCopyPad(residentValues, resident[int64_t(state) * d.geometry[13]],
                     DataCopyExtParams{1, uint32_t(cols * 4), 0, 0, 0},
                     DataCopyPadExtParams<int32_t>{false, 0, 0, 0});
         Sync<HardEvent::MTE2_S>();
         bool hasCold = false;
         auto coldPages = tags[kMaxResidentColumns].ReinterpretCast<float>();
         for (int32_t col = 0; col < cols; ++col) {
-            int32_t hostPage = keys.GetValue(col), devicePage = values.GetValue(col);
+            int32_t hostPage = keys.GetValue(col), devicePage = residentValues.GetValue(col);
             int64_t host = int64_t(hostPage) * 128;
             if (hostPage <= 0 || host >= int64_t(d.geometry[3])) host = -128;
             else if (host + 127 >= int64_t(d.geometry[3])) return false;
@@ -213,20 +217,20 @@ public:
                 else if (mapped + 127 >= int64_t(d.geometry[23])) return false;
             }
             keys.SetValue(col, int32_t(host));
-            values.SetValue(col, int32_t(device));
+            residentValues.SetValue(col, int32_t(device));
             tags.SetValue(col, int32_t(mapped));
         }
-        auto token = order;
-        auto safe = order[kTile];
-        auto column = order[2 * kTile];
-        auto offset = order[3 * kTile];
-        auto result = order[4 * kTile];
-        auto floats = order[5 * kTile].ReinterpretCast<float>();
-        auto lower = order[6 * kTile];
-        auto upper = order[7 * kTile];
-        auto zeros = order[8 * kTile];
-        auto mask = order[9 * kTile].ReinterpretCast<uint8_t>();
-        auto tokenMask = order[9 * kTile + kTile / 4].ReinterpretCast<uint8_t>();
+        auto token = residentScratch;
+        auto safe = residentScratch[kTile];
+        auto column = residentScratch[2 * kTile];
+        auto offset = residentScratch[3 * kTile];
+        auto result = residentScratch[4 * kTile];
+        auto floats = residentScratch[5 * kTile].ReinterpretCast<float>();
+        auto lower = residentScratch[6 * kTile];
+        auto upper = residentScratch[7 * kTile];
+        auto zeros = residentScratch[8 * kTile];
+        auto mask = residentScratch[9 * kTile].ReinterpretCast<uint8_t>();
+        auto tokenMask = residentScratch[9 * kTile + kTile / 4].ReinterpretCast<uint8_t>();
         Sync<HardEvent::S_V>();
         Duplicate(lower, int32_t(-1), kTile);
         Duplicate(upper, cols * 128 - 1, kTile);
@@ -311,7 +315,7 @@ public:
                 PipeBarrier<PIPE_V>();
                 for (int32_t kind = 0; kind < 3; ++kind) {
                     if (kind == 2 && !d.pointers[9]) continue;
-                    auto table = kind == 0 ? keys : (kind == 1 ? values : tags);
+                    auto table = kind == 0 ? keys : (kind == 1 ? residentValues : tags);
                     Gather(result, table, column.ReinterpretCast<uint32_t>(), 0, uint32_t(n));
                     PipeBarrier<PIPE_V>();
                     Add(result, result, offset, n);
@@ -420,16 +424,14 @@ public:
         // every d.* access would otherwise re-load UB inside the hot loop.
         const uint64_t logicalBase = d.pointers[0];
         const int64_t logicalStride = d.geometry[4];
-        int32_t position = 0;
         for (int32_t row = first; row < end; ++row) {
             for (int32_t col = 0; col < topk; ++col) {
                 int32_t host, device;
                 Translate(Read<int32_t>(logicalBase, int64_t(row) * logicalStride + col), host, device);
                 if (device < 0 && host >= 0) {
                     ++references;
-                    if (Lookup(host, true, position) < 0) error = -1;
+                    if (Lookup(host, true) < 0) error = -1;
                 }
-                ++position;
             }
         }
         if (!references || error) {
@@ -458,29 +460,31 @@ public:
                 int32_t h = Lookup(host);
                 if (h >= 0) {
                     hit = true;
-                    int32_t value = kHit | slot;
-                    if (values.GetValue(h) > value) values.SetValue(h, value);
+                    int32_t current = values.GetValue(h);
+                    if (current < 0 || slot < current) values.SetValue(h, int16_t(slot));
                 }
             }
-            order.SetValue(hit ? hits++ : hot - 1 - evictable++, slot);
+            order.SetValue(hit ? hits++ : hot - 1 - evictable++, int16_t(slot));
         }
         for (int32_t h = 0; h < hashSize; ++h) {
-            if (keys.GetValue(h) >= 0 && values.GetValue(h) >= 0) ++misses;
+            if (keys.GetValue(h) >= 0 && values.GetValue(h) < 0) ++misses;
         }
         if (hits + misses > d.geometry[21] || hits + misses > hot) error = hits + misses;
         if (error) { Publish(true); return; }
 
         int32_t rank = 0, buffered = 0;
         const int64_t swapBase = int64_t(first) * topk;
-        position = 0;
+        // Walk requests in the same order used to build the union. The first
+        // occurrence of each unassigned host row claims the next LRU slot.
         for (int32_t row = first; row < end; ++row) {
             for (int32_t col = 0; col < topk; ++col) {
                 int32_t host, device;
                 Translate(Read<int32_t>(logicalBase, int64_t(row) * logicalStride + col), host, device);
                 int32_t h = device < 0 && host >= 0 ? Lookup(host) : -1;
-                if (h >= 0 && values.GetValue(h) == position) {
+                if (h >= 0 && values.GetValue(h) < 0) {
                     int32_t slot = order.GetValue(hot - 1 - rank);
-                    values.SetValue(h, kMiss | slot);
+                    values.SetValue(h, int16_t(slot));
+                    keys.SetValue(h, host | kMissKey);
                     tags.SetValue(slot, host);
                     io.SetValue(buffered, host);
                     io.SetValue(kTile + buffered, Physical(slot));
@@ -491,7 +495,6 @@ public:
                         buffered = 0;
                     }
                 }
-                ++position;
             }
         }
         Store(d.pointers[6], int64_t(state) * hot, tags, hot);
@@ -503,7 +506,7 @@ public:
                 int32_t p = base + i;
                 int32_t source = p < remaining ? hot - 1 - misses - p :
                     (p < remaining + misses ? hot - 1 - (p - remaining) : p - remaining - misses);
-                lruOut.SetValue(i, int16_t(order.GetValue(source)));
+                lruOut.SetValue(i, order.GetValue(source));
             }
             Store(d.pointers[7], int64_t(state) * hot + base, lruOut, count);
         }
@@ -539,7 +542,7 @@ public:
                     io.SetValue(kTile + i, host);
                     if (valid && !error && device < 0 && host >= 0) {
                         int32_t h = Lookup(host);
-                        device = h >= 0 ? Physical(values.GetValue(h) & kSlotMask) : -1;
+                        device = h >= 0 ? Physical(values.GetValue(h)) : -1;
                     }
                     if (error) device = -1;
                     io.SetValue(i, device);
@@ -571,7 +574,7 @@ public:
                     for (int32_t i = 0; i < extent; ++i) {
                         int32_t host = io.GetValue(kTile + i);
                         int32_t h = valid && !error && host >= 0 ? Lookup(host) : -1;
-                        bool miss = h >= 0 && (values.GetValue(h) & kMiss) && values.GetValue(h) >= 0;
+                        bool miss = h >= 0 && keys.GetValue(h) < 0;
                         // Repeated references must not submit duplicate copies.
                         if (miss) {
                             for (int32_t earlier = first; earlier <= row && miss; ++earlier) {
@@ -620,7 +623,8 @@ private:
     // Last valid page/block-table entries cached by Translate/Physical.
     int32_t reqCol = -1, reqPage = 0, stCol = -1, stPage = 0, blkCol = -1, blkPage = 0;
     TBuf<TPosition::VECCALC> keysBuffer, valuesBuffer, tagsBuffer, orderBuffer, ioBuffer;
-    LocalTensor<int32_t> keys, values, tags, order, io;
+    LocalTensor<int32_t> keys, tags, io;
+    LocalTensor<int16_t> values, order;
 };
 
 }  // namespace
