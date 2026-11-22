@@ -217,7 +217,7 @@ def test_worker_customizes_spec_once_without_reading_impl(monkeypatch, backend, 
     [
         ("auto", torch.bfloat16, 576),
         ("int8", torch.int8, 656),
-        ("fp8", torch.float8_e4m3fn, 656),
+        ("fp8", None, 656),
         ("turboquant_4bit_nc", torch.int8, 386),
     ],
 )
@@ -239,6 +239,9 @@ def test_sfa_layer_format_and_owner_spec_ignore_target_flags(monkeypatch, cache_
     impl.sfa_qsfa_tile_size = sfa_v1.SFA_QSFA_TILE_SIZE
     impl.sfa_qsfa_packed_kv_head_dim = 0
     impl._init_kv_cache_format()
+    if dtype is None:
+        # FP8 storage registration depends on platform initialization.
+        dtype = sfa_v1.kv_cache_dtype_str_to_dtype(cache_dtype, impl.vllm_config.model_config)
     layer = _make_owner(impl, AscendSFABackend)
     spec = _get_owner_spec(monkeypatch, layer)
 

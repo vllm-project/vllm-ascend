@@ -3426,6 +3426,7 @@ def test_step5_reshape_rejects_non_tensor_step_aux_raw(monkeypatch) -> None:
     "target_dtype,layer_dtype,packed",
     [
         ("int8", torch.bfloat16, False),
+        ("int8", torch.bfloat16, True),
         ("auto", torch.int8, True),
         ("int8", torch.float8_e4m3fn, True),
     ],
