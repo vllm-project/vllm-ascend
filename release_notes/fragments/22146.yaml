@@ -1,7 +1,0 @@
-pr: 22146
-entries:
-  - category: feature
-    text: >
-      GLM-5.3-Flash can use KDA RecoverSSM with colocated prefill context
-      parallelism and speculative decoding. Enable `--use-replayssm` with
-      TP=1, PP=1, and DCP=1 on a deployment without a KV connector.
