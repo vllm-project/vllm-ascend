@@ -6,8 +6,7 @@ entries:
       on A5 using MemCache host_tcp. The feature requires asynchronous request
       loading (load_async=true) and eager_host_mirror=true for all whole-block
       saves, including Prefill-only saves.
-      Use a vLLM Core build with the HiSparse prepare_kv_cache_views hook.
-      Startup rejects this combination on vLLM v0.33.0.
+      Use a vLLM Core build with Ascend HiSparse backend support.
       The combination supports single-node colocated Prefill and Decode with
       kv_role=kv_both on MultiConnector and its children. Startup rejects PD
       disaggregation, multi-node deployments, prefill context parallelism, duplicate or additional connectors,

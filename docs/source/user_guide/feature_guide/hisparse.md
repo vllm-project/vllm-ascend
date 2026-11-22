@@ -91,9 +91,8 @@ colocated Prefill and Decode. HiSparse continues to own the Host Source and the 
 and Hot buffers. AscendStore saves and restores the transferable Host Source
 and NPU Indexer pages; Resident and Hot pages stay in HiSparse.
 
-Use a vLLM Core build with the HiSparse `prepare_kv_cache_views` hook. Startup
-rejects this combination on vLLM v0.33.0 because Core binds the cache views
-before Ascend can align the shared device slab.
+Use a vLLM Core build with Ascend HiSparse backend support. Stock vLLM v0.33.0
+limits HiSparse to CUDA and rejects HiSparse on Ascend during configuration.
 
 Keep the attention options above and replace the transfer configuration with:
 
