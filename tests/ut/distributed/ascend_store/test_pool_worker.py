@@ -951,6 +951,28 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
 
         self.assertEqual(worker._global_group_alloc_size(0), 4)
 
+    def test_gva_group_allocation_compacts_only_single_pp_and_dcp(self):
+        cls = self._make_worker_class()
+        worker = cls.__new__(cls)
+        worker.group_block_len = {0: [16, 16]}
+        worker.group_num_layers = {0: 2}
+        worker.total_layers = 4
+        worker.num_layers = 2
+        worker.layerwise_key_layer_offset = 2
+        cases = (
+            (True, 1, 1, 1, 32),
+            (True, 2, 1, 1, 64),
+            (True, 1, 2, 2, 4 * 1024 * 1024),
+            (False, 1, 1, 1, 64),
+        )
+        for use_gva, pp_size, dcp_size, put_step, expected in cases:
+            with self.subTest(use_gva=use_gva, pp_size=pp_size, dcp_size=dcp_size):
+                worker.use_layerwise_transfer = use_gva
+                worker.pp_size = pp_size
+                worker.dcp_size = dcp_size
+                worker.put_step = put_step
+                self.assertEqual(worker._global_group_alloc_size(0), expected)
+
     def test_check_all_layers_exists(self):
         cls = self._make_worker_class()
         cases = [

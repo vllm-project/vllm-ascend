@@ -581,6 +581,13 @@ class BaseKVPoolWorker(ABC):
         gbl = self.group_block_len.get(group_id) or []
         if not gbl:
             return self.page_size_bytes
+        # A single PP stage and DCP shard pack only this group's entries.
+        if (
+            getattr(self, "use_layerwise_transfer", False)
+            and getattr(self, "pp_size", 1) == 1
+            and getattr(self, "dcp_size", 1) == 1
+        ):
+            return sum(gbl)
         # Backward compatibility: when total_layers is not set (unit tests,
         # partial init), fall back to the LOCAL sum (pre-PP behavior).
         total_layers = getattr(self, "total_layers", None)
