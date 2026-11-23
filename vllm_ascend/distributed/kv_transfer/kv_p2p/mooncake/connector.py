@@ -283,8 +283,10 @@ class MooncakePushConnector(MooncakeBaseConnector):
 
     @property
     def supports_layerwise_buffer_reuse(self) -> bool:
-        worker = self.connector_worker
-        return isinstance(worker, MooncakePushConnectorWorker) and worker.supports_layerwise_buffer_reuse
+        return (
+            isinstance(self.connector_worker, MooncakePushConnectorWorker)
+            and self.connector_worker.supports_layerwise_buffer_reuse
+        )
 
     def save_kv_layer(
         self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs: Any
