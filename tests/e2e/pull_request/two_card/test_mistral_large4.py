@@ -35,6 +35,13 @@ class MistralLarge4ParallelWorker(MistralLarge4Worker):
 
     def check_expert_parallel_shards(self) -> bool:
         assert self.check_mistral_large4_paths()
+        model = self.model_runner.model
+        assert not self.vllm_config.parallel_config.use_sequence_parallel_moe
+        for layer in model.model.layers:
+            runner = getattr(layer.mlp, "experts", None)
+            if runner is not None:
+                assert not runner.moe_config.is_sequence_parallel
+                assert runner.moe_config.sp_size == 1
         experts = self._routed_experts()
         # Expert parallelism shards the experts; each rank owns half.
         assert experts.ep_size == TP_SIZE, experts.ep_size
@@ -60,7 +67,7 @@ class MistralLarge4ParallelWorker(MistralLarge4Worker):
         raise AssertionError("no MoE layer found in the reduced model")
 
 
-def _run(tmp_path, enable_expert_parallel: bool, check: str):
+def _run(tmp_path, enable_expert_parallel: bool, check: str, enable_flashcomm1: bool = False):
     model = tmp_path / "model"
     _write_model(model)
     with VllmRunner(
@@ -71,6 +78,7 @@ def _run(tmp_path, enable_expert_parallel: bool, check: str):
         dtype="bfloat16",
         tensor_parallel_size=TP_SIZE,
         enable_expert_parallel=enable_expert_parallel,
+        additional_config={"enable_flashcomm1": enable_flashcomm1},
         max_model_len=1024,
         max_num_seqs=2,
         max_num_batched_tokens=1024,
@@ -86,9 +94,15 @@ def _run(tmp_path, enable_expert_parallel: bool, check: str):
 
 
 @wait_until_npu_memory_free()
-def test_mistral_large4_expert_parallel_shards_and_replays(tmp_path):
-    """TP=2 with expert parallelism: the experts really shard across ranks."""
-    _run(tmp_path, enable_expert_parallel=True, check="check_expert_parallel_shards")
+@pytest.mark.parametrize("enable_flashcomm1", [False, True])
+def test_mistral_large4_expert_parallel_shards_and_replays(tmp_path, enable_flashcomm1):
+    """FlashComm preserves upstream's non-SP activations while EP shards experts."""
+    _run(
+        tmp_path,
+        enable_expert_parallel=True,
+        check="check_expert_parallel_shards",
+        enable_flashcomm1=enable_flashcomm1,
+    )
 
 
 @wait_until_npu_memory_free()

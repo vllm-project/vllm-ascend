@@ -1903,6 +1903,35 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             self.assertFalse(enable_sp(vc))
 
     @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_mistral_large4_flashcomm_keeps_upstream_non_sp_layout(self, mock_fix):
+        for dp_size in (1, 2):
+            for use_legacy_env in (False, True):
+                for shared_expert_dp in (False, True):
+                    with (
+                        self.subTest(dp_size=dp_size, legacy_env=use_legacy_env, shared_dp=shared_expert_dp),
+                        patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1" if use_legacy_env else "0"}),
+                    ):
+                        clear_ascend_config()
+                        vc = VllmConfig()
+                        vc.model_config.hf_text_config.model_type = "mistral_large4"
+                        vc.parallel_config.enable_expert_parallel = True
+                        vc.parallel_config.tensor_parallel_size = 2
+                        vc.parallel_config.data_parallel_size = dp_size
+                        vc.parallel_config.all2all_backend = "allgather_reducescatter"
+                        vc.additional_config = {
+                            "enable_shared_expert_dp": shared_expert_dp,
+                            "enable_flashcomm1": not use_legacy_env,
+                        }
+
+                        config = init_ascend_config(vc)
+
+                        self.assertFalse(vc.parallel_config.use_sequence_parallel_moe)
+                        self.assertFalse(enable_sp(vc))
+                        self.assertEqual(vc.parallel_config.all2all_backend, "flashinfer_all2allv")
+                        self.assertEqual(config.enable_shared_expert_dp, shared_expert_dp)
+
+    @_clean_up
     @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
     @patch("vllm_ascend.utils.enable_sp", return_value=True)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

@@ -754,11 +754,19 @@ class AscendConfig:
             "additional_config.enable_flashcomm1",
         ) or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
 
-        if not effective_flashcomm:
+        # Mistral Large 4 keeps the upstream replicated-token MoE layout.
+        # Disable global SP assumptions before graph sizes and runtime metadata
+        # are derived; the FlashComm switch must not add model-side sharding.
+        hf_text_config = getattr(vc.model_config, "hf_text_config", None)
+        mistral_large4_without_sp = getattr(hf_text_config, "model_type", None) == "mistral_large4"
+        if not effective_flashcomm or mistral_large4_without_sp:
             vllm_config.parallel_config.all2all_backend = (
                 "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
             )
-            logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
+            if effective_flashcomm:
+                logger.info_once("Mistral Large 4 keeps upstream's non-SP MoE layout; FlashComm1 SP is not applied.")
+            else:
+                logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
         elif not vc.parallel_config.use_sequence_parallel_moe:
             logger.warning_once("FlashComm1 is enabled, but the current config does not support sp MoE. Disabling")
         else:

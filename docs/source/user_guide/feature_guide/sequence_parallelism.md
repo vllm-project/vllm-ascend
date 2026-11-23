@@ -64,6 +64,12 @@ reduce-scatter. The fused implementation supports BF16/FP16 with TP size 2,
 vLLM Ascend enables SP MoE through the FlashComm switch. The switch is still
 required; SP MoE is not enabled from the parallel configuration alone.
 
+Mistral Large 4 currently keeps the upstream replicated-token MoE layout:
+enabling FlashComm1 does not add token sharding or reject model construction.
+Ascend resolves its effective SP setting to off before deriving graph sizes
+and runtime metadata. The independent `enable_shared_expert_dp` option remains
+available.
+
 To enable SP MoE, set `additional_config.enable_flashcomm1`:
 
 ```bash

@@ -490,7 +490,6 @@ def _reject_unsupported(vllm_config: VllmConfig) -> None:
     Each of these would otherwise fail somewhere less obvious, or silently
     produce wrong numbers.
     """
-    parallel_config = vllm_config.parallel_config
     compilation_config = vllm_config.compilation_config
 
     if getattr(compilation_config.pass_config, "fuse_allreduce_rms", False):
@@ -501,8 +500,6 @@ def _reject_unsupported(vllm_config: VllmConfig) -> None:
             "Ascend: the fused all-reduce RMSNorm it defers to is a "
             "CUDA/ROCm kernel."
         )
-    if parallel_config.use_sequence_parallel_moe:
-        raise NotImplementedError("Sequence-parallel MoE is not supported for Mistral Large 4 on Ascend.")
 
 
 def validate_moe_parallelism(vllm_config: VllmConfig) -> None:

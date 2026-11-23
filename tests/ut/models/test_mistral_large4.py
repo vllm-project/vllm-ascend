@@ -254,7 +254,6 @@ def _vllm_config(**overrides):
     "overrides,match",
     [
         ({"fuse_allreduce_rms": True}, "fuse_allreduce_rms"),
-        ({"use_sequence_parallel_moe": True}, "Sequence-parallel MoE"),
     ],
 )
 def test_unsupported_deployments_are_rejected(overrides, match):
@@ -264,6 +263,10 @@ def test_unsupported_deployments_are_rejected(overrides, match):
 
 def test_a_supported_deployment_is_accepted():
     ml4._reject_unsupported(_vllm_config())
+
+
+def test_global_sp_eligibility_does_not_reject_the_upstream_moe_layout():
+    ml4._reject_unsupported(_vllm_config(use_sequence_parallel_moe=True))
 
 
 def test_eplb_is_accepted():
