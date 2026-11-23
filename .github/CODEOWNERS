@@ -272,3 +272,9 @@
 # SKIP(owner): /tests/deepseek_v41_utils.py
 # SKIP(owner): /tests/ut/
 # SKIP(owner): /tests/e2e/pull_request/
+# SKIP(owner): /vllm_ascend/attention/__init__.py
+# SKIP(owner): /vllm_ascend/model_executor/__init__.py
+# SKIP(owner): /vllm_ascend/models/layer/__init__.py
+# SKIP(owner): /vllm_ascend/models/layer/attention/__init__.py
+# SKIP(owner): /vllm_ascend/worker/__init__.py
+# SKIP(owner): /vllm_ascend/worker/v2/__init__.py
