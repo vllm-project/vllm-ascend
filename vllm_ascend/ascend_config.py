@@ -455,7 +455,7 @@ class QuantizedAllReduceConfig:
             return
         # Imported lazily: the wrapper module imports torch_npu, which should not
         # be pulled in from the config factory at module import time.
-        from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
+        from vllm_ascend.distributed.device_communicators.int8_all_reduce import (
             _MAX_VALID_WORLD_SIZE,
         )
 

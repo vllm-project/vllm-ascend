@@ -41,10 +41,10 @@ import torch
 from vllm.config import CUDAGraphMode
 
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
+from vllm_ascend.distributed.device_communicators.int8_all_reduce import (
     QuantizedAllReduce,
 )
-from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
+from vllm_ascend.distributed.device_communicators.int8_all_reduce import (
     logger as qar_logger,
 )
 
@@ -57,12 +57,12 @@ def _make(
 ) -> QuantizedAllReduce:
     """Build a wrapper; raises on unvalidated device families only."""
     with patch(
-        "vllm_ascend.distributed.device_communicators.quantized_all_reduce.get_ascend_device_type",
+        "vllm_ascend.distributed.device_communicators.int8_all_reduce.get_ascend_device_type",
         return_value=device_type,
     ):
         group = MagicMock()
         with patch(
-            "vllm_ascend.distributed.device_communicators.quantized_all_reduce.dist.get_world_size",
+            "vllm_ascend.distributed.device_communicators.int8_all_reduce.dist.get_world_size",
             return_value=world_size,
         ):
             return QuantizedAllReduce(group, min_numel=min_numel, group_name=group_name)
@@ -70,7 +70,7 @@ def _make(
 
 class TestQuantizedAllReduce(unittest.TestCase):
     def test_debug_logger_has_module_name(self):
-        self.assertEqual(qar_logger.name, "vllm_ascend.distributed.device_communicators.quantized_all_reduce")
+        self.assertEqual(qar_logger.name, "vllm_ascend.distributed.device_communicators.int8_all_reduce")
 
     def test_min_numel_from_config(self):
         wrapper = _make(min_numel=12345)
@@ -100,7 +100,7 @@ class TestQuantizedAllReduce(unittest.TestCase):
         # A5 int8 has no calibration, so reusing the A2 gate there could land
         # below the A5 break-even; an explicit value is required instead.
         with self.assertRaisesRegex(ValueError, "measured on Atlas A2 only"):
-            _make(world_size=8, device_type=AscendDeviceType.A5)
+            _make(world_size=8, min_numel=None, device_type=AscendDeviceType.A5)
         wrapper = _make(world_size=8, device_type=AscendDeviceType.A5, min_numel=16_777_216)
         self.assertEqual(wrapper.min_numel, 16_777_216)
 
@@ -162,7 +162,7 @@ class TestQuantizedAllReduce(unittest.TestCase):
         wrapper = _make(world_size=16, min_numel=1)
         x = torch.ones(2, 4, dtype=torch.bfloat16)
         with (
-            patch("vllm_ascend.distributed.device_communicators.quantized_all_reduce.logger") as mock_logger,
+            patch("vllm_ascend.distributed.device_communicators.int8_all_reduce.logger") as mock_logger,
             patch("torch.distributed.all_reduce"),
             patch("torch_npu.npu_quantize", create=True),
             patch("torch_npu.npu_anti_quant", create=True),
@@ -347,7 +347,7 @@ class TestQuantizedAllReduce(unittest.TestCase):
         for x, marker, expected in cases:
             with self.subTest(marker=marker, dtype=x.dtype, shape=x.shape):
                 with (
-                    patch("vllm_ascend.distributed.device_communicators.quantized_all_reduce.logger") as mock_logger,
+                    patch("vllm_ascend.distributed.device_communicators.int8_all_reduce.logger") as mock_logger,
                     patch("torch.distributed.all_reduce"),
                     patch("torch_npu.npu_quantize", create=True, return_value=torch.zeros_like(x, dtype=torch.int8)),
                     patch("torch_npu.npu_anti_quant", create=True, return_value=torch.zeros_like(x)),

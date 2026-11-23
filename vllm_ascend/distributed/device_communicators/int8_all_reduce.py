@@ -85,7 +85,7 @@ Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
   "INT8 quantized all-reduce enabled (group=..., min_numel=..., max_q=...)".
   To diagnose actual calls, add the following to the same --additional-config:
   "runtime_config": {"ascend_log": {"debug":
-  ["distributed.device_communicators.quantized_all_reduce"]}}
+  ["distributed.device_communicators.int8_all_reduce"]}}
   Look for QAR-HIT and QAR-SKIP. These Python logs may also appear during
   warmup or graph capture and do not count graph replays. Disable debug logging
   for performance measurements.
