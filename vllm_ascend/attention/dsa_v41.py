@@ -57,6 +57,7 @@ from vllm_ascend.utils import (
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     DeviceMetadataTask,
+    get_device_metadata_submission,
     wait_for_device_metadata,
 )
 
@@ -1569,7 +1570,7 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                 else 0
             )
             visible = None
-            needs_visible_lengths = True
+            visible_submission = None
             for plan_ratio in ratios:
                 plan_key = f"smla:a5:w{self._window_size}:mask{mask_key}:c{plan_ratio}"
                 shared_plan = self.common_v41_smla_metadata.get(plan_key)
@@ -1586,18 +1587,14 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                     )
                 plan_buffer = self._a5_smla_plans[plan_ratio]
                 plan_ori, plan_cmp = self._a5_smla_plan_lengths[plan_ratio]
-                refresh_lengths = plan_ratio != 0 and needs_visible_lengths
-                if refresh_lengths:
-                    needs_visible_lengths = False
 
                 def build_a5_smla_metadata(
                     plan_ratio=plan_ratio,
                     plan_buffer=plan_buffer,
                     plan_ori=plan_ori,
                     plan_cmp=plan_cmp,
-                    refresh_lengths=refresh_lengths,
                 ) -> None:
-                    nonlocal visible
+                    nonlocal visible, visible_submission
                     if metadata_tokens == 0 or req.num_reqs == 0:
                         plan_buffer.zero_()
                         return
@@ -1616,15 +1613,17 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                     if plan_ratio:
                         # Graph padding can carry position=0 with an empty KV
                         # sequence. Bound visibility by the request length too.
-                        # The first compressed task recomputes lengths on every
-                        # execution, including capture after eager warmup.
-                        if refresh_lengths:
+                        # The first task actually executed owns this submission's
+                        # visibility. A fresh scope forces warmup/capture rebuilds.
+                        submission = get_device_metadata_submission()
+                        if submission is None or visible_submission is not submission:
                             assert positions is not None
                             rows = torch.arange(metadata_tokens, device=positions.device)
                             ends = common.query_start_loc[1 : req.num_reqs + 1]
                             owners = (rows[:, None] >= ends[None, :]).sum(-1).clamp_max(req.num_reqs - 1)
                             visible = torch.minimum(positions[:metadata_tokens] + 1, req.seq_lens[owners]).clamp_min(0)
                             visible = torch.where(rows < ends[-1], visible, 0)
+                            visible_submission = submission
                         assert visible is not None
                         cmp.copy_(
                             torch.div(visible, plan_ratio, rounding_mode="floor").clamp(0, index_topk).reshape(-1, 1)

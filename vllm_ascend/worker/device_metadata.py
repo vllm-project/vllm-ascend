@@ -13,14 +13,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Protocol, runtime_checkable
 
 import torch
 from vllm.forward_context import BatchDescriptor, get_forward_context, is_forward_context_available
+
+_metadata_submission: ContextVar[object | None] = ContextVar("metadata_submission", default=None)
+
+
+def get_device_metadata_submission() -> object | None:
+    """Identify one producer submission; None means no sharing scope."""
+    return _metadata_submission.get()
+
+
+@contextmanager
+def _device_metadata_submission_scope() -> Iterator[None]:
+    token = _metadata_submission.set(object())
+    try:
+        yield
+    finally:
+        _metadata_submission.reset(token)
 
 
 class DeviceMetadataStage(IntEnum):
@@ -110,7 +127,7 @@ class DeviceMetadataExecutor:
         self._batch_descriptor = batch_descriptor
         self._waited_stages.clear()
         self._inputs_ready.record(torch.npu.current_stream())
-        with torch.npu.stream(self.stream):
+        with torch.npu.stream(self.stream), _device_metadata_submission_scope():
             self.stream.wait_event(self._inputs_ready)
             if self._has_reuse_fence and not self.capture_producers:
                 self.stream.wait_event(self._buffer_reusable)
