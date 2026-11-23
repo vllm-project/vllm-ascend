@@ -73,15 +73,15 @@ def _fused_tiles(
     TILE_G: tl.constexpr,
     TILE_T: tl.constexpr,
 ):
-    token_tiles: tl.constexpr = (BLOCK + TILE_T - 1) // TILE_T
-    group_tiles: tl.constexpr = (GROUPS + TILE_G - 1) // TILE_G
-    tiles_per_page: tl.constexpr = token_tiles * group_tiles
+    TOKEN_TILES: tl.constexpr = (BLOCK + TILE_T - 1) // TILE_T
+    GROUP_TILES: tl.constexpr = (GROUPS + TILE_G - 1) // TILE_G
+    TILES_PER_PAGE: tl.constexpr = TOKEN_TILES * GROUP_TILES
     # The grid covers channel and token tiles within each live page.
     program = tl.program_id(0)
-    page = program // tiles_per_page
-    local_tile = program % tiles_per_page
-    group = (local_tile // token_tiles) * TILE_G
-    token = (local_tile % token_tiles) * TILE_T
+    page = program // TILES_PER_PAGE
+    local_tile = program % TILES_PER_PAGE
+    group = (local_tile // TOKEN_TILES) * TILE_G
+    token = (local_tile % TOKEN_TILES) * TILE_T
     valid_tokens = tl.load(pages + 3 * page + 2)
     if token < valid_tokens:
         table_offset = tl.load(pages + 3 * page)
