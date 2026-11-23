@@ -43,7 +43,7 @@ Add the fields below to the JSON objects passed to the listed flags in your exis
 
 After starting with the recommended settings, look for `vllm_ascend_*.log` in the service log directory and for the Runtime Guard JSON file. Diagnostic files appear when the corresponding feature produces them, for example after a Watchdog timeout, a Runtime Guard report action, or the end of a profiling capture.
 
-## KV transfer and storage logs
+## External component logs
 
 This section covers logging for components used in disaggregated serving and KV pooling.
 
