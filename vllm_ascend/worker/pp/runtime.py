@@ -17,7 +17,9 @@ class PPSendRuntime:
         size = get_pp_buffer_size(config)
         if size and pp_group.world_size > 1 and not pp_group.is_last_rank:
             self.buffer = PPSendBuffer(size, device_module, metadata_handles=1)
-            template = model.make_empty_intermediate_tensors(
+            tensor_factory = model.make_empty_intermediate_tensors
+            send_factory = getattr(tensor_factory, "for_send", tensor_factory)
+            template = send_factory(
                 config.scheduler_config.max_num_batched_tokens,
                 dtype=config.model_config.dtype,
                 device=device,

@@ -79,6 +79,57 @@ def test_aux_buffer_includes_stage_boundary():
     assert all(t.shape == (3, 4) for t in aux)
 
 
+@pytest.mark.parametrize("receive,send", [(False, True), (True, False), (True, True)])
+def test_send_pool_reserves_outgoing_topk_independently_of_receive(receive, send):
+    from vllm_ascend.worker.pp.buffer import PPSendBuffer
+
+    model = SimpleNamespace(
+        receive_pp_topk_indices=receive,
+        send_pp_topk_indices=send,
+        topk_indices_buffer=torch.zeros(8, 4, dtype=torch.int32),
+    )
+    factory = pp_transport.make_empty_intermediate_tensors(
+        model,
+        lambda batch, dtype, device: IntermediateTensors({"hidden_states": torch.empty(batch, 4)}),
+        (pp_transport.PPTransportDataType.TOPK_INDICES,),
+    )
+    device = torch.device("cpu")
+    key = "pp_transport_topk_indices_0"
+    assert (key in factory(8, torch.float32, device).tensors) is receive
+    template = factory.for_send(8, torch.float32, device)
+    assert (key in template.tensors) is send
+    pool = PPSendBuffer(2)
+    pool.reserve(template.tensors)
+    output = {"hidden_states": torch.ones(3, 4)}
+    if send:
+        output[key] = torch.ones(3, 4, dtype=torch.int32)
+    pool.acquire()
+    snapshots = []
+    pool.send(output, lambda payload: snapshots.append(payload) or ())
+    for tensor in output.values():
+        tensor.zero_()
+    assert all(torch.all(tensor == 1) for tensor in snapshots[0].values())
+    expected_bytes = 2 * 8 * 4 * (4 + (4 if send else 0))
+    assert pool.reserved_bytes == expected_bytes
+    pool.drain()
+
+
+def test_send_aux_template_includes_states_produced_inside_stage():
+    model = SimpleNamespace(
+        config=SimpleNamespace(hidden_size=4),
+        start_layer=2,
+        end_layer=6,
+        aux_hidden_state_layers=(0, 2, 4, 6, 8),
+    )
+    factory = pp_transport.make_empty_intermediate_tensors(
+        model, lambda batch, dtype, device: IntermediateTensors({"hidden_states": torch.empty(batch, 4)})
+    )
+    dtype, device = torch.float32, torch.device("cpu")
+    data_type = pp_transport.PPTransportDataType.AUX_HIDDEN_STATES
+    assert len(pp_transport.get_pp_transport_tensors(factory(3, dtype, device), data_type)) == 2
+    assert len(pp_transport.get_pp_transport_tensors(factory.for_send(3, dtype, device), data_type)) == 4
+
+
 def _make_config(
     architecture: str,
     *,

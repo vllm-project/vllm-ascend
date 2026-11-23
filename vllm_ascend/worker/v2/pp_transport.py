@@ -92,7 +92,7 @@ class PPTransportDataType(str, Enum):
 
 
 _PPTransportBufferFactory = Callable[
-    [_PPTransportModel, IntermediateTensors, int, torch.dtype, torch.device, bool],
+    [_PPTransportModel, IntermediateTensors, int, torch.dtype, torch.device, bool, bool],
     IntermediateTensors,
 ]
 
@@ -121,9 +121,11 @@ def _add_aux_hidden_state_buffers(
     dtype: torch.dtype,
     device: torch.device,
     include_start_layer: bool,
+    for_send: bool,
 ) -> IntermediateTensors:
+    boundary = model.end_layer if for_send else model.start_layer
     num_incoming_aux_layers = sum(
-        layer_idx < model.start_layer or (include_start_layer and layer_idx == model.start_layer)
+        layer_idx < boundary or ((for_send or include_start_layer) and layer_idx == boundary)
         for layer_idx in model.aux_hidden_state_layers
     )
     return add_pp_transport_buffers(
@@ -143,16 +145,18 @@ def _add_topk_indices_buffer(
     dtype: torch.dtype,
     device: torch.device,
     include_start_layer: bool,
+    for_send: bool,
 ) -> IntermediateTensors:
     del dtype, device, include_start_layer
-    if not model.receive_pp_topk_indices:
+    required = model.send_pp_topk_indices if for_send else model.receive_pp_topk_indices
+    if not required:
         return intermediate_tensors
 
     topk_indices_buffer = model.topk_indices_buffer
     assert topk_indices_buffer is not None
     if batch_size > topk_indices_buffer.shape[0]:
         raise ValueError(
-            "PP Top-K receive buffer exceeds the model buffer capacity: "
+            "PP Top-K transport buffer exceeds the model buffer capacity: "
             f"requested {batch_size} tokens, capacity {topk_indices_buffer.shape[0]}."
         )
     return add_pp_transport_tensors(
@@ -177,7 +181,7 @@ def make_empty_intermediate_tensors(
     *,
     include_start_layer: bool = True,
 ) -> Callable[[int, torch.dtype, torch.device], IntermediateTensors]:
-    """Wrap a model's PP tensor factory with typed receive buffers."""
+    """Wrap a PP receive factory and expose its outgoing counterpart as for_send."""
     if len(set(data_types)) != len(data_types):
         raise ValueError(f"Duplicate PP transport data types: {data_types}.")
     unsupported_data_types = set(data_types) - _PP_TRANSPORT_BUFFER_FACTORIES.keys()
@@ -188,6 +192,8 @@ def make_empty_intermediate_tensors(
         batch_size: int,
         dtype: torch.dtype,
         device: torch.device,
+        *,
+        for_send: bool = False,
     ) -> IntermediateTensors:
         intermediate_tensors = tensor_factory(batch_size, dtype, device)
         for data_type in data_types:
@@ -198,9 +204,14 @@ def make_empty_intermediate_tensors(
                 dtype,
                 device,
                 include_start_layer,
+                for_send,
             )
         return intermediate_tensors
 
+    def send_tensor_factory(batch_size: int, dtype: torch.dtype, device: torch.device) -> IntermediateTensors:
+        return wrapped_tensor_factory(batch_size, dtype, device, for_send=True)
+
+    wrapped_tensor_factory.for_send = send_tensor_factory
     return wrapped_tensor_factory
 
 
