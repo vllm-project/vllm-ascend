@@ -1,0 +1,9 @@
+pr: 22941
+entries:
+  - category: feature
+    text: >-
+      Added online MXFP8 and W4A8 MXFP4 weight quantization using ModelSlim
+      descriptions on Ascend 950. Set additional_config.online_quantize_weights
+      to true to load BF16 weights and regenerate MX weights and E8M0 scales
+      during startup and layerwise RL weight updates; keep it disabled for
+      already quantized checkpoints.
