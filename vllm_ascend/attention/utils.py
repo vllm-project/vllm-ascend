@@ -380,7 +380,6 @@ def is_suffix_fia_cache_enabled(vllm_config: VllmConfig, impl) -> bool:
             and cache.kv_offloading_size is None
             and cache.kv_sharing_fast_prefill is False
             and ascend.sparse_kv_offload_config.enabled is False
-            and ascend.dynamic_spec_config.method is None
             and isinstance(ascend.pa_shape_list, list)
             and not ascend.pa_shape_list
             and not enable_sfa(vllm_config)

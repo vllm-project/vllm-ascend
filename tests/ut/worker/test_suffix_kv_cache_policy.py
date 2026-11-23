@@ -74,7 +74,6 @@ def suffix_domain(monkeypatch):
     )
     ascend = SimpleNamespace(
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
-        dynamic_spec_config=SimpleNamespace(method=None),
         pa_shape_list=[],
     )
     impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
@@ -174,7 +173,6 @@ def test_suffix_policy_falls_back_to_hf_config(suffix_domain):
         ("config.cache_config.kv_offloading_size", 1),
         ("config.cache_config.kv_sharing_fast_prefill", True),
         ("ascend.sparse_kv_offload_config.enabled", True),
-        ("ascend.dynamic_spec_config.method", "dspark"),
         ("ascend.pa_shape_list", [32]),
         ("ascend.pa_shape_list", None),
         ("impl.attn_type", AttentionType.ENCODER_DECODER),
@@ -220,7 +218,6 @@ def test_suffix_policy_rejects_unsupported_domain(suffix_domain, path, value):
         "config.parallel_config.enable_expert_parallel",
         "config.cache_config.kv_offloading_size",
         "ascend.sparse_kv_offload_config.enabled",
-        "ascend.dynamic_spec_config.method",
         "ascend.pa_shape_list",
         "impl.sliding_window",
         "impl.kv_sharing_target_layer_name",
@@ -440,3 +437,14 @@ def test_suffix_shared_pool_keeps_combined_owner_and_alias(suffix_domain, monkey
     assert torch.count_nonzero(key[0]) == 0
     assert torch.count_nonzero(key[2]) == 0
     assert torch.count_nonzero(value) == 0
+
+
+def test_suffix_policy_matches_real_ascend_config_schema(suffix_domain, monkeypatch):
+    import dataclasses
+
+    from vllm_ascend.ascend_config import AscendConfig
+
+    field_names = {f.name for f in dataclasses.fields(AscendConfig)}
+    real_like = SimpleNamespace(**{k: v for k, v in vars(suffix_domain.ascend).items() if k in field_names})
+    monkeypatch.setattr(attention_utils, "get_ascend_config", lambda: real_like)
+    assert attention_utils.is_suffix_fia_cache_enabled(suffix_domain.config, suffix_domain.impl)
