@@ -1,0 +1,8 @@
+pr: 22983
+entries:
+  - category: performance
+    text: >-
+      With prefill and decode context parallelism enabled, short prefills can
+      now be split across Ascend ranks when fixed-width slicing would replicate
+      them. This reduces the startup token capacity reserved for prefill MC2
+      and MegaMoE without lowering the global batch limit.
