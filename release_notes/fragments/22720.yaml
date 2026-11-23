@@ -1,0 +1,11 @@
+pr: 22720
+entries:
+  - category: performance
+    text: >-
+      Reduced repeated sparse-attention setup for A5 FP8 C8 inference.
+      In a two-node GLM-5.3 benchmark with DFlash, 16K input/20 output tokens
+      and concurrency 32, output throughput increased by 2.6% and mean ITL
+      decreased by 4.0%; concurrency 1/8 showed no clear gain.
+      No new configuration is required.
+    model: GLM-5.3
+    hardware: [A5]
