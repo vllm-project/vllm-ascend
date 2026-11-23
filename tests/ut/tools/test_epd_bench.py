@@ -8,10 +8,15 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from tools.epd_bench import (
+    _fetch_text,
+    _load_ec_bytes,
     aggregate_stage_metrics,
     compare_with_tolerance,
     main,
@@ -205,3 +210,49 @@ def test_help_works_without_vllm() -> None:
     with pytest.raises(SystemExit) as excinfo:
         main(["--help"])
     assert excinfo.value.code == 0
+
+
+class _UnreadableCacheEntry:
+    """Stand-in for an encoder-cache entry whose stat() fails mid-scan."""
+
+    def is_file(self) -> bool:
+        return True
+
+    def stat(self) -> object:
+        raise OSError("simulated stat failure")
+
+
+def test_fetch_text_rejects_url_without_host() -> None:
+    with pytest.raises(ValueError) as excinfo:
+        _fetch_text("not-a-url")
+    assert "has no host" in str(excinfo.value)
+    assert "not-a-url" in str(excinfo.value)
+
+
+def test_fetch_text_rejects_unsupported_scheme() -> None:
+    with pytest.raises(ValueError, match="only http and https are supported"):
+        _fetch_text("ftp://127.0.0.1:9100/metrics")
+
+
+def test_load_ec_bytes_returns_none_when_stat_fails(monkeypatch, tmp_path) -> None:
+    (tmp_path / "entry.safetensors").write_bytes(b"x")
+    monkeypatch.setattr(Path, "glob", lambda self, pattern: iter([_UnreadableCacheEntry()]))
+    args = SimpleNamespace(ec_transfer_bytes=None, ec_shared_storage_path=str(tmp_path))
+    assert _load_ec_bytes(args) is None
+
+
+def test_main_reports_missing_vllm_as_user_error(monkeypatch, tmp_path) -> None:
+    report_md = tmp_path / "epd_report.md"
+    report_json = tmp_path / "epd_report.json"
+
+    def _missing_vllm(*args: object, **kwargs: object) -> None:
+        raise FileNotFoundError("vllm")
+
+    monkeypatch.setattr(subprocess, "run", _missing_vllm)
+    exit_code = main(["--model", "m", "--report-md", str(report_md), "--report-json", str(report_json)])
+
+    assert exit_code == 2
+    assert report_md.is_file()
+    report = json.loads(report_json.read_text(encoding="utf-8"))
+    assert any("failed to execute benchmark command" in note for note in report["notes"])
+    assert report["benchmark"] == parse_bench_output("")

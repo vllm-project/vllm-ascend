@@ -412,6 +412,10 @@ def render_json(report: dict[str, Any]) -> str:
 
 def _fetch_text(url: str) -> str:
     parsed = urllib.parse.urlsplit(url)
+    if parsed.hostname is None:
+        raise ValueError(f"metrics endpoint URL {url!r} has no host")
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"unsupported metrics endpoint URL {url!r}: only http and https are supported")
     connection_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
     connection = connection_cls(parsed.hostname, parsed.port, timeout=30)
     try:
@@ -481,7 +485,11 @@ def _load_ec_bytes(args: argparse.Namespace) -> int | None:
     if args.ec_shared_storage_path:
         root = Path(args.ec_shared_storage_path)
         if root.is_dir():
-            return sum(path.stat().st_size for path in root.glob("**/*.safetensors") if path.is_file())
+            # A broken symlink or a file removed mid-scan must not abort the report.
+            try:
+                return sum(path.stat().st_size for path in root.glob("**/*.safetensors") if path.is_file())
+            except OSError:
+                return None
     return None
 
 
@@ -535,11 +543,17 @@ def main(argv: list[str] | None = None) -> int:
         text = ""
         notes.append("dry-run: the benchmark command was not executed and no numbers were produced")
     else:
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
-        text = completed.stdout + "\n" + completed.stderr
-        if completed.returncode != 0:
-            notes.append(f"benchmark command failed with exit code {completed.returncode}")
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        except OSError as exc:
+            text = ""
+            notes.append(f"failed to execute benchmark command: {exc}")
             exit_code = 2
+        else:
+            text = completed.stdout + "\n" + completed.stderr
+            if completed.returncode != 0:
+                notes.append(f"benchmark command failed with exit code {completed.returncode}")
+                exit_code = 2
 
     benchmark = parse_bench_output(text)
     try:
