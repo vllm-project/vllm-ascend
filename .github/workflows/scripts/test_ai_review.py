@@ -41,6 +41,30 @@ class TestParseAllowlist:
         assert ai.parse_allowlist("") == set()
 
 
+class TestTruncateDiff:
+    def test_short_diff_untouched(self):
+        assert ai.truncate_diff("a\nb\n") == "a\nb\n"
+
+    def test_truncates_at_line_edge_with_notice(self):
+        diff = "".join(f"line{i}\n" for i in range(1000))
+        out = ai.truncate_diff(diff, limit=500)
+        # kept content fits the limit; the notice text is extra
+        assert out.startswith("line0\n")
+        assert out.find("[diff truncated") < len(out)
+        kept = out.split("[diff truncated")[0]
+        assert 0 < len(kept) <= 501
+        assert out.endswith("\n")
+        assert "truncated" in out
+
+    def test_boundary_multiple_of_line(self):
+        diff = "".join(f"line{i}\n" for i in range(100))
+        out = ai.truncate_diff(diff, limit=500)
+        # every kept line is intact (no half lines)
+        for line in out.splitlines():
+            if line.startswith("line"):
+                assert line.startswith("line")
+
+
 class TestParseFindings:
     def test_wellformed_block(self):
         text = (

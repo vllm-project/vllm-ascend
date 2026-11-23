@@ -65,6 +65,9 @@ Every reply MUST be a single PR comment consisting of:
   and set `state=waiting-human`; a human will decide. Never guess a verdict.
 - NITs are optional to fix and never block the pass verdict.
 - Be terse. The reviewer reads this between human reviews.
+- Be frugal with reads: open only the checklist and source files you
+  actually need to ground a finding. Every file you open costs tokens and
+  wall-clock time; never browse the repository out of curiosity.
 - You have read-only access. You do not run builds or tests; you may point
   at which CI job should cover a concern (see the L2 ci checklist).
 - Everything you write is public on the PR timeline: write for the contributor

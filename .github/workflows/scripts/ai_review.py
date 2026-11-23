@@ -24,6 +24,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 
 import regex as re
@@ -53,6 +54,29 @@ def parse_allowlist(text: str) -> set[str]:
     return entries
 
 
+# Cost guards. A several-thousand-line diff (recipes, overlays, .po files)
+# dominates the per-round token bill, and an agent left unbounded can wander
+# for half an hour; cap both.
+MAX_DIFF_CHARS = 80_000
+ROUND_TIMEOUT_SECONDS = 600
+
+
+def truncate_diff(diff: str, limit: int = MAX_DIFF_CHARS) -> str:
+    """Cap the diff so one huge PR cannot dominate the token bill; the
+    agent is told to read the remainder from the head/ checkout."""
+    if len(diff) <= limit:
+        return diff
+    cut = diff[:limit]
+    # keep the truncation boundary on a line edge
+    cut = cut[: cut.rfind("\n") + 1]
+    return (
+        cut
+        + f"\n\n[diff truncated at {limit} characters; "
+        + f"{len(diff) - len(cut)} more characters — read the remaining "
+        + "changed files directly from head/ if needed]\n"
+    )
+
+
 def resolve_domains(domains_yaml: str, files: list[str]) -> list[dict]:
     """Match changed PR files against the coarse domains.yaml registry.
 
@@ -74,6 +98,7 @@ def resolve_domains(domains_yaml: str, files: list[str]) -> list[dict]:
 
 # The agent signals "all MUST-FIX resolved" with this marker line, which the
 # orchestrator (not the agent itself) turns into the `ai-review-passed` label.
+
 PASS_MARKER = "AI-REVIEW-VERDICT: PASS"
 
 # The agent emits each finding as a fenced block; the orchestrator turns the
@@ -257,7 +282,7 @@ class Orchestrator:
         with open(os.path.join(self.workspace, ".github", "agent-review", "instructions.md")) as f:
             instructions = f.read()
         kb_map = self._knowledge_base_map()
-        diff = self._gh("pr", "diff", str(self.pr))
+        diff = truncate_diff(self._gh("pr", "diff", str(self.pr)))
         prev_agent_comment = self._last_agent_comment_text()
         user_reply = self.comment_body or "(n/a — new push or first round)"
         domains = self._touched_domains()
@@ -336,8 +361,43 @@ class Orchestrator:
             # test; harmless to expose until then.
             "AI_REVIEW_MODEL": os.environ.get("AI_REVIEW_MODEL", "deepseek-v4.1-flash"),
         }
-        with open(out_file, "w") as out:
-            subprocess.run([*cmd, prompt_file], stdout=out, check=True, env=env)
+        started = time.monotonic()
+        print(
+            f"::notice::ai-review prompt size: {len(prompt)} chars; "
+            f"engine: {cmd[0]}; timeout: {ROUND_TIMEOUT_SECONDS}s",
+            flush=True,
+        )
+        try:
+            with open(out_file, "w") as out:
+                subprocess.run(
+                    [*cmd, prompt_file],
+                    stdout=out,
+                    check=True,
+                    env=env,
+                    timeout=ROUND_TIMEOUT_SECONDS,
+                )
+        except subprocess.TimeoutExpired:
+            # Budget is NOT consumed: the state signature is re-posted
+            # unchanged so the author can retry after the engine is fixed.
+            print(
+                f"::error::agent round exceeded {ROUND_TIMEOUT_SECONDS}s and was aborted",
+                flush=True,
+            )
+            self.post_notice(
+                f"⏱️ AI review round aborted: the agent exceeded "
+                f"{ROUND_TIMEOUT_SECONDS // 60} minutes. No review was produced "
+                "and the round budget was not consumed. Retry with `/ai-review`.",
+                new_state=State(
+                    state=self.state.state,
+                    round=self.state.round,
+                    total=self.state.total,
+                ),
+            )
+            return
+        print(
+            f"::notice::agent round finished in {time.monotonic() - started:.0f}s",
+            flush=True,
+        )
 
         with open(out_file) as f:
             output = f.read()
