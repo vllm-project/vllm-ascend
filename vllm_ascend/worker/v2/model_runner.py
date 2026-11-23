@@ -529,7 +529,9 @@ class NPUModelRunner(GPUModelRunner):
             ) + 1
             metadata_groups = [*self.attn_groups, *getattr(self.speculator, "attn_groups", [])]
             initialize_kernel_block_table_buffers(
-                (group for groups in metadata_groups for group in groups), max_metadata_reqs
+                (group for groups in metadata_groups for group in groups),
+                max_metadata_reqs,
+                [table.gpu.shape[1] for table in self.block_tables.block_tables],
             )
             self._target_uses_flashmla = self._has_target_flashmla_attention()
             if self.pcp_manager is not None:

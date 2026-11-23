@@ -3522,8 +3522,6 @@ def test_sfa_reshape_uses_each_layer_storage_format(monkeypatch, target_dtype, l
         assert caches[1].shape == (num_blocks, block_size, 1, 64)
 
 
-
-
 @pytest.mark.parametrize("manager_block_size", [128, 512, 640])
 @pytest.mark.parametrize("common_is_manager", [False, True])
 @pytest.mark.parametrize("combined", [False, True])
@@ -3664,7 +3662,7 @@ def test_kernel_block_table_covers_local_and_padding_rows(pcp_size, num_builders
     # Leave an unsplit Group alone: it needs no private mapping table.
     unsplit = AttentionGroup(AscendMLABackend, ["unsplit.layer"], spec, 0)
     capacity = max_num_seqs * (2 if pcp_size > 1 else 1) + 1
-    attn_utils.initialize_kernel_block_table_buffers([*groups, unsplit], capacity)
+    attn_utils.initialize_kernel_block_table_buffers([*groups, unsplit], capacity, [2])
     assert unsplit.kernel_block_table is None
     pointers = [group.kernel_block_table.data_ptr() for group in groups]
     for rows in [max_num_seqs, capacity, 1, capacity]:
@@ -3677,5 +3675,39 @@ def test_kernel_block_table_covers_local_and_padding_rows(pcp_size, num_builders
                 assert mapped.shape[0] == rows
             assert group.kernel_block_table.data_ptr() == pointers[index]
     # Repeating initialization at the same capacity must retain graph addresses.
-    attn_utils.initialize_kernel_block_table_buffers(groups, capacity)
+    attn_utils.initialize_kernel_block_table_buffers(groups, capacity, [2])
     assert [group.kernel_block_table.data_ptr() for group in groups] == pointers
+
+
+@pytest.mark.parametrize("initial_rows,initial_columns", [(1, 4), (3, 4), (3, 16)])
+def test_kernel_block_table_covers_encoder_manager_columns(initial_rows, initial_columns):
+    # Decoder length 448 needs four kernel columns, but encoder capacity 1500
+    # needs six manager columns, hence twelve kernel columns at 256/128.
+    spec = FullAttentionSpec(block_size=256, num_kv_heads=1, head_size=8, dtype=torch.float32)
+    original = torch.full((2, initial_rows, initial_columns), -7, dtype=torch.int32)
+    group = AttentionGroup(
+        backend=AscendAttentionBackend,
+        layer_names=["cross_attn.layer"],
+        kv_cache_spec=spec,
+        kv_cache_group_id=1,
+        kernel_block_size=128,
+        kernel_block_table=original,
+        kernel_block_offsets=torch.arange(2, dtype=torch.int32),
+    )
+    manager_widths = [2, 6]
+    attn_utils.initialize_kernel_block_table_buffers([group], 3, manager_widths)
+    buffer = group.kernel_block_table
+    assert buffer is not None
+    assert buffer.shape == (2, 3, max(initial_columns, 12))
+    torch.testing.assert_close(buffer[:, :initial_rows, :initial_columns], original, rtol=0, atol=0)
+    if initial_columns >= 12 and initial_rows >= 3:
+        assert buffer is original
+
+    manager_table = torch.tensor([[1, 2, 3, 4, 5, 6]], dtype=torch.int32)
+    expected = torch.tensor([[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]], dtype=torch.int32)
+    for ubatch_idx in range(2):
+        mapped = group.map_to_kernel_block_table(manager_table, ubatch_idx)
+        torch.testing.assert_close(mapped, expected, rtol=0, atol=0)
+
+    attn_utils.initialize_kernel_block_table_buffers([group], 3, manager_widths)
+    assert group.kernel_block_table is buffer
