@@ -92,7 +92,7 @@ inline ParallelPlan MakeParallelPlan(uint32_t tokens, uint32_t rows, uint32_t hi
     const uint64_t globalWaves = (rowTasks + cores - 1) / cores;
     const bool occupied = tokens > cores / COOPERATIVE_LOW_TOKEN_OCCUPANCY;
     // Low-occupancy groups must save worker loads without adding a score wave.
-    if (occupied || (groupWaves <= globalWaves && tokens * group < globalCores)) {
+    if (occupied || (groupWaves <= globalWaves && static_cast<uint64_t>(tokens) * group < globalCores)) {
       plan.tokenGroupSize = group;
       const uint32_t ownedRows = (rows + group - 1) / group;
       const uint64_t spare = ubBytes - TokenGroupUbBytes(rows, wholeTile, regBase);

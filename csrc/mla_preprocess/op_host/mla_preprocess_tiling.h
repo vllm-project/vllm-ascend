@@ -229,7 +229,7 @@ void PpMatmulTilingApi::GetTileSize()
     uint32_t maxSubAxes0 = Min(maxAxes0, subAxes);
     for (uint32_t priAxes0 = CONST_16; priAxes0 <= maxPriAxes0; priAxes0 *= BASE_BLOCK_STEP) {
         for (uint32_t subAxes0 = CONST_16; subAxes0 <= maxSubAxes0; subAxes0 *= BASE_BLOCK_STEP) {
-            if (priAxes0 * subAxes0 * sizeof(float) > platformInfo_.l0cSize) {
+            if (static_cast<uint64_t>(priAxes0) * subAxes0 * sizeof(float) > platformInfo_.l0cSize) {
                 continue;
             }
             uint32_t newM0 = priFlag ? priAxes0 : subAxes0;
@@ -306,10 +306,10 @@ float PpMatmulTilingApi::GetCost(const uint32_t m0, const uint32_t n0)
     uint32_t blockDim = Min(rqdNumCore, platformInfo_.coreNumAic);
     uint32_t mOnce = blockDim < nLoop ? m0 : blockDim / nLoop * m0;
     uint32_t nOnce = blockDim < nLoop ? platformInfo_.coreNumAic * n0 : n_;
-    if (mOnce * k_ * sizeof(uint16_t) > platformInfo_.l2Size) {
+    if (static_cast<uint64_t>(mOnce) * k_ * sizeof(uint16_t) > platformInfo_.l2Size) {
         aCoef = bwCoef;
     }
-    if (nOnce * k_ * sizeof(uint16_t) > platformInfo_.l2Size) {
+    if (static_cast<uint64_t>(nOnce) * k_ * sizeof(uint16_t) > platformInfo_.l2Size) {
         bCoef = bwCoef;
     }
     if (transA_ && m0 % CONST_256 == 0) {
@@ -338,7 +338,7 @@ void PpMatmulTilingApi::UpdateTileSize(const uint32_t m0, const uint32_t n0)
         uint32_t x = CeilDiv(n_, maxNumCubeCore);
         uint32_t y = CeilDiv(x, maxN0);
         uint32_t tmpN0 = RoundUp(CeilDiv(x, y), CONST_16);
-        uint32_t rqdL0cSize = tmpM0 * tmpN0 * sizeof(float);
+        const uint64_t rqdL0cSize = static_cast<uint64_t>(tmpM0) * tmpN0 * sizeof(float);
         if (rqdL0cSize < L0C_SIZE && (tmpM0 + tmpN0) * CONST_256 * inDataSize_ < L1_BUFFER_SIZE) {
             m0_ = tmpM0;
             n0_ = tmpN0;
@@ -519,12 +519,11 @@ void MlaPreprocessTiling::SetMlapoWorkSpace()
 {
     uint32_t hiddenStrideRope = opParam.qkNopeHeadDim + opParam.qkRopeHeadDim;
     uint32_t hiddenStrateMm = opParam.qLoraRank + opParam.kvLoraRank + opParam.qkRopeHeadDim;
-    uint64_t s1wsFactor =
-        static_cast<uint64_t>(opParam.cacheMode == 2 ? std::max(opParam.hiddenStateDim * sizeof(int8_t),
-                                                                opParam.headNum * opParam.kvLoraRank * sizeof(uint16_t))
-                                                     : opParam.hiddenStateDim * sizeof(int8_t));
+    const uint64_t hiddenStateBytes = opParam.hiddenStateDim * sizeof(int8_t);
+    const uint64_t kvHeadBytes = static_cast<uint64_t>(opParam.headNum) * opParam.kvLoraRank * sizeof(uint16_t);
+    uint64_t s1wsFactor = opParam.cacheMode == 2 ? std::max(hiddenStateBytes, kvHeadBytes) : hiddenStateBytes;
     uint64_t workSizeS1 = s1wsFactor;
-    uint64_t workSizeS2 = opParam.headNum * hiddenStrideRope * sizeof(uint16_t);
+    uint64_t workSizeS2 = static_cast<uint64_t>(opParam.headNum) * hiddenStrideRope * sizeof(uint16_t);
     uint64_t workSizeS3 = hiddenStrateMm * sizeof(uint16_t);
     uint64_t workSizeS4 = std::max(opParam.headNum * hiddenStrideRope, hiddenStrateMm) * sizeof(uint32_t);
 
