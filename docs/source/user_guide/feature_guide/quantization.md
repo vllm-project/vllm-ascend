@@ -122,6 +122,14 @@ Only the block-wise flavour is supported. A native FP8 checkpoint without `weigh
 
 ### 4. Online quantization (no pre-quantized checkpoint needed)
 
+!!! warning "Experimental"
+
+    Online quantization on Ascend is experimental and limited to what this section
+    describes: only the INT8 per-channel weight recipe has an execution path, only
+    on the standard Ascend quantization backend (A2/A3/A5), and the
+    `--quantization` / `--quantization-config` surface may change in later
+    releases. Evaluate it on your model before depending on it.
+
 Instead of quantizing offline, vLLM Ascend can quantize a plain BF16/FP16
 checkpoint **while the weights are loaded**. No calibration dataset and no
 pre-quantized checkpoint are needed: each weight is quantized from the value
@@ -153,13 +161,19 @@ vllm serve /path/to/Qwen3-30B-A3B --quantization online \
 
 `--quantization-config.ignore` skips matching layers and
 `--quantization-config.targets` gives individual layers their own recipe.
-Layers that match nothing keep the checkpoint dtype (for a partially
-pre-quantized checkpoint the checkpoint's own method still owns its layers):
+Layers that match nothing keep the checkpoint dtype:
 
 ```bash
 vllm serve /path/to/Qwen3-30B-A3B --quantization online \
     --quantization-config '{"targets": {"*mlp.experts*": "int8_per_channel_static"}}'
 ```
+
+Online quantization converts a **plain** checkpoint. Combining `--quantization-config`
+with a checkpoint that already quantized the same layers asks for online
+*re-quantization*, which is not implemented on Ascend yet: loading fails with an
+explicit error while those layers are built. Serve such a checkpoint with its own
+quantization method instead (for example `--quantization ascend` for a ModelSlim
+checkpoint), or start from a BF16/FP16 checkpoint.
 
 Notes:
 
@@ -169,6 +183,8 @@ Notes:
   layer plus the already-quantized INT8 prefix.
 - FP8, MXFP8 and MXFP4 online recipes are rejected with an explanatory error:
   they need an FP8 matmul path that Ascend A2/A3 does not provide.
+- Online re-quantization of a checkpoint-quantized layer is not supported yet;
+  such a combination is rejected while the layer is built.
 - Reloading weights into an online-quantized model is not supported yet.
 - The quantized result is numerically equivalent to re-quantizing the same
   checkpoint with ModelSlim `W8A8_DYNAMIC` and serving it with

@@ -21,6 +21,7 @@ from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase, FusedMoeWeightScaleSupported
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.linear import LinearMethodBase, RowParallelLinear
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
 from vllm.model_executor.layers.quantization.online.moe_base import OnlineMoEMethodBase
@@ -412,6 +413,13 @@ class AscendOnlineLinearMethod(OnlineLinearBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         self.quant_method.process_weights_after_loading(layer)
 
+    def set_requantization_source(self, source_method: QuantizeMethodBase) -> None:
+        raise NotImplementedError(
+            "Online re-quantization of a checkpoint-quantized layer is not supported on Ascend yet "
+            f"(checkpoint method: {type(source_method).__name__}). Serve the quantized checkpoint with "
+            "its own quantization method, or use a bf16/fp16 checkpoint with --quantization online."
+        )
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -444,3 +452,10 @@ class AscendOnlineFusedMoEMethod(_AscendMoEMethodMixin, OnlineMoEMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         self.quant_method.process_weights_after_loading(layer)
+
+    def set_requantization_source(self, source_method: QuantizeMethodBase) -> None:
+        raise NotImplementedError(
+            "Online re-quantization of a checkpoint-quantized layer is not supported on Ascend yet "
+            f"(checkpoint method: {type(source_method).__name__}). Serve the quantized checkpoint with "
+            "its own quantization method, or use a bf16/fp16 checkpoint with --quantization online."
+        )

@@ -580,6 +580,30 @@ class TestBuildAscendOnlineQuantConfig(TestBase):
             build_ascend_online_quant_config(model_config)
 
 
+class TestRequantizationIsRejected(TestBase):
+    """vLLM's `resolve_quant_method` opens this path for a quantized checkpoint."""
+
+    def test_linear_method_rejects_a_requantization_source(self):
+        vllm_config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16))
+        with patch(
+            "vllm.model_executor.layers.quantization.online.fp8.get_current_vllm_config",
+            return_value=vllm_config,
+        ):
+            method = AscendInt8PerChannelOnlineLinearMethod()
+
+        with self.assertRaises(NotImplementedError) as raised:
+            method.set_requantization_source(MagicMock())
+
+        self.assertIn("not supported", str(raised.exception))
+
+    def test_moe_method_rejects_a_requantization_source(self):
+        method = AscendInt8PerChannelOnlineMoEMethod.__new__(AscendInt8PerChannelOnlineMoEMethod)
+        method.quant_method = MagicMock()
+
+        with self.assertRaises(NotImplementedError):
+            method.set_requantization_source(MagicMock())
+
+
 class TestQuantizationConfigPatch(TestBase):
     def test_ascend_online_names_are_diverted(self):
         from vllm.config.vllm import VllmConfig
