@@ -152,13 +152,14 @@ def test_push_advertises_the_worker_layout(configuration):
         get_layout.assert_called_once_with(cache_config)
 
 
-def test_shared_hook_submits_shared_and_resident_writes():
+def test_last_shared_hook_submits_writes_once():
     obj = worker()
     shared, resident = "model.layers.2.long", "model.layers.2.swa"
     other_shared = "model.layers.3.long"
     obj._shared_layer_indices = {shared: 0, other_shared: 1}
+    obj._last_layer_index = obj._layer_index_by_name[shared]
     target = (0, 0, 0)
-    event = object()
+    event = Mock()
     resident_write, shared_write = Future(), Future()
     metadata_future = Mock()
     metadata_future.done.return_value = False
@@ -166,9 +167,9 @@ def test_shared_hook_submits_shared_and_resident_writes():
         metadata_future=metadata_future, required_layers={shared, resident}, pending_layers=set(), completion=None
     )
     state = SimpleNamespace(
-        available_layers={resident: (32, event), shared: (32, event)},
+        available_layers={resident: (32, event)},
         destinations={target: destination},
-        metadata=object(),
+        metadata=SimpleNamespace(num_computed_tokens=16, num_scheduled_tokens=16),
         consumer_engine_id="d",
         expected_ranks={target},
         error=None,
@@ -185,16 +186,20 @@ def test_shared_hook_submits_shared_and_resident_writes():
         {"LayerTransferBatch": lambda layer_name, *_: SimpleNamespace(layer_name=layer_name)},
         OWNER,
     )
-    obj._process_sending_requests = MethodType(process, obj)
+    obj._process_sending_requests = Mock(wraps=MethodType(process, obj))
     submit = load(PUSH, "_submit_shared_layer_writes", {}, OWNER)
+    obj._submit_shared_layer_writes = MethodType(submit, obj)
+    save = load(PUSH, "save_kv_layer", {"torch": SimpleNamespace(npu=SimpleNamespace(Event=lambda: event))}, OWNER)
 
-    obj._process_sending_requests()
+    process(obj)
     metadata_future.result.assert_not_called()
     assert not obj._pending_sends
 
     obj._sending_futures["d"] = [Future()]
-    submit(obj, [shared])
+    save(obj, shared)
 
+    obj._process_sending_requests.assert_called_once_with(layer_hook=True, force=True, wait_for_metadata=True)
+    obj._send_completions.assert_called_once_with()
     metadata_future.result.assert_called_once()
     assert {batch.layer_name: future for batch, future in obj._pending_sends} == {
         resident: resident_write,
