@@ -36,11 +36,16 @@ def parse_args():
     return args
 
 
+def handle_sigterm(signum, frame):
+    raise SystemExit()
+
+
 def main():
     args = parse_args()
     devices_per_rank = args.tp_size * args.pcp_size * args.pp_size
     processes = []
     try:
+        signal.signal(signal.SIGTERM, handle_sigterm)
         for i in range(args.dp_size_local):
             dp_rank = args.dp_rank_start + i
             port = args.vllm_start_port + i

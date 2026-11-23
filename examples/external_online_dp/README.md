@@ -57,8 +57,11 @@ group, waits for its shell, then
 re-raises the exception. Templates must keep their workers in the same process
 group; do not daemonize them or use `setsid` inside the template.
 
-This is best-effort cleanup: it has no timeout, forced termination, or custom
-handler for `SIGTERM` sent to the launcher. Waiting covers the shells; descendants
+Receiving `SIGTERM` raises `SystemExit` and enters the same cleanup path. After
+cleanup completes, the launcher exits with status 0 for this requested stop.
+
+This is best-effort cleanup: it has no timeout or forced termination.
+Waiting covers the shells; descendants
 must respond to `SIGTERM` themselves. It does not guarantee cleanup if a stop
 signal arrives before `Popen` returns or if cleanup is interrupted again.
 

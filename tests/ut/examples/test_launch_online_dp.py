@@ -20,6 +20,7 @@ spec.loader.exec_module(launcher)
 
 class LauncherTests(unittest.TestCase):
     def setUp(self):
+        self.addCleanup(signal.signal, signal.SIGTERM, signal.getsignal(signal.SIGTERM))
         temp = tempfile.TemporaryDirectory(prefix="dp launcher ")
         self.addCleanup(temp.cleanup)
         self.template = Path(temp.name) / "run template.sh"
@@ -198,6 +199,25 @@ class LauncherTests(unittest.TestCase):
                 )
                 workers[0].wait.assert_called_once()
                 workers[1].wait.assert_called_once()
+
+    def test_sigterm_handler_cleans_all_groups(self):
+        workers = [mock.Mock(pid=101), mock.Mock(pid=102)]
+        with (
+            mock.patch.object(launcher.sys, "argv", ["launch_online_dp.py", *self.base]),
+            mock.patch.object(launcher.subprocess, "Popen", side_effect=workers),
+            mock.patch.object(launcher.signal, "signal") as register,
+            mock.patch.object(launcher.os, "killpg", create=True) as killpg,
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(SystemExit) as caught,
+        ):
+            # Invoke the registered handler during monitoring without sending a real signal.
+            workers[0].poll.side_effect = lambda: register.call_args.args[1](signal.SIGTERM, None)
+            launcher.main()
+        register.assert_called_once_with(signal.SIGTERM, launcher.handle_sigterm)
+        self.assertIsNone(caught.exception.code)
+        self.assertEqual(killpg.call_args_list, [mock.call(101, signal.SIGTERM), mock.call(102, signal.SIGTERM)])
+        for worker in workers:
+            worker.wait.assert_called_once()
 
     def test_exited_shell_group_is_still_signalled(self):
         workers = [mock.Mock(pid=101, returncode=0), mock.Mock(pid=102)]
