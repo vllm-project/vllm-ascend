@@ -330,4 +330,3 @@ def causal_conv1d_update(
             out[start : start + out_i.shape[0]] = out_i
 
     return out.to(original_x_dtype)
-

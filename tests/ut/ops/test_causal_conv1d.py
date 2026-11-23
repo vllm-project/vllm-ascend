@@ -45,4 +45,3 @@ def test_causal_conv1d_npu_fallback_matches_grouped_conv(monkeypatch, has_initia
     actual = _causal_conv1d_npu(conv_input, weight, bias, seqlen)
 
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
-
