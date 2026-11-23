@@ -102,7 +102,7 @@ def prepare_chunk_indices_dev(
     chunks_per_seq = (lens + (chunk_size - 1)) // chunk_size
     chunk_ends = torch.cumsum(chunks_per_seq, 0)
     row_ids = torch.arange(total_chunks, dtype=torch.int32, device=cu_seqlens.device)
-    seq_ids = torch.searchsorted(chunk_ends, row_ids, right=True)
+    seq_ids = torch.searchsorted(chunk_ends, row_ids, right=True, out_int32=True)
     seq_ids = torch.where(seq_ids >= num_seqs, torch.zeros_like(seq_ids), seq_ids)
     chunk_in_seq = row_ids - (chunk_ends - chunks_per_seq)[seq_ids]
     return torch.stack((seq_ids, chunk_in_seq), dim=1).to(cu_seqlens)

@@ -12,7 +12,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from .utils import FLA_CHUNK_SIZE, prepare_chunk_indices_dev, prepare_chunk_offsets
+from .utils import FLA_CHUNK_SIZE, prepare_chunk_offsets
 
 # KDA-specific h-state backend. It uses [V, K] state layout and vector gate
 # semantics, so it is exposed through a distinct entry point.
@@ -287,13 +287,16 @@ def chunk_gated_delta_rule_fwd_h_kda(
     H = u.shape[-2]
     BT = chunk_size
 
-    if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices_dev(cu_seqlens, T, chunk_size)
+    # This kernel never receives ``chunk_indices`` - only its row count is used - and the
+    # row count has a closed form, so building the tensor would be pure overhead.
+    num_chunks = None
+    if cu_seqlens is not None:
+        num_chunks = len(chunk_indices) if chunk_indices is not None else T // BT + len(cu_seqlens) - 1
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT = len(cu_seqlens) - 1, len(chunk_indices)
+        N, NT = len(cu_seqlens) - 1, num_chunks
         if chunk_offsets is None:
             chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."

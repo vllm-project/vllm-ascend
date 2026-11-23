@@ -93,11 +93,13 @@ def test_builder_returns_an_empty_tensor_without_sequences(name, host_builder, d
     assert actual.dtype == cu_seqlens.dtype
 
 
-def test_device_builder_does_not_read_back_to_the_host():
+@pytest.mark.parametrize("name,host_builder,device_builder", BUILDERS)
+def test_device_builder_does_not_read_back_to_the_host(name, host_builder, device_builder):
     """The point of the helper: no ``.tolist()``/``.item()`` on the device->host path."""
     import inspect
 
-    source = inspect.getsource(prepare_chunk_indices_dev)
+    # Unwrap a possible @tensor_cache wrapper so the helper's own body is inspected.
+    source = inspect.getsource(getattr(device_builder, "__wrapped__", device_builder))
 
     assert ".tolist()" not in source
     assert ".item()" not in source
