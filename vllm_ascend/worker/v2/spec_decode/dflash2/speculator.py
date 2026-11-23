@@ -125,3 +125,14 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
     # The model's compute_candidates aligns DP rows and exchanges TopK
     # candidates directly, without going through sample_draft.
     _lmhead_tp_sample_draft_supported = True
+
+    def set_attn(self, *args, **kwargs):
+        super().set_attn(*args, **kwargs)
+        # Ascend builds replay metadata in DFlashAclGraphManager. Let upstream
+        # skip its duplicate eager build; the block tables are still refreshed.
+        self.supports_decode_metadata_update = True
+
+    def _update_draft_decode_metadata(self, attn_metadata, num_reqs):
+        # Capture uses the same Ascend padding rule as replay instead of the
+        # backend hook, which the CUSTOM attention backend does not implement.
+        self._update_draft_attn_metadata(attn_metadata, num_reqs)

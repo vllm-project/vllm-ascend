@@ -67,7 +67,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_cache_spec,
     mxfp_cache_views_for_spec,
 )
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionMetadataBuilder, AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
@@ -434,6 +434,9 @@ def build_attn_metadata(
 
     attn_metadata: dict[str, Any] = {}
     step_metadata_builders: list[tuple[list[str], Any]] = []
+    # Reuse dense batch metadata only within this execution. Each compatible
+    # cache group still owns its physical block table and slot mapping.
+    cached_dense_metadata: dict[Any, Any] = {}
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
     common_v41_batch_metadata: dict[str, Any] = {}
@@ -613,7 +616,26 @@ def build_attn_metadata(
             for variant_names, variant_common in metadata_variants:
                 if group_pcp_context is not pcp_context:
                     variant_common = replace(variant_common, pcp_context=group_pcp_context)
-                if for_cudagraph_capture:
+                reuse_dense_metadata = (
+                    type(attn_metadata_builder) is AscendAttentionMetadataBuilder
+                    and attn_metadata_builder.supports_update_block_table
+                    and not for_cudagraph_capture
+                    and not common_attn_metadata_extra_kwargs
+                    and not attn_metadata_extra_kwargs
+                    and pcp_context is None
+                )
+                dense_cache_key = (
+                    (attn_metadata_builder.kv_cache_spec, attn_metadata_builder.decode_threshold, group_causal)
+                    if reuse_dense_metadata
+                    else None
+                )
+                if dense_cache_key is not None and dense_cache_key in cached_dense_metadata:
+                    metadata = attn_metadata_builder.update_block_table(
+                        cached_dense_metadata[dense_cache_key],
+                        variant_common.block_table_tensor,
+                        variant_common.slot_mapping,
+                    )
+                elif for_cudagraph_capture:
                     metadata = attn_metadata_builder.build_for_cudagraph_capture(
                         attn_group._with_kernel_block_table(variant_common),
                         **attn_metadata_extra_kwargs,
@@ -626,6 +648,8 @@ def build_attn_metadata(
                         common_attn_metadata=variant_common,
                         **attn_metadata_extra_kwargs,
                     )
+                    if dense_cache_key is not None:
+                        cached_dense_metadata[dense_cache_key] = metadata
                 if is_dsa_builder:
                     # Preserve sharing even if a builder replaces one of the
                     # dictionaries while constructing its metadata.

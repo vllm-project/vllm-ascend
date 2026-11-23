@@ -786,10 +786,8 @@ def _select_seq_lens(
     Defaults to the CPU mirror: ``_seq_lens_cpu`` is always available and
     updated during draft iterations, while ``seq_lens_cpu`` is None in async
     spec decode mode. Cross-attention and generic parallel drafting override
-    this with the NPU ``seq_lens``; the one exception is DSpark on the GLM5.2
-    family, whose CPU mirror carries the same post-rejection-sampling lengths
-    across draft iterations, so building from it skips the NPU->CPU sync at
-    ``seq_lens.tolist()`` in the metadata build.
+    this with the NPU ``seq_lens``. GLM DSpark and Qwen4Exp DFlash2 keep the
+    per-request CPU bounds to avoid an NPU->CPU sync in ``seq_lens.tolist()``.
     """
     # Prefer _seq_lens_cpu (always available, updated during draft
     # iterations) over seq_lens_cpu (None in async spec decode mode).
@@ -807,10 +805,20 @@ def _select_seq_lens(
     if speculative_config is not None:
         # vLLM #63373 moved this capability off the deprecated legacy field.
         parallel_drafting = speculative_config.speculator_config.parallel_drafting
-        # PARD / DFlash (and DSpark on other models) keep the NPU seq_lens;
-        # only DSpark on the GLM5.2 family keeps the CPU mirror above.
-        if parallel_drafting and not (speculative_config.use_dspark() and _is_glm_model(model_config)):
-            seq_lens = common_attn_metadata.seq_lens
+        if parallel_drafting:
+            draft_model_config = getattr(speculative_config, "draft_model_config", None)
+            is_qwen_dflash2 = (
+                getattr(speculative_config, "method", None) == "dflash"
+                and draft_model_config is not None
+                and "DFlash2DraftModel" in (draft_model_config.architectures or ())
+                and getattr(model_config, "architecture", None)
+                in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration")
+            )
+            # Other parallel drafters retain exact device lengths. The whitelisted
+            # paths use CPU bounds instead of serializing target and draft on D2H.
+            use_cpu_bounds = is_qwen_dflash2 or (speculative_config.use_dspark() and _is_glm_model(model_config))
+            if not use_cpu_bounds:
+                seq_lens = common_attn_metadata.seq_lens
     return seq_lens
 
 
