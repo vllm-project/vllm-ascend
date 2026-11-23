@@ -23,23 +23,30 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 
 
 @pytest.mark.parametrize("defer_wait", [False, True])
-def test_exec_kv_offload_always_completes_compute_and_cache_write(defer_wait):
+@pytest.mark.parametrize("fused, capturing, expected", [(True, False, False), (True, True, True), (False, False, True)])
+def test_exec_kv_offload_always_completes_compute_and_cache_write(defer_wait, fused, capturing, expected):
     impl = AscendSFAKVOffloadImpl.__new__(AscendSFAKVOffloadImpl)
     k_nope, k_pe = torch.ones(2, 4), torch.ones(2, 2)
     impl._is_decode_only = MagicMock(return_value=True)
     impl._compute_kv_only = MagicMock(return_value=(k_nope, k_pe))
     impl._offload_layer_name = MagicMock(return_value="layer")
     impl._cpu_cache_pair = MagicMock(return_value=(torch.empty(1), torch.empty(1)))
-    impl._in_graph_runtime = MagicMock(return_value=False)
+    impl.use_fused_overlap = fused
+    impl._in_graph_runtime = MagicMock(return_value=True)  # Includes PIECEWISE eager islands.
     slots = torch.arange(2)
     metadata = SimpleNamespace(fused_copy_sfa_enabled=False)
-    with patch("vllm_ascend.attention.sfa_kv_offload.get_sparse_kv_offload_manager") as get_manager:
+    with (
+        patch("vllm_ascend.attention.sfa_kv_offload.get_sparse_kv_offload_manager") as get_manager,
+        patch("vllm_ascend.attention.sfa_kv_offload.is_forward_context_available", return_value=True),
+        patch("vllm_ascend.attention.sfa_kv_offload._EXTRA_CTX", SimpleNamespace(capturing=capturing)),
+    ):
         manager = get_manager.return_value
         result = impl.exec_kv(k_nope, k_pe, k_pe, (), slots, metadata, defer_wait=defer_wait)
         assert isinstance(result, tuple)
         assert result[0] is k_pe and result[1] is k_nope
         impl._compute_kv_only.assert_called_once_with(k_nope, k_pe, k_pe)
         manager.offload_new_kv.assert_called_once()
+        assert manager.offload_new_kv.call_args.kwargs["capturing"] is expected
         assert manager.offload_new_kv.call_args.kwargs["slot_mapping"] is slots
         assert manager.offload_new_kv.call_args.kwargs["k"] is k_nope
         assert manager.offload_new_kv.call_args.kwargs["v"] is k_pe
@@ -253,6 +260,11 @@ def test_fused_overlap_external_plan_passes_raw_topk_and_full_selection_state():
         assert kwargs["selection_k_rope"].shape == (8, 4, 1)
         assert kwargs["capturing"] is False
 
+    def join_plan(layer_name, capturing):
+        assert layer_name == "model.layers.0.self_attn"
+        assert capturing is False
+        call_order.append("join_plan")
+
     def wait_for_writeback(capturing):
         call_order.append("wait_writeback")
         assert capturing is False
@@ -270,6 +282,7 @@ def test_fused_overlap_external_plan_passes_raw_topk_and_full_selection_state():
         allocate_fused_overlap_membership_map=allocate_membership,
         prepare_fused_overlap_external_plan=prepare_plan,
         inject_current_kv_into_selection=inject_current,
+        join_fsa_plan_ipc_if_needed=join_plan,
         wait_for_current_kv_writeback=wait_for_writeback,
     )
 
@@ -300,6 +313,7 @@ def test_fused_overlap_external_plan_passes_raw_topk_and_full_selection_state():
         "plan",
         "inject",
         "fused",
+        "join_plan",
         "wait_writeback",
     ]
     assert fused_inputs["selection_kv_cache"].shape == (8, 4, 3)
@@ -402,6 +416,44 @@ def test_fused_overlap_common_inputs_are_reused_only_within_one_forward():
         refreshed.seq_len_thresholds.reshape(-1),
         torch.tensor([5, 6], dtype=torch.int32),
     )
+
+
+@pytest.mark.parametrize("capturing", [False, True])
+@pytest.mark.parametrize("bad_field", ["mapping_short", "mapping_2d", "query", "key"])
+@pytest.mark.parametrize("warm_cache", [False, True])
+def test_fused_overlap_checks_metadata_before_indexing(capturing, bad_field, warm_cache):
+    impl = _make_fused_overlap_impl()
+    metadata = SimpleNamespace(
+        token_to_req=torch.tensor([0, 1, 0]),
+        req_ids_tensor=torch.tensor([101, 202]),
+        block_table=torch.zeros((2, 2), dtype=torch.int32),
+    )
+    args = dict(
+        num_tokens=2,
+        num_reqs=2,
+        topk_indices_decode=torch.zeros((2, 1, 4), dtype=torch.int32),
+        actual_seq_lengths_query_decode=torch.tensor([1, 2], dtype=torch.int32),
+        actual_seq_lengths_key_decode=torch.tensor([4, 5], dtype=torch.int32),
+    )
+    with (
+        patch("vllm_ascend.attention.sfa_kv_offload.get_forward_context", return_value=SimpleNamespace()),
+        patch("vllm_ascend.attention.sfa_kv_offload._EXTRA_CTX", SimpleNamespace(capturing=capturing)),
+    ):
+        if warm_cache:
+            impl._prepare_fused_overlap_decode_common_inputs(metadata, **args)
+        if bad_field.startswith("mapping"):
+            mapping = metadata.token_to_req
+            metadata.token_to_req = mapping[:1] if bad_field == "mapping_short" else mapping.view(1, -1)
+            error = "token_to_req"
+        else:
+            field = f"actual_seq_lengths_{bad_field}_decode"
+            args[field] = args[field][:1]
+            error = "one entry per decode request"
+        with (
+            patch.object(torch, "index_select", side_effect=AssertionError("indexed before validation")),
+            pytest.raises(RuntimeError, match=error),
+        ):
+            impl._prepare_fused_overlap_decode_common_inputs(metadata, **args)
 
 
 def test_c8_quant_lim():

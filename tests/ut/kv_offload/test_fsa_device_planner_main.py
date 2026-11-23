@@ -174,6 +174,77 @@ class TestFsaPlannerMain(unittest.TestCase):
                     stream.wait_stream.assert_not_called()
                 self.assertEqual(torch_npu.npu_scatter_nd_update_.call_count, 2)
 
+    def test_cpu_owner_capture_orders_writeback_before_plan_broadcast(self):
+        stream = Mock()
+        npu = SimpleNamespace(current_stream=Mock(), stream=lambda _: contextlib.nullcontext())
+        prepare = load_methods(
+            MANAGER,
+            "SparseKVOffloadManager",
+            {"prepare_fused_overlap_external_plan"},
+            dict(
+                torch_npu=SimpleNamespace(npu=npu),
+                _sparse_kv_ops=Mock(),
+                FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT=32,
+                FSA_SELECTION_MEMBERSHIP_REQUIRER_COLUMNS=64,
+            ),
+        )["prepare_fused_overlap_external_plan"]
+        tensor = MagicMock()
+        for rank in (0, 1):
+            manager = MagicMock(
+                tp_rank=rank,
+                tp_size=2,
+                topk=8,
+                _fused_device_plan_library=None,
+                fused_plan_stream=stream,
+                fused_overlap_plan_owner_layer_id=None,
+            )
+            order = Mock()
+            order.attach_mock(stream.wait_stream, "writeback")
+            order.attach_mock(manager.tp_group.broadcast, "publish")
+            prepare(manager, "layer", 2, tensor, tensor, tensor, tensor, tensor, capturing=True)
+            expected = (["writeback"] if rank == 0 else []) + ["publish"]
+            self.assertEqual([call[0] for call in order.mock_calls], expected)
+            if rank == 0:
+                stream.wait_stream.assert_called_once_with(manager.current_kv_save_stream)
+
+    def test_cpu_reuse_orders_both_ranks_before_attention(self):
+        torch_npu = Mock()
+        inject = load_methods(
+            MANAGER, "SparseKVOffloadManager", {"inject_current_kv_into_selection"}, {"torch_npu": torch_npu}
+        )["inject_current_kv_into_selection"]
+        tensor = MagicMock(shape=(4, 2))
+        for rank in (0, 1):
+            for capturing, multi, owner, sync in (
+                (True, True, 0, True),
+                (False, True, 0, True),
+                (False, False, 0, False),
+                (True, True, 1, False),
+            ):
+                with self.subTest(rank=rank, capturing=capturing, multi=multi, owner=owner):
+                    manager = MagicMock(
+                        tp_rank=rank,
+                        tp_size=2,
+                        fsa_plan_ipc=None,
+                        _fused_device_plan_library=None,
+                        fused_overlap_plan_owner_layer_id=owner,
+                        fused_plan_multitoken_capture=True,
+                    )
+                    manager._get_offload_layer_id.return_value = 1
+                    manager.current_kv_by_layer.get.return_value = (tensor, tensor)
+                    order = Mock()
+                    stream = torch_npu.npu.current_stream.return_value
+                    order.attach_mock(stream.wait_stream, "wait")
+                    order.attach_mock(manager.tp_group.broadcast, "broadcast")
+                    order.attach_mock(torch_npu.npu_scatter_nd_update_, "scatter")
+                    inject(manager, "layer", 2, tensor, tensor, capturing, multi_token_decode=multi)
+                    expected = [("wait", manager.fused_plan_stream)] if capturing else []
+                    if sync and capturing and rank == 0:
+                        expected.append(("wait", manager.current_kv_save_stream))
+                    if sync:
+                        expected.append(("broadcast", manager.fused_plan_status_npu))
+                    self.assertEqual([(c[0], c.args[0]) for c in order.mock_calls[:-2]], expected)
+                    self.assertEqual([c[0] for c in order.mock_calls[-2:]], ["scatter", "scatter"])
+
     def test_capture_joins_after_forward_and_before_context_exit(self):
         trace = []
         extra = SimpleNamespace(capturing=False)

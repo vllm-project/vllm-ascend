@@ -1589,6 +1589,8 @@ class SparseKVOffloadManager:
                         ],
                         non_blocking=True,
                     )
+                    # Peers can read this layer's CPU KV as soon as the plan arrives.
+                    self.fused_plan_stream.wait_stream(self.current_kv_save_stream)
                 self.tp_group.broadcast(self.fused_plan_metadata_npu, src=0)
             self.fused_overlap_plan_owner_layer_id = layer_id
             self.fused_overlap_plan_topk = self.topk
@@ -1797,19 +1799,15 @@ class SparseKVOffloadManager:
             torch_npu.npu.current_stream().wait_event(self._fsa_plan_publish_done)
         elif capturing:
             torch_npu.npu.current_stream().wait_stream(self.fused_plan_stream)
-        if (
-            self._fused_device_plan_library is not None
-            and self.tp_size > 1
-            # Capture records dependencies for every replay of this graph. Only
-            # speculative decode can consume another query token's KV in a layer.
-            and (self.fused_plan_multitoken_capture if capturing else multi_token_decode)
-            and layer_id != self.fused_overlap_plan_owner_layer_id
+        # A reused plan has no per-layer publication. Verification can read
+        # earlier tokens from this layer's CPU KV before attention completes.
+        if layer_id != self.fused_overlap_plan_owner_layer_id and (
+            self.fused_plan_multitoken_capture if capturing else multi_token_decode
         ):
-            # This layer reused an earlier plan. A later token may need its own
-            # layer's KV from the shared host pool before attention runs.
             if capturing and self.tp_rank == 0:
                 torch_npu.npu.current_stream().wait_stream(self.current_kv_save_stream)
-            self.tp_group.broadcast(self.fused_plan_status_npu, src=0)
+            if self.tp_size > 1:
+                self.tp_group.broadcast(self.fused_plan_status_npu, src=0)
         current_k, current_rope = current_kv
         current_k = current_k.reshape(-1, selection_kv_cache.shape[-1])[:num_tokens]
         current_rope = current_rope.reshape(-1, selection_k_rope.shape[-1])[:num_tokens]
