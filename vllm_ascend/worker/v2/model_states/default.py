@@ -396,7 +396,6 @@ class AscendModelState(DefaultModelState):
 
     def dummy_inputs_embeds(self, num_tokens: int, input_ids: torch.Tensor | None = None) -> torch.Tensor:
         if input_ids is not None:
-            # The upstream embedding lookup already joins any required TP collectives.
             return super().dummy_inputs_embeds(num_tokens, input_ids)
 
         if embedding_tp_enable():
