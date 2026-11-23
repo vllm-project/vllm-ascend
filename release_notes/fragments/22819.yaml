@@ -1,0 +1,14 @@
+pr: 22819
+entries:
+  - category: bugfix
+    text: >-
+      Fixed ModelSlim W4A8 MoE scale-bias allocation to use the effective
+      routed-expert TP size, avoiding uninitialized bias columns when expert
+      weights are partitioned across data-parallel ranks.
+  - category: config
+    text: >-
+      Added a default-off experimental A3 short-query FIA workaround, enabled
+      with VLLM_ASCEND_FIA_SHORT_QUERY_WORKAROUND=1 for the validated BF16
+      paged-attention configuration. Direct full-graph replay calls are not
+      covered by this workaround.
+    hardware: [A3]
