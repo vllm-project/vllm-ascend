@@ -1,0 +1,7 @@
+pr: 22866
+entries:
+  - category: performance
+    text: >-
+      Eligible Qwen4Exp MTP deployments using RecoverSSM avoid a per-decode-step
+      CPU sequence-length snapshot and its main-thread synchronization.
+      Existing context-parallel and sparse KV offload fallbacks are preserved.
