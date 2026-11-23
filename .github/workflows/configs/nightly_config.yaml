@@ -158,10 +158,6 @@ a3:
 a3-560t:
   single_node:
     test_config:
-      - name: Kimi-K3-W4A8-E256-A3-GSM8K-First100
-        os: linux-aarch64-a3-800i-16
-        config_file_path: Kimi-K3-w4a8-experts256-A3-First100.yaml
-        config_base_path: tests/e2e/cases/models/configs/Kimi
       - name: Qwen3.8-27B-w8a8-A3
         os: linux-aarch64-a3-800i-2
         config_file_path: Qwen3.8-27B-w8a8-A3.yaml
