@@ -1,0 +1,6 @@
+pr: 22982
+entries:
+  - category: performance
+    text: Removed redundant BF16 query loads from the DeepSeek V4.1 MXFP4 indexer on A5.
+    model: deepseek-v4.1
+    hardware: [A5]
