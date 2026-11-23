@@ -1,0 +1,8 @@
+pr: 21587
+entries:
+  - category: performance
+    text: >-
+      Fused expert routing for Model Runner V2 with EPLB, with early low-concurrency
+      benchmarks of DeepSeek V4.1 Flash W4A8 on A3 showing 1.2%-2.8% higher
+      end-to-end output token throughput and 1.1%-1.7% lower mean TPOT.
+    model: deepseek-v4.1

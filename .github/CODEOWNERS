@@ -2,23 +2,23 @@
 
 # Infra, CI
 /.gemini @wangxiyuan
-/.github @zhangxinyuehfad
+/.github @zhangxinyuehfad @czydyy
 /.github/CODEOWNERS @wangxiyuan
-/tools @zhangxinyuehfad
-/.gitignore @zhangxinyuehfad
-/.pre-commit-config.yaml @zhangxinyuehfad
-/codecov.yml @zhangxinyuehfad
-/format.sh @zhangxinyuehfad
-/mypy.ini @zhangxinyuehfad
-/requirements* @zhangxinyuehfad
-/typos.toml @zhangxinyuehfad
-/packages.txt @zhangxinyuehfad
-/.markdownlint.yaml @MrZ20
-/.gitleaks.toml @zhangxinyuehfad
-/.clang-format @MrZ20
+/tools @zhangxinyuehfad @czydyy
+/.gitignore @zhangxinyuehfad @czydyy
+/.pre-commit-config.yaml @zhangxinyuehfad @czydyy
+/codecov.yml @zhangxinyuehfad @czydyy
+/format.sh @zhangxinyuehfad @czydyy
+/mypy.ini @zhangxinyuehfad @czydyy
+/requirements* @zhangxinyuehfad @czydyy @winson-00178005
+/typos.toml @zhangxinyuehfad @czydyy
+/packages.txt @zhangxinyuehfad @czydyy
+/.markdownlint.yaml @MrZ20 @czydyy
+/.gitleaks.toml @zhangxinyuehfad @czydyy
+/.clang-format @MrZ20 @czydyy
 /setup.py @wangxiyuan
 /pyproject.toml @wangxiyuan
-/collect_env.py @zhangxinyuehfad
+/collect_env.py @zhangxinyuehfad @czydyy
 /.gitmodules @zzzzwwjj
 
 # Repo metadata
@@ -28,19 +28,19 @@
 /DCO @wangxiyuan
 
 # Agent
-/.agents/ @zhangxinyuehfad
+/.agents/ @zhangxinyuehfad @czydyy
 /.claude/ @MrZ20
 /AGENTS.md @MrZ20
 /CLAUDE.md @MrZ20
 
 # Dockerfiles
-/Dockerfile* @zhangxinyuehfad
+/Dockerfile* @zhangxinyuehfad @czydyy @winson-00178005
 
 # docs
 /docs @liqian79
 /docs/source/getting_started @MrZ20
 /docs/source/user_guide/feature_guide/rfork.md @yangsonglin13
-/docs/source/user_guide/feature_guide/rl.md @Ronald1995
+/docs/source/user_guide/feature_guide/rl.md @Ronald1995 @Liccol
 /docs/source/user_guide/feature_guide/batch_invariance.md @Ronald1995
 /docs/source/community/contributors.md @wangxiyuan
 /.readthedocs.yaml @liqian79 @MrZ20
@@ -49,7 +49,7 @@
 
 # examples
 /examples/ @MrZ20
-/examples/rl/ @Ronald1995
+/examples/rl/ @Ronald1995 @Liccol
 /examples/eplb/ @freyfwt
 /examples/rfork/ @yangsonglin13
 
@@ -89,8 +89,9 @@
 /vllm_ascend/distributed @LCAIZJ @zzzzwwjj @weijinqian0
 /vllm_ascend/distributed/ec_transfer @weijinqian0
 /vllm_ascend/distributed/eplb @freyfwt
+/vllm_ascend/distributed/expert_transfer/ @LookAround0301 @florian0125 @gjc0824 @xuanbozzz
 /vllm_ascend/distributed/kvpp.py @weiguihua2 @pisceskkk @zhaochuang001 @recky-c @li1how
-/vllm_ascend/distributed/weight_transfer @Ronald1995 @Annarine
+/vllm_ascend/distributed/weight_transfer @Ronald1995 @Annarine @Liccol
 /vllm_ascend/distributed/kv_transfer @weijinqian0
 /vllm_ascend/distributed/kv_transfer/kv_pool @weijinqian0 @HF-001
 /vllm_ascend/distributed/kv_transfer/kv_p2p @wangxiaoteng888 @nwpu-zxr
@@ -104,7 +105,7 @@
 /vllm_ascend/ops/dsa.py @zzzzwwjj @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/ops/linear_op.py @xuchi-0808
 /vllm_ascend/ops/vocab_parallel_embedding.py @xuchi-0808
-/vllm_ascend/ops/triton @AuroraEmiya @ZT-AIA @yiz-liu
+/vllm_ascend/ops/triton @ShyRa1n @ZT-AIA @yiz-liu
 /vllm_ascend/ops/triton/eplb.py @freyfwt
 /vllm_ascend/ops/triton/batch_invariant @Ronald1995
 /vllm_ascend/ops/triton/dcp/ @weiguihua2 @zhenwenqi2024 @pisceskkk @zhaochuang001 @li1how @wzx0726
@@ -144,15 +145,15 @@
 /vllm_ascend/ascend_config.py @ningjingbengxiaohai @zzzzwwjj
 /vllm_ascend/ascend_forward_context.py @zzzzwwjj @yiz-liu
 /vllm_ascend/batch_invariant.py @Ronald1995
-/vllm_ascend/config_utils.py @wxsIcey
+/vllm_ascend/config_utils.py @wxsIcey @Tflowers-0129 @Ronald1995 @zhenwenqi2024 @pisceskkk @zzzzwwjj @linfeng-yuan
 /vllm_ascend/cpu_binding.py @zouyida2052
 /vllm_ascend/envs.py @ningjingbengxiaohai @zzzzwwjj
 /vllm_ascend/logger.py @wangxiyuan
 /vllm_ascend/meta_registration.py @ZT-AIA
 /vllm_ascend/mrv2_utils.py @yzeyu71
-/vllm_ascend/platform.py @wxsIcey @Tflowers-0129
+/vllm_ascend/platform.py @wxsIcey @Tflowers-0129 @Ronald1995 @zhenwenqi2024 @pisceskkk @zzzzwwjj @linfeng-yuan
 # /vllm_ascend/profiling_config.py
-/vllm_ascend/utils.py @wxsIcey
+/vllm_ascend/utils.py @wxsIcey @Ronald1995 @Tflowers-0129 @zhenwenqi2024 @pisceskkk @zzzzwwjj @linfeng-yuan
 
 # Patch
 /vllm_ascend/patch @wxsIcey
@@ -165,13 +166,13 @@
 
 # Worker base
 /vllm_ascend/worker/dcp_utils.py @weiguihua2 @zhenwenqi2024 @pisceskkk @zhaochuang001 @li1how @wzx0726
-/vllm_ascend/worker/worker.py @wxsIcey @Ronald1995
+/vllm_ascend/worker/worker.py @wxsIcey @Tflowers-0129 @Ronald1995 @zhenwenqi2024 @pisceskkk @zzzzwwjj @linfeng-yuan
 /vllm_ascend/worker/device_metadata.py @linfeng-yuan
-/vllm_ascend/worker/dspark_utils.py @wxsIcey
+/vllm_ascend/worker/dspark_utils.py @wxsIcey @slippersss @lilinsiman @zhenwenqi2024 @jiajinzhu2
 /vllm_ascend/worker/encoder_acl_graph.py @yiz-liu
 /vllm_ascend/worker/kvpp_cache.py @weiguihua2 @pisceskkk @zhaochuang001 @recky-c @li1how
-/vllm_ascend/worker/spec_decode_utils.py @wxsIcey
-/vllm_ascend/worker/utils.py @wxsIcey
+/vllm_ascend/worker/spec_decode_utils.py @wxsIcey @slippersss @lilinsiman @zhenwenqi2024 @jiajinzhu2
+/vllm_ascend/worker/utils.py @wxsIcey @Tflowers-0129 @Ronald1995 @zhenwenqi2024 @pisceskkk @zzzzwwjj @linfeng-yuan
 
 # Worker V2
 /vllm_ascend/worker/v2/model_states @zzzzwwjj
@@ -205,6 +206,7 @@
 /vllm_ascend/models/kimi_k3 @Dawn952 @hust17yixuan
 /vllm_ascend/models/kimi_k3/recoverssm_config.py @drslark @chenxi-hh
 /vllm_ascend/models/kimi_k3/recoverssm_metadata.py @drslark @chenxi-hh
+/vllm_ascend/models/step5/ @realliujiaxu
 # /vllm_ascend/models/d3.py
 # /vllm_ascend/models/gemma4_mm.py
 # /vllm_ascend/models/llama_eagle3.py
@@ -228,10 +230,10 @@
 # tests
 /tests/ @wenjun91
 # RLHF e2e tests
-/tests/e2e/common/rlhf/ @Ronald1995
+/tests/e2e/common/rlhf/ @Ronald1995 @Liccol
 /tests/e2e/nightly @wenjun91
 /tests/e2e/nightly/single_node/ops @Foriv
-/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_recoverssm_npu.py @drslark @chenxi-hh
+/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/ @Foriv @ShyRa1n
 /tests/ut/models/test_glm5next_recoverssm_config.py @drslark @chenxi-hh
 /tests/ut/models/test_glm5next_recoverssm_metadata.py @drslark @chenxi-hh
 /tests/ut/models/test_kimi_recoverssm_config.py @drslark @chenxi-hh

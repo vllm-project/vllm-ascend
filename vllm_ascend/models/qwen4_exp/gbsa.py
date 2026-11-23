@@ -45,6 +45,7 @@ def qsa_gbsa_attention(
     logical_positions: torch.Tensor,
     seq_lens: torch.Tensor,
     output: torch.Tensor,
+    prepared_metadata: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if key_cache.ndim != 4 or value_cache.ndim != 4:
         raise ValueError("QSA GBSA requires 4-D K/V caches")
@@ -80,6 +81,8 @@ def qsa_gbsa_attention(
     )
     if envs.VLLM_BATCH_INVARIANT:
         # Limit temporary KV storage; each query sees all of its selected blocks.
+        # Packing changes indices and lengths, so rebuild metadata per chunk
+        # instead of reusing metadata prepared for the original paged layout.
         for first in range(0, query.shape[0], 32):
             rows = slice(first, first + 32)
             packed_k, packed_v, idx, lens, table = pack_selected_kv(
@@ -116,6 +119,7 @@ def qsa_gbsa_attention(
                 cu_q,
                 row_block_table,
                 logical_max_seqlen_kv,
+                prepared_metadata=prepared_metadata,
             )
         )
     return output
@@ -131,6 +135,7 @@ def _run_gbsa(
     cu_q,
     row_block_table,
     logical_max_seqlen_kv,
+    prepared_metadata=None,
 ):
     num_kv_heads = key_cache.shape[2]
     common = dict(
@@ -145,17 +150,19 @@ def _run_gbsa(
         residual_block_mode=0,
         is_consistent_topk=False,
     )
-    metadata = generic_block_sparse_attention_metadata(
-        sparse_idx,
-        sparse_count,
-        query.shape[1],
-        num_kv_heads,
-        query.shape[-1],
-        [1, GBSA_COMPRESS_RATIO],
-        max_seqlen_q=1,
-        max_seqlen_kv=int(logical_max_seqlen_kv),
-        **common,
-    )
+    metadata = prepared_metadata
+    if metadata is None:
+        metadata = generic_block_sparse_attention_metadata(
+            sparse_idx,
+            sparse_count,
+            query.shape[1],
+            num_kv_heads,
+            query.shape[-1],
+            [1, GBSA_COMPRESS_RATIO],
+            max_seqlen_q=1,
+            max_seqlen_kv=int(logical_max_seqlen_kv),
+            **common,
+        )
     if envs.VLLM_BATCH_INVARIANT:
         _use_batch_invariant_gbsa_schedule(metadata)
     result, _ = generic_block_sparse_attention(

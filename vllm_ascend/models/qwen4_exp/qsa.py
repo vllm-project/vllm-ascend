@@ -15,7 +15,7 @@
 """Ascend QSA owner for Qwen3.8-Flash-Next."""
 
 from dataclasses import replace
-from typing import Any, Protocol, TypeAlias, cast
+from typing import Any, TypeAlias, cast
 
 import torch
 from vllm.forward_context import get_forward_context
@@ -49,7 +49,7 @@ from vllm_ascend.utils import vllm_version_is
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
-from .lightning_indexer import qsa_select_paged_tokens_lightning
+from .lightning_indexer import QSAIndexerMetadataProtocol, qsa_select_paged_tokens_lightning_v2
 
 if vllm_version_is("0.33.0"):
     import vllm.models.qwen4_exp.amd.indexer_qsa as upstream_indexer  # type: ignore[import-not-found]
@@ -107,18 +107,6 @@ def _compress_qsa_groups(
         compress_ratio,
         rope_cache,
     )
-
-
-class QSAIndexerMetadataProtocol(Protocol):
-    """Metadata fields consumed by the Ascend sparse QSA implementation."""
-
-    num_actual_tokens: int
-    block_table: torch.Tensor
-    slot_mapping: torch.Tensor
-    token_to_req: torch.Tensor
-    logical_positions: torch.Tensor
-    query_start_loc: torch.Tensor
-    seq_lens: torch.Tensor
 
 
 def _qsa_cache_is_bound(kv_cache: QSAKVCache) -> bool:
@@ -253,13 +241,18 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         first_positions: torch.Tensor,
     ) -> torch.Tensor:
         """Normalize and rotate compressed Indexer keys."""
+        original_pooled = pooled
+        original_positions = first_positions
         if getattr(self.rotary_emb, "mrope_section", None):
             first_positions = first_positions.transpose(0, 1)
         else:
             first_positions = first_positions[:, 0]
         pooled = pooled.reshape(-1, 1, self.index_head_dim)
         if not self._fused_norm_rope_eligible(pooled, first_positions):
-            raise ValueError("QSA compressed-key fused norm+RoPE ABI is not satisfied")
+            return super().normalize_compressed_keys(
+                original_pooled,
+                original_positions,
+            )
         return self._fused_norm_rope(
             pooled,
             self.k_layernorm,
@@ -324,7 +317,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             slot_mapping: torch.Tensor | None = None,
             gate_out: torch.Tensor | None = None,
         ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
-            """Run the fused Ascend QSA path (main's fused-prepare signature)."""
+            """Run separate Ascend preparation with main's packed-input ABI."""
             del attn, qkv, slot_mapping, gate_out
             metadata = self._metadata()
             if metadata is None:
@@ -377,7 +370,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         )
         q = q_raw.reshape(-1, self.index_n_heads, self.index_head_dim)
         if not self._fused_norm_rope_eligible(q, positions):
-            raise ValueError("QSA query fused norm+RoPE ABI is not satisfied")
+            return super().project_qk(hidden_states, positions)
         q = self._fused_norm_rope(q, self.q_layernorm, positions)
         return q, token_k.reshape(-1, 1, self.index_head_dim)
 
@@ -429,15 +422,11 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         metadata: QSAIndexerMetadataProtocol,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
-        logger.info_once("QSA is using the CANN Lightning Indexer v2 backend.")
-        return qsa_select_paged_tokens_lightning(
+        logger.info_once("QSA is using native request-batched LightningIndexerV2 through the CANN Torch interface.")
+        return qsa_select_paged_tokens_lightning_v2(
             query,
             self.compressed_key_cache.kv_cache,
-            metadata.block_table,
-            metadata.token_to_req,
-            metadata.logical_positions,
-            metadata.seq_lens,
-            metadata.query_start_loc,
+            metadata,
             self.token_topk,
             self.compress_ratio,
             out,
@@ -604,6 +593,11 @@ class AscendQSAImpl:
                 logical_positions[:num_tokens],
                 seq_lens,
                 output[:num_tokens],
+                prepared_metadata=getattr(
+                    attn_metadata,
+                    "qsa_gbsa_metadata",
+                    None,
+                ),
             )
         # main's ABI does not carry the freshly projected K/V; the dispatcher
         # then gathers them from the paged cache that `do_kv_cache_update`
@@ -729,7 +723,6 @@ else:
 # required before LightningIndexer or the Triton QSA selector consumes them.
 QSAIndexerBackend.uses_descriptor_cache_view = True
 
-
 # The indexer module selects its Triton metadata builder at import time. The
 # upstream kernel uses CUDA PDL intrinsics, so Ascend uses the Torch path.
 qsa_indexer.build_qsa_metadata = qsa_indexer._build_qsa_metadata_torch
@@ -772,9 +765,9 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
 
         # Newer vLLM revisions call the owner with the packed projection when
         # ``use_fused_qsa_prepare`` is enabled. The upstream indexer consumes
-        # that projection itself; Ascend keeps its independently fused main
-        # Q/K/V preparation and indexer paths, so materialize the same outputs
-        # here before entering the existing cache/update transaction.
+        # that projection itself; Ascend materializes Q/K/V and gate through
+        # the inherited projection before its separate indexer preparation
+        # and the existing cache/update transaction.
         if qkv is not None:
             q, k, v, projected_gate = self._project_qkv_gate(qkv, positions)
             query = q.view(-1, self.num_heads, self.head_dim)
@@ -795,7 +788,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             )
         else:
             # Main's indexer returns (selection, prepared main outputs); Ascend
-            # fuses its own Q/K/V preparation, so the second element stays None.
+            # prepares Q/K/V above, so the second element stays None.
             selected = self.indexer(
                 hidden_states,
                 positions,

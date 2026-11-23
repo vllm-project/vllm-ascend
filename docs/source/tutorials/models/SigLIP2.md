@@ -82,13 +82,13 @@ You can use the official all-in-one Docker image. For the available image tags a
   docker ps | grep $NAME
   ```
 
-  Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
+  Expected Result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
 
   ```bash
   pip show vllm-ascend
   ```
 
-  Expected result: The version information is displayed, matching the pulled image version.
+  Expected Result: The version information is displayed, matching the pulled image version.
 
 ### 4.2 Source Code Installation
 
@@ -127,7 +127,7 @@ Expected Result:
 
 If the service starts successfully, the log contains:
 
-```text
+```output
 INFO:     Started server process [<pid>]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -285,7 +285,7 @@ ImageNet val zero-shot Top-1 is a common accuracy benchmark for SigLIP2.
 ### 7.1 Dataset and Labels
 
 1. Download [ImageNet ILSVRC 2012 val images](https://www.image-net.org/download.php) (login required).
-2. Download `val_label.txt` ([example](https://github.com/rentainhe/simple-imagenet-test/blob/master/val_label.txt)). Each line: `ILSVRC2012_val_00000001.JPEG 65` (PyTorch class id 0–999).
+2. Download `val_label.txt` ([example-imagenet-test](https://github.com/rentainhe/simple-imagenet-test/blob/master/val_label.txt)). Each line: `ILSVRC2012_val_00000001.JPEG 65` (PyTorch class id 0–999).
 3. Download `imagenet1000_clsidx_to_labels.txt` for the 1000 class text templates from [yrevar gist](https://gist.github.com/yrevar/942d3a0ac09ec9e5eb3a)
 
 ### 7.2 Offline Evaluation
@@ -300,7 +300,7 @@ import numpy as np
 from PIL import Image
 from vllm import LLM
 
-TEXT_TEMPLATE = "This is a photo of {}."
+TEXT_TEMPLATE = "This is a photo of a {}."
 TOKEN_KWARGS = {"padding": "max_length", "max_length": 64}
 
 MODEL_PATH = "<YOUR_MODEL_PATH>"  # Replace with the path recorded in Section 3.1
@@ -549,7 +549,7 @@ vllm serve $MODEL_PATH \
 
 ##### Optimizations Enabled by Default
 
-The following optimizations are enabled in the recommended [§5.1](#51-single-node-online-deployment) configuration:
+The following optimizations are enabled in the recommended [§5.1 Single-Node Online Deployment](#51-single-node-online-deployment) configuration:
 
 | Optimization Technique | Technical Principle | Performance Benefit |
 | ---------------------- | ------------------- | ------------------- |

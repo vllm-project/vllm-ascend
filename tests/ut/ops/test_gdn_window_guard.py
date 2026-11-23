@@ -34,7 +34,6 @@ OP_NAME = "recurrent_gated_delta_rule"
 # Add an entry whenever the pins below move; ``test_declared_pins_agree``
 # fails until you do, which is the point of the guard.
 KNOWN_OPP_WINDOWS: dict[str, int | None] = {
-    "26.9.1": 8,
     # v26.10.0-feature (ccaed063) and the published A2/A3/A5 wheels retain MAX_MTP=8.
     "26.10.0+feature": 8,
 }

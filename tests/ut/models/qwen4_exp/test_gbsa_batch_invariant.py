@@ -164,15 +164,31 @@ def test_packing_preserves_values_under_page_relocation_and_batch_permutation(dt
 
 
 @pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("precomputed", [False, True])
 @pytest.mark.parametrize("rows", [1, 32, 33, 65])
-def test_adapter_routes_all_rows_and_uses_matching_metadata(enabled, rows):
+def test_adapter_routes_all_rows_and_uses_matching_metadata(enabled, precomputed, rows):
     namespace = load_cpu_adapter(enabled)
     calls = []
     metadata = make_metadata()
-    namespace["generic_block_sparse_attention_metadata"] = lambda *args, **kwargs: metadata.clone()
+    prepared = metadata.clone() if precomputed else None
+    generated = []
+
+    def build_metadata(indices, counts, *args, **kwargs):
+        generated.append((indices.clone(), kwargs["seqused_kv"].clone(), metadata.clone()))
+        return generated[-1][2]
+
+    namespace["generic_block_sparse_attention_metadata"] = build_metadata
 
     def attention(query, keys, values, indices, counts, block_shape, **kwargs):
         received = kwargs["metadata"]
+        if precomputed and not enabled:
+            assert received is prepared
+            assert not generated
+        else:
+            assert received is generated[-1][2]
+            assert received is not prepared
+            torch.testing.assert_close(indices, generated[-1][0])
+            torch.testing.assert_close(kwargs["seqused_kv"], generated[-1][1])
         expected = metadata.clone()
         if enabled:
             expected[5:11] = torch.tensor([0, 0, 0, 2, 0, 0])
@@ -200,9 +216,21 @@ def test_adapter_routes_all_rows_and_uses_matching_metadata(enabled, rows):
     lengths = torch.full((rows,), 9, dtype=torch.int32)
     output = torch.full_like(query, float("nan"))
     result = namespace["qsa_gbsa_attention"](
-        query, backing[:, 0], backing[:, 1], compact, table, torch.arange(rows), lengths - 1, lengths, output
+        query,
+        backing[:, 0],
+        backing[:, 1],
+        compact,
+        table,
+        torch.arange(rows),
+        lengths - 1,
+        lengths,
+        output,
+        prepared_metadata=prepared,
     )
     assert result is output
     expected = query + backing[table[:, 0].long(), 1, 4, 0, 0][:, None, None]
     torch.testing.assert_close(output, expected, rtol=0, atol=0)
     assert calls == ([min(32, rows - start) for start in range(0, rows, 32)] if enabled else [rows])
+    assert len(generated) == (0 if precomputed and not enabled else len(calls))
+    if prepared is not None:
+        torch.testing.assert_close(prepared, metadata, rtol=0, atol=0)

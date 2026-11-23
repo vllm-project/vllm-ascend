@@ -18,6 +18,7 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm_ascend.device.device_config import is_950
 from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, init_device_properties_triton
 
+KDA_L2_NORM_EPS = tl.constexpr(1e-6)
 RECOVERSSM_COMMIT_HEAD_TILE = 2
 # Conservative UB budgets in BV x BK FP32 matrix equivalents. Boundary recovery
 # includes final/boundary accumulators and merge temporaries; these estimates
@@ -34,13 +35,19 @@ RECOVERSSM_CONV_STRIDED_TILE = 256
 
 
 @triton.jit
-def _kda_l2_normalize(vector):
-    # AscendC normalizes nonzero vectors without CUDA's squared-norm bias.
-    norm_square = tl.sum(vector * vector)
-    norm_input = tl.where(norm_square > 0.0, norm_square, 1.0)
+def _kda_inverse_norm(norm_square, USE_NORM_EPS: tl.constexpr):
+    # In FLA 26.10.0+feature, A5 divides only rows with a nonzero norm.
+    if USE_NORM_EPS:
+        norm_input = norm_square + KDA_L2_NORM_EPS
+    else:
+        norm_input = tl.where(norm_square > 0.0, norm_square, 1.0)
     tl.static_assert(norm_input.dtype == tl.float32)
-    inverse = tl.rsqrt(norm_input)
-    return tl.where(norm_square > 0.0, vector * inverse, 0.0)
+    return tl.rsqrt(norm_input)
+
+
+@triton.jit
+def _kda_l2_normalize(vector, USE_NORM_EPS: tl.constexpr):
+    return vector * _kda_inverse_norm(tl.sum(vector * vector), USE_NORM_EPS)
 
 
 @triton.jit
@@ -79,8 +86,9 @@ def _kda_recurrent_step(
     A,
     lower_bound,
     USE_LOWER_BOUND: tl.constexpr,
+    USE_NORM_EPS: tl.constexpr,
 ):
-    normalized_k = _kda_l2_normalize(k)
+    normalized_k = _kda_l2_normalize(k, USE_NORM_EPS)
     gate = _kda_gate(
         raw_g,
         dt_bias,
@@ -139,6 +147,7 @@ def _kda_recoverssm_verify_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
+    USE_NORM_EPS: tl.constexpr,
 ):
     # Advance a register-held checkpoint and record each token's compact
     # correction/key/gate; persistent checkpoint pages remain read-only.
@@ -226,8 +235,8 @@ def _kda_recoverssm_verify_kernel(
             raw_beta_ptr + token * stride_beta_token + pid_h,
         ).to(tl.float32)
 
-        q = _kda_l2_normalize(q) * (K**-0.5)
-        normalized_k = _kda_l2_normalize(k)
+        q = _kda_l2_normalize(q, USE_NORM_EPS) * (K**-0.5)
+        normalized_k = _kda_l2_normalize(k, USE_NORM_EPS)
         gate = _kda_gate(raw_g, dt_bias, A, lower_bound, USE_LOWER_BOUND)
         tl.static_assert(gate.dtype == tl.float32)
         decay = tl.exp(gate)
@@ -293,8 +302,8 @@ def _kda_recoverssm_verify_kernel(
             raw_beta_ptr + token * stride_beta_token + pid_h,
         ).to(tl.float32)
 
-        q = _kda_l2_normalize(q) * (K**-0.5)
-        normalized_k = _kda_l2_normalize(k)
+        q = _kda_l2_normalize(q, USE_NORM_EPS) * (K**-0.5)
+        normalized_k = _kda_l2_normalize(k, USE_NORM_EPS)
         gate = _kda_gate(raw_g, dt_bias, A, lower_bound, USE_LOWER_BOUND)
         tl.static_assert(gate.dtype == tl.float32)
         decay = tl.exp(gate)
@@ -571,6 +580,7 @@ def _accumulate_kda_commit_step(
     boundary_correction,
     K: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
+    USE_NORM_EPS: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
 ):
     correction_ptr = correction_cache_ptr + token_offset * stride_correction_cache_pos
@@ -590,7 +600,7 @@ def _accumulate_kda_commit_step(
         mask=mask_k,
         other=0.0 if mask_k is not None else None,
     ).to(tl.float32)
-    normalized_k = _kda_l2_normalize(k)
+    normalized_k = _kda_l2_normalize(k, USE_NORM_EPS)
     gate = _kda_gate(
         raw_g,
         dt_bias,
@@ -657,6 +667,7 @@ def _commit_kda_state_kernel(
     BV: tl.constexpr,
     NUM_HEADS: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
+    USE_NORM_EPS: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
     SPEC_QUERY_LEN: tl.constexpr,
     UNROLL_COMMIT: tl.constexpr,
@@ -755,6 +766,7 @@ def _commit_kda_state_kernel(
                     boundary_correction,
                     K,
                     USE_LOWER_BOUND,
+                    USE_NORM_EPS,
                     ALIGN_MODE,
                 )
     else:
@@ -782,6 +794,7 @@ def _commit_kda_state_kernel(
                     boundary_correction,
                     K,
                     USE_LOWER_BOUND,
+                    USE_NORM_EPS,
                     ALIGN_MODE,
                 )
     initial_state = tl.load(state_ptrs, mask=mask_state, other=0.0 if mask_state is not None else None).to(tl.float32)
@@ -814,12 +827,10 @@ def _commit_kda_state_kernel(
 
 
 @triton.jit
-def _kda_l2_normalize_heads(vector):
+def _kda_l2_normalize_heads(vector, USE_NORM_EPS: tl.constexpr):
     norm_square = tl.sum(vector * vector, axis=1)
-    norm_input = tl.where(norm_square > 0.0, norm_square, 1.0)
-    tl.static_assert(norm_input.dtype == tl.float32)
-    inverse = tl.rsqrt(norm_input)
-    return tl.where(norm_square[:, None] > 0.0, vector * inverse[:, None], 0.0)
+    inverse = _kda_inverse_norm(norm_square, USE_NORM_EPS)
+    return vector * inverse[:, None]
 
 
 @triton.jit(do_not_specialize=["num_layers"])
@@ -864,6 +875,7 @@ def _commit_kda_state_grouped_kernel(
     BV: tl.constexpr,
     NUM_HEADS: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
+    USE_NORM_EPS: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
     SPEC_QUERY_LEN: tl.constexpr,
     BH: tl.constexpr = 2,
@@ -966,7 +978,7 @@ def _commit_kda_state_grouped_kernel(
                 mask=mask_k,
                 other=0.0 if mask_k is not None else None,
             ).to(tl.float32)
-            normalized_k = _kda_l2_normalize_heads(k)
+            normalized_k = _kda_l2_normalize_heads(k, USE_NORM_EPS)
             gate = _kda_gate(raw_g, dt_bias, A[:, None], lower_bound, USE_LOWER_BOUND)
             tl.static_assert(gate.dtype == tl.float32)
             decay = tl.exp(gate)
@@ -1148,6 +1160,7 @@ def kda_recoverssm_verify(
         BK=block_k,
         BV=block_v,
         USE_LOWER_BOUND=lower_bound is not None,
+        USE_NORM_EPS=not is_a5,
         num_warps=4,
         num_stages=2,
     )
@@ -1537,6 +1550,7 @@ class KDARecoverSSMCommitContext:
             BV=block_v,
             NUM_HEADS=num_heads,
             USE_LOWER_BOUND=self.lower_bound is not None,
+            USE_NORM_EPS=not is_a5,
             SPEC_QUERY_LEN=self.spec_query_len,
             num_warps=4,
             num_stages=2,

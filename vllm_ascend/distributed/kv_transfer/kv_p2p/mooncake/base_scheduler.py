@@ -19,6 +19,7 @@ from vllm.utils.network_utils import get_ip, make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -38,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeTransferMetadataGroups,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import zmq_ctx
+from vllm_ascend.distributed.kv_transfer.utils.utils import truncate_block_hashes_fallback
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -452,7 +454,12 @@ class MooncakeBaseConnectorScheduler:
         has_state_group = any(
             isinstance(spec, MambaSpec) for group_specs in self.group_unique_specs for spec in group_specs
         )
-        return uses_compressed_cache or has_state_group
+        has_sliding_window_group = any(
+            isinstance(spec, SlidingWindowSpec) for group_specs in self.group_unique_specs for spec in group_specs
+        )
+        # D replays the final prompt token. P must retain SWA pages for that
+        # same position rather than retire them for the next token's window.
+        return uses_compressed_cache or has_state_group or has_sliding_window_group
 
     @staticmethod
     def _get_group_unique_specs(group: Any) -> list[Any]:
@@ -528,9 +535,14 @@ class MooncakeBaseConnectorScheduler:
         request._all_token_ids.pop()
         request.num_prompt_tokens -= 1
         request.max_tokens = 1
-        # Request already hashed the full prompt. Rebuild for the shortened one.
-        request.block_hashes.clear()
-        request.update_block_hashes()
+        hash_block_size = self.kv_cache_config.hash_block_size
+        assert hash_block_size is not None
+        lookahead = self.vllm_config.num_hash_lookahead_tokens
+        truncate_hashes = getattr(request, "truncate_block_hashes", None)
+        if callable(truncate_hashes):
+            truncate_hashes(hash_block_size, lookahead)
+        else:
+            truncate_block_hashes_fallback(request, hash_block_size, lookahead)
         params["_p_side_truncated"] = True
 
     def on_new_request(self, request: "Request") -> None:

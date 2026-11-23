@@ -1,0 +1,161 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-11-19 07:16+0000\n"
+"PO-Revision-Date: 2026-11-19 07:16+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "# HiSparse on Ascend"
+msgstr "# 昇腾上的 HiSparse"
+
+msgid "## Feature Introduction"
+msgstr "## 特性介绍"
+
+msgid ""
+"HiSparse keeps a Host mirror of sparse MLA KV rows and refills only the missing\n"
+"rows selected by attention. This reduces the NPU cache capacity needed for long\n"
+"contexts. The experimental Ascend backend requires a SIMT-capable CANN 9.2\n"
+"toolchain on Ascend 950."
+msgstr ""
+"HiSparse 在 Host 侧保留一份稀疏 MLA KV 行的镜像，仅回填注意力所选中但缺失的行。这降低了长上下文所需的 NPU "
+"缓存容量。该实验性昇腾后端需要昇腾 950 上支持 SIMT 的 CANN 9.2 工具链。"
+
+msgid "### Working Principle"
+msgstr "### 工作原理"
+
+msgid ""
+"HiSparse keeps recent KV rows in the NPU Resident cache and uses the NPU Hot\n"
+"cache for rows refilled from Host memory. The resolver checks the selected rows\n"
+"against both NPU caches. Resident and Hot\n"
+"hits can be read directly. For misses, HiSparse refills only the missing rows\n"
+"from the Host KV mirror into Hot before attention runs. With speculative decoding,\n"
+"the resolver considers the selected rows for all query tokens of a request\n"
+"together before evicting Hot rows."
+msgstr ""
+"HiSparse 将最近的 KV 行保存在 NPU Resident 缓存中，并使用 NPU Hot 缓存存放从 Host "
+"内存回填的行。解析器会针对两个 NPU 缓存检查所选中的行。Resident 和 Hot 命中可直接读取。对于未命中，HiSparse "
+"会在注意力计算运行前，仅将缺失的行从 Host KV 镜像回填到 Hot。在使用投机解码时，解析器会在淘汰 Hot 行之前，统一考虑一个请求所有查询 "
+"token 所选中的行。"
+
+msgid "### Usage Scenarios"
+msgstr "### 使用场景"
+
+msgid ""
+"Use HiSparse with Model Runner V2 for sparse RoPE MLA/SFA models serving long\n"
+"contexts. BF16 KV and native Ascend 950 C8 (E4M3FN values with FP32 scales) are\n"
+"supported, with independent Main and Indexer KV dtype selection."
+msgstr ""
+"在 Model Runner V2 中使用 HiSparse，以服务长上下文的稀疏 RoPE MLA/SFA 模型。支持 BF16 KV 和昇腾 950"
+" 原生 C8（E4M3FN 数值配 FP32 缩放因子），并可独立选择 Main 和 Indexer 的 KV 数据类型。"
+
+msgid "### Constraints and Limitations"
+msgstr "### 约束与限制"
+
+msgid "| Category | Constraint |"
+msgstr "| 类别 | 约束 |"
+
+msgid ""
+"| Hardware and software | Ascend 950 with a SIMT-capable CANN 9.2 toolchain."
+" |"
+msgstr "| 硬件与软件 | 昇腾 950，配备支持 SIMT 的 CANN 9.2 工具链。 |"
+
+msgid ""
+"| Cache formats | C4, TurboQuant and INT8-format C8 are outside the current "
+"support scope. |"
+msgstr "| 缓存格式 | C4、TurboQuant 和 INT8 格式的 C8 不在当前支持范围内。 |"
+
+msgid ""
+"| Parallelism and transport | Context parallelism and external P/D transport"
+" are outside the current support scope. |"
+msgstr "| 并行与传输 | 上下文并行和外部 P/D 传输不在当前支持范围内。 |"
+
+msgid ""
+"| Host storage | Use private Host pools per tensor-parallel rank and Core "
+"eager Host mirroring. |"
+msgstr "| Host 存储 | 每个张量并行 rank 使用独立的 Host 池，并采用 Core eager Host 镜像。 |"
+
+msgid ""
+"| TopK | The existing SFA requirement of divisibility by 128 applies. |"
+msgstr "| TopK | 沿用现有 SFA 要求，即必须能被 128 整除。 |"
+
+msgid ""
+"| Feature mutual exclusion | HiSparse and "
+"`additional_config.sparse_kv_offload_config.enabled` cannot be enabled "
+"together. |"
+msgstr ""
+"| 特性互斥 | HiSparse 与 `additional_config.sparse_kv_offload_config.enabled` "
+"不能同时启用。 |"
+
+msgid "## Feature Usage"
+msgstr "## 特性使用"
+
+msgid "### Usage Example"
+msgstr "### 使用示例"
+
+msgid ""
+"Set `MODEL_PATH` to a compatible sparse MLA model and start the server with\n"
+"Model Runner V2:"
+msgstr "将 `MODEL_PATH` 设置为兼容的稀疏 MLA 模型，并使用 Model Runner V2 启动服务："
+
+msgid "For native A5 C8, replace the two dtype options with:"
+msgstr "对于原生 A5 C8，将两个 dtype 选项替换为："
+
+msgid "### Verifying the Feature"
+msgstr "### 验证特性"
+
+msgid ""
+"Send a request and check the server's metrics endpoint for the HiSparse miss\n"
+"counter. The counter can stay at zero when selected rows are already on the NPU."
+msgstr "发送一个请求，并在服务器的指标端点中查看 HiSparse 未命中计数器。当所选中的行已在 NPU 上时，该计数器可能保持为零。"
+
+msgid "## Configuration Parameters"
+msgstr "## 配置参数"
+
+msgid "| Parameter | Meaning |"
+msgstr "| 参数 | 含义 |"
+
+msgid ""
+"| `hisparse_config` | Enables Core HiSparse for the supported sparse "
+"Attention backend. |"
+msgstr "| `hisparse_config` | 为支持的稀疏 Attention 后端启用 Core HiSparse。 |"
+
+msgid ""
+"| `eager_host_mirror` | Keep `true` for this foundation; Core maintains the "
+"Host KV mirror. |"
+msgstr "| `eager_host_mirror` | 在此基础版本中保持为 `true`；由 Core 维护 Host KV 镜像。 |"
+
+msgid ""
+"| `host_pool_gib` | Host pool size in GiB per tensor-parallel rank. Size it "
+"for the planned context lengths and concurrency; the example reserves 4 GiB "
+"per rank. |"
+msgstr ""
+"| `host_pool_gib` | 每个张量并行 rank 的 Host 池大小，单位为 GiB。请根据规划的上下文长度和并发量进行设置；示例中每个"
+" rank 预留 4 GiB。 |"
+
+msgid ""
+"| `device_buffer_size` | Per-request Hot capacity in KV rows. It must hold "
+"the deduplicated union of rows selected during speculative verification and "
+"fit the resolver's on-chip UB budget. |"
+msgstr ""
+"| `device_buffer_size` | 每个请求的 Hot 容量，以 KV "
+"行数计。它必须能容纳投机验证期间所选中的行的去重并集，并符合解析器的片上 UB 预算。 |"
+
+msgid ""
+"| `kv_cache_dtype` / `indexer_kv_dtype` | Select main and Indexer KV formats"
+" independently from model-weight quantization. |"
+msgstr ""
+"| `kv_cache_dtype` / `indexer_kv_dtype` | 独立于模型权重量化，选择 Main 和 Indexer 的 KV "
+"格式。 |"
