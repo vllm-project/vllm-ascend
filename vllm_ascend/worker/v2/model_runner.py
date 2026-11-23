@@ -110,6 +110,7 @@ from vllm_ascend.observability.runtime_guard.hooks import (
 )
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
+from vllm_ascend.platform import QWEN_FA3_TARGETS
 from vllm_ascend.utils import (
     create_hccl_pg_options,
     enable_sfa_dcp_sharded_indexer,
@@ -1433,6 +1434,18 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         if getattr(self, "_skip_fa3_cpu_length_sync", False):
+            architecture = getattr(self.model_config, "architecture", None)
+            if architecture in QWEN_FA3_TARGETS:
+                # Only this Qwen hybrid has been validated without the runner's CPU length snapshot.
+                return (
+                    architecture == "Qwen3_5ForConditionalGeneration"
+                    and spec is not None
+                    and spec.method == "dflash"
+                    and spec.draft_model_config is not None
+                    and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
+                    and isinstance(getattr(self, "model_state", None), MambaHybridModelState)
+                    and self.vllm_config.kv_transfer_config is None
+                )
             return True
 
         if spec is None or self.speculator is None or spec.method != "dspark" or spec.draft_model_config is None:
