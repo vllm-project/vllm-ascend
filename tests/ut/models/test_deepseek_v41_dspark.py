@@ -74,6 +74,9 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch, num_layer
     from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
 
     monkeypatch.setattr("vllm.distributed.parallel_state.model_parallel_is_initialized", lambda: False)
+    monkeypatch.setattr(
+        deepseek_v41_module, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True)
+    )
     monkeypatch.setattr(deepseek_v41_module.envs, "VLLM_MOE_SKIP_PADDING", False)
     # Simulate two ranks with identical local input rows; only collectives are
     # replaced. Exercise the real SP capture and output-gather branches.
@@ -101,6 +104,7 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch, num_layer
     model._mtp_hidden_buffer = None
     model.shared_attention_state = SimpleNamespace(reset=lambda: None)
     model.layers = [Layer(i) for i in range(num_layers)]
+    model.start_layer, model.end_layer = 0, num_layers
     model.norm = lambda hidden: hidden
     target = AscendDeepseekV41LLMForCausalLM.__new__(AscendDeepseekV41LLMForCausalLM)
     torch.nn.Module.__init__(target)

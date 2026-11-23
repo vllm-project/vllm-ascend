@@ -18,6 +18,7 @@
 
 from dataclasses import dataclass
 from enum import Enum, auto
+from math import lcm
 
 import torch
 import torch.distributed as dist
@@ -84,11 +85,18 @@ class VocabParallelMode(Enum):
 
 @dataclass(frozen=True)
 class VocabParallelPlan:
+    """Where this module's vocabulary shards live, and the groups that complete them.
+
+    ``token_exchange_group`` routes token rows; ``output_reduce_group`` sums the other
+    TP columns' embedding contributions; ``output_gather_group`` gathers their logits.
+    """
+
     mode: VocabParallelMode
     shard_rank: int
     shard_world_size: int
     token_exchange_group: GroupCoordinator | None = None
     output_reduce_group: GroupCoordinator | None = None
+    output_gather_group: GroupCoordinator | None = None
 
 
 def _resolve_vocab_parallel_plan(
@@ -134,21 +142,43 @@ def _resolve_vocab_parallel_plan(
             output_reduce_group=None if is_lm_head else tp_group,
         )
 
-    if is_lm_head and lmhead_tp_enable():
-        group = get_lmhead_tp_group()
-        return VocabParallelPlan(
-            VocabParallelMode.FINE_GRAINED,
-            group.rank_in_group,
-            group.world_size,
-        )
-
     if is_token_embedding and embedding_tp_enable():
         group = get_embed_tp_group()
+        shard_rank = group.rank_in_group
+        shard_world_size = group.world_size
+        # TP outer, fine-grained inner (rank = tp_rank * P + fg_rank).
+        # output_reduce_group all-reduces the other TP columns' contributions.
+        tp_group = get_tp_group()
+        output_reduce_group = None
+        if tp_group.world_size > 1:
+            shard_rank = tp_group.rank_in_group * shard_world_size + shard_rank
+            shard_world_size *= tp_group.world_size
+            output_reduce_group = tp_group
         return VocabParallelPlan(
             VocabParallelMode.FINE_GRAINED,
-            group.rank_in_group,
-            group.world_size,
+            shard_rank,
+            shard_world_size,
             token_exchange_group=group,
+            output_reduce_group=output_reduce_group,
+        )
+
+    if is_lm_head and lmhead_tp_enable():
+        group = get_lmhead_tp_group()
+        shard_rank = group.rank_in_group
+        shard_world_size = group.world_size
+        # TP outer, fine-grained inner (rank = tp_rank * P + fg_rank).
+        # output_gather_group all-gathers the other TP columns' shards.
+        tp_group = get_tp_group()
+        output_gather_group = None
+        if tp_group.world_size > 1:
+            shard_rank = tp_group.rank_in_group * shard_world_size + shard_rank
+            shard_world_size *= tp_group.world_size
+            output_gather_group = tp_group
+        return VocabParallelPlan(
+            VocabParallelMode.FINE_GRAINED,
+            shard_rank,
+            shard_world_size,
+            output_gather_group=output_gather_group,
         )
 
     tp_group = get_tp_group()
@@ -191,8 +221,9 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         self.parallel_mode = plan.mode
         self.token_exchange_group = plan.token_exchange_group
         self.output_reduce_group = plan.output_reduce_group
-        # tp_rank/tp_size describe the logical weight layout. For PCP_X_TP that
-        # layout spans two real communication groups rather than one TP group.
+        self.output_gather_group = plan.output_gather_group
+        # tp_rank/tp_size index the vocabulary shard grid: one process group normally, or
+        # the product of TP with an inner axis (fine-grained or PCP) when both are sharded.
         self.tp_rank = plan.shard_rank
         self.tp_size = plan.shard_world_size
 
@@ -203,7 +234,8 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             )
 
         self.num_embeddings = num_embeddings
-        self.padding_size = padding_size
+        # Pad to a multiple of the shard count (P*T when composed).
+        self.padding_size = lcm(padding_size, self.tp_size)
         self.org_vocab_size = org_num_embeddings or num_embeddings
         num_added_embeddings = num_embeddings - self.org_vocab_size
         self.org_vocab_size_padded = pad_vocab_size(self.org_vocab_size, self.padding_size)
@@ -383,8 +415,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         output = reduce_scatter_output[:num_tokens].view(num_tokens, self.embedding_dim)
         reduce_group = self.output_reduce_group
         if reduce_group is not None and reduce_group.world_size > 1:
-            # PCP reduce-scatter reconstructs the TP-local contribution. This
-            # reduction completes the vocabulary result across TP shards.
+            # The reduce-scatter covers this TP column only; add the rest.
             output = torch.ops.vllm.all_reduce(output, reduce_group.unique_name)
         return output
 
@@ -508,19 +539,28 @@ def gather_lm_head_hidden_states(hidden_states: torch.Tensor, capacity: int | No
     return get_lmhead_tp_group().all_gather(hidden_states, dim=0)
 
 
-def gather_lm_head_outputs(output: torch.Tensor, parallel_mode: VocabParallelMode) -> torch.Tensor:
+def gather_lm_head_outputs(
+    output: torch.Tensor,
+    parallel_mode: VocabParallelMode,
+    output_gather_group: GroupCoordinator | None = None,
+) -> torch.Tensor:
     """Exchange dense logits or candidates, keeping any trailing score/ID pairs intact.
 
     Dim 0 contains token rows and dim 1 vocabulary entries or candidates.
     Fine-grained TP routes rows to their DP owner; PCP/standard TP joins
-    vocabulary shards for identical rows. This helper does not select TopK.
+    vocabulary shards for identical rows. ``output_gather_group`` completes a
+    composed fine-grained exchange over the other TP columns. This helper does
+    not select TopK.
     """
     if parallel_mode is VocabParallelMode.FINE_GRAINED:
         group = get_lmhead_tp_group()
         exchanged = lmhead_all_to_all(output.flatten(1), group)
-        return exchanged.reshape(
+        output = exchanged.reshape(
             output.shape[0] // group.world_size, output.shape[1] * group.world_size, *output.shape[2:]
         )
+        if output_gather_group is not None and output_gather_group.world_size > 1:
+            output = output_gather_group.all_gather(output.contiguous(), dim=1 - output.ndim)
+        return output
     # Use the same vocabulary/candidate axis for [rows, vocab] logits and
     # [rows, candidates, 2] packed score/ID tensors.
     dim = 1 - output.ndim
@@ -591,8 +631,9 @@ class AscendLogitsProcessor(LogitsProcessor):
         # Gather hidden states from all devices in tensor parallel group
         gathered_hidden_states = gather_lm_head_hidden_states(hidden_states)
         logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
-        # Gather logits for tensor parallel
-        logits = gather_lm_head_outputs(logits, lm_head.parallel_mode)
+        # Gather logits for tensor parallel; a composed head also joins the other
+        # TP columns after the all-to-all, so that collective moves local rows only.
+        logits = gather_lm_head_outputs(logits, lm_head.parallel_mode, getattr(lm_head, "output_gather_group", None))
 
         # Remove paddings in vocab (if any)
         if logits is not None:

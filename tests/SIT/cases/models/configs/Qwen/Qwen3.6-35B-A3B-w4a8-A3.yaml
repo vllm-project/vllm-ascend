@@ -73,6 +73,7 @@ test_cases:
       VLLM_ASCEND_GDN_MAX_PADDING_RATIO: "2.0"
       VLLM_ASCEND_GDN_MAX_H_OVERALLOC_RATIO: "2.0"
       SERVER_PORT: "DEFAULT_PORT"
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
     server_cmd:
       - "--hf-overrides"
       - '{"text_config":{"rope_parameters":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":262144}}}'

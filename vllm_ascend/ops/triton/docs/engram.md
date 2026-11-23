@@ -12,7 +12,7 @@ table layout or arithmetic.
 | `engram_lookup.py`: `_decode_e8m0` | Decode unsigned exponent bytes. Code 0 represents `2^-127`, and 255 represents NaN. Mask sign extension before constructing FP32 bits. |
 | `engram_hash.py` | Map tokens to requests, read preceding tokens from the current chunk, lookback window or slot cache, then calculate per-layer n-gram hashes. Image/dead tokens stop valid history. Empty requests must not steal another request's tokens. |
 | `engram_lookback.py` | Gather the tokens preceding each request's chunk from device token history. Respect request-state reordering and fill missing history and padded requests with `-1`. |
-| `engram_gate.py` | Fuse the FP32 normalization, key/query weighting, gate and residual addition used by native A5 Engram checkpoints. Retain the unfused operation order rather than contracting the residual into an FMA. |
+| `engram_gate.py` | Fuse the FP32 normalization, key/query weighting, gate and residual addition used by Engram checkpoints. Rotated inputs supply a separate FP32 scoring tensor while the residual stays in its checkpoint basis. Retain the unfused operation order rather than contracting the residual into an FMA. |
 
 ## Current hardware usage
 
@@ -20,7 +20,10 @@ Hash generation and lookback gathering are shared model paths, including A3.
 Lookup also serves A3 BF16/INT8 tables; its MXFP8 path is selected by
 `ENGRAM_MXFP8`, currently an A5 capability. The fused `engram_gate.py` path is
 selected by `ENGRAM_UNROTATED_GATE`, also currently an A5 capability. Moving
-these kernels into `ops/triton` does not change their hardware routing. These
+these kernels into `ops/triton` does not change their hardware routing.
+Rotated A3 checkpoints use `ENGRAM_ROTATED_GATE`: the FP32 rotation GEMM
+remains separate, then the fused gate consumes both restored and original hidden
+states. Other hardware retains its existing fallback for rotated checkpoints. These
 call-path descriptions do not establish A3 runtime validation or CI coverage.
 
 ## Memory and synchronization
@@ -34,3 +37,19 @@ release host memory.
 Output has shape `[tokens * pad_heads, width]`. Only `local_heads` rows per token
 are written, starting at output head zero; `head_start` selects the corresponding
 input ID columns. These two offsets must not be confused.
+
+## Rotated gate validation
+
+Run on an A3 NPU with the supported PyTorch, torch_npu and Triton stack:
+
+```bash
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_engram_gate.py
+```
+
+The test covers the profiled `[132, 4, 5120]` shape, empty input, a non-power-of-two
+channel count, shared and per-block rotations, BF16/FP32, strided tensors and
+masked-token residual identity. A model-dispatch test also captures and replays
+the rotated path with updated inputs and masks. Kernel compilation, graph replay, model accuracy
+and latency still require NPU evidence before merging. No hardware speedup is
+claimed from reducing the number of launches alone. The rotation also retains
+its FP32 input conversion; this is not a claim of exactly three launches.

@@ -466,17 +466,6 @@ QFA_LAYOUT_PA_NZ = "PA_NZ"
 QFA_QSCALE_N2TGD_MAX_G_TIMES_QS = 80
 
 
-def _build_qfa_cu_seqlens(cumulative_seq_lengths: list[int], device: torch.device) -> torch.Tensor:
-    """Build QFA ``cu_seqlens``: int32 (B+1,) with a leading 0.
-
-    FIA-style ``actual_seq_lengths`` are B cumulative entries; QFA expects the
-    cumulative sums prefixed with 0 so batch i spans
-    ``[cu_seqlens[i], cu_seqlens[i + 1])`` (QFA requirement doc, sequence
-    length conversion rules).
-    """
-    return torch.tensor([0, *cumulative_seq_lengths], dtype=torch.int32, device=device)
-
-
 class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     """MXFP8 KV cache backend computed by the QFA dual-operator interface.
 

@@ -63,6 +63,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
     get_transfer_timeout_value,
     inject_qos,
+    truncate_block_hashes_fallback,
     validate_register_region_count,
 )
 from vllm_ascend.utils import enable_custom_op, get_kv_cache_tensor_layers, is_vl_model
@@ -1460,6 +1461,14 @@ class MooncakeConnectorScheduler:
             request._all_token_ids.pop()
             request.num_prompt_tokens -= 1
             request.max_tokens = 1
+            hash_block_size = self.kv_cache_config.hash_block_size
+            assert hash_block_size is not None
+            lookahead = self.vllm_config.num_hash_lookahead_tokens
+            truncate_hashes = getattr(request, "truncate_block_hashes", None)
+            if callable(truncate_hashes):
+                truncate_hashes(hash_block_size, lookahead)
+            else:
+                truncate_block_hashes_fallback(request, hash_block_size, lookahead)
             params["_p_side_truncated"] = True
 
     def _compute_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:

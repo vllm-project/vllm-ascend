@@ -85,7 +85,7 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "67000"
+      - "133720"
       - --max-num-batched-tokens
       - "16384"
       - --trust-remote-code
@@ -143,7 +143,7 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "34816"
+      - "133720"
       - --max-num-batched-tokens
       - "128"
       - --trust-remote-code
@@ -202,7 +202,7 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "34816"
+      - "133720"
       - --max-num-batched-tokens
       - "128"
       - --trust-remote-code
@@ -243,7 +243,7 @@ benchmarks:
         dataset_path: vllm-ascend/aime2025
         request_conf: vllm_api_general_chat
         dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-        max_out_len: 32768
+        max_out_len: 81920
         batch_size: 32
         baseline: 90
         threshold: 10

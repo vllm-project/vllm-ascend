@@ -12,7 +12,7 @@ from vllm.utils.math_utils import cdiv
 
 def as_byte_view(x: torch.Tensor) -> torch.Tensor:
     """Return a byte view for FP8 tensors, preserving their bit patterns."""
-    if x.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+    if x.dtype in (torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e8m0fnu):
         return x.view(torch.uint8)
     return x
 
@@ -20,6 +20,58 @@ def as_byte_view(x: torch.Tensor) -> torch.Tensor:
 def _index_select_kv_blocks(cache: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     # FP8 block movement must preserve bytes, including NaN bit patterns.
     return torch.index_select(as_byte_view(cache), 0, indices).view(cache.dtype)
+
+
+def build_sfa_dcp_compact_kv_metadata(
+    dcp_block_table: torch.Tensor,
+    column_indices: torch.Tensor,
+    collective_rank_order: torch.Tensor,
+    kernel_block_size: int,
+    interleave: int,
+    *,
+    global_dcp_block_table: torch.Tensor | None = None,
+    global_dcp_num_blocks: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Map global token blocks into a compact, rank-major history gather."""
+    if interleave < kernel_block_size or interleave % kernel_block_size:
+        raise NotImplementedError(
+            f"SFA history gather requires interleave ({interleave}) to be a multiple of "
+            f"the kernel block size ({kernel_block_size})."
+        )
+    if global_dcp_block_table is None:
+        valid_block_ids = dcp_block_table.flatten().unique()
+    else:
+        # PCP receivers can own different request rows, including no queries.
+        # Every sender must nevertheless pack the same allocated block IDs.
+        if global_dcp_num_blocks is None:
+            raise ValueError("PCP+DCP compact KV metadata requires valid block counts for the global block table.")
+        valid_mask = column_indices[: global_dcp_block_table.shape[1]].unsqueeze(0) < global_dcp_num_blocks.unsqueeze(1)
+        valid_block_ids = global_dcp_block_table[valid_mask].unique()
+
+    world = collective_rank_order.numel()
+    columns = column_indices[: dcp_block_table.shape[1] * world]
+    blocks_per_interleave = interleave // kernel_block_size
+    local_columns = columns // (world * blocks_per_interleave) * blocks_per_interleave + columns % blocks_per_interleave
+    owners = columns // blocks_per_interleave % world
+    num_blocks = valid_block_ids.numel()
+    if num_blocks == 0:
+        # No allocated history: all entries are padding and have no consumer.
+        # Avoid indexing an empty dictionary when constructing the padded view.
+        shape = (dcp_block_table.shape[0], columns.numel())
+        return valid_block_ids, dcp_block_table.new_zeros(shape, dtype=torch.int32)
+    local_blocks = dcp_block_table.contiguous()
+    compact_blocks = torch.searchsorted(valid_block_ids, local_blocks)
+    # Unused local columns can retain IDs excluded by the global block counts.
+    # Clamp before looking up membership: searchsorted can return num_blocks,
+    # or an in-range insertion point for an ID absent from the dictionary.
+    compact_blocks.clamp_(max=num_blocks - 1)
+    allocated = valid_block_ids[compact_blocks] == local_blocks
+    # Keep the large gathered tensor in HCCL order; only remap its addresses.
+    block_table = compact_blocks[:, local_columns] + collective_rank_order[owners] * num_blocks
+    # Sequence lengths exclude padding. Keep its addresses in bounds as well,
+    # without mapping a stale ID into another rank's segment or gathering it.
+    block_table.masked_fill_(~allocated[:, local_columns], 0)
+    return valid_block_ids, block_table.to(torch.int32)
 
 
 def get_sfa_pcp_global_metadata(
@@ -54,12 +106,6 @@ def get_sfa_dcp_max_local_block_table_cols(
 ) -> int:
     """Return the local logical-block width of an SFA DCP block table."""
     return cdiv(max_model_len, physical_block_size * dcp_size) * blocks_per_physical_block
-
-
-def get_sfa_max_num_reqs(vllm_config: Any) -> int:
-    """Include PCP's two prefill segments and one graph-padding request."""
-    segments = 2 if vllm_config.parallel_config.prefill_context_parallel_size > 1 else 1
-    return vllm_config.scheduler_config.max_num_seqs * segments + 1
 
 
 def get_sfa_dcp_local_block_table(
