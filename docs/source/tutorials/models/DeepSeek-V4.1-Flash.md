@@ -2360,14 +2360,7 @@ with a Mooncake KV Cache Pool. A3 uses `MooncakeConnectorV2` in its default
 non-layerwise pull mode for Prefill-to-Decode KV transfer; A2 uses
 `MooncakeHybridConnector`. Both use `AscendStoreConnector` to store reusable
 KV cache in Mooncake, with the two connectors configured as children of
-`MultiConnector`. Select the same hardware tab for Prefill and Decode.
-
-The A3 scripts use the same W4A8 checkpoint and serving settings as
-[Section 5.2](#52-1p1d-pd-disaggregated-deployment): Prefill DP4/PCP4/TP1 with EPLB,
-Decode DP16/TP1 with a 280-token budget and 40 sequences, and
-`weight_nz_mode: 2` on both roles. Both A3 containers must include
-`fastokens>=0.3.5` and start with `--ulimit memlock=-1`. Check connector port
-allocations as described in the [KV transfer configuration guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#kv-transfer-config-common-parameters).
+`MultiConnector`. Select the tab for your hardware and follow its complete deployment procedure.
 
 DeepSeek-V4.1-Flash does not support layerwise KV Cache Pool access because its
 CED hybrid-attention model structure is incompatible with layer-by-layer KV
@@ -2378,90 +2371,128 @@ Before starting vLLM, configure `mooncake.json` for Prefill and
 Prefill and Decode nodes must export `MOONCAKE_CONFIG_PATH` pointing at the
 configuration file for their role.
 
-#### 5.4.1 Prepare the Mooncake Services
+The Mooncake transport setup depends on both the hardware series and link type:
 
-Prepare two Mooncake configuration files: `mooncake.json` for the Prefill
-ranks, which contribute the pool DRAM and offload evicted objects to SSD, and
-`mooncake_d.json` for the Decode ranks, which are pure consumers: they only
-read the pool and must not reserve host memory for it.
+| Hardware and link | Host preparation | Environment in both Prefill and Decode |
+|-------------------|------------------|----------------------------------------|
+| A2 (RoCE), or A3 with `LINK_TYPE="ROCE"` | Reserve huge pages with `echo 200000 > /proc/sys/vm/nr_hugepages` before starting the engines. | Set `HCCL_IF_IP=$LOCAL_IP`, `GLOO_SOCKET_IFNAME=$NIC_NAME`, `TP_SOCKET_IFNAME=$NIC_NAME`, `HCCL_SOCKET_IFNAME=$NIC_NAME`, and `HCCL_INTRA_ROCE_ENABLE=1`. |
+| A3 with `LINK_TYPE="HCCS"` | Use FabricMem; the RoCE huge-page reservation above does not apply. | Set `ACL_OP_INIT_MODE=1` and `ASCEND_ENABLE_USE_FABRIC_MEM=1`. |
 
-Configure the Prefill `mooncake.json`:
-
-```json
-{
-    "metadata_server": "P2PHANDSHAKE",
-    "protocol": "ascend",
-    "device_name": "",
-    "master_server_address": "xx.xx.xx.xx:50088",
-    "global_segment_size": "24GB",
-    "local_buffer_size": "1GB",
-    "preferred_segment": false,
-    "prefer_alloc_in_same_node": true,
-    "enable_ssd_offload": true,
-    "ssd_offload_path": "/ssd_offload",
-    "tenant_id": "default"
-}
-```
-
-Keep `ssd_offload_path` equal to `SSD_OFFLOAD_ROOT` in the Prefill launcher
-script below. Each Prefill device registers one pool client and contributes
-`24GB`; the total capacity depends on the hardware and Prefill topology:
-
-| Hardware | Prefill topology | Pool clients | Pool DRAM capacity |
-|----------|------------------|--------------|--------------------|
-| A3 | DP4/PCP4/TP1 | 16 | `384GB` |
-| A2 | DP2/PCP4/TP1 | 8 | `192GB` |
-
-Size `global_segment_size` for the host memory available after reserving space
-for the operating system, model loading, Engram offload, and staging buffers.
-Configure the Decode `mooncake_d.json` with zero contributed capacity and SSD
-offload disabled:
-
-```json
-{
-    "metadata_server": "P2PHANDSHAKE",
-    "protocol": "ascend",
-    "device_name": "",
-    "master_server_address": "xx.xx.xx.xx:50088",
-    "global_segment_size": "0",
-    "local_buffer_size": "0",
-    "preferred_segment": false,
-    "prefer_alloc_in_same_node": true,
-    "enable_ssd_offload": false,
-    "tenant_id": "default"
-}
-```
-
-After the configurations are ready, start the mooncake_master process on the
-Prefill node; the validated configuration runs it there, and any node reachable
-from both roles works as well. Wait until the process stays alive and port
-`50088` is listening, which takes a few seconds:
-
-```bash
-mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_ratio 0.1 --default_kv_lease_ttl 11000 --enable_offload=true --offload_on_evict=true --offload_force_evict=false --client_ttl=120
-```
-
-- `eviction_high_watermark_ratio`: Determines the high watermark where Mooncake Store triggers eviction.
-- `eviction_ratio`: Determines the share of stored objects to be evicted.
-- `default_kv_lease_ttl`: Controls the default lease TTL (milliseconds) for KV objects. Configured via `--default_kv_lease_ttl`, and should be larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
-- `--enable_offload` and `--offload_on_evict`: Enable the SSD tier. Objects evicted from the DRAM pool are written to the Prefill node's `ssd_offload_path` rather than dropped.
-- `--client_ttl=120`: Avoid slow-compiling workers from being removed from the pool during startup.
-
-#### 5.4.2 Start the Prefill Node with Pooling
-
-Complete [Section 5.4.3](#543-start-the-decode-node-with-pooling) first: the
-Prefill engines must start only after all Decode engines are ready.
-
-On the Prefill node, save the following script as `run_dp_template.sh`. Set
-`LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, `MOONCAKE_CONFIG_DIR`, and
-`SSD_OFFLOAD_ROOT` for the local environment.
-
-`SSD_OFFLOAD_ROOT` must be a directory on a real SSD mount of the Prefill node,
-for example `/ssd_offload`. The script only runs `mkdir -p`: if the path points
-at the system disk, evicted objects are written there and can fill it, because
-each rank may cache up to `20GiB`.
+These settings follow the [Mooncake configuration examples](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#configuration-examples).
+Keep `protocol` set to `"ascend"` in both Mooncake JSON files for all of these
+hardware/link combinations. See the [HDK and CANN compatibility reference](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#hdk-and-cann-version-compatibility-reference)
+for the required software and networking versions.
 
 === "A3 series"
+
+    The A3 scripts use the same W4A8 checkpoint and serving settings as
+    [Section 5.2](#52-1p1d-pd-disaggregated-deployment): Prefill DP4/PCP4/TP1 with EPLB,
+    Decode DP16/TP1 with a 280-token budget and 40 sequences, and
+    `weight_nz_mode: 2` on both roles. Both A3 containers must include
+    `fastokens>=0.3.5` and start with `--ulimit memlock=-1`. Check connector port
+    allocations as described in the [KV transfer configuration guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#kv-transfer-config-common-parameters).
+
+    #### 5.4.1.1 Prepare the Mooncake Services
+
+    Choose `LINK_TYPE="ROCE"` or `LINK_TYPE="HCCS"` for the actual inter-node
+    connection, and use the same value in the Prefill and Decode scripts below.
+    For RoCE, reserve huge pages once on **each host**, as root, before launching
+    the engines:
+
+    ```bash
+    echo 200000 > /proc/sys/vm/nr_hugepages
+    ```
+
+    Check `Hugepagesize`, `HugePages_Total`, and `HugePages_Free` in `/proc/meminfo`
+    and size the reservation for the pool, staging buffers, and available host
+    memory. The value `200000` is a page count, not a byte count; with 2 MiB pages
+    it reserves approximately 391 GiB. Do not run this host preparation command
+    inside every DP worker.
+
+    For HCCS, skip this RoCE reservation. The scripts instead set
+    `ACL_OP_INIT_MODE=1` and `ASCEND_ENABLE_USE_FABRIC_MEM=1`. In FabricMem mode,
+    `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` must be a multiple of 1 GiB; the
+    SSD staging buffer below is `1073741824` bytes. `local_buffer_size` in the
+    Mooncake JSON is not used in this mode.
+    Use a clean environment when switching link types so that settings from the
+    other mode are not inherited.
+
+    Prepare two Mooncake configuration files: `mooncake.json` for the Prefill
+    ranks, which contribute the pool DRAM and offload evicted objects to SSD, and
+    `mooncake_d.json` for the Decode ranks, which are pure consumers: they only
+    read the pool and must not reserve host memory for it.
+
+    Configure the Prefill `mooncake.json`:
+
+    ```json
+    {
+        "metadata_server": "P2PHANDSHAKE",
+        "protocol": "ascend",
+        "device_name": "",
+        "master_server_address": "xx.xx.xx.xx:50088",
+        "global_segment_size": "24GB",
+        "local_buffer_size": "1GB",
+        "preferred_segment": false,
+        "prefer_alloc_in_same_node": true,
+        "enable_ssd_offload": true,
+        "ssd_offload_path": "/ssd_offload",
+        "tenant_id": "default"
+    }
+    ```
+
+    Keep `ssd_offload_path` equal to `SSD_OFFLOAD_ROOT` in the Prefill launcher
+    script below. Each Prefill device registers one pool client and contributes
+    `24GB`. The A3 DP4/PCP4/TP1 topology uses 16 clients for a total
+    pool DRAM capacity of `384GB`.
+
+    Size `global_segment_size` for the host memory available after reserving space
+    for the operating system, model loading, Engram offload, and staging buffers.
+    Configure the Decode `mooncake_d.json` with zero contributed capacity and SSD
+    offload disabled:
+
+    ```json
+    {
+        "metadata_server": "P2PHANDSHAKE",
+        "protocol": "ascend",
+        "device_name": "",
+        "master_server_address": "xx.xx.xx.xx:50088",
+        "global_segment_size": "0",
+        "local_buffer_size": "0",
+        "preferred_segment": false,
+        "prefer_alloc_in_same_node": true,
+        "enable_ssd_offload": false,
+        "tenant_id": "default"
+    }
+    ```
+
+    After the configurations are ready, start the mooncake_master process on the
+    Prefill node; the validated configuration runs it there, and any node reachable
+    from both roles works as well. Wait until the process stays alive and port
+    `50088` is listening, which takes a few seconds:
+
+    ```bash
+    mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_ratio 0.1 --default_kv_lease_ttl 11000 --enable_offload=true --offload_on_evict=true --offload_force_evict=false --client_ttl=120
+    ```
+
+    - `eviction_high_watermark_ratio`: Determines the high watermark where Mooncake Store triggers eviction.
+    - `eviction_ratio`: Determines the share of stored objects to be evicted.
+    - `default_kv_lease_ttl`: Controls the default lease TTL (milliseconds) for KV objects. Configured via `--default_kv_lease_ttl`, and should be larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
+    - `--enable_offload` and `--offload_on_evict`: Enable the SSD tier. Objects evicted from the DRAM pool are written to the Prefill node's `ssd_offload_path` rather than dropped.
+    - `--client_ttl=120`: Avoid slow-compiling workers from being removed from the pool during startup.
+
+    #### 5.4.1.2 Start the Prefill Node with Pooling
+
+    Complete [Section 5.4.1.3](#5413-start-the-decode-node-with-pooling) first: the
+    Prefill engines must start only after all Decode engines are ready.
+
+    On the Prefill node, save the following script as `run_dp_template.sh`. Set
+    `LINK_TYPE`, `LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, `MOONCAKE_CONFIG_DIR`, and
+    `SSD_OFFLOAD_ROOT` for the local environment.
+
+    `SSD_OFFLOAD_ROOT` must be a directory on a real SSD mount of the Prefill node,
+    for example `/ssd_offload`. The script only runs `mkdir -p`: if the path points
+    at the system disk, evicted objects are written there and can fill it, because
+    each rank may cache up to `20GiB`.
 
     Reuse `launch_online_dp.py` from [Section 5.2.1.1](#5211-prepare-the-dp-launcher).
 
@@ -2476,16 +2507,27 @@ each rank may cache up to `20GiB`.
     export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
     export no_proxy="127.0.0.1,localhost,<PREFILL_NODE_IP>,<DECODE_NODE_IP>"
 
+    LINK_TYPE="ROCE"  # Set to "HCCS" for an HCCS-connected A3 deployment.
     NIC_NAME="<NETWORK_INTERFACE>"
     LOCAL_IP="<PREFILL_NODE_IP>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
     MOONCAKE_CONFIG_DIR="<MOONCAKE_CONFIG_DIR>"
     SSD_OFFLOAD_ROOT="<SSD_OFFLOAD_ROOT>"
 
-    export HCCL_IF_IP="$LOCAL_IP"
-    export GLOO_SOCKET_IFNAME="$NIC_NAME"
-    export TP_SOCKET_IFNAME="$NIC_NAME"
-    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    # Select the Mooncake transport for this A3 deployment.
+    if [ "$LINK_TYPE" == "ROCE" ]; then
+        export HCCL_IF_IP="$LOCAL_IP"
+        export GLOO_SOCKET_IFNAME="$NIC_NAME"
+        export TP_SOCKET_IFNAME="$NIC_NAME"
+        export HCCL_SOCKET_IFNAME="$NIC_NAME"
+        export HCCL_INTRA_ROCE_ENABLE=1
+    elif [ "$LINK_TYPE" == "HCCS" ]; then
+        export ACL_OP_INIT_MODE=1
+        export ASCEND_ENABLE_USE_FABRIC_MEM=1
+    else
+        echo "Error: Set LINK_TYPE to 'ROCE' or 'HCCS' for A3." >&2
+        exit 1
+    fi
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_USE_FASTOKENS=1
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
@@ -2576,7 +2618,251 @@ each rank may cache up to `20GiB`.
     Start the four DP4/PCP4/TP1 Prefill engines with the launcher command from
     [Section 5.2.1.2](#5212-start-the-prefill-node) after all Decode engines are ready.
 
+    #### 5.4.1.3 Start the Decode Node with Pooling
+
+    On the Decode node, save the following script as `run_dp_template.sh`. Set
+    `LINK_TYPE`, `LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, and
+    `MOONCAKE_CONFIG_DIR` for the local environment.
+
+    Reuse `launch_online_dp.py` from [Section 5.2.1.1](#5211-prepare-the-dp-launcher).
+
+    ```shell
+    #!/usr/bin/env bash
+
+    set -euo pipefail
+    ulimit -l unlimited
+
+    unset https_proxy
+    unset http_proxy
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
+    export no_proxy="127.0.0.1,localhost,<PREFILL_NODE_IP>,<DECODE_NODE_IP>"
+
+    LINK_TYPE="ROCE"  # Set to "HCCS" for an HCCS-connected A3 deployment.
+    NIC_NAME="<NETWORK_INTERFACE>"
+    LOCAL_IP="<DECODE_NODE_IP>"
+    MODEL_PATH="<YOUR_MODEL_PATH>"
+    MOONCAKE_CONFIG_DIR="<MOONCAKE_CONFIG_DIR>"
+
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=36000
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # Select the Mooncake transport for this A3 deployment.
+    if [ "$LINK_TYPE" == "ROCE" ]; then
+        export HCCL_IF_IP="$LOCAL_IP"
+        export GLOO_SOCKET_IFNAME="$NIC_NAME"
+        export TP_SOCKET_IFNAME="$NIC_NAME"
+        export HCCL_SOCKET_IFNAME="$NIC_NAME"
+        export HCCL_INTRA_ROCE_ENABLE=1
+    elif [ "$LINK_TYPE" == "HCCS" ]; then
+        export ACL_OP_INIT_MODE=1
+        export ASCEND_ENABLE_USE_FABRIC_MEM=1
+    else
+        echo "Error: Set LINK_TYPE to 'ROCE' or 'HCCS' for A3." >&2
+        exit 1
+    fi
+    export HCCL_BUFFSIZE=4096
+    export ASCEND_RT_VISIBLE_DEVICES="$1"
+
+    # Parameters required by the Mooncake KV Cache Pool.
+    export PYTHONHASHSEED=0
+    # Decode is a pure consumer: use mooncake_d.json (zero contributed capacity).
+    export MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_DIR/mooncake_d.json"
+
+    vllm serve "$MODEL_PATH" \
+        --host 0.0.0.0 \
+        --port "$2" \
+        --data-parallel-size "$3" \
+        --data-parallel-rank "$4" \
+        --data-parallel-address "$5" \
+        --data-parallel-rpc-port "$6" \
+        --tensor-parallel-size "$7" \
+        --prefill-context-parallel-size "$8" \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name dsv41 \
+        --max-model-len 1048576 \
+        --max-num-batched-tokens 280 \
+        --max-num-seqs 40 \
+        --async-scheduling \
+        --block-size 128 \
+        --no-enable-prefix-caching \
+        --no-swa-bounded-replay \
+        --trust-remote-code \
+        --tokenizer-mode deepseek_v41 \
+        --reasoning-parser deepseek_v41 \
+        --tool-call-parser deepseek_v41 \
+        --enable-auto-tool-choice \
+        --safetensors-load-strategy lazy \
+        --gpu-memory-utilization 0.95 \
+        --quantization ascend \
+        --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --kv-transfer-config '{
+            "kv_connector":"MultiConnector",
+            "kv_role":"kv_consumer",
+            "kv_port":"30100",
+            "engine_id":"1",
+            "kv_connector_extra_config":{
+                "connectors":[
+                    {
+                        "kv_connector":"MooncakeConnectorV2",
+                        "kv_role":"kv_consumer",
+                        "kv_port":"30100"
+                    },
+                    {
+                        "kv_connector":"AscendStoreConnector",
+                        "kv_role":"kv_consumer",
+                        "kv_connector_extra_config":{
+                            "backend":"mooncake",
+                            "lookup_rpc_port":"0",
+                            "use_layerwise":false
+                        }
+                    }
+                ]
+            }
+        }' \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --additional-config '{
+            "ascend_compilation_config":{
+                "enable_npugraph_ex":true,
+                "enable_static_kernel":false
+            },
+            "enable_cpu_binding":true,
+            "weight_nz_mode":2,
+            "multistream_overlap_shared_expert":true,
+            "recompute_scheduler_enable":true
+        }'
+    ```
+
+    Start the sixteen DP16/TP1 Decode engines with the launcher command from
+    [Section 5.2.1.3](#5213-start-the-decode-node).
+
+    #### 5.4.1.4 Startup and Verification
+
+    Start the components in this order: Mooncake Master Service, Decode engines, Prefill engines, and then the PD proxy. The Mooncake Store clients are embedded in the vLLM processes; no standalone Store process is required for this configuration.
+    Wait until the Mooncake master process reports successful initialization, then
+    start Decode. Wait until every Decode engine reports `Application startup complete`
+    before starting Prefill. After every Prefill engine is ready, start the proxy for
+    the four Prefill and sixteen Decode endpoints and `--workers 4` from
+    [Section 5.2.1.4](#5214-deploy-the-pd-proxy).
+
+    Send a long prompt to populate the pool, then reuse its prefix with a different
+    suffix. Check all Prefill ranks for increased `external_prefix_cache_hits_total`
+    and successful Mooncake get/load activity. Confirm that Decode logs still show
+    normal Prefill-to-Decode KV transfer.
+
+    Key pooling parameters:
+
+    - `MultiConnector` combines live P-to-D transfer through `MooncakeConnectorV2` with persistent prefix reuse through `AscendStoreConnector`.
+    - `backend: "mooncake"` selects Mooncake as the KV Cache Pool backend.
+    - `use_layerwise: false` is required for DeepSeek-V4.1-Flash. Do not enable layerwise pooling for this model because its CED hybrid-attention structure is not supported by the layerwise path.
+    - Prefill contributes the pool capacity (`global_segment_size` = `24GB` per rank) and enables SSD offload. Decode sets both `global_segment_size` and `local_buffer_size` to `0` and disables SSD offload, so it only reads the pool. Reserving pool DRAM on Decode can fail with `rtsHostRegister` out-of-memory errors and reduces the host memory available to the engines.
+    - `PYTHONHASHSEED` must be `0` on both roles. The pool key is derived from block hashes; if the two sides disagree, lookups never hit.
+    - The `MOONCAKE_OFFLOAD_*` variables cap each Prefill rank's SSD bucket at `20GiB` and its staging buffer at `1GiB`. Adjust them to the SSD capacity available on the Prefill node.
+
+    For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend).
+
 === "A2 series"
+
+    #### 5.4.2.1 Prepare the Mooncake Services
+
+    A2 uses RoCE. Reserve huge pages once on **each host**, as root, before
+    launching the engines:
+
+    ```bash
+    echo 200000 > /proc/sys/vm/nr_hugepages
+    ```
+
+    Check `Hugepagesize`, `HugePages_Total`, and `HugePages_Free` in `/proc/meminfo`
+    and size the reservation for the pool, staging buffers, and available host
+    memory. The value `200000` is a page count, not a byte count; with 2 MiB pages
+    it reserves approximately 391 GiB. Do not run this host preparation command
+    inside every DP worker.
+
+    Both scripts below set `HCCL_IF_IP` to the local node IP and set
+    `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` to the local
+    network interface. They also set `HCCL_INTRA_ROCE_ENABLE=1` for RoCE direct
+    transfer. The A3 HCCS/FabricMem settings do not apply to this A2 recipe.
+
+    Prepare two Mooncake configuration files: `mooncake.json` for the Prefill
+    ranks, which contribute the pool DRAM and offload evicted objects to SSD, and
+    `mooncake_d.json` for the Decode ranks, which are pure consumers: they only
+    read the pool and must not reserve host memory for it.
+
+    Configure the Prefill `mooncake.json`:
+
+    ```json
+    {
+        "metadata_server": "P2PHANDSHAKE",
+        "protocol": "ascend",
+        "device_name": "",
+        "master_server_address": "xx.xx.xx.xx:50088",
+        "global_segment_size": "24GB",
+        "local_buffer_size": "1GB",
+        "preferred_segment": false,
+        "prefer_alloc_in_same_node": true,
+        "enable_ssd_offload": true,
+        "ssd_offload_path": "/ssd_offload",
+        "tenant_id": "default"
+    }
+    ```
+
+    Keep `ssd_offload_path` equal to `SSD_OFFLOAD_ROOT` in the Prefill launcher
+    script below. Each Prefill device registers one pool client and contributes
+    `24GB`. The A2 DP2/PCP4/TP1 topology uses 8 clients for a total
+    pool DRAM capacity of `192GB`.
+
+    Size `global_segment_size` for the host memory available after reserving space
+    for the operating system, model loading, Engram offload, and staging buffers.
+    Configure the Decode `mooncake_d.json` with zero contributed capacity and SSD
+    offload disabled:
+
+    ```json
+    {
+        "metadata_server": "P2PHANDSHAKE",
+        "protocol": "ascend",
+        "device_name": "",
+        "master_server_address": "xx.xx.xx.xx:50088",
+        "global_segment_size": "0",
+        "local_buffer_size": "0",
+        "preferred_segment": false,
+        "prefer_alloc_in_same_node": true,
+        "enable_ssd_offload": false,
+        "tenant_id": "default"
+    }
+    ```
+
+    After the configurations are ready, start the mooncake_master process on the
+    Prefill node; the validated configuration runs it there, and any node reachable
+    from both roles works as well. Wait until the process stays alive and port
+    `50088` is listening, which takes a few seconds:
+
+    ```bash
+    mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_ratio 0.1 --default_kv_lease_ttl 11000 --enable_offload=true --offload_on_evict=true --offload_force_evict=false --client_ttl=120
+    ```
+
+    - `eviction_high_watermark_ratio`: Determines the high watermark where Mooncake Store triggers eviction.
+    - `eviction_ratio`: Determines the share of stored objects to be evicted.
+    - `default_kv_lease_ttl`: Controls the default lease TTL (milliseconds) for KV objects. Configured via `--default_kv_lease_ttl`, and should be larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
+    - `--enable_offload` and `--offload_on_evict`: Enable the SSD tier. Objects evicted from the DRAM pool are written to the Prefill node's `ssd_offload_path` rather than dropped.
+    - `--client_ttl=120`: Avoid slow-compiling workers from being removed from the pool during startup.
+
+    #### 5.4.2.2 Start the Prefill Node with Pooling
+
+    Complete [Section 5.4.2.3](#5423-start-the-decode-node-with-pooling) first: the
+    Prefill engines must start only after all Decode engines are ready.
+
+    On the Prefill node, save the following script as `run_dp_template.sh`. Set
+    `LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, `MOONCAKE_CONFIG_DIR`, and
+    `SSD_OFFLOAD_ROOT` for the local environment.
+
+    `SSD_OFFLOAD_ROOT` must be a directory on a real SSD mount of the Prefill node,
+    for example `/ssd_offload`. The script only runs `mkdir -p`: if the path points
+    at the system disk, evicted objects are written there and can fill it, because
+    each rank may cache up to `20GiB`.
+
+    Reuse `launch_online_dp.py` from [Section 5.2.2.1](#5221-prepare-the-dp-launcher).
 
     ```shell
     #!/usr/bin/env bash
@@ -2683,118 +2969,13 @@ each rank may cache up to `20GiB`.
 
     Start the two DP2/TP1/PCP4 Prefill engines with the launcher command from [Section 5.2.2.2](#5222-start-the-prefill-node) after all Decode engines are ready.
 
-#### 5.4.3 Start the Decode Node with Pooling
+    #### 5.4.2.3 Start the Decode Node with Pooling
 
-On the Decode node, save the following script as `run_dp_template.sh`. Set
-`LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, and
-`MOONCAKE_CONFIG_DIR` for the local environment.
+    On the Decode node, save the following script as `run_dp_template.sh`. Set
+    `LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, and
+    `MOONCAKE_CONFIG_DIR` for the local environment.
 
-=== "A3 series"
-
-    Reuse `launch_online_dp.py` from [Section 5.2.1.1](#5211-prepare-the-dp-launcher).
-
-    ```shell
-    #!/usr/bin/env bash
-
-    set -euo pipefail
-    ulimit -l unlimited
-
-    unset https_proxy
-    unset http_proxy
-    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
-    export no_proxy="127.0.0.1,localhost,<PREFILL_NODE_IP>,<DECODE_NODE_IP>"
-
-    NIC_NAME="<NETWORK_INTERFACE>"
-    LOCAL_IP="<DECODE_NODE_IP>"
-    MODEL_PATH="<YOUR_MODEL_PATH>"
-    MOONCAKE_CONFIG_DIR="<MOONCAKE_CONFIG_DIR>"
-
-    export VLLM_USE_V2_MODEL_RUNNER=1
-    export VLLM_USE_FASTOKENS=1
-    export VLLM_ENGINE_READY_TIMEOUT_S=36000
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export HCCL_IF_IP="$LOCAL_IP"
-    export GLOO_SOCKET_IFNAME="$NIC_NAME"
-    export TP_SOCKET_IFNAME="$NIC_NAME"
-    export HCCL_SOCKET_IFNAME="$NIC_NAME"
-    export HCCL_BUFFSIZE=4096
-    export ASCEND_RT_VISIBLE_DEVICES="$1"
-
-    # Parameters required by the Mooncake KV Cache Pool.
-    export PYTHONHASHSEED=0
-    # Decode is a pure consumer: use mooncake_d.json (zero contributed capacity).
-    export MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_DIR/mooncake_d.json"
-
-    vllm serve "$MODEL_PATH" \
-        --host 0.0.0.0 \
-        --port "$2" \
-        --data-parallel-size "$3" \
-        --data-parallel-rank "$4" \
-        --data-parallel-address "$5" \
-        --data-parallel-rpc-port "$6" \
-        --tensor-parallel-size "$7" \
-        --prefill-context-parallel-size "$8" \
-        --enable-expert-parallel \
-        --seed 1024 \
-        --served-model-name dsv41 \
-        --max-model-len 1048576 \
-        --max-num-batched-tokens 280 \
-        --max-num-seqs 40 \
-        --async-scheduling \
-        --block-size 128 \
-        --no-enable-prefix-caching \
-        --no-swa-bounded-replay \
-        --trust-remote-code \
-        --tokenizer-mode deepseek_v41 \
-        --reasoning-parser deepseek_v41 \
-        --tool-call-parser deepseek_v41 \
-        --enable-auto-tool-choice \
-        --safetensors-load-strategy lazy \
-        --gpu-memory-utilization 0.95 \
-        --quantization ascend \
-        --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --kv-transfer-config '{
-            "kv_connector":"MultiConnector",
-            "kv_role":"kv_consumer",
-            "kv_port":"30100",
-            "engine_id":"1",
-            "kv_connector_extra_config":{
-                "connectors":[
-                    {
-                        "kv_connector":"MooncakeConnectorV2",
-                        "kv_role":"kv_consumer",
-                        "kv_port":"30100"
-                    },
-                    {
-                        "kv_connector":"AscendStoreConnector",
-                        "kv_role":"kv_consumer",
-                        "kv_connector_extra_config":{
-                            "backend":"mooncake",
-                            "lookup_rpc_port":"0",
-                            "use_layerwise":false
-                        }
-                    }
-                ]
-            }
-        }' \
-        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
-        --additional-config '{
-            "ascend_compilation_config":{
-                "enable_npugraph_ex":true,
-                "enable_static_kernel":false
-            },
-            "enable_cpu_binding":true,
-            "weight_nz_mode":2,
-            "multistream_overlap_shared_expert":true,
-            "recompute_scheduler_enable":true
-        }'
-    ```
-
-    Start the sixteen DP16/TP1 Decode engines with the launcher command from
-    [Section 5.2.1.3](#5213-start-the-decode-node).
-
-=== "A2 series"
+    Reuse `launch_online_dp.py` from [Section 5.2.2.1](#5221-prepare-the-dp-launcher).
 
     ```shell
     #!/usr/bin/env bash
@@ -2900,34 +3081,30 @@ On the Decode node, save the following script as `run_dp_template.sh`. Set
 
     Start the eight DP8/TP1 Decode engines with the launcher command from [Section 5.2.2.3](#5223-start-the-decode-node).
 
-#### 5.4.4 Startup and Verification
+    #### 5.4.2.4 Startup and Verification
 
-Start the components in this order: Mooncake Master Service, Decode engines, Prefill engines, and then the PD proxy. The Mooncake Store clients are embedded in the vLLM processes; no standalone Store process is required for this configuration.
-Wait until the Mooncake master process reports successful initialization, then
-start Decode. Wait until every Decode engine reports `Application startup complete`
-before starting Prefill. After every Prefill engine is ready, start the proxy for
-the selected hardware:
+    Start the components in this order: Mooncake Master Service, Decode engines, Prefill engines, and then the PD proxy. The Mooncake Store clients are embedded in the vLLM processes; no standalone Store process is required for this configuration.
+    Wait until the Mooncake master process reports successful initialization, then
+    start Decode. Wait until every Decode engine reports `Application startup complete`
+    before starting Prefill. After every Prefill engine is ready, start the proxy for
+    the two Prefill and eight Decode endpoints from
+    [Section 5.2.2.4](#5224-deploy-the-pd-proxy).
 
-- A3: use the four Prefill and sixteen Decode endpoints and `--workers 4` from
-  [Section 5.2.1.4](#5214-deploy-the-pd-proxy).
-- A2: use the two Prefill and eight Decode endpoints from
-  [Section 5.2.2.4](#5224-deploy-the-pd-proxy).
+    Send a long prompt to populate the pool, then reuse its prefix with a different
+    suffix. Check all Prefill ranks for increased `external_prefix_cache_hits_total`
+    and successful Mooncake get/load activity. Confirm that Decode logs still show
+    normal Prefill-to-Decode KV transfer.
 
-Send a long prompt to populate the pool, then reuse its prefix with a different
-suffix. Check all Prefill ranks for increased `external_prefix_cache_hits_total`
-and successful Mooncake get/load activity. Confirm that Decode logs still show
-normal Prefill-to-Decode KV transfer.
+    Key pooling parameters:
 
-Key pooling parameters:
+    - `MultiConnector` combines live P-to-D transfer through `MooncakeHybridConnector` with persistent prefix reuse through `AscendStoreConnector`.
+    - `backend: "mooncake"` selects Mooncake as the KV Cache Pool backend.
+    - `use_layerwise: false` is required for DeepSeek-V4.1-Flash. Do not enable layerwise pooling for this model because its CED hybrid-attention structure is not supported by the layerwise path.
+    - Prefill contributes the pool capacity (`global_segment_size` = `24GB` per rank) and enables SSD offload. Decode sets both `global_segment_size` and `local_buffer_size` to `0` and disables SSD offload, so it only reads the pool. Reserving pool DRAM on Decode can fail with `rtsHostRegister` out-of-memory errors and reduces the host memory available to the engines.
+    - `PYTHONHASHSEED` must be `0` on both roles. The pool key is derived from block hashes; if the two sides disagree, lookups never hit.
+    - The `MOONCAKE_OFFLOAD_*` variables cap each Prefill rank's SSD bucket at `20GiB` and its staging buffer at `1GiB`. Adjust them to the SSD capacity available on the Prefill node.
 
-- `MultiConnector` combines live P-to-D transfer through `MooncakeConnectorV2` on A3 or `MooncakeHybridConnector` on A2 with persistent prefix reuse through `AscendStoreConnector`.
-- `backend: "mooncake"` selects Mooncake as the KV Cache Pool backend.
-- `use_layerwise: false` is required for DeepSeek-V4.1-Flash. Do not enable layerwise pooling for this model because its CED hybrid-attention structure is not supported by the layerwise path.
-- Prefill contributes the pool capacity (`global_segment_size` = `24GB` per rank) and enables SSD offload. Decode sets both `global_segment_size` and `local_buffer_size` to `0` and disables SSD offload, so it only reads the pool. Reserving pool DRAM on Decode can fail with `rtsHostRegister` out-of-memory errors and reduces the host memory available to the engines.
-- `PYTHONHASHSEED` must be `0` on both roles. The pool key is derived from block hashes; if the two sides disagree, lookups never hit.
-- The `MOONCAKE_OFFLOAD_*` variables cap each Prefill rank's SSD bucket at `20GiB` and its staging buffer at `1GiB`. Adjust them to the SSD capacity available on the Prefill node.
-
-For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend).
+    For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend).
 
 ### 5.5 Multi-Node Colocated Deployment
 
