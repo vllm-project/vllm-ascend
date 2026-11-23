@@ -19,6 +19,7 @@ from typing import Any
 
 import torch
 
+from vllm.logger import logger
 from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadataBuilder
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -27,6 +28,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ops.triton.kda.recoverssm import (
     KDARecoverSSMCommitContext as AscendCommitContext,
+    recoverssm_replays,
 )
 
 FP32_DEFERRED = "fp32_deferred"
@@ -38,6 +40,11 @@ class KDARecoverSSMDeferred:
 
     After sampling, each request's accepted count becomes the pending replay of
     its record slot instead of a commit; the next verify replays it.
+
+    Below the fusion threshold (``recoverssm_replays``), the step folds the
+    pending replays into the checkpoints first (``flush``, upstream's "flush +
+    core" path) and the verify runs without a replay: the fused pass loses to a
+    plain commit on small batches.
     """
 
     record_rows: torch.Tensor  # [>= spec rows] int32: record slot per row, -1: none
@@ -48,6 +55,11 @@ class KDARecoverSSMDeferred:
     layer_names: list[str] = field(default_factory=list, repr=False, compare=False)
     started: bool = False
     flushed: bool = False
+
+    def _fuse(self) -> bool:
+        """Whether this step's verify replays the previous commit in-kernel."""
+        num_heads = self.context.checkpoints[0].shape[1]
+        return recoverssm_replays(num_heads, self.state_indices.shape[0])
 
     def flush(self) -> None:
         """Fold the step's pending replays into the checkpoints (every KDA
@@ -70,7 +82,9 @@ class KDARecoverSSMDeferred:
 
         The recurrent-state replay is fused into each layer's verify (it reuses
         the state load the verify already performs), so only the conv history
-        has to be shifted before ``causal_conv1d``.
+        has to be shifted before ``causal_conv1d``. Below the fusion threshold,
+        the whole step falls back to a full ``flush`` (compact + commit) and the
+        verify runs from committed checkpoints without a replay.
         """
         if self.started or self.flushed:
             return
@@ -80,6 +94,14 @@ class KDARecoverSSMDeferred:
             return
         rows = self.state_indices.shape[0]
         if rows == 0:
+            return
+        if not self._fuse():
+            num_heads = self.context.checkpoints[0].shape[1]
+            logger.info_once(
+                f"KDA RecoverSSM {num_heads} heads x {rows} requests below the "
+                "fusion threshold; folding pending replays before verify"
+            )
+            self.flush()
             return
         self.started = True
         self.context.compact_conv(self.state_indices, self.record_rows[:rows], self.pending)

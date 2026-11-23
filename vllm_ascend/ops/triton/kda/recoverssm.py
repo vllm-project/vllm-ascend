@@ -6,6 +6,7 @@ Adapted from vLLM c4df37dfcc. Preserve its paged-cache strides and public
 verify/commit contracts. Q/K normalization follows the AscendC KDA kernel.
 """
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -31,6 +32,29 @@ RECOVERSSM_VALUE_TILE_LARGE = 128
 RECOVERSSM_LARGE_TILE_MIN_PROGRAMS = 96
 RECOVERSSM_CONV_TILE = 4096
 RECOVERSSM_CONV_STRIDED_TILE = 256
+
+# Deferred RecoverSSM fusion threshold, in (request, head) items. Upstream
+# (`cutedsl/kda/prepared.py::replays`) fuses a verify that replays the previous
+# step's commit only once it has enough items to amortize the fused pass; below
+# it the step folds the pending replays first (flush + plain verify), where the
+# fused pass loses (GB300 TP8 R1: 5.8 us core+commit vs 10.7 us fused per layer).
+# A5 keeps the same shape because the trade-off (state traffic per item vs extra
+# UB residency) is the same. Override with `VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS`.
+RECOVERSSM_FUSED_ITEMS_BY_HEADS = {12: 192}
+RECOVERSSM_FUSED_ITEMS_DEFAULT = 384
+
+
+def recoverssm_replays(num_heads: int, requests: int) -> bool:
+    """Whether a deferred RecoverSSM verify of ``num_heads * requests`` items
+    replays the previous step's commit in the same pass (else: flush + verify)."""
+    forced = os.environ.get("VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS")
+    if forced is not None:
+        threshold = int(forced)
+    else:
+        threshold = RECOVERSSM_FUSED_ITEMS_BY_HEADS.get(
+            num_heads, RECOVERSSM_FUSED_ITEMS_DEFAULT
+        )
+    return requests > 0 and num_heads * requests >= threshold
 
 
 @triton.jit
@@ -154,6 +178,7 @@ def _kda_recoverssm_verify_kernel(
     HAS_REPLAY: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
     SPEC_QUERY_LEN: tl.constexpr,
+    UNROLL_REPLAY: tl.constexpr,
 ):
     # Advance a register-held checkpoint and record each token's compact
     # correction/key/gate; persistent checkpoint pages remain read-only.
@@ -254,31 +279,62 @@ def _kda_recoverssm_verify_kernel(
                 final_correction = tl.zeros([BV, BK], tl.float32)
                 boundary_decay = tl.full([BK], 1.0, tl.float32)
                 boundary_correction = tl.zeros([BV, BK], tl.float32)
-                for reverse_offset in range(tl.minimum(commit_len, SPEC_QUERY_LEN)):
-                    final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
-                        replay_correction_ptr,
-                        replay_kg_ptr,
-                        commit_len - reverse_offset - 1,
-                        offs_k,
-                        offs_v,
-                        mask_k,
-                        mask_v,
-                        stride_correction_pos,
-                        stride_correction_dim,
-                        stride_kg_pos,
-                        stride_kg_dim,
-                        A,
-                        dt_bias,
-                        lower_bound,
-                        boundary_recovery_len,
-                        final_decay,
-                        final_correction,
-                        boundary_decay,
-                        boundary_correction,
-                        K,
-                        USE_LOWER_BOUND,
-                        ALIGN_MODE,
-                    )
+                # A5 unrolls the replay so the per-token dependency chain and the
+                # dynamic loop bound drop out, matching the commit kernel's
+                # UNROLL_COMMIT; A3 keeps the runtime bound to bound UB use.
+                if UNROLL_REPLAY:
+                    for reverse_offset in tl.static_range(SPEC_QUERY_LEN):
+                        if reverse_offset < commit_len:
+                            final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
+                                replay_correction_ptr,
+                                replay_kg_ptr,
+                                commit_len - reverse_offset - 1,
+                                offs_k,
+                                offs_v,
+                                mask_k,
+                                mask_v,
+                                stride_correction_pos,
+                                stride_correction_dim,
+                                stride_kg_pos,
+                                stride_kg_dim,
+                                A,
+                                dt_bias,
+                                lower_bound,
+                                boundary_recovery_len,
+                                final_decay,
+                                final_correction,
+                                boundary_decay,
+                                boundary_correction,
+                                K,
+                                USE_LOWER_BOUND,
+                                ALIGN_MODE,
+                            )
+                else:
+                    for reverse_offset in range(tl.minimum(commit_len, SPEC_QUERY_LEN)):
+                        final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
+                            replay_correction_ptr,
+                            replay_kg_ptr,
+                            commit_len - reverse_offset - 1,
+                            offs_k,
+                            offs_v,
+                            mask_k,
+                            mask_v,
+                            stride_correction_pos,
+                            stride_correction_dim,
+                            stride_kg_pos,
+                            stride_kg_dim,
+                            A,
+                            dt_bias,
+                            lower_bound,
+                            boundary_recovery_len,
+                            final_decay,
+                            final_correction,
+                            boundary_decay,
+                            boundary_correction,
+                            K,
+                            USE_LOWER_BOUND,
+                            ALIGN_MODE,
+                        )
                 state = initial_state * final_decay[None, :] + final_correction
                 final_ptrs = (
                     state_ptr
@@ -1251,9 +1307,20 @@ def kda_recoverssm_verify(
     # Grid specialization: large tiles halve redundant K-side loads and win once
     # enough programs keep the NPU busy; below that, smaller tiles keep more
     # programs in flight. Measured crossover: 96 programs (batch*heads*V tiles).
+    # An aligned fused replay keeps the boundary-correction accumulator live
+    # beside the checkpoint and the final accumulator, so it caps the value tile
+    # instead of taking the large one; the plain and non-aligned fused paths stay
+    # at the stock verify's matrix count and keep the large-tile upgrade.
     is_a5 = is_950()
     block_v = min(triton.next_power_of_2(value_dim), RECOVERSSM_VALUE_TILE)
-    if is_a5 and block_v < RECOVERSSM_VALUE_TILE_LARGE and batch * num_heads >= RECOVERSSM_LARGE_TILE_MIN_PROGRAMS:
+    has_replay = replay_commit_lens is not None
+    caps_large_tile = has_replay and replay_align
+    if (
+        is_a5
+        and not caps_large_tile
+        and block_v < RECOVERSSM_VALUE_TILE_LARGE
+        and batch * num_heads >= RECOVERSSM_LARGE_TILE_MIN_PROGRAMS
+    ):
         large_v = min(triton.next_power_of_2(value_dim), RECOVERSSM_VALUE_TILE_LARGE)
         if batch * num_heads * triton.cdiv(value_dim, large_v) >= RECOVERSSM_LARGE_TILE_MIN_PROGRAMS:
             block_v = large_v
@@ -1306,6 +1373,7 @@ def kda_recoverssm_verify(
         USE_LOWER_BOUND=lower_bound is not None,
         ALIGN_MODE=replay_align,
         SPEC_QUERY_LEN=spec_query_len,
+        UNROLL_REPLAY=is_a5,
         num_warps=4,
         num_stages=2,
     )
@@ -1913,6 +1981,7 @@ def _prepare_flush_plan_kernel(
 __all__ = [
     "KDARecoverSSMCommitContext",
     "kda_recoverssm_verify",
+    "recoverssm_replays",
     "_defer_commit_kernel",
     "_prepare_flush_plan_kernel",
 ]

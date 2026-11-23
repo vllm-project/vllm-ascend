@@ -331,3 +331,23 @@ def test_prefill_chunk_offsets_exclude_ordinary_decode(monkeypatch):
     args, kwargs = prepare_chunk.call_args
     assert args[0] is builder and args[1].tolist() == [0, 4, 10] and args[2] == starts.device
     assert kwargs == {"build_device_metadata": False}
+
+
+def test_recoverssm_replays_fusion_threshold_and_env_override(monkeypatch):
+    from vllm_ascend.ops.triton.kda import recoverssm as mod
+
+    # Default per-head-count table: 12 heads fuses at 192 (request, head) items,
+    # every other head count at 384, matching upstream cutedsl/kda/prepared.py.
+    assert not mod.recoverssm_replays(12, 15)  # 180 < 192
+    assert mod.recoverssm_replays(12, 16)  # 192 >= 192
+    assert not mod.recoverssm_replays(8, 47)  # 376 < 384
+    assert mod.recoverssm_replays(8, 48)  # 384 >= 384
+    assert not mod.recoverssm_replays(8, 0)  # empty steps never fuse
+
+    # The env override pins the threshold and applies to every head count.
+    monkeypatch.setenv("VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS", "64")
+    assert not mod.recoverssm_replays(4, 15)  # 60 < 64
+    assert mod.recoverssm_replays(4, 16)  # 64 >= 64
+    assert mod.recoverssm_replays(64, 1)  # items are heads x requests
+    monkeypatch.delenv("VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS")
+    assert mod.recoverssm_replays(8, 48)  # back to the default table
