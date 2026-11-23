@@ -918,7 +918,7 @@ layerwise setting and topology.
 
     See [950DT preparation](#glm-950-preparation) for checkpoint, environment and PP-node settings.
 
-    This 2P1D service layout has two independent Prefill instances and one Decode group. Each Prefill instance uses PP2/TP1/PCP8 across two eight-device nodes: P0/P1 form the first instance, and P2/P3 form the second. P0 and P2 expose the two Prefill API endpoints; P1 and P3 run headless. Decode uses DP16/TP1 across D0/D1, with eight local ranks per node (global ranks 0-15). Both roles declare DP16/TP1 in MooncakeConnectorV2. Prefill uses one MTP token; Decode uses five, a 60-token batch budget, and at most ten sequences per rank.
+    This GLM-5.3 2P1D service layout has two independent Prefill instances and one Decode group. Each Prefill instance uses PP2/TP1/PCP8 across two eight-device nodes: P0/P1 form the first instance, and P2/P3 form the second. P0 and P2 expose the two Prefill API endpoints; P1 and P3 run headless. Decode uses DP16/TP1 across D0/D1, with eight local ranks per node (global ranks 0-15). Both roles declare DP16/TP1 in MooncakeConnectorV2. Prefill uses one MTP token; Decode uses DFlash with seven speculative tokens, an 80-token batch budget, and at most ten sequences per rank.
 
     ###### Prepare the Scripts
 
@@ -1201,7 +1201,10 @@ layerwise setting and topology.
             ```shell
             #!/usr/bin/env bash
 
+            source /root/.bashrc
+
             : "${MODEL_PATH:?Set the checkpoint path on every node}"
+            : "${DRAFT_MODEL_PATH:?Set the GLM-5.3 DFlash2 checkpoint path on each Decode node}"
             : "${LOCAL_IP:?Set this node address}"
             : "${NIC_NAME:?Set the matching network interface}"
             local_ip="$LOCAL_IP"
@@ -1227,7 +1230,7 @@ layerwise setting and topology.
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
             export HCCL_EXEC_TIMEOUT=1800
             export HCCL_CONNECT_TIMEOUT=1800
-            export HCCL_BUFFSIZE=900
+            export HCCL_BUFFSIZE=300
 
             export OMP_PROC_BIND=false
             export OMP_NUM_THREADS=10
@@ -1247,6 +1250,8 @@ layerwise setting and topology.
             export VLLM_USE_V2_MODEL_RUNNER=1
             export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
+            export VLLM_KV_CACHE_LAYOUT=HND
+
             vllm serve "$MODEL_PATH" \
               --host 0.0.0.0 \
               --port "$2" \
@@ -1256,7 +1261,7 @@ layerwise setting and topology.
               --data-parallel-rpc-port $6 \
               --tensor-parallel-size $7 \
               --max-model-len 135000  \
-              --max-num-batched-tokens 60 \
+              --max-num-batched-tokens 80 \
               --served-model-name glm \
               --gpu-memory-utilization 0.95 \
               --enable-expert-parallel \
@@ -1267,37 +1272,56 @@ layerwise setting and topology.
               --tool-call-parser glm47 \
               --reasoning-parser glm47 \
               --async-scheduling \
-              --enable-prefix-caching \
+              --no-enable-prefix-caching \
               --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-              --speculative-config '{"num_speculative_tokens": 5,"method": "deepseek_mtp", "enforce_eager":true}' \
+              --speculative-config '{"num_speculative_tokens": 7, "method": "dflash", "model": "'"$DRAFT_MODEL_PATH"'", "enforce_eager":true, "kv_cache_dtype": "auto"}' \
               --kv-transfer-config \
-                '{"kv_connector": "MooncakeConnectorV2",
-                "kv_role": "kv_consumer",
-                "engine_id": "2",
-                "kv_port": "30300",
-                "kv_connector_extra_config": {
-                            "use_ascend_direct": true,
-                            "prefill": {
-                                    "dp_size": 1,
-                                    "tp_size": 1, "pcp_size": 8,
-                                    "pp_size": 2,
-                                    "pp_layer_partition": "42,36"
-                            },
-                            "decode": {
-                                    "dp_size": 16,
-                                    "tp_size": 1
-                            }
-                    }
+                '{
+                  "kv_connector": "MultiConnector",
+                  "kv_role": "kv_consumer",
+                  "engine_id": "2",
+                  "kv_connector_extra_config": {
+                    "connectors": [
+                      {
+                        "kv_connector": "MooncakeConnectorV2",
+                        "kv_role": "kv_consumer",
+                        "kv_port": 29200,
+                        "kv_connector_extra_config": {
+                          "use_ascend_direct": true,
+                          "prefill": {
+                            "dp_size": 1,
+                            "pp_size": 2,
+                            "pp_layer_partition": "42,36",
+                            "pcp_size": 8,
+                            "tp_size": 1
+                          },
+                          "decode": {
+                            "tp_size": 1,
+                            "dp_size": 16
+                          }
+                        }
+                      },
+                      {
+                        "kv_connector": "PreemptOffloadConnector",
+                        "kv_role": "kv_consumer",
+                        "kv_connector_extra_config": {
+                          "cpu_bytes_to_use_per_rank": 4294967296
+                        }
+                      }
+                    ]
+                  }
                 }' \
               --kv-cache-dtype fp8 \
               --attention_config.indexer_kv_dtype fp8 \
-              --additional-config '{"enable_cpu_binding": true,"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false, "enable_super_kernel": false}, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":8}, "enable_mlapo": true}'
+              --additional-config '{"weight_nz_mode": 1, "enable_cpu_binding": true,"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false, "enable_super_kernel": false}, "scheduler_config": {"recompute_scheduler_enable": true}, "multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":8, "oproj_tensor_parallel_size":8}, "enable_mlapo": true}'
             ```
 
     ###### Start the Engines
 
     Export the node-specific `MODEL_PATH`, `LOCAL_IP` and `NIC_NAME`, and the shared
-    `D0_IP` address before starting the corresponding node script. Set
+    `D0_IP` address before starting the corresponding node script. On D0/D1,
+    also export `DRAFT_MODEL_PATH="<GLM_5_3_DFLASH2_CHECKPOINT_PATH>"` for the
+    matching local draft checkpoint. This DFlash example is specific to GLM-5.3. Set
     `PP_MASTER_IP` inside each Prefill script: `<P0_IP>` on P0/P1 and `<P2_IP>`
     on P2/P3. Save the appropriate PP-rank script above as `run_dp_template.sh`
     on each node. Run each command on its named node in a separate terminal.
@@ -1346,7 +1370,7 @@ layerwise setting and topology.
 
     Reserve API ports, PP master port 7060 where applicable, DP RPC ports,
     and connector-derived transfer/handshake ports. Base KV ports are P:30000
-    and D:30300 for ordinary PD/pooling, or D:30200 for 1M. Do not run multiple
+    and D:29200 for ordinary PD, D:30300 for pooling, or D:30200 for 1M. Do not run multiple
     scenarios simultaneously on the same devices or ports.
 
     Run the proxy on a separate host after all API endpoints are healthy.
@@ -1395,18 +1419,23 @@ layerwise setting and topology.
       each node. Register all 16 endpoints with the proxy.
     - Both roles use `--max-model-len 135000`. Prefill sets
       `--max-num-seqs 500` and `--max-num-batched-tokens 16384`;
-      Decode sets `10` and `60`, respectively, per engine.
-    - Both roles use FP8 attention and indexer KV caches. MTP uses
-      `deepseek_mtp` with an eager draft: one speculative token on Prefill
-      and five on Decode. Prefill uses `--enforce-eager`; Decode uses
-      `FULL_DECODE_ONLY` graph mode.
+      Decode sets `10` and `80`, respectively, per engine.
+    - Both roles use FP8 attention and indexer KV caches. Prefill uses
+      `deepseek_mtp` with one speculative token and `--enforce-eager`.
+      Decode uses DFlash with seven speculative tokens, an eager draft and
+      draft `kv_cache_dtype: auto`, with `FULL_DECODE_ONLY` target graph mode.
     - `MooncakeConnectorV2` uses `kv_producer` on Prefill and `kv_consumer`
-      on Decode, with base KV ports `30000` and `30300`, respectively.
+      on Decode, with base KV ports `30000` and `29200`, respectively.
       The connector describes each Prefill instance as DP1/PP2/TP1/PCP8 and
       the shared Decode group as DP16/TP1.
     - Prefill enables FlashComm1 and `enable_fused_mc2: 2`.
-      Decode enables MLAPO. Both roles enable shared-expert multistream
-      overlap, prefix caching and recomputation scheduling.
+      Decode enables MLAPO, `weight_nz_mode: 1`, LM-head TP8 and output-projection
+      TP8. Both roles enable shared-expert multistream overlap and recomputation
+      scheduling. Prefill enables prefix caching; Decode disables it.
+    - Decode uses `HCCL_BUFFSIZE=300` and `VLLM_KV_CACHE_LAYOUT=HND`.
+      Its `MultiConnector` combines `MooncakeConnectorV2` with
+      `PreemptOffloadConnector`, reserving 4 GiB of CPU memory per rank
+      (32 GiB on each eight-rank Decode node) for preempted KV cache.
     - `enable_fused_mc2: 2` selects MegaMoE when `cann_ops_transformer`
       is installed. In the selected maintenance branch, MTP draft MoE
       layers with an unsupported quantization layout use the non-fused
@@ -4807,11 +4836,11 @@ The Colocated rows summarize the multi-node examples in
 [Section 5.1.1](#511-single-node-deployment) use different parallelism and
 scheduler limits; do not apply the multi-node rows to those examples.
 
-| Scenario | Hardware | Role | TP | PCP | Global DP | Local DP | PP | DCP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Spec Num |
+| Scenario | Hardware | Role | TP | PCP | Global DP | Local DP | PP | DCP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | Speculative Tokens |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Colocated | 950DT | Shared | 8 | 1 | 1 | 1 | 2 | 1 | 500 | 16384 | 135000 | 5 |
 | Ordinary PD | 950DT | Prefill (2 instances) | 1 | 8 | 1 | 1 | 2 | 1 | 500 | 16384 | 135000 | 1 |
-| Ordinary PD | 950DT | Decode | 1 | 1 | 16 | 8 | 1 | 1 | 10 | 60 | 135000 | 5 |
+| Ordinary PD | 950DT | Decode | 1 | 1 | 16 | 8 | 1 | 1 | 10 | 80 | 135000 | 7 (DFlash) |
 | Pooled PD | 950DT | Prefill | 8 | 1 | 1 | 1 | 2 | 1 | 8 | 4096 | 1048576 | 1 |
 | Pooled PD | 950DT | Decode | 2 | 1 | 16 | 4 | 1 | 1 | 10 | 60 | 1048576 | 5 |
 | 1M PD | 950DT | Prefill | 8 | 1 | 2 | 1 | 1 | 1 | 64 | 32768 | 1046576 | 1 |
