@@ -187,6 +187,7 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
         if metadata.num_prefills:
             # All layers in this metadata batch share the same token extent.
             rows = torch.arange(metadata.num_input_tokens, dtype=torch.int32, device=self.device)
+            assert metadata.query_start_loc is not None
             metadata.prefill_valid_token_mask = rows[:, None] < metadata.query_start_loc[-1]
             seq_lens_cpu = metadata.seq_lens_cpu
             if seq_lens_cpu is None:
