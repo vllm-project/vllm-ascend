@@ -49,6 +49,9 @@ def _bool_env(name: str, default: bool) -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Experimental A3 BF16 paged-FIA 9..15-query workaround. Default: disabled.
+    # Valid values: 0/1. Not sensitive. Enable only on the validated A3 runtime.
+    "VLLM_ASCEND_FIA_SHORT_QUERY_WORKAROUND": lambda: os.getenv("VLLM_ASCEND_FIA_SHORT_QUERY_WORKAROUND", "0") == "1",
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.
