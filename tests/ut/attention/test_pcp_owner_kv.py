@@ -113,6 +113,40 @@ def test_owner_connector_gate_rejects_unvalidated_connectors():
     assert owner_kv.validate_owner_connector(_config(kv_transfer=unnamed))[0] is False
 
 
+def test_owner_connector_gate_finds_nested_layerwise_options():
+    # Connector option names are not normalized across backends, so a nested
+    # use_layerwise must still reject owner sharing.
+    nested = _kv_transfer(
+        "AscendStoreConnector",
+        {"backend": {"mooncake": {"options": [{"use_layerwise": True}]}}},
+    )
+    supported, reason = owner_kv.validate_owner_connector(_config(kv_transfer=nested))
+    assert supported is False
+    assert "layerwise" in reason
+
+    nested_child = _kv_transfer(
+        "MultiConnector",
+        {
+            "connectors": [
+                {
+                    "kv_connector": "AscendStoreConnector",
+                    "kv_connector_extra_config": {"backend": {"options": {"use_layerwise": True}}},
+                }
+            ]
+        },
+    )
+    supported, reason = owner_kv.validate_owner_connector(_config(kv_transfer=nested_child))
+    assert supported is False
+    assert "layerwise" in reason
+
+    # Explicitly disabled nested options stay accepted.
+    disabled = _kv_transfer(
+        "AscendStoreConnector",
+        {"backend": {"options": {"use_layerwise": False}}},
+    )
+    assert owner_kv.validate_owner_connector(_config(kv_transfer=disabled)) == (True, "")
+
+
 def test_resolve_owner_sharing_uses_the_device_backend_probe(monkeypatch):
     from vllm_ascend.attention.context_parallel import pcp_owner_vmm
 
