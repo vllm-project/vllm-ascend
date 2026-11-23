@@ -510,6 +510,11 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
             }
 
+        # Runtime dummy sampling must fit the outer DP bound; keep the padded
+        # forward token count and capture descriptor's request count unchanged.
+        pad_size = getattr(self, "_lmhead_pad_size", None)
+        if pad_size is not None and self._eplb_dummy_run:
+            num_reqs = min(num_reqs, pad_size)
         with self._lmhead_pad_size_context(capture_num_reqs=num_reqs):
             # vLLM main forwards `skip_sample` so the drafter KV stays in sync
             # without sampling when num_speculative_tokens == 0.
