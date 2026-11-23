@@ -291,6 +291,15 @@
 #    Future Plan:
 #       Remove once upstream exposes the PD role to the coordinator or
 #       removes the EAGLE last-block drop for verified prompt blocks.
+#   3. `Scheduler._get_local_prefix_cache_hit`
+#    Why:
+#       Local hashes can refer to overwritten GLM prefill pages.
+#    How:
+#       Ask Mooncake Store for a verified prefix bound before local admission.
+#    Related PR:
+#       vllm-ascend #21301.
+#    Future Plan:
+#       Remove when upstream supports connector-verified prefix admission.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

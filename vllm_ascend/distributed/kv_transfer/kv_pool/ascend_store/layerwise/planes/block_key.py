@@ -49,6 +49,10 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
 
     def prepare_sessions(self, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
         worker = self._worker
+        if worker.layerwise_offload:
+            from .block_key_offload import prepare_offload_sessions
+
+            return prepare_offload_sessions(worker, requests)
         if worker.block_key_hybrid:
             return self._prepare_hybrid_sessions(requests)
         self._prepare_single_group_sessions(requests)
@@ -56,7 +60,7 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
 
     def finish_sessions(self) -> None:
         worker = self._worker
-        if worker._layer_load_aborted.is_set():
+        if worker._layer_load_aborted.is_set() or worker.layerwise_offload:
             req_ids = worker._current_layerwise_request_ids.copy()
             worker._release_layerwise_requests_for_retry(req_ids)
         else:
