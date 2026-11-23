@@ -100,6 +100,7 @@ ALLOWED_VALUES: dict[str, set[str]] = {
     "quantization": {
         "FP16",
         "BF16",
+        "FP8",
         "W8A8",
         "W4A8",
         "W8A8_dynamic",
