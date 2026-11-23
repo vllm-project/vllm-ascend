@@ -901,15 +901,23 @@ class BaseKVPoolWorker(ABC):
         )
         self._previous_save_batch = None
 
-    def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
-        if self.kv_send_thread is not None:
-            send_thread = self.kv_send_thread
-            for req_id in meta.preempted_req_ids:
+    def discard_preempted_requests(self, req_ids: set[str]) -> None:
+        """Retire the old allocation before any transfers for this step start."""
+        send_thread = self.kv_send_thread
+        if send_thread is not None:
+            for req_id in req_ids:
                 if isinstance(send_thread, (KVCacheStoreSendingThread, KVCacheStoreLayerSendingThread)):
                     send_thread.delete_finished_stored_request(req_id)
                 if isinstance(send_thread, KVCacheStoreSendingThread):
                     send_thread.reset_saved_request(req_id)
                     self._retired_store_req_ids.discard(req_id)
+            send_thread.discard_finished_requests(req_ids)
+        if self.kv_recv_thread is not None:
+            self.kv_recv_thread.discard_finished_requests(req_ids)
+
+    def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
+        if self.kv_send_thread is not None:
+            send_thread = self.kv_send_thread
             if isinstance(send_thread, KVCacheStoreSendingThread):
                 for req_id in finished_req_ids:
                     if send_thread.is_stored_request(req_id):
@@ -921,7 +929,6 @@ class BaseKVPoolWorker(ABC):
                     if not send_thread.is_stored_request(req_id):
                         send_thread.reset_saved_request(req_id)
                         self._retired_store_req_ids.discard(req_id)
-            self.kv_send_thread.discard_finished_requests(meta.preempted_req_ids)
             # Saves complete synchronously in wait_for_save(), so the scheduler
             # never waits for a request-level finished_sending notification.
             self.kv_send_thread.get_and_clear_finished_requests()
@@ -930,10 +937,8 @@ class BaseKVPoolWorker(ABC):
             done_sending = set()
 
         done_recving = set()
-        if self.kv_recv_thread is not None:
-            self.kv_recv_thread.discard_finished_requests(meta.preempted_req_ids)
-            if self.load_async and not self.use_layerwise:
-                done_recving = self.kv_recv_thread.get_and_clear_finished_requests(meta.loading_req_ids)
+        if self.kv_recv_thread is not None and self.load_async and not self.use_layerwise:
+            done_recving = self.kv_recv_thread.get_and_clear_finished_requests(meta.loading_req_ids)
 
         logger.debug(
             "Number of completed KV cache send requests: %d, receive requests: %d, tp_rank:%d",

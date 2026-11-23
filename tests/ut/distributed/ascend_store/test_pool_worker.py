@@ -1893,8 +1893,46 @@ class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
         recv_thread.reset_mock()
         recv_thread.get_and_clear_finished_requests.return_value = set()
         meta = AscendConnectorMetadata({"r_preempted"}, loading_req_ids=set())
+        worker.discard_preempted_requests(meta.preempted_req_ids)
         worker.get_finished(set(), meta)
         recv_thread.discard_finished_requests.assert_called_once_with({"r_preempted"})
+
+    def test_reset_does_not_discard_completion_from_readmission(self):
+        worker = self._make_worker(kv_role="kv_consumer")
+        worker.kv_send_thread = None
+        worker.load_async = True
+        completed = {"r1", "other"}
+        recv = MagicMock()
+        recv.discard_finished_requests.side_effect = completed.difference_update
+        recv.get_and_clear_finished_requests.side_effect = lambda ids: completed & ids
+        worker.kv_recv_thread = recv
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.connector_worker = worker
+        metadata = AscendConnectorMetadata({"r1"}, loading_req_ids={"r1"})
+
+        connector.handle_preemptions(metadata)
+        self.assertEqual(completed, {"other"})
+        # The replacement allocation completes before the end-of-step poll.
+        completed.add("r1")
+        self.assertEqual(worker.get_finished(set(), metadata), (set(), {"r1"}))
+
+    def test_reset_preserves_replacement_layerwise_snapshot_and_session(self):
+        worker = make_worker(self, use_layerwise=True, extra_config={"backend": "memcache"})
+        worker.use_block_key_layerwise = True
+        worker.kv_recv_thread = worker.kv_send_thread = None
+        worker._snapshot_keys = {"r1": {"old"}, "other": {"keep"}}
+        open_sessions = {"r1", "other"}
+        worker._release_layerwise_requests_terminal = MagicMock(side_effect=open_sessions.difference_update)
+        metadata = AscendConnectorMetadata({"r1"})
+
+        worker.discard_preempted_requests(metadata.preempted_req_ids)
+        self.assertEqual(worker._snapshot_keys, {"other": {"keep"}})
+        self.assertEqual(open_sessions, {"other"})
+        worker._snapshot_keys["r1"] = {"new"}
+        open_sessions.add("r1")
+        worker.get_finished({"other"}, metadata)
+        self.assertEqual(worker._snapshot_keys, {"r1": {"new"}})
+        self.assertEqual(open_sessions, {"r1"})
 
     def test_get_finished_layerwise_send_thread(self):
         worker = self._make_worker(kv_role="kv_producer")

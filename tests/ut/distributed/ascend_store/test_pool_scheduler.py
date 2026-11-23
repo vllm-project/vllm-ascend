@@ -1205,6 +1205,53 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         self.assertNotIn("r1", scheduler._request_trackers)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_reset_and_resume_in_same_step(self, mock_client_cls):
+        for mode in ("cached", "new", "async"):
+            with self.subTest(mode=mode):
+                config = self._make_config()
+                config.use_v2_model_runner = mode == "new"
+                scheduler = KVPoolScheduler(config, use_layerwise=False)
+                scheduler.load_async = mode == "async"
+                request = MagicMock(
+                    request_id="r1",
+                    num_computed_tokens=0,
+                    prompt_token_ids=list(range(32)),
+                    all_token_ids=list(range(32)),
+                    block_hashes=[b"h0", b"h1"],
+                )
+                old = RequestTracker(req_id="r1", token_len=32, allocated_block_ids=[2, 3])
+                scheduler._unfinished_requests["r1"] = (request, [[2, 3]])
+                scheduler._request_trackers["r1"] = old
+                blocks = MagicMock()
+                blocks.get_block_ids.return_value = ([7, 8],)
+                scheduler.load_specs["r1"] = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=False)
+                scheduler.update_state_after_alloc(request, blocks, num_external_tokens=16)
+                item = SimpleNamespace(
+                    req_id="r1",
+                    prompt_token_ids=list(range(32)),
+                    prefill_token_ids=None,
+                    block_ids=([7, 8],),
+                    num_computed_tokens=0,
+                )
+                output = SimpleNamespace(
+                    finished_req_ids=set(),
+                    preempted_req_ids={"r1"},
+                    scheduled_new_reqs=[item] if mode == "new" else [],
+                    scheduled_cached_reqs=SimpleNamespace(
+                        req_ids=["r1"] if mode == "cached" else [],
+                        new_block_ids=[([7, 8],)] if mode == "cached" else [],
+                    ),
+                    num_scheduled_tokens={} if mode == "async" else {"r1": 32},
+                )
+                metadata = scheduler.build_connector_meta(output)
+                self.assertEqual(metadata.preempted_req_ids, {"r1"})
+                self.assertEqual(metadata.loading_req_ids, {"r1"} if mode == "async" else set())
+                self.assertEqual(scheduler._unfinished_requests["r1"], (request, [[7, 8]]))
+                self.assertIsNot(scheduler._request_trackers["r1"], old)
+                self.assertEqual(scheduler._request_trackers["r1"].allocated_block_ids_by_group, [[7, 8]])
+                self.assertEqual([entry.req_id for entry in metadata.requests], ["r1"])
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_build_connector_meta_preempted(self, mock_client_cls):
         config = self._make_config()
         scheduler = KVPoolScheduler(config, use_layerwise=False)
@@ -1247,6 +1294,7 @@ def test_connector_metadata_preserves_unscheduled_request_order(unfinished_ids, 
     scheduler._request_trackers = {}
     scheduler._unfinished_requests = {req_id: (SimpleNamespace(request_id=req_id), []) for req_id in unfinished_ids}
     scheduler._preempted_req_ids = set()
+    scheduler._allocated_this_step = set()
     scheduler._async_loading_req_ids = set()
     scheduler._process_new_request = MagicMock(return_value=None)
     scheduler._process_async_load_request = MagicMock(side_effect=lambda req_id, *_: SimpleNamespace(req_id=req_id))
@@ -1277,6 +1325,7 @@ def test_connector_metadata_without_pending_requests_does_not_scan_cached_ids(cl
     scheduler._request_trackers = {}
     scheduler._unfinished_requests = {} if cleared_by == "already-empty" else {"retired": (None, [])}
     scheduler._preempted_req_ids = set()
+    scheduler._allocated_this_step = set()
     scheduler._async_loading_req_ids = set()
     scheduler._process_new_request = MagicMock(return_value=None)
     scheduler._process_async_load_request = MagicMock()
@@ -1318,6 +1367,7 @@ def test_connector_metadata_filter_has_linear_key_lookup_work():
     scheduler._request_trackers = {}
     scheduler._unfinished_requests = {req_id: (None, []) for req_id in request_ids + pending_ids}
     scheduler._preempted_req_ids = set()
+    scheduler._allocated_this_step = set()
     scheduler._async_loading_req_ids = set()
     scheduler._process_async_load_request = MagicMock(side_effect=lambda req_id, *_: SimpleNamespace(req_id=req_id))
     scheduler.retain_blocks_for_save = MagicMock()
