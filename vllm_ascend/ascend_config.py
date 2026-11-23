@@ -587,6 +587,7 @@ class AscendConfig:
         == DeviceAdaptorFamily.FP8_OPTIMIZED
     )
     enable_prefill_mc2: bool = False
+    enable_multi_streams: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
     # Static E4M3 PA_NZ is opt-in; C16 preserves the existing MLA KV path.

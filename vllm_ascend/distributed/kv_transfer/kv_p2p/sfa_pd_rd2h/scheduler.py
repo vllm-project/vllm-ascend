@@ -395,6 +395,7 @@ class SFAPDRD2HScheduler:
             self._dspark_pending_recv.add(request.request_id)
         self._reqs_need_recv.add(request.request_id)
         allocator = getattr(self, "_copy_sfa_slot_allocator", None)
+        pool_slot = None
         if allocator is not None:
             kv_tokens = request.num_computed_tokens + num_external_tokens
             if kv_tokens <= 0:

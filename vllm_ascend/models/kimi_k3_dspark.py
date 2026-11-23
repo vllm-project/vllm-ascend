@@ -9,6 +9,7 @@ import torch
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
@@ -216,6 +217,36 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
             prefix=maybe_prefix(prefix, "markov_head"),
         )
 
+    def _start_flash_mla_metadata(self) -> None:
+        """Start draft FlashMLA metadata before the draft layer loop."""
+        if not is_forward_context_available():
+            return
+        attn_metadata = get_forward_context().attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return
+        started = set()
+        for layer in self.layers:
+            self_attn = getattr(layer, "self_attn", None)
+            impl = getattr(self_attn, "impl", None)
+            if impl is None or not hasattr(impl, "start_flash_mla_metadata"):
+                continue
+            layer_name = getattr(self_attn, "layer_name", None) or getattr(impl, "layer_name", None)
+            layer_metadata = attn_metadata.get(layer_name)
+            flash = (
+                layer_metadata.get_external_flashmla(getattr(impl, "flash_mla_layout", None))
+                if layer_metadata is not None
+                else None
+            )
+            if (
+                flash is None
+                or not getattr(flash, "metadata_async", False)
+                or getattr(layer_metadata, "num_decode_tokens", 0) <= 0
+                or id(flash) in started
+            ):
+                continue
+            impl.start_flash_mla_metadata(layer_metadata)
+            started.add(id(flash))
+
     @torch.inference_mode()
     def precompute_and_store_context_kv(
         self,
@@ -267,6 +298,10 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Keep draft metadata on its private side stream from the beginning of
+        # every step, allowing embedding and the rest of the draft pipeline to
+        # overlap with schedule construction.
+        self._start_flash_mla_metadata()
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
         hidden_states = inputs_embeds

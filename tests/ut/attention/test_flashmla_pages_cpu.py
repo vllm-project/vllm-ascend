@@ -118,6 +118,7 @@ def test_selection_keeps_reader_page_and_interleave_consistent(page, interleave,
     }
     select = load(MLA, "_can_use_flashmla", scope, "AscendMLAImpl")
     impl = SimpleNamespace(
+        flash_mla_layout="pa_bbnd",
         is_draft_cache=draft,
         non_causal_multi_token_decode=noncausal,
         num_heads=12,

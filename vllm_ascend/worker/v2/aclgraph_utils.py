@@ -325,16 +325,50 @@ class ModelWithContext(nn.Module):
         if self.is_draft_model_prefill:
             _EXTRA_CTX.is_draft_model_prefill = True
 
+        flash_producers = []
         try:
+            if _EXTRA_CTX.capturing:
+                self._start_flashmla_metadata(forward_context.attn_metadata, flash_producers)
             if self.device_metadata is not None:
                 self.device_metadata.begin_forward()
             return self.original_model(*args, **kwargs)
         finally:
+            # A conditional or dummy forward may not consume every producer.
+            # Join all of them before capture exits, including unused ones.
+            for builder, flash in flash_producers:
+                builder.wait_metadata(flash)
             # Warmup and actual capture receive separate prepare_attn calls.
             # Retire each submission, including unused producers, after its
             # consumers; do not wait for metadata at graph entry.
             if self.device_metadata is not None:
                 self.device_metadata.finish()
+
+    def _start_flashmla_metadata(self, attn_metadata, producers) -> None:
+        """Fork active FlashMLA producers at the beginning of FULL capture."""
+        if not isinstance(attn_metadata, dict):
+            return
+        started = set()
+        for module in self.original_model.modules():
+            impl = getattr(module, "impl", None)
+            builder = getattr(impl, "flash_mla_metadata_builder", None)
+            if builder is None:
+                continue
+            name = getattr(module, "layer_name", None) or getattr(impl, "layer_name", None)
+            metadata = attn_metadata.get(name)
+            if metadata is None or getattr(metadata, "num_decode_tokens", 0) <= 0:
+                continue
+            flash = metadata.get_external_flashmla(getattr(impl, "flash_mla_layout", None))
+            if flash is None or not flash.metadata_async or id(flash) in started:
+                continue
+            # Force a fresh fork inside the graph even if warmup used the same
+            # buffer. The model-level hook must not start it a second time.
+            flash.metadata_started = False
+            flash.metadata_capture_started = True
+            builder.start_metadata(flash)
+            if flash.metadata_async:
+                flash.metadata_capture_events.append((flash.metadata_start, flash.metadata_ready))
+            producers.append((builder, flash))
+            started.add(id(flash))
 
     def get_original_model(self):
         return self.original_model

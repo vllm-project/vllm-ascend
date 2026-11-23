@@ -569,10 +569,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         )
 
     def _decode_requires_current_kv(self, attn_metadata: AscendMLAMetadata) -> bool:
-        if attn_metadata.external_flashmla is not None:
-            # FlashMLA attends persistent history and this step's KV in one
-            # operator call, so no replicated current chunk is staged.
-            return False
+        flash = attn_metadata.get_external_flashmla(self.flash_mla_layout)
+        if flash is not None:
+            return flash.current is not None
         return use_history_current_split_decode(
             attn_metadata,
             is_draft_model=_EXTRA_CTX.is_draft_model,
@@ -581,9 +580,13 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         )
 
     def _forward_external_flashmla(self, preprocessed, fused_cache, metadata):
-        assert metadata.external_flashmla is not None
+        flash = metadata.get_external_flashmla(self.flash_mla_layout)
+        assert flash is not None
         if not isinstance(fused_cache, torch.Tensor):
             raise RuntimeError("DCP FlashMLA requires the original fused BBND cache")
+        if flash.metadata_async and not flash.metadata_started:
+            self.start_flash_mla_metadata(metadata)
+        self.wait_flash_mla_metadata(metadata)
         record_attention_compute_start()
         # The framework owns stream ordering, exchange, reduction and V-up.
         return self._forward_decode_split_attention(
@@ -597,14 +600,37 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             metadata,
         )
 
-    def _run_dcp_flashmla_attention(self, flash, q_nope, q_pe, cache):
-        """Adapt FlashMLA to TND/NT1 over the whole decode range."""
-        query = flash.query
-        adapter, schedule = flash.adapter, flash.schedule
-        block_table, cache_lens = flash.block_table, flash.cache_lens
-        attn_mask = flash.attn_mask
-        query[..., : self.kv_lora_rank].copy_(q_nope)
-        query[..., self.kv_lora_rank :].copy_(q_pe)
+    def _prepare_dcp_flashmla_current(self, flash, q_nope, q_pe, k_nope, k_pe):
+        """Stage current KV and Q on the main stream before history packing."""
+        current = flash.current
+        assert current is not None
+        assert k_nope is not None and k_pe is not None
+        torch_npu.npu_scatter_pa_kv_cache(
+            key=k_nope.reshape(-1, 1, self.kv_lora_rank).contiguous(),
+            value=k_pe.reshape(-1, 1, self.qk_rope_head_dim).contiguous(),
+            key_cache=current.cache[..., : self.kv_lora_rank],
+            value_cache=current.cache[..., self.kv_lora_rank :],
+            slot_mapping=current.slots,
+            cache_mode="Norm",
+        )
+        current.query[..., : self.kv_lora_rank].copy_(q_nope)
+        current.query[..., self.kv_lora_rank :].copy_(q_pe)
+
+    def _run_dcp_flashmla_attention(self, flash, q_nope, q_pe, k_nope, k_pe=None, *, attention_kind=CPKVScope.HISTORY):
+        """Adapt FlashMLA to TND/TN1; current KV/Q must already be staged."""
+        if attention_kind is CPKVScope.CURRENT:
+            current = flash.current
+            assert current is not None
+            query, cache = current.query, current.cache
+            adapter, schedule = current.adapter, current.schedule
+            block_table, cache_lens, attn_mask = current.block_table, flash.used_q, current.attn_mask
+        else:
+            query, cache = flash.query, k_nope
+            adapter, schedule = flash.adapter, flash.schedule
+            block_table, cache_lens = flash.block_table, flash.cache_lens
+            attn_mask = None if flash.current is not None else flash.attn_mask
+            query[..., : self.kv_lora_rank].copy_(q_nope)
+            query[..., self.kv_lora_rank :].copy_(q_pe)
         output, lse = adapter.attention(
             query,
             cache,
@@ -614,6 +640,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             seqused_q=flash.used_q,
             metadata=schedule,
             attn_mask=attn_mask,
+            q_len=flash.q_len,
         )
         return output.transpose(0, 1), lse.transpose(0, 1).unsqueeze(-1)
 
@@ -726,8 +753,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         current_k_pe: torch.Tensor | None,
         block_size: int,
         attn_metadata: AscendMLAMetadata,
+        current_kv_staged: bool = False,
     ) -> torch.Tensor:
-        flash = getattr(attn_metadata, "external_flashmla", None)
+        flash = attn_metadata.get_external_flashmla(self.flash_mla_layout)
         decode_meta = attn_metadata.decode
         if flash is None:
             assert isinstance(decode_meta, AscendMLADCPDecodeMetadata)
@@ -746,14 +774,15 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             # FlashMLA consumes the original paged cache, including its strides.
             history_k_nope, history_k_pe = cache_k_nope, None
 
-        # FlashMLA attends persistent history and this step's KV in one operator
-        # call, so only the framework path stages a replicated current chunk.
-        uses_current_chunk = flash is None
-        if uses_current_chunk:
-            assert current_k_nope is not None and current_k_pe is not None
+        # Native FlashMLA covers history and current in one causal call.
+        # PA_NZ speculative decode keeps its replicated current chunk separate.
+        has_current = flash is None or flash.current is not None
+        if has_current:
             current_q_nope, current_q_pe = self._local_decode_query(q_nope, q_pe, num_heads=self.num_heads)
-            current_k_nope = current_k_nope.view(num_tokens, self.num_kv_heads, self.kv_lora_rank).contiguous()
-            current_k_pe = current_k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim).contiguous()
+            if not current_kv_staged:
+                assert current_k_nope is not None and current_k_pe is not None
+                current_k_nope = current_k_nope.view(num_tokens, self.num_kv_heads, self.kv_lora_rank).contiguous()
+                current_k_pe = current_k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim).contiguous()
 
         if _EXTRA_CTX.capturing and flash is None:
             assert isinstance(decode_meta, AscendMLADCPDecodeMetadata)
@@ -829,18 +858,27 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 attention_kind=CPKVScope.HISTORY,
             )
         else:
-            # One call covers persistent history and this step's KV; the metadata
-            # operator owns the causal boundary of the local slice.
-            history_output, history_lse = self._run_dcp_flashmla_attention(flash, q_nope, q_pe, history_k_nope)
+            history_output, history_lse = self._run_dcp_flashmla_attention(
+                flash, q_nope, q_pe, history_k_nope, history_k_pe, attention_kind=CPKVScope.HISTORY
+            )
 
-        # Stage the framework's current KV and Q on the main stream so its AIV
-        # scatter/copies cannot contend with history output packing. Only the
-        # framework current attention overlaps packing and exchange on the side
-        # stream; the ready event also protects the shared FIA workspace.
+        # Stage FlashMLA's current KV and Q on the main stream so its AIV
+        # scatter/copies cannot contend with history output packing. Only
+        # current attention overlaps packing and exchange on the side stream.
+        # The ready event also protects the history FIA's shared workspace.
         main_stream = torch.npu.current_stream()
         current_output = current_lse = None
-        if uses_current_chunk:
-            assert isinstance(decode_meta, AscendMLADCPDecodeMetadata)
+        if has_current:
+            if flash is not None:
+                if current_kv_staged:
+                    current = flash.current
+                    assert current is not None
+                    current.query[..., : self.kv_lora_rank].copy_(current_q_nope)
+                    current.query[..., self.kv_lora_rank :].copy_(current_q_pe)
+                else:
+                    self._prepare_dcp_flashmla_current(
+                        flash, current_q_nope, current_q_pe, current_k_nope, current_k_pe
+                    )
             attn_stream = cp_decode_comm_stream()
             current_inputs_ready = main_stream.record_event()
             current_tensors: tuple[torch.Tensor | None, ...] = (
@@ -848,27 +886,55 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 current_q_pe,
                 current_k_nope,
                 current_k_pe,
-                decode_meta.attn_mask,
             )
+            if flash is None:
+                assert isinstance(decode_meta, AscendMLADCPDecodeMetadata)
+                current_tensors += (decode_meta.attn_mask,)
+            else:
+                current = flash.current
+                assert current is not None
+                current_tensors += (
+                    current.query,
+                    current.cache,
+                    current.schedule,
+                    current.block_table,
+                    current.slots,
+                    current.attn_mask,
+                    flash.cu,
+                    flash.used_q,
+                    flash.token_live,
+                )
             for tensor in current_tensors:
                 if tensor is not None:
                     tensor.record_stream(attn_stream)
             with torch.npu.stream(attn_stream):
                 attn_stream.wait_event(current_inputs_ready)
-                assert decode_meta.actual_seq_lengths_q is not None
-                current_output, current_lse = self._run_dcp_mtp_split_attention_op(
-                    current_q_nope,
-                    current_q_pe,
-                    current_k_nope,
-                    current_k_pe,
-                    attn_mask=decode_meta.attn_mask,
-                    sparse_mode=3,
-                    block_table=None,
-                    block_size=0,
-                    actual_seq_lengths=decode_meta.actual_seq_lengths_q,
-                    actual_seq_lengths_kv=decode_meta.actual_seq_lengths_q,
-                    attention_kind=CPKVScope.CURRENT,
-                )
+                # Replicated current KV contributes once for this rank's heads.
+                if flash is None:
+                    assert isinstance(decode_meta, AscendMLADCPDecodeMetadata)
+                    assert decode_meta.actual_seq_lengths_q is not None
+                    current_output, current_lse = self._run_dcp_mtp_split_attention_op(
+                        current_q_nope,
+                        current_q_pe,
+                        current_k_nope,
+                        current_k_pe,
+                        attn_mask=decode_meta.attn_mask,
+                        sparse_mode=3,
+                        block_table=None,
+                        block_size=0,
+                        actual_seq_lengths=decode_meta.actual_seq_lengths_q,
+                        actual_seq_lengths_kv=decode_meta.actual_seq_lengths_q,
+                        attention_kind=CPKVScope.CURRENT,
+                    )
+                else:
+                    current_output, current_lse = self._run_dcp_flashmla_attention(
+                        flash,
+                        current_q_nope,
+                        current_q_pe,
+                        current_k_nope,
+                        current_k_pe,
+                        attention_kind=CPKVScope.CURRENT,
+                    )
                 current_attn_done = attn_stream.record_event()
             current_output.record_stream(main_stream)
             current_lse.record_stream(main_stream)
@@ -882,10 +948,10 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             history_lse,
             defer_combine=True,
         )
-        if uses_current_chunk:
+        if has_current:
             main_stream.wait_event(current_attn_done)
-        # Reduce all KV shards exactly once; the merged FlashMLA call already
-        # covers this step's KV, so only framework shards fold in.
+        # Reduce all history shards and the replicated current chunk exactly
+        # once, reading current tensors directly without packing them.
         attn_output = fused_dcp_lse_combine(
             history_recv,
             self.kv_lora_rank,
@@ -903,7 +969,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
     ) -> torch.Tensor:
         # FlashMLA keeps its own entry: one operator call covers the whole decode
         # range and never falls into the framework attention.
-        if getattr(attn_metadata, "external_flashmla", None) is not None or self._decode_requires_current_kv(
+        if attn_metadata.get_external_flashmla(self.flash_mla_layout) is not None or self._decode_requires_current_kv(
             attn_metadata
         ):
             return self._forward_decode_split_attention(

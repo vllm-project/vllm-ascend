@@ -22,6 +22,11 @@ import torch
 ROOT = Path(__file__).resolve().parents[3]
 
 
+class Metadata(SimpleNamespace):
+    def get_external_flashmla(self, layout=None):
+        return self.external_flashmla
+
+
 def load_method(path, class_name, method, scope):
     tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
@@ -138,7 +143,7 @@ def runtime(monkeypatch):
     active_stream = ["main"]
 
     class Stream:
-        def __init__(self, name):
+        def __init__(self, name="metadata"):
             self.name = name
 
         def record_event(self):
@@ -148,7 +153,7 @@ def runtime(monkeypatch):
         def wait_event(self, event):
             events.append(("wait", self.name, event))
 
-    main_stream, attn_stream = Stream("main"), Stream("attn")
+    main_stream, attn_stream, metadata_stream = Stream("main"), Stream("attn"), Stream("metadata")
 
     @contextmanager
     def on_stream(stream):
@@ -160,7 +165,16 @@ def runtime(monkeypatch):
             active_stream[0] = previous
 
     monkeypatch.setattr(
-        torch, "npu", SimpleNamespace(current_stream=lambda: main_stream, stream=on_stream), raising=False
+        torch,
+        "npu",
+        SimpleNamespace(
+            current_stream=lambda: {"main": main_stream, "attn": attn_stream, "metadata": metadata_stream}[
+                active_stream[0]
+            ],
+            stream=on_stream,
+            Stream=lambda: metadata_stream,
+        ),
+        raising=False,
     )
     monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: recorded_streams.append((tensor, stream)))
 
@@ -234,7 +248,16 @@ def runtime(monkeypatch):
     )
 
     def builder(
-        *, size=8, rank=0, interleave=128, heads=8, dtype=torch.float16, use_rope=False, speculative=True, draft=False
+        *,
+        size=8,
+        rank=0,
+        interleave=128,
+        heads=8,
+        dtype=torch.float16,
+        use_rope=False,
+        speculative=True,
+        draft=False,
+        enable_async=False,
     ):
         impl = SimpleNamespace(
             num_heads=heads,
@@ -256,6 +279,7 @@ def runtime(monkeypatch):
             8,
             torch.triu(torch.ones(2048, 2048, dtype=torch.int8), diagonal=1),
             cache_block_size=128 if draft else interleave,
+            enable_async=enable_async,
         )
 
     class AttentionKind(Enum):
@@ -271,6 +295,7 @@ def runtime(monkeypatch):
         "record_attention_compute_start": Mock(),
         "fused_dcp_lse_combine": combine_outputs,
         "AscendMLAMetadata": object,
+        "M": object,
         "AscendMLADCPDecodeMetadata": SimpleNamespace,
         "CPKVScope": AttentionKind,
         "_EXTRA_CTX": context,
@@ -291,12 +316,21 @@ def runtime(monkeypatch):
 
     methods.update(
         {
+            name: load_method("vllm_ascend/attention/mla_v1.py", "AscendMLAImpl", name, scope)
+            for name in ("start_flash_mla_metadata", "wait_flash_mla_metadata")
+        }
+    )
+
+    methods.update(
+        {
             name: load_method("vllm_ascend/attention/context_parallel/common_cp.py", "DCPImplMixin", name, scope)
             for name in ("_local_decode_query", "_merge_dcp_attention_output")
         }
     )
 
     def bind(impl):
+        impl.flash_mla_layout = "pa_bbnd"
+        impl.flash_mla_metadata_builder = None
         for name, method in methods.items():
             setattr(impl, name, MethodType(method, impl))
         impl._forward_decode_split_attention = Mock(wraps=impl._forward_decode_split_attention)
@@ -600,7 +634,7 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         runtime.attention_op.reset_mock()
         # Production external metadata has no FIA CPU length mirrors.
         decode = SimpleNamespace(cp_history_seq_len=None, actual_seq_lengths_q=None)
-        result = runtime.forward(impl, preprocessed, cache, SimpleNamespace(external_flashmla=flash, decode=decode))
+        result = runtime.forward(impl, preprocessed, cache, Metadata(external_flashmla=flash, decode=decode))
         impl._forward_decode_split_attention.assert_called_once()
         impl._run_dcp_mtp_split_attention_op.assert_not_called()
         combined.assert_called_once()
@@ -826,3 +860,50 @@ def test_c8_noncausal_draft_keeps_dcp_interleave_and_128_reader(runtime, rank):
     assert flash.adapter.config.num_heads == 64 and flash.adapter.config.return_softmax_lse
     assert not flash.adapter.config.enable_dcp and flash.global_cache_lens is None
     assert not check_schedule(flash).enable_dcp
+
+
+def test_native_replay_reuses_capture_buffers_when_query_bound_changes(runtime):
+    builder = runtime.builder()
+    inputs = common([130], [4], tokens=4)
+    inputs.max_query_len = 4
+    flash = builder.build(inputs, 1, 4, False, retain_for_graph=True)
+    pointers = addresses(flash)
+    inputs.max_query_len = inputs.num_actual_tokens = 1
+    inputs.query_start_loc[1] = 1
+    inputs.seq_lens[0] = 127
+    same = builder.build(inputs, 1, 1, False)
+    assert same is flash
+    assert addresses(same) == pointers
+    assert len(builder.buffers) == 1
+    assert flash.current is None and flash.prolog_slots is None and flash.block_columns is None
+    assert flash.used_q.tolist() == [1, 0, 0, 0, 0]
+    check_schedule(flash)
+
+
+@pytest.mark.parametrize("retain_for_graph", [False, True])
+def test_native_side_stream_reads_current_global_lengths_and_records_lifetime(runtime, retain_for_graph):
+    builder = runtime.builder(rank=1, interleave=512, enable_async=True)
+    inputs = common([1031, 130], [4, 2], tokens=8)
+    flash = builder.build(inputs, 2, 6, False, retain_for_graph=retain_for_graph)
+    # Captured producers start at graph/model entry; eager can fork immediately
+    # after every length operand is ready, before preparing tables and slots.
+    if retain_for_graph:
+        assert not flash.metadata_started
+        builder.start_metadata(flash)
+    assert flash.metadata_started
+    builder.wait_metadata(flash)
+    plan = check_schedule(flash)
+    assert plan.global_lengths.tolist()[:2] == [1031, 130]
+    assert runtime.events == [
+        ("record", "main"),
+        ("wait", "metadata", "main"),
+        ("record", "metadata"),
+        ("wait", "main", "metadata"),
+    ]
+    expected = (flash.schedule, flash.cache_lens, flash.cu, flash.used_q, flash.global_cache_lens)
+    assert {id(tensor) for tensor, stream in runtime.recorded_streams if stream.name == "metadata"} == {
+        id(tensor) for tensor in expected
+    }
+    starts = len(runtime.events)
+    builder.start_metadata(flash)
+    assert len(runtime.events) == starts

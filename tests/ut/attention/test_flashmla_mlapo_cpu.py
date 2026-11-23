@@ -15,6 +15,11 @@ ROOT = Path(__file__).resolve().parents[3]
 MLA = "vllm_ascend/attention/mla_v1.py"
 
 
+class Metadata(SimpleNamespace):
+    def get_external_flashmla(self, layout=None):
+        return self.external_flashmla
+
+
 class NativeLinear:
     pass
 
@@ -97,6 +102,8 @@ def make_impl():
     return SimpleNamespace(
         layer_name="mla",
         use_flashmla=True,
+        flash_mla_layout="pa_bbnd",
+        use_flashmla_pa_nz=False,
         enable_mlapo=True,
         use_mla_rope=False,
         is_draft_model=False,
@@ -232,7 +239,7 @@ def test_flashmla_mlapo_runtime_decode_limits(tokens, expected, dcp):
     impl._flashmla_writer_buffers = workspace(1025)
     impl._dcp_current_kv_buffers = workspace(1025)
     history, _ = fused_cache()
-    metadata = SimpleNamespace(num_decode_tokens=tokens, num_prefills=0, external_flashmla=object())
+    metadata = Metadata(num_decode_tokens=tokens, num_prefills=0, external_flashmla=object())
     assert impl._can_use_flashmla_mlapo((history[..., :512], history[..., 512:]), metadata) is expected
 
 
@@ -242,7 +249,7 @@ def test_flashmla_mlapo_runtime_requires_pure_decode_and_preallocated_capacity(d
     impl = eligibility_impl()
     impl.dcp_enabled = dcp
     history, _ = fused_cache()
-    metadata = SimpleNamespace(num_decode_tokens=4, num_prefills=0, external_flashmla=object())
+    metadata = Metadata(num_decode_tokens=4, num_prefills=0, external_flashmla=object())
     if reason == "prefill":
         metadata.num_prefills = 1
     elif reason == "external":
@@ -272,7 +279,7 @@ def test_flashmla_mlapo_runtime_checks_cache_contract(reason):
         k = k[..., :511]
     else:
         kr = kr[..., :63]
-    metadata = SimpleNamespace(num_decode_tokens=4, num_prefills=0, external_flashmla=object())
+    metadata = Metadata(num_decode_tokens=4, num_prefills=0, external_flashmla=object())
     assert not impl._can_use_flashmla_mlapo((k, kr), metadata)
 
 
@@ -300,7 +307,7 @@ def test_flashmla_mlapo_runtime_checks_provider_workspace_block_contract(dcp, bl
         buffers = (torch.empty(1, 0, 1, 512), torch.empty(1, 0, 1, 64), torch.arange(4))
     setattr(impl, "_dcp_current_kv_buffers" if dcp else "_flashmla_writer_buffers", buffers)
     history, _ = fused_cache()
-    metadata = SimpleNamespace(num_decode_tokens=4, num_prefills=0, external_flashmla=object())
+    metadata = Metadata(num_decode_tokens=4, num_prefills=0, external_flashmla=object())
     assert impl._can_use_flashmla_mlapo((history[..., :512], history[..., 512:]), metadata) is expected
 
 
@@ -368,7 +375,7 @@ def test_forward_routes_token_fused_decode_with_real_eligibility_helper(case, ex
     elif case == "no_workspace":
         impl._flashmla_writer_buffers = None
     history, _ = fused_cache(torch.float16 if case == "fp16_cache" else torch.bfloat16)
-    metadata = SimpleNamespace(
+    metadata = Metadata(
         num_actual_tokens=tokens,
         num_decodes=1,
         num_decode_tokens=tokens,
@@ -426,12 +433,12 @@ def test_flashmla_no_rope_mlapo_stages_rows_and_preserves_formal_cache(monkeypat
     before = raw.clone()
     slots = torch.full((tokens,), -1, dtype=torch.int32)
     slots[:2] = torch.tensor([0, 128], dtype=torch.int32)
-    metadata = SimpleNamespace(
+    metadata = Metadata(
         num_decode_tokens=tokens,
         num_prefills=0,
         # Deliberately conflicts with the FlashMLA live/padded slots.
         slot_mapping=torch.arange(tokens) + 1,
-        external_flashmla=SimpleNamespace(slots=slots, current=object() if current else None),
+        external_flashmla=SimpleNamespace(slots=slots, current=object() if current else None, metadata_async=False),
         decode=SimpleNamespace(cos=None, sin=None),
     )
     captured = {}
@@ -523,7 +530,7 @@ def test_legacy_component_major_mlapo_keeps_direct_history_write_and_default_eps
     slots = torch.tensor([0, 128], dtype=torch.int32)
     cos = torch.ones(2, 64)
     sin = torch.zeros(2, 64)
-    metadata = SimpleNamespace(
+    metadata = Metadata(
         num_decode_tokens=2,
         slot_mapping=slots,
         external_flashmla=None,

@@ -1002,7 +1002,7 @@ def _uses_single_raw_mla_cache(
         return False
     if not kv_cache_spec.supports_single_raw_backing:
         return False
-    if not supports_component_major_mla_pd(vllm_config) or enable_sfa(vllm_config):
+    if enable_sfa(vllm_config):
         return False
 
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, [layer_name])
@@ -1019,8 +1019,16 @@ def _uses_single_raw_mla_cache(
         # preprocessing contract. Keep their allocation compatible with it.
         return False
     if kv_cache_spec.static_fp8_pa_nz:
+        if not supports_component_major_mla_pd(vllm_config):
+            return False
         validate_pa_nz_page_stride(kv_cache_spec.block_size, kv_cache_spec.page_size_bytes)
         return True
+    if getattr(impl, "flash_mla_layout", None) == "pa_nz":
+        # PA_NZ and the BF16 prolog share one fused raw backing even without
+        # PD transfer; the vendor reader consumes the fused tensor directly.
+        return True
+    if not supports_component_major_mla_pd(vllm_config):
+        return False
     if getattr(impl, "use_flashmla", False):
         # The external reader retains its fused-cache contract, including
         # DCP. Native FIA continues to follow the dependency's exclusions.
@@ -1860,6 +1868,28 @@ def _reshape_kv_cache_v2(
                     kv_caches[layer_name] = (kv_c8,)
                     continue
 
+                if getattr(attn_impl, "flash_mla_layout", None) == "pa_nz":
+                    # PA_NZ reuses the ND allocator and page stride. The first
+                    # axis is the physical 128-token kernel page, so the page
+                    # stride must remain the unpadded slot size.
+                    dense_page_bytes = slot_bytes * kernel_blocks_per_manager
+                    page_size_padded = getattr(kv_cache_spec, "page_size_padded", None)
+                    if kv_cache_spec.page_size_bytes != dense_page_bytes or page_size_padded not in (
+                        None,
+                        dense_page_bytes,
+                    ):
+                        raise ValueError(
+                            "PA_NZ requires dense scheduler pages: "
+                            f"layer={layer_name}, page={kv_cache_spec.page_size_bytes}, "
+                            f"padded={page_size_padded}, dense={dense_page_bytes}."
+                        )
+                    kv_caches[layer_name] = make_page_strided_cache_view(
+                        single_raw_mla_cache,
+                        (*component_shape, fused_dim),
+                        kv_cache_spec.dtype,
+                        slot_bytes,
+                    )
+                    continue
                 if attn_impl.use_flashmla:
                     if kernel_block_size != kv_cache_spec.block_size and not getattr(
                         attn_impl, "is_draft_cache", False

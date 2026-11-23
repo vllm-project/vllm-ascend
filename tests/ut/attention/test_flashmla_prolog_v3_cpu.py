@@ -14,6 +14,11 @@ ROOT = Path(__file__).resolve().parents[3]
 MLA = "vllm_ascend/attention/mla_v1.py"
 
 
+class Metadata(SimpleNamespace):
+    def get_external_flashmla(self, layout=None):
+        return self.external_flashmla
+
+
 def load(path, name, scope, owner=None):
     nodes = ast.parse((ROOT / path).read_text(encoding="utf-8")).body
     constants = [
@@ -70,6 +75,8 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
     # Injected padding values exercise valid-row isolation, not the NPU output contract.
     attention_output[:, -1, :4] = torch.tensor([7.0, torch.nan, torch.inf, -torch.inf])
     flash = SimpleNamespace(
+        metadata_async=False,
+        current=None,
         slots=slots,
         query=torch.empty(tokens, heads, 576),
         adapter=SimpleNamespace(attention=Mock(return_value=(attention_output, None))),
@@ -81,7 +88,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
         attn_mask=None,
         token_live=torch.tensor([True, True, True, False]),
     )
-    metadata = SimpleNamespace(
+    metadata = Metadata(
         causal=causal,
         num_actual_tokens=3,
         num_decodes=1,
@@ -109,6 +116,9 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
     }
     impl = SimpleNamespace(
         layer_name="mla",
+        flash_mla_layout="pa_bbnd",
+        use_flashmla_pa_nz=False,
+        flash_mla_metadata_builder=None,
         dtype=torch.bfloat16,
         layerwise_kv_cache_hook=None,
         num_heads=heads,
@@ -144,6 +154,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
         "_cache_requires_prolog_v3_writer",
         "mla_preprocess_prolog_v3",
         "_get_dcp_current_kv_workspace",
+        "wait_flash_mla_metadata",
         "forward",
     ):
         setattr(impl, name, MethodType(load(MLA, name, scope, "AscendMLAImpl"), impl))
@@ -286,7 +297,7 @@ def test_prolog_writer_stages_interleaved_cache_and_preserves_guards(interleaved
         "exec_context_kv_prolog_v3",
     ):
         setattr(impl, name, MethodType(load(MLA, name, scope, "AscendMLAImpl"), impl))
-    args = (torch.zeros(4, 16), object(), object(), history, slots)
+    args = (torch.zeros(4, 16), torch.empty(4, 64), torch.empty(4, 64), history, slots)
     if context_write:
         impl.exec_context_kv_prolog_v3(*args)
     else:

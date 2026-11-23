@@ -93,6 +93,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
+    # Whether to enable the 0.27 BF16 MLA prolog + FlashMLA path over a merged
+    # PA_NZ latent cache. The default is disabled so Kimi K3 keeps the native
+    # PA_BBND external FlashMLA path. When enabled, only the 0.27 PA_NZ BF16
+    # operators are imported; the C8/FP8 path is not included.
+    # Valid values: 0 or 1. Not sensitive.
+    "VLLM_ASCEND_ENABLE_PA_NZ": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_PA_NZ", "0"))),
 }
 
 # end-env-vars-definition
