@@ -122,7 +122,7 @@ Execute the following commands on each node in sequence. The results must all be
 
 ### 950PR&950DT Products Communication Configuration {: #950pr950dt-products-communication-configuration}
 
-On 950PR/950DT products, PD disaggregation uses the UB super plane (UBC) by default. The parameter plane supports UBG, UBoE, and Host RoCE on appropriately configured hardware.
+On 950PR&950DT Products, PD disaggregation uses the UB super plane (UBC) by default. The parameter plane supports UBG, UBoE, and Host RoCE on appropriately configured hardware.
 
 UBG and UBoE support both automatic and manual endpoint configuration. Host RoCE requires manual configuration. Also use it when HIXL cannot discover the topology of your A5 system, as can happen with custom hardware.
 
