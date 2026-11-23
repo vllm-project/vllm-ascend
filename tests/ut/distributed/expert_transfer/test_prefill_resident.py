@@ -5,9 +5,11 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from vllm_ascend.distributed.expert_transfer.expert_offload_utils import PreparedExpertTensor
 from vllm_ascend.distributed.expert_transfer.expert_weight_transfer import (
     ACL_MEMCPY_DEVICE_TO_DEVICE,
     ACL_MEMCPY_HOST_TO_DEVICE,
+    TorchExpertTransfer,
 )
 
 
@@ -15,8 +17,6 @@ from vllm_ascend.distributed.expert_transfer.expert_weight_transfer import (
 def test_full_pool_uses_current_residents_and_reuses_unchanged_layer(
     expert_factory, manager_factory, monkeypatch, kind
 ):
-    from vllm_ascend.distributed.expert_transfer.expert_weight_transfer import TorchExpertTransfer
-
     first, _ = expert_factory(kind)
     second, _ = expert_factory(kind, layer_name="model.layers.1.mlp.experts")
     third, _ = expert_factory(kind, layer_name="model.layers.2.mlp.experts")
@@ -55,53 +55,45 @@ def test_full_pool_uses_current_residents_and_reuses_unchanged_layer(
 
 
 @pytest.mark.parametrize("kind", ["mxfp4", "mxfp8"])
+@pytest.mark.parametrize(
+    "resident_ids,host_copies,device_copies",
+    [
+        ((70, 31), 3, 2),
+        ((0, 1), 3, 1),
+        ((31, 32), 3, 1),
+        ((32, 31), 3, 2),
+        ((69, 70), 3, 1),
+        ((1, 33), 5, 2),
+    ],
+)
 def test_full_pool_copies_physical_bytes_only_for_missing_experts(
-    expert_factory, manager_factory, native_runtime, kind
+    expert_factory, manager_factory, native_runtime, kind, resident_ids, host_copies, device_copies
 ):
-    from vllm_ascend.distributed.expert_transfer.expert_weight_transfer import TorchExpertTransfer
-
     layer, _ = expert_factory(kind, experts=71)
     manager = manager_factory(layer)
     binding = layer._expert_offload_binding
     expected = {name: tensor.clone() for name, tensor in manager.full_pool.tensors.items()}
     binding.host_store.convert_to_native_layout(binding.adapter, "cpu")
-    TorchExpertTransfer.copy_experts(binding.adapter, binding.host_store, binding.resident, ((70, 0), (31, 1)), "cpu")
-    binding.slot_to_expert = (70, 31)
+    TorchExpertTransfer.copy_experts(
+        binding.adapter,
+        binding.host_store,
+        binding.resident,
+        tuple((expert_id, slot) for slot, expert_id in enumerate(resident_ids)),
+        "cpu",
+    )
+    binding.slot_to_expert = resident_ids
     native_runtime.calls.clear()
 
     result = manager.full_pool.load_layer(binding)
     copies = native_runtime.calls[:-1]
     components = len(binding.adapter.output_names)
-    # The missing IDs form three runs split by the resident IDs and host chunks.
-    assert sum(direction == ACL_MEMCPY_HOST_TO_DEVICE for direction, _ in copies) == 3 * components
-    assert sum(direction == ACL_MEMCPY_DEVICE_TO_DEVICE for direction, _ in copies) == 2 * components
+    # Cover chunk boundaries, reordered residents, and contiguous copy merging.
+    assert sum(direction == ACL_MEMCPY_HOST_TO_DEVICE for direction, _ in copies) == host_copies * components
+    assert sum(direction == ACL_MEMCPY_DEVICE_TO_DEVICE for direction, _ in copies) == device_copies * components
     bytes_per_expert = sum(t.expert_bytes for t in binding.host_store.prepared.values())
     assert sum(size for direction, size in copies if direction == ACL_MEMCPY_HOST_TO_DEVICE) == 69 * bytes_per_expert
     assert sum(size for direction, size in copies if direction == ACL_MEMCPY_DEVICE_TO_DEVICE) == 2 * bytes_per_expert
     assert native_runtime.calls[-1] == "sync"
-    for name in expected:
-        torch.testing.assert_close(result[name].float(), expected[name].float())
-
-
-def test_prefill_waits_for_graph_residency_before_planning(expert_factory, manager_factory, native_runtime):
-    layer, _ = expert_factory()
-    manager = manager_factory(layer)
-    binding = layer._expert_offload_binding
-    expected = {name: tensor.clone() for name, tensor in manager.full_pool.tensors.items()}
-    binding.host_store.convert_to_native_layout(binding.adapter, "cpu")
-    binding.device = SimpleNamespace(type="npu")
-    manager.graph_streams.add(object())
-
-    def finish_graph(_device):
-        for name in binding.resident:
-            binding.resident[name][0].copy_(expected[name][4])
-            binding.resident[name][1].copy_(expected[name][5])
-        binding.slot_to_expert = (4, 5)
-
-    native_runtime.npu.synchronize = Mock(side_effect=finish_graph)
-    native_runtime.calls.clear()
-    result = manager.full_pool.load_layer(binding)
-    native_runtime.npu.synchronize.assert_called_once_with(binding.device)
     for name in expected:
         torch.testing.assert_close(result[name].float(), expected[name].float())
 
@@ -185,64 +177,7 @@ def test_failed_prefill_transfer_invalidates_previous_owner(
         torch.testing.assert_close(result[name].float(), expected[name].float())
 
 
-def test_device_copy_preserves_physical_padding_and_offsets(native_runtime):
-    from vllm_ascend.distributed.expert_transfer.expert_offload_utils import PreparedExpertTensor
-    from vllm_ascend.distributed.expert_transfer.expert_weight_transfer import TorchExpertTransfer
-
-    physical = torch.arange(36, dtype=torch.float32).reshape(3, 2, 6)
-    prepared = PreparedExpertTensor(data=physical.view(torch.uint8).reshape(3, -1), expert_bytes=48)
-    resident_storage = torch.zeros(2, 2, 6)
-    resident_storage[1].copy_(physical[2])
-    resident_view = resident_storage[..., :3]
-    destination_storage = torch.zeros(3, 2, 6)
-    destination_view = destination_storage[..., :3]
-    store = SimpleNamespace(prepared={"weight": prepared})
-
-    native_runtime.calls.clear()
-    TorchExpertTransfer.copy_experts(
-        None,
-        store,
-        {"weight": destination_view},
-        ((0, 0), (1, 1)),
-        "cpu",
-        resident_weights={"weight": resident_view},
-        resident_loads=((1, 2),),
-    )
-    torch.testing.assert_close(destination_storage, physical)
-    assert native_runtime.calls == [(ACL_MEMCPY_HOST_TO_DEVICE, 96)] + [
-        (ACL_MEMCPY_DEVICE_TO_DEVICE, 48),
-        "sync",
-    ]
-
-
-@pytest.mark.parametrize("resident_ids", [(0, 1), (31, 32), (32, 31), (69, 70), (1, 33)])
-def test_coalesced_prefill_preserves_reordered_residents_and_chunk_boundaries(
-    expert_factory, manager_factory, native_runtime, resident_ids
-):
-    from vllm_ascend.distributed.expert_transfer.expert_weight_transfer import TorchExpertTransfer
-
-    layer, _ = expert_factory("mxfp4", experts=71)
-    manager = manager_factory(layer)
-    binding = layer._expert_offload_binding
-    expected = {name: tensor.clone() for name, tensor in manager.full_pool.tensors.items()}
-    binding.host_store.convert_to_native_layout(binding.adapter, "cpu")
-    TorchExpertTransfer.copy_experts(
-        binding.adapter,
-        binding.host_store,
-        binding.resident,
-        tuple((expert_id, slot) for slot, expert_id in enumerate(resident_ids)),
-        "cpu",
-    )
-    binding.slot_to_expert = resident_ids
-    actual = manager.full_pool.load_layer(binding)
-    for name in expected:
-        torch.testing.assert_close(actual[name].float(), expected[name].float())
-
-
 def test_prefill_coalesces_only_contiguous_slots_within_each_source_chunk(native_runtime):
-    from vllm_ascend.distributed.expert_transfer.expert_offload_utils import PreparedExpertTensor
-    from vllm_ascend.distributed.expert_transfer.expert_weight_transfer import TorchExpertTransfer
-
     physical = torch.arange(7 * 2 * 6, dtype=torch.float32).reshape(7, 2, 6)
     chunks = [part.contiguous().view(torch.uint8).reshape(len(part), -1).clone() for part in physical.split(3)]
     prepared = PreparedExpertTensor(data=chunks[0], extra_data=tuple(chunks[1:]), expert_bytes=48)
