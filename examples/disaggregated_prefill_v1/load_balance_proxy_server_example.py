@@ -680,16 +680,19 @@ def manager_config_path(proxy_port: int) -> Path:
 
 
 def write_manager_config(proxy_port: int, host: str, manager_port: int, authkey: bytes) -> None:
-    manager_config_path(proxy_port).write_text(
-        json.dumps(
+    path = manager_config_path(proxy_port)
+    # The config carries the multiprocessing manager authkey; create it
+    # owner-readable only instead of relying on the process umask default.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(
             {
                 "host": host,
                 "port": manager_port,
                 "authkey": base64.b64encode(authkey).decode("ascii"),
-            }
-        ),
-        encoding="utf-8",
-    )
+            },
+            f,
+        )
 
 
 def read_manager_config(proxy_port: int) -> dict[str, Any]:
@@ -1135,11 +1138,14 @@ async def handle_completions_impl(api: str, request: Request):
         except httpx.RequestError as exc:
             await _finish_instance(runtime, instance_info, release_prefill_kv=True)
             request_released = True
+            # Log details server-side only: the exception text can carry
+            # request-controlled data and must not be echoed to the client.
+            logger.warning("Decode backend request to %s failed: %s", api, exc)
             return JSONResponse(
                 status_code=502,
                 content={
                     "error": {
-                        "message": f"Decode backend request to {api} failed: {exc}",
+                        "message": f"Decode backend request to {api} failed",
                         "type": "upstream_error",
                         "code": "decode_backend_unavailable",
                     }

@@ -2000,7 +2000,15 @@ def main():
                 result = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True)
                 if result.returncode == 0:
                     url = result.stdout.strip()
-                    if "github.com" in url:
+                    # Match the parsed hostname instead of a substring search:
+                    # "https://evil.example/github.com/..." must not qualify.
+                    # SSH remotes ("git@github.com:owner/repo.git") carry no
+                    # URL scheme, so recover the host from the user@host part.
+                    if url.startswith("git@"):
+                        host = url.split("@", 1)[1].split(":", 1)[0]
+                    else:
+                        host = urllib.parse.urlparse(url).hostname or ""
+                    if host == "github.com" or host.endswith(".github.com"):
                         match = re.search(r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", url)
                         if match:
                             repo = match.group(1)

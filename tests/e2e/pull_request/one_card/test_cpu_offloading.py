@@ -175,7 +175,9 @@ def test_cpu_offloading(tmp_path, enable_tiering: bool) -> None:
 
     port: int
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("0.0.0.0", 0))
+        # Bind loopback only: this is an availability probe, not the service
+        # endpoint itself.
+        s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
 
     events_endpoint = f"tcp://*:{port}"

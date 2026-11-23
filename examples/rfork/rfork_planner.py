@@ -434,9 +434,11 @@ def _parse_int(value: str, key: str, *, minimum: int = 0) -> int:
     try:
         parsed = int(value)
     except ValueError as exc:
-        raise HeaderError(f"invalid integer header {key}: {value}") from exc
+        # Do not echo the raw header value back to the caller: it is
+        # client-controlled and would leak into the HTTP response.
+        raise HeaderError(f"invalid integer header {key}") from exc
     if parsed < minimum:
-        raise HeaderError(f"header {key} must be >= {minimum}, got {parsed}")
+        raise HeaderError(f"header {key} must be >= {minimum}")
     return parsed
 
 

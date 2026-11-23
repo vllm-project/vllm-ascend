@@ -106,6 +106,7 @@ import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -501,10 +502,21 @@ def parse_png_size(data: bytes):
 
 
 def get_hw_from_local(path: str):
-    if path.startswith("file://"):
-        path = path[7:]
+    """Probe image dimensions for a request-supplied local file:// image.
 
-    with open(path, "rb") as f:
+    The request may only select a file located directly inside the directory
+    the proxy was started from: the opened path always comes from the
+    server-side listing below, so request-controlled paths never reach
+    open() directly (no arbitrary file reads or path traversal).
+    """
+    if not path.startswith("file://"):
+        raise ValueError("only file:// image URLs are supported for local image size probing")
+    name = Path(path[len("file://") :]).name
+    root = Path.cwd()
+    allowed_files = {entry.name: entry for entry in root.iterdir() if entry.is_file()}
+    if name not in allowed_files:
+        raise ValueError(f"image_url must name a file inside the proxy working directory {root}")
+    with open(allowed_files[name], "rb") as f:
         data = f.read(65536)
 
     if data.startswith(b"\x89PNG"):
@@ -846,8 +858,10 @@ async def start_profile(request: Request):
         return JSONResponse(content={"status": "done", "results": results}, status_code=200)
 
     except Exception as e:
+        # Log details server-side only: the exception text can carry
+        # request-controlled data and must not be echoed to the client.
         print(f"Error in start_profile: {e}")
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        return JSONResponse(content={"error": "internal error while forwarding profile request"}, status_code=500)
 
 
 @app.post("/stop_profile")
@@ -899,8 +913,10 @@ async def stop_profile(request: Request):
         return JSONResponse(content={"status": "done", "results": results}, status_code=200)
 
     except Exception as e:
+        # Log details server-side only: the exception text can carry
+        # request-controlled data and must not be echoed to the client.
         print(f"Error in stop_profile: {e}")
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        return JSONResponse(content={"error": "internal error while forwarding profile request"}, status_code=500)
 
 
 if __name__ == "__main__":

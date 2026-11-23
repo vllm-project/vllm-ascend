@@ -125,7 +125,10 @@ def get_available_port(start_port: int = 6000, end_port: int = 7000) -> int:
     for port in range(start_port, end_port):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
-                s.bind(("", port))
+                # Bind loopback only: this is an availability probe, not a
+                # service endpoint, so it must not claim ports on all
+                # interfaces.
+                s.bind(("127.0.0.1", port))
                 return port
             except OSError:
                 continue

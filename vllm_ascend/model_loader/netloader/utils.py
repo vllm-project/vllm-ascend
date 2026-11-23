@@ -52,7 +52,9 @@ def find_free_port():
     - A free port number.
     """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
+        # Bind loopback only: this is an availability probe, not a service
+        # endpoint, so it must not claim ports on all interfaces.
+        s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
