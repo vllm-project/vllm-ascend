@@ -8,6 +8,8 @@ from pathlib import Path
 from types import ModuleType
 from unittest.mock import MagicMock, call, patch
 
+import pytest
+
 _WAIT_SECONDS = 5
 
 
@@ -166,7 +168,7 @@ class TestGlobalTE(unittest.TestCase):
             self.assertIs(global_te.get_transfer_engine("localhost", None), engine)
             global_te.register_buffer([100], [64])
             global_te.register_buffer([100], [64])
-        engine.register_memory.assert_called_once_with(100, 64)
+        engine.register_memory.assert_called_once_with(100, 64, "*")
 
     def test_unregister_and_reregister_registered_buffers(self):
         global_te = self.global_te_cls()
@@ -180,10 +182,10 @@ class TestGlobalTE(unittest.TestCase):
         self.assertFalse(global_te.is_register_buffer)
         global_te.transfer_engine.assert_has_calls(
             [
-                call.register_memory(0x1000, 128),
-                call.register_memory(0x2000, 256),
-                call.unregister_memory(0x1000),
+                call.register_memory(0x1000, 128, "*"),
+                call.register_memory(0x2000, 256, "*"),
                 call.unregister_memory(0x2000),
+                call.unregister_memory(0x1000),
             ]
         )
         self.assertEqual(global_te.transfer_engine.unregister_memory.call_count, 2)
@@ -196,12 +198,201 @@ class TestGlobalTE(unittest.TestCase):
     def test_unregister_failure_leaves_completed_buffers_unregistered(self):
         global_te = self.global_te_cls()
         global_te.transfer_engine = MagicMock(spec_set=["register_memory", "unregister_memory"])
-        global_te.transfer_engine.unregister_memory.side_effect = [0, -1]
-        global_te.registered_buffers = [(0x1000, 128), (0x2000, 256)]
-        global_te.is_register_buffer = True
+        global_te.transfer_engine.register_memory.return_value = 0
+        global_te.transfer_engine.unregister_memory.side_effect = [-1, 0]
+        global_te.register_buffer([0x1000, 0x2000], [128, 256])
+        global_te.transfer_engine.register_memory.reset_mock()
 
-        with self.assertRaisesRegex(RuntimeError, "ptr=0x2000"):
+        with self.assertRaisesRegex(RuntimeError, "ptr=8192"):
             global_te.unregister_buffer()
 
         global_te.transfer_engine.register_memory.assert_not_called()
         self.assertTrue(global_te.is_register_buffer)
+
+
+_GLM_LAYER_BYTES = 1_300_234_240
+_GLM_FIRST_REGION_LAYER_COUNT = 52
+_GLM_SECOND_REGION_LAYER_COUNT = 27
+_TE_REGISTRATION_LIMIT_BYTES = 64 * 1024 * 1024 * 1024
+
+
+def _manager_with_engine(engine: object):
+    source = Path(__file__).parents[4] / "vllm_ascend/distributed/kv_transfer/utils/mooncake_transfer_engine.py"
+    spec = importlib.util.spec_from_file_location("_test_registration_te", source)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    manager = module.GlobalTE()
+    manager.transfer_engine = engine
+    return manager
+
+
+def test_register_buffer_uses_wildcard_location_by_default():
+    engine = MagicMock()
+    engine.register_memory.return_value = 0
+    manager = _manager_with_engine(engine)
+
+    manager.register_buffer([100, 200], [10, 20])
+
+    assert engine.register_memory.call_args_list == [call(100, 10, "*"), call(200, 20, "*")]
+
+
+def test_register_buffer_uses_explicit_locations():
+    engine = MagicMock()
+    engine.register_memory.return_value = 0
+    manager = _manager_with_engine(engine)
+    manager.register_buffer([100, 200], [10, 20], ["*", "npu:0"])
+
+    assert engine.register_memory.call_args_list == [call(100, 10, "*"), call(200, 20, "npu:0")]
+
+
+def test_glm_split_regions_register_and_unregister_in_order():
+    engine = MagicMock()
+    engine.register_memory.return_value = 0
+    engine.unregister_memory.return_value = 0
+    manager = _manager_with_engine(engine)
+    base_ptr = 0x400000
+    first_size = _GLM_FIRST_REGION_LAYER_COUNT * _GLM_LAYER_BYTES
+    second_size = _GLM_SECOND_REGION_LAYER_COUNT * _GLM_LAYER_BYTES
+
+    assert first_size < _TE_REGISTRATION_LIMIT_BYTES
+    assert first_size + _GLM_LAYER_BYTES >= _TE_REGISTRATION_LIMIT_BYTES
+    assert second_size < _TE_REGISTRATION_LIMIT_BYTES
+
+    manager.register_buffer(
+        [base_ptr, base_ptr + first_size],
+        [first_size, second_size],
+        ["npu:0", "npu:0"],
+    )
+    manager.unregister_buffer()
+
+    assert engine.register_memory.call_args_list == [
+        call(base_ptr, first_size, "npu:0"),
+        call(base_ptr + first_size, second_size, "npu:0"),
+    ]
+    assert engine.unregister_memory.call_args_list == [
+        call(base_ptr + first_size),
+        call(base_ptr),
+    ]
+
+
+def test_split_registration_failure_rolls_back_prior_regions():
+    engine = MagicMock()
+    engine.register_memory.side_effect = [0, -1]
+    engine.unregister_memory.return_value = 0
+    manager = _manager_with_engine(engine)
+    first_ptr = 0x400000
+    first_size = _GLM_FIRST_REGION_LAYER_COUNT * _GLM_LAYER_BYTES
+    second_ptr = first_ptr + first_size
+    second_size = _GLM_SECOND_REGION_LAYER_COUNT * _GLM_LAYER_BYTES
+
+    with pytest.raises(RuntimeError, match="Mooncake memory registration failed"):
+        manager.register_buffer(
+            [first_ptr, second_ptr],
+            [first_size, second_size],
+            ["npu:0", "npu:0"],
+        )
+
+    assert engine.register_memory.call_args_list == [
+        call(first_ptr, first_size, "npu:0"),
+        call(second_ptr, second_size, "npu:0"),
+    ]
+    engine.unregister_memory.assert_called_once_with(first_ptr)
+    assert manager._registered_regions == []
+    assert not manager.is_register_buffer
+
+
+def test_register_buffer_only_registers_once():
+    engine = MagicMock()
+    engine.register_memory.return_value = 0
+    manager = _manager_with_engine(engine)
+
+    manager.register_buffer([100], [10])
+    manager.register_buffer([200], [20])
+
+    engine.register_memory.assert_called_once_with(100, 10, "*")
+
+
+def test_register_buffer_raises_when_registration_fails():
+    engine = MagicMock()
+    engine.register_memory.return_value = 7
+    manager = _manager_with_engine(engine)
+
+    with pytest.raises(RuntimeError, match="Mooncake memory registration failed"):
+        manager.register_buffer([100], [10])
+
+    assert not manager.is_register_buffer
+
+
+def test_unregister_buffer_reverses_registration_and_allows_reregistration():
+    engine = MagicMock()
+    engine.register_memory.return_value = 0
+    engine.unregister_memory.return_value = 0
+    manager = _manager_with_engine(engine)
+
+    manager.register_buffer([100, 200], [10, 20])
+    manager.unregister_buffer()
+    manager.unregister_buffer()
+
+    assert engine.unregister_memory.call_args_list == [call(200), call(100)]
+    assert manager._registered_regions == []
+    assert not manager.is_register_buffer
+
+    manager.register_buffer([300], [30])
+    assert engine.register_memory.call_args_list[-1] == call(300, 30, "*")
+
+
+def test_unregister_buffer_retains_failed_regions_for_retry():
+    engine = MagicMock()
+    engine.register_memory.return_value = 0
+    engine.unregister_memory.side_effect = [9, 0, 0]
+    manager = _manager_with_engine(engine)
+    manager.register_buffer([100, 200], [10, 20])
+
+    with pytest.raises(RuntimeError, match="ptr=200: ret_value=9"):
+        manager.unregister_buffer()
+
+    assert manager._registered_regions == [(200, 20, "*")]
+    assert manager.is_register_buffer
+
+    manager.unregister_buffer()
+    assert engine.unregister_memory.call_args_list == [call(200), call(100), call(200)]
+    assert not manager.is_register_buffer
+
+
+def test_reregister_buffer_preserves_explicit_locations():
+    engine = MagicMock()
+    engine.register_memory.return_value = 0
+    engine.unregister_memory.return_value = 0
+    manager = _manager_with_engine(engine)
+    manager.register_buffer([100, 200], [10, 20], ["npu:0", "*"])
+    manager.unregister_buffer()
+    engine.register_memory.reset_mock()
+
+    manager.reregister_buffer()
+
+    assert engine.register_memory.call_args_list == [call(100, 10, "npu:0"), call(200, 20, "*")]
+    assert manager._registered_regions == [(100, 10, "npu:0"), (200, 20, "*")]
+    assert manager.is_register_buffer
+
+
+def test_reregister_failure_rolls_back_and_retains_restore_plan():
+    engine = MagicMock()
+    engine.register_memory.return_value = 0
+    engine.unregister_memory.return_value = 0
+    manager = _manager_with_engine(engine)
+    manager.register_buffer([100, 200], [10, 20], ["npu:0", "*"])
+    manager.unregister_buffer()
+    engine.register_memory.side_effect = [0, -1]
+    engine.unregister_memory.reset_mock()
+
+    with pytest.raises(RuntimeError, match="Mooncake memory registration failed"):
+        manager.reregister_buffer()
+
+    engine.unregister_memory.assert_called_once_with(100)
+    assert manager._registered_regions == []
+    assert not manager.is_register_buffer
+
+    engine.register_memory.side_effect = None
+    manager.reregister_buffer()
+    assert manager._registered_regions == [(100, 10, "npu:0"), (200, 20, "*")]

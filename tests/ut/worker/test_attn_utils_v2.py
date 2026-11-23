@@ -281,7 +281,10 @@ def test_sparse_offload_allocator_uses_host_main_cache_and_device_resident_buffe
     raw_cache = (None, None, torch.empty(48, dtype=torch.int8), torch.empty(24, dtype=torch.int8), 72)
     marker = object()
 
-    def allocate(k_size, v_size, alignment, tp_rank, keep_device, allocate_npu):
+    host_allocator = SimpleNamespace(allocate_host_kv_tensors=MagicMock())
+
+    def allocate(k_size, v_size, alignment, tp_rank, keep_device, allocate_npu, allocate_host):
+        assert allocate_host is host_allocator.allocate_host_kv_tensors
         calls.append((k_size, v_size, alignment, tp_rank, keep_device))
         return raw_cache
 
@@ -300,6 +303,7 @@ def test_sparse_offload_allocator_uses_host_main_cache_and_device_resident_buffe
     monkeypatch.setattr(attn_utils, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *_args: (4, 2))
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args: True)
+    monkeypatch.setattr(attn_utils, "get_sparse_kv_offload_manager", lambda: host_allocator)
     monkeypatch.setattr(attn_utils, "allocate_kv_cache_tensors_for_sparse_kv_offload", allocate)
     monkeypatch.setattr(attn_utils, "reshape_kv_cache_tensors_for_sparse_kv_offload", reshape)
 

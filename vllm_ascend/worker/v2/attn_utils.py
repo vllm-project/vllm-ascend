@@ -91,6 +91,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
+    get_sparse_kv_offload_manager,
     reshape_kv_cache_tensors_for_sparse_kv_offload,
 )
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
@@ -1298,6 +1299,7 @@ def _allocate_kv_cache(
                     get_tensor_model_parallel_rank(),
                     get_ascend_config().sparse_kv_offload_config.keep_device_kv_cache,
                     lambda size, align: _allocate_int8_cache_tensor(size, align, device),
+                    get_sparse_kv_offload_manager().allocate_host_kv_tensors,
                 )
         elif enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(example_spec):
             k_size = kv_cache_tensor_size

@@ -857,3 +857,21 @@ class TestRegisterKvCaches:
         assert kwargs["handshake_port"] == 30007
         assert kwargs["engine_id"] == "engine"
         assert worker.xfer_handshake_metadata is mock_metadata.return_value
+
+
+def test_inherited_hooks_preserve_d2rh_staging_worker():
+    connector = object.__new__(d2rh.MooncakeD2RHConnectorV1)
+    connector.connector_worker = MagicMock()
+    connector._connector_metadata = d2rh.MooncakeConnectorMetadata()
+
+    connector.start_load_kv(SimpleNamespace())
+    connector.connector_worker.start_load_kv.assert_called_once_with(connector._connector_metadata)
+    assert connector.build_connector_worker_meta() is None
+
+    connector.get_finished({"request"})
+    connector.connector_worker.get_finished.assert_called_once_with()
+    connector.get_transfer_results({"request"})
+    connector.connector_worker.get_transfer_results.assert_called_once_with()
+
+    connector.shutdown()
+    connector.connector_worker.shutdown.assert_not_called()

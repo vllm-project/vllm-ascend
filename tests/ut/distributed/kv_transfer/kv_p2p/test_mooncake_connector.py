@@ -1789,11 +1789,9 @@ class TestMainThreadLoop(unittest.TestCase):
         }
 
         self.thread.request_queue = MagicMock(spec=queue.Queue)
-        self.thread.request_queue.get.side_effect = [test_request, None, SystemExit]
-        # None is an ignored queue item, not a shutdown command. Drive the
-        # loop synchronously and stop at a controlled boundary without a leak.
-        with self.assertRaises(SystemExit):
-            self.thread.run()
+        self.thread.request_queue.get.side_effect = [test_request, None]
+        # Shutdown uses a sentinel after pending endpoint tasks have drained.
+        self.thread.run()
         self.assertTrue(self.thread.ready_event.is_set())
         mock_submit.assert_called_once_with(test_request)
         self.thread.request_queue.task_done.assert_called_once_with()
@@ -3205,6 +3203,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
                 assert params is not None
                 self.assertEqual(params["remote_block_ids"], expected)
                 self.assertEqual(params["remote_pcp_size"], pcp_size)
+                self.assertNotIn("remote_pp_size", params)
                 self.assertEqual(params["remote_dcp_size"], dcp_size)
                 self.assertEqual(params["num_prompt_blocks"], 5)
                 self.assertIn(request.request_id, self.scheduler._reqs_need_send)
@@ -3431,6 +3430,42 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         for p in self.patches:
             p.stop()  # type: ignore
 
+    def _set_parallel_config(self, extra: dict[str, Any]) -> None:
+        self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = lambda k, d: extra.get(k, d)
+
+    def test_prefill_tp_lt_decode_tp_broadcasts_prefill_ranks(self):
+        self.vllm_config.model_config.is_deepseek_mla = True
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+        worker._prefill_tp_size = 1
+        worker._decode_tp_size = 2
+        worker._prefill_pp_size = 1
+
+        # One full-copy prefill rank feeds every decode rank.
+        self.assertEqual(worker._get_remote_ranks_for_req("req"), [[0], [0]])
+        self.assertEqual(worker._get_tp_num_need_pulls(1), 1)
+
+    def test_prefill_tp_lt_decode_tp_requires_explicit_opt_in(self):
+        self._set_parallel_config(
+            {
+                "prefill": {"tp_size": 1, "dp_size": 4, "pp_size": 1},
+                "decode": {"tp_size": 2, "dp_size": 16, "pp_size": 1},
+            }
+        )
+        with self.assertRaises(ValueError):
+            MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+
+    def test_prefill_tp_lt_decode_tp_requires_dsa_offload(self):
+        self._set_parallel_config(
+            {
+                "prefill": {"tp_size": 1, "dp_size": 4, "pp_size": 1},
+                "decode": {"tp_size": 2, "dp_size": 16, "pp_size": 1},
+                "allow_prefill_tp_lt_decode_tp": True,
+            }
+        )
+        self.vllm_config.model_config.is_deepseek_mla = True
+        with self.assertRaises(NotImplementedError):
+            MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+
     def test_dp_replica_handshake_ports_are_distinct_and_match_scheduler(self):
         module = MooncakeConnectorWorker.__module__
         with patch(f"{module}.init_ascend_config"):
@@ -3563,6 +3598,36 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         worker.register_kv_caches(self.kv_caches)
         self.assertIsNone(worker.kv_send_thread)
         self.assertIsNotNone(worker.kv_recv_thread)
+
+    def test_dsa_consumer_registers_indexer_and_draft_hbm_destinations(self):
+        self.vllm_config.kv_transfer_config.kv_role = "kv_consumer"
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+        worker._dsa_decode = True
+        worker._dsa_transformer_layers = {"model.layers.0.self_attn": 0}
+        layouts = ([MagicMock()], [MagicMock(is_host=True), MagicMock(is_host=False)])
+        with (
+            patch.object(worker, "_build_dsa_local_layouts", return_value=layouts) as build_layouts,
+            patch.object(
+                worker,
+                "_dsa_consumer_hbm_register_regions",
+                return_value=(MagicMock(ptrs=[123], lengths=[456]), ["*"]),
+            ) as collect_indexer,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.global_te.register_buffer"
+            ) as register_buffer,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.validate_register_region_count"
+            ) as validate_regions,
+        ):
+            worker.register_kv_caches(self.kv_caches)
+
+        build_layouts.assert_called_once_with(self.kv_caches)
+        collect_indexer.assert_called_once_with(self.kv_caches, layouts[0] + [layouts[1][1]])
+        register_buffer.assert_called_once_with([123], [456], ["*"])
+        validate_regions.assert_called_once()
+        self.assertIsNotNone(worker.kv_recv_thread)
+        self.assertEqual(worker.kv_recv_thread._dsa_indexer_local_layout, layouts[0])
+        self.assertEqual(worker.kv_recv_thread._dsa_main_local_layout, layouts[1])
 
     def test_register_kv_caches_mla_case(self):
         self.vllm_config.model_config.is_deepseek_mla = True
