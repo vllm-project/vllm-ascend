@@ -945,10 +945,12 @@ def test_v17e_spec_acceptance_low_rate_triggers_incident():
 
 
 def test_v17f_spec_acceptance_padded_row_uses_num_draft_tokens():
-    """MRV2 shape: runner.input_batch is None; draft_len comes from threaded wave batch.
+    """Discriminate draft_len_hint from the -1 strip fallback (MRV2 shape).
 
-    Same padded row with hint=2 vs hint=4 must yield different draft_len so the
-    test fails if only the -1 strip fallback were used (that always gives 2).
+    Production MRV2 has ``runner.input_batch is None`` at check_after_spec; the
+    wave batch must be threaded in. On ``[bonus, d1, d2, -1, -1]`` the pad-strip
+    fallback always yields ``draft_len=2``, so a hint of ``4`` is the only way
+    this assertion can pass — reverting the hint plumbing makes the test fail.
     """
     from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
 
@@ -964,7 +966,6 @@ def test_v17f_spec_acceptance_padded_row_uses_num_draft_tokens():
         detector_section=lambda name: section,
         detector_get=lambda sec, key, default=None: section.get(key, default),
     )
-    # Match production MRV2: no runner.input_batch after sample_tokens pops state.
     runner = SimpleNamespace(
         tp_rank=0,
         speculative_config=SimpleNamespace(),
@@ -972,10 +973,7 @@ def test_v17f_spec_acceptance_padded_row_uses_num_draft_tokens():
         requests=None,
     )
     det = SpecAcceptanceDetector(runtime_config=rc, runner=runner)
-    # bonus + 2 real drafts + 2 pads; strip-fallback alone would always yield 2.
     sampled = torch.tensor([[10, 11, 12, -1, -1]])
-    wave_batch_2 = SimpleNamespace(req_ids=["r1"], num_draft_tokens_per_req=[2])
-    wave_batch_4 = SimpleNamespace(req_ids=["r1"], num_draft_tokens_per_req=[4])
     with (
         patch(
             "vllm_ascend.observability.runtime_guard.detector.spec_acceptance.get_pp_group",
@@ -986,10 +984,13 @@ def test_v17f_spec_acceptance_padded_row_uses_num_draft_tokens():
             return_value=0,
         ),
     ):
-        assert det.check_all(sampled, [3], req_ids=["r1"], input_batch=wave_batch_2) == []
+        # Negative control: no wave batch → pad-strip only → draft_len=2.
+        assert det.check_all(sampled, [3], req_ids=["r1"]) == []
         assert det._history["r1"][0][1] == 2
         det._history.clear()
-        assert det.check_all(sampled, [3], req_ids=["r1"], input_batch=wave_batch_4) == []
+        # Hint source: same row, num_draft_tokens_per_req=4 must not collapse to 2.
+        wave = SimpleNamespace(req_ids=["r1"], num_draft_tokens_per_req=[4])
+        assert det.check_all(sampled, [3], req_ids=["r1"], input_batch=wave) == []
         assert det._history["r1"][0][1] == 4
 
 
