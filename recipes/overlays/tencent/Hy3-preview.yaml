@@ -1,3 +1,59 @@
+meta:
+  hardware:
+    ascend_910c: supported
+variants:
+  default:
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
+        docker_ipc: host
+        docker_serve_command: env --chdir=/root/.cache/huggingface vllm serve
+        install:
+          pip: false
+          docker: true
+        extra_env:
+          HCCL_OP_EXPANSION_MODE: AIV
+          VLLM_USE_RUST_FRONTEND: "0"
+        extra_args:
+          - --served-model-name
+          - hy3-preview
+          - tencent/Hy3-preview
+          - --enable-ep-weight-filter
+          - --speculative-config
+          - '{"method":"mtp","num_speculative_tokens":1,"enforce_eager":true}'
+          - --max-model-len
+          - "32768"
+          - --max-num-seqs
+          - "8"
+          - --host
+          - 127.0.0.1
+          - --port
+          - "8000"
+strategy_hardware:
+  single_node_tp:
+    ascend_910c: unsupported
+  single_node_tep:
+    ascend_910c: supported
+  single_node_dep:
+    ascend_910c: unsupported
+  multi_node_tp:
+    ascend_910c: unsupported
+  multi_node_tep:
+    ascend_910c: unsupported
+  multi_node_dep:
+    ascend_910c: unsupported
+
+presets:
+  a3_bf16:
+    label: A3 BF16
+    hardware: ascend_910c
+    strategy: single_node_tep
+    variants: [default]
+    default: true
+    select:
+      frontend: python
+    remove_args: [--trust-remote-code]
+
 guide_sections:
   ascend: |-
     ## Single-node A3 release retest
