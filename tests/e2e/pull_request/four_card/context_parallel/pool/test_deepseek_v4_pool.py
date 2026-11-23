@@ -176,8 +176,7 @@ def test_deepseek_v4_dsa_pcp_mtp_pool_watch() -> None:
             expected = EXPECTED_OUTPUT_PREFIXES.get(prompt)
             if expected is not None:
                 assert texts[0].startswith(expected), (
-                    f"unexpected output prefix for {prompt!r}: "
-                    f"got {texts[0][: len(expected)]!r}, expected {expected!r}"
+                    f"unexpected output prefix for {prompt!r}: got {texts[0][: len(expected)]!r}, expected {expected!r}"
                 )
 
         # Absolute floors: catch model/engine regressions on both legs.
@@ -187,9 +186,7 @@ def test_deepseek_v4_dsa_pcp_mtp_pool_watch() -> None:
             Counter,
             Vector,
         )
-        assert len(rates) == len(MIN_ACCEPTANCE_RATES), (
-            f"expected {len(MIN_ACCEPTANCE_RATES)} positions, got {rates}"
-        )
+        assert len(rates) == len(MIN_ACCEPTANCE_RATES), f"expected {len(MIN_ACCEPTANCE_RATES)} positions, got {rates}"
         print(f"[kv_pool_acceptance] rates={rates} minimum={MIN_ACCEPTANCE_RATES}", flush=True)
         for position, (actual, minimum) in enumerate(zip(rates, MIN_ACCEPTANCE_RATES, strict=True)):
             assert actual >= minimum, f"acceptance at draft position {position} is {actual}, below {minimum}"

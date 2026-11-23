@@ -480,9 +480,7 @@ def _control_hit_outputs(
     outputs = [list(ids) for ids, _ in runner.generate_greedy([prompt], max_tokens)]
     after = _prefix_cache_hits(runner)
     local_hits = after - before
-    assert local_hits > 0, (
-        f"CONTROL_DEFECT: B leg got no local prefix-cache hit (prefix_cache_hits Δ{local_hits:.0f})"
-    )
+    assert local_hits > 0, f"CONTROL_DEFECT: B leg got no local prefix-cache hit (prefix_cache_hits Δ{local_hits:.0f})"
     return outputs, local_hits
 
 
