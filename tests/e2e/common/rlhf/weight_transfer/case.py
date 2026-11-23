@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -55,6 +56,7 @@ class WeightUpdateModelCase:
     image_prompt: bool = False
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False
+    online_quantization: bool = False
     skip_reason: str | None = None
     """Why neither lane can carry this case yet.
 
@@ -106,6 +108,41 @@ QWEN35_CASE = WeightUpdateModelCase(
 
 
 QWEN_CASES = (QWEN35_CASE,)
+
+
+def _online_mx_case(base_case: WeightUpdateModelCase, bits: int) -> WeightUpdateModelCase:
+    """Derive an online MX variant without discarding the base model's layout."""
+    if bits not in (4, 8):
+        raise ValueError(f"Online MX weights require 4 or 8 bits, got {bits}")
+    quantization = {
+        "quant_method": "ascend",
+        "model_quant_type": "W8A8_MXFP8" if bits == 8 else "W4A8_MXFP",
+    }
+    # Keep model-specific flags (e.g. DeepSeek's tokenizer mode) and merge
+    # deployment options rather than replacing the base additional config.
+    extra_server_args = list(base_case.extra_server_args)
+    additional_config = {}
+    while "--additional-config" in extra_server_args:
+        index = extra_server_args.index("--additional-config")
+        additional_config.update(json.loads(extra_server_args[index + 1]))
+        del extra_server_args[index : index + 2]
+    additional_config.update(weight_nz_mode=0, online_quantize_weights=True)
+    return replace(
+        base_case,
+        id=f"{base_case.id}-online-{'mxfp8' if bits == 8 else 'w4a8-mxfp4'}",
+        hf_overrides={**deepcopy(base_case.hf_overrides), "quantization_config": quantization},
+        online_quantization=True,
+        extra_server_args=(
+            *extra_server_args,
+            "--additional-config",
+            json.dumps(additional_config),
+            "--worker-extension-cls",
+            "tests.e2e.common.rlhf.weight_transfer.online_mx.OnlineMXAuditWorker",
+        ),
+    )
+
+
+QWEN35_ONLINE_MX_CASES = (_online_mx_case(QWEN35_CASE, 8), _online_mx_case(QWEN35_CASE, 4))
 
 
 DEEPSEEK_V4_CASE = WeightUpdateModelCase(

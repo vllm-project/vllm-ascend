@@ -24,6 +24,7 @@ silently turn the comparison into apples-to-oranges, so the parity and the
 caching contract are pinned here.
 """
 
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -33,6 +34,7 @@ import torch
 from tests.e2e.common.rlhf.weight_transfer import reference_check as utils
 from tests.e2e.common.rlhf.weight_transfer import weight_source
 from tests.e2e.common.rlhf.weight_transfer.case import DEEPSEEK_V4_VISION_CASE, MODEL_CASES
+from tests.e2e.common.rlhf.weight_transfer.online_mx import _snapshot_bytes, assert_online_updates
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     live_update_serve_args,
     reference_serve_args,
@@ -42,6 +44,75 @@ from tests.e2e.common.rlhf.weight_transfer.reference_check import (
 CASE = MODEL_CASES[0]
 PORT = 8123
 GPU_MEMORY_UTILIZATION = 0.75
+
+
+@pytest.mark.parametrize("shape", [(8, 64), (2, 8, 64)])
+def test_snapshot_transposed_internal_format_keeps_packed_bytes(shape):
+    class InternalFormatTensor:
+        """Emulate CANN's rejection of copies from non-contiguous NZ views."""
+
+        def __init__(self, data):
+            self.data = data
+            self.ndim = data.ndim
+
+        def detach(self):
+            return self
+
+        def is_contiguous(self):
+            return self.data.is_contiguous()
+
+        def transpose(self, first, second):
+            return InternalFormatTensor(self.data.transpose(first, second))
+
+        def cpu(self):
+            if not self.data.is_contiguous():
+                raise RuntimeError("Cannot copy a non-contiguous internal format")
+            return self.data.clone()
+
+    packed = torch.arange(torch.tensor(shape).prod().item()).to(torch.uint8).reshape(shape)
+    original = packed.clone()
+    view = packed.transpose(-1, -2)
+    pointer = view.data_ptr()
+    expected = view.contiguous().numpy().tobytes()
+    assert _snapshot_bytes(InternalFormatTensor(view)) == expected
+    assert view.data_ptr() == pointer
+    assert torch.equal(packed, original)
+
+
+@pytest.fixture
+def online_mx_results():
+    def result(value):
+        return {
+            "generation": [(str(value), (float(value),))],
+            "workers": [
+                {
+                    "tensors": {name: ["uint8", [4, 2], str(value)] for name in ("weight", "weight_scale")},
+                    "pointers": {"weight": 100, "weight_scale": 200},
+                }
+            ],
+        }
+
+    references = [result(1), result(2)]
+    return result(0), references, deepcopy([references[0], references[1], references[0]])
+
+
+def test_online_mx_accepts_aba_matching_independent_loads(online_mx_results):
+    assert_online_updates(*online_mx_results, CASE)
+
+
+@pytest.mark.parametrize("failure", ["stale_scale", "no_update", "wrong_output", "moved_storage"])
+def test_online_mx_oracle_rejects_incomplete_reload(online_mx_results, failure):
+    dummy, references, updates = online_mx_results
+    if failure == "stale_scale":
+        updates[1]["workers"][0]["tensors"]["weight_scale"] = references[0]["workers"][0]["tensors"]["weight_scale"]
+    elif failure == "no_update":
+        updates[1] = deepcopy(updates[0])
+    elif failure == "wrong_output":
+        updates[2]["generation"] = updates[1]["generation"]
+    else:
+        updates[2]["workers"][0]["pointers"]["weight_scale"] += 1
+    with pytest.raises(AssertionError):
+        assert_online_updates(dummy, references, updates, CASE)
 
 
 def _flag_map(args: list[str]) -> dict[str, str | bool]:

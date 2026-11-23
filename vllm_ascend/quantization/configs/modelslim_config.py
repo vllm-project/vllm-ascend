@@ -42,6 +42,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod, VocabParallelEmbedding
 from vllm.model_executor.models.utils import WeightsMapper
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
@@ -877,6 +878,10 @@ class AscendModelSlimConfig(QuantizationConfig):
                 logger.debug("Select AscendUnquantizedLinearMethod for %s (layer=%s)", prefix, "LinearBase")
                 return AscendUnquantizedLinearMethod()
             scheme = create_scheme_for_layer(quant_type, prefix, "linear")
+            if quant_type in ("W8A8_MXFP8", "W4A8_MXFP") and get_ascend_config().online_quantize_weights:
+                from ..online_mx import AscendOnlineMXLinearMethod
+
+                return AscendOnlineMXLinearMethod(scheme)
             logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "LinearBase")
             return AscendLinearMethod(scheme)
 
@@ -928,6 +933,10 @@ class AscendModelSlimConfig(QuantizationConfig):
             # registered MoE parameter receives the mapped loader.
             layer.weight_loader = _make_modelslim_moe_weight_loader(layer.weight_loader)
             scheme = create_scheme_for_layer(quant_type, prefix, "moe")
+            if quant_type in ("W8A8_MXFP8", "W4A8_MXFP") and get_ascend_config().online_quantize_weights:
+                from ..online_mx import AscendOnlineMXMoEMethod
+
+                return AscendOnlineMXMoEMethod(scheme, layer.moe_config)
             logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
             return AscendFusedMoEMethod(scheme, layer.moe_config)
         elif isinstance(layer, VocabParallelEmbedding):

@@ -748,6 +748,7 @@ class AscendConfig:
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
+    online_quantize_weights: bool = False
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
@@ -1040,6 +1041,7 @@ class AscendConfig:
         if self.enable_sparse_li_c8 and self.enable_sparse_li_c4:
             raise ValueError("enable_sparse_li_c8 and enable_sparse_li_c4 are mutually exclusive.")
         quant_config = getattr(vc, "quant_config", None)
+        self._validate_online_quantization(vc, quant_config)
         (
             self._sparse_li_c8_layer_ids,
             self._sparse_li_c8_layer_names,
@@ -1218,6 +1220,30 @@ class AscendConfig:
             if any(getattr(getattr(model_config, "hf_text_config", None), "expert_swiglu_limit_list", None) or ()):
                 return True
         return False
+
+    def _validate_online_quantization(self, vllm_config, quant_config):
+        if self.online_quantize_weights:
+            if (
+                quant_config is None
+                or quant_config.get_name() != "ascend"
+                or not any(
+                    value in ("W8A8_MXFP8", "W4A8_MXFP")
+                    for key, value in quant_config.quant_description.items()
+                    if key.endswith(".weight")
+                )
+            ):
+                raise ValueError("online_quantize_weights requires ModelSlim MXFP8 or W4A8 MXFP4 weight descriptions")
+            unsupported = {
+                value
+                for key, value in quant_config.quant_description.items()
+                if key.endswith(".weight") and value not in ("FLOAT", "W8A8_MXFP8", "W4A8_MXFP")
+            }
+            if unsupported:
+                raise ValueError(
+                    f"online_quantize_weights does not support these ModelSlim weight types: {unsupported}"
+                )
+            if vllm_config.parallel_config.enable_eplb or self.eplb_config.dynamic_eplb or self._megamoe_supported:
+                raise ValueError("online_quantize_weights does not support EPLB or MegaMoE")
 
     @staticmethod
     def _is_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:

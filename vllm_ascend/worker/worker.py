@@ -542,7 +542,8 @@ class NPUWorker(GPUWorker):
         self._check_nz_disabled()
 
         assert self.weight_transfer_engine is not None
-        self.weight_transfer_engine.start_weight_update()
+        with set_current_vllm_config(self.vllm_config):
+            self.weight_transfer_engine.start_weight_update()
         self._weight_update_active = True
 
     def update_weights(self, update_info: dict) -> None:
@@ -555,7 +556,10 @@ class NPUWorker(GPUWorker):
             raise RuntimeError("start_weight_update must be called before update_weights.")
 
         try:
-            self.weight_transfer_engine.update_weights(update_info)
+            # Layerwise loading invokes quantization postprocessing here, just
+            # as startup loading does. Native schemes need the worker config.
+            with set_current_vllm_config(self.vllm_config):
+                self.weight_transfer_engine.update_weights(update_info)
         except BaseException:
             self._weight_update_active = False
             raise
@@ -568,11 +572,12 @@ class NPUWorker(GPUWorker):
             raise RuntimeError("start_weight_update must be called before finish_weight_update.")
 
         assert self.weight_transfer_engine is not None
-        self.weight_transfer_engine.finish_weight_update()
-        if vllm_version_is("0.33.0"):
-            self.model_runner.reset_lora_state()
-        else:
-            self.model_runner.on_target_weights_replaced()
+        with set_current_vllm_config(self.vllm_config):
+            self.weight_transfer_engine.finish_weight_update()
+            if vllm_version_is("0.33.0"):
+                self.model_runner.reset_lora_state()
+            else:
+                self.model_runner.on_target_weights_replaced()
         self._weight_update_active = False
 
     def shutdown(self) -> None:

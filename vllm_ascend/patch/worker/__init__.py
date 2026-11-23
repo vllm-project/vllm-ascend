@@ -56,6 +56,7 @@ import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 import vllm_ascend.patch.worker.patch_use_v2_model_runner  # noqa
 
 import vllm_ascend.patch.worker.patch_fused_moe  # noqa
+import vllm_ascend.patch.worker.patch_layerwise_reload  # noqa
 
 import vllm_ascend.patch.worker.patch_uva  # noqa
 import vllm_ascend.patch.worker.patch_input_batch  # noqa

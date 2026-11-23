@@ -60,6 +60,40 @@ After quantization completes, the output directory will contain the quantized mo
 
 For more examples, refer to the [official examples](https://gitcode.com/Ascend/msmodelslim/tree/master/example).
 
+#### Online MX weight quantization for RL updates
+
+On Ascend 950, a rollout worker can load BF16 checkpoint weights and regenerate
+MX weights and E8M0 scales at startup and on every layerwise RL weight update.
+Place a ModelSlim `quant_model_description.json` next to the model's
+`config.json`. Use checkpoint parameter names and `W8A8_MXFP8` or `W4A8_MXFP`
+for quantized projections, and `FLOAT` for projections kept in BF16. For example,
+the following entries describe two projections; a real description must cover
+all shards of every packed module it quantizes:
+
+```json
+{
+  "model_quant_type": "W8A8_MXFP8",
+  "group_size": 32,
+  "model.layers.0.self_attn.q_proj.weight": "W8A8_MXFP8",
+  "lm_head.weight": "FLOAT"
+}
+```
+
+Enable the BF16 input path explicitly:
+
+```bash
+vllm serve /path/to/bf16-model --quantization ascend --dtype bfloat16 \
+  --additional-config '{"online_quantize_weights": true, "weight_nz_mode": 0}'
+```
+
+The sender supplies BF16 weights without quantization scales. The worker calls
+`npu_dynamic_mx_quant`, then uses the native Ascend scheme's inference layout.
+Quantized projections require local reduction dimensions divisible by 64.
+EPLB and MegaMoE are currently unsupported. Leave `online_quantize_weights`
+disabled when loading already quantized ModelSlim checkpoints. The ModelSlim
+tool itself is not required in the rollout worker; its description file selects
+the quantization scheme.
+
 ### 2. LLM-Compressor
 
 [LLM-Compressor](https://github.com/vllm-project/llm-compressor) is a unified compressed model library for faster vLLM inference.
