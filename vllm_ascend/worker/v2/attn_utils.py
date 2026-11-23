@@ -123,6 +123,8 @@ from vllm_ascend.worker.utils import (
     make_page_strided_cache_view,
 )
 
+_STEP5_MODEL_TYPES = ("step5", "step5_vl", "step5_mtp")
+
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
@@ -640,15 +642,10 @@ def _is_dsv4_model(vllm_config: VllmConfig) -> bool:
     return hf_config is not None and hasattr(hf_config, "compress_ratios")
 
 
-def _is_step5_device_cache(vllm_config: VllmConfig, config: KVCacheConfig) -> bool:
+def _is_step5_model(vllm_config: VllmConfig) -> bool:
     model_config = getattr(vllm_config, "model_config", None)
     text_config = getattr(model_config, "hf_text_config", None)
-    tensors = config.kv_cache_tensors
-    return (
-        getattr(text_config, "model_type", None) in ("step5", "step5_vl", "step5_mtp")
-        and bool(tensors)
-        and all(not tensor.host_resident for tensor in tensors)
-    )
+    return getattr(text_config, "model_type", None) in _STEP5_MODEL_TYPES
 
 
 def _get_attention_kv_cache_dims(
@@ -1030,7 +1027,7 @@ def _allocate_kv_cache(
             for name in get_kv_cache_tensor_layers(descriptor):
                 kv_cache_raw_tensors[name] = backing
         return kv_cache_raw_tensors
-    if _is_step5_device_cache(vllm_config, kv_cache_config):
+    if _is_step5_model(vllm_config) and kv_cache_config.kv_cache_tensors:
         tensors = kv_cache_config.kv_cache_tensors
         sizes = {tensor.size for tensor in tensors}
         if len(sizes) != 1:
@@ -1560,7 +1557,7 @@ def unified_allocate_kv_cache(
         kernel_block_sizes,
         shared_layers,
         layout,
-        attn_layers=attn_layers if _is_step5_device_cache(vllm_config, kv_cache_config) else None,
+        attn_layers=attn_layers if _is_step5_model(vllm_config) else None,
         cache_dtype=getattr(vllm_config.cache_config, "cache_dtype", "auto"),
     )
 
@@ -1584,7 +1581,7 @@ def allocate_kv_cache_main(
         raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
     vllm_config = get_current_vllm_config()
     model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
-    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text"):
+    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text", *_STEP5_MODEL_TYPES):
         return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = {
@@ -1592,20 +1589,6 @@ def allocate_kv_cache_main(
         for layer_name, layer in attn_layers.items()
         if (target_layer := getattr(layer, "kv_sharing_target_layer_name", None))
     }
-
-    if (
-        _is_step5_device_cache(vllm_config, kv_cache_config)
-        and KVPPConfig.from_vllm_config(vllm_config).size <= 1
-        and get_layerwise_reuse_layout(kv_cache_config) is None
-        and not is_c8_mxfp_kv_quant(vllm_config)
-        and all(
-            callable(getattr(attn_layers[name], "create_kv_cache_view", None))
-            for tensor in kv_cache_config.kv_cache_tensors
-            for name in tensor.layers
-            if name not in shared_layers
-        )
-    ):
-        return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
 
     raw_tensors = _allocate_kv_cache(
         kv_cache_config,
@@ -1661,7 +1644,7 @@ def _reshape_kv_cache_v2(
     kv_caches: dict[str, Any] = {}
     cache_owners = {}
     declared_block_strides = {}
-    if _is_step5_device_cache(vllm_config, kv_cache_config):
+    if _is_step5_model(vllm_config):
         cache_owners = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
         declared_block_strides = {
             name: descriptor.block_stride
