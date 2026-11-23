@@ -565,7 +565,8 @@ def test_scale_down_removes_dead_rank_and_recovers(moe_backend):
         str(NUM_REDUNDANT_EXPERTS),
     ]
     with _ft_manager(
-        extra_args, additional_config={"enable_prefill_mc2": True, "enable_fused_mc2": 2 if moe_backend == "mega_moe" else 0}
+        extra_args,
+        additional_config={"enable_prefill_mc2": True, "enable_fused_mc2": 2 if moe_backend == "mega_moe" else 0},
     ) as servers:
         assert len(servers) == DP_SIZE
         servers_by_rank = {r: _server_for_rank(servers, r) for r in range(DP_SIZE)}

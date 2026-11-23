@@ -110,23 +110,20 @@ def test_scale_down_uses_backend_specific_physical_expert_ids(mega_moe):
         model=SimpleNamespace(moe_layers=[layer]),
     )
     sentinel = object.__new__(WorkerSentinel)
-    sentinel._eplb_model_state = lambda: state
-    sentinel.worker = SimpleNamespace(model_runner=SimpleNamespace(model=state.model), vllm_config=object())
+    model_config, load_config = object(), object()
     manager = SimpleNamespace(
         has_mega_moe_buffer=mega_moe,
-        query_active_mask=lambda: torch.tensor([0, 1, 0, 0]),
-        get_mc2_elastic_info=Mock(return_value=torch.zeros(12)),
+        orig_to_dense_rank_table=lambda: torch.tensor([0, -1, 1, 2], dtype=torch.int32),
     )
     with (
         patch.object(sentinel_module, "mark_dead_expert_slots_inplace"),
         patch.object(sentinel_module, "redistribute_expert_placement", return_value={(0, 1)}),
         patch.object(sentinel_module, "_commit_eplb_maps"),
-        patch.object(sentinel_module, "rebuild_model_expert_maps"),
         patch.object(sentinel_module, "reload_experts_from_disk") as reload_experts,
         patch.object(sentinel_module, "refresh_model_routing_tables"),
         patch.object(sentinel_module, "get_ep_group", return_value=SimpleNamespace(world_size=4)),
         patch.object(sentinel_module, "get_ep_all2all_manager", return_value=manager),
     ):
-        sentinel._redistribute_experts({1})
-    reload_experts.assert_called_once_with(state.model, sentinel.worker.vllm_config, {(0, 1)})
+        sentinel._redistribute_model(state.model, state, model_config, load_config, {1})
+    reload_experts.assert_called_once_with(state.model, model_config, load_config, {(0, 1)})
     assert table.flatten().tolist() == ([0, 8, 12] if mega_moe else [0, 4, 8])

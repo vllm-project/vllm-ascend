@@ -25,6 +25,7 @@ from vllm_ascend.quantization.methods.w4a8.w4a8 import (
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import (
     AscendW8A8DynamicFusedMoEMethod,
     flatten_expert_dims,
+    scale_from_float_to_int64,
 )
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
@@ -161,6 +162,15 @@ _W8A8_DYNAMIC_SCHEME = _ReloadScheme(
     },
     _to_fractal_nz,
 )
+_W8A8_FUSED_SCHEME = _ReloadScheme(
+    AscendW8A8DynamicFusedMoEMethod,
+    {
+        **_W8A8_DYNAMIC_SCHEME.pipelines,
+        "fused_w1_scale": _WeightPipeline(_gate_up("weight_scale"), scale_from_float_to_int64),
+        "fused_w2_scale": _WeightPipeline(_down_proj("weight_scale"), scale_from_float_to_int64),
+    },
+    _to_fractal_nz,
+)
 _W4A8_ASCEND_SCHEME = _ReloadScheme(
     AscendW4A8DynamicFusedMoEMethod,
     {
@@ -180,6 +190,10 @@ def _resolve_scheme(routed: torch.nn.Module) -> _ReloadScheme:
     """The reload rules a routed-experts layer uses."""
 
     method = getattr(routed.quant_method, "quant_method", routed.quant_method)
+    if _W8A8_DYNAMIC_SCHEME.matches(method) and (
+        getattr(routed, "fused_w1_scale_list", None) is not None or getattr(routed, "fused_w1_scale", None) is not None
+    ):
+        return _W8A8_FUSED_SCHEME
     for scheme in _SCHEMES:
         if scheme.matches(method):
             return scheme

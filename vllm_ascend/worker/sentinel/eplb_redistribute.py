@@ -78,7 +78,12 @@ def _slot_tensor(layer: torch.nn.Module, attr: str, slot: int) -> torch.Tensor:
     """The runtime storage of one per-slot tensor."""
 
     per_slot = getattr(layer, f"{attr}_list", None)
-    return per_slot[slot] if per_slot is not None else getattr(layer, attr).data[slot]
+    if per_slot is not None:
+        return per_slot[slot]
+    tensor = getattr(layer, attr).data
+    if attr in {"fused_w1_scale", "fused_w2_scale"}:
+        tensor = tensor.view(layer.w13_weight.shape[0], -1)
+    return tensor[slot]
 
 
 def _reload_local_slots(
