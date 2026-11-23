@@ -18,7 +18,7 @@ def _load_launcher(relative_path):
     # and its real PyTorch shape/dtype/stride validation intact.
     triton_utils = ModuleType("vllm.triton_utils")
     triton_utils.triton = SimpleNamespace(
-        jit=lambda fn: fn,
+        jit=lambda fn=None, **kwargs: fn if fn is not None else (lambda kernel: kernel),
         autotune=lambda **kwargs: lambda fn: fn,
         Config=MagicMock(),
     )
@@ -115,6 +115,8 @@ class TestCompressorFusedNormValidation(unittest.TestCase):
             out=torch.empty(0, 128, dtype=torch.bfloat16),
             max_query_len=0,
             num_cores=1,
+            prev_rows=None,
+            prev_row_indices=None,
         )
 
     def test_empty_input_preserves_output_and_state_storage(self):
@@ -137,6 +139,21 @@ class TestCompressorFusedNormValidation(unittest.TestCase):
         for eps in (0.0, -1e-6, float("inf"), float("nan")):
             with self.subTest(eps=eps), self.assertRaisesRegex(ValueError, "RMSNorm weight or epsilon"):
                 self.module.compressor_from_projected(**self.args, norm_w=torch.ones(128), rms_eps=eps)
+
+
+    def test_nonempty_cpu_rejection_preserves_caller_output(self):
+        output = torch.full((2, 128), 7, dtype=torch.bfloat16)
+        args = {
+            **self.args,
+            "kv": torch.ones(2, 128),
+            "scores": torch.zeros(2, 128),
+            "out": output,
+            "max_query_len": 2,
+        }
+        before = output.clone()
+        with self.assertRaisesRegex(ValueError, "requires an NPU"):
+            self.module.compressor_from_projected(**args)
+        torch.testing.assert_close(output, before, rtol=0, atol=0)
 
 
 class TestCompressorModelNormDispatch(unittest.TestCase):
@@ -169,7 +186,7 @@ class TestCompressorModelNormDispatch(unittest.TestCase):
                 state = torch.zeros(2, 32, 1, 256)
                 compressor = SimpleNamespace(
                     norm=norm,
-                    state_cache=SimpleNamespace(kv_cache=[state]),
+                    state_cache=SimpleNamespace(kv_cache=state),
                     _ring_pooled=pooled,
                     _ring_num_cores=8,
                 )
@@ -182,6 +199,8 @@ class TestCompressorModelNormDispatch(unittest.TestCase):
                         torch.ones(2, 128),
                         torch.zeros(2, 128),
                         metadata,
+                        prev_rows=None,
+                        prev_row_indices=None,
                     )
                 self.assertIs(result, normalized)
                 call = kernel_module.compressor_from_projected.call_args

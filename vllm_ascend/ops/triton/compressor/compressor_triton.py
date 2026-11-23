@@ -214,7 +214,9 @@ def _pooled_blocked(
     return pooled
 
 
-@triton.jit
+@triton.jit(do_not_specialize=[
+    "total_group_slots", "groups_per_batch", "num_batches", "eps", "num_cache_blocks",
+])
 def _pool_kernel(
     out_ptr,
     kv_ptr,
@@ -226,40 +228,40 @@ def _pool_kernel(
     meta_ptr,  # Packed [start_pos | used_len | out_row_offset | seg_row_base]
     block_table_ptr,
     total_group_slots,
-    GROUP_SLOTS_PER_BATCH,  # Group slots per batch: ceil(max_used_len / RATIO)
-    NUM_BATCH,
+    groups_per_batch,  # Group slots per batch: ceil(max_used_len / RATIO)
+    num_batches,
     CACHE_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     RATIO: tl.constexpr,
     RATIO_PAD: tl.constexpr,
     CHUNK_ROWS: tl.constexpr,
-    eps: tl.constexpr,
+    eps,
     SINGLE_BLOCK: tl.constexpr,
     NO_PAD: tl.constexpr,
     HAS_PREV_ROWS: tl.constexpr,
     TOKEN_ALIGNED: tl.constexpr = False,
     FUSE_TOKEN_NORM: tl.constexpr = False,
-    NUM_CACHE_BLOCKS: tl.constexpr = 0,
+    num_cache_blocks=0,
 ):
     pid = tl.program_id(0)
     offs_h = tl.arange(0, HEAD_DIM)
     if not TOKEN_ALIGNED or FUSE_TOKEN_NORM:
         norm_w = tl.load(norm_w_ptr + offs_h).to(tl.float32)
     for task_id in range(pid, total_group_slots, tl.num_programs(0)):
-        batch = task_id // GROUP_SLOTS_PER_BATCH
-        local_group = task_id - batch * GROUP_SLOTS_PER_BATCH
-        start_pos = tl.load(meta_ptr + batch)  # [0, NUM_BATCH)
-        used_len = tl.load(meta_ptr + NUM_BATCH + batch)  # [NUM_BATCH, 2*NUM_BATCH)
+        batch = task_id // groups_per_batch
+        local_group = task_id - batch * groups_per_batch
+        start_pos = tl.load(meta_ptr + batch)  # [0, num_batches)
+        used_len = tl.load(meta_ptr + num_batches + batch)  # [num_batches, 2*num_batches)
         groups_in_batch = (start_pos + used_len) // RATIO - start_pos // RATIO
         # A ring page is 32 * 2 * HEAD_DIM FP32 elements. At page 65536 the
         # element offset exceeds INT32_MAX; widen before pointer arithmetic.
         cache_row = tl.load(block_table_ptr + batch).to(tl.int64)
         valid = local_group < groups_in_batch
         if TOKEN_ALIGNED:
-            valid = valid & (cache_row > 0) & (cache_row < NUM_CACHE_BLOCKS)
+            valid = valid & (cache_row > 0) & (cache_row < num_cache_blocks)
         if valid:
             group_idx = start_pos // RATIO + local_group
-            seg_row_base = tl.load(meta_ptr + 3 * NUM_BATCH + batch)  # [3*NUM_BATCH, 4*NUM_BATCH)
+            seg_row_base = tl.load(meta_ptr + 3 * num_batches + batch)  # [3*num_batches, 4*num_batches)
             rows = tl.arange(0, CHUNK_ROWS)
             token_pos = group_idx * RATIO + rows
             seg_off = token_pos - start_pos
@@ -344,15 +346,15 @@ def _pool_kernel(
                 out_row = seg_row_base + (group_idx + 1) * RATIO - 1 - start_pos
                 if FUSE_TOKEN_NORM:
                     # Preserve the original BF16 pooling output boundary.
-                    p = pooled.to(tl.bfloat16).to(tl.float32)
-                    variance = tl.sum(p * p, axis=0) / HEAD_DIM
-                    pooled = p * tl.rsqrt(variance + eps) * norm_w
+                    pooled_bf16 = pooled.to(tl.bfloat16).to(tl.float32)
+                    mean_square = tl.sum(pooled_bf16 * pooled_bf16, axis=0) / HEAD_DIM
+                    pooled = pooled_bf16 * tl.rsqrt(mean_square + eps) * norm_w
                 tl.store(out_ptr + out_row * HEAD_DIM + offs_h, pooled.to(tl.bfloat16))
             else:
                 pooled_bf16 = pooled.to(tl.bfloat16).to(tl.float32)
                 var = tl.sum(pooled_bf16 * pooled_bf16, axis=0) / HEAD_DIM
                 norm_out = pooled_bf16 * (1.0 / tl.sqrt(var + eps)) * norm_w
-                out_row = tl.load(meta_ptr + 2 * NUM_BATCH + batch) + local_group
+                out_row = tl.load(meta_ptr + 2 * num_batches + batch) + local_group
                 tl.store(out_ptr + out_row * HEAD_DIM + offs_h, norm_out.to(tl.bfloat16))
 
 
@@ -797,12 +799,14 @@ def compressor_from_projected(
                 or norm_w.dtype not in (torch.bfloat16, torch.float32)
                 or not norm_w.is_contiguous() or not 0 < rms_eps < float("inf")):
             raise ValueError("Invalid C2 RMSNorm weight or epsilon")
-    out.zero_()
     batches = metadata.shape[1]
-    if tokens == 0 or batches == 0 or max_query_len == 0:
-        return out
-    if kv.device.type != "npu":
+    has_work = tokens > 0 and batches > 0 and max_query_len > 0
+    if has_work and kv.device.type != "npu":
         raise ValueError("Projected Triton compressor requires an NPU")
+    # Validate before modifying the caller-owned output buffer.
+    out.zero_()
+    if not has_work:
+        return out
     groups = (max_query_len + 1) // 2
     writes = min(max_query_len, STATE_RING_ROWS)
     # Same-stream launch order is required: residual reads precede ring writes.
@@ -824,12 +828,12 @@ def compressor_from_projected(
         RATIO=2,
         RATIO_PAD=2,
         CHUNK_ROWS=2,
-        eps=rms_eps,
+        eps=float(rms_eps),
         SINGLE_BLOCK=True,
         NO_PAD=True,
         TOKEN_ALIGNED=True,
         FUSE_TOKEN_NORM=norm_w is not None,
-        NUM_CACHE_BLOCKS=state_cache.shape[0],
+        num_cache_blocks=state_cache.shape[0],
         HAS_PREV_ROWS=prev_rows is not None,
     )
     if prev_rows is not None:

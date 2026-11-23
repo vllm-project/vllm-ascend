@@ -1,126 +1,190 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Experimental DeepSeek V4.1 Ascend A2/A3 INT8 indexer K epilogue.
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""DeepSeek V4.1 RMSNorm/RoPE/INT8 publication for ordinary paged caches.
 
-Not hardware-validated. Requires vLLM + Triton Ascend on an NPU host.
-Input is wk(latent), BEFORE k_norm; wk remains a separate GEMM.
-cos/sin are already selected for each source position, repeated interleaved
-as in vllm_ascend/ops/rope_dsv4.py: [T, 1, 1, R] or [T, R].
-slots: physical [block, offset] coordinates, [T, 2]; negatives skip.
-Caches: separate [blocks, page_size, 1, D] INT8 and
-[blocks, page_size, 1, 1] FP16 scale tensors; physical strides are respected.
-Valid output slots must be unique; caller owns metadata and stream ordering.
-Finite inputs only. Zero rows produce q=0, scale=0 (check against your CANN).
-Do not use for A5 packed/MXFP4 caches or folded-cache publication.
+Only k_cache and scale_cache are modified, at valid unique [block, slot]
+coordinates. Inputs must be finite and RoPE tables must repeat each angle
+twice for interleaved rotation. Packed/folded caches and biased normalization
+are handled by the production caller's existing path. See docs/indexer_k_fusion.md.
+Hardware acceptance remains required; this module alone is not validation.
 """
+
 import torch
-from vllm.triton_utils import triton, tl
+from vllm.triton_utils import tl, triton
+
+INT8_QUANT_MAX = 127.0  # Symmetric INT8 dynamic quantization uses [-127, 127].
 
 
 @triton.jit
-def _round_even(x):
-    # Explicit nearest-even; integer casts alone would truncate.
-    lo = tl.floor(x)
-    frac = x - lo
-    odd = (lo.to(tl.int32) & 1) != 0
-    return lo + ((frac > 0.5) | ((frac == 0.5) & odd)).to(tl.float32)
+def _round_even(value):
+    lower = tl.floor(value)
+    fraction = value - lower
+    lower_is_odd = (lower.to(tl.int32) & 1) != 0
+    return lower + ((fraction > 0.5) | ((fraction == 0.5) & lower_is_odd)).to(tl.float32)
 
 
-@triton.jit
-def _indexer_k_norm_rope_int8_store(
-    X, W, COS, SIN, SLOTS, KC, SC,
-    XS: tl.constexpr, WS: tl.constexpr,
-    CS0: tl.constexpr, CS1: tl.constexpr,
-    SS0: tl.constexpr, SS1: tl.constexpr,
-    IS0: tl.constexpr, IS1: tl.constexpr,
-    K0: tl.constexpr, K1: tl.constexpr, K2: tl.constexpr,
-    S0: tl.constexpr, S1: tl.constexpr,
-    NB: tl.constexpr, PAGE: tl.constexpr,
-    D: tl.constexpr, R: tl.constexpr, EPS: tl.constexpr,
+# These scalars only participate in addressing, bounds checks or arithmetic.
+# Keep them runtime values to avoid variants for cache capacity and row strides.
+# Pointer dtype/alignment, constexpr dimensions and compiler options can still
+# specialize. Validate those remaining classes on the installed Triton backend.
+@triton.jit(
+    do_not_specialize=[
+        "input_row_stride", "weight_stride", "cos_row_stride", "cos_col_stride",
+        "sin_row_stride", "sin_col_stride", "slots_row_stride", "slots_col_stride",
+        "key_block_stride", "key_row_stride", "scale_block_stride", "scale_row_stride",
+        "num_blocks", "page_size", "rotary_dim", "rms_eps",
+    ]
+)
+def _indexer_k_norm_rope_int8_store_kernel(
+    input_ptr,
+    weight_ptr,
+    cos_ptr,
+    sin_ptr,
+    slots_ptr,
+    key_cache_ptr,
+    scale_cache_ptr,
+    input_row_stride,
+    weight_stride,
+    cos_row_stride,
+    cos_col_stride,
+    sin_row_stride,
+    sin_col_stride,
+    slots_row_stride,
+    slots_col_stride,
+    key_block_stride,
+    key_row_stride,
+    scale_block_stride,
+    scale_row_stride,
+    num_blocks,
+    page_size,
+    rotary_dim,
+    rms_eps,
+    HEAD_DIM: tl.constexpr,
+    QUANT_MAX: tl.constexpr,
 ):
-    row = tl.program_id(0)
-    block = tl.load(SLOTS + row * IS0).to(tl.int64)
-    slot = tl.load(SLOTS + row * IS0 + IS1).to(tl.int64)
-    if (block >= 0) & (block < NB) & (slot >= 0) & (slot < PAGE):
-        pair = tl.arange(0, D // 2)
-        even = 2 * pair
-        odd = even + 1
-        a = tl.load(X + row * XS + even).to(tl.float32)
-        b = tl.load(X + row * XS + odd).to(tl.float32)
-        inv = tl.rsqrt((tl.sum(a * a, 0) + tl.sum(b * b, 0)) / D + EPS)
-        wa = tl.load(W + even * WS).to(tl.float32)
-        wb = tl.load(W + odd * WS).to(tl.float32)
-        # Preserve the BF16 boundary between RMSNorm and RoPE.
-        a = (a * inv * wa).to(tl.bfloat16).to(tl.float32)
-        b = (b * inv * wb).to(tl.bfloat16).to(tl.float32)
-        local = even - (D - R)
-        rotary = local >= 0
-        safe_local = tl.maximum(local, 0)
-        c = tl.load(COS + row * CS0 + safe_local * CS1,
-                    mask=rotary, other=1.0).to(tl.float32)
-        s = tl.load(SIN + row * SS0 + safe_local * SS1,
-                    mask=rotary, other=0.0).to(tl.float32)
-        ar = (a * c - b * s).to(tl.bfloat16).to(tl.float32)
-        br = (b * c + a * s).to(tl.bfloat16).to(tl.float32)
-        amax = tl.maximum(tl.max(tl.abs(ar), 0), tl.max(tl.abs(br), 0))
-        scale = amax / 127.0
-        # Quantize with FP32 scale; only round the stored scale to FP16.
-        divisor = tl.where(amax > 0.0, scale, 1.0)
-        qa = tl.minimum(tl.maximum(_round_even(ar / divisor), -127.0), 127.0)
-        qb = tl.minimum(tl.maximum(_round_even(br / divisor), -127.0), 127.0)
-        base = KC + block * K0 + slot * K1
-        tl.store(base + even * K2, qa.to(tl.int8))
-        tl.store(base + odd * K2, qb.to(tl.int8))
-        tl.store(SC + block * S0 + slot * S1,scale.to(tl.float16))
+    row = tl.program_id(0).to(tl.int64)
+    block = tl.load(slots_ptr + row * slots_row_stride).to(tl.int64)
+    slot = tl.load(slots_ptr + row * slots_row_stride + slots_col_stride).to(tl.int64)
+    valid = (block >= 0) & (block < num_blocks) & (slot >= 0) & (slot < page_size)
+    if valid:
+        pairs = tl.arange(0, HEAD_DIM // 2)
+        even_offsets = 2 * pairs
+        odd_offsets = even_offsets + 1
+        even_values = tl.load(input_ptr + row * input_row_stride + even_offsets).to(tl.float32)
+        odd_values = tl.load(input_ptr + row * input_row_stride + odd_offsets).to(tl.float32)
+        mean_square = (
+            tl.sum(even_values * even_values, 0) + tl.sum(odd_values * odd_values, 0)
+        ) / HEAD_DIM
+        inv_rms = tl.rsqrt(mean_square + rms_eps)
+        even_weight = tl.load(weight_ptr + even_offsets * weight_stride).to(tl.float32)
+        odd_weight = tl.load(weight_ptr + odd_offsets * weight_stride).to(tl.float32)
+        # The unfused RMSNorm produces BF16 before RoPE consumes its output.
+        even_values = (even_values * inv_rms * even_weight).to(tl.bfloat16).to(tl.float32)
+        odd_values = (odd_values * inv_rms * odd_weight).to(tl.bfloat16).to(tl.float32)
 
-def indexer_k_norm_rope_int8_store(k_pre, weight, eps, cos, sin,
-                                   slots, k_cache, scale_cache):
-    """No host tensor reads, allocation, cache copies, or synchronization."""
+        rotary_offsets = even_offsets - (HEAD_DIM - rotary_dim)
+        rotary_mask = rotary_offsets >= 0
+        safe_offsets = tl.maximum(rotary_offsets, 0)
+        cos_values = tl.load(
+            cos_ptr + row * cos_row_stride + safe_offsets * cos_col_stride,
+            mask=rotary_mask, other=1.0,
+        ).to(tl.float32)
+        sin_values = tl.load(
+            sin_ptr + row * sin_row_stride + safe_offsets * sin_col_stride,
+            mask=rotary_mask, other=0.0,
+        ).to(tl.float32)
+        rotated_even = (even_values * cos_values - odd_values * sin_values).to(tl.bfloat16).to(tl.float32)
+        rotated_odd = (odd_values * cos_values + even_values * sin_values).to(tl.bfloat16).to(tl.float32)
+        abs_max = tl.maximum(tl.max(tl.abs(rotated_even), 0), tl.max(tl.abs(rotated_odd), 0))
+        scale = abs_max / QUANT_MAX
+        # Quantize with FP32 scale; only the published scale is converted to FP16.
+        # Zero-row semantics must be checked against the deployed native operator.
+        divisor = tl.where(abs_max > 0.0, scale, 1.0)
+        quant_even = tl.minimum(tl.maximum(_round_even(rotated_even / divisor), -QUANT_MAX), QUANT_MAX)
+        quant_odd = tl.minimum(tl.maximum(_round_even(rotated_odd / divisor), -QUANT_MAX), QUANT_MAX)
+        key_base = key_cache_ptr + block * key_block_stride + slot * key_row_stride
+        tl.store(key_base + even_offsets, quant_even.to(tl.int8))
+        tl.store(key_base + odd_offsets, quant_odd.to(tl.int8))
+        tl.store(
+            scale_cache_ptr + block * scale_block_stride + slot * scale_row_stride,
+            scale.to(tl.float16),
+        )
+
+
+def indexer_k_norm_rope_int8_store(
+    k_pre: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    slots: torch.Tensor,
+    k_cache: torch.Tensor,
+    scale_cache: torch.Tensor,
+) -> None:
+    """Publish pre-normalization wk output into caller-owned K/scale caches.
+
+    Shapes: k_pre [T,D], weight [D], slots [T,2], cos/sin [T,R] or
+    [T,1,1,R], k_cache [B,P,1,D], scale_cache [B,P,1,1]. D is an even
+    power of two; 0 < R <= D and R is even. Inputs use one NPU. k_pre is
+    BF16, weight BF16/FP32, cos/sin FP32, slots INT32/INT64, and caches
+    INT8/FP16. Cache rows may have physical padding. Valid slots must be
+    unique; out-of-range slots are skipped. Inputs must not alias outputs.
+
+    The caller guarantees finite values, paired RoPE columns, unique slots
+    and stream ordering. Checking tensor contents here would synchronize
+    the hot path. Empty batches are a no-op after metadata validation.
+    No tensor-content host reads, implicit contiguous copies or allocation.
+    """
     if k_pre.ndim != 2 or k_pre.dtype != torch.bfloat16:
         raise ValueError("k_pre must be [T,D] BF16")
-    t, d = k_pre.shape
-    if d < 2 or d & (d - 1) or k_pre.stride(1) != 1:
+    num_tokens, head_dim = k_pre.shape
+    if head_dim < 2 or head_dim & (head_dim - 1) or k_pre.stride(1) != 1:
         raise ValueError("D must be an even power of two with stride(1)=1")
-    if weight.shape != (d,) or weight.dtype not in (torch.bfloat16, torch.float32):
+    if weight.shape != (head_dim,) or weight.dtype not in (torch.bfloat16, torch.float32):
         raise ValueError("weight must be BF16/FP32 [D]")
     if not 0 < eps < float("inf"):
         raise ValueError("Require finite positive model RMSNorm epsilon")
-    if slots.shape != (t, 2) or slots.dtype not in (torch.int32, torch.int64):
+    if slots.shape != (num_tokens, 2) or slots.dtype not in (torch.int32, torch.int64):
         raise ValueError("slots must be INT32/INT64 [T,2]")
     if cos.ndim == 4 and cos.shape[1:3] == (1, 1):
         cos = cos[:, 0, 0, :]
     if sin.ndim == 4 and sin.shape[1:3] == (1, 1):
         sin = sin[:, 0, 0, :]
-    if cos.ndim != 2 or sin.shape != cos.shape or cos.shape[0] != t:
+    if cos.ndim != 2 or sin.shape != cos.shape or cos.shape[0] != num_tokens:
         raise ValueError("cos/sin must be [T,R] or [T,1,1,R]")
     if cos.dtype != torch.float32 or sin.dtype != torch.float32:
         raise ValueError("Require source-selected FP32 RoPE tables")
-    r = cos.shape[1]
-    if not (0 < r <= d and r % 2 == 0):
+    rotary_dim = cos.shape[1]
+    if not (0 < rotary_dim <= head_dim and rotary_dim % 2 == 0):
         raise ValueError("R must be positive, even, and <= D")
-    if k_cache.ndim != 4 or k_cache.shape[2:] != (1, d):
+    if k_cache.ndim != 4 or k_cache.shape[2:] != (1, head_dim):
         raise ValueError("k_cache must be [blocks,page,1,D]")
-    nb, page = k_cache.shape[:2]
-    if scale_cache.shape != (nb, page, 1, 1):
+    num_blocks, page_size = k_cache.shape[:2]
+    if scale_cache.shape != (num_blocks, page_size, 1, 1):
         raise ValueError("scale_cache must be [blocks,page,1,1]")
     if k_cache.dtype != torch.int8 or scale_cache.dtype != torch.float16:
         raise ValueError("Require INT8 K and FP16 dequant scales")
-    # Permit gaps between pages, e.g. views in a shared multi-layer allocation.
-    if (k_cache.stride(3) != 1 or k_cache.stride(1) < d
-            or k_cache.stride(0) < page * k_cache.stride(1)
-            or scale_cache.stride(1) < 1
-            or scale_cache.stride(0) < page * scale_cache.stride(1)):
+    if (
+        k_cache.stride(3) != 1
+        or k_cache.stride(1) < head_dim
+        or k_cache.stride(0) < page_size * k_cache.stride(1)
+        or scale_cache.stride(1) < 1
+        or scale_cache.stride(0) < page_size * scale_cache.stride(1)
+    ):
         raise ValueError("Require internally contiguous, nonoverlapping cache rows")
     tensors = (weight, cos, sin, slots, k_cache, scale_cache)
-    if k_pre.device.type != "npu" or any(x.device != k_pre.device for x in tensors):
+    if k_pre.device.type != "npu" or any(tensor.device != k_pre.device for tensor in tensors):
         raise ValueError("All tensors must share one NPU")
-    if t == 0:
+    if num_tokens == 0:
         return
-    _indexer_k_norm_rope_int8_store[(t,)](
+    _indexer_k_norm_rope_int8_store_kernel[(num_tokens,)](
         k_pre, weight, cos, sin, slots, k_cache, scale_cache,
         k_pre.stride(0), weight.stride(0),
         *cos.stride(), *sin.stride(), *slots.stride(),
-        k_cache.stride(0), k_cache.stride(1), k_cache.stride(3),
+        k_cache.stride(0), k_cache.stride(1),
         scale_cache.stride(0), scale_cache.stride(1),
-        nb, page, d, r, eps,
+        num_blocks, page_size, rotary_dim, float(eps),
+        HEAD_DIM=head_dim,
+        QUANT_MAX=INT8_QUANT_MAX,
         enable_fp_fusion=False,
     )

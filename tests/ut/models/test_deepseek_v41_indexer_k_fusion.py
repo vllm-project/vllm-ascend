@@ -34,7 +34,7 @@ class TestIndexerKFusionDispatch(TestCase):
                 bias_loaded=False,
             ),
             packed_cache_ops=None,
-            k_cache=SimpleNamespace(kv_cache=[(self.key_cache, self.scale_cache)]),
+            k_cache=SimpleNamespace(kv_cache=(self.key_cache, self.scale_cache)),
             k_cache_folded=None,
         )
 
@@ -104,7 +104,7 @@ class TestIndexerKFusionDispatch(TestCase):
         for folded in (False, True):
             with self.subTest(folded=folded):
                 packed = self.indexer.packed_cache_ops = MagicMock()
-                self.indexer.k_cache_folded = SimpleNamespace(kv_cache=[object()]) if folded else None
+                self.indexer.k_cache_folded = SimpleNamespace(kv_cache=object()) if folded else None
                 with (
                     patch(f"{FUSION_MODULE}.indexer_k_norm_rope_int8_store") as fused,
                     patch(f"{INDEXER_MODULE}.DeviceOperator.apply_partial_rotary_inplace"),
@@ -117,5 +117,5 @@ class TestIndexerKFusionDispatch(TestCase):
                 packed.write_index_cache.assert_called_once()
                 self.assertEqual(fold.call_count, int(folded))
                 if folded:
-                    self.assertIs(fold.call_args.args[1], self.indexer.k_cache_folded.kv_cache[0])
+                    self.assertIs(fold.call_args.args[1], self.indexer.k_cache_folded.kv_cache)
                     self.assertIs(fold.call_args.args[2], self.slots)

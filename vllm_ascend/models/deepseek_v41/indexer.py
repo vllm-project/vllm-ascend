@@ -118,8 +118,6 @@ class DeepseekV41Indexer(nn.Module):
         if not self.owns_k or latent.shape[0] == 0:
             return
 
-        k_cache, scale_cache = self.k_cache.kv_cache[0]
-
         # Fuse only the ordinary INT8 cache path without a loaded Norm bias.
         # A5 packed/folded caches and biased Norm retain their original path.
         if self.packed_cache_ops is None and not getattr(self.k_norm, "bias_loaded", False):
@@ -127,6 +125,8 @@ class DeepseekV41Indexer(nn.Module):
 
             if cos.shape[-1] != self.rope_width:
                 raise ValueError("Source RoPE table width does not match indexer rope_width")
+            # bind_kv_cache stores the component tuple directly.
+            k_cache, scale_cache = self.k_cache.kv_cache
             k_pre = self.wk(latent)
             indexer_k_norm_rope_int8_store(
                 k_pre,
