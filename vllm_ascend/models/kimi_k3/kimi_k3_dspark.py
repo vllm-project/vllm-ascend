@@ -218,11 +218,14 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
     ) -> None:
         if context_states.numel() == 0:
             return
-        per_layer_slot_mapping = isinstance(context_slot_mapping, (list, tuple))
         cos, sin = get_cos_and_sin_mla(context_positions)
         for layer_idx, layer in enumerate(self.layers):
             attn = layer.self_attn
-            slots = context_slot_mapping[layer_idx] if per_layer_slot_mapping else context_slot_mapping
+            slots = (
+                context_slot_mapping[layer_idx]
+                if isinstance(context_slot_mapping, (list, tuple))
+                else context_slot_mapping
+            )
             if slots is None and context_slot_mapping is not None:
                 continue
             assert attn.impl.kv_lora_rank is not None
