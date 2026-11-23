@@ -464,12 +464,13 @@ def test_start_flush_gate_selects_fused_vs_flush(monkeypatch):
     # The plan arrays are allocated at max_num_reqs; only the real rows matter.
     assert plan[0].shape[0] >= state_indices.shape[0]
 
-    # Without an override, HEADS x 2 requests is below the default 384.
+    # Without an override, the experiment build always fuses non-empty steps
+    # (the size-based threshold is removed).
     monkeypatch.delenv("VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS")
     deferred = make_deferred()
     deferred.start_flush("layer0")
-    assert deferred.flushed and not deferred.started
-    assert deferred.replay_plan() is None
+    assert deferred.started and not deferred.flushed
+    assert deferred.replay_plan() is not None
 
     print("[PASS] start_flush gate: below threshold flushes, at/above fuses")
 

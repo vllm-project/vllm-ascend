@@ -33,28 +33,19 @@ RECOVERSSM_LARGE_TILE_MIN_PROGRAMS = 96
 RECOVERSSM_CONV_TILE = 4096
 RECOVERSSM_CONV_STRIDED_TILE = 256
 
-# Deferred RecoverSSM fusion threshold, in (request, head) items. Upstream
-# (`cutedsl/kda/prepared.py::replays`) fuses a verify that replays the previous
-# step's commit only once it has enough items to amortize the fused pass; below
-# it the step folds the pending replays first (flush + plain verify), where the
-# fused pass loses (GB300 TP8 R1: 5.8 us core+commit vs 10.7 us fused per layer).
-# A5 keeps the same shape because the trade-off (state traffic per item vs extra
-# UB residency) is the same. Override with `VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS`.
-RECOVERSSM_FUSED_ITEMS_BY_HEADS = {12: 192}
-RECOVERSSM_FUSED_ITEMS_DEFAULT = 384
-
-
+# Experiment build: the size-based fusion threshold is disabled, so every
+# non-empty deferred step replays the previous commit in the verify kernel.
+# `VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS` still pins an item threshold for A/B
+# runs (0 forces the fused path, a large value forces flush + verify).
 def recoverssm_replays(num_heads: int, requests: int) -> bool:
     """Whether a deferred RecoverSSM verify of ``num_heads * requests`` items
     replays the previous step's commit in the same pass (else: flush + verify)."""
+    if requests <= 0:
+        return False
     forced = os.environ.get("VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS")
-    if forced is not None:
-        threshold = int(forced)
-    else:
-        threshold = RECOVERSSM_FUSED_ITEMS_BY_HEADS.get(
-            num_heads, RECOVERSSM_FUSED_ITEMS_DEFAULT
-        )
-    return requests > 0 and num_heads * requests >= threshold
+    if forced is None:
+        return True
+    return num_heads * requests >= int(forced)
 
 
 @triton.jit
