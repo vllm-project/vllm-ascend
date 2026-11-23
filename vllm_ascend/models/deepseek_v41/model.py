@@ -17,7 +17,6 @@ from itertools import islice
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
@@ -33,7 +32,11 @@ from vllm.distributed import (
 from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory, fused_moe_make_expert_params_mapping
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -236,10 +239,15 @@ class DeepseekV41MoE(nn.Module):
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
-        self.gate = ReplicatedLinear(
-            config.hidden_size, config.n_routed_experts, bias=False, quant_config=None, prefix=f"{prefix}.gate"
+        self.gate = GateLinear(
+            input_size=config.hidden_size,
+            output_size=self.n_routed_experts,
+            bias=False,
+            out_dtype=torch.float32,
+            force_fp32_compute=torch.get_default_dtype() != torch.bfloat16,
+            prefix=f"{prefix}.gate",
+            return_bias=False,
         )
-        self.gate.precast_fp32_weight = True
 
         # Load balancing settings.
         eplb_config = parallel_config.eplb_config
@@ -326,39 +334,24 @@ class DeepseekV41MoE(nn.Module):
         self,
         hidden_states: torch.Tensor,
         input_ids: torch.Tensor | None = None,
-        hidden_states_fp32: torch.Tensor | None = None,
         already_sequence_parallel: bool = False,
     ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-        if hidden_states_fp32 is not None:
-            hidden_states_fp32 = hidden_states_fp32.view(-1, hidden_dim)
         # Chunk the hidden states so they aren't replicated across TP ranks.
         # This avoids duplicate computation in self.experts.
         # TODO: We can replace the all_reduce at the end of attn with a
         # reduce_scatter instead of chunking here.
         if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sp_shard(hidden_states)
-            if hidden_states_fp32 is not None:
-                hidden_states_fp32 = sp_shard(hidden_states_fp32)
 
-        if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoEFactory class
-            router_input = hidden_states if hidden_states_fp32 is None else hidden_states_fp32
-            fused_moe_out = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_input,
-                input_ids=input_ids,
-            )
-        else:
-            # router_logits: (num_tokens, n_experts)
-            router_input = hidden_states.float() if hidden_states_fp32 is None else hidden_states_fp32
-            router_logits = F.linear(router_input, self.gate.weight)
-            fused_moe_out = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                input_ids=input_ids,
-            )
+        # An internal router applies the gate inside the MoE runner.
+        router_logits = hidden_states if self.experts.is_internal_router else self.gate(hidden_states)
+        fused_moe_out = self.experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            input_ids=input_ids,
+        )
 
         fused_moe_out_is_tuple = isinstance(fused_moe_out, tuple)
         if fused_moe_out_is_tuple:
@@ -1062,16 +1055,6 @@ class DeepseekV41DecoderLayer(nn.Module):
         else:
             self.engram = None
 
-    def rms_norm_cast(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Normalize once and provide the exact FP32 routing input."""
-        outputs = DeviceOperator.rms_norm_cast(
-            hidden_states, self.post_attention_layernorm.weight, self.post_attention_layernorm.variance_epsilon
-        )
-        if outputs is not None:
-            return outputs
-        normalized = self.post_attention_layernorm(hidden_states)
-        return normalized, normalized.float()
-
     @staticmethod
     def hc_collapse(x, pre_mix):
         return (pre_mix.unsqueeze(-1) * x.float()).sum(-2).to(x.dtype)
@@ -1144,11 +1127,10 @@ class DeepseekV41DecoderLayer(nn.Module):
             self.hc_ffn_base,
             attn_pre,
         )
-        x, x_fp32 = self.rms_norm_cast(x)
+        x = self.post_attention_layernorm(x)
         x = self.mlp(
             x,
             input_ids=input_ids,
-            hidden_states_fp32=x_fp32,
             already_sequence_parallel=use_sequence_parallel,
         )
         hidden_states = self.hc_post(x, residual, ffn_post, ffn_comb)

@@ -41,7 +41,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import (
@@ -105,7 +105,6 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     make_qsa_kernel_page_cache,
     make_slab_view,
 )
-from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.cache import uses_turboquant_groups
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
@@ -358,6 +357,7 @@ def build_attn_metadata(
     offload_dummy: bool = False,
     req_topk_buffer_slots: torch.Tensor | None = None,
     req_topk_buffer_active: torch.Tensor | None = None,
+    req_topk_buffer_stable_prefixes: torch.Tensor | None = None,
     copy_sfa_draft_index: int | None = None,
     copy_sfa_restore_tails: bool = False,
     draft_layer_names: set[str] | None = None,
@@ -491,6 +491,7 @@ def build_attn_metadata(
             offload_dummy=offload_dummy,
             req_topk_buffer_slots=req_topk_buffer_slots,
             req_topk_buffer_active=req_topk_buffer_active,
+            req_topk_buffer_stable_prefixes=req_topk_buffer_stable_prefixes,
             copy_sfa_draft_index=copy_sfa_draft_index,
             copy_sfa_restore_tails=copy_sfa_restore_tails,
             dcp_local_seq_lens=dcp_local_seq_lens,
@@ -507,15 +508,20 @@ def build_attn_metadata(
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_v41_builder = isinstance(attn_metadata_builder, AscendDSAV41MetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
-            if isinstance(attn_metadata_builder, QSAMetadataBuilder) and num_reqs > num_actual_reqs:
+            is_qsa_indexer = isinstance(attn_metadata_builder, QSAMetadataBuilder)
+            layer_common = common_attn_metadata
+            if is_qsa_indexer and num_reqs > num_actual_reqs:
                 # FULL graph padding appends dummy request boundaries to the
                 # shared query_start_loc, while QSA reads the CPU tail as its
                 # mapped-token count. Expose only the live request boundaries.
-                common_attn_metadata = replace(  # type: ignore[call-arg]
-                    common_attn_metadata,
-                    query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu[: num_actual_reqs + 1],
+                layer_common = layer_common.replace(
+                    query_start_loc_cpu=layer_common.query_start_loc_cpu[: num_actual_reqs + 1],
                 )
-            metadata_variants = [(attn_group.layer_names, common_attn_metadata)]
+            if pcp_context is not None and (full_graph_mode or for_cudagraph_capture):
+                backend = getattr(attn_group, "backend", None)
+                if is_qsa_indexer or getattr(backend, "uses_qsa_page_major_kv_view", False):
+                    layer_common = layer_common.replace(graph_pad_size=num_input_tokens)
+            metadata_variants = [(attn_group.layer_names, layer_common)]
             if is_sfa_builder and draft_layer_names:
                 target_names = [name for name in attn_group.layer_names if name not in draft_layer_names]
                 draft_names = [name for name in attn_group.layer_names if name in draft_layer_names]
@@ -2047,11 +2053,8 @@ def _reshape_kv_cache_v2(
 
             if packed_sfa_main_cache:
                 raw_k_tensor = raw_cache
-                k_dtype = (
-                    torch.int8
-                    if vllm_config.cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE
-                    else kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
-                )
+                # Allocation and the layer's reader/writer share this spec.
+                k_dtype = kv_cache_spec.dtype
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)
             elif isinstance(raw_cache, tuple):

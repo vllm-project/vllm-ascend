@@ -280,6 +280,16 @@ Force-cancel all workflow runs on the current PR commit. This cancels runs direc
 
 > Note: This uses the `force-cancel` API endpoint, which can cancel runs even when they are in a pending or queued state waiting for runners.
 
+### `/ai-review` family
+
+Trigger and manage the AI review agent on a pull request (requires the `ai-review` label and an allowlisted PR author — see [AI Code Review](ai-review.md)):
+
+| Command | Effect |
+|---|---|
+| `/ai-review` | Trigger the next review round; also works as a reply inside one of the agent's inline finding threads |
+| `/ai-review-waive` | Waive findings: in a top-level comment waives all open findings (then one re-evaluation round runs); as a reply inside a finding's thread waives only that finding (reviewer only) |
+| `/ai-review-stop` | Stop the review entirely; the agent stays silent until the label is re-applied (reviewer only) |
+
 ## Behavior
 
 1. When you comment a slash command, a 👀 reaction is added to your comment to indicate it has been received
@@ -297,6 +307,9 @@ Force-cancel all workflow runs on the current PR commit. This cancels runs direc
 | `/cherry-pick` | ✅ | ❌ |
 | `/revert` | ✅ | ❌ |
 | `/nightly` | ✅ | ❌ |
+| `/ai-review` | ✅ | ❌ |
+| `/ai-review-waive` | ✅ | ❌ |
+| `/ai-review-stop` | ✅ | ❌ |
 
 ## Permission
 
@@ -309,5 +322,8 @@ Force-cancel all workflow runs on the current PR commit. This cancels runs direc
 | `/cherry-pick` | PR author, or users with triage+ permission on the repository |
 | `/revert` | PR author, or users with triage+ permission on the repository |
 | `/nightly` | Users with triage+ permission on the repository only |
+| `/ai-review` | PR author (once the PR is allowlisted and labeled) |
+| `/ai-review-waive` | Users with write permission on the repository |
+| `/ai-review-stop` | Users with write permission on the repository |
 
 Permission is verified via the GitHub API (`repos/{owner}/{repo}/collaborators/{user}/permission`).

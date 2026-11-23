@@ -48,6 +48,12 @@ as FP4 E2M1 and their separate scales as E8M0. Cached K is viewed as
 packing uses `scale_alg=0` and groups each logical head independently.
 Prequantized Q from fused prepare bypasses a second quantization.
 
+This indexer setting is independent of A8C4 main attention. MXFP4 index Q/K
+uses group-32 E8M0 scales; A8C4 main K/V uses a separate group-16 BF16-scale
+contract. Enabling the indexer setting does not enable A8C4 or change weight
+quantization. Deployments that combine the features must validate their shared
+prepare path as well as the two individual operators.
+
 With supported aligned TopK, the adapter forwards `return_choice=1`, `topk`,
 `init_blocks`, and `local_blocks` alongside the paged sequence metadata.
 The operator returns ascending logical block IDs and `-1` padding. Decode
@@ -86,3 +92,12 @@ actual FP4/E8M0 dtypes forwarded to the external score API:
 ```bash
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -q tests/ut/models/minimax_m3/test_msa_m3_mxfp4.py
 ```
+
+## Model evaluation scope
+
+A prior r129 deployment completed 1730 MMMU-Pro questions per variant using
+W4A4 weights, A8C4 main attention, and DSpark K7. The existing FP8 indexer scored
+1254/1730 (72.49%); the MXFP4 indexer scored 1281/1730 (74.05%). Empty final
+answers occurred in 187 and 164 cases respectively. These are single runs of a
+combined deployment, not final-branch quality acceptance or proof of an accuracy
+improvement. Repeated controls and a native-KV baseline remain necessary.

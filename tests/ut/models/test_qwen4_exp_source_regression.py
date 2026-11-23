@@ -76,7 +76,7 @@ def test_qsa_metadata_ignores_full_graph_dummy_request_boundaries() -> None:
     branch = attn_utils[branch_start:branch_end]
 
     assert "num_reqs > num_actual_reqs" in branch
-    assert "query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu[" in branch
+    assert "query_start_loc_cpu=layer_common.query_start_loc_cpu[" in branch
     assert ": num_actual_reqs + 1" in branch
 
 

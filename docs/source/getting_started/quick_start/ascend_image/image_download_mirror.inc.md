@@ -4,13 +4,13 @@
 
     For example, the original image address is:
 
-    ```text
+    ```bash
     quay.io/ascend/vllm-ascend:<TAG>
     ```
 
     You can replace it with:
 
-    ```text
+    ```bash
     # Replace with tag you want to pull
     TAG={{ vllm_ascend_version }}
     # use
@@ -19,4 +19,4 @@
     docker pull quay.nju.edu.cn/ascend/vllm-ascend:$TAG
     ```
 
-    Replace only the registry prefix and preserve the complete original image tag, including suffixes such as `-a3`, `-310p`, `-950dt`, and `-openeuler`.
+    Replace only the registry prefix and preserve the complete original image tag, including suffixes such as `-a3`, `-a5`, `-310p`, and `-openeuler`.

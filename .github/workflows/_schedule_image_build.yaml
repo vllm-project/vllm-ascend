@@ -273,7 +273,7 @@ jobs:
         retention-days: 1
 
   merge-image:
-    runs-on: linux-amd64-cpu-4
+    runs-on: linux-amd64-cpu-2-hk
     needs: build-push-digest
     if: ${{ inputs.should_push }}
     steps:
