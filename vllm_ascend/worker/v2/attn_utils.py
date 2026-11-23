@@ -355,6 +355,8 @@ def _prepare_qsa_step_metadata(
         if not layer_names:
             continue
         main_metadata = attn_metadata.get(layer_names[0])
+        if main_metadata is None:
+            continue
         request_plan = getattr(main_metadata, "qsa_request_plan", None)
         if request_plan is None:
             continue
