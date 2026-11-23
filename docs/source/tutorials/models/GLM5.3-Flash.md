@@ -1510,13 +1510,8 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     Follow [Scenario 2: Memcache Backend](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend)
     for the Memcache backend configuration.
 
-    Add `--enable-chunked-prefill` on both roles. Keep prefix caching and the
-    hybrid KV cache manager enabled. With prefix caching enabled, the model configuration selects
-    `mamba_cache_mode=align`, which is required by `AscendStoreConnector`.
-    Remove `--use-replayssm` from both role scripts for this pooling scenario.
-    Keep `use_layerwise=false` and PP=DCP=1. Do not enable
-    [RecoverSSM](../../user_guide/feature_guide/speculative_decoding.md)
-    for this deployment: its KV-transfer path does not accept `MultiConnector`.
+    Keep `--use-replayssm` and `--enable-prefix-caching` on both roles,
+    as in ordinary PD. The pool connector uses `use_layerwise=false`.
 
     1. On the Prefill node, replace the final `--kv-transfer-config`
        argument in `run_dp_template.sh` with the following fragment.
