@@ -17,6 +17,7 @@ from unittest import mock
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[3] / "examples" / "external_online_dp"
 spec = importlib.util.spec_from_file_location("launch_online_dp", EXAMPLE_DIR / "launch_online_dp.py")
+assert spec is not None and spec.loader is not None
 launcher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launcher)
 
