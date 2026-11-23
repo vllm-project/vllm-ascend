@@ -238,7 +238,7 @@ class LayerOffloadBinding:
 
 
 class FullExpertPool:
-    """Reuse full-layer buffers and prefetch one layer ahead on a separate stream."""
+    """Reuse two full-layer buffers, prefetching on a separate stream."""
 
     def __init__(self):
         self.tensors: dict[str, torch.Tensor] = {}
@@ -262,16 +262,15 @@ class FullExpertPool:
                     f"{binding.layer_name} differs from {first_binding.layer_name}"
                 )
         # Allocate in the scheme's native format, including scale strides.
-        self.tensors = first_binding.adapter.allocate_weights(
-            first_binding.host_store, first_binding.num_experts, first_binding.device
-        )
-        self.buffers = [self.tensors]
-        if first_binding.device.type == "npu" and remaining_bindings:
-            self.buffers.append(
-                first_binding.adapter.allocate_weights(
-                    first_binding.host_store, first_binding.num_experts, first_binding.device
-                )
+        count = 2 if first_binding.device.type == "npu" and remaining_bindings else 1
+        self.buffers = [
+            first_binding.adapter.allocate_weights(
+                first_binding.host_store, first_binding.num_experts, first_binding.device
             )
+            for _ in range(count)
+        ]
+        self.tensors = self.buffers[0]
+        if count > 1:
             self.load_stream = torch.npu.Stream(device=first_binding.device)
         self.owners = [None] * len(self.buffers)
 
@@ -317,16 +316,17 @@ class FullExpertPool:
                 compute.wait_stream(self.load_stream)
             self.compute_stream = compute
 
-        slot = next((i for i, owner in enumerate(self.owners) if owner is binding), 0)
+        index = self.bindings.index(binding)
+        slot = index % len(self.buffers)
         self._load(binding, slot)
-        if self.load_stream is not None and self.has_prefill:
-            index = self.bindings.index(binding) + 1
-            if index < len(self.bindings) and self.owners[1 - slot] is not self.bindings[index]:
-                # Snapshot past computation before the caller submits this layer's
-                # MoE. The other buffer can then load concurrently with that MoE.
+        following = index + 1
+        if self.load_stream is not None and self.has_prefill and following < len(self.bindings):
+            # Snapshot past computation before the caller submits this layer's
+            # MoE. Load the next layer into the other buffer concurrently.
+            if self.owners[1 - slot] is not self.bindings[following]:
                 self.load_stream.wait_stream(self.compute_stream)
                 self.inflight = True
-                self._load(self.bindings[index], 1 - slot, stream=self.load_stream)
+                self._load(self.bindings[following], 1 - slot, stream=self.load_stream)
         return self.buffers[slot]
 
     def _load(self, binding, slot, *, stream=None):
@@ -347,7 +347,6 @@ class FullExpertPool:
             resident_weights=binding.resident,
             resident_loads=tuple(enumerate(binding.slot_to_expert)),
             stream=stream,
-            synchronize=stream is None,
         )
         self.owners[slot] = binding
 
@@ -359,7 +358,6 @@ class ExpertOffloadManager:
         self.bindings: dict[str, LayerOffloadBinding] = {}
         self.full_pool = FullExpertPool()
         self.comm_methods = {}
-        self.has_prefill = True
         self.graph_load_stream = None
         self.graph_streams = set()
 

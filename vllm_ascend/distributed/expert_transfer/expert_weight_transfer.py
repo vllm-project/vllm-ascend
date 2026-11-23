@@ -21,7 +21,6 @@ class TorchExpertTransfer:
         resident_weights=None,
         resident_loads=(),
         stream=None,
-        synchronize=True,
     ) -> None:
         if not expert_loads and not resident_loads:
             return
@@ -32,24 +31,10 @@ class TorchExpertTransfer:
             # Keep ACL optional for disabled offload and CPU-only tests.
             import acl  # type: ignore[import-not-found]
 
-            if resident_loads:
-                # Prefill copies most experts into a full, expert-ID-ordered
-                # pool. Adjacent slots in the same source allocation can use a
-                # single ACL submission while retaining their physical bytes.
-                copy_parameters = TorchExpertTransfer._prefill_copy_parameters(
-                    host_store, destination_weights, expert_loads, resident_weights, resident_loads
-                )
-            else:
-                copy_parameters = [
-                    (
-                        *TorchExpertTransfer._host_copy_parameters(
-                            destination_weights[name], prepared, expert_id, slot
-                        ),
-                        ACL_MEMCPY_HOST_TO_DEVICE,
-                    )
-                    for expert_id, slot in expert_loads
-                    for name, prepared in host_store.prepared.items()
-                ]
+            copy_parameters = TorchExpertTransfer._copy_parameters(
+                host_store, destination_weights, expert_loads, resident_weights, resident_loads
+            )
+            synchronize = stream is None
             stream = stream if stream is not None else torch.npu.current_stream(device)
             try:
                 for dst_ptr, src_ptr, expert_bytes, direction in copy_parameters:
@@ -78,52 +63,35 @@ class TorchExpertTransfer:
                     destination_weights[name][destination_slot].copy_(tensor[source_slot])
 
     @staticmethod
-    def _host_copy_parameters(destination_tensor, prepared, expert_id, slot):
-        source_chunk, row = prepared.source_chunk(expert_id)
-        expert_bytes = prepared.expert_bytes
-        storage = destination_tensor.untyped_storage()
-        return storage.data_ptr() + slot * expert_bytes, source_chunk.data_ptr() + row * expert_bytes, expert_bytes
-
-    @staticmethod
-    def _prefill_copy_parameters(host_store, destination_weights, expert_loads, resident_weights, resident_loads):
+    def _copy_parameters(host_store, destination_weights, expert_loads, resident_weights, resident_loads):
         parameters = []
-
-        def append_runs(copies, direction):
-            current = None
-            source_allocation = None
-            for dst, src, size, source in copies:
-                if (
-                    current is not None
-                    and source is source_allocation
-                    and current[0] + current[2] == dst
-                    and current[1] + current[2] == src
-                ):
-                    current = (current[0], current[1], current[2] + size, direction)
-                else:
-                    if current is not None:
-                        parameters.append(current)
-                    current = (dst, src, size, direction)
-                    source_allocation = source
-            if current is not None:
-                parameters.append(current)
-
-        def host_copies(prepared, destination):
-            expert_bytes = prepared.expert_bytes
-            for expert_id, slot in expert_loads:
-                chunk, row = prepared.source_chunk(expert_id)
-                yield destination + slot * expert_bytes, chunk.data_ptr() + row * expert_bytes, expert_bytes, chunk
-
         for name, prepared in host_store.prepared.items():
             destination = destination_weights[name].untyped_storage().data_ptr()
             expert_bytes = prepared.expert_bytes
-            append_runs(host_copies(prepared, destination), ACL_MEMCPY_HOST_TO_DEVICE)
-            resident = resident_weights[name]
-            source = resident.untyped_storage().data_ptr()
-            append_runs(
-                (
-                    (destination + dst * expert_bytes, source + src * expert_bytes, expert_bytes, resident)
+            copies = []
+            for expert_id, slot in expert_loads:
+                chunk, row = prepared.source_chunk(expert_id)
+                copies.append((slot, chunk.data_ptr() + row * expert_bytes, ACL_MEMCPY_HOST_TO_DEVICE, chunk))
+            if resident_loads:
+                resident = resident_weights[name]
+                source = resident.untyped_storage().data_ptr()
+                copies.extend(
+                    (dst, source + src * expert_bytes, ACL_MEMCPY_DEVICE_TO_DEVICE, resident)
                     for src, dst in resident_loads
-                ),
-                ACL_MEMCPY_DEVICE_TO_DEVICE,
-            )
+                )
+            previous_source = None
+            for slot, source, direction, allocation in copies:
+                destination_ptr = destination + slot * expert_bytes
+                # Merge only adjacent slots within one source allocation and tensor.
+                if (
+                    allocation is previous_source
+                    and parameters[-1][0] + parameters[-1][2] == destination_ptr
+                    and parameters[-1][1] + parameters[-1][2] == source
+                    and parameters[-1][3] == direction
+                ):
+                    dst, src, size, _ = parameters[-1]
+                    parameters[-1] = (dst, src, size + expert_bytes, direction)
+                else:
+                    parameters.append((destination_ptr, source, expert_bytes, direction))
+                previous_source = allocation
         return parameters

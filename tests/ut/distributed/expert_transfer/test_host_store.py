@@ -28,7 +28,9 @@ def test_native_storage_chunking_transfer_and_full_pool(expert_factory, manager_
         )
         binding.slot_to_expert = expert_ids
         assert native_runtime.calls[-1] == "sync"
-        assert len(native_runtime.calls) == 2 * len(binding.adapter.output_names) + 1
+        assert sum(size for _, size in native_runtime.calls[:-1]) == 2 * sum(
+            prepared.expert_bytes for prepared in store.prepared.values()
+        )
         for name in binding.adapter.output_names:
             torch.testing.assert_close(binding.resident[name].float(), expected[name][list(expert_ids)].float())
     addresses = {name: tensor.data_ptr() for name, tensor in manager.full_pool.tensors.items()}

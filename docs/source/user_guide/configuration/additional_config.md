@@ -92,22 +92,24 @@ compilation mode `NONE` with `FULL_DECODE_ONLY` graphs.
 | `enabled` | bool | `False` | Enable exact expert weight offload. |
 | `num_device_experts` | int or null | `None` | Resident expert slots per layer. Required when enabled; must satisfy `top_k <= num_device_experts < num_experts`. |
 
-Prefill and mixed batches use two reusable full-layer expert buffers on the NPU
-(one buffer suffices for a model with only one offloaded layer).
+When expert offload is enabled, prefill and mixed batches always use two reusable
+full-layer expert buffers on the NPU. A model with only one offloaded layer uses
+one buffer, since there is no next layer to prefetch. There are no additional
+prefill switches, buffer-count settings, or legacy transfer modes.
 Experts already resident on the device are copied into these buffers locally;
 only missing experts are transferred from the host. Preparing a layer's buffer
-also submits the next layer's prefetch, overlapping it with the current layer's
-MoE computation on a separate stream.
-The two buffers are reused across layers and remain available after decode graph
-capture and replay. Decode batches that exceed resident capacity use a synchronous
-full-layer fallback.
+also prefetches the next layer on a separate stream, overlapping that transfer
+with the current layer's MoE computation. Contiguous copies within one
+source allocation are combined for both prefill and decode.
+The buffers are reused across layers and remain available after decode graph
+capture and replay. Decode batches that exceed resident capacity use the same
+pool without speculative prefetch.
 
-Compared with a single full-layer buffer, this reserves one additional complete
-expert layer, including weights, scales, and native format padding. Both buffers
-are included in model memory accounting before KV-cache sizing. Allow for this
-extra memory when choosing `num_device_experts` or an explicit KV-cache budget;
-there is no separate switch for prefill buffering. The weight transfer changes
-preserve expert routing and require no new configuration keys.
+Compared with a single full-layer buffer, this reserves one additional
+complete expert layer, including weights, scales, and native format padding.
+All buffers are included in model memory accounting before KV-cache sizing.
+Allow for this memory when choosing resident expert capacity or an explicit
+KV-cache budget. Expert routing is unchanged.
 
 <span id="runtime_guard"></span>**runtime_guard**
 

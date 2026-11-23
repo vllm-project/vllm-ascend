@@ -124,11 +124,11 @@ def test_partial_transfer_failure_cannot_publish_residency(
     copy = acl.rt.memcpy_async
     copies = []
 
-    def fail_second_expert(*args):
+    def fail_second_copy(*args):
         copies.append(args)
-        return 1 if len(copies) == len(binding.adapter.output_names) + 1 else copy(*args)
+        return 1 if len(copies) == 2 else copy(*args)
 
-    monkeypatch.setattr(acl.rt, "memcpy_async", fail_second_expert)
+    monkeypatch.setattr(acl.rt, "memcpy_async", fail_second_copy)
     exit_worker = Mock(side_effect=SystemExit(1))
     monkeypatch.setattr(os, "_exit", exit_worker)
     if graph_callback:
@@ -141,7 +141,7 @@ def test_partial_transfer_failure_cannot_publish_residency(
         with pytest.raises(RuntimeError, match="asynchronous expert host copy failed"):
             binding.load_resident(slots, loads)
         exit_worker.assert_not_called()
-    assert len(copies) == len(binding.adapter.output_names) + 1
+    assert len(copies) == 2
     assert native_runtime.calls[-1] == "sync"
     assert binding.slot_to_expert == before
     torch.testing.assert_close(binding.mapping.host_map, host_map)

@@ -66,7 +66,8 @@ def make_pool(monkeypatch, layers=4):
     pool.owners = [None] * len(pool.buffers)
     pool.load_stream = load if layers > 1 else None
 
-    def copy(adapter, store, destination, loads, device, *, stream=None, synchronize=True, **kwargs):
+    def copy(adapter, store, destination, loads, device, *, stream=None, **kwargs):
+        synchronize = stream is None
         stream = stream or state.compute
         calls.append((stream.name, "copy", adapter))
         state.copies[adapter] = stream.submit(lambda: destination.update(layer=adapter))
@@ -210,3 +211,16 @@ def test_single_layer_reuses_one_buffer_without_prefetch(monkeypatch):
     assert calls.count(("compute", "copy", 0)) == 1
     assert not pool.inflight
     assert len(pool.buffers) == 1
+
+
+@pytest.mark.parametrize("layers", [1, 2, 4])
+def test_native_allocation_uses_two_buffers_for_multiple_layers(monkeypatch, layers):
+    _, pool, bindings, _, load, _ = make_pool(monkeypatch, layers=layers)
+    for binding in bindings:
+        binding.adapter = SimpleNamespace(allocate_weights=lambda *args: {"layer": None})
+    monkeypatch.setattr(pool, "_expert_layout", lambda _: None)
+    monkeypatch.setattr(mod.torch.npu, "Stream", lambda **kwargs: load, raising=False)
+    pool.allocate(bindings)
+    assert len(pool.buffers) == min(2, layers)
+    assert len({id(buffer) for buffer in pool.buffers}) == min(2, layers)
+    assert (pool.load_stream is not None) == (layers > 1)
