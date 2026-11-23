@@ -6,13 +6,14 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.config import ParallelConfig
 from vllm.v1.attention.ops import metadata as upstream_metadata_ops
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker import cp_utils
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.models.qwen4_exp import qsa
+from vllm_ascend.models.qwen4_exp import model, qsa
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
@@ -583,3 +584,58 @@ def test_qsa_kv_store_keeps_page_stride_with_multiple_heads(monkeypatch) -> None
 
     torch.testing.assert_close(cache[1, 1], rows[0])
     assert not backing[:, 1].any()
+
+
+@pytest.mark.parametrize(
+    "enable_dbo,ubatch_size,pcp_size",
+    [(False, 0, 1), (False, 1, 1), (False, 2, 1), (False, 4, 1), (True, 0, 1), (True, 2, 1), (False, 0, 2)],
+)
+def test_target_topk_sharing_respects_all_microbatch_modes(monkeypatch, enable_dbo, ubatch_size, pcp_size):
+    # Bypass unrelated distributed config validation while retaining the real
+    # upstream use_ubatching property used by the target constructor.
+    parallel_config = object.__new__(ParallelConfig)
+    parallel_config.enable_dbo = enable_dbo
+    parallel_config.ubatch_size = ubatch_size
+    parallel_config.prefill_context_parallel_size = pcp_size
+    parallel_config.decode_context_parallel_size = 1
+    parallel_config.tensor_parallel_size = 1
+    config = SimpleNamespace(
+        parallel_config=parallel_config,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(linear_num_key_heads=4, linear_num_value_heads=4)),
+    )
+
+    def init_attention(self, *, vllm_config, **kwargs):
+        torch.nn.Module.__init__(self)
+        assert vllm_config.parallel_config.prefill_context_parallel_size == 1
+        self.indexer = SimpleNamespace(configure_pcp_cache_backends=Mock())
+        self.register_buffer("topk_indices_buffer", torch.empty(8, 4, dtype=torch.int32), persistent=False)
+
+    def init_backbone(self, **kwargs):
+        torch.nn.Module.__init__(self)
+        self.layers = torch.nn.ModuleList(qsa.AscendQwen4ExpQSAAttention(vllm_config=config) for _ in range(3))
+        self.start_layer, self.end_layer = 0, len(self.layers)
+
+    monkeypatch.setattr(qsa.upstream_qsa.Qwen4ExpQSAAttention, "__init__", init_attention)
+    # model.py replaces the upstream module global with its subclass.
+    monkeypatch.setattr(model.AscendQwen4ExpModel.__bases__[0], "__init__", init_backbone)
+    first = model.AscendQwen4ExpModel(vllm_config=config)
+    second = model.AscendQwen4ExpModel(vllm_config=config)
+    buffers = [attention.topk_indices_buffer for attention in first.layers]
+    should_share = pcp_size == 1 and not (enable_dbo or ubatch_size > 1)
+    assert (buffers[0] is buffers[1] is buffers[2]) == should_share
+    if not should_share:
+        assert len({buffer.data_ptr() for buffer in buffers}) == len(buffers)
+    assert buffers[0] is not second.layers[0].topk_indices_buffer
+    assert not first.state_dict()
+    assert not hasattr(first, "topk_indices_buffer")
+    assert config.parallel_config.prefill_context_parallel_size == pcp_size
+    for layer in first.layers:
+        if pcp_size > 1:
+            layer.indexer.configure_pcp_cache_backends.assert_called_once_with(config)
+        else:
+            layer.indexer.configure_pcp_cache_backends.assert_not_called()
+
+    # Draft attention is created outside the target constructor's scope.
+    draft = [qsa.AscendQwen4ExpQSAAttention(vllm_config=config) for _ in range(2)]
+    assert draft[0].topk_indices_buffer is not draft[1].topk_indices_buffer
+    assert all(attention.topk_indices_buffer is not buffers[0] for attention in draft)

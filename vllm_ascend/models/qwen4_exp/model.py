@@ -91,8 +91,8 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
             head_shards = get_head_parallel_size(parallel)
             if text_config.linear_num_key_heads % head_shards or text_config.linear_num_value_heads % head_shards:
                 raise ValueError("Qwen4Exp GDN key and value heads must be divisible by TP * PCP")
-        # Keep private scratch buffers for PCP and interleaved microbatches.
-        with share_target_topk_buffers(not use_pcp and not vllm_config.parallel_config.enable_dbo):
+        # PCP has separate cache and graph paths. Keep its scratch buffers private.
+        with share_target_topk_buffers(not use_pcp and not parallel.use_ubatching):
             super().__init__(vllm_config=vllm_config, prefix=prefix)
         if use_pcp:
             from vllm_ascend.attention.gdn import shard_gdn_heads_over_pcp
