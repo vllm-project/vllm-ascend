@@ -1,5 +1,6 @@
 from copy import deepcopy
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from vllm.model_executor.layers.quantization import get_quantization_config
@@ -118,6 +119,7 @@ class TestAscendMxfp4Config(TestBase):
         self.assertIsNone(parsed.target_scheme_map["Linear"]["input_activations"])
 
     def test_missing_groups_or_targets_fail_clearly(self):
+        checkpoint: dict[str, Any]
         for checkpoint in ({}, {"config_groups": {}}):
             with self.subTest(checkpoint=checkpoint), self.assertRaisesRegex(ValueError, "config_groups"):
                 AscendMxfp4Config.from_config(checkpoint)
