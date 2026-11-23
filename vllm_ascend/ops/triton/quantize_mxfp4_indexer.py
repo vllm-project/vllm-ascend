@@ -58,20 +58,20 @@ def _quantize_mxfp4_indexer_kernel(
     GROUP_SIZE: tl.constexpr,
 ):
     row = tl.program_id(0)
-    offsets = tl.arange(0, BLOCK_WIDTH)
-    values = tl.load(input_ptr + row * BLOCK_WIDTH + offsets).to(tl.float32)
-    magnitudes = tl.abs(values)
+    pair_offsets = tl.arange(0, BLOCK_WIDTH // 2)
+    even_offsets = pair_offsets * 2
+    row_ptr = input_ptr + row * BLOCK_WIDTH
+    even = tl.load(row_ptr + even_offsets).to(tl.float32)
+    odd = tl.load(row_ptr + even_offsets + 1).to(tl.float32)
+    # The two nibbles in a byte share a scale. Reduce pair maxima, then
+    # reuse the same elements to encode the nibbles without reloading the row.
+    magnitudes = tl.maximum(tl.abs(even), tl.abs(odd))
+    group = even_offsets // GROUP_SIZE
 
-    amax0 = tl.max(tl.where(offsets < GROUP_SIZE, magnitudes, 0.0), axis=0)
-    amax1 = tl.max(
-        tl.where((offsets >= GROUP_SIZE) & (offsets < 2 * GROUP_SIZE), magnitudes, 0.0),
-        axis=0,
-    )
-    amax2 = tl.max(
-        tl.where((offsets >= 2 * GROUP_SIZE) & (offsets < 3 * GROUP_SIZE), magnitudes, 0.0),
-        axis=0,
-    )
-    amax3 = tl.max(tl.where(offsets >= 3 * GROUP_SIZE, magnitudes, 0.0), axis=0)
+    amax0 = tl.max(tl.where(group == 0, magnitudes, 0.0), axis=0)
+    amax1 = tl.max(tl.where(group == 1, magnitudes, 0.0), axis=0)
+    amax2 = tl.max(tl.where(group == 2, magnitudes, 0.0), axis=0)
+    amax3 = tl.max(tl.where(group == 3, magnitudes, 0.0), axis=0)
 
     # The eager golden computes ceil(log2(max(amax, 6*2^-126) / 6)).
     # Dividing the minimum by six yields the smallest finite E8M0 scale.
@@ -88,19 +88,10 @@ def _quantize_mxfp4_indexer_kernel(
     packed_scale = exponent0 | (exponent1 << 8) | (exponent2 << 16) | (exponent3 << 24)
     tl.store(scale_ptr + row, packed_scale)
 
-    pair_offsets = tl.arange(0, BLOCK_WIDTH // 2)
-    even_offsets = pair_offsets * 2
-    odd_offsets = even_offsets + 1
-    even_group = even_offsets // GROUP_SIZE
-    odd_group = odd_offsets // GROUP_SIZE
-    even_exponent = _select_group_value(even_group, exponent0, exponent1, exponent2, exponent3)
-    odd_exponent = _select_group_value(odd_group, exponent0, exponent1, exponent2, exponent3)
-    even_scale = (even_exponent << 23).to(tl.float32, bitcast=True)
-    odd_scale = (odd_exponent << 23).to(tl.float32, bitcast=True)
-    even = tl.load(input_ptr + row * BLOCK_WIDTH + even_offsets).to(tl.float32) / even_scale
-    odd = tl.load(input_ptr + row * BLOCK_WIDTH + odd_offsets).to(tl.float32) / odd_scale
-    even_code = _fp4_e2m1_code(even)
-    odd_code = _fp4_e2m1_code(odd)
+    exponent = _select_group_value(group, exponent0, exponent1, exponent2, exponent3)
+    scale = (exponent << 23).to(tl.float32, bitcast=True)
+    even_code = _fp4_e2m1_code(even / scale)
+    odd_code = _fp4_e2m1_code(odd / scale)
     packed = (even_code & 0x0F) | ((odd_code & 0x0F) << 4)
     tl.store(data_ptr + row * (BLOCK_WIDTH // 2) + pair_offsets, packed)
 
