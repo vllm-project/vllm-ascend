@@ -197,7 +197,7 @@ Use the startup logs (`GPU KV cache size` and `Maximum concurrency for ... token
 
 ## Graph Mode
 
-Batch invariance does not require eager execution: graph mode can be enabled together with batch invariance, and some models are already verified with both features turned on.
+Graph mode can be enabled together with batch invariance.
 
 | Model | Verified on Atlas A2/A3 | Verified on Atlas 950DT |
 | --- | :---: | :---: |
