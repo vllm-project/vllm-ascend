@@ -956,7 +956,7 @@ For DP>1, the launcher executes the role script without filtering.
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_OP_EXPANSION_MODE=AIV
-    export HCCL_BUFFSIZE=1024
+    export HCCL_BUFFSIZE=1200
     export ASCEND_RT_VISIBLE_DEVICES="$1"
     export PYTHONHASHSEED=0
     export ACL_OP_INIT_MODE=1
@@ -1618,7 +1618,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
       and set `--limit-mm-per-prompt` to `'{"image":1}'`.
     - On Prefill, set EPLB `window_size` and `step_interval` to `3000`,
       and `num_redundant_experts` to `0`; remove `--api-server-count 1`.
-    - On Decode, set `multistream_overlap_shared_expert` and `enable_flashcomm1`
+    - On Decode, keep `HCCL_BUFFSIZE=1024`; set `multistream_overlap_shared_expert` and `enable_flashcomm1`
       to `true`. Remove `enable_fused_mc2`, `finegrained_tp_config`, and
       `ascend_compilation_config` from `--additional-config`.
 
