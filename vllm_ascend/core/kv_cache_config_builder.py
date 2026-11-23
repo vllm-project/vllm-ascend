@@ -104,7 +104,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
             return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
-        qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
+        qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups, unified=True)
         if qwen_bytes is not None:
             return qwen_bytes
         if tq_cache.uses_turboquant_groups(kv_cache_groups):

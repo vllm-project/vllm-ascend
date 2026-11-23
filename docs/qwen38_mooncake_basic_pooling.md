@@ -2,9 +2,12 @@
 
 ## Layout and supported paths
 
-QSA K/V and GDN convolution/recurrent state use shared physical pages with
-**disjoint live block IDs**. Raw and compressed indexer slabs remain separate;
-PLE and hidden state use private banks. Views may have a physical block stride
+On the unified runner, QSA K/V, indexer, GDN, PLE and hidden-state owners
+use separate contiguous banks inside one backing allocation. Group banks
+must not overlap: different logical block IDs do not isolate physical bytes
+when groups use different block strides. Pool bytes per block are the sum
+of all owner page sizes; this reduces capacity compared with unsafe aliasing.
+The legacy runner retains its existing slab layout. Views may have a physical block stride
 larger than their payload. Transfers must preserve that stride and leave other
 owners, unused blocks and padding unchanged.
 
@@ -94,3 +97,27 @@ against the exact tested source revision and runtime in the PR. Distinguish
 external restoration from recomputation using zero local hits, actual backend
 reads and matching output. For SSD, require SSD hits and rewarm bytes after
 eviction; configuration or SSD writes alone do not prove a readback.
+
+## Unified model dispatch
+
+`allocate_kv_cache_main` uses an explicit `model_type` allowlist for
+`qwen4_exp`, `qwen4_exp_text` and `qwen4_exp_mtp`, matching the
+implemented Qwen4Exp architecture used by Qwen3.8-Flash-Next.
+Unverified Qwen3.8/Qwen4-Max aliases are not added to the allowlist.
+It reads the text config first, falling back to the outer HF config only
+when the text model type is absent. Unlisted suffixes do not match.
+These types select `unified_allocate_kv_cache`;
+the actual cache layout still comes from specs and backend runtime views.
+Repository/display names are not used to infer architecture.
+
+This is allocator integration, not a Qwen4-Max model implementation. A
+Qwen4-Max checkpoint requires an upstream model/config registration, correct
+cache specs and compatible Ascend runtime backends. Unknown attention
+backends without runtime shape/dtype methods raise an explicit error.
+Real Qwen4-Max inference has not been validated by this change.
+
+Dependency-free dispatch and byte-isolation checks can be run with:
+
+```bash
+python -m unittest discover -s tests/ut/worker -p test_qwen_unified_allocation_contract.py
+```

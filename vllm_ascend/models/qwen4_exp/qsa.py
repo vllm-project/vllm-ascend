@@ -30,7 +30,7 @@ from vllm.utils.torch_utils import (
     get_dtype_size,
 )
 from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from vllm_ascend.attention.utils import (
@@ -693,6 +693,36 @@ class AscendQSABackend(UpstreamQSABackend):  # type: ignore[valid-type, misc]
         return AscendQSAMetadataBuilder
 
     @classmethod
+    def get_runtime_shapes(
+        cls, spec: AttentionSpec, num_blocks: int, layout: Any, kernel_block_size: int | None = None
+    ) -> tuple[tuple[int, int, int, int], ...]:
+        """Describe the kernel-page K/V pair consumed by Ascend GBSA."""
+        block_size = GBSA_PAGE_SIZE if kernel_block_size is None else kernel_block_size
+        if block_size != GBSA_PAGE_SIZE or spec.block_size <= 0 or spec.block_size % block_size:
+            raise ValueError("QSA manager blocks must split into 128-token kernel pages")
+        pages = spec.block_size // block_size
+        itemsize = get_dtype_size(spec.dtype)
+        if spec.page_size_bytes % (pages * itemsize):
+            raise ValueError("QSA kernel pages must be dtype aligned")
+        widths = (spec.head_size, spec.head_size_v)
+        if (
+            widths[0] != widths[1]
+            or block_size * spec.num_kv_heads * sum(widths) * itemsize > spec.page_size_bytes // pages
+        ):
+            raise ValueError("QSA kernel page cannot hold its K/V components")
+        prefix = (num_blocks * pages, spec.num_kv_heads, block_size)
+        return tuple((*prefix, width * itemsize) for width in widths)
+
+    @staticmethod
+    def get_runtime_dtypes(spec: AttentionSpec) -> tuple[torch.dtype, torch.dtype]:
+        return spec.dtype, spec.dtype
+
+    @staticmethod
+    def format_runtime_views(spec: AttentionSpec, components: list[torch.Tensor]) -> QSAKVCache:
+        key, value = components
+        return key, value
+
+    @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
         """Store main K/V in two page-major slots of one descriptor page."""
         if spec.head_size != spec.head_size_v:
@@ -724,10 +754,47 @@ else:
     upstream_qsa.Qwen4ExpQSABackend = AscendQSABackend  # type: ignore[attr-defined]
 
 
-# Indexer-cache descriptors use the same block-outermost layout as main QSA KV.
-# Their physical block stride is honored by the runner, so no compact copy is
-# required before LightningIndexer or the Triton QSA selector consumes them.
-QSAIndexerBackend.uses_descriptor_cache_view = True
+class AscendQSAIndexerBackend(QSAIndexerBackend):
+    """Expose key-only runtime views for raw rings and compressed key pages."""
+
+    uses_descriptor_cache_view = True
+
+    @classmethod
+    def get_runtime_shapes(
+        cls, spec: AttentionSpec, num_blocks: int, layout: Any, kernel_block_size: int | None = None
+    ) -> tuple[tuple[int, int, int, int], ...]:
+        # A raw ring is one request-lifetime block; it must not be split by
+        # the 128-token kernel size selected for the attention cache.
+        if isinstance(spec, CircularBufferSpec):
+            block_size = spec.block_size
+        else:
+            block_size = spec.block_size if kernel_block_size is None else kernel_block_size
+        if block_size <= 0 or spec.block_size % block_size or block_size % spec.tokens_per_state:
+            raise ValueError("QSA indexer kernel blocks must align to the compression ratio")
+        pages = spec.block_size // block_size
+        return (
+            (
+                num_blocks * pages,
+                spec.num_kv_heads,
+                spec.get_num_kernel_states(block_size),
+                spec.head_size * get_dtype_size(spec.dtype),
+            ),
+        )
+
+    @staticmethod
+    def get_runtime_dtypes(spec: AttentionSpec) -> tuple[torch.dtype, ...]:
+        return (spec.dtype,)
+
+    @staticmethod
+    def format_runtime_views(spec: AttentionSpec, components: list[torch.Tensor]) -> torch.Tensor:
+        # Ascend binds caches directly; its kernels consume [B, N, H, D].
+        (cache,) = components
+        return cache
+
+
+qsa_indexer.QSAIndexerBackend = AscendQSAIndexerBackend
+if hasattr(qsa_indexer, "QSAStateBackend"):
+    qsa_indexer.QSAStateBackend = AscendQSAIndexerBackend
 
 
 # The indexer module selects its Triton metadata builder at import time. The

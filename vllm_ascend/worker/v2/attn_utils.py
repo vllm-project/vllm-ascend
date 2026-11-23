@@ -1482,6 +1482,26 @@ def create_kv_cache_runtime_views(
                     raw_tensors[name], shapes, list(spec.dtypes), descriptor.block_stride
                 )
                 continue
+            if is_hidden_state_cache_spec(spec):
+                # Cache-only layers use one BHNC tensor, not the attention
+                # backend's NHD K/V tuple (including speculative hidden states).
+                shape = (
+                    num_blocks,
+                    spec.num_heads,
+                    spec.num_states,
+                    spec.state_content_size_bytes // get_dtype_size(spec.dtype),
+                )
+                caches[name] = create_cache_component_views(
+                    raw_tensors[name], [shape], [spec.dtype], descriptor.block_stride
+                )[0]
+                continue
+            if not callable(getattr(group.backend, "get_runtime_shapes", None)) or not callable(
+                getattr(group.backend, "get_runtime_dtypes", None)
+            ):
+                raise NotImplementedError(
+                    f"Unified KV cache backend for {name} must implement "
+                    "get_runtime_shapes and get_runtime_dtypes; model-type routing alone is insufficient."
+                )
             shapes = group.backend.get_runtime_shapes(
                 spec,
                 num_blocks,
@@ -1590,7 +1610,18 @@ def allocate_kv_cache_main(
         raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
     vllm_config = get_current_vllm_config()
     model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
-    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text", "kimi_linear", "qwen3_5_text"):
+    if model_type is None:
+        model_type = getattr(getattr(vllm_config.model_config, "hf_config", None), "model_type", None)
+    if model_type in (
+        "deepseek_v4",
+        "deepseek_v41",
+        "deepseek_v41_text",
+        "kimi_linear",
+        "qwen3_5_text",
+        "qwen4_exp",
+        "qwen4_exp_text",
+        "qwen4_exp_mtp",
+    ):
         return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = {

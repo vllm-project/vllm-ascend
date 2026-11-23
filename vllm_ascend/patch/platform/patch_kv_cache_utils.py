@@ -488,7 +488,7 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
         return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
-    qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
+    qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups, unified=True)
     if qwen_bytes is not None:
         return qwen_bytes
     if not _is_deepseek_v4_groups(kv_cache_groups):
@@ -510,7 +510,7 @@ def _ascend_max_memory_usage_bytes_from_groups(
         return tq_cache.max_memory_usage(vllm_config, kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_max_memory_usage(vllm_config, kv_cache_groups)
-    qwen_bytes = get_qwen4_exp_max_memory_usage(vllm_config, kv_cache_groups)
+    qwen_bytes = get_qwen4_exp_max_memory_usage(vllm_config, kv_cache_groups, unified=True)
     if qwen_bytes is not None:
         return qwen_bytes
     if not _is_deepseek_v4_groups(kv_cache_groups):
@@ -540,7 +540,7 @@ def _get_ascend_kv_cache_groups(
         return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
     if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
         return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
-    groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups)
+    groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups, unified=True)
     if groups is not None:
         return groups
     return _orig_get_kv_cache_groups(vllm_config, align_hybrid_cache_pages(kv_cache_spec))
@@ -564,7 +564,7 @@ def _ascend_get_kv_cache_config_from_groups(
     qwen_config = (
         None
         if vllm_version_is("0.28.0")
-        else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
+        else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory, unified=True)
     )
     pools = _get_replicated_draft_pools(kv_cache_groups)
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":

@@ -413,6 +413,8 @@ def make_qsa_kernel_page_cache(
 
 def _prepare_qsa_composite_groups(
     kv_cache_spec: dict[str, KVCacheSpec],
+    *,
+    require_gdn: bool = True,
 ) -> tuple[set[str], set[str], set[str]] | None:
     """Identify the three cache owners of every QSA source layer.
 
@@ -451,7 +453,9 @@ def _prepare_qsa_composite_groups(
         )
     main = {source: all_main[source] for source in raw}
     compressed = {source: all_compressed[source] for source in raw}
-    if not any(isinstance(spec, MambaSpec) and len(spec.shapes) == 2 for spec in kv_cache_spec.values()):
+    if require_gdn and not any(
+        isinstance(spec, MambaSpec) and len(spec.shapes) == 2 for spec in kv_cache_spec.values()
+    ):
         raise ValueError("Qwen4 QSA cache layout requires GDN state specs")
 
     main_names: set[str] = set()
@@ -596,8 +600,19 @@ def _private_page_bytes(owner: CacheOwner) -> int:
 
 def get_qwen4_exp_pool_bytes_per_block(
     kv_cache_groups: list[KVCacheGroupSpec],
+    *,
+    unified: bool = False,
 ) -> int | None:
-    """Charge shared slots once, plus one private bank per PLE/hidden owner."""
+    """Charge the descriptor pool, or the legacy slab layout on older runners."""
+    if unified:
+        if not any(name.endswith(".indexer.raw_key_cache") for group in kv_cache_groups for name in group.layer_names):
+            return None
+        # Different groups have different physical block strides. Disjoint
+        # logical block IDs cannot safely alias those byte ranges. Reserve
+        # separate group banks while retaining contiguous QSA kernel pages.
+        return sum(
+            sum(spec.page_size_bytes for spec in _group_member_specs(group).values()) for group in kv_cache_groups
+        )
     layout = build_qwen4_kv_cache_layout(kv_cache_groups, num_blocks=1)
     if layout is None:
         return None
@@ -608,9 +623,11 @@ def get_qwen4_exp_pool_bytes_per_block(
 def get_qwen4_exp_max_memory_usage(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
+    *,
+    unified: bool = False,
 ) -> int | None:
     """Use the allocation divisor for admission across all group lifetimes."""
-    bytes_per_block = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
+    bytes_per_block = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups, unified=unified)
     if bytes_per_block is None:
         return None
     required_blocks = sum(
@@ -624,12 +641,15 @@ def get_qwen4_exp_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
     get_default_groups: Callable[[VllmConfig, dict[str, KVCacheSpec]], list[KVCacheGroupSpec]],
+    *,
+    unified: bool = False,
 ) -> list[KVCacheGroupSpec] | None:
     """Build model-specific alias lifetimes on top of upstream grouping."""
-    owners = _prepare_qsa_composite_groups(kv_cache_spec)
+    owners = _prepare_qsa_composite_groups(kv_cache_spec, require_gdn=not unified)
     if owners is None:
         return None
-    kv_cache_spec = align_hybrid_cache_pages(kv_cache_spec, descriptor_native=True)
+    if not unified:
+        kv_cache_spec = align_hybrid_cache_pages(kv_cache_spec, descriptor_native=True)
     groups = get_default_groups(vllm_config, kv_cache_spec)
     groups = _merge_qsa_composite_groups(groups, kv_cache_spec, *owners)
     groups = _merge_mamba_state_groups(groups, len(owners[0]))
@@ -646,8 +666,16 @@ def get_qwen4_exp_kv_cache_config(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
+    *,
+    unified: bool = False,
 ) -> KVCacheConfig | None:
-    """Plan state slabs and block-packed K/V-or-SSM pages per ordinal slot.
+    """Plan contiguous owner pages for unified allocation, or legacy state slabs.
+
+    Unified descriptors fully describe each owner without model-specific
+    reconstruction. Their layer-compact regions preserve the kernel block
+    numbering used by the existing QSA metadata and GBSA operators.
+
+    The legacy path below retains the old runner contract:
 
     The main descriptor API cannot express that one logical QSA/GDN owner has
     two disjoint physical regions.  Descriptors therefore publish the anchor
@@ -656,6 +684,36 @@ def get_qwen4_exp_kv_cache_config(
     deliberately alias the same allocation because a physical block ID is
     owned by only one group at a time.
     """
+    if unified:
+        bytes_per_block = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups, unified=True)
+        if bytes_per_block is None:
+            return None
+        num_blocks = may_override_num_blocks(vllm_config, available_memory // bytes_per_block)
+        size = num_blocks * bytes_per_block
+        tensors: list[KVCacheTensor] = []
+        offset = 0
+        for group in kv_cache_groups:
+            # All descriptors share one allocation, but group banks must be
+            # disjoint: their unequal block strides cannot alias safely.
+            # Each owner's components retain one physical page stride.
+            for name, spec in _group_member_specs(group).items():
+                tensors.append(
+                    KVCacheTensor(
+                        size=size,
+                        layers=[name],
+                        layer_stride=num_blocks * spec.page_size_bytes,
+                        block_stride=spec.page_size_bytes,
+                        offset=offset,
+                    )
+                )
+                offset += num_blocks * spec.page_size_bytes
+        return KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=tensors,
+            kv_cache_groups=kv_cache_groups,
+            prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+        )
+
     probe = build_qwen4_kv_cache_layout(
         kv_cache_groups,
         num_blocks=1,
