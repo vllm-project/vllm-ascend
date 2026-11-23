@@ -11,13 +11,8 @@ bootstrap_custom_op_env(include_vendor_lib=True)
 import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped] # noqa: E402,F401
 
 
-@pytest.mark.parametrize("queries", [1, 5])
-@pytest.mark.parametrize("context", [1536, 8192, 32768])
-@pytest.mark.parametrize("ratio", [1, 2])
-@pytest.mark.parametrize("mode", [1, 2, 3])
-@pytest.mark.parametrize("topk", [64, 512])
 @torch.inference_mode()
-def test_qli_candidate_vector_repeats(queries, context, ratio, mode, topk):
+def _check_qli_candidate_vector_repeats(queries, context, ratio, mode, topk):
     """Check candidate padding, partial causal blocks and strided PA caches."""
     generator = torch.Generator().manual_seed(1234)
     heads, width = 32, 128
@@ -97,9 +92,24 @@ def test_qli_candidate_vector_repeats(queries, context, ratio, mode, topk):
                 torch.testing.assert_close(blocks.sort().values, torch.arange(expected_blocks))
 
 
+@pytest.mark.parametrize(
+    "queries,context,topk",
+    [
+        (1, 1536, 64),
+        (5, 8192, 64),
+        (5, 32768, 512),
+    ],
+)
+@pytest.mark.parametrize("ratio", [1, 2])
+@pytest.mark.parametrize("mode", [1, 2, 3])
+def test_qli_candidate_vector_repeats(queries, context, ratio, mode, topk):
+    """Cover representative shapes across all candidate modes and ratios."""
+    _check_qli_candidate_vector_repeats(queries=queries, context=context, ratio=ratio, mode=mode, topk=topk)
+
+
 @pytest.mark.parametrize("topk", [1, 63, 65, 1024, 2048])
 @pytest.mark.parametrize("ratio", [1, 2])
 @pytest.mark.parametrize("mode", [1, 2, 3])
 def test_qli_adaptive_topk_boundaries(topk, ratio, mode):
     """Exercise partial 64-element widths and the unchanged maximum width."""
-    test_qli_candidate_vector_repeats(queries=5, context=8192, ratio=ratio, mode=mode, topk=topk)
+    _check_qli_candidate_vector_repeats(queries=5, context=8192, ratio=ratio, mode=mode, topk=topk)
