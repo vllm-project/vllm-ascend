@@ -638,6 +638,15 @@ class Orchestrator:
 
         return 0
 
+    def _comment_round_authorized(self) -> bool:
+        """Comment rounds inherit the label-time authorization: the PR
+        author must still be on the allowlist (the label applier was
+        already checked when the round chain started)."""
+        if not self.author_in_allowlist():
+            print("PR author no longer on the allowlist; ignoring", flush=True)
+            return False
+        return True
+
     def _handle_comment(self) -> int:
         body = self.comment_body or ""
         if not body or self.state.state == "stopped":
@@ -675,6 +684,8 @@ class Orchestrator:
             self.post_notice(
                 f"AI review 已达到整个 PR 的轮次预算上限（{MAX_TOTAL_ROUNDS} 轮），暂停响应。",
             )
+            return 0
+        if not self._comment_round_authorized():
             return 0
 
         next_round = self.state.round + 1
@@ -773,6 +784,8 @@ class Orchestrator:
                 self.post_notice(
                     f"AI review 已达到整个 PR 的轮次预算上限（{MAX_TOTAL_ROUNDS} 轮），暂停响应。",
                 )
+                return 0
+            if not self._comment_round_authorized():
                 return 0
             next_round = self.state.round + 1
             closing = next_round > MAX_ROUNDS_PER_PUSH
