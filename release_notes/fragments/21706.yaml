@@ -1,0 +1,7 @@
+pr: 21706
+entries:
+  - category: feature
+    text: >-
+      Added the lm_head_quantization=w8a8_dynamic startup option for online
+      target LM head quantization with Model Runner V2, using INT8 on A2/A3
+      and MXFP8 on A5. Independent draft model heads retain checkpoint behavior.
