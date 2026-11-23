@@ -84,3 +84,25 @@ def test_different_strides_do_not_share():
         share_topk_buffer(other)
     assert first.topk_indices_buffer.shape == other.topk_indices_buffer.shape
     assert first.topk_indices_buffer is not other.topk_indices_buffer
+
+
+def test_disabled_nested_scope_restores_target_buffers():
+    with share_target_topk_buffers(True):
+        target = layer()
+        with share_target_topk_buffers(False):
+            first_draft, second_draft = layer(), layer()
+        assert layer().topk_indices_buffer is target.topk_indices_buffer
+    assert first_draft.topk_indices_buffer is not second_draft.topk_indices_buffer
+    assert first_draft.topk_indices_buffer is not target.topk_indices_buffer
+
+
+def test_different_devices_do_not_share():
+    with share_target_topk_buffers(True):
+        cpu_layer = layer()
+        meta_layer = torch.nn.Module()
+        meta_layer.register_buffer(
+            "topk_indices_buffer", torch.empty(8, 4, dtype=torch.int32, device="meta"), persistent=False
+        )
+        share_topk_buffer(meta_layer)
+    assert cpu_layer.topk_indices_buffer.device.type == "cpu"
+    assert meta_layer.topk_indices_buffer.device.type == "meta"
