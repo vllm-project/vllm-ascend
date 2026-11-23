@@ -20,7 +20,6 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 import vllm_ascend.worker.v2.attn_utils as attn_utils_v2
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
-from vllm_ascend.core.kv_cache_interface import KVCacheTensorWithBacking
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import KV_CACHE_BUFFER_ALIGNMENT
 from vllm_ascend.models.step5.cache_config import (
     get_step5_kv_cache_config_from_groups,
@@ -168,8 +167,7 @@ def test_step5_shared_allocator_matches_legacy_views(monkeypatch, num_blocks, kv
     else:
         layers[L0] = dense
     monkeypatch.setattr(attn_utils_v2, "get_layers_from_vllm_config", lambda *_: layers)
-    assert all(isinstance(tensor, KVCacheTensorWithBacking) for tensor in config.kv_cache_tensors)
-    assert {tensor.backing_id for tensor in config.kv_cache_tensors} == {0}
+    assert config.single_device_backing
     allocations = []
     allocate = attn_utils_v2._allocate_int8_cache_tensor
 

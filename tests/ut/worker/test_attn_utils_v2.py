@@ -52,7 +52,6 @@ from vllm_ascend.core.kv_cache_config_builder import (
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
-    KVCacheTensorWithBacking,
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -3326,42 +3325,27 @@ def test_legacy_step3_allocate_kv_cache_shares_backing_by_tensor_size(monkeypatc
     assert raw[STEP5_L2].data_ptr() == raw[STEP5_L0].data_ptr() + STEP5_MAIN_PAGE * STEP5_NUM_BLOCKS
 
 
-def _descriptors_with_backing_ids(tensors):
-    return [KVCacheTensorWithBacking(**vars(tensor), backing_id=index) for index, tensor in enumerate(tensors)]
+def _step5_single_backing_config(tensors, groups):
+    tensors = [replace(tensor, size=tensors[0].size) for tensor in tensors]
+    config = _step5_kv_cache_config(tensors, groups)
+    config.single_device_backing = True
+    return config
 
 
-def test_allocate_distinct_declared_backings_with_equal_sizes(monkeypatch) -> None:
+def test_allocate_rejects_inconsistent_single_backing_sizes(monkeypatch) -> None:
     tensors, groups = _step5_tensors_and_groups()
-    descriptors = _descriptors_with_backing_ids(tensors)
-    descriptors[1] = replace(descriptors[1], size=descriptors[2].size)
-    config = _step5_kv_cache_config(descriptors, groups)
-    raw = _step5_allocate(config, _step5_vllm_config("test_descriptor_driven"), monkeypatch)
-
-    main, other_main, summary, ring = (raw[name] for name in (STEP5_L0, STEP5_L2, STEP5_SUMMARY, STEP5_RING))
-    assert main.untyped_storage().data_ptr() == other_main.untyped_storage().data_ptr()
-    assert other_main.data_ptr() - main.data_ptr() == STEP5_MAIN_PAGE * STEP5_NUM_BLOCKS
-    assert summary.untyped_storage().nbytes() == ring.untyped_storage().nbytes()
-    assert summary.untyped_storage().data_ptr() != ring.untyped_storage().data_ptr()
-
-
-def test_allocate_rejects_inconsistent_declared_backing_sizes(monkeypatch) -> None:
-    tensors, groups = _step5_tensors_and_groups()
-    descriptors = _descriptors_with_backing_ids(tensors)
-    descriptors[1] = replace(descriptors[1], backing_id=descriptors[0].backing_id)
-    with pytest.raises(ValueError, match="Inconsistent KV cache size"):
-        _step5_allocate(
-            _step5_kv_cache_config(descriptors, groups), _step5_vllm_config("test_descriptor_driven"), monkeypatch
-        )
+    config = _step5_single_backing_config(tensors, groups)
+    config.kv_cache_tensors[1] = tensors[1]
+    with pytest.raises(ValueError, match="must share one backing allocation"):
+        _step5_allocate(config, _step5_vllm_config("test_descriptor_driven"), monkeypatch)
 
 
 def test_allocate_rejects_declared_view_beyond_backing(monkeypatch) -> None:
     tensors, groups = _step5_tensors_and_groups()
-    descriptors = _descriptors_with_backing_ids(tensors)
-    descriptors[0] = replace(descriptors[0], offset=STEP5_SUMMARY_PAGE)
+    tensors[0] = replace(tensors[0], offset=STEP5_SUMMARY_PAGE)
+    config = _step5_single_backing_config(tensors, groups)
     with pytest.raises(ValueError, match="exceeds its backing allocation"):
-        _step5_allocate(
-            _step5_kv_cache_config(descriptors, groups), _step5_vllm_config("test_descriptor_driven"), monkeypatch
-        )
+        _step5_allocate(config, _step5_vllm_config("test_descriptor_driven"), monkeypatch)
 
 
 def _step5_reshape(config, raw, monkeypatch):
@@ -3391,7 +3375,7 @@ def _step5_reshape(config, raw, monkeypatch):
 
 def test_step5_reshape_aux_views_match_compute_layer_shape(monkeypatch) -> None:
     tensors, groups = _step5_tensors_and_groups()
-    config = _step5_kv_cache_config(_descriptors_with_backing_ids(tensors), groups)
+    config = _step5_single_backing_config(tensors, groups)
     raw = _step5_allocate(config, _step5_vllm_config("test_descriptor_driven"), monkeypatch)
     caches = _step5_reshape(config, raw, monkeypatch)
 
@@ -3417,7 +3401,7 @@ def test_step5_reshape_aux_views_match_compute_layer_shape(monkeypatch) -> None:
 
 def test_step5_reshape_rejects_non_tensor_step_aux_raw(monkeypatch) -> None:
     tensors, groups = _step5_tensors_and_groups()
-    config = _step5_kv_cache_config(_descriptors_with_backing_ids(tensors), groups)
+    config = _step5_single_backing_config(tensors, groups)
     raw = _step5_allocate(config, _step5_vllm_config("test_descriptor_driven"), monkeypatch)
     raw[STEP5_RING] = (raw[STEP5_RING], raw[STEP5_RING])
 

@@ -24,7 +24,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -79,7 +79,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
-    KVCacheTensorWithBacking,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
     requires_padded_page_layout,
@@ -986,14 +985,11 @@ def _allocate_kv_cache(
             for name in get_kv_cache_tensor_layers(descriptor):
                 kv_cache_raw_tensors[name] = backing
         return kv_cache_raw_tensors
-    if _has_declared_cache_backings(kv_cache_config):
-        backings = _allocate_declared_cache_backings(kv_cache_config, device)
-        descriptors = cast(list[KVCacheTensorWithBacking], kv_cache_config.kv_cache_tensors)
+    if _uses_single_device_backing(kv_cache_config):
+        backing = _allocate_single_cache_backing(kv_cache_config, device)
         return {
-            name: _slice_cache_layer(
-                backings[tensor.backing_id], tensor, index, layer_kv_cache_spec[name], kv_cache_config.num_blocks
-            )
-            for tensor in descriptors
+            name: _slice_cache_layer(backing, tensor, index, layer_kv_cache_spec[name], kv_cache_config.num_blocks)
+            for tensor in kv_cache_config.kv_cache_tensors
             for index, name in enumerate(tensor.layers)
         }
     has_mamba = any(isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values())
@@ -1405,17 +1401,16 @@ def create_cache_component_views(
     return views
 
 
-def _allocate_declared_cache_backings(kv_cache_config: KVCacheConfig, device: torch.device) -> dict[int, torch.Tensor]:
-    sizes: dict[int, int] = {}
-    for tensor in kv_cache_config.kv_cache_tensors:
-        if not isinstance(tensor, KVCacheTensorWithBacking) or tensor.host_resident:
-            raise ValueError("Explicit KV cache placement requires a device backing ID for every descriptor.")
-        if sizes.setdefault(tensor.backing_id, tensor.size) != tensor.size:
-            raise ValueError(f"Inconsistent KV cache size for backing {tensor.backing_id}.")
-    return {
-        backing_id: _allocate_int8_cache_tensor(size, KV_CACHE_BUFFER_ALIGNMENT, device)
-        for backing_id, size in sizes.items()
-    }
+def _allocate_single_cache_backing(kv_cache_config: KVCacheConfig, device: torch.device) -> torch.Tensor:
+    tensors = kv_cache_config.kv_cache_tensors
+    if _uses_single_device_backing(kv_cache_config) and any(tensor.host_resident for tensor in tensors):
+        raise ValueError("Single-device KV cache backing cannot contain host-resident descriptors.")
+    sizes = {tensor.size for tensor in tensors}
+    if len(sizes) != 1:
+        raise ValueError("Unified KV cache descriptors must share one backing allocation.")
+    (size,) = sizes
+    logger.info("Allocating unified KV cache: %d bytes", size)
+    return _allocate_int8_cache_tensor(size, KV_CACHE_BUFFER_ALIGNMENT, device)
 
 
 def _slice_cache_layer(
@@ -1432,13 +1427,13 @@ def _slice_cache_layer(
     return backing[start : start + span]
 
 
-def _has_declared_cache_backings(config: KVCacheConfig) -> bool:
-    return any(isinstance(tensor, KVCacheTensorWithBacking) for tensor in config.kv_cache_tensors)
+def _uses_single_device_backing(config: KVCacheConfig) -> bool:
+    return getattr(config, "single_device_backing", False)
 
 
 def create_kv_cache_runtime_views(
     kv_cache_config: KVCacheConfig,
-    backing: torch.Tensor | Mapping[int, torch.Tensor],
+    backing: torch.Tensor,
     attn_groups: Sequence[AttentionGroup],
     kernel_block_sizes: Sequence[int],
     shared_layers: Mapping[str, str],
@@ -1448,6 +1443,7 @@ def create_kv_cache_runtime_views(
     cache_dtype: str = "auto",
 ) -> dict[str, Any]:
     """Delegate component views to backends using the descriptor block strides."""
+    use_layer_views = _uses_single_device_backing(kv_cache_config)
     placements = {
         name: (descriptor, layer_index)
         for descriptor in kv_cache_config.kv_cache_tensors
@@ -1462,19 +1458,15 @@ def create_kv_cache_runtime_views(
         for name in group.layer_names:
             descriptor, layer_index = placements[name]
             num_blocks = kv_cache_config.num_blocks_of(descriptor)
-            if isinstance(descriptor, KVCacheTensorWithBacking):
-                assert attn_layers is not None and not isinstance(backing, torch.Tensor)
-                raw_cache = _slice_cache_layer(
-                    backing[descriptor.backing_id], descriptor, layer_index, spec, num_blocks
-                )
+            raw_cache = _slice_cache_layer(backing, descriptor, layer_index, spec, num_blocks)
+            if use_layer_views:
+                assert attn_layers is not None
                 create_view = getattr(attn_layers[name], "create_kv_cache_view", None)
                 assert callable(create_view)
                 caches[name] = create_view(
                     raw_cache, spec, num_blocks, descriptor.block_stride, kernel_block_size, cache_dtype
                 )
                 continue
-            assert isinstance(backing, torch.Tensor)
-            raw_cache = _slice_cache_layer(backing, descriptor, layer_index, spec, num_blocks)
             shapes = group.backend.get_runtime_shapes(
                 spec,
                 num_blocks,
@@ -1521,16 +1513,7 @@ def unified_allocate_kv_cache(
     vllm_config = get_current_vllm_config()
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = get_shared_kv_cache_layers(vllm_config)
-    backing: torch.Tensor | dict[int, torch.Tensor]
-    if _has_declared_cache_backings(kv_cache_config):
-        backing = _allocate_declared_cache_backings(kv_cache_config, device)
-    else:
-        sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
-        if len(sizes) != 1:
-            raise ValueError("Unified KV cache descriptors must share one backing allocation.")
-        backing_size = sizes.pop()
-        logger.info("Allocating unified KV cache: %d bytes", backing_size)
-        backing = _allocate_int8_cache_tensor(backing_size, KV_CACHE_BUFFER_ALIGNMENT, device)
+    backing = _allocate_single_cache_backing(kv_cache_config, device)
     return create_kv_cache_runtime_views(
         kv_cache_config,
         backing,
@@ -1572,7 +1555,7 @@ def allocate_kv_cache_main(
     }
 
     if (
-        _has_declared_cache_backings(kv_cache_config)
+        _uses_single_device_backing(kv_cache_config)
         and KVPPConfig.from_vllm_config(vllm_config).size <= 1
         and get_layerwise_reuse_layout(kv_cache_config) is None
         and not is_c8_mxfp_kv_quant(vllm_config)
@@ -1637,17 +1620,15 @@ def _reshape_kv_cache_v2(
     vllm_config = get_current_vllm_config()
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     kv_caches: dict[str, Any] = {}
-    cache_owners = (
-        get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
-        if _has_declared_cache_backings(kv_cache_config)
-        else {}
-    )
-    declared_block_strides = {
-        name: descriptor.block_stride
-        for descriptor in kv_cache_config.kv_cache_tensors
-        if isinstance(descriptor, KVCacheTensorWithBacking)
-        for name in descriptor.layers
-    }
+    cache_owners = {}
+    declared_block_strides = {}
+    if _uses_single_device_backing(kv_cache_config):
+        cache_owners = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
+        declared_block_strides = {
+            name: descriptor.block_stride
+            for descriptor in kv_cache_config.kv_cache_tensors
+            for name in descriptor.layers
+        }
     # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
     # view from the same deterministic layout that _allocate_kv_cache used:
     # Shared slabs hold QSA/GDN slots and indexer regions; PLE/hidden banks are private.
