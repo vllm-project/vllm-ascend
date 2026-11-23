@@ -205,6 +205,46 @@ def test_draft_decode_capture_respects_moe_comm_policy(
     assert compilation.decode_cudagraph_capture_request_sizes == [1, 2, 3, 4]
 
 
+@pytest.mark.parametrize("is_prefill", [False, True])
+def test_native_swa_capture_delegates_to_upstream(is_prefill):
+    manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
+    manager.speculator = SimpleNamespace(uses_upstream_swa_graph=True)
+    manager.is_draft_model_prefill = is_prefill
+    args = tuple(object() for _ in range(6))
+    slots = torch.empty((1, 8), dtype=torch.int64)
+    with (
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.communicator_switch",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.model_capture_wrapper",
+            return_value=nullcontext(),
+        ),
+        patch.object(SpeculatorCudaGraphManager, "capture", autospec=True) as capture,
+    ):
+        manager.capture(*args, specialize_spec_tokens=not is_prefill, slot_mappings_buffer=slots)
+    capture.assert_called_once_with(
+        manager,
+        *args,
+        progress_bar_desc="Capturing CUDA graphs",
+        specialize_spec_tokens=not is_prefill,
+        slot_mappings_buffer=slots,
+    )
+
+
+def test_native_swa_decode_replay_needs_no_host_metadata_build():
+    manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
+    manager.speculator = SimpleNamespace(uses_upstream_swa_graph=True, build_draft_attn_metadatas=MagicMock())
+    manager.is_draft_model_prefill = False
+    manager.update_stream = None
+    desc = SimpleNamespace(num_tokens=4, num_reqs=4)
+    with patch.object(SpeculatorCudaGraphManager, "run_fullgraph", autospec=True, return_value="result") as replay:
+        assert manager.run_fullgraph(desc) == "result"
+    replay.assert_called_once_with(manager, desc)
+    manager.speculator.build_draft_attn_metadatas.assert_not_called()
+
+
 def test_run_fullgraph_uses_updatable_graph():
     """Verify full-graph replay uses the updatable graph path."""
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
@@ -214,6 +254,7 @@ def test_run_fullgraph_uses_updatable_graph():
     draft_vllm_config = object()
     draft_attn_metadatas = [{"draft": object()}]
     manager.speculator = SimpleNamespace(
+        uses_upstream_swa_graph=False,
         attn_backend=backend,
         draft_vllm_config=draft_vllm_config,
         build_draft_attn_metadatas=MagicMock(return_value=draft_attn_metadatas),
@@ -244,6 +285,7 @@ def test_run_fullgraph_uses_legacy_graph():
     draft_vllm_config = object()
     draft_attn_metadatas = [{"draft": object()}]
     manager.speculator = SimpleNamespace(
+        uses_upstream_swa_graph=False,
         attn_backend=backend,
         draft_vllm_config=draft_vllm_config,
         build_draft_attn_metadatas=MagicMock(return_value=draft_attn_metadatas),
@@ -272,7 +314,7 @@ def test_run_fullgraph_uses_legacy_graph():
 def test_capture_draft_prefill_prepares_pcp_inputs_and_runs_forward(warmup):
     """Draft prefill capture stages PCP metadata before invoking its forward."""
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
-    manager.speculator = object()
+    manager.speculator = SimpleNamespace(uses_upstream_swa_graph=False)
     manager.is_draft_model_prefill = True
     manager.max_num_reqs = 4
     manager.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=1))
@@ -326,7 +368,7 @@ def test_capture_draft_prefill_prepares_pcp_inputs_and_runs_forward(warmup):
 def test_capture_draft_decode_prepares_inputs_and_runs_forward():
     """Verify draft decode capture prepares inputs and invokes the forward path."""
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
-    manager.speculator = SimpleNamespace(num_speculative_steps=3)
+    manager.speculator = SimpleNamespace(num_speculative_steps=3, uses_upstream_swa_graph=False)
     manager.is_draft_model_prefill = False
     manager.max_num_reqs = 3
     # vLLM #53934 turned `dp_size` into a read-only property backed by

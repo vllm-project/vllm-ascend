@@ -610,9 +610,38 @@ def test_set_attn_detects_architecture():
         assert speculator.attn_architecture == expected
 
 
+@pytest.mark.parametrize(
+    "architecture,supports_update,expected",
+    [("DSA", True, True), ("DSA", False, False), ("GQA", True, False)],
+)
+def test_upstream_swa_graph_requires_supported_dsa(architecture, supports_update, expected):
+    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    speculator.attn_architecture = architecture
+    speculator.supports_decode_metadata_update = supports_update
+    assert speculator.uses_upstream_swa_graph is expected
+
+
+def test_native_swa_capture_uses_upstream_speculator():
+    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    speculator.attn_architecture = "DSA"
+    speculator.supports_decode_metadata_update = True
+    with (
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.build_attn_metadata_wrapper",
+            return_value=nullcontext(),
+        ) as wrapper,
+        patch.object(TargetDependentARSpeculator, "capture", autospec=True) as capture,
+    ):
+        speculator.capture()
+    wrapper.assert_called_once()
+    capture.assert_called_once_with(speculator)
+    assert speculator._eplb_dummy_run
+
+
 def test_capture_single_step_only_captures_prefill():
     """Test single-step capture only captures the prefill graph."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    speculator.attn_architecture = "GQA"
     speculator.last_token_indices = MagicMock()
     speculator.idx_mapping = torch.ones(2, dtype=torch.int32)
     speculator.max_num_reqs = 2
@@ -641,6 +670,7 @@ def test_capture_single_step_only_captures_prefill():
 def test_capture_multi_step_captures_decode():
     """Test multi-step capture includes the decode graph."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    speculator.attn_architecture = "GQA"
     speculator.last_token_indices = MagicMock()
     speculator.idx_mapping = torch.ones(2, dtype=torch.int32)
     speculator.max_num_reqs = 2

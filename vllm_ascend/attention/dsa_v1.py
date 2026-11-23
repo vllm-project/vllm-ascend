@@ -504,6 +504,12 @@ class AscendDSAReqMetadata:
     ori_win_right: int | None = None
     dspark_swa_indices: torch.Tensor | None = None
     vision_swa_indices: torch.Tensor | None = None
+    positions: torch.Tensor | None = None
+    raw_slot_mapping: torch.Tensor | None = None
+    max_seqlen_q: int = 1
+    # Explicit output ownership: graph refreshes must write the RoPE storage
+    # this request metadata already references.
+    rope_buffers: dict | None = None
 
 
 @dataclass
@@ -809,6 +815,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             "compress_ratio",
             getattr(kv_cache_spec, "tokens_per_state", 0),
         )
+        self.supports_draft_decode_metadata_update = (
+            vllm_config.use_v2_model_runner
+            and vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.method in ("mtp", "eagle", "eagle3")
+            and type(self) in (AscendDSAMetadataBuilder, AscendDSASWAMetadataBuilder)
+            and self.compressor_ratio <= 1
+            and vllm_config.parallel_config.prefill_context_parallel_size == 1
+            and vllm_config.parallel_config.decode_context_parallel_size == 1
+            and not get_ascend_config().sparse_kv_offload_config.enabled
+        )
         sas_plan = get_dsa_attn_kv_plan(vllm_config, self.compressor_ratio)
         # Size the buffer for the metadata operator selected by the cache plan.
         self.sas_metadata_buffer_size = (
@@ -1078,6 +1094,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         ori_win_left: int,
         ori_win_right: int,
         dspark_swa: bool,
+        output_buffer: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compatibility entry for generic and drafting metadata consumers."""
         return AscendDSAAttentionMetadataBuilder._build_sas_metadata(
@@ -1093,6 +1110,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             dspark_swa=dspark_swa,
+            output_buffer=output_buffer,
         )
 
     def _build_qli_metadata(
@@ -1298,6 +1316,15 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cache_group_key=self.cache_group_key,
             cos=cos,
             sin=sin,
+            positions=(
+                common.positions[: common.num_input_tokens] if getattr(common, "positions", None) is not None else None
+            ),
+            raw_slot_mapping=common.slot_mapping[: common.num_input_tokens],
+            rope_buffers=(
+                self._step_rope_buffers
+                if self.supports_draft_decode_metadata_update and self.num_prefills == 0
+                else None
+            ),
         )
 
     def _prepare_rope(
@@ -1308,6 +1335,15 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         full_graph_mode: bool,
     ) -> None:
         if req.cos is not None:
+            return
+        if req.rope_buffers is not None:
+            req.cos, req.sin = get_cos_and_sin_dsa(
+                common_attn_metadata.positions[: common_attn_metadata.num_input_tokens].long(),
+                use_cache=False,
+                layer_names=self.layer_names,
+                output_buffers=req.rope_buffers,
+                capacity=self.slot_mapping.shape[0],
+            )
             return
         cache = self.common_ratio_to_sas_metadata
         assert cache is not None
@@ -1381,6 +1417,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             metadata_cache["req_preamble"] = preamble
         max_seqlen_q, max_seqlen_kv = preamble
+        req.max_seqlen_q = max_seqlen_q
         return max_seqlen_q, max_seqlen_kv
 
     def _build_start_positions(self, req: AscendDSAReqMetadata) -> torch.Tensor:
@@ -1403,6 +1440,54 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             if use_specialized_metadata:
                 metadata_cache[start_key] = start_pos
         return start_pos
+
+    def update_draft_decode_metadata(self, metadata: AscendDSAMetadata) -> None:
+        """Refresh native SWA inputs inside the upstream autoregressive graph."""
+        assert self.supports_draft_decode_metadata_update
+        assert metadata.num_prefills == 0
+        if metadata.num_decode_tokens == 0:
+            return
+        req = _require_req_metadata(metadata)
+        assert req.positions is not None
+        assert req.raw_slot_mapping is not None
+        assert req.slot_mapping is not None
+        assert req.sas_metadata is not None
+        assert req.rope_buffers is not None
+
+        get_cos_and_sin_dsa(
+            req.positions.long(),
+            use_cache=False,
+            layer_names=self.layer_names,
+            output_buffers=req.rope_buffers,
+            capacity=self.slot_mapping.shape[0],
+        )
+        formatted_slots = get_dsa_attn_kv_plan(self.vllm_config).format_dsa_slot_mapping(
+            req.raw_slot_mapping, self.storage_block_size
+        )
+        req.slot_mapping.copy_(formatted_slots[: req.slot_mapping.shape[0]])
+
+        # A fresh cache emits length and tiling kernels for every captured
+        # substep rather than reusing build()'s result for the dummy batch.
+        cache: dict = {}
+        cu_seqlens_ori_kv = DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
+            cache, "cu_seqlens_ori_kv", req.seq_lens, req.seq_lens.shape[0], self._zero_i32, self.cu_seqlens_ori_kv
+        )
+        # build() can share a compatible group's SAS output. Refresh the
+        # storage this metadata actually references, not a builder-local copy.
+        self._build_sas_metadata(
+            metadata_cache=cache,
+            layer_name=f"c{self.compressor_ratio}",
+            query_start_loc=req.query_start_loc,
+            seq_lens=req.seq_lens,
+            max_seqlen_q=req.max_seqlen_q,
+            max_seqlen_kv=self.model_config.max_model_len,
+            cu_seqlens_ori_kv=cu_seqlens_ori_kv,
+            cu_seqlens_cmp_kv=DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv),
+            ori_win_left=req.ori_win_left,
+            ori_win_right=req.ori_win_right,
+            dspark_swa=False,
+            output_buffer=req.sas_metadata,
+        )
 
     def build_for_drafting(
         self,
@@ -1709,6 +1794,7 @@ class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
         ori_win_left: int,
         ori_win_right: int,
         dspark_swa: bool,
+        output_buffer: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # DSpark widens the SWA window to include the whole draft block.
         # Metadata and execution must use the same window so split-G cores
@@ -1717,7 +1803,7 @@ class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
         key = ("sas", layer_name, ori_win_left, ori_win_right, dspark_swa)
         use_specialized_metadata = self._use_specialized_metadata()
         output_key = ("sas_output", key)
-        if use_specialized_metadata and output_key in metadata_cache:
+        if use_specialized_metadata and output_buffer is None and output_key in metadata_cache:
             return metadata_cache[output_key]
         sas_metadata = metadata_cache.get(key)
         if sas_metadata is None:
@@ -1767,8 +1853,8 @@ class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
             )
             metadata_cache[key] = sas_metadata
 
-        output = self.sas_metadata_buffer
-        if use_specialized_metadata:
+        output = self.sas_metadata_buffer if output_buffer is None else output_buffer
+        if use_specialized_metadata and output_buffer is None:
             # A single builder can encounter both causal and DSpark groups.
             # Each variant needs its own capture-stable output address.
             if key not in self._sas_variant_buffers:

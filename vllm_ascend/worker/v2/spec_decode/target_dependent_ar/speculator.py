@@ -394,6 +394,10 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
     def capture(self) -> None:
         self._eplb_dummy_run = True
+        if self.uses_upstream_swa_graph:
+            with build_attn_metadata_wrapper():
+                super().capture()
+            return
         logger.info("Capturing model for speculator...")
         # Reset indices to zeros to prevent stale values from prior
         # dummy runs to cause out-of-bounds indexing during capture.
@@ -443,6 +447,10 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 progress_bar_desc="Capturing decode CUDA graphs",
             )
         self.on_multi_step_decode_end(self.max_num_reqs)
+
+    @property
+    def uses_upstream_swa_graph(self) -> bool:
+        return self.attn_architecture == "DSA" and self.supports_decode_metadata_update
 
     def _generate_draft(
         self,
