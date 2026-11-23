@@ -1,0 +1,5 @@
+pr: 22933
+entries:
+  - category: feature
+    text: Added the `vllm_ascend.ops.sol_attn.sol_attn` Python API for noncausal BF16 self-attention on Ascend 910B.
+    hardware: [A2]
