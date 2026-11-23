@@ -362,7 +362,7 @@ class TestMaterializePaddingRow:
                 "_EXTRA_CTX",
                 SimpleNamespace(capturing=True),
             )
-            key, value, remapped = backend._materialize_bnsd_pa_read(PHYSICAL_TABLE.clone())
+            key, value, remapped = backend._materialize_bnsd_pa_read(PHYSICAL_TABLE.clone(), capturing=True)
         assert remapped.shape == (NUM_ROWS + 1, TABLE_WIDTH)
         assert key.shape[0] == NUM_GATHERED + 1
         assert value.shape[0] == NUM_GATHERED + 1
@@ -382,7 +382,7 @@ class TestMaterializePaddingRow:
                 "_EXTRA_CTX",
                 SimpleNamespace(capturing=False),
             )
-            key, value, remapped = backend._materialize_bnsd_pa_read(PHYSICAL_TABLE.clone())
+            key, value, remapped = backend._materialize_bnsd_pa_read(PHYSICAL_TABLE.clone(), capturing=False)
         assert remapped.shape == (NUM_ROWS, TABLE_WIDTH)
         assert key.shape[0] == NUM_GATHERED
         assert remapped.flatten().tolist() == list(range(NUM_GATHERED))
@@ -414,9 +414,9 @@ class TestCapturedGatherUsesPersistentTable:
 
         orig = backend._materialize_bnsd_pa_read
 
-        def spy(block_table, max_kv_len=None):
+        def spy(block_table, max_kv_len=None, **kwargs):
             seen["table"] = block_table
-            return orig(block_table, max_kv_len=max_kv_len)
+            return orig(block_table, max_kv_len=max_kv_len, **kwargs)
 
         backend._materialize_bnsd_pa_read = spy
         try:
@@ -573,7 +573,9 @@ class TestBoundedEagerGather:
         backend = _make_backend()
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(attention_v1, "_EXTRA_CTX", SimpleNamespace(capturing=False))
-            key, value, remapped = backend._materialize_bnsd_pa_read(WIDE_TABLE.clone(), max_kv_len=max(WIDE_SEQ_LENS))
+            key, value, remapped = backend._materialize_bnsd_pa_read(
+                WIDE_TABLE.clone(), max_kv_len=max(WIDE_SEQ_LENS), capturing=False
+            )
         gathered = WIDE_ROWS * WIDE_BOUND_WIDTH
         # The bound applies: only the live columns are gathered.
         assert key.shape == (gathered, BLOCK_SIZE, NUM_KV_HEADS * HEAD_DIM)
@@ -612,7 +614,9 @@ class TestBoundedEagerGather:
         )
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(attention_v1, "_EXTRA_CTX", SimpleNamespace(capturing=False))
-            key, value, block_size, block_table, actual_seq_lengths_kv = backend._get_fia_params(None, None, metadata)
+            key, value, block_size, block_table, actual_seq_lengths_kv = backend._get_fia_params(
+                None, None, metadata, capturing=False
+            )
         assert actual_seq_lengths_kv == WIDE_SEQ_LENS
         assert block_size == BLOCK_SIZE
         assert block_table.shape == (WIDE_ROWS, WIDE_BOUND_WIDTH)
@@ -627,7 +631,9 @@ class TestBoundedEagerGather:
         )
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(attention_v1, "_EXTRA_CTX", SimpleNamespace(capturing=False))
-            key, value, block_size, block_table, actual_seq_lengths_kv = backend._get_fia_params(None, None, metadata)
+            key, value, block_size, block_table, actual_seq_lengths_kv = backend._get_fia_params(
+                None, None, metadata, capturing=False
+            )
         assert block_table.shape == (WIDE_ROWS, WIDE_WIDTH)
         assert key.shape == (WIDE_ROWS * WIDE_WIDTH, BLOCK_SIZE, NUM_KV_HEADS * HEAD_DIM)
 
@@ -635,7 +641,7 @@ class TestBoundedEagerGather:
         backend = _make_backend()
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(attention_v1, "_EXTRA_CTX", SimpleNamespace(capturing=False))
-            key, value, remapped = backend._materialize_bnsd_pa_read(WIDE_TABLE.clone())
+            key, value, remapped = backend._materialize_bnsd_pa_read(WIDE_TABLE.clone(), capturing=False)
         assert key.shape == (WIDE_ROWS * WIDE_WIDTH, BLOCK_SIZE, NUM_KV_HEADS * HEAD_DIM)
         assert remapped.shape == (WIDE_ROWS, WIDE_WIDTH)
         assert remapped.flatten().tolist() == list(range(WIDE_ROWS * WIDE_WIDTH))
@@ -648,7 +654,9 @@ class TestBoundedEagerGather:
         backend = _make_backend()
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(attention_v1, "_EXTRA_CTX", SimpleNamespace(capturing=True))
-            key, value, remapped = backend._materialize_bnsd_pa_read(WIDE_TABLE.clone(), max_kv_len=max(WIDE_SEQ_LENS))
+            key, value, remapped = backend._materialize_bnsd_pa_read(
+                WIDE_TABLE.clone(), max_kv_len=max(WIDE_SEQ_LENS), capturing=True
+            )
         assert remapped.shape == (WIDE_ROWS + 1, WIDE_WIDTH)
         assert key.shape[0] == WIDE_ROWS * WIDE_WIDTH + 1
         assert value.shape[0] == WIDE_ROWS * WIDE_WIDTH + 1
@@ -661,7 +669,7 @@ class TestBoundedEagerGather:
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(attention_v1, "_EXTRA_CTX", SimpleNamespace(capturing=False))
             key, value, remapped = backend._materialize_bnsd_pa_read(
-                WIDE_TABLE.clone(), max_kv_len=(WIDE_WIDTH + 1) * BLOCK_SIZE
+                WIDE_TABLE.clone(), max_kv_len=(WIDE_WIDTH + 1) * BLOCK_SIZE, capturing=False
             )
         assert remapped.shape == (WIDE_ROWS, WIDE_WIDTH)
         assert key.shape[0] == WIDE_ROWS * WIDE_WIDTH
@@ -670,6 +678,6 @@ class TestBoundedEagerGather:
         backend = _make_backend()
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(attention_v1, "_EXTRA_CTX", SimpleNamespace(capturing=False))
-            key, value, remapped = backend._materialize_bnsd_pa_read(WIDE_TABLE.clone(), max_kv_len=0)
+            key, value, remapped = backend._materialize_bnsd_pa_read(WIDE_TABLE.clone(), max_kv_len=0, capturing=False)
         assert remapped.shape == (WIDE_ROWS, 1)
         assert key.shape[0] == WIDE_ROWS

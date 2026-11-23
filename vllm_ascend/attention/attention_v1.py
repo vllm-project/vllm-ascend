@@ -738,7 +738,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         layer=None,
     ) -> torch.Tensor:
-        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
+            key, value, attn_metadata, capturing=True
+        )
         # For the gathered HND read, ``block_table`` is the sequential
         # remapped table over the compact gather buffers; the strong
         # reference kept by the helper below survives register_task's
@@ -841,7 +843,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ) -> torch.Tensor:
-        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
+            key, value, attn_metadata, capturing=True
+        )
         # FIAV2ParamProvider never resolves a block_table override, so the
         # captured remapped table stays bound at replay; keep it alive the
         # same way as the v1 path.
@@ -952,7 +956,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         return key, value, block_size
 
     def _materialize_bnsd_pa_read(
-        self, block_table: torch.Tensor, max_kv_len: int | None = None
+        self, block_table: torch.Tensor, max_kv_len: int | None = None, *, capturing: bool
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Gather the head-major KV cache into the form the FIA kernel reads.
 
@@ -1003,7 +1007,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # (it refuses with a RuntimeError otherwise); narrow for mypy.
         assert self.key_cache is not None and self.value_cache is not None
         block_size = self.key_cache.shape[2]
-        if max_kv_len is not None and not _EXTRA_CTX.capturing:
+        if max_kv_len is not None and not capturing:
             # Eager callers hold the live KV lengths on the host, so only
             # the pages this batch actually reads need gathering. The
             # batch-maximum scalar keeps one static shape per step and
@@ -1024,7 +1028,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             return cache.index_select(0, flat_ids).permute(0, 2, 1, 3).reshape(flat_ids.numel(), block_size, -1)
 
         remapped_table = remapped.reshape(num_rows, table_width).to(block_table.dtype)
-        if _EXTRA_CTX.capturing:
+        if capturing:
             # Graph replay can grow the FIA batch by one synthetic padding
             # request beyond the captured request rows (see
             # AscendAttentionMetadataBuilder.build: a padded FULL-graph
@@ -1043,7 +1047,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
             flat_ids = torch.cat([flat_ids, flat_ids.new_zeros(1)])
         return to_token_major(self.key_cache), to_token_major(self.value_cache), remapped_table
 
-    def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
+    def _get_fia_params(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        kv_cache=None,
+        *,
+        capturing: bool,
+    ):
         # PrefillNoCache doesn't need key_cache, but other modes do
         # Only initialize/require cache for modes that actually use it
         if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache:
@@ -1099,19 +1111,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # so the captured gather sources the pre-padding view instead
             # (the padding request is already mirrored in the gathered
             # world's extra block-0 slot; see _materialize_bnsd_pa_read).
-            if _EXTRA_CTX.capturing:
+            if capturing:
                 pre_padding = getattr(attn_metadata, "block_tables_pre_padding", None)
                 if pre_padding is not None:
                     block_table = pre_padding
             max_kv_len = None
-            if not _EXTRA_CTX.capturing:
+            if not capturing:
                 # Host-side per-request KV lengths: a scalar batch-maximum
                 # bound avoids any device-to-host read. Absent, empty, or
                 # non-list values fall back to the full table width.
                 seq_lens_list = attn_metadata.seq_lens_list
                 if isinstance(seq_lens_list, (list, tuple)) and seq_lens_list:
                     max_kv_len = max(seq_lens_list)
-            key, value, block_table = self._materialize_bnsd_pa_read(block_table, max_kv_len)
+            key, value, block_table = self._materialize_bnsd_pa_read(block_table, max_kv_len, capturing=capturing)
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
     def forward_fused_infer_attention(
@@ -1137,7 +1149,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 return output
         passed_value = value
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
-            key, value, attn_metadata, kv_cache
+            key, value, attn_metadata, kv_cache, capturing=False
         )
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
@@ -1983,7 +1995,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         """C8 FIA V1 TND for prefill states (PrefillNoCache uses float KV directly,
         PrefillCacheHit gathers + dequants paged INT8 KV).
         """
-        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
+            key, value, attn_metadata, capturing=False
+        )
 
         actual_seq_qlen = attn_metadata.actual_seq_lengths_q
         num_tokens = int(actual_seq_qlen[-1])  # type: ignore[index]

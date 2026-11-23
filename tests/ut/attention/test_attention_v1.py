@@ -653,7 +653,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.impl.use_bnsd_kv_cache = False
         self.impl.key_cache = torch.empty(4, 128, 8, 64)
         self.impl.value_cache = torch.empty_like(self.impl.key_cache)
-        key, value, block_size, _, _ = self.impl._get_fia_params(current_key, current_value, metadata)
+        key, value, block_size, _, _ = self.impl._get_fia_params(current_key, current_value, metadata, capturing=False)
         self.assertEqual(key.shape, (4, 128, 512))
         self.assertEqual(value.shape, (4, 128, 512))
         self.assertEqual(block_size, 128)
@@ -667,7 +667,9 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.impl.value_cache = torch.zeros_like(self.impl.key_cache)
         with patch("vllm_ascend.ascend_forward_context.get_forward_context") as ctx:
             ctx.return_value = MagicMock(capturing=False)
-            key, value, block_size, block_table, _ = self.impl._get_fia_params(current_key, current_value, metadata)
+            key, value, block_size, block_table, _ = self.impl._get_fia_params(
+                current_key, current_value, metadata, capturing=False
+            )
         self.assertEqual(key.dim(), 3)
         self.assertTrue(key.is_contiguous())
         self.assertEqual(block_size, 128)
@@ -1273,7 +1275,7 @@ class TestBnsdPaReadGather(unittest.TestCase):
         impl.value_cache = self._make_bnsd_cache() + 100
         block_table = torch.tensor([[0, 3, 5], [3, 0, 1]])
 
-        key, value, remapped = impl._materialize_bnsd_pa_read(block_table)
+        key, value, remapped = impl._materialize_bnsd_pa_read(block_table, capturing=False)
 
         self.assertEqual(key.dim(), 3)
         self.assertEqual(key.shape, (block_table.numel(), self.BLOCK_SIZE, self.NUM_HEADS * self.HEAD_SIZE))
@@ -1301,7 +1303,7 @@ class TestBnsdPaReadGather(unittest.TestCase):
         impl.value_cache = self._make_bnsd_cache()
         block_table = torch.tensor([[2, 2], [2, 2]])
 
-        key, _, remapped = impl._materialize_bnsd_pa_read(block_table)
+        key, _, remapped = impl._materialize_bnsd_pa_read(block_table, capturing=False)
 
         self.assertEqual(key.shape[0], block_table.numel())
         self.assertEqual(remapped.tolist(), [[0, 1], [2, 3]])
@@ -1320,7 +1322,7 @@ class TestBnsdPaReadGather(unittest.TestCase):
         impl.value_cache = self._make_bnsd_cache()
         block_table = torch.tensor([[0, -1], [-1, 2]])
 
-        key, _, remapped = impl._materialize_bnsd_pa_read(block_table)
+        key, _, remapped = impl._materialize_bnsd_pa_read(block_table, capturing=True)
 
         self.assertEqual(remapped.max().item(), key.shape[0] - 1)
         self.assertEqual(key[remapped[0, 1], 0, 0].item(), 0)
@@ -1342,7 +1344,7 @@ class TestBnsdPaReadGather(unittest.TestCase):
         impl.value_cache = self._make_bnsd_cache()
         block_table = torch.tensor([[0, 0], [0, 0]])
 
-        key, _, remapped = impl._materialize_bnsd_pa_read(block_table)
+        key, _, remapped = impl._materialize_bnsd_pa_read(block_table, capturing=True)
 
         self.assertEqual(key.shape[0], block_table.numel() + 1)
         self.assertEqual(remapped.tolist(), [[0, 1], [2, 3], [4, 4]])
@@ -1361,7 +1363,9 @@ class TestBnsdPaReadGather(unittest.TestCase):
         metadata.seq_lens_list = [16, 16]
 
         with patch.object(impl, "_materialize_bnsd_pa_read", wraps=impl._materialize_bnsd_pa_read) as gather:
-            key, value, block_size, block_table, _ = impl._get_fia_params(torch.empty(0), torch.empty(0), metadata)
+            key, value, block_size, block_table, _ = impl._get_fia_params(
+                torch.empty(0), torch.empty(0), metadata, capturing=False
+            )
 
         gather.assert_called_once()
         self.assertEqual(key.dim(), 3)
@@ -1381,7 +1385,9 @@ class TestBnsdPaReadGather(unittest.TestCase):
         metadata.seq_lens_list = [16, 16]
 
         with patch.object(impl, "_materialize_bnsd_pa_read") as gather:
-            key, value, block_size, block_table, _ = impl._get_fia_params(torch.empty(0), torch.empty(0), metadata)
+            key, value, block_size, block_table, _ = impl._get_fia_params(
+                torch.empty(0), torch.empty(0), metadata, capturing=False
+            )
 
         gather.assert_not_called()
         self.assertIs(block_table, metadata.block_tables)
