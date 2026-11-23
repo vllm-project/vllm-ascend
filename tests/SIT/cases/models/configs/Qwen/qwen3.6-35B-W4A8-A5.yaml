@@ -3,7 +3,6 @@ test_cases:
   - name: "Eco-Tech/Qwen3.6-35B-A3B-w4a8-mxfp-A5"
     model: "Eco-Tech/Qwen3.6-35B-A3B-w4a8-mxfp"
     envs:
-      VLLM_USE_V2_MODEL_RUNNER: "1"
       VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3000"
       VLLM_ENGINE_READY_TIMEOUT_S: "2400"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"

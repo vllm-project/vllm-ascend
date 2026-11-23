@@ -26,7 +26,6 @@ env_common: &env_common
   VLLM_PP_LAYER_PARTITION: "42,36"
   VLLM_USE_FASTOKENS: "1"
   VLLM_DISABLE_COMPILE_CACHE: "1"
-  VLLM_USE_V2_MODEL_RUNNER: "0"
 
 deployment:
   - envs:
