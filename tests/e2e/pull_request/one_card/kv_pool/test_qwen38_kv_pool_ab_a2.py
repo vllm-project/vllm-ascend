@@ -64,13 +64,13 @@ Environment knobs:
 - ``KV_POOL_AB_MODE``: ``gate`` (default, A/B comparison must pass) or
   ``record`` (only log the verdict);
 - ``KV_POOL_MEMCACHE_UBSIO_DISK``: raw block device used for the memcache
-  tier-3 UBS IO storage. Default ``/mnt/boostio`` (hosts that bind-mount the
-  device node at that path); the a2-loop-1 CI runner's device plugin injects
-  the node at the conventional ``/dev/loop10`` instead, so the workflow sets
-  this variable to ``/dev/loop10`` for job containers. The path must be a
-  *block device* - dedicated, unmounted, no filesystem signature, and not the
-  backing image file: the ubsio SDK rejects non-block paths late and
-  cryptically, so the test checks it up front;
+  tier-3 UBS IO storage. When unset the case probes the known provisioning
+  locations in order - ``/mnt/boostio`` (bind-mount convention) then
+  ``/dev/loop10`` (Kubernetes device-plugin convention, ContainerPath =
+  HostPath) - and falls back to ``/mnt/boostio`` so the skip reason names the
+  expected path. The path must be a *block device* - dedicated, unmounted, no
+  filesystem signature, and not the backing image file: the ubsio SDK rejects
+  non-block paths late and cryptically, so the test checks it up front;
 - ``KV_POOL_MEMCACHE_UBSIO_DEVICES``: UBS IO standalone device count (default
   ``TP_SIZE``, one per DRAM-enabled local service);
 - ``KV_POOL_MEMCACHE_DRAM_TIER``: memcache pool DRAM tier size written to
@@ -367,10 +367,29 @@ TTFT_P95_LIMITS = {
 # gate stays an order of magnitude below a real regression (a full miss is ~12x
 # slower at ~0.1x throughput), so 1.75/0.55 still catches pool defects.
 THROUGHPUT_LIMITS = {"default": 0.70, "memcache_bulk_tier2": 0.55, "memcache_layerwise_tier3": 0.30}
-# The a2-loop-1 runner mounts its dedicated loop raw device into the job
-# container at /mnt/boostio; other hosts override via the env var (the 145/148
-# dev boxes pass /dev/loopN).
-MEMCACHE_UBSIO_DISK = os.environ.get("KV_POOL_MEMCACHE_UBSIO_DISK", "/mnt/boostio")
+# UBS IO raw cache device resolution (kept in the test file on purpose: the
+# /e2e comment flow resolves the reusable workflow from the default branch, so
+# only code that ships with the PR is guaranteed to run here).
+#   1. KV_POOL_MEMCACHE_UBSIO_DISK wins outright (dev boxes pass /dev/loopN);
+#   2. otherwise probe the known provisioning locations in order: the
+#      bind-mount convention /mnt/boostio, then the Kubernetes device-plugin
+#      convention /dev/loop10 (ContainerPath = HostPath, cgroup opened rwm);
+#   3. with no candidate present, keep /mnt/boostio so the skip reason names
+#      the provisioning path the case expects.
+_UBSIO_DISK_CANDIDATES = ("/mnt/boostio", "/dev/loop10")
+
+
+def _resolve_ubsio_disk() -> str:
+    override = os.environ.get("KV_POOL_MEMCACHE_UBSIO_DISK")
+    if override:
+        return override
+    for candidate in _UBSIO_DISK_CANDIDATES:
+        if os.path.exists(candidate):
+            return candidate
+    return _UBSIO_DISK_CANDIDATES[0]
+
+
+MEMCACHE_UBSIO_DISK = _resolve_ubsio_disk()
 MEMCACHE_UBSIO_DEVICES = int(os.environ.get("KV_POOL_MEMCACHE_UBSIO_DEVICES", TP_SIZE))
 MEMCACHE_UBSIO_MEM_GB = int(os.environ.get("KV_POOL_MEMCACHE_UBSIO_MEM_GB", "8"))
 # Tier-3 default: the layerwise save pre-allocates every layer group of the
@@ -1352,10 +1371,13 @@ def test_qwen38_kv_pool_ab_a2(backend: str, use_layerwise: bool):
         _log_ubsio_disk(case)
     if backend == "memcache" and tier_ssd and not os.path.exists(MEMCACHE_UBSIO_DISK):
         pytest.skip(
-            f"memcache tier-3 needs the raw UBS IO block device {MEMCACHE_UBSIO_DISK!r} "
-            "(no mount point, no filesystem signature; a loop device is fine 鈥?provision "
-            "one on the host, e.g. truncate -s 64G file && losetup -f --show file, and "
-            "pass it into the container with --device; set KV_POOL_MEMCACHE_UBSIO_DISK)."
+            f"memcache tier-3 needs a raw UBS IO block device; none of the probed "
+            f"locations {_UBSIO_DISK_CANDIDATES} exist in this container "
+            "(no mount point, no filesystem signature; a loop device is fine - "
+            "provision one on the host, e.g. truncate -s 64G file && losetup "
+            "-f --show file, then expose it to the job either as a bind-mounted "
+            "node at /mnt/boostio or through the Kubernetes device plugin at "
+            "/dev/loop10; or set KV_POOL_MEMCACHE_UBSIO_DISK)."
         )
 
     if backend == "memcache" and tier_ssd and not stat.S_ISBLK(os.stat(MEMCACHE_UBSIO_DISK).st_mode):
