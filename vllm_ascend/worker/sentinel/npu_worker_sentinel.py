@@ -338,7 +338,6 @@ class WorkerSentinel(GPUWorkerSentinel):
                 for rank in range(context.local_size)
             )
             self.retry_cache_plan = {
-                "request_id": context.round_id,
                 "blocks": sorted(blocks),
                 "hbm_detected": hbm_detected,
             }
