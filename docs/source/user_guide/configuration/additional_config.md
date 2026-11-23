@@ -377,6 +377,29 @@ Omitting `quant_dtype` selects MXFP8 on 950DT Products:
 }
 ```
 
+## GDN prefix-only checkpoint policy
+
+| Option | Type | Default | Behavior |
+| --- | --- | --- | --- |
+| `gdn_checkpoint_policy` | string | `"all"` | Use `"prefix_only"` to reuse matched GDN prefix state and stop publishing new GDN checkpoints for cache-hit requests. |
+
+```bash
+--additional-config '{"gdn_checkpoint_policy":"prefix_only"}'
+```
+
+Use this opt-in for workloads that repeatedly reuse a common prefix and append
+unique suffixes. Cold requests publish checkpoints through the standard prefill
+path. A request with a local prefix hit uses a private working state for the
+remaining prefill and decode. If the remaining prompt fits in one physical
+state page and in the current token budget, the scheduler can skip a split
+used solely to publish the GDN suffix checkpoint. A full-prompt replay can
+hit only the previously published prefix.
+
+This policy requires Model Runner V2 with GDN recurrent groups, local prefix
+caching in `align` mode, and both speculative decoding and
+`gdn_internal_prefill_checkpoints` disabled. Split elision also requires a
+prefix match unit smaller than the physical page size.
+
 ## GDN internal prefill checkpoints
 
 Enable with `--additional-config '{"gdn_internal_prefill_checkpoints": true}'`.

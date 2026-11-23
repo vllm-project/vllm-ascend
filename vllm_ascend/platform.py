@@ -708,6 +708,10 @@ class NPUPlatform(Platform):
 
         # 8.Setup worker class, custom ops and scheduler (ascend_config -> vllm_config).
         _setup_worker_and_scheduler(vllm_config, ascend_config)
+        if ascend_config.gdn_checkpoint_policy == "prefix_only":
+            from vllm_ascend.core.gdn_prefix_only_scheduler import configure_gdn_prefix_only_scheduler
+
+            configure_gdn_prefix_only_scheduler(vllm_config, ascend_config)
 
         # 9.Validate SFA / DCP / KV and SP consistency (vllm_config)
         _validate_sfa_dcp_kv_sp(vllm_config)
