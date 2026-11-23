@@ -96,9 +96,10 @@ def _verify_section(
     warmup: int,
     accept_rate: float | None = None,
     accept_len: int | None = None,
+    blocks_override: int | None = None,
 ) -> tuple[float, float]:
     """Time the stock ``flush + verify`` against ``compact_conv + fused verify``."""
-    blocks = batch + 1
+    blocks = batch + 1 if blocks_override is None else blocks_override
     total = batch * spec_q
     g = torch.Generator(device=DEVICE).manual_seed(11)
 
@@ -189,6 +190,9 @@ def main() -> None:
     parser.add_argument("--spec-q", type=int)
     parser.add_argument("--batch", type=int)
     parser.add_argument("--steps", type=int)
+    parser.add_argument("--blocks", type=int, default=None,
+                        help="state-pool block count (default batch+1); set to "
+                             "reproduce a profiled checkpoint shape like 492 blocks")
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--verify", action="store_true",
                         help="also time stock flush+verify vs fused verify")
@@ -212,7 +216,12 @@ def main() -> None:
     layers, heads = cfg["layers"], cfg["heads"]
     key_dim, value_dim = cfg["key_dim"], cfg["value_dim"]
     spec_q, batch, steps = cfg["spec_q"], cfg["batch"], cfg["steps"]
-    blocks = batch + 1
+    blocks = batch + 1 if args.blocks is None else args.blocks
+    if blocks <= batch:
+        raise SystemExit(
+            f"--blocks ({blocks}) must exceed the batch ({batch}): every request "
+            "needs its own state block in the pool"
+        )
     max_reqs = batch
 
     state_indices = torch.arange(1, batch + 1, dtype=torch.int32, device=DEVICE)
@@ -240,7 +249,7 @@ def main() -> None:
         for b in batches:
             t_stock, t_fused = _verify_section(
                 layers, heads, key_dim, value_dim, spec_q, b, steps, args.warmup,
-                args.accept_rate, args.accept_len,
+                args.accept_rate, args.accept_len, args.blocks,
             )
             rows.append((b, heads * b, t_stock, t_fused))
         print("sweep summary (fused wins when saving > 0)")
