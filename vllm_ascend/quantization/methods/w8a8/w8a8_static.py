@@ -20,7 +20,9 @@ from typing import Any
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.triton_utils import HAS_TRITON
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     maybe_trans_nz,
@@ -40,6 +42,7 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
 
     def __init__(self) -> None:
         self.quant_method = get_current_vllm_config().quant_config.get_name()
+        self.use_triton_quant = False
 
     weight_switch_gather_specs = (WeightSwitchGatherSpec("weight"),)
     weight_switch_output_gather_specs = (
@@ -86,6 +89,15 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         params_dict["weight_offset"] = torch.empty(output_size, 1, dtype=params_dtype)
         return params_dict
 
+    def _quantize_input(self, layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+        if self.use_triton_quant:
+            return torch.ops.vllm.ascend_triton_projection_quantize(
+                x, layer.aclnn_input_scale_reciprocal, layer.aclnn_input_offset
+            )
+        return torch.ops.vllm.quantize(
+            x, layer.aclnn_input_scale, layer.aclnn_input_scale_reciprocal, layer.aclnn_input_offset
+        )
+
     def prepare_input_for_overlap(
         self,
         layer: torch.nn.Module,
@@ -93,12 +105,7 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
     ) -> PreparedLinearInput | None:
         if x.dim() != 2 or x.dtype == torch.int8:
             return None
-        quantized_x = torch.ops.vllm.quantize(
-            x,
-            layer.aclnn_input_scale,
-            layer.aclnn_input_scale_reciprocal,
-            layer.aclnn_input_offset,
-        )
+        quantized_x = self._quantize_input(layer, x)
         return PreparedLinearInput(quantized_x, None, x.dtype)
 
     def apply(
@@ -111,13 +118,7 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         if isinstance(x, PreparedLinearInput):
             x = x.quantized
         elif x.dtype != torch.int8:
-            # quant
-            x = torch.ops.vllm.quantize(
-                x,
-                layer.aclnn_input_scale,
-                layer.aclnn_input_scale_reciprocal,
-                layer.aclnn_input_offset,
-            )
+            x = self._quantize_input(layer, x)
 
         quant_bias = layer.quant_bias if tp_rank == 0 else None
 
@@ -134,6 +135,12 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         return output
 
     def process_weights_after_loading(self, layer):
+        prefix = getattr(layer, "prefix", "")
+        if HAS_TRITON and isinstance(prefix, str) and prefix.endswith((".o_proj", ".indexer.wq_b")):
+            config = get_ascend_config()
+            self.use_triton_quant = (
+                config.enable_oproj_triton_quant if prefix.endswith(".o_proj") else config.enable_indexer_q_triton_quant
+            )
         expanding_factor = layer.weight.data.shape[1]
         layer.aclnn_input_scale = torch.nn.Parameter(
             layer.input_scale.data.repeat(expanding_factor), requires_grad=False
