@@ -361,6 +361,7 @@ def test_config_hook_drops_stale_backend_cache_for_dynamic_speculation(b1_enable
     itself.
     """
     from vllm.v1.attention import selector as attn_selector
+
     from vllm_ascend import platform
 
     selector = _gemma4_selector()
