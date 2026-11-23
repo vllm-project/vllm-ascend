@@ -1106,7 +1106,14 @@ def test_mla_dcp_split_provider_binds_current_metadata(scope):
     decode = SimpleNamespace(actual_seq_lengths_q=[1, 2], cp_history_seq_len=torch.tensor([3, 4]), block_table=table)
     provider = MLADCPParamProvider("layer", scope, 2)
     query = torch.randn(2, 2, 4)
-    task = GraphUpdateTask(Mock(), {"query": query, "actual_seq_kvlen": [0, 0]}, provider, 0, Mock(), Mock())
+    task = GraphUpdateTask(
+        Mock(),
+        {"query": query, "actual_seq_qlen": [0, 0], "actual_seq_kvlen": [0, 0], "block_table": None},
+        provider,
+        0,
+        Mock(),
+        Mock(),
+    )
 
     updated = task.bind(provider.resolve({"layer": SimpleNamespace(decode=decode)}))
 

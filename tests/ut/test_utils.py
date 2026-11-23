@@ -45,7 +45,7 @@ def test_use_updatable_graph_does_not_require_current_vllm_config():
         get_dcp_group.return_value.world_size = 1
         assert utils.use_updatable_graph(AscendMLABackend)
         get_dcp_group.return_value.world_size = 2
-        assert not utils.use_updatable_graph(AscendMLABackend)
+        assert utils.use_updatable_graph(AscendMLABackend)
         assert utils.use_updatable_graph(AscendAttentionBackend)
         assert not utils.use_updatable_graph(None)
 
