@@ -1,0 +1,4 @@
+pr: 22943
+entries:
+  - category: bugfix
+    text: Improved error reporting for CPU binding setup. Failures or format changes in npu-smi output and malformed ASCEND_RT_VISIBLE_DEVICES values now raise descriptive RuntimeErrors instead of raw IndexError/ValueError crashes.
