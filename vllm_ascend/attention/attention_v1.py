@@ -999,6 +999,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         overhead of the HND layout.
         """
         num_rows, table_width = block_table.shape
+        # _get_fia_params guarantees the caches are bound before the gather
+        # (it refuses with a RuntimeError otherwise); narrow for mypy.
+        assert self.key_cache is not None and self.value_cache is not None
         block_size = self.key_cache.shape[2]
         if max_kv_len is not None and not _EXTRA_CTX.capturing:
             # Eager callers hold the live KV lengths on the host, so only
