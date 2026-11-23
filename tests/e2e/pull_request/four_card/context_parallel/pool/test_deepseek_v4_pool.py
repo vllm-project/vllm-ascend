@@ -167,7 +167,7 @@ def test_deepseek_v4_dsa_pcp_mtp_pool_watch() -> None:
     tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
     prompt_ids = build_pool_accuracy_prompt(tokenizer, POOL_PROMPT_TOKENS, POOL_MAX_MODEL_LEN)
 
-    def _accuracy(runner) -> None:
+    def _accuracy(runner) -> list[float]:
         sampling = SamplingParams(temperature=0.0, max_tokens=ACCURACY_MAX_TOKENS, seed=0)
         outputs = runner.generate(PROMPTS_SHORT, sampling)
         assert len(outputs) == len(PROMPTS_SHORT)

@@ -540,7 +540,7 @@ def _classify(a: LegOutcome, b: LegOutcome, token_diff: bool, perf_bad: bool, ac
 def run_pool_ab(
     case_name: str,
     build_leg: Callable[[bool, str], Any],
-    accuracy: Callable[[Any], None],
+    accuracy: Callable[[Any], Sequence[float] | None],
     hit: Callable[[Any], dict[str, Any]] | None = None,
     *,
     prompt_tokens: int = POOL_PROMPT_TOKENS,
