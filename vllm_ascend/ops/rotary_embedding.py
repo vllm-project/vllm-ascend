@@ -17,6 +17,7 @@
 
 import math
 import os
+from contextlib import contextmanager
 
 import torch
 import torch_npu
@@ -24,6 +25,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tp_group
 from vllm.forward_context import is_forward_context_available
 from vllm.logger import logger
+from vllm.model_executor.layers import rotary_embedding as upstream_rope
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding,
     Gemma4RotaryEmbedding,
@@ -150,6 +152,63 @@ def get_cos_and_sin_mla(positions, use_cache=False, *, use_rope=True):
     _cos_mla[:num_tokens, ...] = cos
     _sin_mla[:num_tokens, ...] = sin
     return _cos_mla[:num_tokens, ...], _sin_mla[:num_tokens, ...]
+
+
+_STATIC_ROPE_CACHES = ("_cos_sin_cache", "_cos_cache", "_sin_cache", "_cos_sin_flat")
+
+
+def clear_rope_caches() -> None:
+    """Drop references to cached RoPE modules and their static buffers."""
+    upstream_rope._ROPE_DICT.clear()
+    for name in _STATIC_ROPE_CACHES:
+        globals()[name] = None
+
+
+@contextmanager
+def rope_cache_construction():
+    """Start with empty RoPE caches and restore the previous references on failure."""
+    instances = upstream_rope._ROPE_DICT
+    previous_instances = dict(instances)
+    previous_caches = {name: globals()[name] for name in _STATIC_ROPE_CACHES}
+    clear_rope_caches()
+    try:
+        yield
+    except BaseException:
+        instances.clear()
+        instances.update(previous_instances)
+        globals().update(previous_caches)
+        raise
+
+
+def rebind_rope_caches(model: torch.nn.Module) -> None:
+    """Publish the first RoPE module's buffers after IPC replaces them."""
+    global _cos_sin_cache, _cos_cache, _sin_cache, _cos_sin_flat
+
+    for module in model.modules():
+        if isinstance(module, (AscendRotaryEmbedding, AscendYaRNRotaryEmbedding, AscendGemma4RotaryEmbedding)):
+            _cos_sin_cache = module.cos_sin_cache
+            if not isinstance(module, AscendRotaryEmbedding):
+                # YaRN and Gemma4 publish only the main table at construction;
+                # IPC replaces that buffer but cannot update its global alias.
+                return
+            cos = module._rope_derived_cos_cache
+            sin = module._rope_derived_sin_cache
+            _cos_cache, _sin_cache = cos, sin
+            width = cos.shape[-1]
+            if (
+                cos.untyped_storage().data_ptr() == sin.untyped_storage().data_ptr()
+                and cos.stride() == sin.stride() == (2 * width, 1)
+                and sin.storage_offset() == cos.storage_offset() + width
+            ):
+                # Restore the daemon's interleaved view without allocating.
+                flat = cos.as_strided((cos.shape[0] * 2, width), (width, 1))
+            else:
+                # Upstream copy mode clones the two views independently.
+                # Own the derived fast-path cache as a model buffer as well.
+                flat = torch.stack((cos, sin), dim=1).flatten(0, 1)
+                module.register_buffer("_rope_preload_interleaved_cache", flat, persistent=False)
+            _cos_sin_flat = flat
+            return
 
 
 def _record_cos_sin_cache(cos_sin_cache):

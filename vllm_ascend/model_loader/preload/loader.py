@@ -18,92 +18,40 @@ from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheSt
 
 from .config import validate_preload_config
 
-_STATIC_ROPE_CACHES = ("_cos_sin_cache", "_cos_cache", "_sin_cache", "_cos_sin_flat")
-
-
-def _clear_rope_caches() -> None:
-    from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
-
-    from vllm_ascend.ops import rotary_embedding as rope
-
-    _ROPE_DICT.clear()
-    for name in _STATIC_ROPE_CACHES:
-        setattr(rope, name, None)
-
 
 @contextmanager
 def _model_construction_state(vllm_config: VllmConfig):
     """Roll back constructor registries when upstream falls back to disk."""
-    from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+    from vllm_ascend.ops.rotary_embedding import rope_cache_construction
 
-    from vllm_ascend.ops import rotary_embedding as rope
-
-    rope_dict = dict(_ROPE_DICT)
-    caches = {name: getattr(rope, name) for name in _STATIC_ROPE_CACHES}
     context = vllm_config.compilation_config.static_forward_context
     previous_context = dict(context)
     dynamo = sys.modules.get("torch._dynamo.convert_frame")
     previous_hooks = frozenset(getattr(dynamo, "_bytecode_hooks", {}))
-    _clear_rope_caches()
-    try:
-        yield
-    except BaseException:
-        # A compiled model can register a bound callback during construction.
-        # Detach only callbacks created by this failed attempt, otherwise the
-        # discarded meta model stays alive across the normal disk fallback.
-        dynamo = sys.modules.get("torch._dynamo.convert_frame")
-        hooks = getattr(dynamo, "_bytecode_hooks", {})
-        for hook_id, callback in list(hooks.items()):
-            if hook_id in previous_hooks:
-                continue
-            owner = getattr(callback, "__self__", None)
-            handle = getattr(owner, "_bytecode_hook_handle", None)
-            if (
-                isinstance(owner, torch.nn.Module)
-                and isinstance(handle, RemovableHandle)
-                and handle.id == hook_id
-                and handle.hooks_dict_ref() is hooks
-            ):
-                handle.remove()
-        context.clear()
-        context.update(previous_context)
-        _ROPE_DICT.clear()
-        _ROPE_DICT.update(rope_dict)
-        for name, value in caches.items():
-            setattr(rope, name, value)
-        raise
-
-
-def _rebind_rope_caches(model: torch.nn.Module) -> None:
-    from vllm_ascend.ops import rotary_embedding as rope
-
-    for module in model.modules():
-        if isinstance(
-            module, (rope.AscendRotaryEmbedding, rope.AscendYaRNRotaryEmbedding, rope.AscendGemma4RotaryEmbedding)
-        ):
-            rope._cos_sin_cache = module.cos_sin_cache
-            if not isinstance(module, rope.AscendRotaryEmbedding):
-                # YaRN and Gemma4 publish only the main table at construction;
-                # IPC replaces that buffer but cannot update its global alias.
-                return
-            cos = module._rope_derived_cos_cache
-            sin = module._rope_derived_sin_cache
-            rope._cos_cache, rope._sin_cache = cos, sin
-            width = cos.shape[-1]
-            if (
-                cos.untyped_storage().data_ptr() == sin.untyped_storage().data_ptr()
-                and cos.stride() == sin.stride() == (2 * width, 1)
-                and sin.storage_offset() == cos.storage_offset() + width
-            ):
-                # Restore the daemon's interleaved view without allocating.
-                flat = cos.as_strided((cos.shape[0] * 2, width), (width, 1))
-            else:
-                # Upstream copy mode clones the two views independently.
-                # Own the derived fast-path cache as a model buffer as well.
-                flat = torch.stack((cos, sin), dim=1).flatten(0, 1)
-                module.register_buffer("_rope_preload_interleaved_cache", flat, persistent=False)
-            rope._cos_sin_flat = flat
-            return
+    with rope_cache_construction():
+        try:
+            yield
+        except BaseException:
+            # A compiled model can register a bound callback during construction.
+            # Detach only callbacks created by this failed attempt, otherwise the
+            # discarded meta model stays alive across the normal disk fallback.
+            dynamo = sys.modules.get("torch._dynamo.convert_frame")
+            hooks = getattr(dynamo, "_bytecode_hooks", {})
+            for hook_id, callback in list(hooks.items()):
+                if hook_id in previous_hooks:
+                    continue
+                owner = getattr(callback, "__self__", None)
+                handle = getattr(owner, "_bytecode_hook_handle", None)
+                if (
+                    isinstance(owner, torch.nn.Module)
+                    and isinstance(handle, RemovableHandle)
+                    and handle.id == hook_id
+                    and handle.hooks_dict_ref() is hooks
+                ):
+                    handle.remove()
+            context.clear()
+            context.update(previous_context)
+            raise
 
 
 class AscendIpcModelLoader(IpcModelLoader):
@@ -185,9 +133,11 @@ class AscendIpcModelLoader(IpcModelLoader):
     def _build_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str, state: WeightCacheState
     ) -> torch.nn.Module:
+        from vllm_ascend.ops.rotary_embedding import rebind_rope_caches
+
         with _model_construction_state(vllm_config):
             model = super()._build_model(vllm_config, model_config, prefix, state)
-            _rebind_rope_caches(model)
+            rebind_rope_caches(model)
             return model
 
     def _apply_entries(self, model: torch.nn.Module, state: WeightCacheState, device_index: int) -> None:

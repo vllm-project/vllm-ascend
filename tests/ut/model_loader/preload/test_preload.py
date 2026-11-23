@@ -325,29 +325,44 @@ def test_nd_export_uses_torch_npu_patched_reducer(monkeypatch):
     reducer.assert_called_once_with(tensor)
 
 
-def test_failed_constructor_restores_rope_and_attention_registry(monkeypatch):
+@pytest.mark.parametrize("failure_stage", ["construction", "rope_rebind"])
+def test_failed_ipc_build_restores_rope_and_attention_registry(monkeypatch, failure_stage):
     from vllm.model_executor.layers import rotary_embedding as upstream_rope
 
-    from vllm_ascend import ops
-    from vllm_ascend.model_loader.preload.loader import _model_construction_state
+    from vllm_ascend.ops import rotary_embedding as rope
 
     fields = ("_cos_sin_cache", "_cos_cache", "_sin_cache", "_cos_sin_flat")
     previous = {name: object() for name in fields}
-    rope = SimpleNamespace(**previous)
-    monkeypatch.setattr(ops, "rotary_embedding", rope, raising=False)
+    for name, value in previous.items():
+        monkeypatch.setattr(rope, name, value)
     original_rope = {"existing": object()}
-    monkeypatch.setattr(upstream_rope, "_ROPE_DICT", dict(original_rope))
+    instances = dict(original_rope)
+    monkeypatch.setattr(upstream_rope, "_ROPE_DICT", instances)
     original_context = {"existing": object()}
     context = dict(original_context)
     cfg = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context=context))
-    with pytest.raises(RuntimeError, match="constructor failure"), _model_construction_state(cfg):
+
+    def build_model(*args):
         assert not upstream_rope._ROPE_DICT
         assert all(getattr(rope, name) is None for name in fields)
         context["discarded"] = object()
         upstream_rope._ROPE_DICT["discarded"] = object()
-        raise RuntimeError("constructor failure")
+        if failure_stage == "construction":
+            raise RuntimeError("IPC build failure")
+        return torch.nn.Module()
+
+    def rebind(model):
+        assert "discarded" in upstream_rope._ROPE_DICT
+        rope._cos_sin_cache = object()
+        raise RuntimeError("IPC build failure")
+
+    monkeypatch.setattr(AscendIpcModelLoader.__bases__[0], "_build_model", build_model)
+    monkeypatch.setattr(rope, "rebind_rope_caches", rebind)
+    with pytest.raises(RuntimeError, match="IPC build failure"):
+        _loader()._build_model(cfg, None, "", WeightCacheState({}, {}, {}))
     assert context == original_context
-    assert original_rope == upstream_rope._ROPE_DICT
+    assert upstream_rope._ROPE_DICT is instances
+    assert instances == original_rope
     assert all(getattr(rope, name) is value for name, value in previous.items())
 
 
@@ -472,7 +487,6 @@ def test_mutating_operations_reject_shared_weights(operation):
 
 @pytest.mark.parametrize("copy", [False, True])
 def test_rope_globals_bind_imported_buffers_and_preserve_fast_path(monkeypatch, copy):
-    from vllm_ascend.model_loader.preload.loader import _rebind_rope_caches
     from vllm_ascend.ops import rotary_embedding as rope
 
     model = object.__new__(rope.AscendRotaryEmbedding)
@@ -484,10 +498,13 @@ def test_rope_globals_bind_imported_buffers_and_preserve_fast_path(monkeypatch, 
     model.register_buffer("_rope_derived_sin_cache", sin.clone() if copy else sin)
     for name in ("_cos_sin_cache", "_cos_cache", "_sin_cache", "_cos_sin_flat"):
         monkeypatch.setattr(rope, name, None)
-    _rebind_rope_caches(model)
+    rope.rebind_rope_caches(model)
     assert rope._cos_sin_cache is model.cos_sin_cache
     torch.testing.assert_close(rope._cos_sin_flat, interleaved.flatten(0, 1))
-    if not copy:
+    if copy:
+        assert rope._cos_sin_flat is model._rope_preload_interleaved_cache
+        assert "_rope_preload_interleaved_cache" not in model.state_dict()
+    else:
         assert rope._cos_sin_flat.data_ptr() == interleaved.data_ptr()
 
 
@@ -495,7 +512,6 @@ def test_rope_globals_bind_imported_buffers_and_preserve_fast_path(monkeypatch, 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("mode", ["zero_copy", "copy"])
 def test_rope_without_derived_buffers_rebinds_meta_cache(monkeypatch, rotary_class, dtype, mode):
-    from vllm_ascend.model_loader.preload.loader import _rebind_rope_caches
     from vllm_ascend.ops import rotary_embedding as rope
 
     # Isolate the real class's buffer replacement contract from op dispatch.
@@ -509,7 +525,7 @@ def test_rope_without_derived_buffers_rebinds_meta_cache(monkeypatch, rotary_cla
     state = WeightCacheState({"cos_sin_cache": TensorEntry.from_tensor(cache, "buffer")}, {}, {})
     _loader(mode)._apply_entries(model, state, 0)
     assert rope._cos_sin_cache.is_meta
-    _rebind_rope_caches(model)
+    rope.rebind_rope_caches(model)
     assert rope._cos_sin_cache is model.cos_sin_cache
     assert not rope._cos_sin_cache.is_meta
     assert rope._cos_cache is rope._sin_cache is rope._cos_sin_flat is None
@@ -903,7 +919,8 @@ def test_zero_copy_fallback_reconciles_only_released_memory(
 def test_daemon_copy_release_collects_cycles_and_hooks_before_acknowledging(monkeypatch):
     from torch.utils.hooks import RemovableHandle
 
-    from vllm_ascend.model_loader.preload import daemon, loader
+    from vllm_ascend.model_loader.preload import daemon
+    from vllm_ascend.ops import rotary_embedding as rope
 
     class CyclicModel(torch.nn.Module):
         def callback(self):
@@ -922,7 +939,7 @@ def test_daemon_copy_release_collects_cycles_and_hooks_before_acknowledging(monk
     instance.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context=context))
     del model
     order = []
-    monkeypatch.setattr(loader, "_clear_rope_caches", lambda: order.append("clear caches"))
+    monkeypatch.setattr(rope, "clear_rope_caches", lambda: order.append("clear caches"))
     monkeypatch.setattr(torch.npu, "ipc_collect", lambda: order.append("collect IPC"))
 
     def acknowledge(self, connection):

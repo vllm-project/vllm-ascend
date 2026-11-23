@@ -61,7 +61,7 @@ class AscendWeightCacheDaemon(upstream.WeightCacheDaemon):
         return
 
     def _handle_release(self, conn: socket.socket) -> None:
-        from .loader import _clear_rope_caches
+        from vllm_ascend.ops.rotary_embedding import clear_rope_caches
 
         # Parameters can own bound weight_loader methods, forming cycles.
         # Compiled models also register strong bytecode callbacks. Drop these
@@ -76,7 +76,7 @@ class AscendWeightCacheDaemon(upstream.WeightCacheDaemon):
             del module
         self.model = None
         self.vllm_config.compilation_config.static_forward_context.clear()
-        _clear_rope_caches()
+        clear_rope_caches()
         gc.collect()
         torch.npu.ipc_collect()
         super()._handle_release(conn)
