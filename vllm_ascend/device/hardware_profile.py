@@ -331,6 +331,9 @@ class HardwareProfile:
     # First row count where the integrated Qwen4Exp HC gate-mix wrapper is
     # faster than the one-row kernel on this hardware family.
     qwen4exp_hc_gate_mix_row_block_min_rows: int = 2048
+    # A3 fuses INT8 dynamic quantization and top-k expansion when the native
+    # routing kernel is faster than separate permutation and quantization.
+    moe_all2allv_fused_init_routing_min_tokens: int | None = None
 
     def supports(self, capability: HardwareCapability) -> bool:
         """Return whether the exact documented ``capability`` contract is available."""
@@ -435,6 +438,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
             flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX}),
+            moe_all2allv_fused_init_routing_min_tokens=1024,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
             default_worker_cls=_DEFAULT_WORKER_CLS,
