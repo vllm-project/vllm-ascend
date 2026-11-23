@@ -1081,7 +1081,7 @@ class BaseKVPoolWorker(ABC):
         if evidence is not None and logical_ids is None:
             # Defensive: an evidence-active load must always supply the
             # logical indices; fail every expected block rather than
-            # mis-attributing outcomes to physical ids.
+            # attributing outcomes to the wrong physical ids.
             evidence.note_blocks_failed(sorted(evidence.expected_blocks))
             return True
         if evidence is not None:
