@@ -15,7 +15,7 @@ from vllm_ascend.models.qwen4_exp import model
 )
 def test_ple_construction_and_registration(monkeypatch, dp, pcp, expected):
     calls = []
-    registry = {}
+    registry: dict[str, object] = {}
     text = SimpleNamespace(linear_num_key_heads=16, linear_num_value_heads=24)
     config = SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=text),
