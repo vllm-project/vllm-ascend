@@ -4,6 +4,7 @@
 
 import os
 from contextlib import ExitStack, contextmanager
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -51,12 +52,29 @@ POOL_KV_TRANSFER_CONFIG = {
 }
 
 
+def _read(path: str) -> str:
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return "?"
+
+
 def _host_memory() -> str:
-    """Summarize host memory so a pod-level kill leaves a trace in the log."""
+    """Summarize host and cgroup memory so a pod-level kill leaves a trace."""
     memory = psutil.virtual_memory()
     shm = psutil.disk_usage("/dev/shm") if os.path.isdir("/dev/shm") else None
     shm_text = f" shm_total={shm.total >> 30}GiB shm_free={shm.free >> 30}GiB" if shm else ""
-    return f"mem_available={memory.available >> 30}GiB mem_total={memory.total >> 30}GiB{shm_text}"
+    cgroup_limit = _read("/sys/fs/cgroup/memory.max")
+    cgroup_usage = _read("/sys/fs/cgroup/memory.current")
+    if cgroup_limit == "?":
+        cgroup_limit = _read("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+        cgroup_usage = _read("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+    devices = [name for name in ("/dev/uburma", "/dev/ummu", "/etc/hixlep") if os.path.exists(name)]
+    return (
+        f"mem_available={memory.available >> 30}GiB mem_total={memory.total >> 30}GiB{shm_text}"
+        f" cgroup_limit={cgroup_limit} cgroup_usage={cgroup_usage}"
+        f" pool_devices={devices or 'none'}"
+    )
 
 
 def _build_mooncake_pool_config() -> MooncakeKVPoolConfig:
@@ -130,11 +148,11 @@ def _leg(use_pool: bool, case_name: str):
         "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "PYTHONHASHSEED": "0",
-        # 950PR/950DT runs the UB super plane. Selecting the UBG protocol
-        # explicitly avoids the auto-detect path that aborts the container when
-        # protocol_desc is unset, while UBoE endpoints are not provisioned on
-        # every A5 runner (E19999 GenDefaultUboeEndpointConfig).
-        "ASCEND_GLOBAL_RESOURCE_CONFIG": '{"comm_resource_config.protocol_desc":["ub_rtp:device"]}',
+        # The 950DT pod exposes the UB CTP (URMA) interconnect: HIXL rejects
+        # ub_rtp:device (conflicts with InterconType=2) and the UBoE auto path
+        # cannot generate endpoints (E19999 GenDefaultUboeEndpointConfig). UB
+        # CTP pure-URMA mode is selected with the bare ub_ctp descriptor.
+        "ASCEND_GLOBAL_RESOURCE_CONFIG": '{"comm_resource_config.protocol_desc":["ub_ctp"]}',
         "ASCEND_LOCAL_COMM_RES": '{"version":"1.3"}',
         # DP8 settings mirrored from PR #22258's known-good A5 config.
         "HCCL_OP_EXPANSION_MODE": "CCU_SCHED",
