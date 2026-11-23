@@ -351,7 +351,7 @@ class TestGLM53Store(unittest.TestCase):
         def infos(keys, **kwargs):
             return [
                 SimpleNamespace(
-                    size=lambda key=key: int(key in readable),
+                    size=lambda key=key: len(buffers[key]) if key in readable else 0,
                     gva_list=lambda key=key: [ctypes.addressof(buffers[key])],
                 )
                 for key in keys
