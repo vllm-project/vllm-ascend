@@ -1,24 +1,37 @@
-# DeepSeek-V4-Flash Mooncake offload 开发与整体验收
+# DeepSeek-V4-Flash Mooncake KV offload validation
 
-P 节点将 Attention compressor KV（随上下文增长的压缩历史缓存）、SWA（近期滑窗缓存）、Indexer K/scale（索引历史及缩放信息）和两类 compressor state（主注意力和索引压缩器各自的续算状态）纳入跨层轮转。
-独立层和 DSpark（DeepSeek-V4 的推测解码方法）的草稿缓存保留独立的组内地址。
+The prefill (P) worker supports cross-layer slot reuse for attention compressor KV
+(compressed history), sliding-window attention (SWA), indexer K and scale, and
+the recurrent states of the attention and indexer compressors. Independent
+layers and DSpark draft caches retain their own addresses within their groups.
 
-## 实现与运行配置
+## Layout and runtime configuration
 
-模型缓存布局入口为 `vllm_ascend/models/deepseek_v4/cache_config.py`，由公共规划器按页步长和缓存组规划共享槽。
-同层同组的不同组件使用不同槽。多个槽被同一层复用时，显存写入等待所有涉及的前驱层完成存池和交接。
-D 节点使用普通跨组布局。P 节点每个物理槽独立分配。
-容量计算、MRV2（第二版模型执行器）的实际分配和搬运地址均消费同一份描述。
-每份分配额外预留 2 MiB（满足现有地址对齐分配器需要的空间），不会按逻辑别名重复收费。
+The model layout entry point in `vllm_ascend/models/deepseek_v4/cache_config.py`
+uses the common planner to assign shared slots by page stride and cache group.
+Components in the same layer and group use distinct slots. A layer that reuses
+multiple slots waits for every predecessor's Store save and handoff before
+writing those slots.
 
-配对 vLLM 提交：`24420b7a341af37a9bc3186e6fc6062512e0aa58`。
-在该版本上，调度端通过 `kv_connector_block_state.get_block_ids()`（读取本轮真实有效分组块表的接口）替换请求跟踪表。
-即使本轮没有分配新块也同步，保留滑窗回收后的空块位置。接口缺失或表缺失会报错。
+The decode (D) worker uses the standard cross-group layout. The P worker
+allocates each physical slot separately. Capacity estimation, Model Runner V2
+(MRV2) allocation, and transfer addressing use the same layout descriptors.
+The planner reserves an extra 2 MiB per allocation for alignment and counts
+aliased storage once.
 
-采用 eager（直接执行算子）和同步调度。DSpark 验收使用 `--speculative-config '{"method":"dspark","num_speculative_tokens":3}'`。PP（流水线并行）、PCP（预填充上下文并行）、DCP（解码上下文并行）均为1。
-DP（独立数据并行副本）和 TP（张量并行）沿用现有服务配置，目标为 DP4/TP1＋EP（专家并行）。
-必须启用 MRV2，并配置 `--enforce-eager --max-num-batched-tokens 4096`。
-沿用原有模型、量化和 Mooncake 连接配置，Store（缓存池连接器）配置示例：
+Use vLLM commit `24420b7a341af37a9bc3186e6fc6062512e0aa58`. The scheduler
+can read the current grouped block table through
+`kv_connector_block_state.get_block_ids()`, including null entries left after
+sliding-window reclamation. Validate continuation even when a step allocates
+zero new blocks.
+
+Use MRV2 with `--enforce-eager --max-num-batched-tokens 4096` and synchronous
+scheduling for the initial baseline. Set pipeline parallelism (PP), prefill
+context parallelism (PCP), and decode context parallelism (DCP) to 1. The target
+configuration uses DP4/TP1 with expert parallelism enabled. For DSpark, use
+`--speculative-config '{"method":"dspark","num_speculative_tokens":3}'`.
+Keep the model, quantization, and Mooncake settings consistent with the
+baseline. The Store connector configuration is:
 
 ```json
 {
@@ -34,30 +47,35 @@ DP（独立数据并行副本）和 TP（张量并行）沿用现有服务配置
 }
 ```
 
-分别以 B（每个兼容域的共享槽数）=1/2/3/4 启动并保留完整服务日志。
-全驻留对照可使用相同配置并将 `layerwise_independent_layers` 设置为 `"all"`。
-这里的对照仍保留外部池能力，可另用未开启共享的原服务核对普通布局。
+Run with 1, 2, 3, and 4 shared slots per compatible set and retain the full
+server logs. Set `layerwise_independent_layers` to `"all"` for a fully resident
+control that still uses the external Store. Use the original service without
+slot sharing to check the standard layout separately.
 
-## 六项整体验收
+## Validation criteria
 
-| 项目 | 操作和证据 | 判定边界 |
+| Area | Procedure | Expected result |
 | --- | --- | --- |
-| 共享和驻留布局 | B=1/2/3/4；通过主机测试核对组件地址、组号、页大小、步长和前驱 | 仅压缩历史同域轮转；辅助组件和 L0/L1 不误共享 |
-| 物理预算一致 | 主机测试按唯一底层分配核对字节预算和对齐预留 | 相同底层分配只计一次，驻留组件未按 B 折叠 |
-| 跨 chunk（一次调度处理的一段 token）续算 | 4096 分段，4096/4097/8193/12289 等输入；运行下面的确定性输出对照 | 读取准确 E（上一段计算结束的原始 token 位置）；同请求辅助数据不轮转换入，输出一致 |
-| 外部前缀和并发 | 冷请求、重复、不同后缀和混合长度并发；对照前缀命中指标及确定性输出 | 不能仅凭主压缩历史可读就认为完整命中；缺少必需组必须缩短命中或失败 |
-| 槽位覆盖保护 | 主机测试控制前驱保存完成事件，验证槽覆盖顺序 | 前驱保存完成后才允许写入共享槽 |
-| 生命周期和错误 | 正常完成、客户端取消、GET（从池恢复）失败、PUT 失败、commit 失败及小容量池 | 必需数据失败后不能继续使用不完整缓存；主机测试核对撤销和读会话释放 |
+| Shared and resident layout | Check component addresses, group IDs, page sizes, strides, and predecessors in host tests with 1, 2, 3, and 4 shared slots. | Only eligible components share slots with compatible layouts. Independent layers and resident components keep separate allocations. |
+| Physical memory budget | Compare the budget with unique allocations and alignment reserves in host tests. | Each allocation is counted once, and the shared slot count does not reduce resident allocations. |
+| Chunked prefill continuation | Use 4096-token chunks and input lengths of 4096, 4097, 8193, and 12289. Compare deterministic outputs. | Restoration uses the previous chunk's exact token endpoint. Resident data stays in HBM and outputs match. |
+| External prefixes and concurrency | Compare hit metrics and outputs for cold, repeated, different-suffix, and mixed-length concurrent requests. | A full hit requires all required groups. Missing data shortens the hit or causes the request to fail when required. |
+| Slot overwrite protection | Control predecessor completion events in host tests. | A shared slot becomes writable after all required predecessor saves and handoff reads finish. |
+| Lifecycle and failures | Exercise normal completion, cancellation, GET, PUT, and commit failures, and a small pool. | Required transfer failures prevent reuse of incomplete data. Host tests verify cancellation and read-session release. |
 
-同请求续算时，混合组中的索引数据依旧可发布给外部读者，但恢复搬运只选择共享压缩历史。
-外部前缀恢复保留全部必需组件任务，并复用基线协调器的端点与可达范围检查。
-公共对象身份包含实际组件规格、格式、模型配置和并行分片，不添加 DP 专用隔离。
+During continuation, resident components in a mixed group can still be
+published for external readers. The worker reloads the shared components that
+the next chunk needs. External prefix restoration uses the shared
+coordinator's endpoint and readable-range checks. Public Store keys account
+for component specifications, format, model configuration, and parallel
+sharding without adding a data-parallel rank namespace.
 
-### 确定性输出与并发对照
+### Deterministic output and concurrency
 
-在服务器仓库根目录运行；两个服务使用相同权重、分词器和采样配置。
-脚本直接使用整数 token 输入，确保输入长度准确。并发批次包含重复输入及混合长度。
-对照结果只证明已运行用例的文本一致，不代替异常路径验证。
+Run from the repository root on the server. Use the same model weights,
+tokenizer, and sampling settings for both services. The script supplies token
+IDs directly to control input length. Its concurrent batches include repeated
+and mixed-length inputs.
 
 ```bash
 python tests/e2e/cases/features/kv_pool/tools/compare_dsv4_offload.py \
@@ -66,82 +84,78 @@ python tests/e2e/cases/features/kv_pool/tools/compare_dsv4_offload.py \
   --model dsv4 --concurrency 4 > comparison.log
 ```
 
-### 回传不超过 300 行
+Retain the full service logs. Report performance metrics, output comparison
+results, and the first error with its context in at most 300 lines. After a
+cancellation, send a normal request to check that the service still responds.
 
-保留完整服务日志，回传性能指标、输出对照结果和首个错误及其上下文。取消用例结束后，再发送正常请求检查服务可用性。
-
-## 本机验证范围
+## Host checks
 
 ```bash
 python -m pytest --noconftest -q tests/host/test_dsv4_mooncake_offload.py
 bash format.sh ci
 ```
 
-主机测试直接执行生产代码中的规划、地址构建和范围选择函数，隔离框架导入，包含真实主机字节复制检查。
-这不证明 NPU 算子、跨流同步、服务启动或多卡输出正确；这些结论由服务器六项整体验收提供。
-现有平台布局补丁只增加对模型布局入口的调用。后续上游支持相同模型布局入口时可移除该版本桥接，模型侧规格仍保留。
+Host tests exercise production layout, addressing, and range-selection
+functions and include host memory copy checks. Use the server scenarios above
+to validate NPU execution, stream synchronization, service startup, and
+multi-device outputs. The platform layout patch calls the model-specific layout
+entry point and can be removed once upstream provides the same hook.
 
-## P/D 部署修正（2026-11-10）
+## P/D deployment
 
-独立 Store 的配置只用于单节点 offload。`load_balance_proxy_layerwise_server_example.py`
-先请求 D，由 D 回调 `/v1/metaserver` 后才调度 P；独立 Store 不实现此回调。
-此前使用独立 Store 的 D 返回成功而 P 没有请求，不能作为 P/D 验收证据。
+The standalone Store configuration is for single-node offload. The layerwise
+proxy sends the request to D first and dispatches to P after D calls
+`/v1/metaserver`. The standalone Store connector does not implement that
+callback.
 
-本次交接使用 D2D（P 的设备缓存直接复制到 D 的设备缓存）：
+- On P, use `MultiConnector` with `MooncakePushConnector` and
+  `AscendStoreConnector`. Store handles P-side save and restore.
+- On D, use `MooncakePushConnector` with fully resident caches. Push copies KV
+  directly from P device memory to D device memory.
+- Use the same Push implementation, model, quantization, cache format, and
+  block size on both sides. Preserve MRV2, DP/EP, and Mooncake settings.
+- Push uses each component's group ID, live block table, and actual page
+  stride. Validate history completion and transfer of live window and recurrent
+  state at the final endpoint.
+- D computes the last prompt token locally. P prefills through the token
+  endpoint N−1. The proxy returns the response from D.
+- Shared slots wait for Store writes and D2D reads before reuse. Validate that
+  request blocks remain allocated until the associated reads finish.
 
-- P：`MultiConnector`，组合 `MooncakePushConnector` 与 `AscendStoreConnector`。
-- D：独立 `MooncakePushConnector`，全驻留缓存，不配置共享槽，不从 Store 恢复交接数据。
-- 两端使用同一版 Push 代码。P 在发送前核对模型、缓存组件和缓存格式。
-- P 在中间 chunk 逐层发送 D 缺少的完整历史页。最终 chunk 补齐剩余历史页，并按最终端点发送有效滑窗和循环状态。Store 继续负责 P 端缓存的保存与恢复。
-- D 保留最后一个 prompt token 本地计算。P 在原始 token 端点 N−1 完成预填充并产生一个供交接流程使用的 token，代理最终响应来自 D。
-- 每个组件按自身组号、当前有效块表和两端真实页步长传输；必要空块、格式不一致均拒绝。
-- Store PUT 与 D2D 读取都释放后才允许共享槽覆盖；step 结束前排空 D2D，禁止回收仍被读取的请求块。
+Use TP=PP=PCP=DCP=1 and DP4 with expert parallelism. Start with eager execution,
+synchronous scheduling, and speculative decoding disabled. Then run the
+combined configuration with `--async-scheduling --enable-prefix-caching`.
+Check that the P worker restores the shared slots from the external prefix and
+that the D worker reuses its local resident prefix. For a partial D hit,
+check that Push fills the required remaining history and final window. Compare
+cold and repeated requests as well as concurrent requests that share a prefix
+and have different suffixes.
 
-本路径限制 TP=PP=PCP=DCP=1，允许 DP4＋EP；首次基线验证使用 eager 和同步调度，关闭推测解码。
-两端使用相同模型、量化、缓存格式及块大小。联合验证使用
-`--async-scheduling --enable-prefix-caching`。P 的共享压缩槽只从 Mooncake
-恢复经对象校验的前缀，D 的常驻缓存可复用本地前缀。D 有部分本地命中时，
-Push 从命中边界补齐历史页，并按最终端点恢复不参与前缀缓存的有效滑窗和状态。
-对同一长前缀分别跑冷请求、重复请求和共享前缀但后缀不同的并发请求，对比输出。
-从汇总中检查 D 本地前缀和 Push 补齐 token 数。
-
-仓库根目录中，P 的启动命令使用：
+Add the following arguments to the P startup command:
 
 ```bash
 --kv-transfer-config "$(cat examples/disaggregated_prefill_v1/dsv4_offload_p.json)" \
 --enforce-eager --no-async-scheduling --max-num-batched-tokens 4096
 ```
 
-D 的启动命令使用：
+Add the following arguments to the D startup command:
 
 ```bash
 --kv-transfer-config "$(cat examples/disaggregated_prefill_v1/dsv4_offload_d.json)" \
 --enforce-eager --no-async-scheduling
 ```
 
-两端保留原有 MRV2、模型、DP/EP、Mooncake 环境配置。
-P2P 侧信道示例使用 P 14500～14503、D 14600～14603，需可互访且不被其他服务占用。
-代理仍使用用户已有命令：
+The example side-channel port ranges are 14500–14503 on P and 14600–14603 on D.
+Ensure the peers can reach these ports. Start the proxy from the repository root:
 
 ```bash
 python examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py \
-  --host 141.61.133.128 --port 1999 \
-  --prefiller-hosts 141.61.133.128 --prefiller-ports 8099 \
-  --decoder-hosts 141.61.133.128 --decoder-ports 8066
+  --host PROXY_HOST --port 1999 \
+  --prefiller-hosts PREFILL_HOST --prefiller-ports 8099 \
+  --decoder-hosts DECODE_HOST --decoder-ports 8066
 ```
 
-压测和对照脚本的 candidate 必须指向 `http://141.61.133.128:1999`。
-观察 P 的逐层 Push 写入与共享槽等待、D 的接收完成，以及任何 Push 失败或超时。
-先跑新输入的短请求确认 P/D 都参与，再跑 4097/8193/12289 等跨 chunk 用例。
-回传不超过 300 行；P/D 接通不自动代表六项验收全部通过。
-
-### 本轮方案核对
-
-| 方案项 | 源码核对及修正 | 待服务器验证 |
-| --- | --- | --- |
-| 第2～3章布局与预算 | 现有组件计划、独立分配与统一预算保留；P/D 地址差异由真实页步长处理 | B=1/3/4，普通布局回归 |
-| 第4章续算和块表 | Store 增量更新块表并刷新可缓存 SWA 组。P2P 在最终端点同步块表，避免携带已回收 SWA 块 | 长输入、多并发及非对齐尾页 |
-| 第5章外部完整恢复和身份 | 复用现有协调器；P2P 新增模型、组件及格式身份校验，不以页长相等代替兼容性 | 缺辅助组件、不同后缀、并发发布 |
-| P/D 部署（原方案未明确） | 普通历史页逐 chunk D2D，滑窗和循环状态在最终 chunk 交接，保留回调连接器组合及两端示例 | 完整 P/D 服务运行和确定性输出 |
-
-本轮 CPU 用例和静态检查只能证明其覆盖的生产函数行为；全部 NPU 场景仍以服务器日志判定。
+Point the benchmark and comparison script at `http://PROXY_HOST:1999`. Start
+with a short request and confirm it reaches both workers. Then check
+cross-chunk requests of 4097, 8193, and 12289 tokens for completed transfers,
+shared-slot waits, timeouts, and output parity.
