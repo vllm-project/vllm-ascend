@@ -96,7 +96,6 @@ Using `-s` with `git commit` will automatically add this header.
 
 ## Commit message content
 
-Use a Conventional Commits subject such as `fix(attention): preserve the KV cache block stride`.
 Cover the following in the commit body.
 
 - **Problem** — Describe when the issue occurs and how it affects users or developers.
