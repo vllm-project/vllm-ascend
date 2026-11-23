@@ -534,3 +534,58 @@ def test_c8_resident_prefill_handles_hma_stride_and_pcp_padding(monkeypatch, blo
         assert tnd.call_args.kwargs == {"indices_are_mapped": True}
         assert indices[:, :4].tolist() == [[384, 1, -1, -1], [0, 389, -1, -1]]
         assert (indices[:, 4:] == -1).all()
+
+
+def test_bf16_staged_prefill_reuses_paged_sfa_with_pcp_padding(monkeypatch):
+    from vllm_ascend.attention import sfa_hisparse
+    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+
+    impl = sfa_hisparse.AscendHiSparseImpl.__new__(sfa_hisparse.AscendHiSparseImpl)
+    impl.enable_sparse_sfa_c8 = False
+    impl.kv_lora_rank = 8
+    impl.qk_rope_head_dim = 4
+    impl.index_group_index = 0
+    cache = handle()
+    cache.all_context_pages_resident = False
+    cache.runtime.host_cache = torch.zeros(2, 16, 12)
+    impl.hisparse_cache = cache
+
+    staged = torch.zeros(2, 16, 12)
+    staged_table = torch.tensor([[0, 1]], dtype=torch.int32)
+    impl.index_group = NS(
+        set_logical_topk_ready=Mock(),
+        stage_prefill_rows=Mock(return_value=(staged, staged_table, torch.tensor([0, 0], dtype=torch.int32))),
+    )
+
+    meta = NS(
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_prefills=1,
+        num_reqs=1,
+        num_actual_tokens=2,
+        hisparse_for_capture=False,
+        req_id_per_token=torch.tensor([0, 0, 0, 0], dtype=torch.int32),
+        query_start_loc=torch.tensor([2], dtype=torch.int32),
+        prefill=NS(host_staging_plan=NS(block_size=16)),
+        block_size=16,
+    )
+    pa_bsnd = Mock(return_value=torch.ones(2, 1, 8))
+    monkeypatch.setattr(AscendSFAImpl, "_execute_sparse_flash_attention_process", pa_bsnd)
+    monkeypatch.setattr(impl, "_attention_physical", Mock())
+
+    out = impl._execute_sparse_flash_attention_process(
+        torch.zeros(4, 1, 8),
+        torch.zeros(4, 1, 4),
+        (),
+        torch.zeros(4, 1, 4, dtype=torch.int32),
+        meta,
+        torch.tensor([2], dtype=torch.int32),
+        torch.tensor([10], dtype=torch.int32),
+    )
+    assert out.shape == (4, 1, 8)
+    assert (out[2:] == 0).all()
+    q, q_rope, (latent, rope), topk, _, q_ends, k_lens = pa_bsnd.call_args.args
+    assert (q.shape, q_rope.shape, topk.shape) == ((2, 1, 8), (2, 1, 4), (2, 1, 4))
+    assert (latent.shape, rope.shape) == ((2, 16, 1, 8), (2, 16, 1, 4))
+    assert q_ends.tolist() == [2] and k_lens.tolist() == [10]
+    assert pa_bsnd.call_args.kwargs["block_table"] is staged_table
