@@ -43,7 +43,7 @@ SCALE_DOWN_DEADLINE_S = 90
 # Qwen3-30B-A3B has 128 routed experts; on EP=4, 48 redundant experts give
 # 44 physical slots per rank, so the 3 surviving ranks still have
 # 3 * 44 = 132 >= 128 slots after one rank is removed (the strict minimum
-# ``check_redundancy_sufficient`` accepts for a 4 -> 3 shrink is 44).
+# accepted for a 4 -> 3 shrink is 44).
 NUM_REDUNDANT_EXPERTS = 48
 
 # Post-recovery accuracy check: after retry recovery, every DP rank must
