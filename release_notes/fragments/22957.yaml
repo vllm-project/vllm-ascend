@@ -1,0 +1,4 @@
+pr: 22957
+entries:
+  - category: bugfix
+    text: Fixed Qwen4Exp unified KV cache allocation, including text-config dispatch and isolation between cache groups. Disjoint cache banks may reduce available cache capacity for a fixed memory budget.
