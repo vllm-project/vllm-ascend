@@ -10,7 +10,10 @@ on:
 # round's output would be stale or discarded anyway, so latest-wins is
 # both cheaper and closer to what the human intended.
 concurrency:
-  group: ai-review-${{ github.event.pull_request.number }}
+  # issue_comment events carry the PR number at issue.number; without the
+  # fallback every PR's comment round would share one empty-key group and
+  # cancel each other
+  group: ai-review-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:
@@ -22,16 +25,20 @@ jobs:
     # comment. issue_comment also fires on plain issues, so require a PR.
     # PR events fire on every push and every label of every PR in the repo;
     # gate them on the ai-review label so unlabeled PRs never start a job
-    # (and their fork code is never checked out). unlabeled() is needed so
-    # removing the label still reaches the stop handler. Review-comment and
-    # issue_comment events keep the command-body filter: only comments that
-    # contain the command family start a job.
+    # (and their fork code is never checked out). synchronize requires the
+    # label on the PR; labeled/unlabeled require the event's own label to be
+    # ai-review (adding any other label must not re-trigger a round; the
+    # unlabeled arm is what lets the stop handler run). Comment events keep
+    # the command-body filter: only comments containing the command family
+    # start a job.
     if: >-
       (
         github.event_name == 'pull_request_target' &&
         (
-          contains(github.event.pull_request.labels.*.name, 'ai-review') ||
-          github.event.label.name == 'ai-review'
+          (github.event.action == 'synchronize' &&
+            contains(github.event.pull_request.labels.*.name, 'ai-review')) ||
+          ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
+            github.event.label.name == 'ai-review')
         )
       ) ||
       (
