@@ -616,9 +616,12 @@ def _mixed_quant_sparse_flash_mla_impl(
         out=attn_out,
         lse=softmax_lse,
     )
-    # CannBotDSL records these temporaries on the submission stream. Retire
-    # that use after a device event so the allocator can reuse the buffers
-    # without synchronizing the host. Graph capture retains its lifetimes.
+    # Temporary workaround for eager execution. CannBotDSL records these
+    # temporaries on the submission stream. Retire those uses after a device
+    # event so the allocator can reuse the buffers without synchronizing the
+    # host. Graph capture retains the buffer lifetimes.
+    # TODO(lihefei): Remove this workaround once CannBotDSL manages eager
+    # buffer lifetimes without caller-side cleanup.
     if not torch.npu.is_current_stream_capturing():
         from torch_npu.npu.utils import _erase_stream
 
