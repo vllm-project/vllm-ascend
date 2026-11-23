@@ -96,6 +96,7 @@ def make_vllm_config(sharing_targets: Mapping[str, str]) -> SimpleNamespace:
         name: SimpleNamespace(kv_sharing_target_layer_name=sharing_targets.get(name)) for name in ALL_LAYERS
     }
     return SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(get_from_extra_config=lambda name, default: default),
         compilation_config=SimpleNamespace(static_forward_context=forward_context),
         parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),
         model_config=SimpleNamespace(
@@ -242,10 +243,13 @@ def pull_one_request(
         local_full_block_ids=(CONSUMER_BLOCKS,),
     )
     try:
-        failed = thread._handle_requests("engine-p", "127.0.0.1", 6000, {"request-d": request})
+        thread.add_requests("engine-p", {"request-d": request})
+        thread._process_next()
     finally:
         thread.executor.shutdown(wait=True)
-    assert failed == set()
+    results = thread.get_and_clear_finished_requests()
+    assert results.finished_recving == {"request-d"}
+    assert not results.failed_recving
     return engine
 
 
