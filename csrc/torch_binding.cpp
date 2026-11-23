@@ -41,7 +41,6 @@
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "attention/sparse_flash_attention_vllm/sparse_flash_attention_vllm_torch_adpt.h"
-#include "attention/gbsa_torch_adpt.h"
 #include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
 #include "attention/kv_compress_epilog_v2/kv_compress_epilog_v2_torch_adpt.h"
 #include "attention/quant_lightning_indexer_v2/quant_lightning_indexer_v2_torch_adpt.h"
@@ -82,6 +81,200 @@
 #include <vector>
 
 namespace vllm_ascend {
+
+constexpr int64_t GBSA_METADATA_SIZE = 1024;
+constexpr int64_t GBSA_NO_QUANT = 0;
+
+// These wrappers intentionally contain no GBSA host, tiling, or kernel
+// implementation. EXEC_NPU_CMD resolves the two ACLNN entry points from the
+// CANN transformer op-api library at runtime.
+at::Tensor npu_generic_block_sparse_attention_metadata(
+    const at::Tensor &sparse_block_idx, const at::Tensor &sparse_block_count,
+    int64_t num_heads_q, int64_t num_heads_kv, int64_t head_dim,
+    at::IntArrayRef block_shape,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &cu_seqlens_kv,
+    const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &seqused_kv,
+    int64_t max_seqlen_q, int64_t max_seqlen_kv,
+    c10::string_view layout_q, c10::string_view layout_kv,
+    int64_t layout_sparse_pattern, int64_t mask_mode, int64_t quant_mode,
+    int64_t softmax_precision, int64_t win_left, int64_t win_right,
+    int64_t residual_block_mode, bool is_consistent_topk)
+{
+    auto output = at::empty(
+        {GBSA_METADATA_SIZE}, sparse_block_idx.options().dtype(at::kInt));
+    std::string layout_q_str(layout_q);
+    std::string layout_kv_str(layout_kv);
+    char *layout_q_ptr = const_cast<char *>(layout_q_str.c_str());
+    char *layout_kv_ptr = const_cast<char *>(layout_kv_str.c_str());
+
+    EXEC_NPU_CMD(aclnnGenericBlockSparseAttentionMetadata,
+                 sparse_block_idx, sparse_block_count, cu_seqlens_q,
+                 cu_seqlens_kv, seqused_q, seqused_kv, max_seqlen_q,
+                 max_seqlen_kv, num_heads_q, num_heads_kv, head_dim,
+                 block_shape, layout_q_ptr, layout_kv_ptr,
+                 layout_sparse_pattern, mask_mode, quant_mode,
+                 softmax_precision, win_left, win_right,
+                 residual_block_mode, is_consistent_topk, output);
+    return output;
+}
+
+at::Tensor npu_generic_block_sparse_attention_out(
+    const at::Tensor &q, const at::Tensor &k, const at::Tensor &v,
+    const at::Tensor &sparse_block_idx, const at::Tensor &sparse_block_count,
+    at::IntArrayRef block_shape, at::Tensor &attention_out,
+    const c10::optional<at::Tensor> &metadata,
+    const c10::optional<at::Tensor> &attn_mask,
+    const c10::optional<at::Tensor> &q_dequant_scale,
+    const c10::optional<at::Tensor> &k_dequant_scale,
+    const c10::optional<at::Tensor> &v_dequant_scale,
+    const c10::optional<at::Tensor> &p_quant_scale,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &cu_seqlens_kv,
+    const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &seqused_kv,
+    const c10::optional<at::Tensor> &block_table,
+    c10::string_view layout_q, c10::string_view layout_kv,
+    int64_t layout_sparse_pattern, double softmax_scale,
+    int64_t mask_mode, int64_t quant_mode, double dst_type_max,
+    int64_t softmax_precision, int64_t win_left, int64_t win_right,
+    bool return_softmax_lse, int64_t residual_block_mode,
+    bool is_consistent_topk,
+    c10::optional<at::ScalarType> attention_out_dtype)
+{
+    TORCH_CHECK(q.numel() > 0, "Tensor q is empty.");
+    TORCH_CHECK(k.numel() > 0, "Tensor k is empty.");
+    TORCH_CHECK(v.numel() > 0, "Tensor v is empty.");
+    TORCH_CHECK(sparse_block_idx.numel() > 0,
+                "Tensor sparse_block_idx is empty.");
+    TORCH_CHECK(sparse_block_count.numel() > 0,
+                "Tensor sparse_block_count is empty.");
+    TORCH_CHECK(block_shape.size() == 2,
+                "block_shape must contain [query_block_size, kv_block_size].");
+
+    at::ScalarType output_dtype;
+    if (attention_out_dtype.has_value()) {
+        output_dtype = attention_out_dtype.value();
+    } else {
+        TORCH_CHECK(quant_mode == GBSA_NO_QUANT,
+                    "attention_out_dtype must be specified when quant_mode != 0");
+        output_dtype = q.scalar_type();
+    }
+
+    TORCH_CHECK(attention_out.sizes() == q.sizes(),
+                "attention_out shape must match q");
+    TORCH_CHECK(attention_out.scalar_type() == output_dtype,
+                "attention_out dtype does not match the requested output dtype");
+    TORCH_CHECK(attention_out.device() == q.device(),
+                "attention_out must be on the same device as q");
+    TORCH_CHECK(attention_out.is_contiguous(),
+                "attention_out must be contiguous");
+
+    std::vector<int64_t> lse_shape{0};
+    if (return_softmax_lse) {
+        const auto layout_q_str = std::string(layout_q);
+        if (layout_q_str == "TND") {
+            lse_shape = {q.size(0), q.size(1), 1};
+        } else if (layout_q_str == "BNSD") {
+            lse_shape = {q.size(0), q.size(1), q.size(2), 1};
+        } else {
+            lse_shape = {q.size(0), q.size(2), q.size(1), 1};
+        }
+    }
+    auto softmax_lse = at::empty(lse_shape, q.options().dtype(at::kFloat));
+
+    std::string layout_q_str(layout_q);
+    std::string layout_kv_str(layout_kv);
+    char *layout_q_ptr = const_cast<char *>(layout_q_str.c_str());
+    char *layout_kv_ptr = const_cast<char *>(layout_kv_str.c_str());
+    const int64_t return_softmax_lse_flag = return_softmax_lse ? 1 : 0;
+    EXEC_NPU_CMD(aclnnGenericBlockSparseAttention,
+                 q, k, v, sparse_block_idx, sparse_block_count, metadata,
+                 attn_mask, q_dequant_scale, k_dequant_scale, v_dequant_scale,
+                 p_quant_scale, cu_seqlens_q, cu_seqlens_kv, seqused_q,
+                 seqused_kv, block_table, block_shape,
+                 layout_q_ptr, layout_kv_ptr,
+                 layout_sparse_pattern, softmax_scale, mask_mode, quant_mode,
+                 dst_type_max, softmax_precision, win_left, win_right,
+                 return_softmax_lse_flag, residual_block_mode,
+                 is_consistent_topk, attention_out, softmax_lse);
+    return softmax_lse;
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_generic_block_sparse_attention(
+    const at::Tensor &q, const at::Tensor &k, const at::Tensor &v,
+    const at::Tensor &sparse_block_idx, const at::Tensor &sparse_block_count,
+    at::IntArrayRef block_shape,
+    const c10::optional<at::Tensor> &metadata,
+    const c10::optional<at::Tensor> &attn_mask,
+    const c10::optional<at::Tensor> &q_dequant_scale,
+    const c10::optional<at::Tensor> &k_dequant_scale,
+    const c10::optional<at::Tensor> &v_dequant_scale,
+    const c10::optional<at::Tensor> &p_quant_scale,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &cu_seqlens_kv,
+    const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &seqused_kv,
+    const c10::optional<at::Tensor> &block_table,
+    c10::string_view layout_q, c10::string_view layout_kv,
+    int64_t layout_sparse_pattern, double softmax_scale,
+    int64_t mask_mode, int64_t quant_mode, double dst_type_max,
+    int64_t softmax_precision, int64_t win_left, int64_t win_right,
+    bool return_softmax_lse, int64_t residual_block_mode,
+    bool is_consistent_topk,
+    c10::optional<at::ScalarType> attention_out_dtype)
+{
+    at::ScalarType output_dtype;
+    if (attention_out_dtype.has_value()) {
+        output_dtype = attention_out_dtype.value();
+    } else {
+        TORCH_CHECK(quant_mode == GBSA_NO_QUANT,
+                    "attention_out_dtype must be specified when quant_mode != 0");
+        output_dtype = q.scalar_type();
+    }
+    auto attention_out = at::empty(q.sizes(), q.options().dtype(output_dtype));
+    auto softmax_lse = npu_generic_block_sparse_attention_out(
+        q, k, v, sparse_block_idx, sparse_block_count, block_shape,
+        attention_out, metadata, attn_mask, q_dequant_scale, k_dequant_scale,
+        v_dequant_scale, p_quant_scale, cu_seqlens_q, cu_seqlens_kv,
+        seqused_q, seqused_kv, block_table, layout_q, layout_kv,
+        layout_sparse_pattern, softmax_scale, mask_mode, quant_mode,
+        dst_type_max, softmax_precision, win_left, win_right,
+        return_softmax_lse, residual_block_mode, is_consistent_topk,
+        attention_out_dtype);
+    return {attention_out, softmax_lse};
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_qsa_union_inputs(
+    const at::Tensor& compact_indices, const at::Tensor& visible_lengths,
+    const at::Tensor& group_row_map)
+{
+    TORCH_CHECK(compact_indices.scalar_type() == at::kInt,
+                "compact_indices must be int32");
+    TORCH_CHECK(visible_lengths.scalar_type() == at::kInt,
+                "visible_lengths must be int32");
+    TORCH_CHECK(group_row_map.scalar_type() == at::kInt,
+                "group_row_map must be int32");
+    const int64_t width = checked_qsa_union_width(compact_indices, visible_lengths, group_row_map);
+    TORCH_CHECK(compact_indices.is_contiguous() &&
+                    visible_lengths.is_contiguous() &&
+                    group_row_map.is_contiguous(),
+                "qsa_union_inputs requires contiguous inputs");
+
+    const int64_t groups = group_row_map.size(0);
+    at::Tensor union_idx = at::empty(
+        {1, groups, width}, compact_indices.options());
+    at::Tensor union_count = at::empty(
+        {1, groups}, compact_indices.options());
+    at::Tensor exact_mask = at::empty(
+        {1, groups, width * 4}, compact_indices.options());
+    if (groups != 0) {
+        EXEC_NPU_CMD(aclnnQsaUnionInputs, compact_indices, visible_lengths,
+                     group_row_map, union_idx, union_count, exact_mask);
+    }
+    return {union_idx, union_count, exact_mask};
+}
 
 c10::optional<at::Tensor> get_npu_view_from_cpu_tensor(const at::Tensor& cpu_tensor)
 {

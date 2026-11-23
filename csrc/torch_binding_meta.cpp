@@ -6,7 +6,7 @@
 #include <torch_npu/csrc/npu/Module.h>
 #include "acl/acl_base_rt.h"
 #include "utils.h"
-#include "attention/qsa_union_inputs/qsa_union_inputs_shape.h"
+#include "attention/qsa_union_inputs/qsa_union_inputs_torch_adpt.h"
 
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
