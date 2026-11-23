@@ -1574,7 +1574,7 @@ def test_a5_async_plans_use_real_lengths_and_first_consumption_order(builders, m
 
     builder._device_backend = SimpleNamespace(mixed_quant_sparse_flash_mla_metadata=plan)
     minimum = torch.minimum
-    visibility_calls = []
+    visibility_calls: list[None] = []
 
     def track_visibility(*args, **kwargs):
         visibility_calls.append(None)
