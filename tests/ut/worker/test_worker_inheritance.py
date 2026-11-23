@@ -9,6 +9,8 @@ from unittest.mock import Mock
 
 import pytest
 
+from vllm_ascend.utils import vllm_version_is
+
 # Remove an entry and its NPUWorker stub together only after validating the
 # inherited contract.
 UNVERIFIED_GPU_WORKER_METHODS = (
@@ -102,9 +104,17 @@ def worker_constructor(monkeypatch):
     monkeypatch.setattr(
         worker_module, "get_current_hardware_profile", Mock(return_value=Mock(supports=lambda _: False))
     )
-    for name in ("register_ascend_customop", "init_ascend_config", "check_ascend_device_type"):
+    for name in ("register_ascend_customop", "check_ascend_device_type"):
         monkeypatch.setattr(worker_module, name, record(name))
-    monkeypatch.setattr(ascend_logger, "configure_ascend_file_logging", record("logging"))
+    ascend_config = SimpleNamespace(ascend_log_path="/test/ascend/log")
+
+    def init_config(config):
+        events.append("init_ascend_config")
+        return ascend_config
+
+    monkeypatch.setattr(worker_module, "init_ascend_config", Mock(side_effect=init_config))
+    file_logging = record("logging")
+    monkeypatch.setattr(ascend_logger, "configure_ascend_file_logging", file_logging)
     monkeypatch.setattr(
         worker_module,
         "get_ascend_config",
@@ -139,6 +149,8 @@ def worker_constructor(monkeypatch):
         module=worker_module,
         parent_calls=parent_calls,
         events=events,
+        ascend_config=ascend_config,
+        file_logging=file_logging,
         sleep_manager=sleep_manager,
         executor_factory=executor_module.ElasticEPScalingExecutor,
     )
@@ -178,6 +190,7 @@ def construct_worker(setup, worker_class=None, cache_dtype="auto"):
         is_driver_worker=True,
     )
     setup.executor_factory.assert_called_once_with(worker)
+    setup.file_logging.assert_called_once_with(setup.ascend_config.ascend_log_path)
     assert worker.vllm_config is config
     assert worker.model_config is config.model_config
     assert worker.parallel_config is config.parallel_config
@@ -187,7 +200,8 @@ def construct_worker(setup, worker_class=None, cache_dtype="auto"):
     assert worker.is_driver_worker is True
     assert worker._sleep_saved_buffers == {}
     assert worker._sleep_saved_parameters == {}
-    assert worker._sleep_saved_draft_buffers == {}
+    if vllm_version_is("0.33.0"):
+        assert worker._sleep_saved_draft_buffers == {}
     assert worker.weight_transfer_engine is None
     assert worker._weight_update_active is False
     assert worker._weight_update_is_draft is False

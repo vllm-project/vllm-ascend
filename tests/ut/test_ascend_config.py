@@ -19,6 +19,7 @@ import math
 import os
 import subprocess
 import sys
+from copy import copy
 from importlib.util import find_spec as real_find_spec
 from statistics import NormalDist
 from types import SimpleNamespace
@@ -48,6 +49,7 @@ from vllm_ascend.ascend_config import (
     ShortRequestFirstConfig,
     SparseKVOffloadConfig,
     clear_ascend_config,
+    draft_config_context,
     get_ascend_config,
     init_ascend_config,
     is_mega_moe_supported,
@@ -1955,7 +1957,7 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_fused_mc2_rolls_back_even_when_config_supported(self, mock_fix, mock_megamoe_supported):
         # After the megamoe op rollback (#15267), enable_fused_mc2=1 short-circuits
-        # _MEGA_MOE_SUPPORTED to False in _validate_user_input_ranges, regardless
+        # the published MegaMoE flag to False, regardless
         # of whether the model config supports megamoe. So even when
         # _is_megamoe_supported_by_config() is True, is_mega_moe_supported() ends
         # up False and the fused path routes to dispatch_ffn_combine instead of
@@ -1968,6 +1970,52 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         # The rollback forces _MEGA_MOE_SUPPORTED=False, so the fused path
         # routes to dispatch_ffn_combine instead of mega_moe.
         self.assertFalse(is_mega_moe_supported())
+
+    @_clean_up
+    @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", None)
+    @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=True)
+    @patch(
+        "vllm_ascend.ascend_config.importlib.util.find_spec",
+        side_effect=lambda name, *args: object() if name == "cann_ops_transformer" else real_find_spec(name, *args),
+    )
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_fused_mc2_falls_back_for_per_layer_swiglu_limit(self, mock_fix, mock_find_spec, mock_megamoe_config):
+        # A target or draft model with per-layer limits takes the regular path
+        # and keeps the requested overlap, including when MegaMoe is available.
+        for fused_mc2, target_limits, draft_limits, expected in (
+            (1, [0, 4], None, (0, True, False)),
+            (1, [0, None], [0, 4], (0, True, False)),
+            (1, [0, None], None, (1, False, False)),
+            (2, [0, 4], None, (0, True, False)),
+            (2, [0, None], [0, 4], (0, True, False)),
+            (2, [0, None], None, (1, False, True)),
+            (2, None, None, (1, False, True)),
+            (2, [], None, (1, False, True)),
+            (3, [0, 4], None, (0, True, False)),
+        ):
+            with self.subTest(fused_mc2=fused_mc2, target_limits=target_limits, draft_limits=draft_limits):
+                clear_ascend_config()
+                vc = VllmConfig()
+                vc.additional_config = {"enable_fused_mc2": fused_mc2, "multistream_overlap_shared_expert": True}
+                vc.model_config.hf_text_config = SimpleNamespace(expert_swiglu_limit_list=target_limits)
+                if draft_limits is not None:
+                    draft_text_config = SimpleNamespace(expert_swiglu_limit_list=draft_limits)
+                    vc.speculative_config = SimpleNamespace(
+                        method="mtp",
+                        num_speculative_tokens=1,
+                        draft_model_config=SimpleNamespace(hf_text_config=draft_text_config),
+                    )
+
+                device_type = AscendDeviceType.A5 if fused_mc2 == 3 else AscendDeviceType.A3
+                with patch(
+                    "vllm_ascend.ascend_config.get_current_hardware_profile",
+                    return_value=get_hardware_profile(device_type),
+                ):
+                    config = init_ascend_config(vc)
+
+                actual = (config.enable_fused_mc2, config.multistream_overlap_shared_expert, is_mega_moe_supported())
+                self.assertEqual(actual, expected)
+                self.assertFalse(config.megamoe_shared_expert_fusion)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -2006,37 +2054,39 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_minimax_m3_derivation_initializes_unknown_megamoe_support(self, mock_fix):
+    def test_minimax_m3_draft_validates_its_own_mc2_mode(self, mock_fix):
         vc = VllmConfig()
         vc.model_config.architectures = ["MiniMaxM3SparseForCausalLM"]
-        config = init_ascend_config(vc)
-        # Exercise a custom entry point with normalized MC2 mode and an
-        # uninitialized capability cache, outside the usual factory ordering.
-        config.enable_fused_mc2 = 1
+        vc.parallel_config.world_size = 8
+        vc.additional_config = {"enable_fused_mc2": 2}
+
         with (
-            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", None),
             patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=object()),
             patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=True),
+            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", None),
         ):
-            config.derive_and_validate(vc)
-            self.assertEqual(config.enable_fused_mc2, 1)
+            target = init_ascend_config(vc)
             self.assertTrue(is_mega_moe_supported())
+            draft_vc = copy(vc)
+            draft_vc.additional_config = {"enable_fused_mc2": 1}
 
-        # An explicitly disabled cache must stay disabled even with CANN
-        # installed: MiniMax cannot use dispatch_ffn_combine.
-        with (
-            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", False),
-            patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=object()),
-            self.assertRaisesRegex(AssertionError, "MiniMax M3 does not support enable_fused_mc2=1"),
-        ):
-            config.derive_and_validate(vc)
+            with (
+                draft_config_context(),
+                self.assertRaisesRegex(AssertionError, "MiniMax M3 does not support enable_fused_mc2=1"),
+            ):
+                init_ascend_config(draft_vc)
+
+            self.assertIs(get_ascend_config(), target)
+            self.assertTrue(is_mega_moe_supported())
 
     @_clean_up
     @patch(
         "vllm_ascend.ascend_config.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    def test_fused_mc2_mode_3_rejects_a3(self, _mock_profile):
+    def test_fused_mc2_mode_3_allows_a3_int8(self, _mock_profile):
+        # A3 (arch22) supports the INT8 shared-expert fusion path, so mode 3
+        # must pass validation on A3 as well.
         config = AscendConfig(
             sparse_kv_offload_config=SimpleNamespace(enabled=False),
             enable_fused_mc2=3,
@@ -2045,8 +2095,7 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         vllm_config = SimpleNamespace(
             model_config=SimpleNamespace(hf_text_config=SimpleNamespace(hidden_size=4096)),
         )
-        with self.assertRaisesRegex(NotImplementedError, "only supported on A5"):
-            config._validate_megamoe_shared_expert_fusion(vllm_config)
+        config._validate_megamoe_shared_expert_fusion(vllm_config)
 
     @_clean_up
     @patch(

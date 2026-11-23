@@ -90,16 +90,14 @@ _IS_ROT_WEIGHT_USED = None
 def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max_num_reqs: int) -> int:
     """Keep replicated draft requests when profiling PCP-local prefill.
 
-    Initial memory profiling precedes KV/PCP-manager initialization.
-    Block drafters retain the global budget: their context-KV precompute
-    processes all target hidden states, independently of short queries.
+    Initial profiling runs before KV cache initialization. DFlash and DSpark
+    gather global context from the local target outputs for their replicated drafts.
+    The runner validates PCP support before using this budget.
     """
     pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
     if pcp_size <= 1:
         return max_num_tokens
     spec = vllm_config.speculative_config
-    if spec is not None and spec.method not in ("mtp", "eagle", "eagle3"):
-        return max_num_tokens
 
     # PCP: bound replicated decodes, including uneven whole-request sharding.
     # Shared config keeps this bound identical across pipeline stages.
@@ -133,13 +131,9 @@ def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max
     return profile_tokens
 
 
-def is_gqa_pcp_dcp_config(model_config: Any, parallel_config: Any) -> bool:
-    """Whether a GQA/MQA model enables both PCP and DCP."""
-    return (
-        parallel_config.decode_context_parallel_size > 1
-        and parallel_config.prefill_context_parallel_size > 1
-        and not model_config.use_mla
-    )
+def model_supports_dcp(model_config: Any) -> bool:
+    """Whether the model enables MLA or uses Ascend SFA attention."""
+    return getattr(model_config, "use_mla", False) or model_uses_sfa_sparse(model_config)
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
@@ -1671,6 +1665,32 @@ def uses_mooncake_connector(kv_transfer_config: Any) -> bool:
     return bool(_collect_kv_connector_names(kv_transfer_config) & mooncake_connector_names)
 
 
+def uses_ascend_store_memcache(kv_transfer_config: Any) -> bool:
+    """Find an AscendStoreConnector using the Memcache backend, including in MultiConnector."""
+    if isinstance(kv_transfer_config, (list, tuple)):
+        return any(uses_ascend_store_memcache(item) for item in kv_transfer_config)
+
+    if isinstance(kv_transfer_config, dict):
+        connector = kv_transfer_config.get("kv_connector")
+        extra_config = kv_transfer_config.get("kv_connector_extra_config")
+    else:
+        connector = getattr(kv_transfer_config, "kv_connector", None)
+        extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None)
+
+    if isinstance(extra_config, dict):
+        backend = extra_config.get("backend", "mooncake")
+        connectors = extra_config.get("connectors", [])
+    else:
+        backend = getattr(extra_config, "backend", "mooncake")
+        connectors = getattr(extra_config, "connectors", [])
+
+    if connector == "AscendStoreConnector":
+        if isinstance(backend, str) and backend.lower() == "memcache":
+            return True
+
+    return uses_ascend_store_memcache(connectors)
+
+
 def _collect_kv_connector_names(value: Any) -> set[str]:
     connector_names: set[str] = set()
     if isinstance(value, dict):
@@ -1984,9 +2004,22 @@ def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
 def use_updatable_graph(
     attn_backend,
 ) -> bool:
+    if attn_backend is None:
+        return False
+
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 
-    return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)
+    if issubclass(attn_backend, AscendAttentionBackend):
+        return True
+
+    from vllm.distributed import get_dcp_group
+
+    from vllm_ascend.attention.mla_v1 import AscendMLABackend
+
+    # Non-DCP MLA now registers decode FIA tasks during capture. Keep DCP MLA
+    # on its specialized graph-parameter path until its grouped update logic is
+    # migrated separately.
+    return issubclass(attn_backend, AscendMLABackend) and get_dcp_group().world_size == 1
 
 
 def _is_glm_model(model_config) -> bool:

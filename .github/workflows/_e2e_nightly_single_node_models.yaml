@@ -69,6 +69,8 @@ on:
         type: string
         description: test case execution timeout period,default:120 minutes
     secrets:
+      PAT_TOKEN:
+        required: false
       OBS_ACCESS_KEY_ID:
         required: false
       OBS_SECRET_ACCESS_KEY:
@@ -324,6 +326,15 @@ jobs:
           if [ $any_failure -ne 0 ]; then
             exit 1
           fi
+
+      - name: Dispatch Daily Issue update
+        id: daily-report
+        if: ${{ !cancelled() && startsWith(inputs.request_id, 'daily-') && steps.report.outcome == 'failure' }}
+        uses: ./../../_temp/ci-workflow/.github/actions/dispatch-daily-issue
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          request-id: ${{ inputs.request_id }}
+          case-name: ${{ inputs.model_list }} accuracy test
 
       - name: Generate step summary
         if: ${{ always() }}

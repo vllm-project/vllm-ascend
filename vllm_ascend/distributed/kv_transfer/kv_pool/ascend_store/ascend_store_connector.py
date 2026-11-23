@@ -2,7 +2,7 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import (
     KVCacheEvent,
     KVConnectorKVEvents,
@@ -47,7 +47,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_wor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyServer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
-    get_sharded_mamba_group_ids,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
@@ -119,6 +118,13 @@ class AscendStoreKVEvents(KVConnectorKVEvents):
 
 class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     @classmethod
+    def supports_lookahead_block_hashes(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        # AscendStore's external coordinator retains the trailing EAGLE-block
+        # drop and prompt-token replay boundaries. It does not propagate the
+        # core lookahead length through its store/lookup masks.
+        return False
+
+    @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """
         AscendStore requires PIECEWISE CUDA graph mode when layerwise
@@ -129,17 +135,12 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        parallel_config = vllm_config.parallel_config
-        if (
-            get_sharded_mamba_group_ids(kv_cache_config)
-            and parallel_config.tensor_parallel_size > 1
-            and parallel_config.prefill_context_parallel_size > 1
-        ):
-            raise ValueError("AscendStore sharded Mamba state transfer currently requires PCP=1 or TP=1")
-
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        if "consumer_is_to_put" in extra_config:
+            raise ValueError("consumer_is_to_put has been replaced by save_decode_cache")
+        if "consumer_is_to_load" in extra_config:
+            raise ValueError("consumer_is_to_load has been replaced by enable_lookup")
         self.use_layerwise = extra_config.get("use_layerwise", False)
-        self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
         self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
@@ -151,19 +152,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
         )
-        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
-        if (
-            self.kv_role == "kv_consumer"
-            and self.save_decode_cache
-            and not self.consumer_is_to_put
-            and self.use_layerwise
-        ):
-            raise ValueError(
-                "save_decode_cache on a kv_consumer does not support use_layerwise "
-                "unless consumer_is_to_put is enabled. "
-                "Decode-only saving is not implemented in the layerwise transfer path. "
-                "Set use_layerwise=False for Decode KV offload."
-            )
+        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.save_decode_cache
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
         if connector_name == "MooncakeConnectorStoreV1":
@@ -399,15 +388,23 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         cast(LayerwiseKVPoolWorker, self.connector_worker).wait_for_layer_load_ready(layer_name)
 
+    def finish_forward(self) -> None:
+        if self.use_layerwise and self.has_connector_metadata():
+            assert self.connector_worker is not None
+            cast(LayerwiseKVPoolWorker, self.connector_worker).load_dflash_draft_kv()
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
             return
         assert self.connector_worker is not None
+        worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+        if layer_name in getattr(worker, "dflash_draft_layer_names", ()):
+            return
         # PLE and attention can share one physical layer. Load its groups once,
         # then let each cache owner copy its own recurrent state before use.
-        layer = self.connector_worker._extract_physical_layer_index(layer_name)
+        layer = worker._extract_physical_layer_index(layer_name)
         if self._loaded_layer != layer:
-            cast(LayerwiseKVPoolWorker, self.connector_worker).wait_for_layer_load()
+            worker.wait_for_layer_load()
             self._loaded_layer = layer
         # Mamba state copy must run AFTER this layer's load finishes,
         # otherwise the copy would race with the in-flight layerwise load and
@@ -445,7 +442,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             # A load-only consumer does not publish KV.
             return
         assert self.connector_worker is not None
-        cast(LayerwiseKVPoolWorker, self.connector_worker).save_kv_layer(self._get_connector_metadata())
+        worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+        if layer_name not in getattr(worker, "dflash_draft_layer_names", ()):
+            worker.save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):
         if not self.can_put:
@@ -453,6 +452,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
 
         if self.use_layerwise:
+            assert self.connector_worker is not None
+            worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+            if self.has_connector_metadata():
+                worker.save_dflash_draft_kv(self._get_connector_metadata())
             return
 
         assert self.connector_worker is not None
