@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Persistent node-local immutable MXFP8 tables.
 
-The standalone CLI uses only the standard library; it never initializes NPU.
+The owner CLI does not import the model or initialize the NPU.
 Consumers receive size-sealed memfds, register and then protect their mappings.
 """
 
@@ -14,14 +14,18 @@ import hashlib
 import json
 import mmap
 import os
+import select
 import socket
 import struct
 import threading
 import time
 import uuid
 from pathlib import Path
+from typing import NamedTuple
 
 PROTOCOL_VERSION = 1
+# Linux UAPI value on Ascend host architectures, including older Python builds.
+SO_PEERPIDFD = getattr(socket, "SO_PEERPIDFD", 77)
 COPY_BYTES = 16 * 1024 * 1024
 MAX_MESSAGE_BYTES = 1024 * 1024
 INDEX_FILES = (
@@ -129,13 +133,35 @@ def request(endpoint, message, timeout=30):
         return _recv_json(connection)
 
 
+def _close_fds(fds):
+    for fd in fds:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
+def _peer_pidfd(connection: socket.socket, peer_pid: int) -> int | None:
+    # SO_PEERPIDFD identifies the connecting process even across PID namespaces.
+    with contextlib.suppress(OSError):
+        return connection.getsockopt(socket.SOL_SOCKET, SO_PEERPIDFD)
+    # Older kernels only support pidfd_open. PID 0 is not visible to this owner.
+    if peer_pid > 0:
+        with contextlib.suppress(OSError):
+            return os.pidfd_open(peer_pid)
+    return None
+
+
+class _Lease(NamedTuple):
+    pidfd: int | None
+    stale: bool = False
+
+
 class NodeTableLease:
     """A control lease kept until device synchronization and unregister finish."""
 
     def __init__(self, endpoint, generation, fingerprint, key, timeout=1800):
         deadline = time.monotonic() + timeout
-        self.connection = None
-        self.fds = []
+        self.connection: socket.socket | None = None
+        self.fds: list[int] = []
         while True:
             connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             connection.settimeout(min(30, max(1, deadline - time.monotonic())))
@@ -160,7 +186,9 @@ class NodeTableLease:
                     continue
                 if not response.get("ok"):
                     raise RuntimeError(f"Engram attach rejected: {response}")
-                received, ancillary, flags, _ = connection.recvmsg(1, socket.CMSG_SPACE(2 * array.array("i").itemsize))
+                received, ancillary, flags, _ = connection.recvmsg(
+                    1, socket.CMSG_SPACE(2 * array.array("i").itemsize), socket.MSG_CMSG_CLOEXEC
+                )
                 for level, kind, data in ancillary:
                     if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
                         handles = array.array("i")
@@ -178,23 +206,25 @@ class NodeTableLease:
                 time.sleep(0.2)
             except BaseException:
                 connection.close()
-                for fd in self.fds:
-                    os.close(fd)
+                _close_fds(self.fds)
                 self.fds.clear()
                 raise
 
-    def release(self):
-        if self.connection is None:
+    def release(self) -> None:
+        connection = self.connection
+        if connection is None:
             return
-        _send_json(self.connection, {"op": "release", "lease": self.metadata["lease"]})
-        reply = _recv_json(self.connection)
-        if not reply.get("ok"):
-            raise RuntimeError(f"Engram release rejected: {reply}")
-        self.connection.close()
         self.connection = None
-        for fd in self.fds:
-            os.close(fd)
-        self.fds.clear()
+        try:
+            _send_json(connection, {"op": "release", "lease": self.metadata["lease"]})
+            reply = _recv_json(connection)
+            if not reply.get("ok"):
+                raise RuntimeError(f"Engram release rejected: {reply}")
+        finally:
+            with contextlib.suppress(OSError):
+                connection.close()
+            _close_fds(self.fds)
+            self.fds.clear()
 
 
 def _load_sealed_memfd(part):
@@ -239,12 +269,13 @@ class NodeTableOwner:
         self.model_path = model_path
         self.layout = checkpoint_layout(model_path)
         self.state = "loading"
-        self.error = None
-        self.handles = {}
-        self.leases = {}
+        self.error: str | None = None
+        self.handles: dict[str, list[int]] = {}
+        self.leases: dict[str, _Lease] = {}
         self.lock = threading.Lock()
 
     def load(self):
+        loaded: dict[str, list[int]] = {}
         try:
             available = next(
                 int(line.split()[1]) * 1024
@@ -254,8 +285,8 @@ class NodeTableOwner:
             if self.layout["allocation_bytes"] > available * 0.9:
                 raise MemoryError("Not enough host memory for one Engram table")
             for key, parts in self.layout["tables"].items():
-                handles = []
-                self.handles[key] = handles
+                handles: list[int] = []
+                loaded[key] = handles
                 for kind in ("codes", "scales"):
                     handles.append(_load_sealed_memfd(parts[kind]))
                 print(f"Loaded {key}: {sum(p['size'] for p in parts.values())} bytes", flush=True)
@@ -263,12 +294,17 @@ class NodeTableOwner:
                 raise ValueError("Checkpoint changed while loading")
             with self.lock:
                 if self.state == "loading":
+                    self.handles = loaded
+                    loaded = {}
                     self.state = "ready"
         except Exception as exc:
             with self.lock:
                 self.error = f"{type(exc).__name__}: {exc}"
                 self.state = "failed"
             print(self.error, flush=True)
+        finally:
+            for handles in loaded.values():
+                _close_fds(handles)
 
     def status(self):
         return {
@@ -278,13 +314,30 @@ class NodeTableOwner:
             "fingerprint": self.layout["fingerprint"],
             "allocation_bytes": self.layout["allocation_bytes"],
             "backing_inodes": {key: [os.fstat(fd).st_ino for fd in handles] for key, handles in self.handles.items()},
-            "active_leases": sum(not p["stale"] for p in self.leases.values()),
-            "stale_leases": sum(p["stale"] for p in self.leases.values()),
+            "active_leases": sum(not lease.stale for lease in self.leases.values()),
+            "stale_leases": sum(lease.stale for lease in self.leases.values()),
             "error": self.error,
         }
 
+    def _remove_lease(self, lease: str) -> None:
+        pidfd = self.leases.pop(lease).pidfd
+        if pidfd is not None:
+            _close_fds((pidfd,))
+
+    def _reap_stale_leases(self) -> None:
+        # Called under self.lock. Readable pidfds indicate an exited process.
+        stale = {info.pidfd: lease for lease, info in self.leases.items() if info.stale and info.pidfd is not None}
+        if stale:
+            poller = select.poll()
+            for pidfd in stale:
+                poller.register(pidfd, select.POLLIN)
+            for pidfd, event in poller.poll(0):
+                if event & select.POLLIN:
+                    self._remove_lease(stale[pidfd])
+
     def handle(self, connection):
         lease = None
+        delivered = False
         released = False
         try:
             connection.settimeout(30)
@@ -318,7 +371,7 @@ class NodeTableOwner:
                 ):
                     raise ValueError("Engram generation, checkpoint or layout mismatch")
                 lease = uuid.uuid4().hex
-                self.leases[lease] = {"pid": peer_pid, "stale": False}
+                self.leases[lease] = _Lease(_peer_pidfd(connection, peer_pid))
                 handles = self.handles[key]
                 _send_json(
                     connection,
@@ -330,13 +383,15 @@ class NodeTableOwner:
                         "inodes": [os.fstat(fd).st_ino for fd in handles],
                     },
                 )
-                connection.sendmsg([b"F"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", handles))])
+                if connection.sendmsg([b"F"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", handles))]) != 1:
+                    raise OSError("Engram table descriptors were not sent")
+                delivered = True
             connection.settimeout(None)
             message = _recv_json(connection)
             if message != {"op": "release", "lease": lease}:
                 raise ValueError("Invalid Engram lease release")
             with self.lock:
-                del self.leases[lease]
+                self._remove_lease(lease)
                 released = True
             _send_json(connection, {"ok": True})
         except Exception as exc:
@@ -345,8 +400,12 @@ class NodeTableOwner:
         finally:
             if lease is not None and not released:
                 with self.lock:
-                    # EOF alone does not prove asynchronous NPU reads are over.
-                    self.leases[lease]["stale"] = True
+                    if lease in self.leases:
+                        if delivered:
+                            # EOF alone does not prove asynchronous NPU reads are over.
+                            self.leases[lease] = _Lease(self.leases[lease].pidfd, stale=True)
+                        else:
+                            self._remove_lease(lease)
             connection.close()
 
     def serve(self):
@@ -367,6 +426,7 @@ class NodeTableOwner:
                 try:
                     while True:
                         with self.lock:
+                            self._reap_stale_leases()
                             if self.state == "failed" or (
                                 self.state == "draining" and not self.leases and not loader.is_alive()
                             ):
@@ -379,10 +439,13 @@ class NodeTableOwner:
                 finally:
                     loader.join()
                     endpoint.unlink(missing_ok=True)
-                    for handles in self.handles.values():
-                        for fd in handles:
-                            os.close(fd)
-                    self.state = "closed"
+                    with self.lock:
+                        for handles in self.handles.values():
+                            _close_fds(handles)
+                        self.handles.clear()
+                        for lease in list(self.leases):
+                            self._remove_lease(lease)
+                        self.state = "closed"
             if self.error:
                 raise RuntimeError(self.error)
 

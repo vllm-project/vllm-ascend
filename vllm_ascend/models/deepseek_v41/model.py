@@ -62,6 +62,7 @@ from vllm_ascend.attention.dsa_v41 import (
 from vllm_ascend.core.kv_cache_interface import resolve_bounded_replay
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.engram_node_shared import checkpoint_layout
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -95,7 +96,6 @@ from .engram.embedding import (
     preflight_engram_checkpoint,
 )
 from .engram.layer import AscendEngram
-from .engram.node_shared import checkpoint_layout
 from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
 from .indexer import DeepseekV41Indexer
 
@@ -981,8 +981,11 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
         self.hc_mult = config.hc_mult
         spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
+        # DSpark consumes auxiliary hidden states, not the full HC residual.
+        needs_mtp_hidden_states = (
+            spec_config is not None
+            and not spec_config.use_dspark()
+            and (spec_config.use_eagle() or spec_config.uses_draft_model())
         )
         self._mtp_hidden_buffer = (
             torch.empty(
@@ -1590,9 +1593,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 last_layer = self.layers[self.end_layer - 1]
                 break
             last_layer = layer
-            # DSpark consumes the residual stream entering its configured
-            # target layers. The runner expresses checkpoint IDs as one-based.
-            if layer.layer_idx + 1 in self.aux_hidden_state_layers:
+            # Checkpoint IDs are zero-based. Capture the residual entering
+            # the selected layer, before its Engram and attention updates.
+            if layer.layer_idx in self.aux_hidden_state_layers:
                 aux_hidden_state = hidden_states.mean(dim=1)
                 if use_sequence_parallel:
                     aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
@@ -1646,7 +1649,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         aux = []
         for layer_idx in range(self.decoder_replay_start, self.end_layer):
             layer = self.layers[layer_idx]
-            if layer.layer_idx + 1 in self.aux_hidden_state_layers:
+            if layer.layer_idx in self.aux_hidden_state_layers:
                 residual = hidden_states.mean(dim=1)
                 if self.use_sequence_parallel:
                     residual = sp_all_gather(residual)[: positions.shape[0]]

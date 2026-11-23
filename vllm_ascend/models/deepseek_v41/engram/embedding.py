@@ -32,7 +32,8 @@ from vllm.model_executor.utils import set_weight_attrs
 # Upstream #56741 normalized the V4.1 model package name.
 from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
 
-from .node_shared import NodeTableLease
+from vllm_ascend.engram_node_shared import NodeTableLease
+
 from .npu import (
     HostUvaBuffer,
     NodeUvaBuffer,

@@ -382,8 +382,9 @@ An example of additional configuration is as follows:
 Independently launched DeepSeek-V4.1-Flash instances on one A5 host can share a
 single copy of the MXFP8 Engram codes and E8M0 scales. Enable CPU offload and
 DP shared memory in Engram config. This mode requires TP1/PP1, lazy
-safetensors loading, and sleep mode disabled. DP shared memory requires
-DP or PCP greater than one and is incompatible with elastic expert parallelism.
+safetensors loading, and sleep mode disabled. The vLLM version paired with
+this release requires `--data-parallel-size` greater than one for DP shared
+memory and disallows elastic expert parallelism with this option.
 
 | Additional configuration key | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -396,7 +397,7 @@ private directory owned by the serving user.
 
 ```bash
 install -d -m 700 /path/to/private-engram-dir
-python -m vllm_ascend.models.deepseek_v41.engram.node_shared serve \
+python -m vllm_ascend.engram_node_shared serve \
     --model /path/to/checkpoint \
     --endpoint /path/to/private-engram-dir/owner.sock \
     --generation run-1
@@ -413,6 +414,12 @@ vllm serve /path/to/checkpoint \
 
 Shut down consumers before draining the owner. Graceful worker shutdown
 synchronizes outstanding device reads and releases the table leases.
+If a worker disconnects without releasing its lease, the owner holds the
+lease until a Linux pidfd reports that the worker has exited. On kernels
+without `SO_PEERPIDFD`, run the owner where consumer PIDs are visible
+(for example, in the host PID namespace) to enable crash recovery.
+If the owner cannot obtain a pidfd, the lease remains in place. In that
+case, stop all consumers before shutting down the owner manually.
 
 ### KV pipeline parallelism (KVPP)
 

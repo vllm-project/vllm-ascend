@@ -1047,6 +1047,7 @@ class KVPoolWorker:
                 key_list_c[:3],
             )
             load_get_start = time.perf_counter()
+            self._wait_for_block_zeroing_before_get()
             ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
             self._record_kv_connector_operation(
                 "load_get",
@@ -1258,6 +1259,12 @@ class KVPoolWorker:
                 all_block_ids.append(block_id)
         return all_keys, all_addrs, all_sizes, all_block_ids
 
+    def _wait_for_block_zeroing_before_get(self) -> None:
+        # A native GET can race with block zeroing on the prefill compute stream.
+        # The async receiver runs on a different thread with a different current stream.
+        if not self.load_async and self.backend_name == "mooncake" and self.kv_role in ("kv_producer", "kv_both"):
+            torch.npu.current_stream().synchronize()
+
     def _load_kv_tp_mismatch(
         self,
         block_hashes: list,
@@ -1281,6 +1288,7 @@ class KVPoolWorker:
             keys_c[:3],
         )
         load_get_start = time.perf_counter()
+        self._wait_for_block_zeroing_before_get()
         ret = self.m_store.get(keys_c, addrs_c, sizes_c)
         self._record_kv_connector_operation(
             "load_get",

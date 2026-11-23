@@ -1,0 +1,5 @@
+pr: 22510
+entries:
+  - category: bugfix
+    text: Fixed a hang when DeepSeek V4.1 multimodal prefill leaves a PCP rank with no local tokens.
+    model: deepseek-v4.1

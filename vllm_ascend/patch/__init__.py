@@ -37,6 +37,17 @@
 #   Future plan: Remove when upstream applies the model's weight predicate
 #                before tensor materialization in the lazy loader.
 # --------------------------------
+# * platform/patch_kv_cache_admission.py:
+#   Target: SlidingWindowManager and ChunkedLocalAttentionManager admission.
+#   Why: Logical KV tables include skipped NULL prefix entries and shared blocks
+#        that cannot provide recyclable physical capacity for async prefill.
+#   How: Shift first-time admission past skipped prefixes and offset existing
+#        reservations only by exclusively held, non-NULL blocks. Delegate all
+#        other allocation accounting to the original upstream method.
+#   Related PR: No upstream physical-block admission patch is available yet.
+#   Future plan: Contribute this accounting to vLLM and remove the patch when
+#        both supported vLLM versions cover first-time and shared-block admission.
+# --------------------------------
 # * worker/patch_kda_recoverssm.py:
 #   Target: Kimi KDA's KDARecoverSSMCommitContext module binding.
 #   Why: The upstream metadata builder imports its CUDA context directly.
@@ -1700,6 +1711,17 @@
 #       Define AscendModelState and initialize it in init_model_state.
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
+#
+#   2. `vllm.v1.worker.gpu.model_states.interface.ModelState.gather_mm_embeddings`
+#    Why:
+#       An idle PCP rank can retain a zero-token request inside an image span.
+#    How:
+#       Return empty media embeddings and a mask for an idle PCP rank so it
+#       can continue to the shared padded token embedding exchange.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/64435
+#    Future Plan:
+#       Remove the wrapper once the paired vLLM includes the upstream guard.
 #
 # ** 28. File: worker/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

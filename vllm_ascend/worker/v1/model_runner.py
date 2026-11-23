@@ -197,6 +197,7 @@ from vllm_ascend.utils import (
     get_kv_cache_tensor_layers,
     global_stream,
     is_c8_mxfp_kv_quant,
+    is_deepseek_v41,
     is_hidden_state_cache_spec,
     is_score_encoder_cache_manager,
     kv_cache_spec_uses_packed_sfa_main_cache,
@@ -826,10 +827,13 @@ class NPUModelRunner(GPUModelRunner):
             return layer_ids
         if self.speculative_config.use_dspark():
             hf_config = self.speculative_config.draft_model_config.hf_config
+            uses_v41_layer_inputs = is_deepseek_v41(hf_config)
             hf_config = getattr(hf_config, "text_config", hf_config)
-            # deepseek v4 dspark
+            # V4.1 captures zero-based layer inputs; V4 retains after-layer IDs.
             dspark_layer_ids = getattr(hf_config, "dspark_target_layer_ids", None)
             if dspark_layer_ids:
+                if uses_v41_layer_inputs:
+                    return tuple(dspark_layer_ids)
                 return tuple(i + 1 for i in dspark_layer_ids)
             # gqa backend dspark
             dspark_layer_ids = getattr(hf_config, "target_layer_ids", None)
