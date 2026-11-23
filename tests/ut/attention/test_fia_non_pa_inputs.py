@@ -290,3 +290,58 @@ def test_graph_provider_preserves_captured_pa_mode(sliding_window, is_draft_mode
         assert runtime_kwargs["block_table"] is captured_block_table
     else:
         assert runtime_kwargs["block_table"] is (None if is_non_pa else metadata.block_tables)
+
+
+def test_graph_provider_selects_maskless_single_token_decode():
+    metadata = _make_metadata(AscendAttentionState.DecodeOnly)
+    metadata.max_query_len = 1
+    provider = FIAParamProvider("layer", None)
+
+    params = provider.resolve({"layer": metadata})
+
+    assert params["atten_mask"] is None
+    assert params["sparse_mode"] == 0
+
+
+def test_graph_provider_keeps_captured_mask_for_multi_token_replay():
+    metadata = _make_metadata(AscendAttentionState.DecodeOnly)
+    metadata.max_query_len = 4
+    provider = FIAParamProvider("layer", None)
+
+    params = provider.resolve({"layer": metadata})
+
+    assert "atten_mask" not in params
+    assert "sparse_mode" not in params
+
+
+def test_graph_provider_keeps_captured_mask_for_non_decode_state():
+    metadata = _make_metadata(AscendAttentionState.ChunkedPrefill)
+    metadata.max_query_len = 1
+    provider = FIAParamProvider("layer", None)
+
+    params = provider.resolve({"layer": metadata})
+
+    assert "atten_mask" not in params
+    assert "sparse_mode" not in params
+
+
+def test_graph_provider_keeps_captured_mask_for_sliding_window():
+    metadata = _make_metadata(AscendAttentionState.DecodeOnly)
+    metadata.max_query_len = 1
+    provider = FIAParamProvider("layer", 16)
+
+    params = provider.resolve({"layer": metadata})
+
+    assert "atten_mask" not in params
+    assert "sparse_mode" not in params
+
+
+def test_graph_provider_tolerates_missing_max_query_len():
+    metadata = _make_metadata(AscendAttentionState.DecodeOnly)
+    del metadata.max_query_len
+    provider = FIAParamProvider("layer", None)
+
+    params = provider.resolve({"layer": metadata})
+
+    assert "atten_mask" not in params
+    assert "sparse_mode" not in params

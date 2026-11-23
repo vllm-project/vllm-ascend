@@ -499,14 +499,18 @@ class FIAParamProvider:
                 "actual_seq_lengths_kv": metadata.seq_lens_list,
             }
         # Replay-time mask choice (cf. PR #17682 review, issue #16889):
-        # FULL graphs are captured with the right-aligned causal mask +
-        # sparse_mode=3, which must stay valid for every replay shape.
-        # For genuine single-token decode batches causal masking is
-        # implicit, so the maskless parameterization (atten_mask=None,
-        # sparse_mode=0) is valid and avoids redundant mask construction.
-        # Sliding-window decode and multi-token replays (speculative-decode
-        # verification, draft expansion, chunked prefill) keep the mask.
-        if self.sliding_window is None and getattr(metadata, "max_query_len", 0) == 1:
+        # Capture keeps the right-aligned causal mask (sparse_mode=3), so
+        # multi-token replay shapes retain a valid mask. For genuine
+        # single-token DecodeOnly batches causal masking is implicit, so
+        # replay can select maskless parameters (atten_mask=None,
+        # sparse_mode=0) to avoid redundant mask construction.
+        # Sliding-window, non-DecodeOnly, and multi-token replays (speculative-
+        # decode verification, draft expansion, chunked prefill) keep the mask.
+        if (
+            self.sliding_window is None
+            and getattr(metadata, "attn_state", None) == AscendAttentionState.DecodeOnly
+            and getattr(metadata, "max_query_len", 0) == 1
+        ):
             params["atten_mask"] = None
             params["sparse_mode"] = 0
         return params
@@ -1011,7 +1015,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # query token; multi-token batches labeled DecodeOnly
                 # (spec-decode draft/verify) keep the mask, cf. #17948.
                 is_decode = (
-                    attn_metadata.attn_state == AscendAttentionState.DecodeOnly and attn_metadata.max_query_len == 1
+                    attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+                    and getattr(attn_metadata, "max_query_len", 0) == 1
                 )
                 attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
                     query=query,

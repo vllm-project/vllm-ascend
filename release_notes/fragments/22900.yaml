@@ -1,0 +1,6 @@
+pr: 22900
+entries:
+  - category: performance
+    text: Optimized FIA decode paths by skipping redundant attention mask construction for genuine single-token DecodeOnly batches. The upstream PR reports ~10% end-to-end decode improvement for Qwen3-8B at high concurrency and long KV lengths (up to 8192) on A2/A3.
+  - category: bugfix
+    text: Kept the causal mask and sparse_mode=3 in FULL-graph FIA capture and for multi-token batches labeled DecodeOnly (speculative-decode verification and draft expansion), fixing spec-decode acceptance-rate regressions on A2/A3. Capture keeps the mask for every replay shape; single-token DecodeOnly replay selects maskless parameters through FIAParamProvider.

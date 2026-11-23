@@ -804,10 +804,11 @@ class TestAscendAttentionBackendImpl(TestBase):
         # token per request (AscendInputBatch.make_dummy), but the captured
         # graphs also replay multi-token batches (speculative-decode and
         # adaptive-verification batches, chunked prefill). FIA graph replay
-        # cannot rebind atten_mask/sparse_mode, so capture must keep the
-        # right-aligned causal mask (sparse_mode=3), which is valid for every
-        # replay shape. Skipping the mask at capture corrupts spec-decode
-        # acceptance rates (test_dynamic dspark/dflash, cf. #17948).
+        # cannot rebind atten_mask/sparse_mode at the NPU level, so capture
+        # must keep the right-aligned causal mask (sparse_mode=3), which is
+        # valid for every replay shape. Replay-time selection happens in
+        # FIAParamProvider.resolve; skipping the mask at capture corrupts
+        # spec-decode acceptance rates (test_dynamic dspark/dflash, cf. #17948).
         query = torch.randn(2, 8, 64)
         key = torch.randn(2, 8, 64)
         value = torch.randn(2, 8, 64)
