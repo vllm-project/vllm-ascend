@@ -36,7 +36,6 @@ from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNHostMetadataBackend,
     AscendGDNHostMetadataBuilder,
 )
-from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend
 from vllm_ascend.ops.triton.fla import utils as fla_utils
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices as runtime_prepare_chunk_indices,
@@ -343,7 +342,7 @@ def test_kimi_recoverssm_does_not_inherit_glm_pcp_buffers():
     config.parallel_config.prefill_context_parallel_size = 2
     config.compilation_config.max_cudagraph_capture_size = 4
     spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
-    with patch("vllm_ascend.ops.kda_pcp.get_pcp_group", return_value=SimpleNamespace(rank_in_group=1)):
+    with patch("vllm_ascend.ops.recurrent_pcp.get_pcp_group", return_value=SimpleNamespace(rank_in_group=1)):
         builder = AscendKimiKDARecoverSSMMetadataBuilder(spec, ["layer0"], config, torch.device("cpu"))
     assert builder.decode_cudagraph_max_bs == 8
     assert config.compilation_config.max_cudagraph_capture_size == 4
@@ -518,7 +517,7 @@ def test_kimi_chunk_metadata_uses_linear_attention_head_count() -> None:
 
 def test_ascend_gdn_attention_uses_ascend_backend():
     from vllm_ascend.models.glm5next.kda import Glm5NextGDNHostMetadataBackend, Glm5NextLinearAttention
-    from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
+    from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention, KimiKDAHostMetadataBackend
 
     fused_backend = AscendGatedDeltaNetAttention.get_attn_backend(object())  # type: ignore[arg-type]
     kimi_attention = SimpleNamespace(use_recoverssm=False)

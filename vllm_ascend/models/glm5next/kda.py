@@ -41,7 +41,7 @@ from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
 from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendGDNHostMetadataBuilder
-from vllm_ascend.ops.kda_pcp import prepare_kda_pcp_config
+from vllm_ascend.ops.recurrent_pcp import prepare_recurrent_pcp_config
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 
 if TYPE_CHECKING:
@@ -54,7 +54,7 @@ def prepare_glm_pcp_config(vllm_config):
         and vllm_config.parallel_config.pcp_shard_decode_requests
         and vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
     ):
-        return prepare_kda_pcp_config(vllm_config)
+        return prepare_recurrent_pcp_config(vllm_config)
     return vllm_config
 
 
