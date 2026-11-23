@@ -435,6 +435,13 @@ class NPUWorker(GPUWorker):
         return apply_process_metrics_level(level)
 
     def sleep(self, level: int = 1) -> None:
+        backend_name = getattr(self.model_config, "sleep_mode_backend", "cumem")
+        if hasattr(GPUWorker, "_discardable_parameters") and backend_name not in ("cumem", "camem"):
+            raise ValueError(
+                "Third-party sleep-mode backends are not supported on this vLLM "
+                "version until discardable support is added; use the in-tree "
+                "camem backend."
+            )
         self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Level-1 only offloads the weights pool. Persistent metadata such as
