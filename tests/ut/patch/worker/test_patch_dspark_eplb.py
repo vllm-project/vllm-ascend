@@ -2,7 +2,7 @@
 
 from copy import copy, deepcopy
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from transformers import Qwen3MoeConfig
@@ -38,8 +38,7 @@ def test_draft_marker_restored_after_nested_failure():
     assert not ascend_config.is_draft_config_context()
 
 
-@pytest.fixture
-def dspark_config(tmp_path, monkeypatch, phase, draft_supports_eplb):
+def _build_dspark_config(tmp_path, monkeypatch, phase, draft_supports_eplb):
     from vllm.v1.worker.gpu.spec_decode import utils as spec_decode_utils
 
     # Scope platform initialization state and suppress log-file creation only.
@@ -51,16 +50,18 @@ def dspark_config(tmp_path, monkeypatch, phase, draft_supports_eplb):
     monkeypatch.setenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
     # Admit the accelerator-only EPLB topology on CPU, then run the actual
     # Ascend validation and configuration initialization on reconstruction.
-    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    # Preserve descriptor lookup so later tests can patch the platform class.
+    platform_type = type(current_platform)
+    monkeypatch.setattr(platform_type, "is_cuda_alike", lambda _self: True)
     monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
-    original_check = current_platform.check_and_update_config
+    original_check = platform_type.check_and_update_config
 
-    def check_and_update_config(config):
+    def check_and_update_config(_cls, config):
         original_check(config)
         _validate_eplb_config(config)
         ascend_config.init_ascend_config(config)
 
-    monkeypatch.setattr(current_platform, "check_and_update_config", check_and_update_config)
+    monkeypatch.setattr(platform_type, "check_and_update_config", classmethod(check_and_update_config))
     # Config reconstruction runs before distributed worker initialization.
     monkeypatch.setattr(spec_decode_utils, "get_pp_group", lambda: SimpleNamespace(world_size=1))
     # A local config is sufficient: no checkpoint/tokenizer download or weights.
@@ -108,6 +109,25 @@ def dspark_config(tmp_path, monkeypatch, phase, draft_supports_eplb):
         speculative_config=speculative_config,
         additional_config={"eplb_config": {"load_collection_phase": phase, "stair_config": {"load_window_bins": 32}}},
     )
+
+
+@pytest.fixture
+def dspark_config(tmp_path, monkeypatch, phase, draft_supports_eplb):
+    return _build_dspark_config(tmp_path, monkeypatch, phase, draft_supports_eplb)
+
+
+def test_platform_config_hook_restored_after_draft_setup(tmp_path):
+    with pytest.MonkeyPatch.context() as draft_patch:
+        _build_dspark_config(tmp_path, draft_patch, "prefill", False)
+
+    # Later tests must be able to intercept configuration through the platform
+    # class after the draft fixture has restored its temporary validation hook.
+    with (
+        patch.object(ascend_logger, "configure_ascend_file_logging"),
+        patch.object(type(current_platform), "check_and_update_config") as check_and_update,
+    ):
+        config = VllmConfig()
+    check_and_update.assert_called_once_with(config)
 
 
 @pytest.mark.parametrize("phase", ["prefill", "decode"])

@@ -346,13 +346,14 @@ def eplb_worker_config(tmp_path):
 def validate_eplb_on_cpu(monkeypatch):
     # CPU platform validation does not run the Ascend EPLB hook. Exercise the
     # real hook on every VllmConfig reconstruction, without accelerator setup.
-    original_check = current_platform.check_and_update_config
+    platform_type = type(current_platform)
+    original_check = platform_type.check_and_update_config
 
-    def check_and_update_config(config):
+    def check_and_update_config(_cls, config):
         original_check(config)
         _validate_eplb_config(config)
 
-    monkeypatch.setattr(current_platform, "check_and_update_config", check_and_update_config)
+    monkeypatch.setattr(platform_type, "check_and_update_config", classmethod(check_and_update_config))
 
 
 @pytest.mark.parametrize(
