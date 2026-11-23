@@ -437,6 +437,26 @@ def test_manager_block_ids_expanded_when_blocks_per_kv_gt_1():
     assert block_ids_for_request(runner, "r1", kv_cache_group=0) == [2, 3]
 
 
+def test_scalar_blocks_per_kv_block_expands_not_silent_r1():
+    """Gemini: scalar ratio must expand (not TypeError→R=1)."""
+    from vllm_ascend.observability.runtime_guard.dump import (
+        _blocks_per_kv_block_for_group,
+        block_ids_for_request,
+    )
+
+    runner = SimpleNamespace(
+        requests={"r1": SimpleNamespace(block_ids=([1],))},
+        block_tables=SimpleNamespace(blocks_per_kv_block=2),  # scalar, not [2]
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+        kv_cache_config=None,
+    )
+    assert _blocks_per_kv_block_for_group(runner, 0) == 2
+    assert _blocks_per_kv_block_for_group(runner, 1) == 2
+    assert block_ids_for_request(runner, "r1", kv_cache_group=0) == [2, 3]
+
+
 def test_kv_source_prefers_forward_context_tuple_parts(tmp_path: Path):
     """C8-style tuple on static_forward_context keeps part names (not flat list)."""
     from vllm_ascend.observability.runtime_guard.dump import KvCacheReader

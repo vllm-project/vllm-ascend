@@ -469,17 +469,24 @@ def _group_for_layer(layer_name: str, layer_to_group: dict[str, int]) -> int | N
 
 
 def _blocks_per_kv_block_for_group(runner: Any, kv_cache_group: int) -> int:
-    """Kernel pages per manager block for ``kv_cache_group`` (default 1)."""
+    """Kernel pages per manager block for ``kv_cache_group`` (default 1).
+
+    Accepts a per-group sequence or a scalar shared by all groups. A scalar
+    must not be treated as ``R=1`` via a failed subscript (wrong expansion).
+    """
     block_tables = getattr(runner, "block_tables", None)
     ratios = getattr(block_tables, "blocks_per_kv_block", None) if block_tables is not None else None
     if ratios is None:
         return 1
+    # Scalar ratio shared by all groups (int/float; not bool).
+    if isinstance(ratios, (int, float)) and not isinstance(ratios, bool):
+        return max(1, int(ratios))
     try:
         return max(1, int(ratios[kv_cache_group]))
     except IndexError:
         return 1
     except (TypeError, ValueError):
-        # Some builds expose a scalar ratio shared by all groups.
+        # Numpy / tensor scalars and other non-sequence numerics.
         try:
             return max(1, int(ratios))
         except (TypeError, ValueError):
