@@ -640,16 +640,76 @@ def test_init_speculator_main_actual_native_config_mtp_and_eagle(
     [
         ("dflash", "vllm.v1.worker.gpu.spec_decode.xpress.speculator.XPressSpeculator"),
         ("suffix", "vllm.v1.worker.gpu.spec_decode.suffix.speculator.SuffixSpeculator"),
-        ("unsupported", None),
     ],
 )
 def test_init_speculator_main_rejects_unadapted_upstream_speculator(monkeypatch, method, speculator_class):
-    """Unadapted upstream speculator classes fail cleanly with NotImplementedError."""
+    """Unadapted concrete speculator classes fail with an explicit class-level NotImplementedError."""
     monkeypatch.setattr(v2_spec_decode, "vllm_version_is", lambda _: False)
     config = _make_config(method, speculator_class=speculator_class)
 
-    with pytest.raises(NotImplementedError, match=f"{method} is not supported yet"):
+    with pytest.raises(NotImplementedError) as exc_info:
         init_speculator(config, torch.device("cpu"))
+
+    assert speculator_class in str(exc_info.value)
+    assert f"{method} is not supported yet" not in str(exc_info.value)
+
+
+def test_init_speculator_main_rejects_none_speculator_class(monkeypatch):
+    """Speculator configs with speculator_class=None keep the method-level NotImplementedError."""
+    monkeypatch.setattr(v2_spec_decode, "vllm_version_is", lambda _: False)
+    config = _make_config("unsupported", speculator_class=None)
+
+    with pytest.raises(NotImplementedError, match="unsupported is not supported yet"):
+        init_speculator(config, torch.device("cpu"))
+
+
+def test_init_speculator_main_actual_native_config_xpress_rejected_vs_dflash(monkeypatch):
+    """Real XPressSpeculatorConfig (method='dflash') rejects XPress explicitly instead of generic DFlash."""
+    if v2_spec_decode.vllm_version_is("0.33.0"):
+        pytest.skip("SpeculativeConfig.speculator_config requires vLLM main")
+
+    from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
+    from vllm.v1.worker.gpu.spec_decode.xpress.config import XPressSpeculatorConfig
+
+    assert issubclass(XPressSpeculatorConfig, DFlashSpeculatorConfig)
+    assert XPressSpeculatorConfig.base_method == "dflash"
+
+    dflash_ctor = _mock_speculator_module(
+        monkeypatch,
+        "vllm_ascend.worker.v2.spec_decode.dflash.speculator",
+        "AscendDFlashSpeculator",
+    )
+    device = torch.device("cpu")
+
+    xpress_spec = object.__new__(SpeculativeConfig)
+    xpress_spec.method = "dflash"
+    xpress_spec.custom_method = None
+    xpress_spec.enforce_eager = False
+    xpress_spec.draft_model_config = cast(
+        Any,
+        SimpleNamespace(speculator_config_class="vllm.v1.worker.gpu.spec_decode.xpress.config.XPressSpeculatorConfig"),
+    )
+    assert isinstance(xpress_spec.speculator_config, XPressSpeculatorConfig)
+    expected_xpress_cls = "vllm.v1.worker.gpu.spec_decode.xpress.speculator.XPressSpeculator"
+    assert xpress_spec.speculator_config.speculator_class == expected_xpress_cls
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        init_speculator(SimpleNamespace(speculative_config=xpress_spec), device)
+
+    assert expected_xpress_cls in str(exc_info.value)
+    assert "dflash is not supported yet" not in str(exc_info.value)
+    dflash_ctor.assert_not_called()
+
+    dflash_spec = object.__new__(SpeculativeConfig)
+    dflash_spec.method = "dflash"
+    dflash_spec.custom_method = None
+    dflash_spec.enforce_eager = False
+    dflash_spec.draft_model_config = cast(Any, SimpleNamespace(speculator_config_class=None))
+    assert type(dflash_spec.speculator_config) is DFlashSpeculatorConfig
+
+    dflash_cfg = SimpleNamespace(speculative_config=dflash_spec)
+    assert init_speculator(dflash_cfg, device) is dflash_ctor.return_value
+    dflash_ctor.assert_called_once_with(dflash_cfg, device)
 
 
 def test_init_speculator_main_supports_custom_speculator(monkeypatch):

@@ -196,4 +196,6 @@ def init_speculator(
             return factory(vllm_config, device, req_states=req_states)
         return factory(vllm_config, device)
 
-    raise NotImplementedError(f"{speculative_config.method} is not supported yet.")
+    raise NotImplementedError(
+        f"Speculator class '{qualname}' (method='{speculative_config.method}') is not supported on Ascend MRV2 yet."
+    )
