@@ -31,7 +31,7 @@ from vllm_ascend.ascend_forward_context import (
 from vllm_ascend.distributed.eplb.eplb_state import refresh_model_routing_tables
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.worker.sentinel.eplb_redistribute import (
-    densify_routing_table_physical_ids,
+    densify_routing_tables,
     reload_experts_from_disk,
 )
 
@@ -43,19 +43,18 @@ _sentinel: "WorkerSentinel | None" = None
 
 
 def _num_local_experts(model_state: EplbModelState) -> int:
-    """Physical expert slots per original EP rank (dead ranks keep their slots)."""
+    """How many per-expert weight tensors each original EP rank hosts (dead ranks keep theirs)."""
     return model_state.physical_to_logical_map.shape[1] // get_ep_group().world_size
 
 
 def fault_barrier_wrapper(func: Callable):
-    """Barrier between device faults and the async step loop.
+    """Wrap a worker method so a device fault is handled where it happens.
 
-    On the first device-touching fault (e.g. an EP-group allreduce failing on a
-    dead peer that poisons the model stream) it quarantines the worker and
-    resets the device immediately, before any tensor teardown on the broken
-    stream can std::terminate the process. The fault is then raised through the
-    executor's failure channel instead of being reported as an empty success;
-    retry lifts the quarantine only after the groups are rebuilt.
+    If the wrapped method raises (for example, an EP all-reduce times out
+    because a peer died), mark the worker as faulted, stop and restart its
+    device, then re-raise the error. While the flag is set, wrapped calls fail
+    immediately instead of touching the broken device; ``retry`` clears it once
+    the process groups have been rebuilt.
     """
 
     def wrapped(self, *args, **kwargs):
@@ -63,21 +62,22 @@ def fault_barrier_wrapper(func: Callable):
         if sentinel is None:
             return func(self, *args, **kwargs)
         if sentinel.worker_faulted:
-            raise RuntimeError(f"[FT] worker is quarantined after fault: {sentinel.fault_info}")
+            raise RuntimeError(f"[FT] worker is faulted and will not use the device until retry: {sentinel.fault_info}")
         try:
             return func(self, *args, **kwargs)
         except Exception as exc:
-            rank = getattr(self, "rank", "worker")
+            rank = getattr(self, "rank", None)
+            rank_desc = f"rank {rank}" if isinstance(rank, int) else "worker"
             sentinel.worker_faulted = True
             sentinel.fault_info = f"{type(exc).__name__}: {exc}"
-            logger.warning("[FT] Quarantining %s after fault: %s", rank, exc)
+            logger.warning("[FT] Marking %s faulted after: %s", rank_desc, exc)
             try:
                 sentinel.reset_device()
             except Exception:
-                logger.exception("[FT] self device reset failed on %s.", rank)
+                logger.exception("[FT] device reset failed on %s.", rank_desc)
             # Drop the frames that pin device tensors of the broken stream.
             exc.__traceback__ = None
-            raise RuntimeError(f"[FT] worker quarantined after fault: {sentinel.fault_info}")
+            raise RuntimeError(f"[FT] worker faulted: {sentinel.fault_info}")
 
     return wrapped
 
@@ -91,8 +91,8 @@ class WorkerSentinel(GPUWorkerSentinel):
     """
 
     def __init__(self, worker: "Worker", device: torch.device):
-        # Upstream's platform-independent guards; MoE drafts are supported here,
-        # so its draft check is intentionally omitted.
+        # Two constraints: PCP is not supported yet, and fault tolerance needs
+        # the v2 model runner.
         if worker.parallel_config.prefill_context_parallel_size > 1:
             raise ValueError("[FT] fault tolerance on Ascend NPU does not support PCP yet.")
         if not worker.vllm_config.use_v2_model_runner:
@@ -100,8 +100,8 @@ class WorkerSentinel(GPUWorkerSentinel):
         global _sentinel
         self.device = device
         self.worker = worker
-        # Set once a device-touching method faults, to keep this worker off the
-        # device until FT recovery rebuilds the groups.
+        # Set when a device-touching method fails; cleared by retry. While set,
+        # wrapped methods fail fast instead of using the device.
         self.worker_faulted = False
         self.fault_info: str | None = None
         _sentinel = self
@@ -111,6 +111,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         return {"mask": get_ep_all2all_manager().query_active_mask().tolist()}
 
     def reset_device(self) -> None:
+        """Stop and restart the NPU, then rebuild the process groups."""
         NPUPlatform.set_device(self.device)
         torch_npu.npu.stop_device(self.device.index)
         torch_npu.npu.restart_device(self.device.index)
@@ -119,27 +120,26 @@ class WorkerSentinel(GPUWorkerSentinel):
 
     def retry(self, ft_request: FaultToleranceRequest):
         # Reset first so hung device collectives are aborted, then run the
-        # base flow and lift the quarantine after the groups are rebuilt.
+        # upstream retry and clear the fault flag once the groups are rebuilt.
         self.reset_device()
         super().retry(ft_request)
         self.worker_faulted = False
         self.fault_info = None
 
     def init_num_local_experts(self) -> None:
-        """Record the per-rank physical expert slot count after model load."""
+        """Record how many per-expert weight tensors this rank hosts after model load."""
         if self.worker.model_runner.eplb_state is None:
             return
         get_ep_all2all_manager().set_num_local_physical_experts(_num_local_experts(self._eplb_model_state()))
-        # The MC2 capacity exists only now; surface a config scale_down will reject.
-        self._check_mc2_only_execution(raise_on_error=False)
+        # The MC2 token capacity is known only after model load, so check it
+        # now and warn if scale_down would be rejected at recovery time.
+        self._check_comm_method_supports_scale_down(raise_on_error=False)
 
     def scale_down(self, ft_request: FaultToleranceRequest):
-        """Scale down over the surviving DP ranks, reusing the upstream flow.
+        """Remove dead DP ranks and recover.
 
-        ``super().scale_down`` runs the deterministic dead-rank masking and
-        expert redistribution, dispatching ``retry`` / ``_redistribute_experts``
-        to the Ascend overrides below. Ascend adds its platform preconditions
-        and a dummy-batch runnability check on top.
+        Runs the upstream scale-down flow with Ascend preconditions and a
+        dummy-batch runnability check on top.
         """
         self._validate_scale_down_preconditions()
         super().scale_down(ft_request)
@@ -161,6 +161,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         torch.npu.synchronize()
 
     def _validate_scale_down_preconditions(self) -> None:
+        """Check the config and kernel preconditions scale_down requires."""
         model_runner = self.worker.model_runner
         eplb_config = self.worker.parallel_config.eplb_config
         if model_runner.eplb_state is None or eplb_config.num_redundant_experts <= 0:
@@ -178,7 +179,7 @@ class WorkerSentinel(GPUWorkerSentinel):
             raise ValueError(
                 "[FT] scale_down (elastic_info) is mutually exclusive with mc2 hierarchy comm (comm_alg='hierarchy')."
             )
-        self._check_mc2_only_execution(raise_on_error=True)
+        self._check_comm_method_supports_scale_down(raise_on_error=True)
         if not hasattr(torch_npu, "npu_moe_distribute_dispatch_v2"):
             raise ValueError(
                 "[FT] scale_down requires npu_moe_distribute_dispatch_v2 "
@@ -190,11 +191,14 @@ class WorkerSentinel(GPUWorkerSentinel):
         capture_sizes = self.worker.vllm_config.compilation_config.cudagraph_capture_sizes or [0]
         return max(self.worker.vllm_config.scheduler_config.max_num_batched_tokens, max(capture_sizes))
 
-    def _check_mc2_only_execution(self, *, raise_on_error: bool) -> None:
-        """Require MC2 for every reachable batch; warn or raise when it fails.
+    def _check_comm_method_supports_scale_down(self, *, raise_on_error: bool) -> None:
+        """Check that every reachable batch uses a MoE communication method that scale-down supports.
 
-        Dead ranks stay in the device EP group; only MC2 excludes them via
-        elastic_info, so AllToAll/AllGather would target the stopped rank.
+        Scale-down currently supports MC2 (MegaMoE is planned): the MC2
+        dispatch/combine kernels take the ``elastic_info`` tensor (a per-EP-rank
+        live/dead mask passed on every call) and skip dead ranks. Dead ranks
+        stay in the device EP group, so AllToAll/AllGather would keep targeting
+        the stopped rank.
         """
         capacity = get_mc2_tokens_capacity()
         if capacity is None:
@@ -215,19 +219,13 @@ class WorkerSentinel(GPUWorkerSentinel):
         logger.warning("[FT] scale_down will be rejected at recovery time: %s", message)
 
     def _redistribute_experts(self, dead_ep_ranks: set[int]) -> None:
-        """Redistribute experts onto the surviving slots after scale-down.
+        """Redistribute the dead ranks' experts onto the surviving ranks' per-expert tensors.
 
-        Overrides the upstream flow so reassigned weights reload through the
-        Ascend reloader: the upstream reloader writes via ``model.load_weights``,
-        which cannot produce Ascend's runtime expert layout (transpose / NZ /
-        per-slot lists / quant scales). The shared redistribution steps (mark
-        dead slots, steal spare slots, rebuild the logical maps) are kept; on
-        top of that, refreshes the Ascend kernel-facing routing tables into
-        the densified id space and shrinks the MC2 physical-expert width.
-
-        Each EPLB-registered model (main model and drafter) is redistributed
-        against its own placement and reloaded from its own checkpoint; results
-        are never shared across models.
+        Runs the upstream redistribution steps, then reloads the moved experts'
+        weights through the Ascend reloader and renumbers the routing tables the
+        kernels read so dead ranks are skipped. Each EPLB-registered model (main
+        model and drafter) is redistributed against its own placement and
+        reloaded from its own checkpoint.
         """
         model_runner = self.worker.model_runner
         vllm_config = self.worker.vllm_config
@@ -273,21 +271,26 @@ class WorkerSentinel(GPUWorkerSentinel):
         num_local_experts = _num_local_experts(model_state)
 
         mark_dead_expert_slots_inplace(p2l, dead_ep_ranks, num_local_experts)
-        reassignments = redistribute_expert_placement(p2l, num_logical, num_local_experts)
+        moved_experts = redistribute_expert_placement(p2l, num_logical, num_local_experts)
         logger.info(
-            "[FT] %s expert redistribution: moe_layers=%d, num_logical=%d, reassignments=%d",
+            "[FT] %s expert redistribution: moe_layers=%d, num_logical=%d, moved_experts=%d",
             type(model).__name__,
             p2l.shape[0],
             num_logical,
-            len(reassignments),
+            len(moved_experts),
         )
         _commit_eplb_maps(model_state, p2l.cpu())
-        # Keep the model-side expert map: slot ownership is unchanged, and the
-        # map is physical-id indexed, so p2l (logical ids) must not be written into it.
-        if reassignments:
-            reload_experts_from_disk(model, model_config, load_config, reassignments)
+        # The model's expert map maps physical expert ids to local slots, and
+        # those ids do not change here, so leave it as is (p2l holds logical
+        # ids and must not be written into it).
+        if moved_experts:
+            reload_experts_from_disk(model, model_config, load_config, moved_experts)
         refresh_model_routing_tables(model_state)
-        self._densify_routing_tables(model_state)
+        densify_routing_tables(
+            model_state.model.moe_layers,
+            get_ep_all2all_manager().orig_to_dense_rank_table(),
+            num_local_experts,
+        )
 
     def _resolve_drafter(self) -> tuple[torch.nn.Module, EplbModelState, ModelConfig, LoadConfig] | None:
         """Resolve the drafter's EPLB state and checkpoint, rejecting unregistered MoE."""
@@ -306,18 +309,3 @@ class WorkerSentinel(GPUWorkerSentinel):
         if spec is None or spec.draft_model_config is None:
             raise ValueError("[FT] scale_down requires draft_model_config for an EPLB-registered drafter.")
         return drafter, state, spec.draft_model_config, get_draft_load_config(self.worker.vllm_config)
-
-    def _densify_routing_tables(self, eplb_model_state) -> None:
-        """Renumber the kernel-facing routing tables into the densified id space.
-
-        The MC2 kernels consume the routing tables in the densified id space,
-        so the kernel-facing values are renumbered in place after the refresh.
-        The mapping comes from the manager, which owns the cumulative dead set
-        used for elastic_info, so both stay on the same numbering.
-        """
-        num_local_experts = _num_local_experts(eplb_model_state)
-        orig_to_dense_rank = get_ep_all2all_manager().orig_to_dense_rank_table()
-        for layer in eplb_model_state.model.moe_layers:
-            routing_table = getattr(getattr(layer, "eplb_state", None), "expert_replica_routing_table", None)
-            if routing_table is not None:
-                densify_routing_table_physical_ids(routing_table, orig_to_dense_rank, num_local_experts)

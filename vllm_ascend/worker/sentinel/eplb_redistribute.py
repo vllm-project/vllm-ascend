@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""NPU expert redistribution and weight reload for fault-tolerance scale-down.
+"""Expert redistribution and weight reload for fault-tolerance scale-down.
 
-After dead EP ranks are removed and their experts reassigned to surviving
-ranks, this module renumbers the expert-replica routing tables into the
-densified rank space and reloads the reassigned experts' weights from the
-checkpoint into each rank's local slots.
+After dead EP ranks are removed, renumber the routing tables so they only
+refer to the live ranks, and copy the moved experts' weights from the
+checkpoint into each rank's per-expert weight tensors.
 """
 
 import os
@@ -21,72 +20,67 @@ from vllm.logger import logger
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 
 from vllm_ascend.worker.sentinel.eplb_quant_schemes import (
+    _MOE_WEIGHT_NAMES,
     _WANTED_SUFFIXES,
-    _WEIGHT_ATTRS,
     _ReloadScheme,
     _resolve_scheme,
     _WeightPipeline,
 )
 
 __all__ = [
-    "densify_routing_table_physical_ids",
+    "densify_routing_tables",
     "reload_experts_from_disk",
 ]
 
-# (layer, expert) pairs per chunk: bigger chunks amortise device rounds but grow the stacked buffer.
-_RELOAD_CHUNK_SIZE = 32
+# How many experts are reloaded together as one stacked tensor.
+_EXPERTS_PER_STACK = 32
 
-# Threads assembling one chunk; bounded because worker processes share host memory bandwidth.
+# Host threads that prepare one stack of expert tensors in parallel.
 _GATHER_MAX_WORKERS = 8
 
 
-def densify_routing_table_physical_ids(
-    routing_table: torch.Tensor,
+def densify_routing_tables(
+    moe_layers: list,
     orig_to_dense_rank: torch.Tensor,
     num_local_experts: int,
 ) -> None:
-    """Renumber one layer's ``expert_replica_routing_table`` into the densified id space.
+    """Renumber every layer's routing table so it refers to live EP ranks only.
 
-    The MC2 dispatch kernel indexes ``table2[expert_id // num_local]`` and the
-    combine kernel drops ids beyond the shrunk expert count, so ids must be
-    dense-rank-major (``dense_rank * num_local + slot``); a dead rank in the
-    middle would otherwise misroute tokens. The update is an in-place
-    ``copy_``, so captured graphs keep pointing at valid storage.
+    Each entry is a physical expert id; it becomes
+    ``dense_rank * num_local_experts + slot``, where ``dense_rank`` is the
+    0-based position of the hosting rank among the live ranks (dead ranks are
+    skipped). Entries are updated in place, so captured graphs keep pointing
+    at valid storage.
     """
-    ids = routing_table.to(torch.int64)
-    if bool((ids < 0).any()):
-        raise RuntimeError(
-            "[FT] expert replica routing table references empty slots after "
-            "redistribution; every logical expert must have a live replica."
-        )
-    orig_rank = torch.div(ids, num_local_experts, rounding_mode="floor")
-    dense_rank = orig_to_dense_rank.to(device=ids.device, dtype=torch.int64)[orig_rank]
-    if bool((dense_rank < 0).any()):
-        raise RuntimeError(
-            "[FT] expert replica routing table references dead EP ranks after "
-            "redistribution; the placement did not vacate the dead ranks."
-        )
-    dense_ids = dense_rank * num_local_experts + ids % num_local_experts
-    routing_table.copy_(dense_ids.to(routing_table.dtype))
+    for layer in moe_layers:
+        routing_table = getattr(getattr(layer, "eplb_state", None), "expert_replica_routing_table", None)
+        if routing_table is None:
+            continue
+        ids = routing_table.to(torch.int64)
+        if bool((ids < 0).any()):
+            raise RuntimeError(
+                "[FT] expert replica routing table references empty slots after "
+                "redistribution; every logical expert must have a live replica."
+            )
+        orig_rank = torch.div(ids, num_local_experts, rounding_mode="floor")
+        dense_rank = orig_to_dense_rank.to(device=ids.device, dtype=torch.int64)[orig_rank]
+        if bool((dense_rank < 0).any()):
+            raise RuntimeError(
+                "[FT] expert replica routing table references dead EP ranks after "
+                "redistribution; the placement did not vacate the dead ranks."
+            )
+        dense_ids = dense_rank * num_local_experts + ids % num_local_experts
+        routing_table.copy_(dense_ids.to(routing_table.dtype))
 
 
-def _slot_tensor(layer: torch.nn.Module, attr: str, slot: int) -> torch.Tensor:
-    """The runtime storage of one per-slot tensor."""
-
-    per_slot = getattr(layer, f"{attr}_list", None)
-    return per_slot[slot] if per_slot is not None else getattr(layer, attr).data[slot]
-
-
-def _reload_local_slots(
+def _reload_local_expert_slots(
     routed_layers: list,
     local_slots: dict[tuple[int, int], int],
     expert_weights: dict[tuple[int, int], dict[str, torch.Tensor]],
 ) -> int:
-    """Reload all local (layer, expert) pairs in scheme-uniform chunks.
+    """Store the dead ranks' experts, now redistributed onto this rank, in its local per-expert tensors.
 
-    Pairs are grouped by (scheme, per-slot layout) so every stacked chunk is
-    shape- and dtype-uniform; the layout comes from the runtime slots, so a new
-    scheme needs no change here.
+    Returns the number of experts copied.
     """
     groups: dict[tuple, list[tuple[int, int]]] = {}
     for (layer_idx, logical_id), slot in sorted(local_slots.items()):
@@ -94,17 +88,18 @@ def _reload_local_slots(
         if getattr(routed, "w13_bias", None) is not None or getattr(routed, "w2_bias", None) is not None:
             raise NotImplementedError("[FT] scale_down weight reload does not support MoE expert bias yet.")
         reload_scheme = _resolve_scheme(routed)
-        layout = []
-        for attr in reload_scheme.pipelines:
-            tensor = _slot_tensor(routed, attr, slot)
-            layout.append((attr, tensor.shape, tensor.dtype))
-        groups.setdefault((reload_scheme, tuple(layout)), []).append((layer_idx, logical_id))
+        slot_shapes = []
+        for weight_name in reload_scheme.pipelines:
+            per_slot = getattr(routed, f"{weight_name}_list", None)
+            tensor = per_slot[slot] if per_slot is not None else getattr(routed, weight_name).data[slot]
+            slot_shapes.append((weight_name, tensor.shape, tensor.dtype))
+        groups.setdefault((reload_scheme, tuple(slot_shapes)), []).append((layer_idx, logical_id))
 
     reloaded = 0
-    for (reload_scheme, _layout), layer_experts in groups.items():
-        for start in range(0, len(layer_experts), _RELOAD_CHUNK_SIZE):
-            chunk = layer_experts[start : start + _RELOAD_CHUNK_SIZE]
-            reloaded += _reload_chunk(reload_scheme, routed_layers, chunk, local_slots, expert_weights)
+    for (reload_scheme, _slot_shapes), layer_experts in groups.items():
+        for start in range(0, len(layer_experts), _EXPERTS_PER_STACK):
+            expert_stack = layer_experts[start : start + _EXPERTS_PER_STACK]
+            reloaded += _reload_expert_stack(reload_scheme, routed_layers, expert_stack, local_slots, expert_weights)
     return reloaded
 
 
@@ -114,29 +109,28 @@ def _process_expert(
     expert_weights: dict[tuple[int, int], dict[str, torch.Tensor]],
     pipelines: dict[str, _WeightPipeline],
 ) -> dict[str, torch.Tensor]:
-    """CPU-side gather + transform of one expert, keyed by runtime attribute."""
-
-    # EP reports (0, 1); the shard helpers still split for TP>1 deployments.
+    """Read one expert's checkpoint tensors and apply the same conversions as a normal weight load."""
+    # EP-only deployments report tp_size=1, so the checkpoint is read unsharded.
     parallel_config = routed_layers[layer_expert[0]].moe_config.moe_parallel_config
     tp_rank, tp_size = parallel_config.tp_rank, parallel_config.tp_size
     tensors = expert_weights[layer_expert]
     return {
-        attr: pipeline.processor(pipeline.source(tensors, tp_rank, tp_size)) for attr, pipeline in pipelines.items()
+        weight_name: pipeline.processor(pipeline.source(tensors, tp_rank, tp_size))
+        for weight_name, pipeline in pipelines.items()
     }
 
 
-def _reload_chunk(
+def _reload_expert_stack(
     scheme: _ReloadScheme,
     routed_layers: list,
     layer_experts: list[tuple[int, int]],
     local_slots: dict[tuple[int, int], int],
     expert_weights: dict[tuple[int, int], dict[str, torch.Tensor]],
 ) -> int:
-    """Apply one chunk of pairs sharing a scheme and per-slot layout.
+    """Reload one stack of experts that use the same reload rules.
 
-    Assemble on the CPU pool, then do one H2D and one layout cast per attribute
-    for the whole stack, and one non-blocking copy per slot drained by a single
-    sync -- instead of doing all of that per pair.
+    Their tensors are prepared on the CPU pool, then stacked, NZ-cast and
+    written into the per-expert tensors.
     """
     # CPU phase: assemble pairs in parallel (read-only shared state).
     assemble = partial(
@@ -145,32 +139,37 @@ def _reload_chunk(
     with ThreadPoolExecutor(max_workers=min(len(layer_experts), _GATHER_MAX_WORKERS)) as pool:
         per_expert = list(pool.map(assemble, layer_experts))
 
-    # Device phase: one H2D and one layout cast per attribute. Landing at the
-    # slot's dtype covers every scheme (int8 weights, int64 bit scales, fp32).
+    # Device phase: one H2D copy and one NZ cast per weight tensor;
+    # each tensor is converted to the dtype its destination holds (int8
+    # weights, int64 bit scales, fp32).
     first_layer = routed_layers[layer_experts[0][0]]
     first_slot = local_slots[layer_experts[0]]
     device_tensors: dict[str, torch.Tensor] = {}
-    for attr in scheme.pipelines:
-        ref = _slot_tensor(first_layer, attr, first_slot)
-        stacked = torch.stack([expert[attr] for expert in per_expert])
-        device_tensors[attr] = stacked.to(device=ref.device, dtype=ref.dtype)
-    for attr in _WEIGHT_ATTRS:
-        device_tensors[attr] = scheme.cast_layout(device_tensors[attr])
+    for weight_name in scheme.pipelines:
+        per_slot = getattr(first_layer, f"{weight_name}_list", None)
+        ref = per_slot[first_slot] if per_slot is not None else getattr(first_layer, weight_name).data[first_slot]
+        stacked = torch.stack([expert[weight_name] for expert in per_expert])
+        device_tensors[weight_name] = stacked.to(device=ref.device, dtype=ref.dtype)
+    for weight_name in _MOE_WEIGHT_NAMES:
+        device_tensors[weight_name] = scheme.cast_layout(device_tensors[weight_name])
 
     # Scatter phase: non-blocking copies drained by one sync.
     for i, layer_expert in enumerate(layer_experts):
         layer, slot = routed_layers[layer_expert[0]], local_slots[layer_expert]
-        for attr in device_tensors:
-            _slot_tensor(layer, attr, slot).copy_(device_tensors[attr][i], non_blocking=True)
+        for weight_name in device_tensors:
+            per_slot = getattr(layer, f"{weight_name}_list", None)
+            target = per_slot[slot] if per_slot is not None else getattr(layer, weight_name).data[slot]
+            target.copy_(device_tensors[weight_name][i], non_blocking=True)
     torch.npu.synchronize()
     return len(layer_experts)
 
 
 def _get_ckpt_name_mapper(model: torch.nn.Module) -> Callable[[str], str]:
-    """Map raw checkpoint weight names into the model's runtime namespace."""
+    """Map checkpoint weight names to the names the model's own parameters use."""
     mapper = getattr(model, "hf_to_vllm_mapper", None)
     if mapper is None:
-        # No mapping declared: the checkpoint already uses runtime names (e.g. Qwen3-MoE).
+        # No mapping declared: the checkpoint already uses the model's parameter
+        # names (e.g. Qwen3-MoE).
         return lambda name: name
     return lambda name: mapper._map_name(name) or name
 
@@ -197,14 +196,14 @@ def _resolve_expert_tensor(
     return (key, suffix) if key is not None else None
 
 
-def _collect_safetensors_shards(
+def _collect_safetensors_files(
     model_config: ModelConfig,
     load_config: LoadConfig,
     model: torch.nn.Module,
 ) -> list[str]:
-    """Safetensors shards the normal loader would find (repo IDs via cache/download)."""
+    """Checkpoint safetensors file paths, resolved the same way the normal loader does."""
     loader = DefaultModelLoader(load_config)
-    _, shards, use_safetensors, _ = loader._prepare_weights(
+    _, files, use_safetensors, _ = loader._prepare_weights(
         model_name_or_path=model_config.model,
         subfolder=None,
         revision=model_config.revision,
@@ -212,26 +211,25 @@ def _collect_safetensors_shards(
         allow_patterns_overrides=getattr(model, "allow_patterns_overrides", None),
     )
     if not use_safetensors:
-        found = ", ".join(os.path.basename(shard) for shard in shards[:3]) or "no weight files"
+        found = ", ".join(os.path.basename(f) for f in files[:3]) or "no weight files"
         raise RuntimeError(
             f"[FT] scale_down expert reload requires a safetensors checkpoint, but "
             f"'{model_config.model}' resolved to non-safetensors files ({found})."
         )
-    return sorted(shard for shard in shards if shard.endswith(".safetensors"))
+    return sorted(f for f in files if f.endswith(".safetensors"))
 
 
 def _collect_matching_weights(
-    shards: list[str],
+    files: list[str],
     name_mapper: Callable[[str], str],
     wanted: dict[str, dict[int, tuple[int, int]]],
 ) -> dict[tuple[int, int], dict[str, torch.Tensor]]:
-    """Read only the wanted experts' tensors by walking shard headers.
+    """Return ``{(layer_idx, logical_expert_id): {suffix: tensor}}`` for the wanted experts.
 
-    ``safe_open(...).keys()`` reads just the JSON header, so rejected names
-    never reach ``get_tensor``: reads stay limited to the wanted experts.
+    Only file headers are read, so tensors of other experts are never loaded.
     """
     expert_weights: dict[tuple[int, int], dict[str, torch.Tensor]] = {}
-    for st_file in shards:
+    for st_file in files:
         with safe_open(st_file, framework="pt") as f:
             for raw_name in f.keys():  # noqa: SIM118
                 found = _resolve_expert_tensor(name_mapper(raw_name), wanted)
@@ -243,25 +241,24 @@ def _collect_matching_weights(
     return expert_weights
 
 
-def _resolve_local_slots(
+def _resolve_local_expert_slots(
     routed_layers: list,
     moe_layers: list,
-    reassignments: set[tuple[int, int]],
+    moved_experts: set[tuple[int, int]],
     ep_rank: int,
 ) -> dict[tuple[int, int], int]:
-    """Return the local weight slot of each reassigned expert on this rank.
+    """Map each moved expert to the index of its per-expert tensor on this rank.
 
-    An expert can have replicas on several ranks. Keep the replica hosted by
-    this rank, then subtract this rank's first physical expert id to get the
-    slot index used by the local weight tensors.
+    An expert may have replicas on several ranks; only the replica hosted by
+    this rank is returned.
     """
     local_slots: dict[tuple[int, int], int] = {}
-    for layer_idx, logical_id in reassignments:
+    for layer_idx, logical_id in moved_experts:
         layer_state = getattr(moe_layers[layer_idx], "eplb_state", None)
         l2p = getattr(layer_state, "logical_to_physical_map", None)
         if l2p is None:
             raise RuntimeError(
-                f"[FT] MoE layer {layer_idx} has no EPLB placement map; the reassigned expert has nowhere to land."
+                f"[FT] MoE layer {layer_idx} has no EPLB placement map; the moved expert has nowhere to land."
             )
         num_local = routed_layers[layer_idx].moe_config.num_local_experts
         start = ep_rank * num_local
@@ -276,25 +273,22 @@ def reload_experts_from_disk(
     model: torch.nn.Module,
     model_config: ModelConfig,
     load_config: LoadConfig,
-    reassignments: set[tuple[int, int]],
+    moved_experts: set[tuple[int, int]],
 ) -> int:
-    """Reload reassigned (moe_layer_idx, logical_expert_id) weights from disk.
+    """Reload the moved experts' weights into this rank's per-expert tensors.
 
-    Ascend keeps expert weights in runtime layout (transposed, NZ-cast, per-slot
-    lists, derived quant scales), so ``model.load_weights`` cannot write them
-    back. Only experts landing in this rank's physical block are reloaded, into
-    the slot from ``eplb_state.logical_to_physical_map`` after
-    ``_commit_eplb_maps``.
-
-    ``model_config``/``load_config`` locate the checkpoint like the normal
-    loader; a drafter passes its own draft config.
+    The tensors must end up exactly as ``process_weights_after_loading`` leaves
+    them (weights transposed and cast to NZ, quant scales converted, one tensor
+    per expert slot), which ``model.load_weights`` cannot produce. Each model is
+    read with its own checkpoint config and ``hf_to_vllm_mapper``; returns the
+    number of (layer, expert) pairs reloaded.
     """
-    if not reassignments:
+    if not moved_experts:
         return 0
 
     moe_layers = list(model.moe_layers)
     routed_layers = [getattr(layer, "routed_experts", layer) for layer in moe_layers]
-    local_slots = _resolve_local_slots(routed_layers, moe_layers, reassignments, get_ep_group().rank_in_group)
+    local_slots = _resolve_local_expert_slots(routed_layers, moe_layers, moved_experts, get_ep_group().rank_in_group)
     if not local_slots:
         return 0
 
@@ -305,22 +299,22 @@ def reload_experts_from_disk(
     for layer_idx, logical_id in local_slots:
         wanted.setdefault(routed_layers[layer_idx].layer_name, {})[logical_id] = (layer_idx, logical_id)
 
-    logger.info("[FT] Reloading %d reassigned (layer, expert) pair(s) on this rank from disk.", len(local_slots))
-    shards = _collect_safetensors_shards(model_config, load_config, model)
-    expert_weights = _collect_matching_weights(shards, name_mapper, wanted)
-    # A pair with no checkpoint weight would silently keep its slot's previous occupant, so fail.
+    logger.info("[FT] Reloading %d moved (layer, expert) pair(s) on this rank from disk.", len(local_slots))
+    files = _collect_safetensors_files(model_config, load_config, model)
+    expert_weights = _collect_matching_weights(files, name_mapper, wanted)
+    # A missing weight would leave the previous expert's weights in that tensor, so fail.
     unmatched = [layer_expert for layer_expert in local_slots if layer_expert not in expert_weights]
     if unmatched:
         raise RuntimeError(
             f"[FT] {len(unmatched)} (layer, expert) pair(s) had no matching "
             f"checkpoint weight, e.g. {unmatched[:5]}. The model's expert "
-            "weights likely use a layout that does not follow "
+            "weights likely use checkpoint names that do not follow "
             "'<layer_name>.<expert_id>.' (e.g. fused experts), or the "
-            "checkpoint's naming differs from the runtime namespace without "
-            "an hf_to_vllm_mapper declared on the model class."
+            "checkpoint's naming differs from the model's parameter names and "
+            "no hf_to_vllm_mapper is declared on the model class."
         )
 
-    reloaded = _reload_local_slots(routed_layers, local_slots, expert_weights)
+    reloaded = _reload_local_expert_slots(routed_layers, local_slots, expert_weights)
 
     logger.info("[FT] Expert weight reload complete: %d (layer, expert) pair(s).", reloaded)
     return reloaded

@@ -276,7 +276,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         return scale_bias.transpose(-2, -1).contiguous().sum(-2)
 
     @staticmethod
-    def process_scale_to_runtime(scale: torch.Tensor) -> torch.Tensor:
+    def _process_scale(scale: torch.Tensor) -> torch.Tensor:
         """Convert a checkpoint scale into the transposed int64 bit pattern npu_grouped_matmul reads (CPU)."""
         scale_np = scale.transpose(-2, -1).to(torch.float32).contiguous().cpu().numpy()
         scale_np.dtype = np.uint32
@@ -285,7 +285,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
     @staticmethod
     def w13_scale_to_runtime(scale: torch.Tensor) -> torch.Tensor:
         """Convert w13's per-channel scale into flat int64 bits with the group dim squeezed (CPU)."""
-        scale = AscendW4A8DynamicFusedMoEMethod.process_scale_to_runtime(scale)
+        scale = AscendW4A8DynamicFusedMoEMethod._process_scale(scale)
         if scale.dim() > 1 and scale.shape[1] == 1:
             scale = scale.squeeze(1)
         return scale
@@ -375,7 +375,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         # Keep w2's scale unsqueezed for npu_grouped_matmul.
         layer.w13_weight_scale.data = self.w13_scale_to_runtime(layer.w13_weight_scale.data).npu()
-        layer.w2_weight_scale.data = self.process_scale_to_runtime(layer.w2_weight_scale.data).npu()
+        layer.w2_weight_scale.data = self._process_scale(layer.w2_weight_scale.data).npu()
 
         # Packs 2 int4 into 1 int8 on-the-fly to mirror the modelslim path
         layer.w13_weight.data = self._pack_int4_to_int8(layer.w13_weight.data)
@@ -586,7 +586,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         # Keep w2's scale unsqueezed for npu_grouped_matmul.
         layer.w13_weight_scale.data = self.w13_scale_to_runtime(layer.w13_weight_scale.data).npu()
-        layer.w2_weight_scale.data = self.process_scale_to_runtime(layer.w2_weight_scale.data).npu()
+        layer.w2_weight_scale.data = self._process_scale(layer.w2_weight_scale.data).npu()
 
         layer.w13_scale_bias.data = self.reduce_scale_bias_modelslim(layer.w13_scale_bias.data)
         layer.w2_scale_bias.data = self.reduce_scale_bias_modelslim(layer.w2_scale_bias.data)
