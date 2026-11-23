@@ -305,14 +305,6 @@ jobs:
           uv pip install --no-deps "flash-linear-attention-npu-${NPU_TYPE}==26.11.0.dev20261126"
           python3 -c "import fla_npu.ops.ascendc"
 
-      - name: Install CannBot DSL ops for A5
-        if: ${{ matrix.group.npu_type == 'a5' }}
-        run: |
-          set -euo pipefail
-          export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly"
-          python3 -m pip install "cannbotdsl===0.8.2" "cannbot-arena-net-ops===0.3.0"
-          python3 -c "import ops"
-
       - name: Build MemFabric AccOffload for sparse KV lifecycle test
         if: ${{ matrix.group.npu_type == 'a3' && contains(matrix.group.tests, 'test_sparse_kv_offload_lifecycle.py') }}
         timeout-minutes: 15
