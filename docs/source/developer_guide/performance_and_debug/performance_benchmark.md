@@ -195,7 +195,7 @@ vllm bench throughput \
 If successful, you will see the following output:
 
 ```shell
-Processed prompts: 100%|█| 10/10 [00:03<00:00,  2.74it/s, est. speed input: 351.02 toks/s, output: 351.02 toks/s]
+Processed prompts: 100%|█| 10/10 [00:03<00:00, 2.74it/s, est. speed input: 351.02 tokens/s, output: 351.02 tokens/s]
 Throughput: 2.73 requests/s, 699.93 total tokens/s, 349.97 output tokens/s
 Total num prompt tokens:  1280
 Total num output tokens:  1280
@@ -223,7 +223,7 @@ vllm bench serve --model Qwen/Qwen2.5-VL-7B-Instruct \
 --no-stream
 ```
 
-```shell
+```output
 ============ Serving Benchmark Result ============
 Successful requests:                     10
 Failed requests:                         0
@@ -269,7 +269,7 @@ vllm bench serve \
   --dataset-path <your dataset path>/datasets/ShareGPT_V3_unfiltered_cleaned_split.json
 ```
 
-```shell
+```output
 ============ Serving Benchmark Result ============
 Successful requests:                     10
 Failed requests:                         0

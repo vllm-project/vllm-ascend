@@ -16,7 +16,7 @@ We should keep in mind that Patch is not the best way to make vLLM Ascend compat
 
 In `vllm_ascend/patch`, you can see the code structure as follows:
 
-```shell
+```text
 vllm_ascend/
 └── patch/
     ├── platform/
@@ -35,8 +35,8 @@ vllm_ascend/
 
 Before writing a patch, following the principle above, we should patch the least code. If it's necessary, we can patch the code in either **platform** or **worker** folder. Here is an example to patch `distributed` module in vLLM.
 
-1. Decide which version of vLLM we should patch. For example, after analysis, here we want to patch both `0.10.0` and `main` of vLLM.
-2. Decide which process we should patch. For example, here `distributed` belongs to the vLLM main process, so we should patch `platform`.
+1. Decide which version of vLLM we should patch. For example, after analysis, here we want to patch both `v0.10.0` and `main` of vLLM.
+2. Decide which process we should patch. For example, here `distributed` belongs to the vLLM Main process, so we should patch `platform`.
 3. Create the patch file in the right folder. The file should be named as `patch_{module_name}.py`. The example here is `vllm_ascend/patch/platform/patch_distributed.py`.
 4. Write your patch code in the new file. Here is an example:
 
@@ -67,7 +67,7 @@ Before writing a patch, following the principle above, we should patch the least
     #       <Describe the future plan to remove the patch>
     ```
 
-7. Add the Unit Test and E2E Test. Any newly added code in vLLM Ascend should contain the Unit Test and E2E Test as well. You can find more details in [test guide](../contribution/testing.md)
+7. Add the Unit Test and E2E Test. Any newly added code in vLLM Ascend should contain the Unit Test and E2E Test as well. You can find more details in [test guide](../contribution/testing.md).
 
 ## Limitations
 

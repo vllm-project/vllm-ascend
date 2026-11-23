@@ -5,7 +5,7 @@
 This feature addresses the need to optimize the **Time Per Output Token (TPOT)** and **Time To First Token (TTFT)** in large-scale inference tasks. The motivation is two-fold:
 
 1. **Adjusting Parallel Strategy and Instance Count for P and D Nodes**  
-   Using the disaggregated-prefill strategy, this feature allows the system to flexibly adjust the parallelization strategy (e.g., data parallelism (dp), tensor parallelism (tp), and expert parallelism (ep)) and the instance count for both P (Prefiller) and D (Decoder) nodes. This leads to better system performance tuning, particularly for **TTFT** and **TPOT**.
+   Using the disaggregated-prefill strategy, this feature allows the system to flexibly adjust the parallelization strategy (e.g., data parallelism (DP), tensor parallelism (TP), and expert parallelism (EP)) and the instance count for both P (Prefiller) and D (Decoder) nodes. This leads to better system performance tuning, particularly for **TTFT** and **TPOT**.
 
 2. **Optimizing TPOT**
    Without the disaggregated-prefill strategy, prefill tasks are inserted during decoding, which results in inefficiencies and delays. Disaggregated-prefill solves this by allowing for better control over the system's **TPOT**. By managing chunked prefill tasks effectively, the system avoids the challenge of determining the optimal chunk size and provides more reliable control over the time taken for generating output tokens.
@@ -227,11 +227,11 @@ Validate KV transfer config by checking whether the kv_connector type is support
 
 ### 2. Port Conflict Detection
 
-Before startup, perform a port-usage check on configured ports (e.g., rpc_port, metrics_port, http_port/metaserver) by attempting to bind. If a port is already in use, fail fast and log an error.
+Before startup, perform a port-usage check on configured ports (e.g., `rpc_port`, `metrics_port`, `http_port`/`metaserver`) by attempting to bind. If a port is already in use, fail fast and log an error.
 
 ### 3. PD Ratio Validation
 
-Under non-symmetric PD scenarios, validate the P-to-D tp ratio against expected and scheduling constraints to ensure correct and reliable operation.
+Under non-symmetric PD scenarios, validate the P-to-D TP ratio against expected and scheduling constraints to ensure correct and reliable operation.
 
 ---
 
@@ -239,4 +239,4 @@ Under non-symmetric PD scenarios, validate the P-to-D tp ratio against expected 
 
 - Heterogeneous P and D nodes are not supported, for example, running P nodes on A2 and D nodes on A3.
 
-- In non-symmetric TP configurations, only cases where the P nodes have a higher TP degree than the D nodes and the P TP count is an integer multiple of the D TP count are supported (i.e., P_tp > D_tp and P_tp % D_tp = 0).
+- In unequal TP configurations, only cases where the P nodes have a higher TP degree than the D nodes and the P TP count is an integer multiple of the D TP count are supported (i.e., P_tp > D_tp and P_tp % D_tp = 0).

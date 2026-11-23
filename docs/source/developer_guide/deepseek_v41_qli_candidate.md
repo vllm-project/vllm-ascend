@@ -15,7 +15,7 @@ updates remain unchanged.
 The operator consumes `TND` Q and `PA_BBND` index K directly. DeepSeek V4.1's
 four-slot layer-outermost allocator packs index K and FP16 scales after KV
 inside each shared page. C2 uses 64-row views with a 128KB block stride;
-C1 uses 128-row views with a 147712-byte block stride. The PyTorch adapter passes
+C1 uses 128-row views with a 144.25KB block stride. The PyTorch adapter passes
 their actual leading strides to ACLNN.
 Neither layout requires gathering the whole context into a dense tensor.
 

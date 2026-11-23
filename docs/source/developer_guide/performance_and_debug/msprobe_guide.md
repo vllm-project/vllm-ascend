@@ -6,7 +6,7 @@ For more details, see [Ascend/msprobe](https://gitcode.com/Ascend/msprobe).
 
 ## 0. Background Concepts
 
-`msprobe` supports three accuracy levels:
+`msprobe` supports three dump levels:
 
 - **L0**: dumps tensors at the module level and generates `construct.json` so that visualization tools can rebuild the network structure. A model or submodule handle must be passed in.
 - **L1**: collects operator-level statistics only, which is suitable for lightweight troubleshooting.
@@ -14,7 +14,7 @@ For more details, see [Ascend/msprobe](https://gitcode.com/Ascend/msprobe).
 
 ## 1. Prerequisites
 
-### 1.1 Install `msprobe`
+### 1.1 Install msprobe
 
 Install msprobe with pip:
 
@@ -24,7 +24,7 @@ pip install mindstudio-probe
 
 ### 1.2 Graph mode dump (optional)
 
-If you need to dump cudagraph graphs, you need to install from source code:
+If you need to dump CUDA graphs, you need to install from source code:
 
 1. Install `aclgraph_dump` from source code:
 
@@ -36,7 +36,7 @@ If you need to dump cudagraph graphs, you need to install from source code:
    pip install artifacts/mindstudio_probe*.whl
    ```
 
-## 2. Collecting Data with `msprobe`
+## 2. Collecting Data with msprobe
 
 We generally follow a coarse-to-fine strategy when capturing data. First, identify the token where the issue shows up, and then decide which range needs to be sampled around that token. The typical workflow is described below.
 
@@ -74,7 +74,7 @@ To restrict the operators that are captured, configure the `list` block:
   The `level` setting determines what can be provided—modules when `level=L0`, APIs when `level=L1`, and either modules or APIs when `level=mix`.
 
 - `list` (list[str]): Custom operator list. Options include:
-    - Supply the full names of specific APIs in PyTorch pynative scenarios to only dump those APIs. Example: `"list": ["Tensor.permute.1.forward", "Tensor.transpose.2.forward", "Torch.relu.3.forward"]`.
+    - Supply the full names of specific APIs in PyTorch PyNative scenarios to only dump those APIs. Example: `"list": ["Tensor.permute.1.forward", "Tensor.transpose.2.forward", "Torch.relu.3.forward"]`.
     - When `level=mix`, you can provide module names so that the dump expands to everything produced while the module is running. Example: `"list": ["Module.module.language_model.encoder.layers.0.mlp.ParallelMlp.forward.0"]`.
     - Provide a substring such as `"list": ["relu"]` to dump every API whose name contains the substring. When `level=mix`, modules whose names contain the substring are also expanded.
 
@@ -100,7 +100,7 @@ eager mode:
 }
 ```
 
-Graph mode:
+graph mode:
 
 ```json
 {
@@ -113,7 +113,7 @@ Graph mode:
 }
 ```
 
-## 3. Enable `msprobe` in vllm-ascend
+## 3. Enable msprobe in vllm-ascend
 
 1. Start vLLM and pass the dump config content through `--additional-config`:
 
@@ -290,7 +290,7 @@ Use `msprobe graph_visualize` to build or compare graphs, then open the generate
 - `RuntimeError: Please enforce eager mode`: Restart vLLM and add the `--enforce-eager` flag.
 - No dump files: Confirm that the JSON path is correct and every node has write permission. In distributed scenarios set `keep_all_ranks` so that every rank writes its own dump.
 - Dumps are too large: Start with a `statistics` task to locate abnormal tensors, then narrow the scope with `scope`/`list`/`tensor_list`, `filters`, `token_range`, etc.
-- `TypeError: PrecisionDebugger.start() got an unexpected keyword argument 'scheduled_tokens'`: Please Upgrade `msprobe` to v26.2.0 or later.
+- `TypeError: PrecisionDebugger.start() got an unexpected keyword argument 'scheduled_tokens'`: Please upgrade `msprobe` to v26.2.0 or later.
 
 ---
 
@@ -302,7 +302,7 @@ Use `msprobe graph_visualize` to build or compare graphs, then open the generate
 
 An L0 `dump.json` contains forward I/O for modules together with parameters. Using PyTorch's `Conv2d` as an example, the network code looks like:
 
-`output = self.conv2(input)  # self.conv2 = torch.nn.Conv2d(64, 128, 5, padding=2, bias=True)`
+`output = self.conv2(input) # self.conv2 = torch.nn.Conv2d(64, 128, 5, padding=2, bias=True)`
 
 `dump.json` contains the following entries:
 
@@ -402,7 +402,7 @@ An L1 `dump.json` records forward I/O for APIs. Using PyTorch's `relu` function 
  "task": "tensor",
  "level": "L1",
  "framework": "pytorch",
- "dump_data_dir":"/dump/path",
+ "dump_data_dir": "/dump/path",
  "data": {
   "Functional.relu.0.forward": {
    "input_args": [
