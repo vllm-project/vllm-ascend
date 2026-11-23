@@ -11,7 +11,6 @@ transport setups. Choose the setup for your hardware, start a single-host
 **1E + 1PD** service, then add shared caching and a second Encoder. The serving
 commands use the `ascend` Mooncake protocol in both setups.
 
-
 ## Roles and topologies
 
 Disaggregated Encoder (EPD) splits the multimodal path of a vision-language
@@ -154,29 +153,22 @@ creation inside a running worker.
 
 ## Model Runner support
 
-EPD runs on **Model Runner V2 (MRV2) by default**. MRV2 gained EPD and
-encoder-only support in the encoder-cache and model-runner work that removed
-`ec_transfer_config` and `mm_encoder_only` from the V2 blacklist, so no extra
-flag is needed on the Ascend side. To force the legacy Model Runner V1, export:
+EPD runs on **Model Runner V2 (MRV2)**, the only model runner. Model Runner V1
+has been removed from vllm-ascend, so no extra flag is needed on the Ascend
+side and there is no V1 fallback to select. Do **not** set
+`VLLM_USE_V2_MODEL_RUNNER=0`: the setting cannot be honored and the vLLM
+process fails at startup with a `ValueError` (`vllm_ascend/mrv2_utils.py`).
 
-```bash
-export VLLM_USE_V2_MODEL_RUNNER=0
-```
+Runner selection lives in `vllm_ascend/mrv2_utils.py`; E nodes use the upstream
+`MMEncoderModelRunner` for the encoder-only instance, and P/D nodes use the
+Ascend V2 model runner and the upstream encoder-cache contract.
 
-The selection logic lives in `vllm_ascend/mrv2_utils.py`:
-
-- **MRV2 (default)**: E nodes use the upstream `MMEncoderModelRunner` for the
-  encoder-only instance; P/D nodes use the Ascend V2 model runner and the
-  upstream encoder-cache contract.
-- **MRV1**: EPD is served by the V1 Ascend model runner, which contains the
-  complete encoder-cache implementation.
-
-Some features still force V1 even when MRV2 is the default. In particular,
-**the VL encoder graph is not supported on MRV2**: setting
-`--compilation-config '{"cudagraph_mm_encoder": true}'` makes the runner fall
-back to MRV1 with a warning. Other V2 blacklist entries (draft-window and
-several speculative-decoding modes) behave the same way. Do not combine the VL
-encoder graph with EPD if MRV2 behavior is required.
+**The VL encoder graph is supported on MRV2**: setting
+`--compilation-config '{"cudagraph_mm_encoder": true}'` enables the encoder ACL
+graph on Model Runner V2, and the V1 fallback that older builds used for it no
+longer exists. Features the V2 runner cannot serve are rejected at startup
+instead of falling back to another runner. The EPD examples do not enable the
+encoder graph.
 
 ### Encoder-only pooling models are a different entry point
 
@@ -975,8 +967,9 @@ disconnects before the first streamed chunk. Stop in this order:
 ## Limitations
 
 - **VL encoder graph**: `--compilation-config '{"cudagraph_mm_encoder": true}'`
-  is not supported on MRV2 and falls back to MRV1. EPD with the encoder graph
-  should be treated as a V1 deployment.
+  is supported on MRV2 (encoder ACL graph); there is no V1 fallback, and the
+  EPD examples do not enable it. EPD with the encoder graph has not been
+  validated.
 - **Encoder-only pooling models** (`--runner pooling`) are not EPD; they have
   no PD/EPD split. SigLIP2 does not support PD separation.
 - **EC + Pipeline Parallel** is not verified. Treat the combination as unknown
@@ -994,9 +987,9 @@ disconnects before the first streamed chunk. Stop in this order:
   multimodal processor cache, so processed multimodal inputs are not reused.
   This cache is independent of the encoder-cache transfer described here.
 - **310P**: multi-process EPD is not committed on 310P.
-- **E+P+D** is documented as a supported deployment design, but end-to-end
-  validation currently covers E+PD only; MRV1 EPD and E+P+D end-to-end tests are
-  still being added.
+- **E+P+D** is documented as a supported deployment design. End-to-end test
+  cases for E+P+D are included in the test suite but have not been validated
+  on hardware yet.
 
 ## Related guides
 

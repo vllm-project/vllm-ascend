@@ -16,7 +16,7 @@ export EC_SHARED_STORAGE_PATH=/path/visible/to/all/nodes/ec_cache
 
 ## Model Runner support
 
-EPD runs on Model Runner V2 by default; set `VLLM_USE_V2_MODEL_RUNNER=0` to force Model Runner V1. The VL encoder graph (`--compilation-config '{"cudagraph_mm_encoder": true}'`) is not supported on Model Runner V2 and falls back to Model Runner V1 automatically.
+EPD runs on Model Runner V2, the only model runner; Model Runner V1 has been removed, so `VLLM_USE_V2_MODEL_RUNNER=0` fails at startup. The VL encoder graph (`--compilation-config '{"cudagraph_mm_encoder": true}'`) is supported on Model Runner V2 (encoder ACL graph); there is no V1 fallback.
 
 ### ECexample-connector deployment guide
 

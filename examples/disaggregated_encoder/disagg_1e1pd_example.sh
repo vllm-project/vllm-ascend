@@ -23,8 +23,9 @@ TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-12000}"   # wait_for_server timeout
 NUM_PROMPTS="${NUM_PROMPTS:-100}"    # number of prompts to send in benchmark
 MM_IMAGE_PATH="${MM_IMAGE_PATH:-}"  # local image for the smoke request; see tools/send_mm_request.py (dataset vllm-ascend/mm_request)
 
-# EPD defaults to Model Runner V2; export VLLM_USE_V2_MODEL_RUNNER=0 to force MRV1
-# (the VL encoder graph falls back to MRV1).
+# EPD runs on Model Runner V2, the only model runner: Model Runner V1 has been
+# removed, so do not set VLLM_USE_V2_MODEL_RUNNER=0 (it fails at startup).
+# The VL encoder graph is supported on Model Runner V2; there is no V1 fallback.
 
 ###############################################################################
 # Helpers

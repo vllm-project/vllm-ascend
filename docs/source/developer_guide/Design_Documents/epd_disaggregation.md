@@ -123,26 +123,24 @@ sequenceDiagram
 
 ### 5. Model runner selection
 
-The encoder-cache integration has two implementations behind a single
-configuration:
-
-- **Model Runner V1**: `vllm_ascend/worker/v1/model_runner.py` contains the
-  complete encoder-cache implementation, including the E-node encoder-only path
-  and the consumer-side load path.
-- **Model Runner V2**: the runner delegates the encoder-cache contract to the
-  upstream V2 interfaces. Ascend pieces live in
-  `vllm_ascend/worker/worker.py`: encoder-only instances use the upstream
-  `MMEncoderModelRunner`; `ensure_ec_transfer_initialized` registers the
-  connector during worker distributed initialization;
-  `start_worker_services()` starts connector services after model load, and
-  `ensure_ec_transfer_shutdown()` stops them during worker shutdown.
+Model Runner V1 has been removed from vllm-ascend, so Model Runner V2 is the
+only runner and the encoder-cache integration has a single implementation: the
+runner delegates the encoder-cache contract to the upstream V2 interfaces.
+Ascend pieces live in
+`vllm_ascend/worker/worker.py`: encoder-only instances use the upstream
+`MMEncoderModelRunner`; `ensure_ec_transfer_initialized` registers the
+connector during worker distributed initialization;
+`start_worker_services()` starts connector services after model load, and
+`ensure_ec_transfer_shutdown()` stops them during worker shutdown.
 
 Runner selection is implemented by
 `vllm_ascend/mrv2_utils.py` and installed by
-`vllm_ascend/patch/platform/patch_use_v2_model_runner.py`. MRV2 is the
-default; `VLLM_USE_V2_MODEL_RUNNER=0` forces V1. The V2 blacklist still
-contains the VL encoder graph (`compilation_config.cudagraph_mm_encoder`), so
-an encoder-graph deployment falls back to V1 with a warning.
+`vllm_ascend/patch/platform/patch_use_v2_model_runner.py`. Do not set
+`VLLM_USE_V2_MODEL_RUNNER=0`: there is no V1 runner to select and the process
+fails at startup with a `ValueError`. Features the V2 runner cannot serve are
+rejected at startup by the V2 validation instead of falling back to another
+runner. The VL encoder graph (`compilation_config.cudagraph_mm_encoder`) is
+supported by Model Runner V2.
 
 Encoder-only **pooling** models (BERT/BGE/SigLIP2 with `--runner pooling`) are
 a separate feature: they are served as pure embedding models and have no EPD
@@ -185,9 +183,9 @@ The Ascend ExampleConnector adaptation (`vllm_ascend/patch/platform/patch_exampl
 
 | Environment variable | Effect |
 | --- | --- |
-| unset | Model Runner V2 by default, unless the config hits the V2 blacklist |
-| `VLLM_USE_V2_MODEL_RUNNER=1` | Force Model Runner V2 |
-| `VLLM_USE_V2_MODEL_RUNNER=0` | Force Model Runner V1 |
+| unset | Model Runner V2 |
+| `VLLM_USE_V2_MODEL_RUNNER=1` | Model Runner V2 (explicit) |
+| `VLLM_USE_V2_MODEL_RUNNER=0` | Not supported: startup error, because Model Runner V1 has been removed |
 
 ### Reference proxy options
 
@@ -328,8 +326,9 @@ script (`disagg_1e1pd_example.sh`) redirects them to files under `LOG_PATH`.
 
 ## Limitations
 
-- **VL encoder graph**: `compilation_config.cudagraph_mm_encoder=True` is in
-  the V2 blacklist and forces MRV1; MRV2 does not support the encoder graph.
+- **VL encoder graph**: `compilation_config.cudagraph_mm_encoder=True` is
+  supported by Model Runner V2; Model Runner V1 has been removed, so there is
+  no V1 fallback. The EPD examples do not enable the encoder graph.
 - **EC + Pipeline Parallel** is unverified (marked unknown in the feature
   matrix).
 - **ECCPUConnector** supports a single host only; it is not a cross-node EPD
@@ -337,6 +336,6 @@ script (`disagg_1e1pd_example.sh`) redirects them to files under `LOG_PATH`.
 - **ECMooncakeConnector** needs a Mooncake deployment and shared storage.
 - **ECExampleConnector** needs a shared filesystem with identical absolute paths
   on E and P/D.
-- **E+P+D** is a supported design with example scripts, but end-to-end test
-  coverage currently exists for E+PD only; MRV1 EPD and E+P+D scenarios are
-  still being added.
+- **E+P+D** is a supported design with example scripts. End-to-end test cases
+  for E+P+D are included in the test suite but have not been validated on
+  hardware yet.
