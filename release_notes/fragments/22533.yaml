@@ -1,0 +1,4 @@
+pr: 22533
+entries:
+  - category: performance
+    text: Reduced paged INT8 KV-cache preparation time for GQA cached prefill on Ascend NPUs.
