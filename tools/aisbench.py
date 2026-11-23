@@ -316,7 +316,10 @@ class AisbenchRunner:
         while True:
             line = self._check_runtime_stdout()
             if "Current exp folder: " in line:
-                self.exp_folder = re.search(r"Current exp folder: (.*)", line).group(1)
+                match = re.search(r"Current exp folder: (.*)", line)
+                if match is None:
+                    raise RuntimeError(f"Failed to parse experiment folder from aisbench output: {line!r}")
+                self.exp_folder = match.group(1)
                 print(f"Current exp folder: {self.exp_folder}")
                 return
             self._check_runtime_error(line)
@@ -345,7 +348,10 @@ class AisbenchRunner:
             raise RuntimeError(error_msg) from None
 
     def _get_result_performance(self):
-        result_dir = re.search(r"Performance Result files located in (.*)", self.result_line).group(1)[:-1]
+        match = re.search(r"Performance Result files located in (.*)", self.result_line)
+        if match is None:
+            raise RuntimeError(f"Failed to parse performance result path from aisbench output: {self.result_line!r}")
+        result_dir = match.group(1)[:-1]
         dataset_type = self.dataset_conf.split("/")[0]
         result_csv_file = os.path.join(result_dir, f"{dataset_type}.csv")
         result_json_file = os.path.join(result_dir, f"{dataset_type}.json")
@@ -356,7 +362,10 @@ class AisbenchRunner:
         self.result = [self.result_csv, self.result_json]
 
     def _get_result_accuracy(self):
-        acc_file = re.search(r"write csv to (.*)", self.result_line).group(1)
+        match = re.search(r"write csv to (.*)", self.result_line)
+        if match is None:
+            raise RuntimeError(f"Failed to parse accuracy csv path from aisbench output: {self.result_line!r}")
+        acc_file = match.group(1)
         df = pd.read_csv(acc_file)
         self.result = float(df.iloc[0, -1])
 
