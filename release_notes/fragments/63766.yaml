@@ -1,0 +1,4 @@
+pr: 63766
+entries:
+  - category: bugfix
+    text: Improved error reporting for malformed inputs in vllm_ascend/utils.py. calc_split_factor now raises a descriptive ValueError instead of a bare ZeroDivisionError when given an empty or non-positive dim list, and malformed mtp.* checkpoint weight names now raise a ValueError naming the offending weight instead of a context-free int() failure.
