@@ -1796,12 +1796,12 @@ def _reshape_kv_cache_v2(
                     if group_spec.cache_sparse_li_c4:
                         indexer_scale_cache_shape = (*indexer_scale_cache_shape[:-1], group_spec.scale_dim // 2, 2)
 
-                    # Native allocation already returns separate K and scale views.
-                    # A reused slot arrives as one raw tensor, so split it once both
-                    # component shapes are known.
+                    # Without offload, the Indexer allocator already returns (K, scale).
+                    # Offload provides one byte tensor. Both shapes are known here,
+                    # so we can calculate where to split it.
                     if use_contiguous_components and isinstance(raw_cache, torch.Tensor):
-                        # Keep the native K/scale planes for P/D transfer when no other group overlays this slot.
-                        # Store all K blocks first, then all scale blocks.
+                        # With one cache group, use [all K blocks][all scale blocks]
+                        # so Push can copy K to K and scale to scale on the decode worker.
                         k_bytes = math.prod(kv_cache_shape) * get_dtype_size(group_spec.dtype)
                         scale_elem_size = get_dtype_size(group_spec.scale_dtype)
                         scale_offset = _align_up(k_bytes, scale_elem_size)
@@ -1814,7 +1814,7 @@ def _reshape_kv_cache_v2(
                             )
                         raw_k_tensor = raw_cache[:k_bytes]
                         raw_scale_tensor = raw_cache[scale_offset:required_bytes]
-                        # Reuse the native tuple branch below to reshape both views.
+                        # The else branch below sets the dtype and shape of both slices.
                         raw_cache = (raw_k_tensor, raw_scale_tensor)
 
                 if isinstance(raw_cache, torch.Tensor):
