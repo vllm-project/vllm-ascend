@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 from vllm.config.model import ModelConfig
-from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -14,7 +13,6 @@ from vllm_ascend.patch.platform.patch_pp_mtp import (
     _patch_engine_core,
     _patch_model_config_validation,
     _patch_model_runner_output,
-    _patch_scheduler_make_cached_request_data,
     _patch_scheduler_update_after_schedule,
     _patch_scheduler_update_from_output,
     _update_pp_mtp_spec_token_ids,
@@ -135,87 +133,6 @@ def test_pp_ipc_runtime_patch_skips_pd_prefill_node():
 
 
 @pytest.mark.parametrize("async_scheduling", [False, True])
-def test_pp_ipc_cached_request_data_carries_confirmed_token_for_sync_and_async(
-    async_scheduling,
-):
-    scheduler = Scheduler.__new__(Scheduler)
-    scheduler.use_pp = True
-    scheduler.use_v2_model_runner = False
-    scheduler.scheduler_config = SimpleNamespace(async_scheduling=async_scheduling)
-    scheduler.vllm_config = SimpleNamespace(
-        kv_transfer_config=None,
-        speculative_config=object(),
-        use_v2_model_runner=False,
-    )
-    scheduler.prev_step_scheduled_req_ids = set()
-
-    request = SimpleNamespace(
-        request_id="req-0",
-        all_token_ids=[11, 12, 13],
-        num_computed_tokens=2,
-        num_output_tokens=1,
-        num_output_placeholders=0,
-        # vLLM main's Scheduler._make_cached_request_data fences the final
-        # prefill chunk with this flag; v0.34.0 does not read it.
-        is_prefill_chunk=False,
-    )
-    blocks = SimpleNamespace(get_block_ids=lambda allow_none: ([0],))
-
-    cached_reqs_data = Scheduler._make_cached_request_data(
-        scheduler,
-        running_reqs=[request],
-        num_scheduled_tokens={"req-0": 3},
-        spec_decode_tokens={"req-0": [101, 102]},
-        req_to_new_blocks={"req-0": blocks},
-    )
-
-    assert cached_reqs_data.req_ids == ["req-0"]
-    assert cached_reqs_data.new_token_ids == [[13]]
-    assert scheduler.scheduler_config.async_scheduling is async_scheduling
-
-
-@pytest.mark.parametrize(
-    ("async_scheduling", "expected_new_token_ids"),
-    [(False, [[]]), (True, [[13]])],
-)
-def test_pp_ipc_cached_request_data_fills_empty_confirmed_token_only_for_async(
-    async_scheduling,
-    expected_new_token_ids,
-):
-    scheduler = Scheduler.__new__(Scheduler)
-    scheduler.use_pp = True
-    scheduler.use_v2_model_runner = False
-    scheduler.scheduler_config = SimpleNamespace(async_scheduling=async_scheduling)
-    scheduler.vllm_config = SimpleNamespace(
-        kv_transfer_config=None,
-        speculative_config=object(),
-        use_v2_model_runner=False,
-    )
-    scheduler.prev_step_scheduled_req_ids = set()
-
-    request = SimpleNamespace(
-        request_id="req-0",
-        all_token_ids=[11, 12, 13],
-        num_computed_tokens=3,
-        num_output_tokens=1,
-        num_output_placeholders=0,
-        is_prefill_chunk=False,
-    )
-    blocks = SimpleNamespace(get_block_ids=lambda allow_none: ([0],))
-
-    cached_reqs_data = Scheduler._make_cached_request_data(
-        scheduler,
-        running_reqs=[request],
-        num_scheduled_tokens={"req-0": 2},
-        spec_decode_tokens={"req-0": [101, 102]},
-        req_to_new_blocks={"req-0": blocks},
-    )
-
-    assert cached_reqs_data.new_token_ids == expected_new_token_ids
-    assert scheduler.scheduler_config.async_scheduling is async_scheduling
-
-
-@pytest.mark.parametrize("async_scheduling", [False, True])
 def test_pp_mtp_spec_tokens_are_written_from_model_runner_output_for_sync_and_async(
     async_scheduling,
 ):
@@ -262,7 +179,6 @@ def test_pp_mtp_helpers_and_patch_reentry():
     _patch_model_runner_output()
     _patch_engine_core()
     _patch_scheduler_update_after_schedule()
-    _patch_scheduler_make_cached_request_data()
     _patch_scheduler_update_from_output()
     _patch_model_config_validation()
 
@@ -352,33 +268,3 @@ def test_pp_mtp_spec_tokens_remain_unconstrained_during_reasoning(monkeypatch):
     _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_output)
 
     assert request.spec_token_ids == [301, 302]
-
-
-def test_pp_ipc_cached_request_data_skips_empty_output_tokens():
-    scheduler = Scheduler.__new__(Scheduler)
-    scheduler.use_pp = True
-    scheduler.use_v2_model_runner = False
-    scheduler.scheduler_config = SimpleNamespace(async_scheduling=True)
-    scheduler.vllm_config = SimpleNamespace(
-        kv_transfer_config=None,
-        speculative_config=object(),
-        use_v2_model_runner=False,
-    )
-    scheduler.prev_step_scheduled_req_ids = set()
-    req_empty = SimpleNamespace(
-        request_id="req-0",
-        all_token_ids=[],
-        num_computed_tokens=3,
-        num_output_tokens=0,
-        num_output_placeholders=0,
-        is_prefill_chunk=False,
-    )
-    blocks = SimpleNamespace(get_block_ids=lambda allow_none: ([0],))
-    cached = Scheduler._make_cached_request_data(
-        scheduler,
-        running_reqs=[req_empty],
-        num_scheduled_tokens={"req-0": 2},
-        spec_decode_tokens={},
-        req_to_new_blocks={"req-0": blocks},
-    )
-    assert cached.new_token_ids == [[]]
