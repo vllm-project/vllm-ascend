@@ -650,6 +650,11 @@ class NPUPlatform(Platform):
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
 
+        model_config = vllm_config.model_config
+        if model_config.enable_sleep_mode and model_config.sleep_mode_backend == "cumem":
+            model_config.sleep_mode_backend = "camem"
+            logger.info_once("Using Ascend sleep-mode backend 'camem' for the default 'cumem' name.")
+
         # vLLM #61392 folds `compress_ratios` into `layer_types`/`compress_rates`.
         # Restore the legacy field before any runner/model/cache component reads
         # it (e.g. NPUModelRunner.__init__ setting `use_compress`).

@@ -21,7 +21,6 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from vllm.device_allocator.sleep_mode_backend import SleepModeBackend, SleepModeBackendFactory
-from vllm.logger import logger
 
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 
@@ -58,8 +57,3 @@ SleepModeBackendFactory.register_backend(
     "vllm_ascend.device_allocator.sleep_mode_backend",
     "CaMemBackend",
 )
-
-# "cumem" is the platform sleep allocator. Point the upstream default name at
-# the CaMem implementation instead of changing ModelConfig.
-SleepModeBackendFactory._registry["cumem"] = SleepModeBackendFactory._registry["camem"]
-logger.info_once("Ascend maps sleep-mode backend 'cumem' to CaMemBackend.")
