@@ -1801,7 +1801,6 @@ def _reshape_kv_cache_v2(
                     # so we can calculate where to split it.
                     if use_contiguous_components and isinstance(raw_cache, torch.Tensor):
                         # With one cache group, use [all K blocks][all scale blocks]
-                        # so Push can copy K to K and scale to scale on the decode worker.
                         k_bytes = math.prod(kv_cache_shape) * get_dtype_size(group_spec.dtype)
                         scale_elem_size = get_dtype_size(group_spec.scale_dtype)
                         scale_offset = _align_up(k_bytes, scale_elem_size)
