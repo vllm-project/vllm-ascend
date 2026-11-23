@@ -25,3 +25,18 @@ domains:
       needs one at all
     paths:
       - "release_notes/**"
+  - name: patch
+    description: upstream monkey-patches under vllm_ascend/patch/ (registration,
+      catalog discipline, upstream removal plan)
+    paths:
+      - "vllm_ascend/patch/**"
+  - name: model-execution
+    description: inheritance surfaces over upstream vLLM (worker, model runner
+      V1/V2, 310P, attention, compilation, sample, spec_decode)
+    paths:
+      - "vllm_ascend/worker/**"
+      - "vllm_ascend/_310p/**"
+      - "vllm_ascend/attention/**"
+      - "vllm_ascend/compilation/**"
+      - "vllm_ascend/sample/**"
+      - "vllm_ascend/spec_decode/**"
