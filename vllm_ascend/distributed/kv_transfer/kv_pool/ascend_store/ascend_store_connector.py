@@ -443,6 +443,12 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         cast(KVPoolWorker, self.connector_worker).wait_for_save(self._get_connector_metadata())
 
+    def drain_queued_saves(self) -> None:
+        worker = self.connector_worker
+        drain = getattr(worker, "drain_queued_saves", None)
+        if drain is not None:
+            drain()
+
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
