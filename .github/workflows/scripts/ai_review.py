@@ -276,12 +276,11 @@ class Orchestrator:
         perm = self._gh_json("api", f"repos/:owner/:repo/collaborators/{self.actor}/permission")
         return perm.get("permission") in ("admin", "maintain", "write")
 
-    def author_in_allowlist(self) -> bool:
-        author = self._gh("pr", "view", str(self.pr), "--json", "author", "-q", ".author.login")
+    def user_in_allowlist(self, user: str) -> bool:
         path = os.path.join(self.workspace, ".github", "agent-review", "allowlist.txt")
         with open(path) as f:
             entries = parse_allowlist(f.read())
-        return author in entries
+        return user in entries
 
     # ---- agent round ------------------------------------------------------
 
@@ -588,9 +587,12 @@ class Orchestrator:
             if not self.actor_can_write():
                 print(f"actor {self.actor} lacks write access; ignoring", flush=True)
                 return 0
-            if not self.author_in_allowlist():
+            # The allowlist authorizes OPERATORS (who may apply the label to
+            # any PR), not the PR under review.
+            if not self.user_in_allowlist(self.actor):
                 self.post_notice(
-                    "AI review POC 未覆盖此 PR（作者不在灰度名单），已忽略并移除标签。如需参与请在 RFC #21451 留言。",
+                    f"@{self.actor} 不在 ai-review 灰度名单，无法启动评审（名单见 "
+                    "`.github/agent-review/allowlist.txt`，加入请在 RFC #21451 留言）。标签已移除。",
                 )
                 subprocess.run(
                     ["gh", "pr", "edit", str(self.pr), "--remove-label", AI_REVIEW_LABEL],
