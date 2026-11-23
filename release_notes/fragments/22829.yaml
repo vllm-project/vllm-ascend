@@ -1,0 +1,8 @@
+pr: 22829
+entries:
+  - category: performance
+    text: >-
+      On GDN models with Model Runner V2 and align-mode prefix caching,
+      set `gdn_checkpoint_policy` to `prefix_only` to reuse the cached prefix
+      on a cache hit while skipping new suffix checkpoints and the prefill
+      splits used to save them.
