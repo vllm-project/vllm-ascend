@@ -1500,24 +1500,18 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     Reuse the Prefill TP1/PCP8/DP1 and Decode TP1/PCP1/DP8 topology,
     launcher and proxy from [Section 5.3](#glm53-flash-5-3-950dt).
     Both roles use EP8, FP8 main KV cache and an FP8 indexer.
-    For this pool example, set `--max-model-len 133120`,
-    `--limit-mm-per-prompt '{"image": 1, "video": 0}'` and explicit
-    `--enable-chunked-prefill` on both roles. Prefill uses
-    `HCCL_BUFFSIZE=3072`, `--max-num-seqs 256`,
-    `--max-num-batched-tokens 24576`, `--gpu-memory-utilization 0.9` and
-    `multistream_overlap_shared_expert: true`; set `enable_flashcomm1: false`,
-    `enable_fused_mc2: 0` and `enable_shared_expert_dp: false` on Prefill.
-    Add `PYTHONHASHSEED=0`, `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'`
-    and `--allowed-local-media-path /` on both roles. Decode uses
-    `HCCL_BUFFSIZE=1024`,
-    `--max-num-seqs 30`, `--max-num-batched-tokens 120`,
-    `enable_fused_mc2: 0` and `enable_npugraph_ex: false`.
+    Keep the ordinary PD serving parameters on both roles, including the
+    context length, multimodal limits, scheduling limits, HCCL buffer sizes,
+    memory utilization, MTP and role-specific tuning options. Apply only the
+    pooling changes below.
+    Add `PYTHONHASHSEED=0` and `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'`
+    on both roles for the Memcache backend.
 
     Follow [Scenario 2: Memcache Backend](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend)
     for the Memcache backend configuration.
 
-    Keep prefix caching, chunked prefill and the hybrid KV cache manager
-    enabled. With prefix caching enabled, the model configuration selects
+    Add `--enable-chunked-prefill` on both roles. Keep prefix caching and the
+    hybrid KV cache manager enabled. With prefix caching enabled, the model configuration selects
     `mamba_cache_mode=align`, which is required by `AscendStoreConnector`.
     Remove `--use-replayssm` from both role scripts for this pooling scenario.
     Keep `use_layerwise=false` and PP=DCP=1. Do not enable
@@ -1563,7 +1557,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     2. On the Decode node, replace the final `--kv-transfer-config`
        argument in `run_dp_template.sh` with the following fragment.
        Keep the remaining Decode flags from Section 5.3, including
-       `--device-ids "$1"`, the FP8 indexer, MTP5 and `FULL_DECODE_ONLY`.
+       `ASCEND_RT_VISIBLE_DEVICES="$1"`, the FP8 indexer, MTP5 and `FULL_DECODE_ONLY`.
 
         ```shell
           --kv-transfer-config \
