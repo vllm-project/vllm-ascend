@@ -718,6 +718,34 @@ def test_execute_model_finalizes_dump_for_pooling_pp_non_last_rank(stub_dp_skip_
     debugger.step.assert_called_once_with()
 
 
+@pytest.mark.parametrize("num_drafts", [0, 3])
+def test_sample_tokens_enters_proposer_scope_only_when_drafting(monkeypatch, num_drafts):
+    runner = _make_runner()
+    runner.pcp_manager = None
+    runner.execute_model_state = SimpleNamespace(num_spec_tokens_to_schedule=num_drafts)
+    calls = []
+
+    @contextmanager
+    def scope(model_state):
+        assert model_state is runner.model_state
+        calls.append("enter")
+        try:
+            yield
+        finally:
+            calls.append("exit")
+
+    def sample(*args):
+        calls.append("sample")
+        raise RuntimeError("sampling failed")
+
+    runner.speculator = SimpleNamespace(sampling_scope=scope)
+    monkeypatch.setattr("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", lambda: False)
+    monkeypatch.setattr(GPUModelRunner, "sample_tokens", sample)
+    with pytest.raises(RuntimeError, match="sampling failed"):
+        runner.sample_tokens(None)
+    assert calls == (["enter", "sample", "exit"] if num_drafts else ["sample"])
+
+
 def test_sample_tokens_closes_dump_cycle_on_last_rank():
     debugger = Mock(spec=["start", "step"])
     runner = _make_dump_runner(debugger)

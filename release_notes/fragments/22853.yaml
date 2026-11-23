@@ -1,0 +1,9 @@
+pr: 22853
+entries:
+  - category: performance
+    text: >-
+      Kimi K3 and K3.1 decode workers on Ascend 950 using DSpark, RecoverSSM
+      and an aligned cache can submit drafts while recovering accepted states.
+      With three compatible cache groups, this reduces recurrent-state launches
+      from six to two per decode step. This applies to direct MooncakeConnectorV2
+      consumers with PP1 and PCP1.

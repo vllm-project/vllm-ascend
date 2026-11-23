@@ -47,6 +47,16 @@
      requests use two matrix buffers; crossing requests retain the existing
      six-buffer recovery path. A5 uses grouped heads for FP32 `H32/H64`,
      `K=V=128`; other layouts use the ordinary kernel with UB-bounded value tiles.
+  5. On an A5 Kimi DSpark decode worker using direct `MooncakeConnectorV2`
+     transfer, `align` cache mode and PP1/PCP1, compatible cache groups
+     share the two recurrent-state launches. Each group uses its own source
+     pages, destination pages and sampler-row map. The verify records still
+     use the group's local request row. Groups can share a backing slot because
+     their writable pages come from the scheduler's common block pool.
+     Convolution compaction remains per group.
+     After sampling, the worker submits state recovery on a separate NPU stream.
+     The draft uses the target hidden states and sampled tokens. A device event
+     joins recovery before the worker publishes drafts or finalizes KV transfer.
 - **Supported modes**: Atlas A3 and Ascend 950DT (A5), inference only, eager and
   NPU graph execution. Atlas A2 and 950PR are not validated by these tests.
   Operator validation is separate from model/worker integration. Serving
@@ -261,6 +271,12 @@ checks that verify and commit use the same request's scratch records, including
 rejected suffixes filled with NaNs, null pages, and eager/graph execution.
 `test_multilayer_paged_commit_maps_sampler_rows_and_compacts_conv` additionally
 checks sampler-row mapping and convolution compaction across layers.
+
+The Kimi multi-group regression compares all recurrent and convolution pages to
+the per-group commit for pure and mixed batches. It covers separate and shared
+cache slots, shuffled request and page mappings, an exact boundary without a
+next page, and two consecutive steps.
+Run it with `pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kimi_multigroup_commit.py`.
 
 Window regressions explicitly check the selected ordinary/grouped path for
 Q1/Q2/Q4/Q6/Q8, both local head counts and eager/graph execution, with additional

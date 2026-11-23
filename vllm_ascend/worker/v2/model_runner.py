@@ -393,7 +393,14 @@ class NPUModelRunner(GPUModelRunner):
 
         state = self.execute_model_state
         self._lmhead_pad_size = self._get_lmhead_pad_size(state) if state is not None and lmhead_tp_enable() else None
-        output = super().sample_tokens(grammar_output)
+        # A proposer can coordinate model-state updates with its draft. Keep
+        # the scope around sampling so it also closes if proposal setup fails.
+        sampling_scope = getattr(self.speculator, "sampling_scope", None)
+        if sampling_scope is not None and state is not None and state.num_spec_tokens_to_schedule:
+            with sampling_scope(self.model_state):
+                output = super().sample_tokens(grammar_output)
+        else:
+            output = super().sample_tokens(grammar_output)
         self._lmhead_pad_size = None
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).

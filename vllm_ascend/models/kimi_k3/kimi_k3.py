@@ -91,6 +91,7 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.models.kimi_k3.recoverssm_config import use_fused_dspark_recovery
 from vllm_ascend.ops.kda_parallel import KDARowParallelLinear, get_kda_state_shape
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
@@ -1396,11 +1397,12 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
         self.model.dspark_aux_capture_materialized = enabled
 
     def get_model_state_cls(self):
-        """Use the Ascend hybrid state instead of the inherited ROCm one.
+        """Select the state implementation for this Ascend Kimi target."""
+        if use_fused_dspark_recovery(self.vllm_config):
+            from vllm_ascend.models.kimi_k3.recoverssm import KimiRecoverSSMModelState
 
-        vLLM main lets the AMD Kimi class provide its own model state; that
-        state builds upstream attention metadata, which is invalid on NPU.
-        """
+            return KimiRecoverSSMModelState
+
         from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
             AscendMambaHybridModelState,
         )
@@ -1525,6 +1527,9 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
 
     def get_language_model(self) -> AscendKimiLinearForCausalLM:
         return self.language_model
+
+    def get_model_state_cls(self):
+        return self.language_model.get_model_state_cls()
 
     def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
         self.language_model.set_dspark_aux_capture_materialized(enabled)

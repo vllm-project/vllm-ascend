@@ -9,6 +9,9 @@ from typing import TYPE_CHECKING
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
+from vllm_ascend.device.device_config import is_950
+from vllm_ascend.utils import model_uses_kimi_kda
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
@@ -29,6 +32,25 @@ def supports_request_indexed_kda_recoverssm(vllm_config: VllmConfig) -> bool:
 
 def use_request_indexed_kda_recoverssm(vllm_config: VllmConfig) -> bool:
     return vllm_config.cache_config.use_replayssm and supports_request_indexed_kda_recoverssm(vllm_config)
+
+
+def use_fused_dspark_recovery(config: VllmConfig) -> bool:
+    """Use the fused KDA state on an aligned A5 Mooncake decoder."""
+    spec = config.speculative_config
+    transfer = config.kv_transfer_config
+    return (
+        config.cache_config.use_kda_recoverssm
+        and config.cache_config.mamba_cache_mode == "align"
+        and spec is not None
+        and spec.use_dspark()
+        and transfer is not None
+        and transfer.kv_role == "kv_consumer"
+        and transfer.kv_connector == "MooncakeConnectorV2"
+        and config.parallel_config.pipeline_parallel_size == 1
+        and config.parallel_config.prefill_context_parallel_size == 1
+        and model_uses_kimi_kda(config.model_config)
+        and is_950()
+    )
 
 
 def validate_request_indexed_kda_recoverssm(vllm_config: VllmConfig) -> None:

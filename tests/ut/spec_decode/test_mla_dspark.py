@@ -157,7 +157,12 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
     monkeypatch.setattr(shared, "build_dspark_draft_config", lambda config: config)
     config = SimpleNamespace(
         attention_config=AttentionConfig(),
-        speculative_config=SimpleNamespace(method="dspark", enforce_eager=None, use_dspark=lambda: True),
+        speculative_config=SimpleNamespace(
+            method="dspark",
+            enforce_eager=None,
+            use_dspark=lambda: True,
+            draft_model_config=SimpleNamespace(architectures=["Qwen3DSparkModel"]),
+        ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=128),
     )
