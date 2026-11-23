@@ -350,7 +350,7 @@ def test_pcp_indexer_compresses_complete_groups_across_ranks(monkeypatch) -> Non
 
 
 def test_pcp_indexer_replaces_registered_cache_owners() -> None:
-    static_context = {}
+    static_context: dict[str, object] = {}
     config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context=static_context))
     cache_args = dict(
         vllm_config=config,
