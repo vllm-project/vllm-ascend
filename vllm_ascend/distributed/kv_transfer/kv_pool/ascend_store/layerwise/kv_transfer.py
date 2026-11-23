@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections import defaultdict
@@ -11,6 +12,7 @@ import numpy as np
 import torch
 from vllm.logger import logger
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     Backend,
     require_aligned_batch_results,
@@ -29,10 +31,59 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase, ReqMeta
 
+_KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
 
 
+def _build_range_debug_payload(
+    direction: str,
+    layer_id: int,
+    sizes: list[list[int]],
+    object_offsets: list[list[int]],
+    results: list[int],
+) -> dict[str, Any]:
+    nested_sizes = [[int(size) for size in key_sizes] for key_sizes in sizes]
+    return {
+        "event": "range",
+        "direction": direction,
+        "layer_id": int(layer_id),
+        "key_count": len(results),
+        "requested_bytes": [sum(key_sizes) for key_sizes in nested_sizes],
+        "sizes": nested_sizes,
+        "object_offsets": [[int(offset) for offset in key_offsets] for key_offsets in object_offsets],
+        "results": [int(result) for result in results],
+    }
 
 
+def _emit_range_debug_event(
+    direction: str,
+    layer_id: int,
+    sizes: list[list[int]],
+    object_offsets: list[list[int]],
+    results: list[int],
+) -> None:
+    try:
+        if not get_ascend_config().kv_pool_range_debug:
+            return
+        payload = _build_range_debug_payload(direction, layer_id, sizes, object_offsets, results)
+        logger.info("%s %s", _KVPOOL_RANGE_DEBUG_PREFIX, json.dumps(payload, separators=(",", ":")))
+    except Exception:
+        # Debug instrumentation must never affect the transfer path.
+        pass
+
+
+def _emit_commit_debug_event(layer_id: int, key_count: int, results: list[int]) -> None:
+    try:
+        if not get_ascend_config().kv_pool_range_debug:
+            return
+        payload = {
+            "event": "commit",
+            "layer_id": int(layer_id),
+            "key_count": int(key_count),
+            "results": [int(result) for result in results],
+        }
+        logger.info("%s %s", _KVPOOL_RANGE_DEBUG_PREFIX, json.dumps(payload, separators=(",", ":")))
+    except Exception:
+        pass
 
 
 def _circular_shift(lst: list, offset: int) -> list:
@@ -630,6 +681,7 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                         self.m_store.batch_copy_put(keys, buffers, sizes, offsets),
                     )
                 )
+            _emit_range_debug_event("save", layer_id, active_sizes, active_offsets, results)
             failed_keys = [key for key, result in zip(active_keys, results, strict=True) if result < 0]
             if failed_keys:
                 self._revoke_range_keys(failed_keys)
@@ -645,6 +697,7 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                 commit_results = require_aligned_batch_results(
                     "batch_commit", active_keys, self.m_store.batch_commit(active_keys)
                 )
+                _emit_commit_debug_event(layer_id, len(active_keys), commit_results)
             except Exception:
                 self._revoke_range_keys(active_keys)
                 raise
@@ -927,6 +980,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                         self.m_store.batch_copy_get(keys, buffers, sizes, offsets),
                     )
                 )
+            _emit_range_debug_event("load", layer_id, active_sizes, active_offsets, results)
             failed_indices = [index for index, result in zip(active_indices, results, strict=True) if result < 0]
             if failed_indices:
                 self._mark_invalid_range_indices(req_meta, failed_indices)

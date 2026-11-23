@@ -564,6 +564,8 @@ def test_layerwise_prefill_keeps_checkpoint_for_partial_tail(ns, offload, target
 @pytest.mark.parametrize("fault", [None, "put", "commit"])
 def test_publication_requires_all_layer_copies_and_failures_revoke(ns, fault):
     ns.update(
+        _emit_range_debug_event=MagicMock(),
+        _emit_commit_debug_event=MagicMock(),
         require_aligned_batch_results=lambda operation, keys, results: results,
     )
     cls = isolated_method(
