@@ -19,9 +19,11 @@
 Run `pytest tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py`.
 """
 
+import json
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -456,6 +458,31 @@ def test_dsv3_2_sfa_pcp_pp_mtp_model_runner_v2_graph() -> None:
     _run_inference_case(DSV3_2_SFA_PCP_PP_MTP_CASE)
 
 
+@pytest.fixture
+def dsv3_2_c8_model(tmp_path: Path) -> str:
+    from huggingface_hub import constants, snapshot_download
+    from vllm.model_executor.model_loader.weight_utils import maybe_download_from_modelscope
+
+    source = Path(DSV3_2_MODEL)
+    if not source.is_dir():
+        snapshot = maybe_download_from_modelscope(DSV3_2_MODEL)
+        source = Path(snapshot or snapshot_download(DSV3_2_MODEL, local_files_only=constants.HF_HUB_OFFLINE))
+
+    # The pruning checkpoint has FLOAT indexer projections. Dynamic INT8 cache
+    # quantizes their outputs at runtime and needs no additional weight tensors.
+    # Give the target and MTP workers the same test-only cache recipe.
+    descriptor = source / "quant_model_description.json"
+    recipe = json.loads(descriptor.read_text())
+    for name in list(recipe):
+        if name.endswith(".indexer.wq_b.weight"):
+            recipe.setdefault(name.removesuffix("wq_b.weight") + "quant_type", "INT8_DYNAMIC")
+    for entry in source.iterdir():
+        if entry != descriptor:
+            (tmp_path / entry.name).symlink_to(entry.resolve(), target_is_directory=entry.is_dir())
+    (tmp_path / descriptor.name).write_text(json.dumps(recipe))
+    return str(tmp_path)
+
+
 @pytest.mark.e2e_model(DSV3_2_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
@@ -476,9 +503,9 @@ def test_dsv3_2_sfa_pcp_pp_mtp_model_runner_v2_graph() -> None:
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_dsv3_2_sfa_pcp_dcp_model_runner_v2_graph_accuracy() -> None:
+def test_dsv3_2_sfa_pcp_dcp_model_runner_v2_graph_accuracy(dsv3_2_c8_model: str) -> None:
     """Guard MRV2 SFA PCP+DCP+MTP full-decode-only graph accuracy."""
-    _run_accuracy_case(DSV3_2_SFA_PCP_DCP_CASE)
+    _run_accuracy_case(replace(DSV3_2_SFA_PCP_DCP_CASE, model=dsv3_2_c8_model))
 
 
 MTP_PCP_CASE = AccuracyCase(
