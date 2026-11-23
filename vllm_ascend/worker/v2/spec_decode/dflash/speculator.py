@@ -372,13 +372,12 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             # Profiling runs the draft with its own query token count, which
             # can differ from the target batch. Let forward_context coordinate
             # the actual draft counts instead of reusing the target DP state.
-            # TODO: Remove this guard once main2main includes upstream vLLM
+            # TODO: Drop the sync_state reset once main2main includes upstream vLLM
             # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
-            if is_profile:
-                input_batch, last_hidden_states, aux_hidden_states = prepare_replicated_draft_profile_inputs(
-                    input_batch, last_hidden_states, aux_hidden_states, self.input_buffers
-                )
+            input_batch, last_hidden_states, aux_hidden_states = prepare_replicated_draft_profile_inputs(
+                input_batch, last_hidden_states, aux_hidden_states, self.input_buffers
+            )
         self.input_batch = input_batch
         # Upstream trims DP dummy draft requests before selecting its graph,
         # while input_batch still describes the padded target batch. Replay

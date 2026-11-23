@@ -24,6 +24,7 @@ from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadata, 
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2 import attn_utils
+from vllm_ascend.worker.v2.spec_decode import pcp_utils
 from vllm_ascend.worker.v2.spec_decode.dflash import aclgraph as dflash_graph
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
@@ -525,6 +526,7 @@ def test_dspark_profile_without_attention_skips_cpu_lengths(monkeypatch):
     spec.max_num_tokens = 12
     del spec.target_input_buffers
     sentinel = object()
+    monkeypatch.setattr(pcp_utils, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
     monkeypatch.setattr(DSparkSpeculator, "propose", lambda *args, **kwargs: sentinel)
     result = spec.propose(
         spec.input_batch,
@@ -540,5 +542,6 @@ def test_dspark_profile_without_attention_skips_cpu_lengths(monkeypatch):
         None,
         dummy_run=True,
         skip_attn_for_dummy_run=True,
+        is_profile=True,
     )
     assert result is sentinel
