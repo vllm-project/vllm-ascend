@@ -1002,6 +1002,7 @@ def test_replicated_draft_profile_keeps_target_sampling_local(
     runner.step_timing = Mock()
     runner.model = torch.nn.Identity()
     runner.draft_context = nullcontext
+    runner._draft_workspace_lane = int(speculator_cls is ascend_dspark.AscendDSparkSpeculator)
     speculator = object.__new__(speculator_cls)
     speculator.num_query_per_req, speculator.supports_mm_inputs = 3, False
     speculator.pcp_manager = None  # KV cache initialization has not run.
