@@ -42,6 +42,10 @@ Prepare the UB endpoint configuration directory used by `ascend_local_comm_res_p
 
 ### 4.1 Docker Image Installation
 
+!!! note "Docker version"
+
+    Docker Engine 20.10 or later is recommended when the host uses cgroup v2. Earlier Docker versions do not support cgroup v2; devices passed with `--device` may therefore be inaccessible inside the container, causing NPU initialization to fail. Check the Docker Engine and cgroup versions on the host if this occurs.
+
 Choose the Hy4-Flash image for your container environment:
 
 | Image Variant | Image |

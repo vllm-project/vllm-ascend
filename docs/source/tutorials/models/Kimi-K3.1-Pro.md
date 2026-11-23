@@ -49,6 +49,10 @@ Before multi-node deployment, follow the [multi-node communication verification 
 
 {% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
 
+!!! note "Docker version"
+
+    Docker Engine 20.10 or later is recommended when the host uses cgroup v2. Earlier Docker versions do not support cgroup v2; devices passed with `--device` may therefore be inaccessible inside the container, causing NPU initialization to fail. Check the Docker Engine and cgroup versions on the host if this occurs.
+
 Select an image for the deployment platform and host operating system, and start a container on every node. Refer to the [installation guide](../../getting_started/installation.md) for additional container options.
 
 === "A3 series"
