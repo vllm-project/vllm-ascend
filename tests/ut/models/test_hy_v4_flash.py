@@ -69,6 +69,34 @@ def test_long_flash_indexpool_ranks_groups_and_unconditionally_includes_tail():
     assert output[1].tolist() == list(range(8, 19)) + [-1]
 
 
+def test_long_flash_indexpool_preserves_near_tie_at_topk_cutoff():
+    from types import SimpleNamespace
+
+    from vllm.models.hy_v4_flash.nvidia.indexpool_ops import expand_groups, select_groups
+
+    from vllm_ascend.models.hy4_flash.long_context import AscendHYV4FlashIndexPool
+
+    indexer = SimpleNamespace(num_heads=2, group_budget=1, ratio=4)
+    query = torch.ones((1, 2, 128), dtype=torch.bfloat16)
+    query[0, 1].zero_()
+    query[0, 1, 1] = 1
+    keys = torch.ones((2, 128), dtype=torch.bfloat16)
+    keys[1, :2] = torch.tensor([1.25, 0.875], dtype=keys.dtype)
+    weights = torch.tensor([[1.0, 0.5]], dtype=torch.float32)
+    positions = torch.tensor([9])
+
+    # Head 0 scores are 128 and 128.125. Rounding both to BF16 makes the
+    # lower-weighted second head choose the wrong group without a top-k tie.
+    logits = ((query.float() @ keys.float().T).relu() * weights[..., None]).sum(1)
+    groups = select_groups(logits, positions // indexer.ratio, indexer.group_budget)
+    expected = expand_groups(groups, positions, indexer.ratio)
+
+    output = AscendHYV4FlashIndexPool._select_indices(indexer, query, weights, keys, positions)
+
+    assert expected.tolist() == [[4, 5, 6, 7, 8, 9, -1, -1]]
+    torch.testing.assert_close(output, expected)
+
+
 def test_long_flash_indexpool_completes_group_across_prefill_chunks():
     from types import SimpleNamespace
 

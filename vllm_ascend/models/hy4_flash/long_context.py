@@ -141,13 +141,15 @@ class AscendHYV4FlashIndexPool(nn.Module):
         pool_cache[blocks, group_ids % block_size, 0] = pooled
 
     def _select_indices(self, query, weights, keys, positions):
+        # Preserve near-tied logits until the weighted reduction and top-k.
+        score_keys = keys.float().T if keys.shape[0] > self.group_budget else None
         output = []
         for start in range(0, query.shape[0], _SCORE_CHUNK_SIZE):
             end = start + _SCORE_CHUNK_SIZE
             q, w, pos = query[start:end], weights[start:end], positions[start:end]
-            if keys.shape[0] > self.group_budget:
-                projected = q.reshape(-1, INDEX_DIM) @ keys.T
-                scores = (projected.view(q.shape[0], self.num_heads, -1).float().relu_() * w[..., None]).sum(1)
+            if score_keys is not None:
+                projected = q.reshape(-1, INDEX_DIM).float() @ score_keys
+                scores = (projected.view(q.shape[0], self.num_heads, -1).relu_() * w[..., None]).sum(1)
                 chosen = select_groups(scores, pos // self.ratio, self.group_budget)
             else:
                 # Every complete group fits in the selection budget.
