@@ -29,6 +29,7 @@ or relies on cross-step event ordering.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, ClassVar
 
 import torch
@@ -51,6 +52,8 @@ from vllm_ascend.models.step5.ops.generic_block_sparse_attention import (
     gbsa_expected_counts,
     gbsa_sparse_attention,
     gbsa_sparse_attention_metadata,
+    gbsa_union_sparse_attention,
+    gbsa_union_sparse_metadata,
 )
 from vllm_ascend.models.step5.ops.indexer_region_score import indexer_score_topk
 from vllm_ascend.ops.triton.step5.summary_update import (
@@ -75,6 +78,18 @@ else:
         Step5SparseSummaryCacheLayer,
         Step5SparseSummaryMetadataBuilder,
     )
+
+
+@lru_cache
+def _can_use_union_attention() -> bool:
+    """Select Union sparse attention for Step5"""
+    try:
+        import cann_ops_nn
+    except (ImportError, OSError, RuntimeError):
+        # An unavailable Union extension retains the existing native fallback.
+        return False
+
+    return hasattr(cann_ops_nn, "union_sparse_gen_launch")
 
 
 class AscendStep5CSATailRing(Step5CSATailRing):
@@ -472,15 +487,35 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
             prefill_positions = prefill_context_lens.to(torch.int64)[reqs] + token_idx - qsl[reqs]
             prefill_metadata.positions = prefill_positions
             prefill_metadata.owners = reqs.to(torch.int64)
-            prefill_metadata.gbsa_metadata = self._build_gbsa_metadata(
-                prefill_positions,
-                prefill_metadata.query_start_loc,
-                prefill_seq_lens,
-                block_table,
-                prefill_metadata.max_query_len,
-                path="prefill",
-                use_graph_shape=False,
-            )
+            if _can_use_union_attention():
+                # Union tiling, also once per step: the schedule is built
+                # from the union capacity bound (the largest union any
+                # layer can produce), and the AI Core kernel clamps its
+                # ranges to each layer's runtime union counts, so every
+                # layer of the step shares this one tensor.
+                prefill_metadata.gbsa_metadata = gbsa_union_sparse_metadata(
+                    num_heads=self.gbsa_num_heads,
+                    num_kv_groups=self.gbsa_num_kv_groups,
+                    head_dim=self.gbsa_head_size,
+                    region_size=self.gbsa_region_size,
+                    topk=self.gbsa_topk,
+                    cu_seqlens_q=prefill_metadata.query_start_loc,
+                    seqused_kv=prefill_seq_lens,
+                    seq_lens_host=prefill_metadata.seq_lens_host,
+                    context_lens_host=prefill_metadata.context_lens_host,
+                    max_pages=int(block_table.shape[1]),
+                    page_size=self.gbsa_block_size,
+                )
+            else:
+                prefill_metadata.gbsa_metadata = self._build_gbsa_metadata(
+                    prefill_positions,
+                    prefill_metadata.query_start_loc,
+                    prefill_seq_lens,
+                    block_table,
+                    prefill_metadata.max_query_len,
+                    path="prefill",
+                    use_graph_shape=False,
+                )
 
         decode_metadata: AscendStep5DSADecodeMetadata | None = None
         active_decodes = 0
@@ -878,12 +913,7 @@ class AscendStep5DSAImpl(AttentionImplBase[AscendStep5DSAMetadata]):
         # each token's own position // region_size, so the current region
         # never competes for a slot; the attention operator appends it and
         # causally truncates it to the token's position.
-        cu_seq_lens = torch.cat(
-            [
-                torch.zeros((1,), device=index_q.device, dtype=torch.int32),
-                p.query_start_loc[1 : num_reqs + 1].to(torch.int32),
-            ]
-        )
+        cu_seq_lens = p.query_start_loc
         actual_kv_lengths = p.seq_lens[:num_reqs].to(torch.int32)
         summary_md = self._summary_metadata()
         ids = indexer_score_topk(
@@ -897,20 +927,38 @@ class AscendStep5DSAImpl(AttentionImplBase[AscendStep5DSAMetadata]):
             topk=self.topk_regions,
             region_size=self.region_size,
         )
-        out = gbsa_sparse_attention(
-            query,
-            key_cache,
-            value_cache,
-            ids,
-            q_positions,
-            p.block_table[:num_reqs],
-            cu_seq_lens.to(torch.int64),
-            p.seq_lens[:num_reqs].to(torch.int32),
-            p.gbsa_metadata,
-            num_kv_groups=self.num_kv_groups,
-            region_size=self.region_size,
-            softmax_scale=self.scale,
-        )
+        if _can_use_union_attention():
+            out = gbsa_union_sparse_attention(
+                query,
+                key_cache,
+                value_cache,
+                ids,
+                q_positions,
+                p.block_table[:num_reqs],
+                cu_seq_lens,
+                p.seq_lens[:num_reqs].to(torch.int32),
+                num_kv_groups=self.num_kv_groups,
+                region_size=self.region_size,
+                softmax_scale=self.scale,
+                seq_lens_host=p.seq_lens_host,
+                context_lens_host=p.context_lens_host,
+                metadata=p.gbsa_metadata,
+            )
+        else:
+            out = gbsa_sparse_attention(
+                query,
+                key_cache,
+                value_cache,
+                ids,
+                q_positions,
+                p.block_table[:num_reqs],
+                cu_seq_lens.to(torch.int64),
+                p.seq_lens[:num_reqs].to(torch.int32),
+                p.gbsa_metadata,
+                num_kv_groups=self.num_kv_groups,
+                region_size=self.region_size,
+                softmax_scale=self.scale,
+            )
         output[token_offset : token_offset + num_query_tokens] = out.to(output.dtype)
 
     def forward(
