@@ -138,9 +138,7 @@ def _resolve_sampling_input_batch(runner: Any, peeked_batch: Any) -> Any:
     the only batch and is safe.
     """
     pcp = getattr(runner, "pcp_manager", None)
-    # unittest.mock fabricates attrs; treat mocks as "no PCP" so UT shells that
-    # MagicMock the runner keep the peeked batch instead of a fake sampling view.
-    if pcp is None or type(pcp).__module__ == "unittest.mock":
+    if pcp is None:
         if peeked_batch is not None:
             return peeked_batch
         fallback = getattr(runner, "input_batch", None)
@@ -151,13 +149,13 @@ def _resolve_sampling_input_batch(runner: Any, peeked_batch: Any) -> Any:
             )
         return fallback
     sampling = getattr(pcp, "_sampling_global_batch", None)
-    if sampling is not None and type(sampling).__module__ != "unittest.mock":
+    if sampling is not None:
         return sampling
     try:
         global_batch = getattr(pcp, "global_batch", None)
     except Exception:
         global_batch = None
-    if global_batch is not None and type(global_batch).__module__ != "unittest.mock":
+    if global_batch is not None:
         return global_batch
     logger.warning_once(
         "[runtime_guard] PCP active but sampling/global batch missing after "
@@ -323,10 +321,12 @@ def wrap_compute_logits_for_pre_sample(runner: Any, peeked_batch: Any) -> Iterat
         nonlocal fired
         logits = orig(hidden_states, *args, **kwargs)
         if not fired:
-            fired = True
             batch = _resolve_sampling_input_batch(runner, peeked_batch)
             if batch is None:
+                # Leave fired unset so a later compute_logits in this context
+                # can retry after restore_for_sampling has stashed the batch.
                 return logits
+            fired = True
             check_before_sample_from_batch(guard, logits, batch)
         return logits
 

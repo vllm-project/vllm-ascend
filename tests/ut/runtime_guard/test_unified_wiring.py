@@ -49,6 +49,23 @@ def test_wrap_fires_once_for_two_compute_logits_calls():
     assert "scheduler_output" not in dfx.calls[0]
 
 
+def test_wrap_retries_when_pcp_batch_missing_then_available():
+    """Do not set fired until a usable batch exists (restore may land mid-context)."""
+    dfx = _FakeDfx()
+    runner, model = _make_runner("logits-tensor", dfx)
+    global_batch = SimpleNamespace(req_ids=["g0"], logits_indices=[0])
+    pcp = SimpleNamespace(_sampling_global_batch=None, global_batch=None)
+    runner.pcp_manager = pcp
+    with wrap_compute_logits_for_pre_sample(runner, SimpleNamespace(req_ids=["local"])):
+        assert model.compute_logits("h") == "logits-tensor"
+        assert len(dfx.calls) == 0
+        pcp._sampling_global_batch = global_batch
+        assert model.compute_logits("h") == "logits-tensor"
+    assert len(dfx.calls) == 1
+    assert dfx.calls[0]["logits"] == "logits-tensor"
+    assert dfx.calls[0]["input_batch"] is global_batch
+
+
 def test_wrap_restores_compute_logits():
     dfx = _FakeDfx()
     runner, model = _make_runner("L", dfx)
