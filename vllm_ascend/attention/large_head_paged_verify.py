@@ -123,10 +123,9 @@ def _can_use_large_head_bnsd_verify(impl: Any, attn_metadata: Any, num_tokens: i
         return False
     query_len = num_tokens // seq_lens.shape[0]
     spec_cfg = getattr(getattr(impl, "vllm_config", None), "speculative_config", None)
-    verify_len = spec_cfg.num_speculative_tokens + 1 if spec_cfg is not None else None
-    if _EXTRA_CTX.is_draft_model:
-        return query_len == 1 or (verify_len is not None and query_len == verify_len)
-    return verify_len is not None and query_len == verify_len
+    num_spec_tokens = getattr(spec_cfg, "num_speculative_tokens", None)
+    verify_len = num_spec_tokens + 1 if num_spec_tokens is not None else 1
+    return 1 <= query_len <= verify_len
 
 
 @dataclass
@@ -204,9 +203,10 @@ def large_head_decode_graph_params(
         else metadata.block_tables
     )
     if getattr(metadata, "use_pa_graph", False):
+        context_device = metadata.seq_lens.device if metadata.seq_lens is not None else torch.device("cpu")
         return {
             "block_table": block_table,
-            "context_lens": torch.tensor(seq_lens, dtype=torch.int32, device=metadata.seq_lens.device),
+            "context_lens": torch.tensor(seq_lens, dtype=torch.int32, device=context_device),
         }
     return {
         "block_table": block_table,
@@ -308,6 +308,7 @@ class AscendLargeHeadPagedAttentionBackendImpl(AscendAttentionBackendImpl):
         return (
             bool(_EXTRA_CTX.capturing)
             and not self.full_cudagraph
+            and self.use_bnsd_kv_cache
             and _can_use_large_head_bnsd_verify(self, attn_metadata, num_tokens)
         )
 
@@ -419,6 +420,10 @@ class AscendLargeHeadPagedAttentionBackendImpl(AscendAttentionBackendImpl):
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Capture 512-dim FULL mode PagedAttention using non-mutating per-token PA metadata."""
+        if not self.full_cudagraph or self.use_bnsd_kv_cache:
+            raise RuntimeError(
+                "full_graph_pa for head_dim=512 requires CUDAGraphMode.FULL with natural (non-BNSD) KV cache layout."
+            )
         assert output is not None, "Output tensor must be provided for full_graph_pa."
         pa_block_table = getattr(attn_metadata, "pa_block_tables", None)
         block_table = pa_block_table if pa_block_table is not None else attn_metadata.block_tables
@@ -474,7 +479,12 @@ class AscendLargeHeadPagedAttentionBackendImpl(AscendAttentionBackendImpl):
             and self.sliding_window is None
             and _supports_large_head_paged_path()
         ):
-            return self.full_graph_pa(query, attn_metadata, output)
+            if self.full_cudagraph:
+                return self.full_graph_pa(query, attn_metadata, output)
+            raise RuntimeError(
+                "Unsupported head_dim=512 ACL graph capture outside CUDAGraphMode.FULL: "
+                f"num_tokens={query.shape[0]}, actual_seq_lengths_q={attn_metadata.actual_seq_lengths_q}."
+            )
         if self._should_eager_bnsd_verify(attn_metadata, query.shape[0], kv_cache):
             return self._eager_fia_v2_paged_verify(query, attn_metadata, output)
         if self._can_use_large_head_eager_phase_split(attn_metadata, query.shape[0], kv_cache):
@@ -490,6 +500,17 @@ class AscendLargeHeadPagedAttentionBackendImpl(AscendAttentionBackendImpl):
         if self._should_capture_bnsd_verify(attn_metadata, query.shape[0]):
             assert output is not None
             return self.full_graph_fia_v2_paged_verify(query, attn_metadata, output)
+        if (
+            _EXTRA_CTX.capturing
+            and not self.full_cudagraph
+            and self.head_size == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+            and self.sliding_window is None
+            and _supports_large_head_paged_path()
+        ):
+            raise RuntimeError(
+                "Unsupported head_dim=512 paged-attention ACL graph capture outside CUDAGraphMode.FULL: "
+                f"num_tokens={query.shape[0]}, actual_seq_lengths_q={attn_metadata.actual_seq_lengths_q}."
+            )
         if self._should_eager_bnsd_verify(attn_metadata, query.shape[0]):
             assert output is not None
             return self._eager_fia_v2_paged_verify(query, attn_metadata, output)

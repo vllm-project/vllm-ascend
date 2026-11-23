@@ -124,6 +124,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         # when in decode phase of eagle speculator, we need some value in
         # draft model's input_batch. so we keep a reference here.
         self.input_batch: InputBatch | None = None
+        self._num_rejected: torch.Tensor | None = None
+        self._num_rejected_cpu: torch.Tensor | None = None
         self._eplb_source_is_padding: torch.Tensor | None = None
         self._eplb_dummy_run = False
         self._sparse_kv_offload_metadata = SparseKVOffloadMetadata(
@@ -298,6 +300,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         """
         self.input_batch = input_batch
         self._eplb_dummy_run = dummy_run
+        self._num_rejected = None if self.advance_draft_positions else num_rejected
+        self._num_rejected_cpu = None
         # PCP can change the draft prefill token layout and uniform decode
         # shape. Negotiate its DP agreement instead of reusing the target's.
         sync_state = None if self.pcp_manager is not None else dp_sync_state
@@ -315,33 +319,37 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             attn_metadata = self._get_draft_prefill_metadata(attn_metadata)
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
-        with (
-            build_attn_metadata_wrapper(),
-            torch_gather_wrapper(),
-            self._lmhead_pad_size_context(
-                sync_state,
-                capture_num_reqs=input_batch.num_reqs if self.dp_size == 1 else None,
-            ),
-        ):
-            return super().propose(
-                input_batch,
-                attn_metadata,
-                slot_mappings,
-                last_hidden_states,
-                aux_hidden_states,
-                num_sampled,
-                num_rejected,
-                last_sampled,
-                next_prefill_tokens,
-                temperature,
-                seeds,
-                sync_state,
-                dummy_run,
-                skip_attn_for_dummy_run,
-                mm_inputs,
-                is_profile=is_profile,
-                num_speculative_tokens=num_speculative_tokens,
-            )
+        try:
+            with (
+                build_attn_metadata_wrapper(),
+                torch_gather_wrapper(),
+                self._lmhead_pad_size_context(
+                    sync_state,
+                    capture_num_reqs=input_batch.num_reqs if self.dp_size == 1 else None,
+                ),
+            ):
+                return super().propose(
+                    input_batch,
+                    attn_metadata,
+                    slot_mappings,
+                    last_hidden_states,
+                    aux_hidden_states,
+                    num_sampled,
+                    num_rejected,
+                    last_sampled,
+                    next_prefill_tokens,
+                    temperature,
+                    seeds,
+                    sync_state,
+                    dummy_run,
+                    skip_attn_for_dummy_run,
+                    mm_inputs,
+                    is_profile=is_profile,
+                    num_speculative_tokens=num_speculative_tokens,
+                )
+        finally:
+            self._num_rejected = None
+            self._num_rejected_cpu = None
 
     @staticmethod
     def _get_draft_prefill_metadata(attn_metadata: dict[str, Any]) -> dict[str, Any]:
@@ -751,6 +759,21 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
         return draft_attn_metadatas
 
+    def _get_query_only_num_rejected_cpu(self, num_reqs: int) -> torch.Tensor | None:
+        """Return CPU rejection counts for query-only drafters sharing target KV."""
+        if self.advance_draft_positions or num_reqs <= 0:
+            return None
+        cached: torch.Tensor | None = getattr(self, "_num_rejected_cpu", None)
+        if cached is not None and cached.numel() >= num_reqs:
+            return cached[:num_reqs]
+        num_rejected: torch.Tensor | None = getattr(self, "_num_rejected", None)
+        if not isinstance(num_rejected, torch.Tensor) or num_rejected.numel() < num_reqs:
+            return None
+        sliced = num_rejected[:num_reqs].detach()
+        cpu_rejected = sliced if sliced.device.type == "cpu" else sliced.to("cpu")
+        self._num_rejected_cpu = cpu_rejected
+        return cpu_rejected
+
     def _update_decode_attn_metadata(
         self, attn_metadata: dict[str, Any] | None, step: int, num_reqs: int | None = None
     ):
@@ -769,13 +792,17 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         if num_reqs is None:
             num_reqs = num_reqs_padded
         # Query-only drafters (such as Gemma4 MTP) read the shared target KV
-        # cache at a fixed length across draft steps instead of advancing +1.
+        # cache at the accepted target length across draft steps instead of
+        # advancing +1.
         step_offset = step if self.advance_draft_positions else 0
         next_seq_lens_cpu = self._calc_next_seq_lens_cpu(seq_lens_cpu, num_reqs, num_reqs_padded, step_offset)
         if not self.advance_draft_positions:
-            # Capture warmups can leave active request lengths at zero before a
-            # real batch populates seq_lens_cpu; keep active rows >= 1 while
-            # leaving padded rows at zero.
+            rejected_cpu = self._get_query_only_num_rejected_cpu(num_reqs)
+            if rejected_cpu is not None:
+                next_seq_lens_cpu[:num_reqs] -= rejected_cpu.to(dtype=next_seq_lens_cpu.dtype)
+            # Capture warmups or full-proposal rejections can leave active
+            # request lengths <= 0; keep active rows >= 1 while leaving padded
+            # rows at zero.
             next_seq_lens_cpu[:num_reqs].clamp_(min=1)
 
         dcp_local_seq_lens_cpu = None
@@ -805,6 +832,12 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 )
 
             metadata.seq_lens_cpu.copy_(next_seq_lens_cpu)
+            if (
+                isinstance(metadata, AscendLargeHeadPagedMetadata)
+                and metadata.pa_context_lens is not None
+                and metadata.pa_context_lens.shape == next_seq_lens_cpu.shape
+            ):
+                metadata.pa_context_lens.copy_(next_seq_lens_cpu)
 
     # TODO: Move build_fia_params out of the
     # speculator into the attention backend's graph-parameter helpers.
@@ -842,13 +875,24 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
         fia_params: list[dict[str, Any]] = []
-        step_offset = 1 if self.advance_draft_positions else 0
+        base_seq_lens: list[int] | None = None
+        if not self.advance_draft_positions:
+            rejected_cpu = self._get_query_only_num_rejected_cpu(num_reqs)
+            rejected_list = rejected_cpu.tolist() if rejected_cpu is not None else None
+            base_seq_lens = []
+            for i, seq_len in enumerate(self.input_batch.seq_lens_np[:num_reqs]):
+                rejected = int(rejected_list[i]) if rejected_list is not None else 0
+                base_seq_lens.append(min(max(int(seq_len) - rejected, 1), self.max_model_len))
+            base_seq_lens.extend([0] * (num_reqs_padded - num_reqs))
         for step in range(1, self.num_speculative_steps):
-            delta = step * step_offset
-            seq_lens = [
-                min(int(seq_len) + delta, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
-            ]
-            seq_lens.extend([0] * (num_reqs_padded - num_reqs))
+            if base_seq_lens is not None:
+                seq_lens = list(base_seq_lens)
+            else:
+                seq_lens = [
+                    min(int(seq_len) + step, self.max_model_len)
+                    for seq_len in self.input_batch.seq_lens_np[:num_reqs]
+                ]
+                seq_lens.extend([0] * (num_reqs_padded - num_reqs))
             for layer_name, metadata in draft_attn_metadata.items():
                 if isinstance(metadata, AscendLargeHeadPagedMetadata):
                     fia_params.append({"layer_name": layer_name, **large_head_decode_graph_params(metadata, seq_lens)})

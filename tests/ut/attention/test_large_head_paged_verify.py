@@ -828,3 +828,176 @@ def test_eager_mixed_chunked_prefill_full_mode_uses_pa_for_decode(monkeypatch):
     assert gather_spy.call_count == 0
     torch.testing.assert_close(out[:8], torch.full_like(out[:8], 4.0))
     torch.testing.assert_close(out[8:14], torch.full_like(out[8:14], 5.0))
+
+
+@pytest.mark.parametrize(
+    ("qlen", "is_draft_model", "via_paged_attn"),
+    [
+        (2, False, False),
+        (2, True, False),
+        (3, False, False),
+        (4, False, False),
+        (1, False, False),
+        (1, False, True),
+        (1, True, False),
+    ],
+)
+def test_full_decode_only_dynamic_widths_capture_bsnd_and_match_replay(
+    monkeypatch,
+    qlen: int,
+    is_draft_model: bool,
+    via_paged_attn: bool,
+):
+    cfg = _mock_vllm_config(with_spec=True, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
+    extra_ctx = _patch_large_head_env(monkeypatch, cfg)
+    impl = _new_large_head_impl(
+        torch.zeros((4, 2, 8, 512), dtype=torch.bfloat16),
+        torch.zeros((4, 2, 8, 512), dtype=torch.bfloat16),
+    )
+    assert impl.use_bnsd_kv_cache is True
+
+    get_fia_ws_mock = MagicMock(return_value=torch.zeros(128, dtype=torch.uint8))
+    get_pa_ws_mock = MagicMock(return_value=torch.zeros(128, dtype=torch.uint8))
+    reg_mock = MagicMock()
+    monkeypatch.setattr(
+        "torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace",
+        get_fia_ws_mock,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "torch_npu._npu_paged_attention_get_workspace",
+        get_pa_ws_mock,
+        raising=False,
+    )
+    monkeypatch.setattr("vllm_ascend.attention.large_head_paged_verify.register_task", reg_mock)
+    monkeypatch.setattr(
+        "vllm_ascend.attention.large_head_paged_verify.get_capture_resource",
+        lambda _key, factory, use_max_workspace=False: factory(),
+    )
+
+    num_reqs = 2
+    num_tokens = num_reqs * qlen
+    q = torch.randn((num_tokens, 8, 512), dtype=torch.bfloat16)
+    k = torch.randn((num_tokens, 2, 512), dtype=torch.bfloat16)
+    v = torch.randn((num_tokens, 2, 512), dtype=torch.bfloat16)
+    output = torch.empty_like(q)
+    cap_meta = AscendLargeHeadPagedMetadata(
+        block_tables=torch.tensor([[0, 1], [2, 3]], dtype=torch.int32),
+        actual_seq_lengths_q=[qlen * (i + 1) for i in range(num_reqs)],
+        seq_lens=torch.tensor([1, 0], dtype=torch.int32),
+        seq_lens_list=[1, 0],
+        attn_state=AscendAttentionState.DecodeOnly if qlen == 1 else AscendAttentionState.ChunkedPrefill,
+        num_prefills=0,
+        causal=True,
+    )
+
+    extra_ctx.capturing = True
+    extra_ctx.is_draft_model = is_draft_model
+    try:
+        if via_paged_attn:
+            impl.forward_paged_attention(q, cap_meta, output)
+        else:
+            impl.forward_fused_infer_attention(q, k, v, cap_meta, output)
+    finally:
+        extra_ctx.capturing = False
+        extra_ctx.is_draft_model = False
+
+    get_pa_ws_mock.assert_not_called()
+    get_fia_ws_mock.assert_called_once()
+    reg_mock.assert_called_once()
+    op_arg, kwargs_arg, provider_arg = reg_mock.call_args[0]
+    assert op_arg is torch_npu.npu_fused_infer_attention_score_v2.out
+    assert kwargs_arg["input_layout"] == "BSND"
+    assert kwargs_arg["actual_seq_qlen"] == [qlen, qlen]
+    if qlen > 1:
+        assert kwargs_arg["sparse_mode"] == 3
+        assert kwargs_arg["atten_mask"].shape == (2048, 2048)
+        assert kwargs_arg["atten_mask"].dtype == torch.int8
+    else:
+        assert kwargs_arg["sparse_mode"] == 0
+        assert kwargs_arg["atten_mask"] is None
+    assert provider_arg == LargeHeadPagedVerifyParamProvider("layer.59")
+
+    replay_meta = AscendLargeHeadPagedMetadata(
+        block_tables=torch.zeros((4, 2), dtype=torch.int32),
+        actual_seq_lengths_q=[qlen * (i + 1) for i in range(4)],
+        seq_lens=torch.tensor([10, 8, 1, 0], dtype=torch.int32),
+        seq_lens_list=[10, 8, 1, 0],
+        use_pa_graph=False,
+    )
+    resolved = provider_arg.resolve({"layer.59": replay_meta})
+    assert set(resolved) == {"block_table", "actual_seq_kvlen"}
+    assert "context_lens" not in resolved
+    assert set(resolved) <= set(kwargs_arg)
+    assert resolved["actual_seq_kvlen"] == ([10, 8, qlen, qlen] if qlen > 1 else [10, 8, 1, 0])
+
+
+def test_full_decode_only_rejects_unsupported_capture_shapes_before_pa(monkeypatch):
+    cfg = _mock_vllm_config(with_spec=True, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
+    extra_ctx = _patch_large_head_env(monkeypatch, cfg)
+    impl = _new_large_head_impl(
+        torch.zeros((4, 2, 8, 512), dtype=torch.bfloat16),
+        torch.zeros((4, 2, 8, 512), dtype=torch.bfloat16),
+    )
+
+    get_pa_ws_mock = MagicMock()
+    reg_mock = MagicMock()
+    monkeypatch.setattr("torch_npu._npu_paged_attention_get_workspace", get_pa_ws_mock, raising=False)
+    monkeypatch.setattr("vllm_ascend.attention.large_head_paged_verify.register_task", reg_mock)
+    monkeypatch.setattr(
+        "vllm_ascend.attention.large_head_paged_verify.get_capture_resource",
+        lambda _key, factory, use_max_workspace=False: factory(),
+    )
+
+    block_tables = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+    extra_ctx.capturing = True
+    try:
+        # 1) Width exceeding K + 1 (= 4) on forward_fused_infer_attention.
+        q5 = torch.randn((10, 8, 512), dtype=torch.bfloat16)
+        meta5 = AscendLargeHeadPagedMetadata(
+            block_tables=block_tables,
+            actual_seq_lengths_q=[5, 10],
+            seq_lens=torch.tensor([1, 0], dtype=torch.int32),
+            seq_lens_list=[1, 0],
+        )
+        with pytest.raises(RuntimeError):
+            impl.forward_fused_infer_attention(q5, q5[:, :2], q5[:, :2], meta5, torch.empty_like(q5))
+
+        # 2) Non-divisible token count.
+        q_nondiv = torch.randn((5, 8, 512), dtype=torch.bfloat16)
+        meta_nondiv = AscendLargeHeadPagedMetadata(
+            block_tables=block_tables,
+            actual_seq_lengths_q=[2, 5],
+            seq_lens=torch.tensor([4, 4], dtype=torch.int32),
+            seq_lens_list=[4, 4],
+        )
+        with pytest.raises(RuntimeError):
+            impl.forward_fused_infer_attention(
+                q_nondiv, q_nondiv[:, :2], q_nondiv[:, :2], meta_nondiv, torch.empty_like(q_nondiv)
+            )
+
+        # 3) Non-uniform per-request query lengths.
+        q_nonunif = torch.randn((4, 8, 512), dtype=torch.bfloat16)
+        meta_nonunif = AscendLargeHeadPagedMetadata(
+            block_tables=block_tables,
+            actual_seq_lengths_q=[1, 4],
+            seq_lens=torch.tensor([4, 4], dtype=torch.int32),
+            seq_lens_list=[4, 4],
+        )
+        with pytest.raises(RuntimeError):
+            impl.forward_fused_infer_attention(
+                q_nonunif, q_nonunif[:, :2], q_nonunif[:, :2], meta_nonunif, torch.empty_like(q_nonunif)
+            )
+
+        # 4) Width exceeding K + 1 on forward_paged_attention.
+        with pytest.raises(RuntimeError):
+            impl.forward_paged_attention(q5, meta5, torch.empty_like(q5))
+
+        # 5) Direct full_graph_pa call outside FULL / with BNSD cache layout.
+        with pytest.raises(RuntimeError):
+            impl.full_graph_pa(q5, meta5, torch.empty_like(q5))
+    finally:
+        extra_ctx.capturing = False
+
+    get_pa_ws_mock.assert_not_called()
+    reg_mock.assert_not_called()

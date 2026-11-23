@@ -18,6 +18,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
 from vllm.v1.worker.gpu.spec_decode.gemma4.speculator import Gemma4Speculator
@@ -340,3 +341,146 @@ def test_updatable_graph_bind_and_shared_source_lookup():
     }
     assert "unused_key" not in bound.kwargs
     assert task.kwargs["block_table"] == "bt_orig"
+
+
+def _make_gemma4_test_speculator(cls, *, target_seq_lens):
+    speculator = cls.__new__(cls)
+    speculator.use_dcp = False
+    speculator.pcp_manager = None
+    speculator.dp_size = 1
+    speculator.enable_adaptive_verification = False
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=8192))
+    speculator.num_speculative_steps = 3
+    speculator.draft_attn_layer_names = ["draft.swa.0", "draft.global.0"]
+    speculator._num_rejected = None
+    speculator._num_rejected_cpu = None
+    speculator.input_batch = SimpleNamespace(num_reqs=len(target_seq_lens), seq_lens_np=target_seq_lens)
+    return speculator
+
+
+def _call_propose_with_hook(speculator, num_rejected, hook):
+    dummy = torch.zeros(1)
+    with (
+        patch("vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_enable", return_value=False),
+        patch.object(TargetDependentARSpeculator, "propose", side_effect=hook),
+    ):
+        return speculator.propose(
+            speculator.input_batch,
+            {},
+            {},
+            dummy,
+            None,
+            dummy,
+            num_rejected,
+            dummy,
+            dummy,
+            dummy,
+            dummy,
+        )
+
+
+@pytest.mark.parametrize("use_pa_graph", [False, True])
+def test_gemma4_partial_rejection_updates_both_pa_and_fia_graph_params(use_pa_graph: bool):
+    """Query-only Gemma4 graph replay must pass target - num_rejected to both FIA and PA."""
+    speculator = _make_gemma4_test_speculator(
+        AscendGemma4Speculator,
+        target_seq_lens=np.array([11, 20], dtype=np.int32),
+    )
+    swa_meta = AscendMetadata(block_tables=torch.tensor([[1, 2], [3, 4], [0, 0]], dtype=torch.int32))
+    global_meta = AscendLargeHeadPagedMetadata(
+        block_tables=torch.tensor([[5, 6], [7, 8], [0, 0]], dtype=torch.int32),
+        seq_lens=torch.zeros(3, dtype=torch.int32),
+        use_pa_graph=use_pa_graph,
+    )
+    draft_meta = {"draft.swa.0": swa_meta, "draft.global.0": global_meta}
+    captured: list[list[dict]] = []
+
+    def _run_hook(*_args, **_kwargs):
+        captured.append(speculator.build_fia_params(3, draft_meta, is_draft_model_prefill=False))
+        return torch.zeros((2, 3), dtype=torch.int32)
+
+    _call_propose_with_hook(speculator, torch.tensor([2, 0], dtype=torch.int32), _run_hook)
+
+    assert len(captured) == 1
+    decode_params = captured[0]
+    swa_params = [p for p in decode_params if p["layer_name"] == "draft.swa.0"]
+    global_params = [p for p in decode_params if p["layer_name"] == "draft.global.0"]
+    assert len(swa_params) == 2 and len(global_params) == 2
+    assert all(p["actual_seq_lengths_kv"] == [9, 20, 0] for p in swa_params)
+    assert all(p["actual_seq_kvlen"] == [9, 20, 0] for p in swa_params)
+    if use_pa_graph:
+        assert all(
+            p["context_lens"].dtype == torch.int32 and p["context_lens"].tolist() == [9, 20, 0] for p in global_params
+        )
+        assert all("actual_seq_kvlen" not in p for p in global_params)
+    else:
+        assert all(p["actual_seq_kvlen"] == [9, 20, 0] for p in global_params)
+        assert all("context_lens" not in p for p in global_params)
+    assert speculator._num_rejected is None and speculator._num_rejected_cpu is None
+
+    def _raise_hook(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _call_propose_with_hook(speculator, torch.tensor([2, 0], dtype=torch.int32), _raise_hook)
+    assert speculator._num_rejected is None and speculator._num_rejected_cpu is None
+
+
+def test_gemma4_partial_rejection_metadata_update_clamp_and_eagle_non_regression():
+    """Verify eager metadata update, lower clamp >=1, and unchanged Eagle +step behavior."""
+    target_buffers = AscendInputBuffers.__new__(AscendInputBuffers)
+    target_buffers.seq_lens_cpu = torch.tensor([11, 20, 0, 0], dtype=torch.int32)
+
+    gemma_spec = _make_gemma4_test_speculator(
+        AscendGemma4Speculator,
+        target_seq_lens=np.array([11, 20], dtype=np.int32),
+    )
+    gemma_spec.attn_architecture = "GQA"
+    gemma_spec.max_num_reqs = 4
+    gemma_spec.target_input_buffers = target_buffers
+    pa_lens = torch.zeros(4, dtype=torch.int32)
+    gemma_meta = {
+        "draft.swa.0": AscendMetadata(seq_lens_cpu=torch.zeros(4, dtype=torch.int32)),
+        "draft.global.0": AscendLargeHeadPagedMetadata(
+            seq_lens_cpu=torch.zeros(4, dtype=torch.int32),
+            pa_context_lens=pa_lens,
+            use_pa_graph=True,
+        ),
+    }
+
+    _call_propose_with_hook(
+        gemma_spec,
+        torch.tensor([2, 0], dtype=torch.int32),
+        lambda *_a, **_kw: gemma_spec._update_decode_attn_metadata(gemma_meta, step=2, num_reqs=2),
+    )
+    assert gemma_meta["draft.swa.0"].seq_lens_list == [9, 20, 0, 0]
+    assert gemma_meta["draft.swa.0"].seq_lens_cpu.tolist() == [9, 20, 0, 0]
+    assert gemma_meta["draft.global.0"].seq_lens_list == [9, 20, 0, 0]
+    assert pa_lens.tolist() == [9, 20, 0, 0]
+
+    clamp_spec = _make_gemma4_test_speculator(AscendGemma4Speculator, target_seq_lens=np.array([3], dtype=np.int32))
+    clamp_meta = {"draft.swa.0": AscendMetadata(block_tables=torch.zeros((2, 1), dtype=torch.int32))}
+    clamped: list[list[dict]] = []
+    _call_propose_with_hook(
+        clamp_spec,
+        torch.tensor([3], dtype=torch.int32),
+        lambda *_a, **_kw: clamped.append(clamp_spec.build_fia_params(2, clamp_meta, is_draft_model_prefill=False)),
+    )
+    assert all(p["actual_seq_lengths_kv"] == [1, 0] for p in clamped[0])
+
+    eagle_spec = _make_gemma4_test_speculator(
+        AscendTargetDependentARSpeculator,
+        target_seq_lens=np.array([11, 20], dtype=np.int32),
+    )
+    eagle_meta = {"draft.swa.0": AscendMetadata(block_tables=torch.zeros((3, 1), dtype=torch.int32))}
+    eagle_captured: list[list[dict]] = []
+    _call_propose_with_hook(
+        eagle_spec,
+        torch.tensor([2, 0], dtype=torch.int32),
+        lambda *_a, **_kw: eagle_captured.append(
+            eagle_spec.build_fia_params(3, eagle_meta, is_draft_model_prefill=False)
+        ),
+    )
+    assert eagle_captured[0][0]["actual_seq_lengths_kv"] == [12, 21, 0]
+    assert eagle_captured[0][1]["actual_seq_lengths_kv"] == [13, 22, 0]
+    assert eagle_spec._num_rejected is None
