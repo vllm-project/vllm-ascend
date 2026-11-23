@@ -246,7 +246,12 @@ def block_ids_for_request(
             raw = getattr(state, "block_ids", None)
             parsed = _normalize_block_ids(raw, kv_cache_group=kv_cache_group)
             if parsed:
-                return parsed
+                # ``requests[].block_ids`` are scheduler/manager ids. Ascend
+                # kernel-paged caches use dim0 = manager_id * R + k; expand here.
+                # ``runner.block_tables`` paths below are already kernel-expanded
+                # by AscendBlockTables — do not expand those twice.
+                ratio = _blocks_per_kv_block_for_group(runner, kv_cache_group)
+                return expand_manager_block_ids(parsed, ratio)
 
     if input_batch is None:
         # V2: runner.input_batch stays None; prefer execute_model_state batch
@@ -451,6 +456,36 @@ def _logical_layer_name(layer_name: str) -> str:
     return layer_name
 
 
+def _blocks_per_kv_block_for_group(runner: Any, kv_cache_group: int) -> int:
+    """Kernel pages per manager block for ``kv_cache_group`` (default 1)."""
+    block_tables = getattr(runner, "block_tables", None)
+    ratios = getattr(block_tables, "blocks_per_kv_block", None) if block_tables is not None else None
+    if ratios is None:
+        return 1
+    try:
+        return max(1, int(ratios[kv_cache_group]))
+    except IndexError:
+        return 1
+    except (TypeError, ValueError):
+        # Some builds expose a scalar ratio shared by all groups.
+        try:
+            return max(1, int(ratios))
+        except (TypeError, ValueError):
+            return 1
+
+
+def expand_manager_block_ids(block_ids: list[int], blocks_per_kv_block: int) -> list[int]:
+    """Expand scheduler/manager block ids to kernel dim0 indices."""
+    ratio = max(1, int(blocks_per_kv_block))
+    if ratio == 1:
+        return [int(b) for b in block_ids]
+    out: list[int] = []
+    for bid in block_ids:
+        base = int(bid) * ratio
+        out.extend(range(base, base + ratio))
+    return out
+
+
 def _list_layer_name(i: int, *, names: list[str], start_layer: int) -> str:
     if 0 <= i < len(names):
         return names[i]
@@ -587,7 +622,8 @@ class KvCacheReader:
         """Yield per-layer CPU snapshots for one request (D2H per layer).
 
         ``block_ids`` is the arm-time group-0 hint. Each layer resolves its own
-        ``kv_cache_group`` block table (hybrid / draft / multi-group).
+        ``kv_cache_group`` block table (hybrid / draft / multi-group) and expands
+        manager ids to kernel pages when ``blocks_per_kv_block > 1``.
         """
         fallback_ids = list(block_ids)
         out_dir.mkdir(parents=True, exist_ok=True)
