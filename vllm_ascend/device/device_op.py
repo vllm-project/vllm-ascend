@@ -1598,7 +1598,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     @staticmethod
     def dsa_indexer_scatter_scale_part3(kv_scale, indexer_scale_cache, slot_mapping):
         """Part3 of multi-stream indexer scatter.
-        A5: no-op — fused op in Part1 already handled scale_cache."""
+        A5: no-op �� fused op in Part1 already handled scale_cache."""
         pass
 
     @staticmethod
@@ -1940,6 +1940,11 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             if q_li_scale is not None:
                 q_li_scale = q_li_scale.view(q_li_shape_ori[:-1])
                 key_dequant_scale = kv_cache[indexer_scale_cache_idx].squeeze(2)
+
+                # The INT8 QuantLightningIndexer signature requires FP16
+                # weights. Keep the FP8 path's original weights dtype.
+                if q_li.dtype == torch.int8:
+                    weights = weights.to(torch.float16)
 
                 topk_indices = torch_npu.npu_quant_lightning_indexer(
                     query=q_li.view(q_li_shape_ori),
