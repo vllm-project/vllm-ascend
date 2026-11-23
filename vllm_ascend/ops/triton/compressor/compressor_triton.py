@@ -214,9 +214,10 @@ def _pooled_blocked(
     return pooled
 
 
-@triton.jit(do_not_specialize=[
-    "total_group_slots", "groups_per_batch", "num_batches", "eps", "num_cache_blocks",
-])
+# Runtime request bounds vary across batches; specialize only the vector/tile
+# dimensions and algorithm branches below. eps is a runtime float, whose value
+# does not trigger the integer value/alignment specialization handled here.
+@triton.jit(do_not_specialize=["total_group_slots", "groups_per_batch", "num_batches", "num_cache_blocks"])
 def _pool_kernel(
     out_ptr,
     kv_ptr,
@@ -795,9 +796,13 @@ def compressor_from_projected(
     if num_cores <= 0 or not 0 <= max_query_len <= tokens:
         raise ValueError("Invalid compressor launch bounds")
     if norm_w is not None:
-        if (norm_w.shape != (width,) or norm_w.device != kv.device
-                or norm_w.dtype not in (torch.bfloat16, torch.float32)
-                or not norm_w.is_contiguous() or not 0 < rms_eps < float("inf")):
+        if (
+            norm_w.shape != (width,)
+            or norm_w.device != kv.device
+            or norm_w.dtype not in (torch.bfloat16, torch.float32)
+            or not norm_w.is_contiguous()
+            or not 0 < rms_eps < float("inf")
+        ):
             raise ValueError("Invalid C2 RMSNorm weight or epsilon")
     batches = metadata.shape[1]
     has_work = tokens > 0 and batches > 0 and max_query_len > 0

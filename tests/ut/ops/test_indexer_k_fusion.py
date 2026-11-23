@@ -3,6 +3,7 @@
 """CPU validation tests; Triton import stubs do not execute kernel math."""
 
 import importlib.util
+import inspect
 import unittest
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -100,6 +101,91 @@ class TestIndexerKFusionValidation(unittest.TestCase):
                 ):
                     self.module.indexer_k_norm_rope_int8_store(**args)
 
+    def test_runtime_layouts_and_vector_constants_are_forwarded(self):
+        # Metadata-only inputs exercise the real wrapper without NPU execution.
+        # Keep this launch-contract regression alongside the input validation.
+        device = SimpleNamespace(type="npu", index=0)
+
+        def tensor(shape, strides, dtype):
+            return SimpleNamespace(
+                shape=shape,
+                ndim=len(shape),
+                dtype=dtype,
+                device=device,
+                stride=lambda axis=None: strides if axis is None else strides[axis],
+            )
+
+        kernel = self.module._indexer_k_norm_rope_int8_store_kernel
+        for vector_stride in (1, 2):
+            for tokens, page, gap, slots_row, slots_col in (
+                (0, 16, 0, 2, 1),
+                (1, 16, 0, 2, 1),
+                (17, 32, 16, 6, 2),
+                (257, 64, 32, 8, 3),
+            ):
+                with self.subTest(tokens=tokens, page=page, vector_stride=vector_stride):
+                    blocks = 8 + gap
+                    key_row, scale_row = 128 + gap, 1 + gap // 16
+                    key_block, scale_block = page * key_row + 128, page * scale_row + 8
+                    args = dict(
+                        k_pre=tensor((tokens, 128), (128 + gap, 1), torch.bfloat16),
+                        weight=tensor((128,), (vector_stride,), torch.bfloat16),
+                        eps=1 if tokens == 257 else 1e-6,
+                        cos=tensor((tokens, 64), (64 * vector_stride + gap, vector_stride), torch.float32),
+                        sin=tensor((tokens, 64), (64 * vector_stride + gap + 16, vector_stride), torch.float32),
+                        slots=tensor((tokens, 2), (slots_row, slots_col), torch.int32),
+                        k_cache=tensor((blocks, page, 1, 128), (key_block, key_row, key_row, 1), torch.int8),
+                        scale_cache=tensor((blocks, page, 1, 1), (scale_block, scale_row, scale_row, 1), torch.float16),
+                    )
+                    with patch.object(self.module, "_indexer_k_norm_rope_int8_store_kernel") as launcher:
+                        self.module.indexer_k_norm_rope_int8_store(**args)
+                    if tokens == 0:
+                        launcher.__getitem__.assert_not_called()
+                        continue
+                    self.assertEqual(launcher.__getitem__.call_args.args, ((tokens,),))
+                    call = launcher.__getitem__.return_value.call_args
+                    keywords = dict(call.kwargs)
+                    self.assertFalse(keywords.pop("enable_fp_fusion"))
+                    bound = inspect.signature(kernel).bind(*call.args, **keywords).arguments
+                    for pointer, name in (
+                        ("input_ptr", "k_pre"),
+                        ("weight_ptr", "weight"),
+                        ("cos_ptr", "cos"),
+                        ("sin_ptr", "sin"),
+                        ("slots_ptr", "slots"),
+                        ("key_cache_ptr", "k_cache"),
+                        ("scale_cache_ptr", "scale_cache"),
+                    ):
+                        self.assertIs(bound[pointer], args[name])
+                    expected_runtime = {
+                        "input_row_stride": 128 + gap,
+                        "cos_row_stride": 64 * vector_stride + gap,
+                        "sin_row_stride": 64 * vector_stride + gap + 16,
+                        "slots_row_stride": slots_row,
+                        "slots_col_stride": slots_col,
+                        "key_block_stride": key_block,
+                        "key_row_stride": key_row,
+                        "scale_block_stride": scale_block,
+                        "scale_row_stride": scale_row,
+                        "num_blocks": blocks,
+                        "page_size": page,
+                        "rms_eps": float(args["eps"]),
+                    }
+                    for name, value in expected_runtime.items():
+                        self.assertEqual(bound[name], value)
+                    self.assertIsInstance(bound["rms_eps"], float)
+                    self.assertEqual(
+                        {name: value for name, value in bound.items() if name.isupper()},
+                        {
+                            "HEAD_DIM": 128,
+                            "ROTARY_DIM": 64,
+                            "QUANT_MAX": 127.0,
+                            "WEIGHT_STRIDE": vector_stride,
+                            "COS_COL_STRIDE": vector_stride,
+                            "SIN_COL_STRIDE": vector_stride,
+                        },
+                    )
+
 
 class TestCompressorFusedNormValidation(unittest.TestCase):
     @classmethod
@@ -139,7 +225,6 @@ class TestCompressorFusedNormValidation(unittest.TestCase):
         for eps in (0.0, -1e-6, float("inf"), float("nan")):
             with self.subTest(eps=eps), self.assertRaisesRegex(ValueError, "RMSNorm weight or epsilon"):
                 self.module.compressor_from_projected(**self.args, norm_w=torch.ones(128), rms_eps=eps)
-
 
     def test_nonempty_cpu_rejection_preserves_caller_output(self):
         output = torch.full((2, 128), 7, dtype=torch.bfloat16)

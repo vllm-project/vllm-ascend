@@ -2,18 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Device acceptance tests; CPU mocks do not cover these checks.
 
-Set VLLM_ASCEND_DSV41_TEST_CONFIG to the config.json used in deployment to
-include real model dimensions. Default dimensions below are interface cases,
-not a claim that all deployed model configurations have been covered.
+MODEL_DIMENSIONS lists the model cases explicitly in this file. The initial
+case is an interface example; add dimensions from the deployed model config
+before claiming real-model coverage.
 """
-
-import json
-import os
 
 import pytest
 import torch
-
-torch_npu = pytest.importorskip("torch_npu")
+import torch_npu
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -25,18 +21,14 @@ pytestmark = pytest.mark.skipif(
     reason="Ordinary A2/A3 INT8 fusion; test A5 fallback separately",
 )
 
+# (index_head_dim, qk_rope_head_dim, head_dim, rms_norm_eps).
+# Replace or extend this immutable table with the actual deployment cases.
+MODEL_DIMENSIONS = (pytest.param((128, 64, 512, 1e-6), id="interface-example"),)
 
-def _dimensions():
-    path = os.environ.get("VLLM_ASCEND_DSV41_TEST_CONFIG")
-    if path is None:
-        return 128, 64, 512, 1e-6
-    with open(path) as file:
-        config = json.load(file)
-    config = config.get("text_config", config)
-    return (
-        int(config["index_head_dim"]), int(config["qk_rope_head_dim"]),
-        int(config["head_dim"]), float(config["rms_norm_eps"]),
-    )
+
+@pytest.fixture(scope="module", params=MODEL_DIMENSIONS)
+def dsv41_dimensions(request):
+    return request.param
 
 
 def _assert_float_accuracy(actual, expected, dtype):
@@ -78,18 +70,21 @@ def _native_reference(k_pre, weight, eps, cos, sin):
 # Correlated cases avoid a large redundant Cartesian product. Counts cover
 # empty/single-row, 16-row boundaries and a larger batch; the layout cases
 # exercise the stride contract without inventing a new production shape.
-@pytest.mark.parametrize("tokens,layout,slot_dtype,weight_dtype", [
-    (0, "dense", torch.int32, torch.bfloat16),
-    (1, "dense", torch.int32, torch.bfloat16),
-    (15, "padded", torch.int64, torch.float32),
-    (16, "four_dimensional", torch.int32, torch.bfloat16),
-    (17, "padded", torch.int64, torch.bfloat16),
-    (257, "dense", torch.int32, torch.bfloat16),
-])
+@pytest.mark.parametrize(
+    "tokens,layout,slot_dtype,weight_dtype",
+    [
+        (0, "dense", torch.int32, torch.bfloat16),
+        (1, "dense", torch.int32, torch.bfloat16),
+        (15, "padded", torch.int64, torch.float32),
+        (16, "four_dimensional", torch.int32, torch.bfloat16),
+        (17, "padded", torch.int64, torch.bfloat16),
+        (257, "dense", torch.int32, torch.bfloat16),
+    ],
+)
 @torch.no_grad()
-def test_indexer_matches_native_chain(tokens, layout, slot_dtype, weight_dtype):
+def test_indexer_matches_native_chain(tokens, layout, slot_dtype, weight_dtype, dsv41_dimensions):
     torch.manual_seed(1234)
-    width, rotary_dim, _, eps = _dimensions()
+    width, rotary_dim, _, eps = dsv41_dimensions
     device = "npu"
     row_width = width + 16 if layout == "padded" else width
     projection_base = torch.randn(tokens, row_width, dtype=torch.bfloat16, device=device)
@@ -104,10 +99,16 @@ def test_indexer_matches_native_chain(tokens, layout, slot_dtype, weight_dtype):
     page_size = 16
     num_blocks = (tokens + page_size - 1) // page_size + 1
     key_storage = torch.full(
-        (num_blocks, page_size + 1, 1, width + 16), -91, dtype=torch.int8, device=device,
+        (num_blocks, page_size + 1, 1, width + 16),
+        -91,
+        dtype=torch.int8,
+        device=device,
     )
     scale_storage = torch.full(
-        (num_blocks, page_size + 1, 1, 2), -7.0, dtype=torch.float16, device=device,
+        (num_blocks, page_size + 1, 1, 2),
+        -7.0,
+        dtype=torch.float16,
+        device=device,
     )
     keys = key_storage[:, :page_size, :, :width]
     scales = scale_storage[:, :page_size, :, :1]
@@ -116,7 +117,9 @@ def test_indexer_matches_native_chain(tokens, layout, slot_dtype, weight_dtype):
     # Include all four invalid-coordinate classes, not just the negative sentinel.
     if tokens >= 15:
         invalid = torch.tensor(
-            [[-1, 0], [0, -1], [num_blocks, 0], [0, page_size]], device=device, dtype=slot_dtype,
+            [[-1, 0], [0, -1], [num_blocks, 0], [0, page_size]],
+            device=device,
+            dtype=slot_dtype,
         )
         slots[-4:] = invalid
     before_inputs = [t.clone() for t in (projection, weight, cos, sin, slots)]
@@ -149,24 +152,34 @@ def test_indexer_matches_native_chain(tokens, layout, slot_dtype, weight_dtype):
         block, offset = coordinates[row]
         written_scales[block, offset, 0, 0] = True
     torch.testing.assert_close(
-        scale_storage[~written_scales], expected_scales[~written_scales], rtol=0, atol=0,
+        scale_storage[~written_scales],
+        expected_scales[~written_scales],
+        rtol=0,
+        atol=0,
     )
     _assert_float_accuracy(
-        scale_storage[written_scales], expected_scales[written_scales], torch.float16,
+        scale_storage[written_scales],
+        expected_scales[written_scales],
+        torch.float16,
     )
 
 
 @pytest.mark.parametrize("magnitude", [1.0, 2**-20, 2**10])
 @torch.no_grad()
-def test_indexer_quantization_ties_and_scale_ranges(magnitude):
-    width, rotary_dim, _, eps = _dimensions()
+def test_indexer_quantization_ties_and_scale_ranges(magnitude, dsv41_dimensions):
+    width, rotary_dim, _, eps = dsv41_dimensions
     if width < 8:
         pytest.skip("Tie vector requires at least eight columns")
     projection = torch.ones(1, width, dtype=torch.bfloat16, device="npu")
     weight = torch.zeros(width, dtype=torch.bfloat16, device="npu")
-    weight[:8] = torch.tensor(
-        [127, 0.5, 1.5, 2.5, -0.5, -1.5, -2.5, -127], dtype=torch.bfloat16, device="npu",
-    ) * magnitude
+    weight[:8] = (
+        torch.tensor(
+            [127, 0.5, 1.5, 2.5, -0.5, -1.5, -2.5, -127],
+            dtype=torch.bfloat16,
+            device="npu",
+        )
+        * magnitude
+    )
     cos = torch.ones(1, rotary_dim, device="npu")
     sin = torch.zeros_like(cos)
     slots = torch.tensor([[0, 0]], dtype=torch.int32, device="npu")
@@ -178,40 +191,64 @@ def test_indexer_quantization_ties_and_scale_ranges(magnitude):
     _assert_float_accuracy(scales.flatten(), reference_scales, torch.float16)
 
 
-@pytest.mark.parametrize("start,length,use_gather", [
-    (0, 1, False), (0, 2, False), (1, 1, False), (1, 3, True), (31, 3, True),
-])
+@pytest.mark.parametrize(
+    "start,length,use_gather",
+    [
+        (0, 1, False),
+        (0, 2, False),
+        (1, 1, False),
+        (1, 3, True),
+        (31, 3, True),
+    ],
+)
 @pytest.mark.parametrize("weight_dtype", [torch.bfloat16, torch.float32])
 @torch.no_grad()
-def test_c2_fused_norm_matches_separate_norm(start, length, use_gather, weight_dtype):
+def test_c2_fused_norm_matches_separate_norm(start, length, use_gather, weight_dtype, dsv41_dimensions):
     torch.manual_seed(17)
-    _, _, width, eps = _dimensions()
+    _, _, width, eps = dsv41_dimensions
     kv = torch.randn(length, width, device="npu", dtype=torch.float32)
     scores = torch.randn_like(kv)
     weight = torch.randn(width, device="npu", dtype=weight_dtype)
     # Block 0 is reserved; batch 1 is padding. The first request uses block 1.
     metadata = torch.tensor(
-        [[start, 0], [length, 0], [0, 0], [0, 0], [1, 0]], device="npu", dtype=torch.int32,
+        [[start, 0], [length, 0], [0, 0], [0, 0], [1, 0]],
+        device="npu",
+        dtype=torch.int32,
     )
     initial_state = torch.randn(3, 32, 2 * width, device="npu", dtype=torch.float32)
     reference_state, fused_state = initial_state.clone(), initial_state.clone()
     prev_rows = torch.randn(1, 2 * width, device="npu") if use_gather else None
     prev_indices = torch.tensor([0, -1], device="npu", dtype=torch.int64) if use_gather else None
     kwargs = dict(
-        max_query_len=length, num_cores=1, prev_rows=prev_rows, prev_row_indices=prev_indices,
+        max_query_len=length,
+        num_cores=1,
+        prev_rows=prev_rows,
+        prev_row_indices=prev_indices,
     )
     readonly = (kv, scores, weight, metadata)
     if use_gather:
         readonly += (prev_rows, prev_indices)
     readonly_before = [tensor.clone() for tensor in readonly]
     raw = compressor_from_projected(
-        kv, scores, reference_state, metadata, torch.empty_like(kv, dtype=torch.bfloat16),
-        **kwargs, norm_w=None,
+        kv,
+        scores,
+        reference_state,
+        metadata,
+        torch.empty_like(kv, dtype=torch.bfloat16),
+        **kwargs,
+        norm_w=None,
     )
     expected, _ = torch_npu.npu_rms_norm(raw, weight, eps)
     output = torch.full_like(kv, 5, dtype=torch.bfloat16)
     result = compressor_from_projected(
-        kv, scores, fused_state, metadata, output, **kwargs, norm_w=weight, rms_eps=eps,
+        kv,
+        scores,
+        fused_state,
+        metadata,
+        output,
+        **kwargs,
+        norm_w=weight,
+        rms_eps=eps,
     )
     torch.npu.synchronize()
     assert result.data_ptr() == output.data_ptr()

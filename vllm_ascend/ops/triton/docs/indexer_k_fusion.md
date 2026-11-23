@@ -46,10 +46,31 @@
   formats are rejected; packed/folded formats are dispatched outside this wrapper.
 - Graph path uses stable caller-owned output storage and reads no tensor contents
   on the host. Actual ACL graph capture/replay validation remains pending.
-- `HEAD_DIM` is constexpr because it defines vector/reduction size; the fixed
-  `QUANT_MAX` defines the quantization algorithm. Rotary width, strides,
-  capacities and epsilon are runtime arguments with specialization suppressed. Token count only changes the grid. Pointer dtype/alignment,
-  compiler settings, backend and source/cache state can still cause compilation.
+- Specialization preserves vector-layout optimization while keeping row and
+  cache addressing dynamic:
+
+  | Arguments | Policy | Reason |
+  | --- | --- | --- |
+  | `HEAD_DIM` | constexpr | Defines vector and reduction sizes. |
+  | `ROTARY_DIM` | constexpr | Fixed per model; exposes the partial-RoPE mask to constant folding. |
+  | `WEIGHT_STRIDE` | constexpr | Exposes the per-lane weight access pattern. |
+  | `COS_COL_STRIDE`, `SIN_COL_STRIDE` | constexpr | Expose the per-lane RoPE-table access patterns. |
+  | `QUANT_MAX` | fixed constexpr | Symmetric INT8 algorithm constant, always 127. |
+  | `input_row_stride`, `cos_row_stride`, `sin_row_stride` | runtime, do_not_specialize | Only calculate the selected row base. |
+  | `slots_row_stride`, `slots_col_stride` | runtime, do_not_specialize | Address the two scalar slot coordinates. |
+  | `key_block_stride`, `key_row_stride`, `scale_block_stride`, `scale_row_stride` | runtime, do_not_specialize | Reuse artifacts across cache row layouts and allocations. |
+  | `num_blocks`, `page_size` | runtime, do_not_specialize | Only check physical-slot bounds in this kernel. |
+  | `rms_eps` | runtime float | Arithmetic input; float values alone do not specialize. |
+
+  The constexpr domain is the model dimensions, three vector access strides and
+  the fixed quantization constant. Changing row strides, slot-record strides,
+  cache bounds or grid does not change those constants. Different vector-column
+  strides or rotary widths intentionally select different specializations.
+  Tensor dtype/alignment, scalar types, compiler options, backend and source/cache
+  state can still affect compilation. Supported strided views remain supported;
+  the wrapper performs no contiguous copies. This policy is a tuning candidate,
+  not evidence of lower latency or fewer variants than the all-runtime
+  implementation. Validate both on the deployed Triton version.
 - Warmup: no new warmup registration is included in this proposal. First measure
   remaining runtime variants, then, if required, use the shared Ascend wrapper
   and active registration window described in `triton_jit_warmup.md`. Preserve
@@ -72,13 +93,14 @@
 
 ```bash
 python -m pytest tests/ut/ops/test_indexer_k_fusion.py tests/ut/models/test_deepseek_v41_indexer_k_fusion.py -q
-VLLM_ASCEND_DSV41_TEST_CONFIG=/path/to/deployed/model/config.json \
 python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_indexer_k_fusion.py
 ```
 
-The model config is required for merge evidence, including index_head_dim,
-qk_rope_head_dim and rms_norm_eps. Without it, device tests only cover example
-interface dimensions. Test A2/A3 separately; also validate the A5 and loaded-bias
+The test module's MODEL_DIMENSIONS table contains explicit tuples of
+index_head_dim, qk_rope_head_dim, head_dim and rms_norm_eps. Replace or extend
+the interface-example case using the deployed model config before reporting
+model acceptance. No custom pytest option is required. Test A2/A3 separately;
+also validate the A5 and loaded-bias
 production fallback. Add real workload shapes observed during prefill, decode,
 speculative decoding and PCP to the parameter table when collecting results.
 Required additional acceptance includes graph replay, rounding ties/native

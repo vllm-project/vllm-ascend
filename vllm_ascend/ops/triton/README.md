@@ -80,7 +80,7 @@ configuration rather than the runner input or sampling interface.
 | [batch_invariant/softmax.py](batch_invariant/softmax.py) | Batch-invariant operations |
 | [build_window_indices.py](build_window_indices.py) | Model/attention primitive or shared utility |
 | [c2_ring_metadata.py](c2_ring_metadata.py) | Model/attention primitive or shared utility |
-| [compressor/compressor_triton.py](compressor/compressor_triton.py) | Model compression |
+| [compressor/compressor_triton.py](compressor/compressor_triton.py) | Model compression; see [projected C2 pooling](docs/compressor_from_projected.md). |
 | [dcp/dcp_a2a.py](dcp/dcp_a2a.py) | Distributed attention |
 | [dcp/dcp_a2a_batched.py](dcp/dcp_a2a_batched.py) | Distributed attention |
 | [dcp/sfa_dcp_exchange.py](dcp/sfa_dcp_exchange.py) | Model/attention primitive or shared utility |
@@ -110,6 +110,7 @@ configuration rather than the runner input or sampling interface.
 | [glm5_next_cann_keypool.py](glm5_next_cann_keypool.py) | Model/attention primitive or shared utility |
 | [glm5_next_kpool_tail_compress.py](glm5_next_kpool_tail_compress.py) | Model/attention primitive or shared utility |
 | [glm5_next_lightning_indexer.py](glm5_next_lightning_indexer.py) | Model/attention primitive or shared utility |
+| [indexer_k_fusion.py](indexer_k_fusion.py) | DeepSeek V4.1 indexer cache publication; see [operator documentation](docs/indexer_k_fusion.md). |
 | [kda/chunk_delta_h.py](kda/chunk_delta_h.py) | KDA computation |
 | [kda/conv_state.py](kda/conv_state.py) | KDA computation |
 | [kda/cumsum.py](kda/cumsum.py) | KDA computation |

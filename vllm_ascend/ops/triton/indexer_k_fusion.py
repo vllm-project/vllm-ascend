@@ -23,16 +23,23 @@ def _round_even(value):
     return lower + ((fraction > 0.5) | ((fraction == 0.5) & lower_is_odd)).to(tl.float32)
 
 
-# These scalars only participate in addressing, bounds checks or arithmetic.
-# Keep them runtime values to avoid variants for cache capacity and row strides.
-# Pointer dtype/alignment, constexpr dimensions and compiler options can still
-# specialize. Validate those remaining classes on the installed Triton backend.
+# Specialize on vector dimensions, weight/RoPE column strides and the fixed
+# quantization algorithm. Row/slot addressing and cache bounds stay dynamic so
+# changing row layouts or cache allocations does not add scalar-value variants.
+# Epsilon is a runtime float; its value needs no integer specialization controls.
 @triton.jit(
     do_not_specialize=[
-        "input_row_stride", "weight_stride", "cos_row_stride", "cos_col_stride",
-        "sin_row_stride", "sin_col_stride", "slots_row_stride", "slots_col_stride",
-        "key_block_stride", "key_row_stride", "scale_block_stride", "scale_row_stride",
-        "num_blocks", "page_size", "rotary_dim", "rms_eps",
+        "input_row_stride",
+        "cos_row_stride",
+        "sin_row_stride",
+        "slots_row_stride",
+        "slots_col_stride",
+        "key_block_stride",
+        "key_row_stride",
+        "scale_block_stride",
+        "scale_row_stride",
+        "num_blocks",
+        "page_size",
     ]
 )
 def _indexer_k_norm_rope_int8_store_kernel(
@@ -44,11 +51,8 @@ def _indexer_k_norm_rope_int8_store_kernel(
     key_cache_ptr,
     scale_cache_ptr,
     input_row_stride,
-    weight_stride,
     cos_row_stride,
-    cos_col_stride,
     sin_row_stride,
-    sin_col_stride,
     slots_row_stride,
     slots_col_stride,
     key_block_stride,
@@ -57,9 +61,12 @@ def _indexer_k_norm_rope_int8_store_kernel(
     scale_row_stride,
     num_blocks,
     page_size,
-    rotary_dim,
     rms_eps,
+    WEIGHT_STRIDE: tl.constexpr,
+    COS_COL_STRIDE: tl.constexpr,
+    SIN_COL_STRIDE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    ROTARY_DIM: tl.constexpr,
     QUANT_MAX: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -72,26 +79,26 @@ def _indexer_k_norm_rope_int8_store_kernel(
         odd_offsets = even_offsets + 1
         even_values = tl.load(input_ptr + row * input_row_stride + even_offsets).to(tl.float32)
         odd_values = tl.load(input_ptr + row * input_row_stride + odd_offsets).to(tl.float32)
-        mean_square = (
-            tl.sum(even_values * even_values, 0) + tl.sum(odd_values * odd_values, 0)
-        ) / HEAD_DIM
+        mean_square = (tl.sum(even_values * even_values, 0) + tl.sum(odd_values * odd_values, 0)) / HEAD_DIM
         inv_rms = tl.rsqrt(mean_square + rms_eps)
-        even_weight = tl.load(weight_ptr + even_offsets * weight_stride).to(tl.float32)
-        odd_weight = tl.load(weight_ptr + odd_offsets * weight_stride).to(tl.float32)
+        even_weight = tl.load(weight_ptr + even_offsets * WEIGHT_STRIDE).to(tl.float32)
+        odd_weight = tl.load(weight_ptr + odd_offsets * WEIGHT_STRIDE).to(tl.float32)
         # The unfused RMSNorm produces BF16 before RoPE consumes its output.
         even_values = (even_values * inv_rms * even_weight).to(tl.bfloat16).to(tl.float32)
         odd_values = (odd_values * inv_rms * odd_weight).to(tl.bfloat16).to(tl.float32)
 
-        rotary_offsets = even_offsets - (HEAD_DIM - rotary_dim)
+        rotary_offsets = even_offsets - (HEAD_DIM - ROTARY_DIM)
         rotary_mask = rotary_offsets >= 0
         safe_offsets = tl.maximum(rotary_offsets, 0)
         cos_values = tl.load(
-            cos_ptr + row * cos_row_stride + safe_offsets * cos_col_stride,
-            mask=rotary_mask, other=1.0,
+            cos_ptr + row * cos_row_stride + safe_offsets * COS_COL_STRIDE,
+            mask=rotary_mask,
+            other=1.0,
         ).to(tl.float32)
         sin_values = tl.load(
-            sin_ptr + row * sin_row_stride + safe_offsets * sin_col_stride,
-            mask=rotary_mask, other=0.0,
+            sin_ptr + row * sin_row_stride + safe_offsets * SIN_COL_STRIDE,
+            mask=rotary_mask,
+            other=0.0,
         ).to(tl.float32)
         rotated_even = (even_values * cos_values - odd_values * sin_values).to(tl.bfloat16).to(tl.float32)
         rotated_odd = (odd_values * cos_values + even_values * sin_values).to(tl.bfloat16).to(tl.float32)
@@ -178,13 +185,30 @@ def indexer_k_norm_rope_int8_store(
     if num_tokens == 0:
         return
     _indexer_k_norm_rope_int8_store_kernel[(num_tokens,)](
-        k_pre, weight, cos, sin, slots, k_cache, scale_cache,
-        k_pre.stride(0), weight.stride(0),
-        *cos.stride(), *sin.stride(), *slots.stride(),
-        k_cache.stride(0), k_cache.stride(1),
-        scale_cache.stride(0), scale_cache.stride(1),
-        num_blocks, page_size, rotary_dim, float(eps),
+        k_pre,
+        weight,
+        cos,
+        sin,
+        slots,
+        k_cache,
+        scale_cache,
+        k_pre.stride(0),
+        cos.stride(0),
+        sin.stride(0),
+        slots.stride(0),
+        slots.stride(1),
+        k_cache.stride(0),
+        k_cache.stride(1),
+        scale_cache.stride(0),
+        scale_cache.stride(1),
+        num_blocks,
+        page_size,
+        float(eps),
+        WEIGHT_STRIDE=weight.stride(0),
+        COS_COL_STRIDE=cos.stride(1),
+        SIN_COL_STRIDE=sin.stride(1),
         HEAD_DIM=head_dim,
+        ROTARY_DIM=rotary_dim,
         QUANT_MAX=INT8_QUANT_MAX,
         enable_fp_fusion=False,
     )

@@ -46,7 +46,8 @@
   path. The BF16 pooling boundary before RMSNorm must not be removed.
 - HEAD_DIM and algorithm/branch flags remain constexpr. Pooling epsilon and
   cache block bounds become runtime values; scheduler scalars suppress value
-  specialization. FUSE_TOKEN_NORM/HAS_PREV_ROWS and weight pointer dtypes still
+  specialization. Epsilon is passed as a float and does not need integer
+  specialization controls. FUSE_TOKEN_NORM/HAS_PREV_ROWS and weight pointer dtypes still
   distinguish required variants. This patch does not change the separate
   `_cache_update_kernel` specialization policy.
 - Graph capture/replay and remaining variants must be checked on the target
@@ -68,12 +69,12 @@
 ## Test Cases
 
 ```bash
-VLLM_ASCEND_DSV41_TEST_CONFIG=/path/to/deployed/model/config.json \
 python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_indexer_k_fusion.py -k c2
 python -m pytest tests/ut/ops/test_indexer_k_fusion.py tests/ut/models/test_deepseek_v41_cache.py tests/ut/attention/test_dsa_v41_cp.py -q
 ```
 
-Use actual head_dim and epsilon from the deployed model. Device cases include
+Set the test module's MODEL_DIMENSIONS table to the deployed model's actual
+head_dim and epsilon (along with the indexer dimensions). Device cases include
 complete/incomplete pairs, odd start position, ring wrap and gathered predecessor
 paths. Also retain full production PCP tests proving residual reads happen before
 the caller's ring write, bias fallback and exactly-once normalization.
