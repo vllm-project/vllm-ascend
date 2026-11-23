@@ -3,6 +3,7 @@
 
 import pytest
 import torch
+
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.quantize_mxfp4_indexer import quantize_mxfp4_indexer

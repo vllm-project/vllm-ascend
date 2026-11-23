@@ -11,6 +11,8 @@ _INDEXER_WIDTH = 128
 _GROUP_SIZE = 32
 _GROUP_COUNT = _INDEXER_WIDTH // _GROUP_SIZE
 _PACKED_WIDTH = _INDEXER_WIDTH // 2
+_QUERY_TILE_ROWS = 32
+_QUERY_TILE_MIN_ROWS = 2048
 
 
 @triton.jit
@@ -58,20 +60,20 @@ def _quantize_mxfp4_indexer_kernel(
     GROUP_SIZE: tl.constexpr,
 ):
     row = tl.program_id(0)
-    pair_offsets = tl.arange(0, BLOCK_WIDTH // 2)
-    even_offsets = pair_offsets * 2
-    row_ptr = input_ptr + row * BLOCK_WIDTH
-    even = tl.load(row_ptr + even_offsets).to(tl.float32)
-    odd = tl.load(row_ptr + even_offsets + 1).to(tl.float32)
-    # The two nibbles in a byte share a scale. Reduce pair maxima, then
-    # reuse the same elements to encode the nibbles without reloading the row.
-    magnitudes = tl.maximum(tl.abs(even), tl.abs(odd))
-    group = even_offsets // GROUP_SIZE
+    offsets = tl.arange(0, BLOCK_WIDTH)
+    values = tl.load(input_ptr + row * BLOCK_WIDTH + offsets).to(tl.float32)
+    magnitudes = tl.abs(values)
 
-    amax0 = tl.max(tl.where(group == 0, magnitudes, 0.0), axis=0)
-    amax1 = tl.max(tl.where(group == 1, magnitudes, 0.0), axis=0)
-    amax2 = tl.max(tl.where(group == 2, magnitudes, 0.0), axis=0)
-    amax3 = tl.max(tl.where(group == 3, magnitudes, 0.0), axis=0)
+    amax0 = tl.max(tl.where(offsets < GROUP_SIZE, magnitudes, 0.0), axis=0)
+    amax1 = tl.max(
+        tl.where((offsets >= GROUP_SIZE) & (offsets < 2 * GROUP_SIZE), magnitudes, 0.0),
+        axis=0,
+    )
+    amax2 = tl.max(
+        tl.where((offsets >= 2 * GROUP_SIZE) & (offsets < 3 * GROUP_SIZE), magnitudes, 0.0),
+        axis=0,
+    )
+    amax3 = tl.max(tl.where(offsets >= 3 * GROUP_SIZE, magnitudes, 0.0), axis=0)
 
     # The eager golden computes ceil(log2(max(amax, 6*2^-126) / 6)).
     # Dividing the minimum by six yields the smallest finite E8M0 scale.
@@ -88,12 +90,54 @@ def _quantize_mxfp4_indexer_kernel(
     packed_scale = exponent0 | (exponent1 << 8) | (exponent2 << 16) | (exponent3 << 24)
     tl.store(scale_ptr + row, packed_scale)
 
-    exponent = _select_group_value(group, exponent0, exponent1, exponent2, exponent3)
-    scale = (exponent << 23).to(tl.float32, bitcast=True)
-    even_code = _fp4_e2m1_code(even / scale)
-    odd_code = _fp4_e2m1_code(odd / scale)
+    pair_offsets = tl.arange(0, BLOCK_WIDTH // 2)
+    even_offsets = pair_offsets * 2
+    odd_offsets = even_offsets + 1
+    even_group = even_offsets // GROUP_SIZE
+    odd_group = odd_offsets // GROUP_SIZE
+    even_exponent = _select_group_value(even_group, exponent0, exponent1, exponent2, exponent3)
+    odd_exponent = _select_group_value(odd_group, exponent0, exponent1, exponent2, exponent3)
+    even_scale = (even_exponent << 23).to(tl.float32, bitcast=True)
+    odd_scale = (odd_exponent << 23).to(tl.float32, bitcast=True)
+    even = tl.load(input_ptr + row * BLOCK_WIDTH + even_offsets).to(tl.float32) / even_scale
+    odd = tl.load(input_ptr + row * BLOCK_WIDTH + odd_offsets).to(tl.float32) / odd_scale
+    even_code = _fp4_e2m1_code(even)
+    odd_code = _fp4_e2m1_code(odd)
     packed = (even_code & 0x0F) | ((odd_code & 0x0F) << 4)
     tl.store(data_ptr + row * (BLOCK_WIDTH // 2) + pair_offsets, packed)
+
+
+@triton.jit
+def _quantize_mxfp4_indexer_tiled_kernel(
+    input_ptr,
+    data_ptr,
+    scale_ptr,
+    WIDTH: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    ROWS_PER_BLOCK: tl.constexpr,
+):
+    num_groups: tl.constexpr = WIDTH // GROUP_SIZE
+    pairs_per_group: tl.constexpr = GROUP_SIZE // 2
+    rows = tl.program_id(0) * ROWS_PER_BLOCK + tl.arange(0, ROWS_PER_BLOCK)
+    columns = tl.arange(0, WIDTH)
+    values = tl.load(input_ptr + rows[:, None] * WIDTH + columns[None, :])
+    values = values.to(tl.float32).reshape((ROWS_PER_BLOCK, num_groups, pairs_per_group, 2))
+    even, odd = tl.split(values)
+    magnitudes = tl.maximum(tl.abs(even), tl.abs(odd))
+    amax = tl.max(magnitudes, axis=2)
+    exponent = _ceil_e8m0_scale_byte(tl.maximum(amax, 6.0 * 2.0**-126) / 6.0)
+    group_offsets = tl.arange(0, num_groups)
+    packed_scale = tl.sum(exponent << (8 * group_offsets[None, :]), axis=1)
+    tl.store(scale_ptr + rows, packed_scale)
+
+    scale = (exponent << 23).to(tl.float32, bitcast=True)
+    packed = _fp4_e2m1_code(even / scale[:, :, None])
+    packed |= _fp4_e2m1_code(odd / scale[:, :, None]) << 4
+    pairs = tl.arange(0, WIDTH // 2)
+    tl.store(
+        data_ptr + rows[:, None] * (WIDTH // 2) + pairs[None, :],
+        packed.reshape((ROWS_PER_BLOCK, WIDTH // 2)),
+    )
 
 
 @triton.jit
@@ -187,7 +231,18 @@ def quantize_mxfp4_indexer(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]
     rows = contiguous.numel() // _INDEXER_WIDTH
     data_i8 = torch.empty((rows, _PACKED_WIDTH), dtype=torch.int8, device=x.device)
     packed_scale = torch.empty((rows,), dtype=torch.int32, device=x.device)
-    if rows:
+    # Large indexer batches use one contiguous read and one reduction per
+    # group. Keep the single-row path for small decode batches and partial tiles.
+    if rows >= _QUERY_TILE_MIN_ROWS and rows % _QUERY_TILE_ROWS == 0:
+        _quantize_mxfp4_indexer_tiled_kernel[(rows // _QUERY_TILE_ROWS,)](
+            contiguous,
+            data_i8,
+            packed_scale,
+            WIDTH=_INDEXER_WIDTH,
+            GROUP_SIZE=_GROUP_SIZE,
+            ROWS_PER_BLOCK=_QUERY_TILE_ROWS,
+        )
+    elif rows:
         _quantize_mxfp4_indexer_kernel[(rows,)](
             contiguous,
             data_i8,
