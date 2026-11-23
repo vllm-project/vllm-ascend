@@ -94,7 +94,9 @@ def _core_fence_resolver():
     when the repair stack is installed (the hm vLLM builds the gate
     targets), and the mirror above on stock vLLM images."""
     try:
-        from vllm.v1.worker.gpu.repair_executor import find_repair_fence_layer
+        from vllm.v1.worker.gpu.repair_executor import (  # type: ignore[import-not-found]
+            find_repair_fence_layer,
+        )
     except ImportError:
         return _mirror_find_repair_fence_layer
     return find_repair_fence_layer
@@ -107,10 +109,10 @@ def _inject_repair_executor(monkeypatch, derived=None, raises=None):
         def _raise(layer):
             raise raises
 
-        module._repair_block_size = _raise
+        module._repair_block_size = _raise  # type: ignore[attr-defined]
     else:
-        module._repair_block_size = lambda layer: derived
-    module.find_repair_fence_layer = _core_fence_resolver()
+        module._repair_block_size = lambda layer: derived  # type: ignore[attr-defined]
+    module.find_repair_fence_layer = _core_fence_resolver()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, _REPAIR_EXECUTOR, module)
 
 
