@@ -34,7 +34,7 @@ from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 import vllm_ascend.patch.platform.patch_eplb as patch_eplb
 from vllm_ascend.patch.platform.patch_eplb import _AscendAsyncLayerResult
 
-DEV = "npu:0"
+DEV = "npu"
 NUM_ROWS = 8          # physical expert slots
 HIDDEN = 16384        # wide row -> long per-row copy, like real expert weights
 NUM_LAYERS = 4
@@ -301,7 +301,8 @@ def _run_cycle(ms, reader_stream_kind: str, barrier: str) -> dict:
 
 
 def _arm(reader_kind, barrier, cycles=CYCLES):
-    torch.npu.set_device(0)
+    # Use the active NPU device allocated by the test runner; forcing device 0
+    # breaks multi-NPU / pytest-xdist runs.
     totals = {"pre_old": 0, "pre_fresh": 0, "pre_torn": 0,
               "post_old": 0, "post_fresh": 0, "post_torn": 0}
     torn_cycles = []
