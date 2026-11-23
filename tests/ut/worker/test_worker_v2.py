@@ -338,7 +338,7 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
         worker.parallel_config = SimpleNamespace(pipeline_parallel_size=1)
         worker.vllm_config = SimpleNamespace(
             weight_transfer_config=SimpleNamespace(backend="hccl"),
-            speculative_config=SimpleNamespace(draft_model_config=object()),
+            speculative_config=SimpleNamespace(draft_model_config=object(), prefill_context_kv_only=False),
         )
         worker.model_runner = SimpleNamespace(
             get_draft_model=lambda: draft,
@@ -387,13 +387,13 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
                 self.assertFalse(worker._draft_weight_update_active)
                 worker.model_runner.reset_lora_state.assert_not_called()
 
-    def test_draft_capability_is_limited_to_validated_backend(self):
+    def test_draft_capability_follows_engine_support(self):
         for backend, use_v2, engine_support, supported in (
             ("hccl", True, True, True),
-            ("ipc", True, True, False),
-            ("npu_ipc", True, True, False),
+            ("npu_ipc", True, True, True),
             ("hccl", False, True, False),
             ("hccl", True, False, False),
+            ("npu_ipc", True, False, False),
         ):
             with self.subTest(backend=backend, use_v2=use_v2, engine_support=engine_support):
                 worker, _ = self._make_worker()
@@ -402,7 +402,7 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
                 worker.weight_transfer_engine.supports_draft_weight_update = engine_support
                 self.assertEqual(worker.supports_draft_weight_updates(), supported)
                 if not supported:
-                    with self.assertRaisesRegex(RuntimeError, "supported only"):
+                    with self.assertRaisesRegex(RuntimeError, "supporting weight transfer engine"):
                         worker.start_draft_weight_update()
                     worker.weight_transfer_engine.set_weight_update_target.assert_not_called()
 

@@ -346,12 +346,11 @@ class NPUWorker(GPUWorker):
             self.use_v2_model_runner
             and self.parallel_config.pipeline_parallel_size == 1
             and config is not None
-            and config.backend == "hccl"
             and self.weight_transfer_engine is not None
             and self.weight_transfer_engine.supports_draft_weight_update
             and speculative_config is not None
             and speculative_config.draft_model_config is not None
-            and not getattr(speculative_config, "prefill_context_kv_only", False)
+            and not speculative_config.prefill_context_kv_only
             and self.get_draft_model() is not None
         )
 
@@ -373,8 +372,8 @@ class NPUWorker(GPUWorker):
             raise RuntimeError("A weight update is already active. Call finish_weight_update first.")
         if not self.supports_draft_weight_updates():
             raise RuntimeError(
-                "Draft weight updates are supported only by the HCCL Model Runner V2 path "
-                "with a configured draft model."
+                "Draft weight updates require Model Runner V2, a configured draft model "
+                "and a supporting weight transfer engine."
             )
         self._check_nz_disabled()
         assert self.weight_transfer_engine is not None
