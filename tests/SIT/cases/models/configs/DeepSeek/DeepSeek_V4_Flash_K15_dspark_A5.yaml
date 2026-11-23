@@ -7,6 +7,7 @@ _envs: &envs
   PYTHONHASHSEED: "0"   # 池化哈希一致性要求, 全实例统一
   VLLM_ENGINE_READY_TIMEOUT_S: "36000"
   VLLM_RPC_TIMEOUT: "6000"
+  ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
 _kv_pool: &kv_pool
   type: "memcache"
   meta_service_port: 5000
