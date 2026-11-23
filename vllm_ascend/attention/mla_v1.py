@@ -91,6 +91,18 @@ BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
 
+def _mla_qkv_weight_for_slicing(weight: torch.Tensor) -> torch.Tensor:
+    if (
+        weight.dtype == torch.int8
+        and weight.device.type == "npu"
+        and torch_npu.get_npu_format(weight) == ACL_FORMAT_FRACTAL_NZ
+    ):
+        # Generic slicing of packed INT8 NZ can fail on A3. The callers pack
+        # the sliced Q and KV matrices back to NZ after splitting in ND.
+        return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_ND)
+    return weight
+
+
 def _uses_unpadded_drafter_batch(speculative_config) -> bool:
     if vllm_version_is("0.33.0"):
         return speculative_config.disable_padded_drafter_batch
@@ -1361,7 +1373,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert self.fused_qkv_a_proj is not None
 
         is_native = self._mlapo_uses_native_weights
-        fused_weight = self.fused_qkv_a_proj.weight.data
+        fused_weight = _mla_qkv_weight_for_slicing(self.fused_qkv_a_proj.weight.data)
         weight_uq_qr = self.q_proj.weight.data
         if is_native:
             # Native Linear stores [out_features, in_features], while the
@@ -2006,7 +2018,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 )
             return prepared
 
-        fused_weight = self.fused_qkv_a_proj.weight.data
+        fused_weight = _mla_qkv_weight_for_slicing(self.fused_qkv_a_proj.weight.data)
         weight_uq_qr = self.q_proj.weight.data
         weight_uk = self.mlapo_W_UK_T
         prolog_num_heads = getattr(self, "num_heads", weight_uk.shape[0])
