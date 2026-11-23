@@ -30,7 +30,7 @@ def test_mla_target_and_draft_accept_target_interleave(monkeypatch, is_draft, pc
     monkeypatch.setattr(mla_v1, "get_current_vllm_config", lambda: draft)
     monkeypatch.setattr(mla_v1, "get_ascend_config", lambda: SimpleNamespace(enable_kv_nz=False))
     monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: False))
-    monkeypatch.setattr(mla_v1, "enable_fa_quant", lambda *_: False)
+    monkeypatch.setattr(mla_v1, "enable_fa_quant", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(mla_v1, "enabling_mlapo", lambda *_: False)
     monkeypatch.setattr(AscendMLAImpl, "_can_use_flashmla", lambda _: False)
     impl = AscendMLAImpl(
