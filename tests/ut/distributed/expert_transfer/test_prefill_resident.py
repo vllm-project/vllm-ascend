@@ -19,9 +19,10 @@ def test_full_pool_uses_current_residents_and_reuses_unchanged_layer(
 
     first, _ = expert_factory(kind)
     second, _ = expert_factory(kind, layer_name="model.layers.1.mlp.experts")
+    third, _ = expert_factory(kind, layer_name="model.layers.2.mlp.experts")
     for parameter in second.parameters():
         parameter.data = (parameter.data.float() + 3).to(parameter.dtype)
-    manager = manager_factory(first, second)
+    manager = manager_factory(first, second, third)
     binding = first._expert_offload_binding
     expected = binding.adapter.load_experts(binding.host_store, range(binding.num_experts), "cpu")
     slots, loads = binding.plan_expert_loads({1, 4})
@@ -42,6 +43,11 @@ def test_full_pool_uses_current_residents_and_reuses_unchanged_layer(
     manager.full_pool.load_layer(binding)
     transfer.assert_not_called()
     manager.full_pool.load_layer(second._expert_offload_binding)
+    transfer.reset_mock()
+    manager.full_pool.load_layer(binding)
+    transfer.assert_not_called()
+    # The third layer reuses the first buffer and forces a reload of current residents.
+    manager.full_pool.load_layer(third._expert_offload_binding)
     manager.full_pool.load_layer(binding)
     assert transfer.call_args.kwargs["resident_loads"] == tuple(enumerate(binding.slot_to_expert))
     for name in expected:
@@ -144,14 +150,16 @@ def test_failed_prefill_transfer_invalidates_previous_owner(
 
     first, _ = expert_factory()
     second, _ = expert_factory(layer_name="model.layers.1.mlp.experts")
-    for parameter in second.parameters():
+    third, _ = expert_factory(layer_name="model.layers.2.mlp.experts")
+    for parameter in third.parameters():
         parameter.data.add_(3)
-    manager = manager_factory(first, second)
-    bindings = [first._expert_offload_binding, second._expert_offload_binding]
+    manager = manager_factory(first, second, third)
+    bindings = [layer._expert_offload_binding for layer in (first, second, third)]
     expected = {name: tensor.clone() for name, tensor in manager.full_pool.tensors.items()}
     for binding in bindings:
         binding.host_store.convert_to_native_layout(binding.adapter, "cpu")
     manager.full_pool.load_layer(bindings[0])
+    manager.full_pool.load_layer(bindings[1])
     original_copy = acl.rt.memcpy_async
 
     seen = 0
@@ -166,8 +174,9 @@ def test_failed_prefill_transfer_invalidates_previous_owner(
 
     monkeypatch.setattr(acl.rt, "memcpy_async", fail_copy)
     with pytest.raises(RuntimeError, match="asynchronous expert .* copy failed"):
-        manager.full_pool.load_layer(bindings[1])
+        manager.full_pool.load_layer(bindings[2])
     assert manager.full_pool.owners[0] is None
+    assert manager.full_pool.owners[1] is bindings[1]
     assert native_runtime.calls[-1] == "sync"
     monkeypatch.setattr(acl.rt, "memcpy_async", original_copy)
     result = manager.full_pool.load_layer(bindings[0])
