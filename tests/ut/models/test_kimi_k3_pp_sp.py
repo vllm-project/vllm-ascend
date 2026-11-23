@@ -589,6 +589,50 @@ def test_aux_contract_selected_before_draft_load(runtime, stage, draft_type, dra
     assert model.use_sequence_parallel is True
 
 
+@pytest.mark.parametrize("stage", range(4))
+@pytest.mark.parametrize("runner_v2", [False, True])
+@pytest.mark.parametrize(
+    "dflash_config,materialized",
+    [
+        ({"aux_hidden_stream": "attn_res"}, True),
+        ({"aux_hidden_stream": "hidden_states"}, False),
+        ({}, False),
+        (None, False),
+    ],
+)
+def test_dflash_aux_contract_selected_before_draft_load(runtime, stage, runner_v2, dflash_config, materialized):
+    namespace, context = runtime
+    context.tp = 2
+    context.pp = SimpleNamespace(is_first_rank=stage == 0, is_last_rank=stage == 3)
+    cfg = config(tp=2, pp=4, runner_v2=runner_v2)
+    cfg.model_config.hf_text_config = SimpleNamespace(
+        vocab_size=16,
+        hidden_size=3,
+        num_hidden_layers=8,
+        num_attention_heads=2,
+        attn_res_block_size=2,
+        rms_norm_eps=1e-5,
+    )
+    draft_hf_config = SimpleNamespace(model_type="qwen3", architectures=["DFlash2DraftModel"])
+    if dflash_config is not None:
+        draft_hf_config.dflash_config = dflash_config
+    cfg.speculative_config = SimpleNamespace(
+        method="dflash",
+        draft_model_config=SimpleNamespace(hf_config=draft_hf_config),
+    )
+    namespace.update(
+        VocabParallelEmbedding=lambda *args, **kwargs: nn.Identity(),
+        PPMissingLayer=nn.Identity,
+        RMSNorm=lambda *args, **kwargs: nn.Identity(),
+        ReplicatedLinear=lambda *args, **kwargs: nn.Identity(),
+        make_layers=lambda *args, **kwargs: (stage * 2, stage * 2 + 2, nn.ModuleList()),
+    )
+    # AST extraction retains methods only, so supply the production class default.
+    namespace["AscendKimiLinearModel"].dspark_aux_capture_materialized = False
+    model = namespace["AscendKimiLinearModel"](vllm_config=cfg)
+    assert model.dspark_aux_capture_materialized is materialized
+
+
 @pytest.mark.parametrize("owns_embed", [False, True])
 def test_draft_mapper_reuses_upstream_rules(owns_embed):
     @dataclass

@@ -1075,6 +1075,19 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             self.dspark_aux_capture_materialized = draft_config.model_type == "qwen3" and any(
                 arch in ("DSparkDraftModel", "Qwen3DSparkModel") for arch in (draft_config.architectures or ())
             )
+        elif spec_config is not None and spec_config.method == "dflash":
+            draft_hf_config = getattr(spec_config.draft_model_config, "hf_config", None)
+            dflash_config = getattr(draft_hf_config, "dflash_config", None)
+            # Checkpoints such as Kimi-K3.1-Dflash2-Preview set
+            # aux_hidden_stream="attn_res": the draft was trained against
+            # the AttnRes mixture, not the raw residual prefix sum.
+            # Upstream gates the same stream behind
+            # VLLM_KIMI_K3_AUX_ATTN_RES_STREAM; read the draft's own
+            # declaration so prefix-sum capture stays the default for
+            # DFlash checkpoints that do not set it.
+            self.dspark_aux_capture_materialized = isinstance(dflash_config, dict) and (
+                dflash_config.get("aux_hidden_stream") == "attn_res"
+            )
         # vLLM's generic MoE SP switch currently requires DP > 1. K3 also
         # needs the same rank-local token layout for the TP/EP, DP=1 topology
         # that FlashComm used before the standard SP operators were available.

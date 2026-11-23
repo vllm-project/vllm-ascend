@@ -21,6 +21,12 @@ entries:
       stacked-shard weight validation from upstream vLLM#63752 finds the
       tracking dict on the plain column-parallel path used by the MLA draft.
   - category: bugfix
+    text: Kimi-K3.1-Dflash2-Preview declares dflash_config.aux_hidden_stream="attn_res"
+      (the draft was trained against the AttnRes mixture), but the target always
+      fed the raw residual prefix sum; the target now captures the materialized
+      AttnRes stream for DFlash drafts that declare it, keeping prefix-sum capture
+      as the default for DFlash checkpoints without the declaration.
+  - category: bugfix
     text: DFlash2 draft checkpoints whose layers mix causal and non-causal
       attention, or declare different sliding windows, now fail fast at
       startup when those layers would share one KV cache group, instead of
