@@ -36,16 +36,17 @@ class MistralLarge4ParallelWorker(MistralLarge4Worker):
     def check_expert_parallel_shards(self) -> bool:
         assert self.check_mistral_large4_paths()
         model = self.model_runner.model
-        assert not self.vllm_config.parallel_config.use_sequence_parallel_moe
+        use_sp = self.vllm_config.parallel_config.use_sequence_parallel_moe
         for layer in model.model.layers:
             runner = getattr(layer.mlp, "experts", None)
             if runner is not None:
-                assert not runner.moe_config.is_sequence_parallel
-                assert runner.moe_config.sp_size == 1
+                assert runner.moe_config.is_sequence_parallel == use_sp
+                assert runner.moe_config.sp_size == (TP_SIZE if use_sp else 1)
+                assert layer.self_attn.o_proj.reduce_results is not use_sp
         experts = self._routed_experts()
         # Expert parallelism shards the experts; each rank owns half.
-        assert experts.ep_size == TP_SIZE, experts.ep_size
-        local = experts.n_local_physical_experts
+        assert experts.moe_config.ep_size == TP_SIZE, experts.moe_config.ep_size
+        local = experts.routed_experts.local_num_experts
         assert local == NUM_EXPERTS // TP_SIZE, local
         return True
 
@@ -54,8 +55,8 @@ class MistralLarge4ParallelWorker(MistralLarge4Worker):
         experts = self._routed_experts()
         # With expert parallelism off every rank holds every expert, and the
         # MoE is sharded along the intermediate size instead.
-        assert experts.ep_size == 1, experts.ep_size
-        assert experts.n_local_physical_experts == NUM_EXPERTS
+        assert experts.moe_config.ep_size == 1, experts.moe_config.ep_size
+        assert experts.routed_experts.local_num_experts == NUM_EXPERTS
         return True
 
     def _routed_experts(self):
@@ -73,6 +74,7 @@ def _run(tmp_path, enable_expert_parallel: bool, check: str, enable_flashcomm1: 
     with VllmRunner(
         str(model),
         load_format="dummy",
+        config_format="mistral",
         skip_tokenizer_init=True,
         worker_extension_cls=f"{__name__}.MistralLarge4ParallelWorker",
         dtype="bfloat16",
@@ -96,7 +98,7 @@ def _run(tmp_path, enable_expert_parallel: bool, check: str, enable_flashcomm1: 
 @wait_until_npu_memory_free()
 @pytest.mark.parametrize("enable_flashcomm1", [False, True])
 def test_mistral_large4_expert_parallel_shards_and_replays(tmp_path, enable_flashcomm1):
-    """FlashComm preserves upstream's non-SP activations while EP shards experts."""
+    """FlashComm switches activations to SP while EP continues to shard experts."""
     _run(
         tmp_path,
         enable_expert_parallel=True,

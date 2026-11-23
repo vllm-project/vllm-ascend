@@ -37,23 +37,29 @@ What this module does replace:
   for sparse layers. The Ascend SFA impl has no such method, so the call is
   made only where it exists.
 * **The KV-sharing write.** See :func:`adopt_shared_kv_skip`.
+* **FlashComm1.** Keep residual, normalization and MoE token rows sharded,
+  gathering attention inputs and reduce-scattering its output projection.
+  Model outputs and DSpARK taps retain their original full-token layout.
 
 Everything else — MLA, the DSA indexer, the shared-indexer schedule, NoPE,
-YaRN, the MoE block and the FP8 block-scaled checkpoint — is carried by paths
+YaRN, MoE routing and the FP8 block-scaled checkpoint — is carried by paths
 vLLM-Ascend already ships. Backend selection needs no patch: a config with
 ``index_topk`` and no ``compress_ratios`` resolves to ``AscendSFABackend``.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from typing import Any, cast
 
 import torch
 from torch import nn
+from transformers import PreTrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.logger import logger
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -65,6 +71,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.models.mistral.amd.attention import MistralMLAAttention
 from vllm.models.mistral.amd.indexer import MistralIndexer
+from vllm.models.mistral.amd.mlp import MistralMLP
 from vllm.models.mistral.amd.moe import MistralMoE
 from vllm.models.mistral.amd.ssmax import SSMaxScaling
 from vllm.models.mistral.common.layer_spec import MistralLayerSpec
@@ -73,10 +80,13 @@ from vllm.models.mistral.mistral_large4.amd.dspark import (
 )
 from vllm.models.mistral.mistral_large4.amd.model import (
     MistralLarge4ForCausalLM,
+    MistralLarge4Model,
 )
 from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_scatter, sp_shard
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.ops.rotary_embedding import (
     _record_cos_and_sin_cache_interleaved,
@@ -502,10 +512,152 @@ def _reject_unsupported(vllm_config: VllmConfig) -> None:
         )
 
 
+class AscendMistralSequenceParallelMoE(MistralMoE):
+    """Mistral routing and shared experts with sequence-sharded activations."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        config: PreTrainedConfig,
+        prefix: str,
+        reduce_results: bool = True,
+    ) -> None:
+        # Construct the runner with SP enabled from the start. Rebuilding it
+        # after the upstream constructor would register the same layer twice.
+        nn.Module.__init__(self)
+        assert config.scoring_func == "softmax" and config.topk_method is None
+        assert (config.n_group or 1) == 1, "Grouped top-k is not supported"
+        quant_config = vllm_config.quant_config
+        parallel_config = vllm_config.parallel_config
+        self.gate = GateLinear(
+            config.hidden_size, config.n_routed_experts, out_dtype=torch.float32, prefix=f"{prefix}.gate"
+        )
+        # Ascend's shared-expert linears and runner jointly select TP weights
+        # with AG/RS, or replicated weights with local-token computation.
+        self.shared_experts = (
+            MistralMLP(
+                config.hidden_size,
+                config.moe_intermediate_size * config.n_shared_experts,
+                quant_config,
+                reduce_results=False,
+                prefix=f"{prefix}.shared_experts",
+            )
+            if config.n_shared_experts
+            else None
+        )
+        self.experts = FusedMoEFactory(
+            num_experts=config.n_routed_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            renormalize=config.norm_topk_prob,
+            quant_config=quant_config,
+            prefix=f"{prefix}.experts",
+            scoring_func="softmax",
+            routed_scaling_factor=config.routed_scaling_factor,
+            enable_eplb=parallel_config.enable_eplb,
+            num_redundant_experts=parallel_config.eplb_config.num_redundant_experts,
+            gate=self.gate,
+            router_logits_dtype=torch.float32,
+            is_sequence_parallel=True,
+            reduce_results=reduce_results,
+            shared_experts=self.shared_experts,
+        )
+
+
+class AscendMistralFlashCommModel(MistralLarge4Model):
+    """Keep residual and MoE activations sharded between attention calls."""
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: object = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            assert input_ids is not None
+            hidden_states = self.embed_input_ids(input_ids)
+        num_tokens = hidden_states.shape[0]
+        log_positions = torch.log(positions.to(torch.float32) + 1)
+        residual = None
+        is_sharded = False
+        aux_hidden_states: list[torch.Tensor] = []
+        for idx, layer in enumerate(self.layers):
+            use_sp = getattr(layer, "use_flashcomm1", False)
+            # Track layout explicitly: with one token, a TP shard and the
+            # full input both have one row, so shape comparisons are unsafe.
+            if use_sp and not is_sharded:
+                hidden_states = sp_shard(hidden_states)
+                if residual is not None:
+                    residual = sp_shard(residual)
+            elif is_sharded and not use_sp:
+                hidden_states = sp_all_gather(hidden_states)[:num_tokens]
+                residual = sp_all_gather(residual)[:num_tokens]
+            is_sharded = use_sp
+            hidden_states, residual = layer.input_norm(hidden_states, residual)
+            if idx in self.aux_hidden_state_layers:
+                aux = sp_all_gather(residual)[:num_tokens] if is_sharded else residual
+                aux_hidden_states.append(aux.clone())
+            if use_sp:
+                # Sparse MLA, SSMax and shared indexers consume full token
+                # rows. Only the OProj partial sum is reduce-scattered.
+                attn_input = sp_all_gather(hidden_states)[:num_tokens]
+                hidden_states = layer.self_attn(positions, attn_input, log_positions, self.rotary_emb)
+                hidden_states = sp_reduce_scatter(hidden_states)
+                hidden_states, residual = layer.post_attention_layernorm(hidden_states, residual)
+                if isinstance(layer.mlp, AscendMistralSequenceParallelMoE):
+                    hidden_states = layer.mlp(hidden_states)
+                else:
+                    # Diagnostic fallback: retain attention/norm SP while
+                    # running the original MoE on full token rows.
+                    hidden_states = sp_all_gather(hidden_states)[:num_tokens]
+                    hidden_states = sp_shard(layer.mlp(hidden_states))
+            else:
+                hidden_states, residual = layer(positions, hidden_states, residual, log_positions, self.rotary_emb)
+        hidden_states, residual = self.layers[-1].residual_norm(self.norm, hidden_states, residual)
+        if is_sharded:
+            hidden_states = sp_all_gather(hidden_states)[:num_tokens]
+        if len(self.layers) in self.aux_hidden_state_layers:
+            aux = sp_all_gather(residual)[:num_tokens] if is_sharded else residual
+            aux_hidden_states.append(aux.clone())
+        return (hidden_states, aux_hidden_states) if aux_hidden_states else hidden_states
+
+
+@contextmanager
+def _use_ascend_mistral_layers(vllm_config: VllmConfig) -> Iterator[None]:
+    # Upstream hard-codes these constructors. Limit replacement to model
+    # construction; remove the MoE replacement once upstream exposes SP hooks.
+    from vllm.models.mistral.mistral_large4.amd import model as upstream_model
+
+    original_attention = upstream_model.MistralMLAAttention
+    original_moe = upstream_model.MistralMoE
+    try:
+        upstream_model.MistralMLAAttention = AscendMistralMLAAttention
+        if vllm_config.parallel_config.use_sequence_parallel_moe and get_ascend_config().enable_mistral_moe_sp:
+            upstream_model.MistralMoE = AscendMistralSequenceParallelMoE
+        yield
+    finally:
+        upstream_model.MistralMLAAttention = original_attention
+        upstream_model.MistralMoE = original_moe
+
+
+def _adopt_flashcomm1(model: MistralLarge4Model, vllm_config: VllmConfig) -> None:
+    if not vllm_config.parallel_config.use_sequence_parallel_moe:
+        return
+    for layer in model.layers:
+        if isinstance(layer.mlp, MistralMoE):
+            layer.use_flashcomm1 = True
+            layer.self_attn.o_proj.reduce_results = False
+    model.__class__ = AscendMistralFlashCommModel
+
+
 def validate_moe_parallelism(vllm_config: VllmConfig) -> None:
     """Check the MoE block against the layout it will actually run under.
 
-    The MoE itself needs no rewiring: vLLM-Ascend overrides ``MoERunner`` and
+    vLLM-Ascend overrides ``MoERunner`` and
     ``RoutedExperts`` in the out-of-tree custom-op registry, so upstream's
     ``FusedMoEFactory`` already builds the Ascend experts, router and
     dispatch/combine. Unlike Muse Spark there is no per-route norm to thread
@@ -626,24 +778,14 @@ class AscendMistralLarge4ForCausalLM(MistralLarge4ForCausalLM, MistralLarge4Mixt
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         _reject_unsupported(vllm_config)
         validate_moe_parallelism(vllm_config)
-        # Upstream currently hard-codes MistralMLAAttention in the AMD decoder
-        # layer and provides no class hook. Replace only that module-global
-        # constructor for the duration of this model build; every created
-        # layer is already the Ascend class when its inner attention backend
-        # is selected, so construction cannot fail before the adapter runs.
-        from vllm.models.mistral.mistral_large4.amd import model as upstream_model
-
-        original_attention_cls = upstream_model.MistralMLAAttention
-        upstream_model.MistralMLAAttention = AscendMistralMLAAttention
-        try:
+        with _use_ascend_mistral_layers(vllm_config):
             super().__init__(vllm_config=vllm_config, prefix=prefix)
-        finally:
-            upstream_model.MistralMLAAttention = original_attention_cls
         # Upstream fails fast when an unsupported deployment asks for the
         # specialized decode; on Ascend it is never built, since its runtime is
         # HIP IPC and peer memory.
         self.model.specialized_decode_config = None
         self.model.specialized_decode = None
+        _adopt_flashcomm1(self.model, vllm_config)
 
         shared = adopt_ascend_modules(self)
         expected = sum(spec.shares_kv for spec in self.model.layer_specs)

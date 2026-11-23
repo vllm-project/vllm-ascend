@@ -1,8 +1,9 @@
 pr: 15
 entries:
-  - category: bugfix
+  - category: performance
     text: >-
-      Mistral Large 4 keeps upstream's non-sequence-parallel MoE layout when
-      FlashComm1 is requested, allowing construction without introducing token
-      sharding. Shared expert data parallelism remains independently configurable.
+      Mistral Large 4 supports opt-in FlashComm1 with attention output
+      reduce-scatter and sequence-parallel residual, normalization, router and
+      MoE execution. Shared expert data parallelism remains independently
+      configurable.
     model: mistral-large-4

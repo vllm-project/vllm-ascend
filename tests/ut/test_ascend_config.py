@@ -1904,7 +1904,7 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_mistral_large4_flashcomm_keeps_upstream_non_sp_layout(self, mock_fix):
+    def test_mistral_large4_flashcomm_enables_sp_independently_of_shared_expert_dp(self, mock_fix):
         for dp_size in (1, 2):
             for use_legacy_env in (False, True):
                 for shared_expert_dp in (False, True):
@@ -1926,10 +1926,26 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
                         config = init_ascend_config(vc)
 
-                        self.assertFalse(vc.parallel_config.use_sequence_parallel_moe)
-                        self.assertFalse(enable_sp(vc))
-                        self.assertEqual(vc.parallel_config.all2all_backend, "flashinfer_all2allv")
+                        self.assertTrue(vc.parallel_config.use_sequence_parallel_moe)
+                        self.assertTrue(enable_sp(vc))
+                        self.assertEqual(vc.parallel_config.all2all_backend, "allgather_reducescatter")
                         self.assertEqual(config.enable_shared_expert_dp, shared_expert_dp)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_mistral_moe_sp_can_be_disabled_without_disabling_flashcomm(self, mock_fix):
+        vc = VllmConfig()
+        vc.model_config.hf_text_config.model_type = "mistral_large4"
+        vc.parallel_config.enable_expert_parallel = True
+        vc.parallel_config.tensor_parallel_size = 2
+        vc.parallel_config.all2all_backend = "allgather_reducescatter"
+        vc.additional_config = {"enable_flashcomm1": True, "enable_mistral_moe_sp": False}
+
+        config = init_ascend_config(vc)
+
+        self.assertFalse(config.enable_mistral_moe_sp)
+        self.assertTrue(vc.parallel_config.use_sequence_parallel_moe)
+        self.assertTrue(enable_sp(vc))
 
     @_clean_up
     @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)

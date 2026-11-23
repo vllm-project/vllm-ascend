@@ -64,11 +64,19 @@ reduce-scatter. The fused implementation supports BF16/FP16 with TP size 2,
 vLLM Ascend enables SP MoE through the FlashComm switch. The switch is still
 required; SP MoE is not enabled from the parallel configuration alone.
 
-Mistral Large 4 currently keeps the upstream replicated-token MoE layout:
-enabling FlashComm1 does not add token sharding or reject model construction.
-Ascend resolves its effective SP setting to off before deriving graph sizes
-and runtime metadata. The independent `enable_shared_expert_dp` option remains
-available.
+For Mistral Large 4, FlashComm1 keeps residual, RMSNorm, router and MoE
+activations sharded across TP ranks between attention calls. Attention gathers
+the normalized input and reduce-scatters the output projection. Dense layers,
+model outputs and DSpARK hidden-state taps retain full token layouts. The
+independent `enable_shared_expert_dp` option selects replicated shared-expert
+weights; with it disabled, shared experts retain TP weights and use input
+all-gather plus output reduce-scatter.
+
+For Mistral Large 4 diagnosis, set `enable_mistral_moe_sp` to `false` in
+`additional_config` to run MoE on full token rows while retaining the
+FlashComm1 attention and normalization layout. It defaults to `true` and has
+no effect when FlashComm1 is off. This allows isolating MoE SP from the other
+FlashComm1 changes before comparing accuracy and performance.
 
 To enable SP MoE, set `additional_config.enable_flashcomm1`:
 

@@ -22,6 +22,7 @@ The upstream model package is not in a vLLM release yet
 
 import abc
 import importlib.util
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -267,6 +268,178 @@ def test_a_supported_deployment_is_accepted():
 
 def test_global_sp_eligibility_does_not_reject_the_upstream_moe_layout():
     ml4._reject_unsupported(_vllm_config(use_sequence_parallel_moe=True))
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("moe_sp", [False, True])
+def test_flashcomm_constructor_selection_is_scoped(monkeypatch, enabled, moe_sp):
+    from vllm.models.mistral.mistral_large4.amd import model as upstream_model
+
+    original_moe = upstream_model.MistralMoE
+    original_attention = upstream_model.MistralMLAAttention
+    monkeypatch.setattr(ml4, "get_ascend_config", lambda: SimpleNamespace(enable_mistral_moe_sp=moe_sp))
+    with ml4._use_ascend_mistral_layers(_vllm_config(use_sequence_parallel_moe=enabled)):
+        assert upstream_model.MistralMoE is (
+            ml4.AscendMistralSequenceParallelMoE if enabled and moe_sp else original_moe
+        )
+        assert upstream_model.MistralMLAAttention is ml4.AscendMistralMLAAttention
+    assert upstream_model.MistralMoE is original_moe
+    assert upstream_model.MistralMLAAttention is original_attention
+
+
+def test_flashcomm_moe_preserves_routing_and_shared_expert_contract(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(ml4, "GateLinear", lambda *args, **kwargs: calls.setdefault("gate", (args, kwargs)))
+    monkeypatch.setattr(ml4, "MistralMLP", lambda *args, **kwargs: calls.setdefault("shared", (args, kwargs)))
+    monkeypatch.setattr(ml4, "FusedMoEFactory", lambda **kwargs: calls.setdefault("experts", kwargs))
+    vc = _vllm_config(use_sequence_parallel_moe=True, enable_expert_parallel=True)
+    vc.quant_config = None
+    vc.parallel_config.eplb_config = SimpleNamespace(num_redundant_experts=0)
+    config = SimpleNamespace(
+        scoring_func="softmax",
+        topk_method=None,
+        n_group=1,
+        hidden_size=4,
+        n_routed_experts=8,
+        moe_intermediate_size=16,
+        n_shared_experts=1,
+        num_experts_per_tok=2,
+        norm_topk_prob=True,
+        routed_scaling_factor=1.5,
+    )
+    moe = ml4.AscendMistralSequenceParallelMoE(vc, config, "model.layers.1.mlp")
+    assert isinstance(moe, ml4.MistralMoE)
+    assert calls["experts"]["is_sequence_parallel"]
+    assert calls["experts"]["scoring_func"] == "softmax"
+    assert calls["experts"]["router_logits_dtype"] == torch.float32
+    assert calls["experts"]["routed_scaling_factor"] == 1.5
+    assert calls["experts"]["shared_experts"] is moe.shared_experts
+    assert calls["shared"][1]["reduce_results"] is False
+    assert calls["shared"][1]["prefix"] == "model.layers.1.mlp.shared_experts"
+
+
+class _FlashCommNorm(torch.nn.Module):
+    def forward(self, hidden, residual=None):
+        if residual is None:
+            return torch.nn.functional.rms_norm(hidden, (hidden.shape[-1],))
+        residual = hidden + residual
+        return torch.nn.functional.rms_norm(residual, (residual.shape[-1],)), residual
+
+
+class _FlashCommExperts(torch.nn.Module):
+    def forward(self, hidden_states, router_logits=None):
+        return torch.nn.functional.silu(hidden_states) * 0.25
+
+
+class _FlashCommAttention(torch.nn.Module):
+    def __init__(self, rank, world_size):
+        super().__init__()
+        self.rank = rank
+        self.world_size = world_size
+        self.o_proj = SimpleNamespace(reduce_results=True)
+
+    def forward(self, positions, hidden, log_positions, rotary_emb):
+        assert hidden.shape[0] == positions.shape[0] == log_positions.shape[0]
+        output = hidden * 0.125 + log_positions[:, None] * 0.001
+        if not self.o_proj.reduce_results:
+            output = output * ((self.rank + 1) / sum(range(1, self.world_size + 1)))
+        return output
+
+
+class _FlashCommLayer(torch.nn.Module):
+    def __init__(self, is_moe, rank, world_size, use_moe_sp):
+        super().__init__()
+        self.input_layernorm = _FlashCommNorm()
+        self.post_attention_layernorm = _FlashCommNorm()
+        self.self_attn = _FlashCommAttention(rank, world_size)
+        if is_moe:
+            moe_cls = ml4.AscendMistralSequenceParallelMoE if use_moe_sp else ml4.MistralMoE
+            self.mlp = moe_cls.__new__(moe_cls)
+            torch.nn.Module.__init__(self.mlp)
+            self.mlp.experts = _FlashCommExperts()
+        else:
+            self.mlp = _FlashCommExperts()
+
+    def input_norm(self, hidden, residual):
+        if residual is None:
+            return self.input_layernorm(hidden), hidden
+        return self.input_layernorm(hidden, residual)
+
+    def residual_norm(self, norm, hidden, residual):
+        return norm(hidden, residual)
+
+    def forward(self, positions, hidden, residual, log_positions, rotary_emb):
+        hidden = self.self_attn(positions, hidden, log_positions, rotary_emb)
+        hidden, residual = self.post_attention_layernorm(hidden, residual)
+        return self.mlp(hidden), residual
+
+
+def _check_flashcomm_distributed_layout(rank, world_size, rendezvous):
+    import torch.distributed as dist
+
+    from vllm_ascend.models.common.ops import sequence_parallel as sp
+
+    torch.set_num_threads(1)
+    dist.init_process_group(
+        "gloo", init_method=rendezvous, rank=rank, world_size=world_size, timeout=timedelta(seconds=60)
+    )
+    sp.get_tensor_model_parallel_world_size = lambda: world_size
+    sp.get_tensor_model_parallel_rank = lambda: rank
+    ml4.sp_shard = sp._ascend_sp_shard_impl
+
+    def all_gather(value):
+        outputs = [torch.empty_like(value) for _ in range(world_size)]
+        dist.all_gather(outputs, value.contiguous())
+        return torch.cat(outputs)
+
+    def reduce_scatter(value):
+        value = torch.nn.functional.pad(value, (0, 0, 0, (-value.shape[0]) % world_size))
+        dist.all_reduce(value)
+        return value.chunk(world_size)[rank].contiguous()
+
+    ml4.sp_all_gather = all_gather
+    ml4.sp_reduce_scatter = reduce_scatter
+    try:
+        for layout in ((False, True, True), (True, False, True), (True,), (False,)):
+            for num_tokens in (1, 3, 8):
+                models = []
+                for use_sp, use_moe_sp in ((False, False), (True, True), (True, False)):
+                    model = ml4.MistralLarge4Model.__new__(ml4.MistralLarge4Model)
+                    torch.nn.Module.__init__(model)
+                    model.layers = torch.nn.ModuleList(
+                        [_FlashCommLayer(is_moe, rank, world_size, use_moe_sp) for is_moe in layout]
+                    )
+                    model.norm = _FlashCommNorm()
+                    model.rotary_emb = None
+                    model.aux_hidden_state_layers = tuple(range(len(layout) + 1))
+                    model.specialized_decode = None
+                    if use_sp:
+                        ml4._adopt_flashcomm1(model, _vllm_config(use_sequence_parallel_moe=True))
+                    models.append(model)
+                hidden = torch.arange(num_tokens * 4, dtype=torch.float64).reshape(num_tokens, 4) * 0.01
+                positions = torch.arange(num_tokens)
+                expected, expected_aux = models[0](None, positions, inputs_embeds=hidden.clone())
+                for model in models[1:]:
+                    actual, actual_aux = model(None, positions, inputs_embeds=hidden.clone())
+                    torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+                    assert len(actual_aux) == len(expected_aux) == len(layout) + 1
+                    for actual_tap, expected_tap in zip(actual_aux, expected_aux):
+                        assert actual_tap.shape == hidden.shape
+                        torch.testing.assert_close(actual_tap, expected_tap, atol=1e-12, rtol=1e-12)
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(not torch.distributed.is_gloo_available(), reason="Requires CPU Gloo")
+def test_flashcomm_matches_full_layout_across_two_cpu_ranks(tmp_path):
+    # Real collectives exercise single-token ambiguity, TP padding, dense/MoE
+    # transitions and the full-layout DSpARK taps without requiring NPUs.
+    torch.multiprocessing.spawn(
+        _check_flashcomm_distributed_layout,
+        args=(2, (tmp_path / "rendezvous").as_uri()),
+        nprocs=2,
+        join=True,
+    )
 
 
 def test_eplb_is_accepted():

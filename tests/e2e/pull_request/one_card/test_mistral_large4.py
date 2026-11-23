@@ -50,23 +50,24 @@ CONFIG: dict[str, Any] = {
     "model_type": "mistral_large4",
     "architectures": ["MistralLarge4ForCausalLM"],
     "vocab_size": VOCAB_SIZE,
-    "hidden_size": 512,
-    "intermediate_size": 1024,
+    # HCCL MoE dispatch requires a hidden width of at least 1024.
+    "hidden_size": 1024,
+    "intermediate_size": 2048,
     "num_hidden_layers": NUM_LAYERS,
-    "num_attention_heads": 8,
-    "num_key_value_heads": 8,
+    "num_attention_heads": 16,
+    "num_key_value_heads": 16,
     # MLA: no q-LoRA, which is what switches the fused prolog off.
     "q_lora_rank": None,
-    "kv_lora_rank": 64,
-    "qk_nope_head_dim": 32,
-    "qk_rope_head_dim": 32,
-    "v_head_dim": 64,
-    "head_dim": 32,
-    # DSA indexer. head_dim stays a power of two: the Ascend top-k kernel
-    # reads a full row with tl.arange.
-    "index_topk": 16,
-    "index_n_heads": 4,
-    "index_head_dim": 32,
+    # Keep the fused sparse-MLA kernel's supported latent/head dimensions.
+    "kv_lora_rank": 512,
+    "qk_nope_head_dim": 64,
+    "qk_rope_head_dim": 64,
+    "v_head_dim": 128,
+    "head_dim": 128,
+    # LightningIndexer requires at least eight heads and 128-wide keys.
+    "index_topk": 2048,
+    "index_n_heads": 8,
+    "index_head_dim": 128,
     "indexer_norm_eps": 1e-5,
     "indexer_ssmax_scaling": True,
     "ssmax_scaling": True,
@@ -97,7 +98,7 @@ CONFIG: dict[str, Any] = {
 
 
 class MistralLarge4Worker:
-    """Read-only checks of which paths the loaded model actually takes."""
+    """Inspect model paths and initialize dummy-weight rotary metadata."""
 
     model_runner: Any  # Supplied by the worker extension host at runtime.
 
@@ -108,6 +109,16 @@ class MistralLarge4Worker:
         )
 
         model = self.model_runner.model
+        # DummyModelLoader skips the model's load_weights hook, which normally
+        # publishes the final LeRoPE table for the Ascend metadata builder.
+        from vllm_ascend.ops.rotary_embedding import (
+            _record_cos_and_sin_cache_interleaved,
+            _record_cos_sin_cache,
+        )
+
+        rotary_emb = model.model.rotary_emb
+        _record_cos_sin_cache(rotary_emb.cos_sin_cache)
+        _record_cos_and_sin_cache_interleaved(rotary_emb, rotary_emb.cos_sin_cache)
         layers = model.model.layers
         attentions = [layer.self_attn for layer in layers]
 
@@ -154,6 +165,52 @@ class MistralLarge4Worker:
 def _write_model(destination, config: dict[str, Any] = CONFIG) -> None:
     destination.mkdir()
     (destination / "config.json").write_text(json.dumps(config))
+    # ML4's native config is adapted from params.json; it is not registered
+    # with Transformers AutoConfig under the synthetic model_type above.
+    params = {
+        "dim": config["hidden_size"],
+        "hidden_dim": config["intermediate_size"],
+        "n_layers": config["num_hidden_layers"],
+        "n_heads": config["num_attention_heads"],
+        "n_kv_heads": config["num_key_value_heads"],
+        "head_dim": config["head_dim"],
+        "norm_eps": config["rms_norm_eps"],
+        "vocab_size": config["vocab_size"],
+        "max_position_embeddings": config["max_position_embeddings"],
+        "tied_embeddings": False,
+        "rope_theta": config["rope_parameters"]["rope_theta"],
+        "q_lora_rank": None,
+        "kv_lora_rank": config["kv_lora_rank"],
+        "qk_nope_head_dim": config["qk_nope_head_dim"],
+        "qk_rope_head_dim": config["qk_rope_head_dim"],
+        "v_head_dim": config["v_head_dim"],
+        "ssmax_scaling": True,
+        "softmax_tanh_gating": config["softmax_tanh_gating"],
+        "nope": ",".join("nope" if flag else "rope" for flag in config["nope_layer_flags"]),
+        "kv_sharing": {"source_layers_str": ",".join(map(str, config["kv_source_layers"]))},
+        "dsa": {
+            "topk": config["index_topk"],
+            "n_heads": config["index_n_heads"],
+            "head_dim": config["index_head_dim"],
+            "rope_head_dim": config["qk_rope_head_dim"],
+            "norm_eps": config["indexer_norm_eps"],
+            "ssmax_scaling": True,
+            "match_nope": True,
+            "sharing": ",".join(config["index_sharing"]),
+        },
+        "moe": {
+            "route_every_n": config["moe_layer_freq"],
+            "first_k_dense_replace": config["first_k_dense_replace"],
+            "num_experts": config["n_routed_experts"],
+            "num_experts_per_tok": config["num_experts_per_tok"],
+            "num_shared_experts": config["n_shared_experts"],
+            "expert_hidden_dim": config["moe_intermediate_size"],
+            "num_expert_groups": 1,
+            "num_expert_groups_per_tok": 1,
+            "routed_scale": 1.0,
+        },
+    }
+    (destination / "params.json").write_text(json.dumps(params))
 
 
 def _generate(runner: VllmRunner) -> list[tuple[list[int], list[dict]]]:
@@ -188,6 +245,7 @@ def test_mistral_large4_dummy_forward_and_logprob_replay(tmp_path):
     with VllmRunner(
         str(model),
         load_format="dummy",
+        config_format="mistral",
         skip_tokenizer_init=True,
         worker_extension_cls=f"{__name__}.MistralLarge4Worker",
         dtype="bfloat16",
@@ -225,6 +283,7 @@ def test_mistral_large4_decode_replays_under_graph_capture(tmp_path):
     with VllmRunner(
         str(model),
         load_format="dummy",
+        config_format="mistral",
         skip_tokenizer_init=True,
         worker_extension_cls=f"{__name__}.MistralLarge4Worker",
         dtype="bfloat16",
