@@ -367,7 +367,7 @@ def test_config_hook_drops_stale_backend_cache_for_dynamic_speculation(b1_enable
     selector = _gemma4_selector()
     fake_platform = SimpleNamespace(
         device_name="npu",
-        get_attn_backend_cls=platform.AscendPlatform.get_attn_backend_cls,
+        get_attn_backend_cls=platform.NPUPlatform.get_attn_backend_cls,
     )
     # num_heads is part of the core cache key; 7 keeps this entry private to
     # the test without touching the cache.
