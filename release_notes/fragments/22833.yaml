@@ -1,0 +1,5 @@
+pr: 22833
+entries:
+  - category: bugfix
+    text: Fixed startup failures on Atlas A3 when MLA prolog prepares an INT8 fused Q/KV projection stored in NZ format.
+    hardware: [A3]
