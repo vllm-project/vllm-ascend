@@ -299,7 +299,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
         # field; indexer_kv_dtype now only drives the LI C8 indexer cache.
         # "int8" is what this test packs and what
         # _reference_quantized_sparse_attention asserts.
-        cache_config=SimpleNamespace(cache_dtype="int8"),
+        cache_config=SimpleNamespace(cache_dtype="int8" if enable_c8 else "auto"),
         attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
     )
     ascend_config = SimpleNamespace(
