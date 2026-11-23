@@ -189,3 +189,14 @@ def test_mixed_decode_limit_preserves_an_explicit_custom_scheduler():
     with pytest.raises(ValueError, match="requires the default scheduler"):
         _setup_mixed_batch_scheduler(vllm_config, SchedulerConfig(max_num_decode_seqs_in_mixed_batch=2))
     assert vllm_config.scheduler_config.scheduler_cls == "custom.Scheduler"
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_mixed_decode_scheduler_setup_accepts_its_previous_selection(async_scheduling):
+    scheduler = _make_scheduler(async_scheduling, cap=0, decode_after_prefill=True)
+    config = scheduler.vllm_config
+    selected_cls = type(scheduler)
+
+    _setup_mixed_batch_scheduler(config, SchedulerConfig.from_additional_config(config.additional_config))
+
+    assert config.scheduler_config.get_scheduler_cls() is selected_cls
