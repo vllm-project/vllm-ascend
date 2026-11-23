@@ -20,14 +20,13 @@ duplicate-fill copies live[src] -> live[dst]). The patched recorder below
 mirrors that shape; if the core moves to copy_rows aggregation (#66660), the
 recorder must be updated alongside.
 """
+
 import json
-import os
 
 import numpy as np
 import pytest
 import torch
 import torch_npu  # noqa: F401
-
 import vllm.distributed.eplb.rebalance_execute as _rebalance
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 
@@ -35,10 +34,10 @@ import vllm_ascend.patch.platform.patch_eplb as patch_eplb
 from vllm_ascend.patch.platform.patch_eplb import _AscendAsyncLayerResult
 
 DEV = "npu"
-NUM_ROWS = 8          # physical expert slots
-HIDDEN = 16384        # wide row -> long per-row copy, like real expert weights
+NUM_ROWS = 8  # physical expert slots
+HIDDEN = 16384  # wide row -> long per-row copy, like real expert weights
 NUM_LAYERS = 4
-READERS = 64          # heavy read amplification per cycle
+READERS = 64  # heavy read amplification per cycle
 CYCLES = 60
 
 VAL_A = 1.0
@@ -62,8 +61,7 @@ class CopyRecorder:
         self.dup_pairs: list[tuple[int, int]] = []
         self.calls = 0
 
-    def __call__(self, expert_weights, expert_weights_buffers,
-                 transfer_metadata, new_indices, ep_rank):
+    def __call__(self, expert_weights, expert_weights_buffers, transfer_metadata, new_indices, ep_rank):
         self.calls += 1
         is_unchanged = transfer_metadata.is_unchanged
         is_received_locally = transfer_metadata.is_received_locally
@@ -114,8 +112,7 @@ class _Model:
     def __init__(self):
         # two weight tensors per layer (e.g. up/down projection), row-major
         self.expert_weights = [
-            [torch.full((NUM_ROWS, HIDDEN), VAL_A, device=DEV) for _ in range(2)]
-            for _ in range(NUM_LAYERS)
+            [torch.full((NUM_ROWS, HIDDEN), VAL_A, device=DEV) for _ in range(2)] for _ in range(NUM_LAYERS)
         ]
 
 
@@ -123,25 +120,21 @@ class FakeModelState:
     def __init__(self, layer_idx, is_last=True):
         self.model = _Model()
         self.layer_idx_used = layer_idx
-        self.expert_buffer = [
-            torch.full((NUM_ROWS, HIDDEN), VAL_B, device=DEV) for _ in range(2)
-        ]
+        self.expert_buffer = [torch.full((NUM_ROWS, HIDDEN), VAL_B, device=DEV) for _ in range(2)]
         # maps in production layout: [num_layers, num_physical]
-        self.physical_to_logical_map = torch.arange(NUM_LAYERS * NUM_ROWS,
-                                                    dtype=torch.int32).reshape(
-                                                        NUM_LAYERS, NUM_ROWS)
-        self.logical_to_physical_map = torch.arange(NUM_LAYERS * NUM_ROWS,
-                                                    dtype=torch.int32).reshape(
-                                                        NUM_LAYERS, NUM_ROWS)
-        self.logical_replica_count = torch.ones(NUM_LAYERS, NUM_ROWS,
-                                                dtype=torch.int32)
+        self.physical_to_logical_map = torch.arange(NUM_LAYERS * NUM_ROWS, dtype=torch.int32).reshape(
+            NUM_LAYERS, NUM_ROWS
+        )
+        self.logical_to_physical_map = torch.arange(NUM_LAYERS * NUM_ROWS, dtype=torch.int32).reshape(
+            NUM_LAYERS, NUM_ROWS
+        )
+        self.logical_replica_count = torch.ones(NUM_LAYERS, NUM_ROWS, dtype=torch.int32)
         self.rebalanced = True
         self.pending_result = _AscendAsyncLayerResult(
             layer_idx=layer_idx,
             # new_physical_to_logical must be CONSISTENT with the metadata:
             # row 1 holds migrated logical expert 11, row 3 is its duplicate.
-            new_physical_to_logical_map=torch.tensor(
-                [0, 11, 2, 11, 4, 5, 6, 7], dtype=torch.int32),
+            new_physical_to_logical_map=torch.tensor([0, 11, 2, 11, 4, 5, 6, 7], dtype=torch.int32),
             new_logical_to_physical_map=torch.arange(NUM_ROWS, dtype=torch.int32),
             new_logical_replica_count=torch.ones(NUM_ROWS, dtype=torch.int32),
             transfer_metadata=self._metadata(),
@@ -154,13 +147,13 @@ class FakeModelState:
         """Normal migration on rows {1,2}; duplicate-fill row 3 from row 1."""
         n = NUM_ROWS
         is_unchanged = np.zeros(n, dtype=bool)
-        is_unchanged[[0, 4, 5, 6, 7]] = True          # rows unchanged
+        is_unchanged[[0, 4, 5, 6, 7]] = True  # rows unchanged
         is_received_locally = np.zeros(n, dtype=bool)
-        is_received_locally[[1, 2]] = True            # rows 1,2 migrated locally
+        is_received_locally[[1, 2]] = True  # rows 1,2 migrated locally
         recv_primary_mask = np.zeros(n, dtype=bool)
         recv_count = 1
-        recv_expert_ids = np.array([11], dtype=np.int32)   # logical expert 11
-        recv_dst_rows = np.array([1], dtype=np.int32)      # landed at row 1
+        recv_expert_ids = np.array([11], dtype=np.int32)  # logical expert 11
+        recv_dst_rows = np.array([1], dtype=np.int32)  # landed at row 1
         return _rebalance.TransferMetadata(
             is_unchanged=is_unchanged,
             is_received_locally=is_received_locally,
@@ -185,7 +178,7 @@ def _read_once(layer_weights, out):
     w = layer_weights[0]
     row = w[3]
     H = row.shape[-1]
-    torch.add(row[: H // 2], row[H // 2:], out=out[: H // 2])
+    torch.add(row[: H // 2], row[H // 2 :], out=out[: H // 2])
     out[H // 2] = row[::2].sum()
     out[H // 2 + 1] = w[1].sum()
 
@@ -206,7 +199,6 @@ def _row_kind_row(row) -> str:
     if not (all_a or all_b):
         return "torn"  # halves mixed inside the add kernel
     strided = row[H // 2]
-    r1 = row[H // 2 + 1]
     # strided sum must agree with the add picture (2.0*A-H means rows still A)
     expect_strided_a = VAL_A * (H // 2)
     expect_strided_b = VAL_B * (H // 2)
@@ -226,6 +218,7 @@ def recorder():
     # patch_eplb resolved `_eplb_state.move_from_buffer` at import time - the
     # module holds its own reference; rebind it too.
     import vllm.distributed.eplb.eplb_state as es
+
     saved_es = es.move_from_buffer
     es.move_from_buffer = rec
     saved_pe = patch_eplb._eplb_state.move_from_buffer
@@ -303,8 +296,7 @@ def _run_cycle(ms, reader_stream_kind: str, barrier: str) -> dict:
 def _arm(reader_kind, barrier, cycles=CYCLES):
     # Use the active NPU device allocated by the test runner; forcing device 0
     # breaks multi-NPU / pytest-xdist runs.
-    totals = {"pre_old": 0, "pre_fresh": 0, "pre_torn": 0,
-              "post_old": 0, "post_fresh": 0, "post_torn": 0}
+    totals = {"pre_old": 0, "pre_fresh": 0, "pre_torn": 0, "post_old": 0, "post_fresh": 0, "post_torn": 0}
     torn_cycles = []
     for c in range(cycles):
         ms = FakeModelState(layer_idx=0, is_last=True)
@@ -340,8 +332,7 @@ def test_production_commit_really_runs_both_paths(recorder):
     torch.npu.synchronize()
     assert recorder.calls == before_calls + 1
     assert (1, 1) in recorder.normal_pairs and (2, 2) in recorder.normal_pairs
-    assert (3, 1) in recorder.dup_pairs, \
-        f"duplicate-fill (row3 <- row1, live->live) not observed: {recorder.dup_pairs}"
+    assert (3, 1) in recorder.dup_pairs, f"duplicate-fill (row3 <- row1, live->live) not observed: {recorder.dup_pairs}"
     # row0/4..7 unchanged: must NOT appear in normal pairs
     for untouched in (0, 4, 5, 6, 7):
         assert (untouched, untouched) not in recorder.normal_pairs
@@ -364,13 +355,9 @@ def test_side_stream_reader_safe_with_fix(recorder):
     see test_unpatched_simulation_canary for the load-dependent evidence.
     """
     totals = _arm("side", "none", cycles=30)
-    assert totals["post_torn"] == 0, (
-        "fix failed on the post side (new weights not visible): "
-        + json.dumps(totals)
-    )
-    assert totals["pre_torn"] == 0, (
-        "fix failed on the pre side (in-flight reader saw torn old weights): "
-        + json.dumps(totals)
+    assert totals["post_torn"] == 0, "fix failed on the post side (new weights not visible): " + json.dumps(totals)
+    assert totals["pre_torn"] == 0, "fix failed on the pre side (in-flight reader saw torn old weights): " + json.dumps(
+        totals
     )
     # direction oracle: pre reads must be all-old, post all-new
     assert totals["pre_fresh"] == 0, json.dumps(totals)
@@ -411,9 +398,7 @@ def test_targeted_barrier_arms(barrier):
     concentrated in early cycles; root-cause documented in the round-2
     report. Post side has never torn under a barrier.)"""
     totals = _arm("side", barrier, cycles=30)
-    assert totals["post_torn"] == 0, (
-        f"barrier={barrier} post side torn (visibility broken): " + json.dumps(totals)
-    )
+    assert totals["post_torn"] == 0, f"barrier={barrier} post side torn (visibility broken): " + json.dumps(totals)
     pre_rate = totals["pre_torn"] / max(1, totals["pre_old"] + totals["pre_fresh"] + totals["pre_torn"])
     assert pre_rate < 0.01, (  # no-barrier runs reach ~1-2%; barriers keep <0.6%
         f"barrier={barrier} pre-torn rate {pre_rate:.4%} too high: " + json.dumps(totals)
