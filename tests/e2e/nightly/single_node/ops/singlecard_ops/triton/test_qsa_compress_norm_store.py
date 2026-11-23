@@ -63,6 +63,23 @@ def test_compress_norm_store_matches_decomposition(with_positions, chunk):
     torch.testing.assert_close(args[2], old_ring, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("chunk", [342, 1366])
+@torch.inference_mode()
+def test_vectorized_compression_tiles_match_decomposition(chunk):
+    # 1026 and 4098 rows select BLOCK_M=16 and 32. Both leave masked rows in
+    # the final tile, covering the vector path's safe handling of padding.
+    args, weight, rotary, cache = _inputs(True, chunk)
+    expected = cache.clone()
+    _unfused(args, weight, rotary, expected)
+    qsa_compress_norm_mrope_store(
+        *args,
+        norm_weight=weight,
+        rotary_cache=rotary,
+        compressed_cache=cache,
+    )
+    torch.testing.assert_close(cache, expected, rtol=0, atol=0.0078125)
+
+
 @torch.inference_mode()
 def test_compressed_cache_replay_and_masked_slots():
     args, weight, rotary, cache = _inputs(True, 4)
