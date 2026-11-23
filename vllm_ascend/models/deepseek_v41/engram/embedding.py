@@ -73,7 +73,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         self.scale_dtype = torch.uint8 if storage_dtype == torch.float8_e4m3fn else torch.float32
         self.cpu_offload = cpu_offload
         self._node_shared = node_shared
-        self._node_lease = None
+        self._node_lease: NodeTableLease | None = None
         self._checkpoint_key = checkpoint_key
         if node_shared is not None and (
             not cpu_offload or not dp_shared_memory or storage_dtype != torch.float8_e4m3fn
@@ -154,23 +154,24 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         scales_shape = (self.part_num_embeddings, self.dim // self.block_size)
         device = torch.device("npu", torch.npu.current_device())
         quantized = self.storage_dtype != torch.bfloat16
-        if getattr(self, "_node_shared", None) is not None:
+        config: dict | None = getattr(self, "_node_shared", None)
+        if config is not None:
             if self.tp_size != 1 or self.vocab_start_idx != 0:
                 raise ValueError("Node-shared Engram requires a complete TP1 table")
-            config = self._node_shared
-            self._node_lease = NodeTableLease(
+            lease = NodeTableLease(
                 config["endpoint"],
                 config["generation"],
                 config["fingerprint"],
                 self._checkpoint_key,
                 config["timeout"],
             )
+            self._node_lease = lease
             try:
-                parts = self._node_lease.metadata["parts"]
+                parts = lease.metadata["parts"]
                 if parts["codes"]["shape"] != list(codes_shape) or parts["scales"]["shape"] != list(scales_shape):
                     raise ValueError("Node-shared Engram model/owner shape mismatch")
-                self._codes_uva = NodeUvaBuffer(self._node_lease.fds[0], codes_shape, self.storage_dtype, device)
-                self._scales_uva = NodeUvaBuffer(self._node_lease.fds[1], scales_shape, self.scale_dtype, device)
+                self._codes_uva = NodeUvaBuffer(lease.fds[0], codes_shape, self.storage_dtype, device)
+                self._scales_uva = NodeUvaBuffer(lease.fds[1], scales_shape, self.scale_dtype, device)
             except Exception as exc:
                 # Retain a registered buffer if constructor cleanup failed.
                 pending = getattr(exc, "host_buffer", None)
@@ -183,16 +184,16 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                     for buffer in (self._codes_uva, self._scales_uva):
                         if buffer is not None:
                             buffer.close()
-                    self._node_lease.release()
+                    lease.release()
                 except Exception:
                     # Keep the attachment available to the caller for retry.
-                    exc.engram_attachment = self
+                    exc.engram_attachment = self  # type: ignore[attr-defined]
                 raise
             logger.info(
                 "Node-shared Engram attached: key=%s generation=%s inodes=%s",
                 self._checkpoint_key,
                 config["generation"],
-                self._node_lease.metadata["inodes"],
+                lease.metadata["inodes"],
             )
             return self._codes_uva.tensor, self._scales_uva.tensor
         if not self.cpu_offload:
@@ -252,8 +253,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                     requires_grad=False,
                 ),
             )
-        if getattr(self, "_node_lease", None) is not None:
-            self._node_lease.release()
+        lease: NodeTableLease | None = getattr(self, "_node_lease", None)
+        if lease is not None:
+            lease.release()
             self._node_lease = None
 
     def bind_checkpoint(self, model_path, key: str) -> None:

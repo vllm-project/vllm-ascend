@@ -7,7 +7,7 @@ from collections.abc import Iterator
 import torch
 from safetensors import safe_open
 from torch import nn
-from tqdm.auto import tqdm
+from tqdm.auto import tqdm  # type: ignore[import-untyped]
 from vllm.config import ModelConfig
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import should_skip_weight
