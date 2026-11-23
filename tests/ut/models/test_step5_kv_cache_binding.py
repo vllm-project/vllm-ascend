@@ -167,7 +167,6 @@ def test_step5_shared_allocator_matches_legacy_views(monkeypatch, num_blocks, kv
     else:
         layers[L0] = dense
     monkeypatch.setattr(attn_utils_v2, "get_layers_from_vllm_config", lambda *_: layers)
-    assert config.single_device_backing
     allocations = []
     allocate = attn_utils_v2._allocate_int8_cache_tensor
 
@@ -197,8 +196,6 @@ def test_step5_shared_allocator_matches_legacy_views(monkeypatch, num_blocks, kv
 
     monkeypatch.setattr(attn_utils_v2, "_allocate_kv_cache", reject_legacy)
     monkeypatch.setattr(attn_utils_v2, "_reshape_kv_cache_v2", reject_legacy)
-    runtime.model_config.hf_text_config.model_type = "test_descriptor_driven"
-    runtime.model_config.hf_config.model_type = "test_descriptor_driven"
     actual = attn_utils_v2.allocate_kv_cache_main(config, device, layout, block_sizes)
     (backing,) = allocations
     assert backing.nbytes == legacy_backing.nbytes == config.kv_cache_tensors[0].size

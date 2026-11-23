@@ -3331,9 +3331,7 @@ def test_legacy_step3_allocate_kv_cache_shares_backing_by_tensor_size(monkeypatc
 
 def _step5_single_backing_config(tensors, groups):
     tensors = [replace(tensor, size=tensors[0].size) for tensor in tensors]
-    config = _step5_kv_cache_config(tensors, groups)
-    config.single_device_backing = True
-    return config
+    return _step5_kv_cache_config(tensors, groups)
 
 
 def test_allocate_rejects_inconsistent_single_backing_sizes(monkeypatch) -> None:
@@ -3341,7 +3339,7 @@ def test_allocate_rejects_inconsistent_single_backing_sizes(monkeypatch) -> None
     config = _step5_single_backing_config(tensors, groups)
     config.kv_cache_tensors[1] = tensors[1]
     with pytest.raises(ValueError, match="must share one backing allocation"):
-        _step5_allocate(config, _step5_vllm_config("test_descriptor_driven"), monkeypatch)
+        _step5_allocate(config, _step5_vllm_config("step5"), monkeypatch)
 
 
 def test_allocate_rejects_declared_view_beyond_backing(monkeypatch) -> None:
@@ -3349,11 +3347,11 @@ def test_allocate_rejects_declared_view_beyond_backing(monkeypatch) -> None:
     tensors[0] = replace(tensors[0], offset=STEP5_SUMMARY_PAGE)
     config = _step5_single_backing_config(tensors, groups)
     with pytest.raises(ValueError, match="exceeds its backing allocation"):
-        _step5_allocate(config, _step5_vllm_config("test_descriptor_driven"), monkeypatch)
+        _step5_allocate(config, _step5_vllm_config("step5"), monkeypatch)
 
 
 def _step5_reshape(config, raw, monkeypatch):
-    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: _step5_vllm_config("step5"))
     cache_owners = {name: Step5AuxiliaryCacheView() for name in (STEP5_RING, STEP5_SUMMARY)}
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: cache_owners)
     backend = SimpleNamespace(
@@ -3380,7 +3378,7 @@ def _step5_reshape(config, raw, monkeypatch):
 def test_step5_reshape_aux_views_match_compute_layer_shape(monkeypatch) -> None:
     tensors, groups = _step5_tensors_and_groups()
     config = _step5_single_backing_config(tensors, groups)
-    raw = _step5_allocate(config, _step5_vllm_config("test_descriptor_driven"), monkeypatch)
+    raw = _step5_allocate(config, _step5_vllm_config("step5"), monkeypatch)
     caches = _step5_reshape(config, raw, monkeypatch)
 
     # Auxiliary layers get the typed page view straight from
@@ -3406,7 +3404,7 @@ def test_step5_reshape_aux_views_match_compute_layer_shape(monkeypatch) -> None:
 def test_step5_reshape_rejects_non_tensor_step_aux_raw(monkeypatch) -> None:
     tensors, groups = _step5_tensors_and_groups()
     config = _step5_single_backing_config(tensors, groups)
-    raw = _step5_allocate(config, _step5_vllm_config("test_descriptor_driven"), monkeypatch)
+    raw = _step5_allocate(config, _step5_vllm_config("step5"), monkeypatch)
     raw[STEP5_RING] = (raw[STEP5_RING], raw[STEP5_RING])
 
     with pytest.raises(ValueError, match="must use one raw tensor"):

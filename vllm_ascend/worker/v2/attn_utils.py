@@ -640,6 +640,17 @@ def _is_dsv4_model(vllm_config: VllmConfig) -> bool:
     return hf_config is not None and hasattr(hf_config, "compress_ratios")
 
 
+def _is_step5_device_cache(vllm_config: VllmConfig, config: KVCacheConfig) -> bool:
+    model_config = getattr(vllm_config, "model_config", None)
+    text_config = getattr(model_config, "hf_text_config", None)
+    tensors = config.kv_cache_tensors
+    return (
+        getattr(text_config, "model_type", None) in ("step5", "step5_vl", "step5_mtp")
+        and bool(tensors)
+        and all(not tensor.host_resident for tensor in tensors)
+    )
+
+
 def _get_attention_kv_cache_dims(
     layer_name: str,
     kv_cache_spec: AttentionSpec,
@@ -1019,10 +1030,8 @@ def _allocate_kv_cache(
             for name in get_kv_cache_tensor_layers(descriptor):
                 kv_cache_raw_tensors[name] = backing
         return kv_cache_raw_tensors
-    if _uses_single_device_backing(kv_cache_config):
+    if _is_step5_device_cache(vllm_config, kv_cache_config):
         tensors = kv_cache_config.kv_cache_tensors
-        if any(tensor.host_resident for tensor in tensors):
-            raise ValueError("Single-device KV cache backing cannot contain host-resident descriptors.")
         sizes = {tensor.size for tensor in tensors}
         if len(sizes) != 1:
             raise ValueError("Unified KV cache descriptors must share one backing allocation.")
@@ -1455,10 +1464,6 @@ def _slice_cache_layer(
     return backing[start : start + span]
 
 
-def _uses_single_device_backing(config: KVCacheConfig) -> bool:
-    return getattr(config, "single_device_backing", False)
-
-
 def create_kv_cache_runtime_views(
     kv_cache_config: KVCacheConfig,
     backing: torch.Tensor,
@@ -1471,7 +1476,6 @@ def create_kv_cache_runtime_views(
     cache_dtype: str = "auto",
 ) -> dict[str, Any]:
     """Delegate component views to backends using the descriptor block strides."""
-    use_layer_views = _uses_single_device_backing(kv_cache_config)
     placements = {
         name: (descriptor, layer_index)
         for descriptor in kv_cache_config.kv_cache_tensors
@@ -1487,8 +1491,7 @@ def create_kv_cache_runtime_views(
             descriptor, layer_index = placements[name]
             num_blocks = kv_cache_config.num_blocks_of(descriptor)
             raw_cache = _slice_cache_layer(backing, descriptor, layer_index, spec, num_blocks)
-            if use_layer_views:
-                assert attn_layers is not None
+            if attn_layers is not None:
                 create_view = getattr(attn_layers[name], "create_kv_cache_view", None)
                 assert callable(create_view)
                 caches[name] = create_view(
@@ -1539,8 +1542,6 @@ def unified_allocate_kv_cache(
     tensors = kv_cache_config.kv_cache_tensors
     if not tensors:
         return {}
-    if _uses_single_device_backing(kv_cache_config) and any(tensor.host_resident for tensor in tensors):
-        raise ValueError("Single-device KV cache backing cannot contain host-resident descriptors.")
     sizes = {tensor.size for tensor in tensors}
     if len(sizes) != 1:
         raise ValueError("Unified KV cache descriptors must share one backing allocation.")
@@ -1559,7 +1560,7 @@ def unified_allocate_kv_cache(
         kernel_block_sizes,
         shared_layers,
         layout,
-        attn_layers=attn_layers,
+        attn_layers=attn_layers if _is_step5_device_cache(vllm_config, kv_cache_config) else None,
         cache_dtype=getattr(vllm_config.cache_config, "cache_dtype", "auto"),
     )
 
@@ -1593,7 +1594,7 @@ def allocate_kv_cache_main(
     }
 
     if (
-        _uses_single_device_backing(kv_cache_config)
+        _is_step5_device_cache(vllm_config, kv_cache_config)
         and KVPPConfig.from_vllm_config(vllm_config).size <= 1
         and get_layerwise_reuse_layout(kv_cache_config) is None
         and not is_c8_mxfp_kv_quant(vllm_config)
@@ -1660,7 +1661,7 @@ def _reshape_kv_cache_v2(
     kv_caches: dict[str, Any] = {}
     cache_owners = {}
     declared_block_strides = {}
-    if _uses_single_device_backing(kv_cache_config):
+    if _is_step5_device_cache(vllm_config, kv_cache_config):
         cache_owners = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
         declared_block_strides = {
             name: descriptor.block_stride
