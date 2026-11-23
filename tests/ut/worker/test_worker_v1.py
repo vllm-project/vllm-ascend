@@ -192,6 +192,48 @@ class TestNPUWorker(TestBase):
         with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
             self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), 12345)
 
+    def test_layerwise_alignment_reserve_requires_shared_backing(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+            LAYERWISE_REUSE_BACKING_BYTES,
+        )
+        from vllm_ascend.worker import worker as worker_module
+
+        alignment = worker_module.KV_CACHE_BUFFER_ALIGNMENT
+        budget = 4 * alignment
+        spec = SimpleNamespace(model_version="glm5_next")
+        groups = [KVCacheGroupSpec(layer_names=["model.layers.0.attn"], kv_cache_spec=spec)]
+        worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
+        worker.use_v2_model_runner = True
+        worker._kvpp_cache_allocation_plan = None
+        worker.vllm_config = SimpleNamespace(
+            attention_config=AttentionConfig(),
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm5_next_text")),
+            kv_transfer_config=SimpleNamespace(
+                kv_connector="AscendStoreConnector",
+                kv_role="kv_producer",
+                kv_connector_extra_config={
+                    "backend": "mooncake",
+                    "use_layerwise": True,
+                    "layerwise_num_shared_buffers": 1,
+                },
+            ),
+        )
+        worker.get_kv_cache_spec = MagicMock(return_value={"model.layers.0.attn": spec})
+        for backing_bytes in (None, 1024):
+            with (
+                self.subTest(backing_bytes=backing_bytes),
+                patch.object(worker_module, "get_kv_cache_groups", return_value=groups),
+                patch.object(worker_module, "get_kv_cache_config_builder") as get_builder,
+            ):
+                materialize = get_builder.return_value.get_kv_cache_config_from_groups
+                extra_config = {} if backing_bytes is None else {LAYERWISE_REUSE_BACKING_BYTES: backing_bytes}
+                materialize.return_value = SimpleNamespace(
+                    kv_transfer_config=SimpleNamespace(kv_connector_extra_config=extra_config),
+                )
+                expected = budget - alignment if backing_bytes is not None else budget
+                self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(budget), expected)
+                materialize.assert_called_once_with(worker.vllm_config, groups, num_blocks=1)
+
     def test_hybrid_budget_scaling_follows_runner_backing_layout(self):
         from vllm_ascend.worker.worker import NPUWorker
 
