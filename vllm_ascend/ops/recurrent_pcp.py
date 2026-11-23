@@ -11,25 +11,31 @@ from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.v1.attention.backend import AttentionMetadataBuilder as _RecurrentMetadataBuilder
 else:
     # The concrete metadata builder comes next in the mixin's runtime MRO.
     _RecurrentMetadataBuilder = object
 
 
+def prepare_recurrent_pcp_config(vllm_config: "VllmConfig") -> "VllmConfig":
+    pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+    if pcp_size > 1:
+        # Runner capture sizes count local tokens. Recurrence uses the
+        # global batch, including requests owned by other decode shards.
+        vllm_config = copy(vllm_config)
+        vllm_config.compilation_config = copy(vllm_config.compilation_config)
+        capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
+        if capture_size is not None:
+            vllm_config.compilation_config.max_cudagraph_capture_size = capture_size * pcp_size
+    return vllm_config
+
+
 class PCPRecurrentMetadataBuilderMixin(_RecurrentMetadataBuilder):
     decode_cudagraph_max_bs: int
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
-        pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        if pcp_size > 1:
-            # Runner capture sizes count local tokens. Recurrence uses the
-            # global batch, including requests owned by other decode shards.
-            vllm_config = copy(vllm_config)
-            vllm_config.compilation_config = copy(vllm_config.compilation_config)
-            capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
-            if capture_size is not None:
-                vllm_config.compilation_config.max_cudagraph_capture_size = capture_size * pcp_size
+        vllm_config = prepare_recurrent_pcp_config(vllm_config)
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0

@@ -342,7 +342,7 @@ def test_kimi_recoverssm_does_not_inherit_glm_pcp_buffers():
     config.parallel_config.prefill_context_parallel_size = 2
     config.compilation_config.max_cudagraph_capture_size = 4
     spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
-    with patch("vllm_ascend.ops.kda_pcp.get_pcp_group", return_value=SimpleNamespace(rank_in_group=1)):
+    with patch("vllm_ascend.ops.recurrent_pcp.get_pcp_group", return_value=SimpleNamespace(rank_in_group=1)):
         builder = AscendKimiKDARecoverSSMMetadataBuilder(spec, ["layer0"], config, torch.device("cpu"))
     assert builder.decode_cudagraph_max_bs == 8
     assert config.compilation_config.max_cudagraph_capture_size == 4
