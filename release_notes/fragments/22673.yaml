@@ -2,6 +2,6 @@ pr: 22673
 entries:
   - category: performance
     text: >-
-      Restored the A3 hyper-connection kernel optimizations for DeepSeek V4.1,
-      lowering the per-token HC pre/post overhead in MoE layers.
+      Reduced the per-token hyper-connection pre/post overhead for DeepSeek V4
+      Flash MoE layers on A3.
     hardware: [A3]
