@@ -56,16 +56,20 @@ its FP32 input conversion; this is not a claim of exactly three launches.
 
 ## Gate channel tiling
 
-The gate reduces scoring inputs in tiles of at most 1024 channels and writes
-the residual in tiles of the same size. This bounds live FP32 vectors instead
-of padding a 5120-channel row to 8192 channels, which exceeded A5 UB capacity
-for FP32 inputs. Tile reductions accumulate in FP32; their reduction order
-differs from a single full-row reduction. The public interface, output dtype,
-input strides and hardware routing are unchanged. No additional kernel launch
-or host synchronization is introduced. The tile size is derived in the public
-wrapper from the channel dimension and adds no workload-dependent tuning key.
+Only A5 gates with FP32 residual inputs and more than 4096 channels use tiles
+of at most 1024 channels for scoring and residual writes. The 4096 threshold
+avoids padding these rows to 8192 channels, which exceeded A5 UB capacity in
+the 5120-channel FP32 tests. Both rotated and unrotated scoring are covered.
+A3, A5 BF16, and smaller FP32 inputs retain the original whole-row arithmetic
+through a compile-time branch. Hardware profiles own the FP32 whole-row limit;
+this is internal launch policy, with no user-facing configuration.
 
-The gate test above runs on A3 and A5 and covers a full tile (1024 channels),
-a partial second tile (1056), and the failing 5120-channel FP32 cases for all
-rotation modes. Accuracy and latency comparisons on both devices remain
-required before merge.
+Tile reductions accumulate in FP32 and change reduction order. There is no
+additional kernel launch or host synchronization. The compile-time branch is
+derived from the hardware profile, residual dtype and channel dimension; it
+does not introduce a content-dependent specialization or autotuning key.
+
+The gate test above runs on A3 and A5, covers both sides of the dispatch
+boundary (4096 and 4128 channels), and retains the failing 5120-channel FP32
+cases for every rotation mode. Accuracy and latency comparisons on both
+devices remain required before merge.

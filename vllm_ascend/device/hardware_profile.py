@@ -325,6 +325,9 @@ class HardwareProfile:
     flash_attn_npu_3_models: frozenset[FlashAttentionNpu3Model] = frozenset()
 
     # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
+    # Whole-row FP32 Engram gates above this width use bounded channel tiles.
+    # None preserves the original whole-row kernel on other hardware stacks.
+    engram_gate_fp32_full_row_max_channels: int | None = None
     requires_2d_nz_linear_input: bool = False
     # A5 uses mixed softmax for compatibility with CANN GBSA packages that
     # reject BF16 precision 0. A3 retains FP32 online softmax.
@@ -490,6 +493,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             # TODO: Route Step5 back to CANN flash_attn and remove this exception
             # once CANN supports Step5 and the integration is validated.
             flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.STEP5}),
+            # FP32 rows padded to 8192 channels overflow A5 UB (5120 observed).
+            engram_gate_fp32_full_row_max_channels=4096,
             qwen4exp_hc_gate_mix_row_block_min_rows=1024,
             requires_2d_nz_linear_input=True,
             minimax_m3_gbsa_bf16_softmax_precision=1,

@@ -312,6 +312,12 @@ def test_current_hardware_profile_uses_device_config() -> None:
     assert get_current_hardware_profile() is expected_profile
 
 
+@pytest.mark.parametrize("device_type", list(AscendDeviceType))
+def test_engram_gate_fp32_full_row_limit(device_type):
+    expected = 4096 if device_type == AscendDeviceType.A5 else None
+    assert get_hardware_profile(device_type).engram_gate_fp32_full_row_max_channels == expected
+
+
 def test_current_hardware_profile_is_dynamo_safe(monkeypatch: pytest.MonkeyPatch) -> None:
     # CPU UTs expose a mocked NPU backend that is not importable as
     # ``torch.npu``. Keep accelerator stream discovery out of this test so it
