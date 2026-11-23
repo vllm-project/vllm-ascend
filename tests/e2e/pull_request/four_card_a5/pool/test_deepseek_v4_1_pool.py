@@ -97,6 +97,10 @@ def _leg(use_pool: bool, case_name: str):
             compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
             enable_prefix_caching=not use_pool,
             disable_log_stats=False,
+            # Bound pool-side hangs: workers start sequentially, and a hung
+            # generate should surface as ENV_BLOCKED instead of the job timeout.
+            dp_start_timeout=600,
+            dp_request_timeout=600,
             speculative_config={
                 "method": "dspark",
                 "num_speculative_tokens": NUM_SPECULATIVE_TOKENS,
