@@ -40,7 +40,8 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.ops.triton.linearnorm import qsa_rmsnorm_mrope as _qsa_rmsnorm_mrope  # noqa: F401
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
-    qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_fused,
+    qsa_compress_groups_with_ratio,
+    qsa_compress_norm_mrope_store,
 )
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_store_cache_rows as qsa_store_cache_rows_fused,
@@ -95,7 +96,7 @@ def _compress_qsa_groups(
     rope_cache: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pool completed groups with the fused QSA compression kernel."""
-    return qsa_compress_groups_with_ratio_fused(
+    return qsa_compress_groups_with_ratio(
         raw_keys,
         raw_positions,
         compressor_state_cache,
@@ -393,7 +394,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         if not self._fused_norm_rope_eligible(token_k, positions):
             raise ValueError("QSA compressed-key fused norm+RoPE ABI is not satisfied")
         rotary_cache = self.rotary_emb._match_cos_sin_cache_dtype(token_k)  # noqa: SLF001
-        qsa_compress_groups_with_ratio_fused(
+        qsa_compress_norm_mrope_store(
             token_k[:num_tokens],
             position_rows,
             raw_key_cache,

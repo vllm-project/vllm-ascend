@@ -7,7 +7,11 @@ from vllm.triton_utils import HAS_TRITON
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.linearnorm.qsa_rmsnorm_mrope import triton_qsa_rmsnorm_mrope
-from vllm_ascend.ops.triton.qwen4_exp.qsa import qsa_compress_groups_with_ratio, qsa_store_cache_rows
+from vllm_ascend.ops.triton.qwen4_exp.qsa import (
+    qsa_compress_groups_with_ratio,
+    qsa_compress_norm_mrope_store,
+    qsa_store_cache_rows,
+)
 
 pytestmark = [
     pytest.mark.skipif(
@@ -54,7 +58,7 @@ def test_compress_norm_store_matches_decomposition(with_positions, chunk):
     expected = cache.clone()
     old_ring = args[2].clone()
     _unfused(args, weight, rotary, expected)
-    qsa_compress_groups_with_ratio(*args, norm_weight=weight, rotary_cache=rotary, compressed_cache=cache)
+    qsa_compress_norm_mrope_store(*args, norm_weight=weight, rotary_cache=rotary, compressed_cache=cache)
     torch.testing.assert_close(cache, expected, rtol=0, atol=0)
     torch.testing.assert_close(args[2], old_ring, rtol=0, atol=0)
 
@@ -64,7 +68,7 @@ def test_compressed_cache_replay_and_masked_slots():
     args, weight, rotary, cache = _inputs(True, 4)
 
     def run():
-        qsa_compress_groups_with_ratio(*args, norm_weight=weight, rotary_cache=rotary, compressed_cache=cache)
+        qsa_compress_norm_mrope_store(*args, norm_weight=weight, rotary_cache=rotary, compressed_cache=cache)
 
     for _ in range(3):
         run()
@@ -94,12 +98,22 @@ def test_compressed_cache_empty_rows_and_invalid_contract():
     empty = list(args)
     for index in (0, 1, 4, 6, 7):
         empty[index] = empty[index][:0]
-    result = qsa_compress_groups_with_ratio(*empty, norm_weight=weight, rotary_cache=rotary, compressed_cache=cache)
+    result = qsa_compress_norm_mrope_store(*empty, norm_weight=weight, rotary_cache=rotary, compressed_cache=cache)
     assert result is None
     with pytest.raises(ValueError, match="norm weight"):
-        qsa_compress_groups_with_ratio(*args, rotary_cache=rotary, compressed_cache=cache)
+        qsa_compress_norm_mrope_store(
+            *args,
+            norm_weight=weight[:64],
+            rotary_cache=rotary,
+            compressed_cache=cache,
+        )
     with pytest.raises(ValueError, match="rotary cache"):
-        qsa_compress_groups_with_ratio(*args, norm_weight=weight, rotary_cache=rotary[:, :32], compressed_cache=cache)
+        qsa_compress_norm_mrope_store(
+            *args,
+            norm_weight=weight,
+            rotary_cache=rotary[:, :32],
+            compressed_cache=cache,
+        )
 
 
 @torch.inference_mode()
@@ -116,7 +130,7 @@ def test_compression_transaction_preserves_ring_across_steps():
         args[7].copy_(torch.where((args[6] + 1) % 4 == 0, torch.arange(3, device="npu") * 2, -1))
         # Both paths must read the previous state before any row overwrites it.
         _unfused(reference_args, weight, rotary, expected)
-        qsa_compress_groups_with_ratio(*args, norm_weight=weight, rotary_cache=rotary, compressed_cache=cache)
+        qsa_compress_norm_mrope_store(*args, norm_weight=weight, rotary_cache=rotary, compressed_cache=cache)
         raw_slots = args[3][:, 0].long() * args[2].shape[1] + args[6] % args[2].shape[1]
         for state in (args, reference_args):
             qsa_store_cache_rows(state[2], raw_slots, state[0])
