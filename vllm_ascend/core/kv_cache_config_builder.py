@@ -44,6 +44,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     LAYERWISE_REUSE_BACKING_BYTES,
     get_layerwise_reuse_backing_bytes,
 )
+from vllm_ascend.models.deepseek_v4.cache_config import _get_deepseek_v4_cache_layout
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -158,7 +159,9 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
     ) -> int | None:
         """Return the device memory cost per global block ID."""
         extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
-        if extra_config is not None and kv_cache_groups and get_spec_reuse_rules(vllm_config) is not None:
+        if extra_config is not None and kv_cache_groups and (
+            get_spec_reuse_rules(vllm_config) is not None or _is_deepseek_v4_groups(kv_cache_groups)
+        ):
             probe = self.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)
             backing_bytes = get_layerwise_reuse_backing_bytes(probe)
             if backing_bytes is not None:
@@ -346,51 +349,6 @@ def _get_kv_cache_groups_uniform_groups(
             )
 
     return [full_mla_group, full_mla_c128_group, *swa_mla_groups]
-
-
-def _get_deepseek_v4_cache_layout(
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> tuple[list[int], list[dict[int, list[str]]], list[str], int, int]:
-    """Return the geometry shared by DSV4 planning and memory accounting.
-
-    Precondition: kv_cache_groups[0] is the full-MLA group; its page sizes
-    define the canonical bucket set. Non-full-MLA groups must have been
-    page_size-padded upstream so every layer's page_size matches one of the
-    full-MLA bucket sizes.
-
-    For each group, bucket its layers by page_size_bytes and place each layer
-    at tuple_idx = position-within-bucket.
-    """
-    full_mla_spec = kv_cache_groups[0].kv_cache_spec
-    assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
-    page_sizes = sorted(_page_sizes(full_mla_spec))
-
-    # Pre-bucket each group's layers by page_size (registration order within
-    # bucket). bucketed[g_idx][page_size] = [layer_name, ...].
-    mtp_layer_names = []
-    mtp_page_size = 0
-    bucketed: list[dict[int, list[str]]] = []
-    for group in kv_cache_groups:
-        assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        specs = group.kv_cache_spec.kv_cache_specs
-        b: dict[int, list[str]] = defaultdict(list)
-        for name in group.layer_names:
-            padded = getattr(specs[name], "page_size_padded", None)
-            page_size = padded if padded is not None else specs[name].page_size_bytes
-            if "mtp" not in name:
-                b[page_size].append(name)
-            else:
-                mtp_layer_names.append(name)
-                mtp_page_size = page_size
-        bucketed.append(b)
-
-    # num_layer_tuples = longest bucket list across all groups. For the
-    # full-MLA group this equals the count of layers in the largest
-    # per-page-size bucket (= get_num_layer_tuples()); for SWA sub-groups
-    # this equals the sub-group size (each has a single page_size).
-    num_layer_tuples = max(len(layers) for b in bucketed for layers in b.values()) + len(mtp_layer_names)
-
-    return page_sizes, bucketed, mtp_layer_names, mtp_page_size, num_layer_tuples
 
 
 def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
@@ -596,7 +554,11 @@ def _attach_transfer_and_speculation_metadata(
             kv_transfer_config,
             kv_connector_extra_config={
                 **kv_transfer_config.kv_connector_extra_config,
-                LAYERWISE_REUSE_BACKING_BYTES: reuse_layout.kv_cache_tensors[0].size,
+                LAYERWISE_REUSE_BACKING_BYTES: (
+                    sum(tensor.size for tensor in reuse_layout.kv_cache_tensors)
+                    if getattr(kv_cache_config, "dsv4_shared_cache_names", None) is not None
+                    else reuse_layout.kv_cache_tensors[0].size
+                ),
             },
         )
     return kv_cache_config

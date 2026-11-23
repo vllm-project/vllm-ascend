@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import threading
 import time
 from collections import defaultdict
@@ -12,7 +11,6 @@ import numpy as np
 import torch
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     Backend,
     require_aligned_batch_results,
@@ -31,59 +29,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase, ReqMeta
 
-_KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
 
 
-def _build_range_debug_payload(
-    direction: str,
-    layer_id: int,
-    sizes: list[list[int]],
-    object_offsets: list[list[int]],
-    results: list[int],
-) -> dict[str, Any]:
-    nested_sizes = [[int(size) for size in key_sizes] for key_sizes in sizes]
-    return {
-        "event": "range",
-        "direction": direction,
-        "layer_id": int(layer_id),
-        "key_count": len(results),
-        "requested_bytes": [sum(key_sizes) for key_sizes in nested_sizes],
-        "sizes": nested_sizes,
-        "object_offsets": [[int(offset) for offset in key_offsets] for key_offsets in object_offsets],
-        "results": [int(result) for result in results],
-    }
 
 
-def _emit_range_debug_event(
-    direction: str,
-    layer_id: int,
-    sizes: list[list[int]],
-    object_offsets: list[list[int]],
-    results: list[int],
-) -> None:
-    try:
-        if not get_ascend_config().kv_pool_range_debug:
-            return
-        payload = _build_range_debug_payload(direction, layer_id, sizes, object_offsets, results)
-        logger.info("%s %s", _KVPOOL_RANGE_DEBUG_PREFIX, json.dumps(payload, separators=(",", ":")))
-    except Exception:
-        # Debug instrumentation must never affect the transfer path.
-        pass
-
-
-def _emit_commit_debug_event(layer_id: int, key_count: int, results: list[int]) -> None:
-    try:
-        if not get_ascend_config().kv_pool_range_debug:
-            return
-        payload = {
-            "event": "commit",
-            "layer_id": int(layer_id),
-            "key_count": int(key_count),
-            "results": [int(result) for result in results],
-        }
-        logger.info("%s %s", _KVPOOL_RANGE_DEBUG_PREFIX, json.dumps(payload, separators=(",", ":")))
-    except Exception:
-        pass
 
 
 def _circular_shift(lst: list, offset: int) -> list:
@@ -124,6 +73,7 @@ class LayerBatchBuilder:
                 min(layer * caches_per_layer, self._block_len_np.shape[0]) for layer in range(num_layers + 1)
             ]
         self._layer_cache_entry_offsets_np = np.asarray(layer_cache_entry_offsets, dtype=np.int64)
+        self.shared_cache_entries: list[bool] | None = None
         self._block_ids_buf: np.ndarray | None = None
         self._block_gvas_buf: np.ndarray | None = None
 
@@ -386,6 +336,7 @@ class LayerBatchBuilder:
         is_last_chunks: list[bool | None] = []
         all_load_keys: list[str] = []
         seen_save_keys: set[str] = set()
+        previous_step_rows: list[bool] = []
 
         for block_range in task.block_ranges:
             request = block_range.request
@@ -421,6 +372,9 @@ class LayerBatchBuilder:
                 if key is None or (is_save and key in seen_save_keys):
                     continue
                 block_ids.append(block_id)
+                previous_step_rows.append(
+                    not is_save and request.load_spec is not None and request.load_spec.layerwise_previous_step
+                )
                 block_keys.append(key)
                 if is_save:
                     seen_save_keys.add(key)
@@ -430,6 +384,9 @@ class LayerBatchBuilder:
                 if partial_block_index < 0 or partial_block_index >= len(request_block_ids):
                     raise RuntimeError(f"ReqMeta block metadata does not cover partial block {partial_block_index}")
                 if last_block_key is not None and (not is_save or last_block_key not in seen_save_keys):
+                    previous_step_rows.append(
+                        not is_save and request.load_spec is not None and request.load_spec.layerwise_previous_step
+                    )
                     block_ids.append(request_block_ids[partial_block_index])
                     block_keys.append(last_block_key)
                     if is_save:
@@ -439,6 +396,7 @@ class LayerBatchBuilder:
             block_ids_arr=np.asarray(block_ids, dtype=np.int64),
             block_gvas_arr=None,
             block_keys=block_keys,
+            previous_step_rows=previous_step_rows,
             req_ids=req_ids,
             is_last_chunks=is_last_chunks,
             load_keys=all_load_keys,
@@ -465,14 +423,23 @@ class LayerBatchBuilder:
             all_buffers = [
                 (layer_base_addrs + block_id * layer_block_stride).tolist() for block_id in shared.block_ids_arr
             ]
+            all_sizes = [sizes.copy() for _ in shared.block_ids_arr]
+            all_offsets = [offsets.copy() for _ in shared.block_ids_arr]
+            if self.shared_cache_entries is not None and shared.previous_step_rows:
+                keep = self.shared_cache_entries[base_offset:end_offset]
+                for row, previous in enumerate(shared.previous_step_rows):
+                    if previous:
+                        all_buffers[row] = [v for v, selected in zip(all_buffers[row], keep, strict=True) if selected]
+                        all_sizes[row] = [v for v, selected in zip(all_sizes[row], keep, strict=True) if selected]
+                        all_offsets[row] = [v for v, selected in zip(all_offsets[row], keep, strict=True) if selected]
             return LayerRangeReqMeta(
                 req_ids=shared.req_ids,
                 layer_id=layer_id,
                 block_ids=shared.block_ids_arr.tolist(),
                 keys=shared.block_keys,
                 all_buffers=all_buffers,
-                all_sizes=[sizes.copy() for _ in shared.block_ids_arr],
-                all_offsets=[offsets.copy() for _ in shared.block_ids_arr],
+                all_sizes=all_sizes,
+                all_offsets=all_offsets,
                 load_keys=shared.load_keys,
             )
 
@@ -663,7 +630,6 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                         self.m_store.batch_copy_put(keys, buffers, sizes, offsets),
                     )
                 )
-            _emit_range_debug_event("save", layer_id, active_sizes, active_offsets, results)
             failed_keys = [key for key, result in zip(active_keys, results, strict=True) if result < 0]
             if failed_keys:
                 self._revoke_range_keys(failed_keys)
@@ -679,7 +645,6 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                 commit_results = require_aligned_batch_results(
                     "batch_commit", active_keys, self.m_store.batch_commit(active_keys)
                 )
-                _emit_commit_debug_event(layer_id, len(active_keys), commit_results)
             except Exception:
                 self._revoke_range_keys(active_keys)
                 raise
@@ -936,7 +901,9 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         # layer, so an is_set() per key is pure overhead in the receive thread.
         aborted = self._load_abort_event.is_set()
         active_indices = [
-            index for index in range(len(req_meta.keys)) if not aborted and index in self._active_load_indices
+            index
+            for index in range(len(req_meta.keys))
+            if not aborted and index in self._active_load_indices and req_meta.all_sizes[index]
         ]
         active_keys = [req_meta.keys[index] for index in active_indices]
         if active_keys:
@@ -960,7 +927,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                         self.m_store.batch_copy_get(keys, buffers, sizes, offsets),
                     )
                 )
-            _emit_range_debug_event("load", layer_id, active_sizes, active_offsets, results)
             failed_indices = [index for index, result in zip(active_indices, results, strict=True) if result < 0]
             if failed_indices:
                 self._mark_invalid_range_indices(req_meta, failed_indices)

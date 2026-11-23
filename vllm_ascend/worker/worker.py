@@ -1387,6 +1387,8 @@ class NPUWorker(GPUWorker):
         # Plan from this rank's native descriptors before connectors bind to the cache.
         reuse_layout = plan_layerwise_cache_reuse(kv_cache_config, self.vllm_config)
         if reuse_layout is not None:
+            if getattr(kv_cache_config, "dsv4_shared_cache_names", None) and not self.use_v2_model_runner:
+                raise ValueError("DSV4 Mooncake temporal offload requires Model Runner V2")
             kv_cache_config = apply_layerwise_kv_cache_plan(
                 kv_cache_config, self.vllm_config.kv_transfer_config, reuse_layout
             )

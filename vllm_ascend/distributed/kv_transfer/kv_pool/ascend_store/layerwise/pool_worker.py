@@ -70,6 +70,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     is_kv_save_role,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
+from vllm_ascend.models.deepseek_v4.cache_transfer import transfer_cache_views
 
 # PERF-TUNE switch: defer the last layer's save drain out of the forward
 # critical path; the drain runs at the start of the next step's start_load_kv.
@@ -426,6 +427,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     layer_byte_offset=layer_byte_offset,
                 )
             )
+        shared_entries = getattr(self, "dsv4_group_shared_entries", {})
+        for group_id, builder in enumerate(builders):
+            builder.shared_cache_entries = shared_entries.get(group_id)
         return builders
 
     def configure_dspark_prefix_cache(self, keys: DSparkPrefixKeys) -> None:
@@ -567,6 +571,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._transfer_threads_started = True
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        if getattr(self.kv_cache_config, "dsv4_component_identity", None) is not None:
+            kv_caches = transfer_cache_views(kv_caches)
         if self.use_recoverssm:
             kv_caches = self._recoverssm_store_caches(kv_caches)
         draft_names = set(getattr(self, "_dspark_draft_layer_names", ()))
@@ -927,6 +933,14 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     def _release_layerwise_requests_terminal(self, req_ids: set[str]) -> None:
         with self._load_session_lock:
             self._end_layerwise_load_keys(self._layerwise_session_tracker.release_terminal(req_ids))
+        aliases = getattr(self, "_offload_private_aliases", None)
+        if aliases:
+            for identity in [identity for identity in aliases if identity[0] in req_ids]:
+                del aliases[identity]
+        for name in ("_offload_active_pages", "_offload_pending_pages"):
+            checkpoints = getattr(self, name, {})
+            for identity in [identity for identity in checkpoints if identity[0] in req_ids]:
+                del checkpoints[identity]
 
     def _release_failed_layerwise_get_attempts(self, request_ids_by_key: dict[str, set[str]]) -> None:
         with self._load_session_lock:
@@ -1626,6 +1640,16 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 window_end = min(window_end, draft_start - 1)
             else:
                 window_end = self.current_layer
+        # DSpark writes draft context directly between Store load/save hooks.
+        # Those writes do not open the attention gate used by prefetch tasks.
+        speculative = getattr(getattr(self, "vllm_config", None), "speculative_config", None)
+        if (
+            getattr(getattr(self, "kv_cache_config", None), "dsv4_component_identity", None) is not None
+            and getattr(speculative, "method", None) == "dspark"
+        ):
+            first_draft = self._global_to_local_layer.get(self.hf_config.num_hidden_layers)
+            if first_draft is not None:
+                window_end = min(window_end, max(self.current_layer, first_draft - 1))
         while self.next_layer_to_submit <= window_end:
             layer_id = self.next_layer_to_submit
             self.next_layer_to_submit += 1
@@ -1781,3 +1805,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self._check_hybrid_load_errors()
         for event in save_finished_events[:num_local]:
             event.clear()
+        pending = getattr(self, "_offload_pending_pages", None)
+        if pending:
+            if not hasattr(self, "_offload_active_pages"):
+                self._offload_active_pages = {}
+            self._offload_active_pages.update(pending)
+            pending.clear()

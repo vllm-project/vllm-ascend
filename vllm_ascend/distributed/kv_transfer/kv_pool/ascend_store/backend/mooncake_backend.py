@@ -15,7 +15,6 @@ from vllm.config import ParallelConfig
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     QOS_VALUE_MAX,
@@ -43,21 +42,6 @@ MOONCAKE_LAYERWISE_CLIENT_METHODS = (
     "batch_get_into_multi_buffer_ranges",
     "batch_get_session_end",
 )
-_KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
-
-
-def _emit_whole_key_debug_event(direction: str, key_count: int) -> None:
-    try:
-        if not get_ascend_config().kv_pool_range_debug:
-            return
-        payload = {
-            "event": "whole_key",
-            "direction": direction,
-            "key_count": int(key_count),
-        }
-        logger.info("%s %s", _KVPOOL_RANGE_DEBUG_PREFIX, json.dumps(payload, separators=(",", ":")))
-    except Exception:
-        pass
 
 
 @functools.lru_cache(maxsize=1)
@@ -717,7 +701,6 @@ class MooncakeBackend(Backend):
         assert self.store is not None
         try:
             config = self._build_replicate_config()
-            _emit_whole_key_debug_event("put", len(keys))
             res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
             failed_codes = [int(value) for value in res if value < 0]
             failed_count = len(failed_codes)
@@ -763,7 +746,6 @@ class MooncakeBackend(Backend):
             keys[:3],
         )
         try:
-            _emit_whole_key_debug_event("get", len(keys))
             res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
             res_list = list(res)
             failed_codes = [int(value) for value in res_list if value < 0]

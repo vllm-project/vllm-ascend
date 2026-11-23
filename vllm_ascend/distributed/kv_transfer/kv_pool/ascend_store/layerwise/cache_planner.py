@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, KVCacheTensor
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import get_backend_class
+from vllm_ascend.models.deepseek_v4.cache_config import build_deepseek_v4_reuse_config, is_deepseek_v4_cache
 
 from .layerwise_cache_layout import (
     LayerwiseCacheConfig,
@@ -303,6 +304,22 @@ def plan_layerwise_cache_reuse(
     # An empty device pool has no byte views to reuse.
     if not kv_cache_config.kv_cache_tensors or kv_cache_config.num_blocks == 0 or not kv_cache_config.kv_cache_groups:
         return None
+    if _is_mooncake(extra_config) and is_deepseek_v4_cache(kv_cache_config.kv_cache_groups):
+        plan = build_deepseek_v4_reuse_config(
+            vllm_config, kv_cache_config.kv_cache_groups, kv_cache_config.num_blocks
+        )
+        assert plan is not None
+        for name in (
+            "dsv4_component_identity",
+            "dsv4_shared_cache_names",
+            "dsv4_window_group_ids",
+            "dsv4_nominal_windows",
+            "dsv4_continuation_windows",
+            "kv_cache_allocation_alignment",
+        ):
+            if hasattr(plan, name):
+                setattr(kv_cache_config, name, getattr(plan, name))
+        return plan.layerwise_reuse_layout if plan.layerwise_reuse_layout.has_layer_reuse else None
     rules = get_spec_reuse_rules(vllm_config)
     if rules is None:
         if _is_mooncake(extra_config):

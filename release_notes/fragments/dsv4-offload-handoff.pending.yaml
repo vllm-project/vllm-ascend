@@ -1,0 +1,7 @@
+entries:
+  - category: feature
+    model: DeepSeek-V4-Flash
+    text: >-
+      Added layerwise Mooncake D2D handoff alongside Store temporal KV offload.
+      Complete history pages can be sent across prefill chunks, while window and
+      circular-state caches are sent in the final chunk.

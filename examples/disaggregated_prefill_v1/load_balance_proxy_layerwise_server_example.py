@@ -507,7 +507,7 @@ async def _handle_completions(api: str, request: Request):
         # Use the prefiller's kv_transfer_params to select decoder
         decoder_idx = proxy_state.select_decoder(decoder_score)
         decoder = proxy_state.decoders[decoder_idx]
-        # logger.debug("Using %s %s", prefiller.url, decoder.url)
+        logger.info("Push dispatch D request=%s target=%s", request_id, decoder.url)
         # Stream response from decoder
         released_kv = False
 
@@ -694,7 +694,7 @@ async def dispatch_prefill_batch(
                 request_id: params_by_request_id[request_id] for request_id in expected_request_ids
             }
             req_data["kv_transfer_params"] = kv_transfer_params
-        logger.debug("Using prefill prefiller.url=%r req_data=%r", prefiller.url, req_data)
+        logger.info("Push dispatch P request=%s target=%s", parent_request_id, prefiller.url)
         await send_request_to_service(
             prefiller.client,
             prefiller_idx,
@@ -718,6 +718,7 @@ async def metaserver(request: Request):
         raise HTTPException(status_code=404, detail=f"Unknown metaserver request_id: {request_id!r}")
 
     req_data, request_length, api, parent_request_id = request_record
+    logger.info("Push metaserver received request=%s parent=%s", request_id, parent_request_id)
     async with proxy_state.metaserver_lock:
         params_by_request_id = proxy_state.metaserver_params[parent_request_id]
         params_by_request_id[request_id] = kv_transfer_params

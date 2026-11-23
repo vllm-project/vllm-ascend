@@ -141,7 +141,8 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
                 token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
             if token_len < self.cache_transfer_granularity:
                 return None
-            return self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens)
+            hbm_hit_tokens = 0 if self.layerwise_offload else num_computed_tokens
+            return self._get_block_key_layerwise_hit_tokens(request, token_len, hbm_hit_tokens)
 
         if self.use_layerwise_transfer:
             return self._get_layerwise_hit_tokens(request, prompt_token_len, num_computed_tokens)
