@@ -1,0 +1,10 @@
+pr: 21708
+entries:
+  - category: feature
+    text: >-
+      Added text-backbone LoRA support for DeepSeek-V4 with `--enable-lora` under
+      `data_parallel_size=1` (TP and TP+EP), mapping HuggingFace `.attn.` and
+      `.ffn.`/`w1`/`w2`/`w3` adapter keys onto vLLM attention, shared-expert, and
+      routed-expert modules (excluding fused `compressor` projections).
+    model: deepseek-v4
+    hardware: [A3]
