@@ -412,20 +412,22 @@ class Orchestrator:
         # verified recipe: a --patch overlay declaring an OpenAI-protocol
         # provider (Bearer auth) plus the agent-default-model override.
         with open(PATCH_FILE, "w") as f:
+            # quote the env-derived values: a URL containing "#" or ":"
+            # would otherwise be mangled by YAML comment/key parsing
             f.write(
                 "- id: agent-default-model\n"
                 "  config:\n"
                 "    provider: ai-review-gateway\n"
-                f"    model: {model}\n"
+                f'    model: "{model}"\n'
                 "- id: llm-pi-ai\n"
                 "  config:\n"
                 "    providers:\n"
                 "      ai-review-gateway:\n"
                 "        apiKeyEnv: AI_REVIEW_KEY\n"
                 "        api: openai-completions\n"
-                f"        baseURL: {base_url}\n"
+                f'        baseURL: "{base_url}"\n'
                 "        models:\n"
-                f"          - id: {model}\n"
+                f'          - id: "{model}"\n'
             )
         started = time.monotonic()
         print(
