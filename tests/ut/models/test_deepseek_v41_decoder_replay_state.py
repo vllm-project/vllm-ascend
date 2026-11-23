@@ -443,7 +443,7 @@ def test_compacted_pcp_rank_uses_padded_dp_count(synchronized_dp, monkeypatch, a
 @pytest.mark.parametrize("compact", [False, True])
 @pytest.mark.parametrize("fail", [False, True])
 @pytest.mark.parametrize("sequence_parallel", [False, True])
-def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypatch, compact, fail, sequence_parallel):
+def test_replay_context_preserves_moe_cursor_and_restores_mc2(state, monkeypatch, compact, fail, sequence_parallel):
     original_padding = torch.tensor([False, True, False, True])
     state.layers.sequence_parallel = sequence_parallel
     gather_padding = Mock(side_effect=lambda *args, **kwargs: original_padding.clone())
@@ -454,6 +454,7 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypat
         slot_mapping={"original": torch.arange(4)},
         is_padding=original_padding[:2] if sequence_parallel else original_padding,
         additional_kwargs={"eplb_heat_collection_status": True},
+        moe_layer_index=21,
     )
     state.num_tokens = 4
     state.num_actual_tokens = 2 if compact else 3
@@ -463,7 +464,7 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypat
     state.metadata = {"compacted": object()}
     mask = torch.tensor([False, True, False, True, True, False])
     saved_mask = mask.clone()
-    inner = SimpleNamespace(additional_kwargs={"mc2_mask": mask})
+    inner = SimpleNamespace(additional_kwargs={"mc2_mask": mask}, moe_layer_index=0)
     current = [outer]
     monkeypatch.setattr(replay_mod, "get_forward_context", lambda: current[0])
     monkeypatch.setattr(replay_mod, "get_mc2_mask", lambda: mask)
@@ -489,10 +490,13 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypat
                 [True, True, False, False, False, False] if compact else [True, False, True, False, False, False]
             )
             assert inner.additional_kwargs["eplb_heat_collection_status"] is True
+            assert inner.moe_layer_index == 21
+            inner.moe_layer_index += 19
             if fail:
                 raise RuntimeError("decoder failure")
     except RuntimeError:
         assert fail
+    assert current[0] is outer and outer.moe_layer_index == 21
     assert torch.equal(mask, saved_mask)
     assert torch.equal(original_padding, torch.tensor([False, True, False, True]))
     assert gather_padding.call_count == int(sequence_parallel)
