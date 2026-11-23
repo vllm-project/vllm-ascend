@@ -8,6 +8,7 @@ import pytest
 import torch
 from torch import nn
 
+from vllm_ascend.ops.kda import KimiK31FlashKDASchedule, run_chunk_kda
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiK3DeltaAttention,
@@ -237,7 +238,8 @@ def test_fused_bfg_linear_recomposes_f_after_source_reload():
 
 
 @pytest.mark.parametrize("recover", [False, True])
-def test_fused_bfg_projection_preserves_staged_outputs(recover):
+@pytest.mark.parametrize("leave_beta_raw", [False, True])
+def test_fused_bfg_projection_preserves_staged_outputs(recover, leave_beta_raw):
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     attention.head_dim = 3
@@ -250,19 +252,22 @@ def test_fused_bfg_projection_preserves_staged_outputs(recover):
     projected_bfg = attention._project_bfg(hidden_states)
     assert projected_bfg is fused_output
 
-    beta, raw_gate, output_gate = attention._postprocess_bfg(projected_bfg)
-    expected_beta = fused_output[:, :2] if recover else fused_output[:, :2].float().sigmoid()
+    beta, raw_gate, output_gate = attention._postprocess_bfg(projected_bfg, leave_beta_raw=leave_beta_raw)
+    expected_beta = fused_output[:, :2] if recover or leave_beta_raw else fused_output[:, :2].float().sigmoid()
     torch.testing.assert_close(beta, expected_beta.unsqueeze(0))
     torch.testing.assert_close(raw_gate, fused_output[:, 2:8].reshape(4, 2, 3).unsqueeze(0))
     torch.testing.assert_close(output_gate, fused_output[:, 8:].reshape(4, 2, 3))
 
 
 @pytest.mark.parametrize("recover", [False, True])
-def test_mixed_forward_marks_auxiliary_beta_as_preprocessed(recover):
+@pytest.mark.parametrize("flash_kda", [False, True])
+def test_mixed_forward_marks_auxiliary_beta_as_preprocessed(recover, flash_kda):
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     attention.uses_mixed_projection = True
     attention.use_recoverssm = recover
+    attention._is_kimi_k31 = flash_kda
+    attention.prefix = "kda"
     attention.pcp_size = 1
     attention.local_num_heads = 2
     attention.head_dim = 3
@@ -277,11 +282,18 @@ def test_mixed_forward_marks_auxiliary_beta_as_preprocessed(recover):
     attention._forward = MagicMock()
     attention.o_proj = _RecordingLinear(projected)
 
-    actual = attention.forward(hidden_states, positions)
+    prefill = SimpleNamespace(chunk=SimpleNamespace(kimi_k31_flash_kda=object() if flash_kda else None))
+    metadata = SimpleNamespace(non_spec_prefill_metadata=prefill)
+    with patch(
+        "vllm_ascend.ops.kimi_kda.get_forward_context",
+        return_value=SimpleNamespace(attn_metadata={"kda": metadata}),
+    ):
+        actual = attention.forward(hidden_states, positions)
 
     assert actual is projected
     assert attention._forward.call_args.kwargs["beta"] is beta
-    assert attention._forward.call_args.kwargs["beta_is_preprocessed"] is (not recover)
+    assert attention._run_overlapped_qkv_bfg.call_args.kwargs["leave_beta_raw"] is (flash_kda and not recover)
+    assert attention._forward.call_args.kwargs["beta_is_preprocessed"] is (not (recover or flash_kda))
 
 
 def test_overlapped_qkv_bfg_keeps_two_stage_vector_cube_overlap():
@@ -308,7 +320,7 @@ def test_overlapped_qkv_bfg_keeps_two_stage_vector_cube_overlap():
         trace.append("qkv_matmul")
         return qkv
 
-    def record_postprocess_bfg(*_args: object) -> tuple[_RecordingTensor, ...]:
+    def record_postprocess_bfg(*_args: object, **_kwargs: object) -> tuple[_RecordingTensor, ...]:
         trace.append("postprocess_bfg")
         return processed_bfg
 
@@ -471,6 +483,94 @@ def test_prefill_fuses_raw_gate_and_updates_v_first_state(lower_bound):
     assert chunk_kda_fwd.call_args.kwargs["safe_gate"] is (lower_bound is not None)
     assert chunk_kda_fwd.call_args.kwargs["lower_bound"] == (lower_bound if lower_bound is not None else -5.0)
     torch.testing.assert_close(recurrent_state[state_indices], final_state)
+
+
+def test_chunk_kda_passes_raw_inputs_and_original_schedule_to_flash_kda():
+    q, k, v, raw_gate = (torch.randn(1, 3, 2, 128, dtype=torch.bfloat16) for _ in range(4))
+    raw_beta = torch.randn(1, 3, 2, dtype=torch.bfloat16)
+    initial_state = torch.randn(2, 2, 128, 128, dtype=torch.bfloat16)
+    a_log, dt_bias = torch.zeros(2), torch.zeros(256)
+    output, final_state = torch.randn_like(v[0]), initial_state.float()
+    cu_seqlens = torch.tensor([0, 1, 3], dtype=torch.int32)
+    schedule = torch.empty(1, dtype=torch.int32)
+    flash_kda = MagicMock(return_value=(output, final_state, None))
+    metadata = SimpleNamespace(kimi_k31_flash_kda=KimiK31FlashKDASchedule(cu_seqlens, schedule, flash_kda))
+
+    with patch("vllm_ascend.ops.kda.chunk_kda_fwd") as legacy:
+        actual, state = run_chunk_kda(
+            q, k, v, raw_gate, raw_beta, initial_state, metadata, a_log, dt_bias, lower_bound=-5.0
+        )
+    legacy.assert_not_called()
+    args, kwargs = flash_kda.call_args
+    for argument, tensor in zip(args[:5], (q, k, v, raw_gate, raw_beta)):
+        assert argument.is_contiguous()
+        torch.testing.assert_close(argument, tensor[0])
+    assert args[5] is schedule
+    assert kwargs["cu_seqlens"] is cu_seqlens
+    assert kwargs["layout"] == "TND"
+    assert kwargs["lower_bound"] == -5.0
+    for flag in ("use_qk_l2norm_in_kernel", "use_beta_sigmoid_in_kernel", "use_gate_in_kernel", "output_final_state"):
+        assert kwargs[flag] is True
+    torch.testing.assert_close(kwargs["initial_state"], final_state)
+    assert kwargs["dt_bias"].shape == (2, 128)
+    torch.testing.assert_close(actual, output.unsqueeze(0))
+    assert state is final_state
+
+
+@pytest.mark.parametrize("recover", [False, True])
+def test_flash_kda_mixed_batch_activates_only_decode_beta(recover):
+    raw_beta = torch.tensor([[[-2.0], [0.5], [2.0]]], dtype=torch.bfloat16)
+    hidden_out = torch.empty(1, 3, 1, 128, dtype=torch.bfloat16)
+    conv_meta = SimpleNamespace(query_start_loc=None, cache_indices=None, initial_state_mode=None)
+    metadata = SimpleNamespace(
+        num_actual_tokens=3,
+        num_prefills=1,
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_spec_decodes=0,
+        spec_state_indices_tensor=None,
+        spec_sequence_masks=None,
+        spec_token_indx=None,
+        non_spec_token_indx=None,
+        non_spec_prefill_metadata=SimpleNamespace(
+            causal_conv1d=conv_meta,
+            chunk=SimpleNamespace(kimi_k31_flash_kda=object()),
+        ),
+        non_spec_query_start_loc=torch.tensor([0, 1, 3], dtype=torch.int32),
+        non_spec_state_indices_tensor=torch.tensor([0, 1]),
+        prefill_state_indices=torch.tensor([1]),
+        prefill_has_initial_state=torch.tensor([False]),
+    )
+    recurrent = MagicMock(side_effect=lambda q, k, v, *args: v)
+    prefill = MagicMock(side_effect=lambda q, k, v, *args: v)
+    attention = SimpleNamespace(
+        prefix="kda",
+        use_recoverssm=recover,
+        head_dim=128,
+        kv_cache=(torch.empty(1), torch.empty(1)),
+        get_parameter=MagicMock(),
+        _run_causal_conv1d=lambda x, *args, **kwargs: x,
+        _run_prefill=prefill,
+        _run_recurrent=recurrent,
+        o_norm=SimpleNamespace(forward_oot=MagicMock()),
+    )
+    with (
+        patch("vllm_ascend.ops.kimi_kda.GDNAttentionMetadata", SimpleNamespace),
+        patch(
+            "vllm_ascend.ops.kimi_kda.get_forward_context",
+            return_value=SimpleNamespace(attn_metadata={"kda": metadata}),
+        ),
+    ):
+        AscendKimiK3DeltaAttention._forward(
+            attention,
+            torch.zeros(3, 384, dtype=torch.bfloat16),
+            torch.zeros_like(hidden_out),
+            torch.zeros_like(hidden_out[0]),
+            raw_beta,
+            hidden_out,
+        )
+    torch.testing.assert_close(recurrent.call_args.args[4], raw_beta[:, :1].float().sigmoid())
+    torch.testing.assert_close(prefill.call_args.args[4], raw_beta[:, 1:])
 
 
 @pytest.mark.parametrize("lower_bound", [None, -4.0])
@@ -727,7 +827,7 @@ def test_recoverssm_dispatches_without_spec_mask_and_sigmoids_beta_once(mixed):
 
 
 @pytest.mark.parametrize("recover", [False, True])
-@pytest.mark.parametrize("mode", ["prefill", "idle"])
+@pytest.mark.parametrize("mode", ["prefill", "flash_kda", "idle"])
 def test_kda_prefill_direct_norm_and_idle_output(mode, recover):
     tokens, capacity, heads, dim = 3, 4, 2, 128
     core = torch.randn(1, tokens, heads, dim)
@@ -737,7 +837,7 @@ def test_kda_prefill_direct_norm_and_idle_output(mode, recover):
     conv_meta = SimpleNamespace(query_start_loc=None, cache_indices=None, initial_state_mode=None)
     metadata = SimpleNamespace(
         num_actual_tokens=tokens,
-        num_prefills=int(mode == "prefill"),
+        num_prefills=int(mode != "idle"),
         num_decodes=0,
         num_decode_tokens=0,
         num_spec_decodes=0,
@@ -745,7 +845,10 @@ def test_kda_prefill_direct_norm_and_idle_output(mode, recover):
         spec_sequence_masks=None,
         spec_token_indx=None,
         non_spec_token_indx=None,
-        non_spec_prefill_metadata=SimpleNamespace(causal_conv1d=conv_meta, chunk=None),
+        non_spec_prefill_metadata=SimpleNamespace(
+            causal_conv1d=conv_meta,
+            chunk=SimpleNamespace(kimi_k31_flash_kda=object() if mode == "flash_kda" else None),
+        ),
         prefill_state_indices=torch.tensor([0]),
         prefill_has_initial_state=torch.tensor([False]),
     )
@@ -791,7 +894,8 @@ def test_kda_prefill_direct_norm_and_idle_output(mode, recover):
         torch.testing.assert_close(output, torch.zeros_like(output))
     else:
         norm.assert_called_once()
-        torch.testing.assert_close(attention._run_prefill.call_args.args[4], raw_beta.sigmoid())
+        expected_beta = raw_beta if mode == "flash_kda" else raw_beta.sigmoid()
+        torch.testing.assert_close(attention._run_prefill.call_args.args[4], expected_beta)
         torch.testing.assert_close(output[:, :tokens], before * gate[:tokens].sigmoid())
         torch.testing.assert_close(output[:, tokens:], torch.zeros_like(output[:, tokens:]))
         torch.testing.assert_close(core, before)

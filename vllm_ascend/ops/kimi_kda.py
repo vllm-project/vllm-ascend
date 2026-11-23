@@ -3,6 +3,8 @@
 """Ascend Kimi K3 delta attention with TP x PCP head-sharded state."""
 
 from functools import wraps
+from importlib import import_module
+from inspect import signature
 
 import torch
 import torch_npu
@@ -44,7 +46,14 @@ from vllm_ascend.ops.head_parallel import (
     get_head_parallel_rank,
     get_head_parallel_size,
 )
-from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.ops.kda import (
+    FLASH_KDA_HEAD_DIM,
+    FLASH_KDA_MAX_HEADS,
+    KimiK31FlashKDASchedule,
+    is_kimi_k31,
+    run_chunk_kda,
+    run_recurrent_kda,
+)
 from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
@@ -213,7 +222,87 @@ def _prepare_beta(
     return beta if is_preprocessed else beta.float().sigmoid()
 
 
-class KimiKDAHostMetadataBuilder(PCPRecurrentMetadataBuilderMixin, AscendGDNHostMetadataBuilder):
+def _has_flash_kda_prefill(attn_metadata: GDNAttentionMetadata | None) -> bool:
+    prefill = getattr(attn_metadata, "non_spec_prefill_metadata", None)
+    return prefill is not None and getattr(prefill.chunk, "kimi_k31_flash_kda", None) is not None
+
+
+class KimiKDAMetadataBuilderMixin(PCPRecurrentMetadataBuilderMixin):
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._flash_kda_ops = None
+        model_config = getattr(vllm_config, "model_config", None)
+        if not is_kimi_k31(model_config) or model_config.dtype != torch.bfloat16:
+            return
+        if not get_current_hardware_profile().supports(HardwareCapability.CANNBOT_FLASH_KDA):
+            return
+
+        kda_config = getattr(model_config.hf_text_config, "linear_attn_config", None)
+        if kda_config is None:
+            return
+        local_heads = kda_config["num_heads"] // get_head_parallel_size(vllm_config.parallel_config)
+        if kda_config["head_dim"] != FLASH_KDA_HEAD_DIM or not 0 < local_heads <= FLASH_KDA_MAX_HEADS:
+            return
+        # Only eligible workers import the optional package, after the NPU is selected.
+        try:
+            flash_kda = getattr(import_module("ops.flash_kda"), "flash_kda", None)
+            make_schedule = getattr(import_module("ops.flash_kda_metadata"), "flash_kda_metadata", None)
+        except ModuleNotFoundError as error:
+            if error.name not in {"ops", "ops.flash_kda", "ops.flash_kda_metadata", "cannbotdsl"}:
+                raise
+            return
+
+        # Older packages used a different metadata API and lacked the fusion switches.
+        if not callable(flash_kda) or not callable(make_schedule):
+            return
+        if not {
+            "metadata",
+            "cu_seqlens",
+            "layout",
+            "output_final_state",
+            "use_qk_l2norm_in_kernel",
+            "use_gate_in_kernel",
+            "use_beta_sigmoid_in_kernel",
+        } <= set(signature(flash_kda).parameters):
+            return
+        if not {"cu_seqlens", "batch_size", "nheads_qk", "nheads_v", "seqlens", "enable_grad", "layout"} <= set(
+            signature(make_schedule).parameters
+        ):
+            return
+
+        self._flash_kda_ops = (flash_kda, make_schedule)
+        self._flash_kda_num_heads = local_heads
+        self._flash_kda_device = device
+
+    def build(self, *args, **kwargs):
+        metadata = super().build(*args, **kwargs)
+        if self._flash_kda_ops is None or metadata.non_spec_prefill_metadata is None:
+            return metadata
+
+        chunk = metadata.non_spec_prefill_metadata.chunk
+        cu_seqlens_host = chunk.cu_seqlens_kern
+        if cu_seqlens_host is None:
+            cu_seqlens_host = chunk.cu_seqlens_host
+        if len(cu_seqlens_host) < 2 or cu_seqlens_host[-1] == 0:
+            return metadata
+
+        flash_kda, make_schedule = self._flash_kda_ops
+        cu_seqlens = torch.tensor(cu_seqlens_host, dtype=torch.int32, device=self._flash_kda_device)
+        with torch.npu.device(self._flash_kda_device):
+            schedule = make_schedule(
+                cu_seqlens=cu_seqlens,
+                batch_size=len(cu_seqlens_host) - 1,
+                nheads_qk=self._flash_kda_num_heads,
+                nheads_v=self._flash_kda_num_heads,
+                seqlens=cu_seqlens_host[-1],
+                enable_grad=False,
+                layout="TND",
+            )
+        chunk.kimi_k31_flash_kda = KimiK31FlashKDASchedule(cu_seqlens, schedule, flash_kda)
+        return metadata
+
+
+class KimiKDAHostMetadataBuilder(KimiKDAMetadataBuilderMixin, AscendGDNHostMetadataBuilder):
     pass
 
 
@@ -241,6 +330,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     # Worker startup prepares this layer after KV-cache binding.
     _requires_kda_state_copy = True
     use_contiguous_conv_indices = True
+    _is_kimi_k31 = False
 
     def __init__(self, config, vllm_config, prefix: str = "") -> None:
         quant_config = getattr(vllm_config, "quant_config", None)
@@ -253,6 +343,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             )(f"{prefix}.in_proj_qkvgfab")
         )
         super().__init__(config, vllm_config, prefix)
+        self._is_kimi_k31 = is_kimi_k31(vllm_config.model_config)
         parallel_config = getattr(vllm_config, "parallel_config", None)
         self.pcp_size = getattr(parallel_config, "prefill_context_parallel_size", 1)
         self.pcp_group = get_pcp_group() if self.pcp_size > 1 else None
@@ -405,7 +496,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     def _forward_projections(self, hidden_states: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         if self.uses_mixed_projection:
             num_tokens = hidden_states.size(0)
-            mixed_qkv, beta, g1, g2 = self._run_overlapped_qkv_bfg(hidden_states)
+            leave_beta_raw = False
+            if self._is_kimi_k31 and not self.use_recoverssm:
+                metadata = get_forward_context().attn_metadata
+                leave_beta_raw = isinstance(metadata, dict) and _has_flash_kda_prefill(metadata.get(self.prefix))
+            mixed_qkv, beta, g1, g2 = self._run_overlapped_qkv_bfg(hidden_states, leave_beta_raw=leave_beta_raw)
             core_attn_out = torch.empty(
                 (1, num_tokens, self.local_num_heads, self.head_dim),
                 dtype=hidden_states.dtype,
@@ -417,7 +512,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 g2=g2,
                 beta=beta,
                 core_attn_out=core_attn_out,
-                beta_is_preprocessed=not self.use_recoverssm,
+                beta_is_preprocessed=not (self.use_recoverssm or leave_beta_raw),
             )
             core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
             return self.o_proj(core_attn_out)[0]
@@ -426,6 +521,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     def _run_overlapped_qkv_bfg(
         self,
         hidden_states: torch.Tensor,
+        *,
+        leave_beta_raw: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fork BFG work to an auxiliary stream and join it back to main."""
         main_stream = torch.npu.current_stream()
@@ -452,7 +549,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             # beta's FP32 conversion and sigmoid. Pack the F/output gates so all
             # BFG output handling occurs after the QKV matmul is enqueued.
             bfg_stream.wait_event(quant_ready)
-            beta, g1, g2 = self._postprocess_bfg(fused_bfg)
+            beta, g1, g2 = self._postprocess_bfg(fused_bfg, leave_beta_raw=leave_beta_raw)
             bfg_ready = bfg_stream.record_event()
 
         for tensor in (beta, g1, g2):
@@ -471,12 +568,14 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     def _postprocess_bfg(
         self,
         fused_bfg: torch.Tensor,
+        *,
+        leave_beta_raw: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         beta, raw_gate, output_gate = fused_bfg.split(
             self._fused_bfg_output_sizes,
             dim=-1,
         )
-        if not self.use_recoverssm:
+        if not (self.use_recoverssm or leave_beta_raw):
             beta = beta.float().sigmoid()
         beta = beta.unsqueeze(0)
         # Pack the raw gate on the auxiliary stream. This also
@@ -641,11 +740,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         has_initial_state: torch.Tensor,
         prebuilt_metadata,
     ) -> torch.Tensor:
-        cu_seqlens = (
-            prebuilt_metadata.cu_seqlens_host
-            if prebuilt_metadata.cu_seqlens_kern is None
-            else prebuilt_metadata.cu_seqlens_kern
-        )
         # Unlike the standalone copy API, prefill requires per-request flags.
         # Missing flags must not silently preserve potentially stale cache rows.
         if has_initial_state is None:
@@ -669,8 +763,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             raw_gate,
             beta,
             initial_state_vk,
-            cu_seqlens,
-            prebuilt_metadata.chunk_indices_chunk64_host,
+            prebuilt_metadata,
             self.A_log,
             self.dt_bias,
             lower_bound=self.gate_lower_bound,
@@ -713,7 +806,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         g1 = g1[:, :num_actual_tokens]
         g2 = g2[:num_actual_tokens]
         use_recoverssm = self.use_recoverssm
-        if use_recoverssm:
+        use_flash_kda = _has_flash_kda_prefill(attn_metadata)
+        if use_recoverssm or use_flash_kda:
             beta = beta[:, :num_actual_tokens]
         else:
             beta = _prepare_beta(
@@ -797,6 +891,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                     self.num_spec + 1,
                 )
             else:
+                if use_flash_kda:
+                    beta_spec = beta_spec.float().sigmoid()
                 core_spec = self._run_recurrent(
                     q_spec,
                     k_spec,
@@ -842,7 +938,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             )
             assert raw_gate_non_spec is not None
             assert beta_non_spec is not None
-            if use_recoverssm:
+            if use_recoverssm and not use_flash_kda:
                 beta_non_spec = beta_non_spec.float().sigmoid()
 
             split_non_spec = not use_spec and attn_metadata.num_prefills > 0 and attn_metadata.num_decodes > 0
@@ -851,12 +947,15 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             if split_non_spec:
                 assert attn_metadata.non_spec_query_start_loc is not None
                 assert attn_metadata.non_spec_state_indices_tensor is not None
+                beta_decode = beta_non_spec[:, :num_decode_tokens]
+                if use_flash_kda:
+                    beta_decode = beta_decode.float().sigmoid()
                 core_decode = self._run_recurrent(
                     q_non_spec[:, :num_decode_tokens],
                     k_non_spec[:, :num_decode_tokens],
                     v_non_spec[:, :num_decode_tokens],
                     raw_gate_non_spec[:, :num_decode_tokens],
-                    beta_non_spec[:, :num_decode_tokens],
+                    beta_decode,
                     recurrent_state,
                     attn_metadata.non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
                     attn_metadata.non_spec_state_indices_tensor[: attn_metadata.num_decodes],

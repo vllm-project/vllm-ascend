@@ -69,7 +69,6 @@ def chunk_kda(
         state_indices = state_indices[metadata.keep_meta]
         has_initial_state = has_initial_state[metadata.keep_meta]
     initial_state = gather_initial_states(state, state_indices, has_initial_state).float().contiguous()
-    cu_seqlens = metadata.cu_seqlens_host if metadata.cu_seqlens_kern is None else metadata.cu_seqlens_kern
     output, final_state = run_chunk_kda(
         q,
         k,
@@ -77,8 +76,7 @@ def chunk_kda(
         raw_gate,
         raw_beta.float().sigmoid(),
         initial_state,
-        cu_seqlens,
-        metadata.chunk_indices_chunk64_host,
+        metadata,
         a_log,
         dt_bias,
         lower_bound=lower_bound,
