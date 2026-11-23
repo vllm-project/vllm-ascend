@@ -246,7 +246,7 @@ def _compress_qsa_groups_kernel(
 
 
 @triton.jit
-def _compress_qsa_groups_norm_store_kernel(
+def _compress_qsa_groups_norm_mrope_store_kernel(
     raw_keys_ptr,
     raw_positions_ptr,
     compressor_state_cache_ptr,
@@ -276,20 +276,20 @@ def _compress_qsa_groups_norm_store_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_D: tl.constexpr,
     LOAD_ROPE_POSITIONS: tl.constexpr,
-    norm_weight_ptr=None,
-    rotary_cache_ptr=None,
-    compressed_cache_ptr=None,
-    rotary_cache_rows: tl.constexpr = 0,
-    rotary_cache_stride: tl.constexpr = 0,
-    compressed_stride_block: tl.constexpr = 0,
-    compressed_stride_token: tl.constexpr = 0,
-    compressed_stride_dim: tl.constexpr = 0,
-    compressed_page_size: tl.constexpr = 1,
-    compressed_num_slots: tl.constexpr = 0,
-    norm_eps: tl.constexpr = 1e-6,
-    rotary_dim: tl.constexpr = 64,
-    mrope_section_h: tl.constexpr = 11,
-    mrope_section_w: tl.constexpr = 10,
+    norm_weight_ptr,
+    rotary_cache_ptr,
+    compressed_cache_ptr,
+    rotary_cache_rows: tl.constexpr,
+    rotary_cache_stride: tl.constexpr,
+    compressed_stride_block: tl.constexpr,
+    compressed_stride_token: tl.constexpr,
+    compressed_stride_dim: tl.constexpr,
+    compressed_page_size: tl.constexpr,
+    compressed_num_slots: tl.constexpr,
+    norm_eps: tl.constexpr,
+    rotary_dim: tl.constexpr,
+    mrope_section_h: tl.constexpr,
+    mrope_section_w: tl.constexpr,
 ) -> None:
     rows = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
     dims = tl.arange(0, BLOCK_D)
@@ -330,6 +330,7 @@ def _compress_qsa_groups_norm_store_kernel(
 
     for group_offset in tl.range(0, COMPRESS_RATIO):
         position = end_position - (COMPRESS_RATIO - 1 - group_offset)
+        safe_position = tl.maximum(position, 0)
         use_raw = position >= chunk_start_position
         raw_row = query_row_start + position - chunk_start_position
         raw_values = tl.load(
@@ -343,7 +344,7 @@ def _compress_qsa_groups_norm_store_kernel(
         compressor_state_values = tl.load(
             compressor_state_cache_ptr
             + tl.maximum(compressor_state_block, 0).to(tl.int64)[:, None] * stride_compressor_state_block
-            + (position % COMPRESSOR_STATE_SIZE)[:, None] * stride_compressor_state_token
+            + (safe_position % COMPRESSOR_STATE_SIZE)[:, None] * stride_compressor_state_token
             + dims[None, :] * stride_compressor_state_dim,
             mask=(valid_row & ~use_raw & valid_compressor_state_block)[:, None] & (dims < HEAD_DIM)[None, :],
             other=0.0,
@@ -351,6 +352,7 @@ def _compress_qsa_groups_norm_store_kernel(
         accumulator += tl.where(use_raw[:, None], raw_values, compressor_state_values)
 
     first_position = end_position - COMPRESS_RATIO + 1
+    safe_first_position = tl.maximum(first_position, 0)
     if LOAD_ROPE_POSITIONS:
         first_from_raw = first_position >= chunk_start_position
         raw_first_row = query_row_start + first_position - chunk_start_position
@@ -388,7 +390,7 @@ def _compress_qsa_groups_norm_store_kernel(
         state_position_base = (
             rope_cache_ptr
             + tl.maximum(compressor_state_block, 0).to(tl.int64) * stride_rope_block
-            + (first_position % COMPRESSOR_STATE_SIZE) * stride_rope_token
+            + (safe_first_position % COMPRESSOR_STATE_SIZE) * stride_rope_token
         )
         position_0 = tl.where(
             first_from_raw,
@@ -766,7 +768,7 @@ def qsa_compress_norm_mrope_store(
         block_m = _COMPRESS_BLOCK_M_MEDIUM
     else:
         block_m = _COMPRESS_BLOCK_M_LARGE
-    _compress_qsa_groups_norm_store_kernel[(triton.cdiv(rows, block_m),)](
+    _compress_qsa_groups_norm_mrope_store_kernel[(triton.cdiv(rows, block_m),)](
         raw_keys,
         raw_positions,
         compressor_state_cache,
@@ -812,9 +814,6 @@ def qsa_compress_norm_mrope_store(
         mrope_section_w=_FUSED_MROPE_SECTIONS[2],
         num_warps=4,
     )
-    return None
-
-
 __all__ = [
     "pack_qsa_group_indices_npu",
     "qsa_compress_groups_with_ratio",
