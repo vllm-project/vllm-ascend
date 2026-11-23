@@ -585,10 +585,16 @@ jobs:
           echo "vllm_ascend_hash=${HASH_vllm_ascend:-N/A}" >> "$GITHUB_OUTPUT"
           rm -f "$LEADER_TMP"
 
+      - name: Stage Daily Issue action
+        id: stage-daily-issue-action
+        if: ${{ !cancelled() && startsWith(inputs.request_id, 'daily-') && steps.stream_logs.outcome == 'failure' }}
+        shell: bash
+        run: bash .github/workflows/scripts/stage_ci_actions.sh
+
       - name: Dispatch Daily Issue update
         id: daily-report
-        if: ${{ !cancelled() && startsWith(inputs.request_id, 'daily-') && steps.stream_logs.outcome == 'failure' }}
-        uses: ./.github/actions/dispatch-daily-issue
+        if: ${{ !cancelled() && steps.stage-daily-issue-action.outcome == 'success' }}
+        uses: ./../../_temp/ci-workflow/.github/actions/dispatch-daily-issue
         with:
           github-token: ${{ secrets.PAT_TOKEN }}
           request-id: ${{ inputs.request_id }}
