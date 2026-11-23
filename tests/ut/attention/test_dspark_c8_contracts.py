@@ -6,11 +6,12 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-import vllm_ascend.ops  # noqa: F401
 from torch import nn
 from vllm.compilation import backends
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.models import utils as model_utils
+
+import vllm_ascend.ops  # noqa: F401
 from vllm_ascend.attention import mla_v1
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.models.kimi_k3 import kimi_k3_dspark
