@@ -164,6 +164,18 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         softmax_lse: torch.Tensor | None = None,
         workspace: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        import os
+        if os.environ.get("KIMI_ALIGNMENT_VISION_FA") == "1":
+            # Fixed-operand replay verified the training FA path on this BF16 ViT.
+            # This candidate is explicitly eager-only; graph semantics are untested.
+            assert out is None and workspace is None and softmax_lse is None
+            assert not self.enable_pad and self.num_heads == self.num_kv_heads
+            assert query.dtype == key.dtype == value.dtype == torch.bfloat16
+            return torch_npu.npu_fusion_attention(
+                query, key, value, head_num=query.shape[1], pse=None,
+                atten_mask=None, scale=self.scale, keep_prob=1., input_layout="TND",
+                actual_seq_qlen=actual_seq_lengths_q,
+                actual_seq_kvlen=actual_seq_lengths_kv)[0]
         fia_kwargs = dict(
             query=query,
             key=key.contiguous(),

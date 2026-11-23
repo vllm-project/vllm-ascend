@@ -157,6 +157,9 @@ class MoECommMethod(ABC):
             fused_experts_input=fused_experts_input,
         )
         token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+        from moe_trace import stage
+        stage('dispatch', comm=type(self).__name__, input=token_dispatch_input,
+              metadata=token_dispatch_output.combine_metadata)
 
         shared_activation_overlap_start_evt = None
         if self.shared_activation_overlaps_routed_gmm1:
@@ -183,6 +186,7 @@ class MoECommMethod(ABC):
             combine_metadata=token_dispatch_output.combine_metadata,
         )
 
+        stage('combined_routed', output=routed_out)
         return FusedExpertsResult(
             routed_out=routed_out,
             before_dispatch_evt=before_dispatch_evt,

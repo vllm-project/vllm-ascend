@@ -491,6 +491,9 @@ class NPUWorker(WorkerBase):
         self._init_worker_distributed_environment()
         # Set random seed.
         set_random_seed(self.model_config.seed)
+        if os.environ.get("KIMI_ALIGNMENT_DETERMINISTIC_LEVEL") == "3":
+            torch_npu.npu.set_deterministic_level(3)
+            print(f"KIMI_ALIGNMENT_DETERMINISTIC rank={self.rank} role=rollout level=3", flush=True)
         # Initialize device properties used by triton kernels.
         init_device_properties_triton()
 

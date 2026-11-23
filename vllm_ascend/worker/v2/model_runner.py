@@ -1085,6 +1085,11 @@ class NPUModelRunner(GPUModelRunner):
         logits = self.model.compute_logits(hidden_states[sample_indices])
         logits = logits[:num_logits]
 
+        import os as alignment_os
+        if alignment_os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
+            from alignment_audit import capture_vllm_v2_step
+            capture_vllm_v2_step(self, logits, hidden_states[sample_indices][:num_logits], input_batch)
+
         # Dispatch tail mirrors GPUModelRunner.sample; refresh it on main bumps.
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
