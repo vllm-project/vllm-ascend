@@ -355,6 +355,13 @@ def main() -> None:
           f"({(def_ms / imm_ms - 1) * 100:5.1f}%)")
     print()
 
+    # The immediate/deferred section above held three full checkpoint sets
+    # (blocks x layers, e.g. ~12 GB each at 492 blocks x 34 layers). Free them
+    # before the verify section allocates its two contexts, or a large
+    # --blocks run over-commits the device.
+    del ctx_imm, ctx_def, ctx_def2
+    torch.npu.empty_cache()
+
     if args.verify:
         _verify_section(
             layers, heads, key_dim, value_dim, spec_q, batch, steps, args.warmup,

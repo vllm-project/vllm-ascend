@@ -52,17 +52,6 @@ def recoverssm_replays(num_heads: int, requests: int) -> bool:
     return num_heads * requests >= int(forced)
 
 
-def _recoverssm_prefetch_replay() -> bool:
-    """Whether the fused verify prefetches the whole accepted replay window.
-
-    A/B control for the memory/vector overlap experiment: the prefetch loads
-    every accepted record before the accumulation (a burst the memory engine
-    can drain while the vector engine walks the decay chain). Set the env var
-    to "0" to fall back to the static/dynamic per-token-load variants.
-    """
-    return os.environ.get("VLLM_ASCEND_RECOVERSSM_PREFETCH_REPLAY", "1") != "0"
-
-
 @triton.jit
 def _kda_l2_normalize(vector):
     # AscendC normalizes nonzero vectors without CUDA's squared-norm bias.
@@ -186,7 +175,6 @@ def _kda_recoverssm_verify_kernel(
     SPEC_QUERY_LEN: tl.constexpr,
     UNROLL_REPLAY: tl.constexpr,
     PIPELINE_STAGES: tl.constexpr,
-    PREFETCH_REPLAY: tl.constexpr,
 ):
     # Advance a register-held checkpoint and record each token's compact
     # correction/key/gate; persistent checkpoint pages remain read-only.
@@ -290,72 +278,7 @@ def _kda_recoverssm_verify_kernel(
                 # A5 unrolls the replay so the per-token dependency chain and the
                 # dynamic loop bound drop out, matching the commit kernel's
                 # UNROLL_COMMIT; A3 keeps the runtime bound to bound UB use.
-                if PREFETCH_REPLAY:
-                    # Load every accepted record before the accumulation so the
-                    # strided per-token loads become one burst of independent
-                    # loads. The memory engine can then drain that burst while
-                    # the vector engine walks the decay chain, instead of the
-                    # load/compute serialization that made mte2 + vector equal
-                    # the kernel time. Invalid rows clamp to slot 0 and are
-                    # skipped by the accumulation guard.
-                    k_rows = []
-                    corr_rows = []
-                    raw_g_rows = []
-                    for reverse_offset in tl.static_range(SPEC_QUERY_LEN):
-                        safe_offset = tl.maximum(commit_len - reverse_offset - 1, 0)
-                        k_rows.append(
-                            tl.load(
-                                replay_kg_ptr + safe_offset * stride_kg_pos + offs_k * stride_kg_dim,
-                                mask=mask_k,
-                                other=0.0 if mask_k is not None else None,
-                            ).to(tl.float32)
-                        )
-                        raw_g_rows.append(
-                            tl.load(
-                                replay_kg_ptr + safe_offset * stride_kg_pos + (K + offs_k) * stride_kg_dim,
-                                mask=mask_k,
-                                other=0.0 if mask_k is not None else None,
-                            ).to(tl.float32)
-                        )
-                        corr_rows.append(
-                            tl.load(
-                                replay_correction_ptr + safe_offset * stride_correction_pos + offs_v * stride_correction_dim,
-                                mask=mask_v,
-                                other=0.0 if mask_v is not None else None,
-                            ).to(tl.float32)
-                        )
-                    for reverse_offset in tl.static_range(SPEC_QUERY_LEN):
-                        if reverse_offset < commit_len:
-                            normalized_k = _kda_l2_normalize(k_rows[reverse_offset])
-                            gate = _kda_gate(
-                                raw_g_rows[reverse_offset],
-                                dt_bias,
-                                A,
-                                lower_bound,
-                                USE_LOWER_BOUND,
-                            )
-                            tl.static_assert(gate.dtype == tl.float32)
-                            decay = tl.exp(gate)
-                            final_correction = tl.fma(
-                                corr_rows[reverse_offset][:, None],
-                                normalized_k[None, :] * final_decay,
-                                final_correction,
-                            )
-                            final_decay *= decay
-                            if ALIGN_MODE:
-                                before_boundary = (commit_len - reverse_offset - 1) < boundary_recovery_len
-                                boundary_k = normalized_k * boundary_decay
-                                boundary_correction = tl.where(
-                                    before_boundary,
-                                    tl.fma(
-                                        corr_rows[reverse_offset][:, None],
-                                        boundary_k[None, :],
-                                        boundary_correction,
-                                    ),
-                                    boundary_correction,
-                                )
-                                boundary_decay *= tl.where(before_boundary, decay, 1.0)
-                elif UNROLL_REPLAY:
+                if UNROLL_REPLAY:
                     for reverse_offset in tl.static_range(SPEC_QUERY_LEN):
                         if reverse_offset < commit_len:
                             final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
@@ -1455,7 +1378,6 @@ def kda_recoverssm_verify(
         SPEC_QUERY_LEN=spec_query_len,
         UNROLL_REPLAY=is_a5,
         PIPELINE_STAGES=RECOVERSSM_VERIFY_PIPELINE_STAGES,
-        PREFETCH_REPLAY=_recoverssm_prefetch_replay(),
         num_warps=4,
         num_stages=RECOVERSSM_VERIFY_PIPELINE_STAGES,
     )
