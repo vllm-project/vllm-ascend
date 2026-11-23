@@ -156,6 +156,45 @@ def test_rotary_wrapper_preserves_delegate_fallback(monkeypatch):
     assert delegate.calls == 1
 
 
+@pytest.mark.parametrize("axes", [1, 3])
+def test_prepared_rotary_preserves_dynamic_token_axis(monkeypatch, axes):
+    from vllm import triton_utils
+
+    monkeypatch.setattr(triton_utils, "HAS_TRITON", True)
+    adapter_cls, _ = _load_adapter(monkeypatch)
+    layer = AscendQwen4ExpQSAAttention()
+    layer.rotary_emb = _RotaryDelegate()
+    adapter = adapter_cls(_Model(layer))
+    rotary = layer.rotary_emb
+    compile_count = 0
+
+    def backend(graph, _inputs):
+        nonlocal compile_count
+        compile_count += 1
+        return graph.forward
+
+    def rotate(positions, query, key):
+        prepared = rotary._prepared_cos_sin.reshape(-1, query.shape[-1])
+        return query + prepared[-query.shape[0] :], key + prepared[-key.shape[0] :]
+
+    monkeypatch.setattr(rotary, "_forward_prepared", rotate)
+    compiled = torch.compile(rotary, backend=backend, fullgraph=True)
+    for num_tokens in (4, 7):
+        positions = torch.arange(num_tokens)
+        if axes == 3:
+            positions = positions.expand(axes, -1)
+        query = torch.ones((num_tokens, 4))
+        key = torch.full_like(query, 2)
+        adapter.prepare_positions(positions, num_tokens)
+        torch._dynamo.mark_dynamic(positions, positions.ndim - 1)
+        torch._dynamo.mark_dynamic(query, 0)
+        torch._dynamo.mark_dynamic(key, 0)
+        query_out, key_out = compiled(positions, query, key)
+        torch.testing.assert_close(query_out, query)
+        torch.testing.assert_close(key_out, key)
+    assert compile_count == 1
+
+
 @pytest.mark.parametrize("tokens", [1, 2, 7])
 def test_mrope_slices_token_axis_and_keeps_fixed_address(tokens: int, monkeypatch):
     adapter_cls, _ = _load_adapter(monkeypatch)
