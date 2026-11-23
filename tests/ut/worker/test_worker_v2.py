@@ -343,32 +343,44 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
         worker.model_runner = SimpleNamespace(
             get_draft_model=lambda: draft,
             reset_lora_state=MagicMock(),
+            on_target_weights_replaced=MagicMock(),
         )
         return worker, draft
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_draft_update_then_target_update(self, ascend_config):
         ascend_config.return_value.weight_nz_mode = 0
-        worker, draft = self._make_worker()
-        engine = worker.weight_transfer_engine
-        worker.start_draft_weight_update()
-        engine.set_weight_update_target.assert_called_once_with(
-            draft, worker.vllm_config.speculative_config.draft_model_config
-        )
-        worker.update_weights({})
-        worker.finish_weight_update()
-        self.assertFalse(worker._weight_update_active)
-        self.assertFalse(worker._draft_weight_update_active)
-        worker.model_runner.reset_lora_state.assert_not_called()
-        engine.reset_weight_update_target.assert_called_once_with()
+        for is_release in (True, False):
+            with (
+                self.subTest(vllm_version="0.33.0" if is_release else "main"),
+                patch("vllm_ascend.worker.worker.vllm_version_is", return_value=is_release),
+            ):
+                worker, draft = self._make_worker()
+                engine = worker.weight_transfer_engine
+                worker.start_draft_weight_update()
+                engine.set_weight_update_target.assert_called_once_with(
+                    draft, worker.vllm_config.speculative_config.draft_model_config
+                )
+                worker.update_weights({})
+                worker.finish_weight_update()
+                self.assertFalse(worker._weight_update_active)
+                self.assertFalse(worker._draft_weight_update_active)
+                worker.model_runner.reset_lora_state.assert_not_called()
+                worker.model_runner.on_target_weights_replaced.assert_not_called()
+                engine.reset_weight_update_target.assert_called_once_with()
 
-        worker.start_weight_update()
-        worker.finish_weight_update()
-        engine.update_weights.assert_called_once_with({})
-        self.assertEqual(engine.start_weight_update.call_count, 2)
-        self.assertEqual(engine.finish_weight_update.call_count, 2)
-        engine.reset_weight_update_target.assert_called_once_with()
-        worker.model_runner.reset_lora_state.assert_called_once_with()
+                worker.start_weight_update()
+                worker.finish_weight_update()
+                engine.update_weights.assert_called_once_with({})
+                self.assertEqual(engine.start_weight_update.call_count, 2)
+                self.assertEqual(engine.finish_weight_update.call_count, 2)
+                engine.reset_weight_update_target.assert_called_once_with()
+                if is_release:
+                    worker.model_runner.reset_lora_state.assert_called_once_with()
+                    worker.model_runner.on_target_weights_replaced.assert_not_called()
+                else:
+                    worker.model_runner.on_target_weights_replaced.assert_called_once_with()
+                    worker.model_runner.reset_lora_state.assert_not_called()
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_failed_draft_update_restores_routing(self, ascend_config):
@@ -386,6 +398,7 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
                 self.assertFalse(worker._weight_update_active)
                 self.assertFalse(worker._draft_weight_update_active)
                 worker.model_runner.reset_lora_state.assert_not_called()
+                worker.model_runner.on_target_weights_replaced.assert_not_called()
 
     def test_draft_capability_follows_engine_support(self):
         for backend, use_v2, engine_support, supported in (
