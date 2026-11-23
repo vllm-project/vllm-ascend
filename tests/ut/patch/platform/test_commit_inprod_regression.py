@@ -22,6 +22,7 @@ recorder must be updated alongside.
 """
 
 import json
+from typing import Any
 
 import numpy as np
 import pytest
@@ -94,7 +95,7 @@ class CopyRecorder:
         prim_d = recv_dst_rows[:recv_count]
         order = np.argsort(prim_e, kind="stable")
         pe_s, pd_s = prim_e[order], prim_d[order]
-        pos = np.searchsorted(pe_s, dup_experts)
+        pos: np.ndarray = np.asarray(np.searchsorted(pe_s, dup_experts), dtype=np.intp)
         valid = np.logical_and(
             pos < pe_s.shape[0],
             pe_s[np.minimum(pos, pe_s.shape[0] - 1)] == dup_experts,
@@ -296,8 +297,15 @@ def _run_cycle(ms, reader_stream_kind: str, barrier: str) -> dict:
 def _arm(reader_kind, barrier, cycles=CYCLES):
     # Use the active NPU device allocated by the test runner; forcing device 0
     # breaks multi-NPU / pytest-xdist runs.
-    totals = {"pre_old": 0, "pre_fresh": 0, "pre_torn": 0, "post_old": 0, "post_fresh": 0, "post_torn": 0}
-    torn_cycles = []
+    totals: dict[str, Any] = {
+        "pre_old": 0,
+        "pre_fresh": 0,
+        "pre_torn": 0,
+        "post_old": 0,
+        "post_fresh": 0,
+        "post_torn": 0,
+    }
+    torn_cycles: list[int] = []
     for c in range(cycles):
         ms = FakeModelState(layer_idx=0, is_last=True)
         r = _run_cycle(ms, reader_kind, barrier)
