@@ -78,7 +78,7 @@ def bind_kv_cache_to_layers(
     """
     for layer_name, kv_cache in kv_caches.items():
         layer = forward_context[layer_name]
-        if isinstance(layer, DeepseekV41CacheLayer) or callable(getattr(layer, "create_kv_cache_view", None)):
+        if isinstance(layer, DeepseekV41CacheLayer) or callable(getattr(layer, "get_kv_cache_view_layout", None)):
             layer.bind_kv_cache(kv_cache)
         else:
             layer.kv_cache = kv_cache

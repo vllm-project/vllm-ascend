@@ -7,23 +7,19 @@ import torch
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import AttentionSpec, compute_layer_kv_cache_shape_bytes
 
-from vllm_ascend.worker.utils import make_page_strided_cache_view
+Step5CacheViewLayout = tuple[tuple[tuple[int, ...], ...], tuple[torch.dtype, ...], int]
 
 
 class Step5AttentionCacheView:
-    def create_kv_cache_view(
+    def get_kv_cache_view_layout(
         self,
-        raw_cache: torch.Tensor,
         spec: AttentionSpec,
         num_blocks: int,
         block_stride: int,
         kernel_block_size: int,
         cache_dtype: str,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Expose the page's K and V with the backend's axis order."""
-        # Import the V2 reshape lazily to keep worker initialization out of model import.
-        from vllm_ascend.worker.v2.attn_utils import _reshape_combined_attention_kv_cache
-
+    ) -> Step5CacheViewLayout:
+        """Describe K and V in the backend's axis order."""
         kernel_blocks_per_page, remainder = divmod(spec.block_size, kernel_block_size)
         if remainder:
             raise ValueError("Kernel block size must divide the Step5 cache block size.")
@@ -34,24 +30,30 @@ class Step5AttentionCacheView:
             spec.head_size,
             (getattr(spec, "cache_dtype_str", None) or "auto") if spec.is_draft else cache_dtype,
         )
-        return _reshape_combined_attention_kv_cache(raw_cache, shape, spec.dtype, block_stride, kernel_blocks_per_page)
+        if len(shape) != 5 or shape[0] != 2:
+            raise ValueError("Step5 attention cache must describe K and V.")
+        component_shape = shape[1:]
+        kernel_stride, remainder = divmod(block_stride, kernel_blocks_per_page)
+        itemsize = get_dtype_size(spec.dtype)
+        if remainder or kernel_stride % itemsize:
+            raise ValueError("Step5 attention pages must split into dtype-aligned kernel blocks.")
+        if 2 * math.prod(component_shape[1:]) * itemsize > kernel_stride:
+            raise ValueError("Step5 K and V must fit inside one physical kernel block.")
+        return (component_shape, component_shape), (spec.dtype, spec.dtype), kernel_stride
 
 
 class Step5AuxiliaryCacheView:
     @staticmethod
-    def create_kv_cache_view(
-        raw_cache: torch.Tensor,
+    def get_kv_cache_view_layout(
         spec: AttentionSpec,
         num_blocks: int,
         block_stride: int,
         kernel_block_size: int,
         cache_dtype: str,
-    ) -> torch.Tensor:
-        """Expose one typed [B, H, N, C] view for the layer's binder."""
-        if not isinstance(raw_cache, torch.Tensor):
-            raise ValueError("Step5 auxiliary cache must use one raw tensor.")
+    ) -> Step5CacheViewLayout:
+        """Describe one typed [B, H, N, C] view for the layer's binder."""
         blocks, heads, tokens, content_bytes = compute_layer_kv_cache_shape_bytes(spec, num_blocks)
         if math.prod((heads, tokens, content_bytes)) > block_stride:
             raise ValueError("Step5 auxiliary cache view must fit inside one physical page.")
         shape = (blocks, heads, tokens, content_bytes // get_dtype_size(spec.dtype))
-        return make_page_strided_cache_view(raw_cache, shape, spec.dtype, block_stride)
+        return (shape,), (spec.dtype,), block_stride
