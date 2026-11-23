@@ -21,7 +21,7 @@
 #include "lib/matmul_intf.h"
 
 #include "mla_preprocess.h"
-#include "../op_host/tiling/mla_preprocess_tiling.h"
+#include "mla_preprocess_tiling_data.h"
 
 namespace MLAPO_BF16_NQ {
 template <typename QkDtype, typename CosDtype, typename QOutDtype, int8_t CacheMode>
@@ -375,8 +375,8 @@ public:
 
         AscendC::DataCopy(gammaTensor, gammaGmTensor,
                           AscendC::DataCopyParams(1, (num_col_ - input_stride_) / BLOCK_SIZE_16, 0, 0));
-        AscendC::DataCopy(betaTensor, betaGmTensor,
-                          AscendC::DataCopyParams(1, (num_col_ - input_stride_) / BLOCK_SIZE_16, 0, 0));
+        // This no-quant RMSNorm path does not apply beta. beta2 is optional at
+        // the ACLNN boundary, so do not dereference it when the caller omits it.
         SET_FLAG(MTE2, V, EVENT_ID1);
 
         AscendC::SetFlag<HardEvent::S_V>(EVENT_ID0);

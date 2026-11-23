@@ -22,7 +22,7 @@ import torch
 import torch_npu
 from vllm.logger import logger
 
-from ..base import AscendLinearScheme
+from ..base import AscendLinearScheme, PreparedLinearInput
 from ..registry import register_scheme
 
 KRONECKER_QUANT_MAX_BATCH_SIZE = 32768
@@ -122,33 +122,67 @@ class AscendW4A4FlatQuantDynamicLinearMethod(AscendLinearScheme):
         params_dict["weight_offset"] = torch.empty(output_size, 1, dtype=torch.float32)
         return params_dict
 
-    def apply(
+    def prepare_input_for_overlap(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-        tp_rank: int | None = 0,
-    ) -> torch.Tensor:
-        original_dtype = x.dtype
-        input_shape = x.shape
-        in_features = input_shape[-1]
+    ) -> PreparedLinearInput | None:
+        if x.dim() != 2:
+            return None
+        in_features = x.shape[-1]
         left_dim = layer.left_trans.shape[0]
         right_dim = layer.right_trans.shape[0]
         if left_dim * right_dim != in_features:
-            err_msg = (
+            raise ValueError(
                 f"FlatQuant transform matrices dimension mismatch: "
                 f"left_dim({left_dim}) * right_dim({right_dim}) != in_features({in_features})"
             )
-            logger.error(err_msg)
-            raise ValueError(err_msg)
-        left_trans_matched = layer.left_trans.to(original_dtype)
-        right_trans_matched = layer.right_trans.to(original_dtype)
-        x_reshaped = x.view(-1, left_dim, right_dim)
-        x_quantized_int4, activation_scale = batched_kronecker_quant(
-            x_reshaped, left_trans_matched, right_trans_matched, layer.aclnn_clip_ratio
+        x_quantized, activation_scale = batched_kronecker_quant(
+            x.view(-1, left_dim, right_dim),
+            layer.left_trans.to(x.dtype),
+            layer.right_trans.to(x.dtype),
+            layer.aclnn_clip_ratio,
         )
-        x_quantized_reshaped = x_quantized_int4.view(-1, left_dim * right_dim // 8)
-        pertoken_scale = activation_scale.view(-1).to(torch.float32)
+        return PreparedLinearInput(
+            x_quantized.view(-1, left_dim * right_dim // 8),
+            activation_scale.view(-1).to(torch.float32),
+            x.dtype,
+        )
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | PreparedLinearInput,
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = 0,
+    ) -> torch.Tensor:
+        if isinstance(x, PreparedLinearInput):
+            x_quantized_reshaped = x.quantized
+            assert x.scale is not None
+            pertoken_scale = x.scale
+            original_dtype = x.output_dtype
+            input_shape = None
+        else:
+            original_dtype = x.dtype
+            input_shape = x.shape
+            in_features = input_shape[-1]
+            left_dim = layer.left_trans.shape[0]
+            right_dim = layer.right_trans.shape[0]
+            if left_dim * right_dim != in_features:
+                err_msg = (
+                    f"FlatQuant transform matrices dimension mismatch: "
+                    f"left_dim({left_dim}) * right_dim({right_dim}) != in_features({in_features})"
+                )
+                logger.error(err_msg)
+                raise ValueError(err_msg)
+            left_trans_matched = layer.left_trans.to(original_dtype)
+            right_trans_matched = layer.right_trans.to(original_dtype)
+            x_reshaped = x.view(-1, left_dim, right_dim)
+            x_quantized_int4, activation_scale = batched_kronecker_quant(
+                x_reshaped, left_trans_matched, right_trans_matched, layer.aclnn_clip_ratio
+            )
+            x_quantized_reshaped = x_quantized_int4.view(-1, left_dim * right_dim // 8)
+            pertoken_scale = activation_scale.view(-1).to(torch.float32)
         output = torch_npu.npu_quant_matmul(
             x_quantized_reshaped,
             layer.weight_packed.t(),
@@ -157,7 +191,8 @@ class AscendW4A4FlatQuantDynamicLinearMethod(AscendLinearScheme):
             bias=None,
             output_dtype=original_dtype,
         )
-        output = output.view(*input_shape[:-1], -1)
+        if input_shape is not None:
+            output = output.view(*input_shape[:-1], -1)
         if bias is not None:
             output = output + bias.to(original_dtype)
         return output

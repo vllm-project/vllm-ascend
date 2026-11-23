@@ -18,18 +18,14 @@
 import threading
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
 from logging import Logger
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, cast
 
 import torch
 import torch.nn as nn
+import torch_npu
 from vllm.logger import logger
 from xlite._C import Model, ModelConfig
-
-from vllm_ascend.attention.attention_v1 import AscendMetadata
-from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
-from vllm_ascend.attention.sfa_v1 import AscendSFAMetadata
 
 _MISSING = object()
 """Unique sentinel for missing attributes in this module."""
@@ -51,6 +47,121 @@ def set_dummy_tensor(tensor: torch.Tensor) -> None:
     """
     global _DUMMY_TENSOR
     _DUMMY_TENSOR = tensor
+
+
+def is_dummy_tensor(tensor: torch.Tensor) -> bool:
+    """Check whether ``tensor`` is the :data:`_DUMMY_TENSOR` placeholder.
+
+    A tensor is considered dummy when it is either the exact placeholder object (same :meth:`data_ptr`) or an empty
+    tensor (``numel() == 0``). The two conditions cover both the default ``torch.empty(0)`` placeholder and any
+    non-empty placeholder (e.g. ``torch.empty(1, ...)``) rebound via :func:`set_dummy_tensor`, so callers do not need
+    to know which shape the placeholder currently has.
+
+    Args:
+        tensor (torch.Tensor): The tensor to test.
+
+    Returns:
+        bool: True if ``tensor`` is the dummy placeholder (by identity or by being empty).
+    """
+    return tensor.numel() == 0 or tensor.data_ptr() == _DUMMY_TENSOR.data_ptr()
+
+
+class _TensorRepr:
+    """
+    A simple class to provide a string representation of a tensor or an iterable of tensors.
+
+    Attributes:
+        value (Any): The tensor or iterable of tensors to represent, or any other object. If the value is not a tensor
+            or iterable of tensors, its standard representation is used.
+        max_it (int | None): The maximum number of items to show in the representation for iterables. If the iterable
+            has more items than `max_it`, an ellipsis ("...") is used as padding. If `max_it <= 0`, all items are shown.
+    """
+
+    def __init__(self, value: Any, /, *, max_it: int | None = 3) -> None:
+        self.value: Any = value
+        self.max_it: int = max_it if isinstance(max_it, int) else 0
+
+    def _prune_list_repr(self, repr_list: list[str], /) -> list[str]:
+        """Prune a list of string representations to a maximum number of items, adding an ellipsis if pruned."""
+        repr_set: set[str] = set()
+        pruned_repr_list: list[str] = []
+        last_item_is_ellipsis = False
+        for i, s in enumerate(repr_list):
+            if i >= self.max_it and self.max_it > 0:
+                if not last_item_is_ellipsis:
+                    last_item_is_ellipsis = True
+                    pruned_repr_list.append("...")
+                break
+            if s in repr_set:
+                if not last_item_is_ellipsis:
+                    last_item_is_ellipsis = True
+                    pruned_repr_list.append("...")
+                continue
+            last_item_is_ellipsis = False
+            pruned_repr_list.append(s)
+            repr_set.add(s)
+        return pruned_repr_list
+
+    def _single_tensor_repr(self, tensor: torch.Tensor, /) -> str:
+        tensor_info: list[str] = [f"shape={tuple(tensor.shape)}"]
+        if not tensor.is_contiguous():
+            tensor_info.append(f"stride={tensor.stride()}")
+        tensor_info.append(f"dtype={str(tensor.dtype).strip().lstrip('torch.')}")
+        if tensor.device.type == "npu" and (tensor_format := torch_npu.get_npu_format(tensor)) != torch_npu.Format.ND:
+            tensor_info.append(f"format={str(tensor_format)}")
+        return f"Tensor({', '.join(tensor_info)})"
+
+    def _iterable_tensor_repr(self, iterable: torch.Tensor | Sequence[torch.Tensor], /) -> str:
+        if isinstance(iterable, torch.Tensor):
+            return self._single_tensor_repr(iterable)
+        if len(iterable) == 0:
+            return "TensorList(len=0)"
+        tensor_repr_list = self._prune_list_repr([self._single_tensor_repr(t) for t in iterable])
+        return f"TensorList(len={len(iterable)}, items=[{', '.join(tensor_repr_list)}])"
+
+    def _iterable_tensor_2d_repr(
+        self, iterable: torch.Tensor | Sequence[torch.Tensor] | Sequence[Sequence[torch.Tensor]], /
+    ) -> str:
+        if isinstance(iterable, torch.Tensor):
+            return self._single_tensor_repr(iterable)
+        if all(isinstance(t, torch.Tensor) for t in iterable):
+            iterable = cast(Sequence[torch.Tensor], iterable)
+            return self._iterable_tensor_repr(iterable)
+        iterable = cast(Sequence[Sequence[torch.Tensor]], iterable)
+        if len(iterable) == 0:
+            return "TensorList2D(len=0)"
+        iterable_repr_list = self._prune_list_repr([self._iterable_tensor_repr(t) for t in iterable])
+        return f"TensorList2D(len={len(iterable)}, items=[{', '.join(iterable_repr_list)}])"
+
+    def __bool__(self) -> bool:
+        """False only when the value is a tensor or iterable of tensors and all tensors are empty (numel() == 0).
+        Otherwise, True. This is used to determine whether to include the attribute in the string representation.
+        """
+        value: Any = self.value
+        if isinstance(value, torch.Tensor):
+            return value.numel() > 0
+        if isinstance(value, Sequence) and all(isinstance(t, torch.Tensor) for t in value):
+            return any(t.numel() > 0 for t in cast(Sequence[torch.Tensor], value))
+        if isinstance(value, Sequence) and all(
+            isinstance(t, Sequence) and all(isinstance(tt, torch.Tensor) for tt in t) for t in value
+        ):
+            return any(any(tt.numel() > 0 for tt in t) for t in cast(Sequence[Sequence[torch.Tensor]], value))
+        return True
+
+    def __repr__(self) -> str:
+        value = self.value
+        if isinstance(value, torch.Tensor):
+            return self._single_tensor_repr(value)
+        if isinstance(value, Sequence) and all(isinstance(t, torch.Tensor) for t in value):
+            return self._iterable_tensor_repr(value)
+        if isinstance(value, Sequence) and all(
+            isinstance(t, Sequence) and all(isinstance(tt, torch.Tensor) for tt in t) for t in value
+        ):
+            return self._iterable_tensor_2d_repr(value)
+        return repr(value)
+
+    def __str__(self) -> str:
+        return self.__repr__()
 
 
 class AttributeSetterMixin:
@@ -91,6 +202,8 @@ class AttributeSetterMixin:
     """Behavior when attempting to set a missing attribute. If `warn`, a logger must be provided to log a warning."""
     _logger: Logger | None = logger
     """Optional logger for warning about missing attributes. If None, no warnings will be logged."""
+    _repr_item: int = 3
+    """Maximum number of items to show in the string representation of iterable attributes."""
 
     def __init_subclass__(cls) -> None:
         if cls.__mro__[1] is not AttributeSetterMixin:
@@ -147,6 +260,19 @@ class AttributeSetterMixin:
         finally:
             local.match_conditions = previous  # always restore, even on exception
 
+    def __repr__(self) -> str:
+        repr_list = [
+            f"{attr}={val_repr!r}"
+            for attr in dir(self)
+            if not attr.startswith("_")
+            and not callable(value := getattr(self, attr))
+            and (val_repr := _TensorRepr(value, max_it=self._repr_item))
+        ]
+        return f"{type(self).__name__}({', '.join(repr_list)})"
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
 
 class XModel(AttributeSetterMixin, Model):
     """:mod:`xlite._C.Model` subclass with safe attribute setting for better backwards compatibility."""
@@ -154,154 +280,6 @@ class XModel(AttributeSetterMixin, Model):
 
 class XModelConfig(AttributeSetterMixin, ModelConfig):
     """:mod:`xlite._C.ModelConfig` subclass with safe attribute setting for better backwards compatibility."""
-
-
-@dataclass
-class AttnMetadataRouter:
-    """A router for attention metadata objects of different types. This is used to handle the differences in attention
-    metadata across different model architectures and vLLM/vLLM-ascend versions in a more robust way.
-
-    The router provides unified access to commonly used attention metadata attributes (e.g., actual sequence lengths for
-    query and block tables) via properties.
-
-    Currently included metadata types:
-
-    - `AscendMetadata`
-    - `AscendMLAMetadata`
-    - `AscendSFAMetadata`
-
-    Typically, the attention metadata has the following notations::
-
-        |---------- N-1 iteration --------|
-        |---------------- N iteration ---------------------|
-        |- tokenA -|......................|-- newTokens ---|
-        |---------- context_len ----------|
-        |-------------------- seq_len ---------------------|
-                                          |-- query_len ---|
-    """
-
-    attn_metadata: Any
-    """The attention metadata object to route, e.g., an instance of `AscendMetadata` or `AscendSFAMetadata`."""
-    device: str | torch.device | int | None = "cpu"
-    """Device specification for the returned tensors. If None, the tensors will be on the same device as the original
-    metadata tensors. The current implementation assumes `cpu` device for minimal data transfer."""
-
-    @contextmanager
-    def on_device(self, device: str | torch.device | int | None) -> Generator["AttnMetadataRouter", None, None]:
-        """Context manager to temporarily set the device for the router. This is useful for cases where we want to
-        access multiple properties on the same device without repeatedly specifying the device.
-
-        Usage::
-
-            with router.on_device("cpu"):
-                query_lens = router.cu_query_lens  # on cpu
-                block_tables = router.block_tables  # also on cpu
-        """
-        original_device = self.device
-        self.device = device
-        try:
-            yield self
-        finally:
-            self.device = original_device
-
-    def __getattr__(self, name: str) -> Any:
-        """Route attribute access to the appropriate handler method based on the attribute name."""
-        if (value := getattr(self.attn_metadata, name, _MISSING)) is not _MISSING:
-            return value
-
-        raise AttributeError(f"{type(self.attn_metadata).__name__} has no attribute {name}.")
-
-    @property
-    def cu_query_lens(self) -> torch.Tensor:
-        """Get the cumulative query lengths from the attention metadata, if available."""
-        if isinstance(self.attn_metadata, (AscendMetadata, AscendMLAMetadata)):
-            return torch.as_tensor(self.attn_metadata.query_start_loc, device=self.device)
-
-        if isinstance(self.attn_metadata, AscendSFAMetadata):
-            return torch.as_tensor(self.attn_metadata.cum_query_lens, device=self.device)
-
-        for candidate in ["query_start_loc", "cum_query_lens", "actual_seq_lengths_q"]:
-            if (lengths := getattr(self.attn_metadata, candidate, None)) is not None:
-                return torch.as_tensor(lengths, device=self.device)
-
-        raise ValueError(
-            f"Cannot find actual sequence lengths for query in attention metadata of type {type(self.attn_metadata)}."
-        )
-
-    @property
-    def block_tables(self) -> torch.Tensor:
-        """Get the block tables from the attention metadata, if available."""
-        if isinstance(self.attn_metadata, AscendMetadata):
-            return torch.as_tensor(self.attn_metadata.block_tables, device=self.device)
-
-        if isinstance(self.attn_metadata, AscendSFAMetadata):
-            return torch.as_tensor(self.attn_metadata.block_table, device=self.device)
-
-        if isinstance(self.attn_metadata, AscendMLAMetadata):
-            # AscendMLAMetadataBuilder.build_decode_metadata breaks `AscendMLAMetadata.block_tables`
-            # thus we may need to patch together block tables from prefill and decode metadata if available
-            block_tables = []
-            if self.attn_metadata.decode is not None:
-                block_tables.append(torch.as_tensor(self.attn_metadata.decode.block_table, device=self.device))
-            if self.attn_metadata.prefill is not None:
-                block_tables.append(torch.as_tensor(self.attn_metadata.prefill.block_table, device=self.device))
-            if block_tables:
-                return torch.concat(block_tables, dim=0)
-            return torch.as_tensor(self.attn_metadata.block_tables, device=self.device)
-
-        for candidate in ["block_tables", "block_table"]:
-            if (tables := getattr(self.attn_metadata, candidate)) is not None:
-                return torch.as_tensor(tables, device=self.device)
-
-        raise ValueError(f"Cannot find block tables in attention metadata of type {type(self.attn_metadata)}.")
-
-    @property
-    def seq_lens(self) -> torch.Tensor:
-        """Return the per-sequence `seq_lens` tensor in a device-safe torch.Tensor form."""
-        if isinstance(self.attn_metadata, (AscendMetadata, AscendSFAMetadata)):
-            return torch.as_tensor(self.attn_metadata.seq_lens_cpu, device=self.device)
-
-        if isinstance(self.attn_metadata, AscendMLAMetadata):
-            # AscendMLAMetadataBuilder.build_decode_metadata breaks `AscendMLAMetadata.seq_lens`
-            # thus prefill metadata's seq_lens is preferentially used if available
-            if self.attn_metadata.prefill is not None:
-                return torch.as_tensor(self.attn_metadata.prefill.seq_lens, device=self.device)
-            return torch.as_tensor(self.attn_metadata.seq_lens_cpu, device=self.device)
-
-        for candidate in ["seq_lens_cpu", "seq_lens"]:
-            if (s := getattr(self.attn_metadata, candidate)) is not None:
-                return torch.as_tensor(s, device=self.device)
-
-        raise ValueError(f"Cannot find seq_lens in attention metadata of type {type(self.attn_metadata)}.")
-
-    @property
-    def num_prefills(self) -> int:
-        for candidate in ["num_prefills"]:
-            if (num_prefills := getattr(self.attn_metadata, candidate)) is not None:
-                return int(num_prefills)
-        return 0
-
-    @property
-    def num_decodes(self) -> int:
-        for candidate in ["num_decodes"]:
-            if (num_decodes := getattr(self.attn_metadata, candidate)) is not None:
-                return int(num_decodes)
-        return 0
-
-    @property
-    def num_decode_tokens(self) -> int:
-        for candidate in ["num_decode_tokens"]:
-            if (num_decode_tokens := getattr(self.attn_metadata, candidate, None)) is not None:
-                return int(num_decode_tokens)
-        return 0
-
-    @property
-    def num_actual_tokens(self) -> int:
-        """Return the number of actual tokens (excluding padding)."""
-        for candidate in ["num_actual_tokens"]:
-            if (num_actual_tokens := getattr(self.attn_metadata, candidate)) is not None:
-                return int(num_actual_tokens)
-        raise ValueError(f"Cannot find num_actual_tokens in attention metadata of type {type(self.attn_metadata)}.")
 
 
 def get_nested_attr(obj: Any, /, *attrs: str, default: Any = None, raises: bool = False) -> Any:
@@ -355,6 +333,7 @@ class WeightGetterConfig(TypedDict, total=False):
     mask: Sequence[bool] | None
     secondary_flattening: str | slice | None
     post_processor: Callable[[torch.Tensor], torch.Tensor] | None
+    check_is_contiguous: bool
 
 
 def get_layer_weights(
@@ -364,6 +343,7 @@ def get_layer_weights(
     mask: Sequence[bool] | None = None,
     secondary_flattening: str | slice | None = None,
     post_processor: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    check_is_contiguous: bool = True,
     **kwargs: Any,
 ) -> list[torch.Tensor]:
     """Extract specified weights from a sequence of layers with optional secondary flattening and post-processing.
@@ -397,6 +377,8 @@ def get_layer_weights(
             Cannot be specified at the same time as `mask`.
         post_processor (Callable[[torch.Tensor], torch.Tensor] | None, optional): An optional function to apply to
             each retrieved tensor before returning the final list of weights.
+        check_is_contiguous (bool, optional): If True, checks that each retrieved tensor is contiguous in memory. If
+            any tensor is not contiguous, a ValueError is raised. Default is True.
         **kwargs: Additional keyword arguments for future extensions.
 
     Returns:
@@ -443,6 +425,8 @@ def get_layer_weights(
 
         if post_processor:
             weights = [post_processor(weight) for weight in weights]
+        if check_is_contiguous and not all(weight.is_contiguous() for weight in weights):
+            raise ValueError("xlite: Found non-contiguous tensor in the retrieved weights.")
 
         if weights:
             return weights

@@ -1,0 +1,6 @@
+pr: 20407
+entries:
+  - category: bugfix
+    text: Fixed incorrect native MLA query projections with padded attention heads on A3, restoring DSpark acceptance for affected Kimi-K3 configurations.
+    model: kimi-k3
+    hardware: [A3]

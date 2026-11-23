@@ -123,6 +123,13 @@ private:
     GlobalTensor<int32_t> actualSeqCmpKvlenGm;
     GlobalTensor<int32_t> cmpResidualKvGm;
     GlobalTensor<int32_t> actualSeqQlenGm;
+    // SWA bounded replay: per-token visible ori KV length, read by
+    // ComputeS2LoopInfo in band mode.
+    GlobalTensor<int32_t> oriTopkLengthGm;
+    // The cmp side of the same channel. ComputeS2LoopInfo reads it whenever
+    // hasCmpTopkLength is set, so it needs a bound tensor rather than a
+    // placeholder when the caller supplies one.
+    GlobalTensor<int32_t> cmpTopkLengthGm;
 
     bool hasCuSeqlensQ = false;
     bool hasCuSeqlensOriKv = false;
@@ -175,7 +182,16 @@ __aicore__ inline void SparseFlashMlaSwaKernel<CubeBlockType, VecBlockType>::Ini
     constInfo.s1BaseSize = 64;
     constInfo.s2BaseSize = 128;
     constInfo.hasOriTopkLength = (oriTopkLength != nullptr);
+    if (constInfo.hasOriTopkLength) {
+        // Bound here rather than in InitGlobalBuffer, which does not receive it.
+        this->oriTopkLengthGm.SetGlobalBuffer((__gm__ int32_t *)oriTopkLength);
+    }
     constInfo.hasCmpTopkLength = (cmpTopkLength != nullptr);
+    if (constInfo.hasCmpTopkLength) {
+        // Same reason as the ori side, and it is the flag above that decides
+        // whether ComputeS2LoopInfo reads at all.
+        this->cmpTopkLengthGm.SetGlobalBuffer((__gm__ int32_t *)cmpTopkLength);
+    }
 
     this->ParseTilingData(cuSeqlensQ, sequsedQ, cuSeqlensOriKv, cuSeqlensCmpKv, seqUsedOriKv, seqUsedCmpKv,
                           cmpResidualKV);
@@ -517,9 +533,12 @@ __aicore__ inline void SparseFlashMlaSwaKernel<CubeBlockType, VecBlockType>::Pro
                 this->ComputeAxisIdxByBnAndGs1(bnIdx, gS1Index, runParam);
                 bool s1NoNeedCalc =
                     ComputeParamS1<TEMPLATE_INTF_ARGS>(runParam, this->constInfo, gS1Index, this->cuSeqlensQGm);
-                GlobalTensor<int32_t> tmpTensor;
+                // Both length tensors are real ones: the ori side carries the band
+                // bound (see ComputeS2LoopInfo), the cmp side is read whenever
+                // hasCmpTopkLength is set.
                 bool s2NoNeedCalc = ComputeS2LoopInfo<TEMPLATE_INTF_ARGS>(
-                    bnIdx, gS1Index, this->cuSeqlensQGm, tmpTensor, tmpTensor, runParam, this->constInfo);
+                    bnIdx, gS1Index, this->cuSeqlensQGm, this->oriTopkLengthGm, this->cmpTopkLengthGm, runParam,
+                    this->constInfo);
                 if constexpr (IS_BATCH_CONSISTENCY) {
                     int64_t oriLoad = runParam.s2OriLineEndIdx - runParam.s2OriLineStartIdx;
                     int64_t cmpLoad = runParam.s2CmpLineEndIdx - runParam.s2CmpLineStartIdx;

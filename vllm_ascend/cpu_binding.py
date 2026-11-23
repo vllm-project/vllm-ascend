@@ -685,13 +685,10 @@ class CpuAlloc:
             self.bind(thread_id, self.assign_acl[self.current_npu], False)
         for thread_id in threads_map.get(main_pid, {}).get("release_thread", []):
             self.bind(thread_id, self.assign_rel[self.current_npu], False)
-        # Migrate memory once for the whole process, after all threads are pinned.
-        self.bind_memory(main_pid, self.current_npu)
 
     def bind_ascend_950_threads(self) -> None:
         main_pid = str(psutil.Process().pid)
         self.bind(main_pid, self.assign_main[self.current_npu], True)
-        self.bind_memory(main_pid, self.current_npu)
 
     def bind_npu_irq(self) -> None:
         if not self._reserve_irq_cpus():
@@ -784,18 +781,22 @@ class CpuAlloc:
         with open(f"/proc/irq/{cq_irq}/smp_affinity", "w") as f:
             f.write(self.cpu_to_mask(cq_cpu))
 
-    def run_all(self) -> None:
+    def run_all(self, *, migrate_memory: bool = True) -> None:
         if not self.build_cpu_pools():
             return
         self.allocate()
         self.print_plan()
         self.bind_threads()
+        if migrate_memory:
+            self.bind_memory(str(psutil.Process().pid), self.current_npu)
+        else:
+            logger.info("CPU affinity applied without process-wide NUMA page migration.")
         self.bind_npu_irq()
 
 
-def bind_cpus(rank_id: int, npu_id: int) -> None:
+def bind_cpus(rank_id: int, npu_id: int, *, migrate_memory: bool = True) -> None:
     if not is_arm_cpu():
         logger.info("CPU binding skipped: non-ARM CPU detected.")
         return
     binder = CpuAlloc(rank_id, npu_id=npu_id)
-    binder.run_all()
+    binder.run_all(migrate_memory=migrate_memory)

@@ -4,7 +4,7 @@
 
 - **Location**:
 `vllm_ascend/ops/triton/fused_gdn_gating.py` — `fused_gdn_gating_kernel`, 1:1 wrapper `fused_gdn_gating_patch`
-- **Function**: Computes the gating pair of the GDN (Gated DeltaNet) linear attention in one fused kernel: the log-decay gate `g` and the interpolation coefficient `beta_output`. It replaces the host-side torch chain `g = -exp(A_log) * softplus(a + dt_bias); beta = sigmoid(b)` in the recurrent-attention step of `vllm_ascend/ops/gdn.py` (Qwen3-Next / Qwen3.5 hybrid GDN models). Entry: `DeviceOperator.fused_gdn_gating` (A2/A5) → 1:1 wrapper `fused_gdn_gating_patch` → `fused_gdn_gating_kernel`.
+- **Function**: Computes the gating pair of the GDN (Gated DeltaNet) linear attention in one fused kernel: the log-decay gate `g` and the interpolation coefficient `beta_output`. It replaces the host-side torch chain `g = -exp(A_log) * softplus(a + dt_bias); beta = sigmoid(b)` in the recurrent-attention step of `vllm_ascend/ops/gdn.py` (Qwen3-Next / Qwen3.5 hybrid GDN models). Entry: `DeviceOperator.fused_gdn_gating` (A2/950PR&950DT Products) → 1:1 wrapper `fused_gdn_gating_patch` → `fused_gdn_gating_kernel`.
 - **Formula** (per token `t`, per head `h`, computed in fp32):
     - `x = a[t, h] + dt_bias[h]`
     - `softplus(x) = (1/beta) * log(1 + exp(beta * x))` when `beta * x <= threshold`, else `x` (overflow guard, identical to `torch.nn.functional.softplus(beta, threshold)`)
@@ -14,7 +14,7 @@
   1. Grid `(num_vectorcore, seq_len=1)`: each program owns `ceil(num_tokens / num_vectorcore)` token rows, iterated in `ROW_ITER` tiles of `BLK_BATCHES=64` rows.
   2. Within a row tile, heads are tiled by `BLK_HEADS=8` (`COL_ITER = ceil(num_heads / 8)` iterations); per tile, load the `A_log` / `dt_bias` head slices and the `a` / `b` blocks with row/head masks.
   3. Compute `softplus`, `exp`, `sigmoid` in fp32 and store `g` and `beta_output` element-wise.
-- **Supported modes**: Atlas A2, Atlas A3, and Ascend 950 (the A2/A5 `DeviceOperator` entries route to this same Triton kernel). Used by the GDN recurrent-attention path of `vllm_ascend/ops/gdn.py`; works in both eager and graph-capture modes.
+- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products (the A2/950PR&950DT Products `DeviceOperator` entries route to this same Triton kernel). Used by the GDN recurrent-attention path of `vllm_ascend/ops/gdn.py`; works in both eager and graph-capture modes.
 
 ## Parameters
 

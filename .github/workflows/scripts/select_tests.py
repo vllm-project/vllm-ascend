@@ -31,7 +31,7 @@ Test selection is driven by the coverage/AST based precision testing pipeline
 
 - ``--all-tests``: Full-suite mode. Scans ``tests/ut`` (routed to the CPU
   runner) and ``tests/e2e/pull_request`` (routed by directory convention).
-  Used for ready-all runs and scheduled full scans.
+  Used for full-suite runs and scheduled full scans.
 
 - ``--curated``: Curated-suite mode. Reads the named test list from
   ``curated_tests:`` in the routing config and routes each path.
@@ -764,6 +764,12 @@ def main():
         "on a reserved runner. Scheduled full-suite coverage runs do not pass "
         "this flag, so --all-tests keeps collecting CPU UT coverage.",
     )
+    parser.add_argument(
+        "--skip-a5",
+        action="store_true",
+        help="Exclude A5 runner groups. PR precision/full runs use this while "
+        "A5 capacity is limited; A5 tests run separately under ready-a5.",
+    )
     args = parser.parse_args()
     global _SKIP_CPU_UT
     _SKIP_CPU_UT = args.skip_cpu_ut
@@ -859,7 +865,7 @@ def main():
     # even when the targets came from different selection modes.
     _dedup_groups(all_groups)
 
-    # Full-suite runs (ready-all) and any run that includes accuracy tests
+    # Full-suite runs and any run that includes accuracy tests
     # (files listed in accuracy_tests) are pinned to 560T machines: replace
     # the mixed-pool A3 labels before resolving partitions to runners.
     if args.all_tests or _has_accuracy_tests(all_groups, accuracy_tests):
@@ -879,6 +885,8 @@ def main():
             parser.error(str(exc))
 
     test_groups = _resolve_to_runners(all_groups, runners, partition_config, estimated_times)
+    if args.skip_a5:
+        test_groups = [group for group in test_groups if group["npu_type"] != NpuType.A5.value]
 
     _write_output(test_groups, matched_modules)
 

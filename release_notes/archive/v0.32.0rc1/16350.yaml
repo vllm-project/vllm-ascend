@@ -1,0 +1,6 @@
+pr: 16350
+entries:
+  - category: performance
+    text: Optimized native SFA decode query layouts, output/LSE exchange and sparse-index remapping under decode context parallelism. Native C8 indexer cache writes combine scale conversion with key and scale publication.
+  - category: bugfix
+    text: Fixed UB allocation failures when packing large native SFA DCP output/LSE payloads by using bounded tiles. Fixed BF16-to-INT32 view failures for single-token DCP inputs with odd singleton strides.

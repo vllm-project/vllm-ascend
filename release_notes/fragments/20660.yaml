@@ -1,0 +1,5 @@
+pr: 20660
+entries:
+  - category: bugfix
+    text: Fixed QSFA static kernel execution failures caused by dispatch tiling access on A2/A3 and A5.
+    hardware: [A2, A3, A5]

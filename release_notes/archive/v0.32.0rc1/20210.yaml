@@ -1,0 +1,5 @@
+pr: 20210
+entries:
+  - category: feature
+    text: Added support for combining prefill context parallelism and data parallelism with DeepSeek V4.1 SWA bounded decoder replay on Model Runner V2, including uneven and idle DP batches.
+    model: deepseek-v4.1

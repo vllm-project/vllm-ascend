@@ -10,6 +10,13 @@ from vllm_ascend.core.kv_cache_placement import (
 )
 from vllm_ascend.distributed.parallel_state import get_kvpp_group
 
+KVPP_BUFFER_ALIGNMENT = 2 * 1024 * 1024
+
+
+def _allocate_kvpp_buffer(size: int, device: torch.device) -> torch.Tensor:
+    raw = torch.zeros(size + KVPP_BUFFER_ALIGNMENT, dtype=torch.int8, device=device)
+    return raw.narrow(0, (-raw.data_ptr()) % KVPP_BUFFER_ALIGNMENT, size)
+
 
 def get_kvpp_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
     specs: dict[str, KVCacheSpec] = {}
@@ -33,16 +40,14 @@ def allocate_kvpp_cache(
     }
     scratch_size = max((size for name, (_, size) in layouts.items() if name in plan.layer_owner_ranks), default=0)
     scratch = (
-        [torch.zeros(scratch_size, dtype=torch.int8, device=device) for _ in range(KVPP_SCRATCH_BUFFER_COUNT)]
-        if scratch_size
-        else []
+        [_allocate_kvpp_buffer(scratch_size, device) for _ in range(KVPP_SCRATCH_BUFFER_COUNT)] if scratch_size else []
     )
     caches: dict[str, tuple[torch.Tensor, ...]] = {}
     target_index = 0
     for name, (layout, size) in layouts.items():
         owner = plan.layer_owner_ranks.get(name)
         if owner is None or owner == plan.kvpp_rank:
-            buffer = torch.zeros(size, dtype=torch.int8, device=device)
+            buffer = _allocate_kvpp_buffer(size, device)
         else:
             buffer = scratch[target_index % KVPP_SCRATCH_BUFFER_COUNT]
         for cache_name, parts in layout.items():

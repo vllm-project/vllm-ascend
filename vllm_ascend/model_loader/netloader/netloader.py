@@ -36,7 +36,7 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 from .executor.elastic_load import cache_processed_layout_transfer_manifest, synchronize_npu
 from .interaction.elastic import ElasticServer
 from .load import elastic_load
-from .utils import find_free_port, is_valid_path_prefix
+from .utils import disk_fallback_loader_extra_config, find_free_port, is_valid_path_prefix
 
 DRAFT_PORT_OFFSET = 10000
 MAX_FREE_PORT_RETRIES = 5
@@ -89,7 +89,9 @@ def pre_transfer_weight_processing(model: nn.Module):
 
     for module in model.modules():
         if AscendMoERunner is not None and isinstance(module, AscendMoERunner):
-            _unwrap_quant_method(module._quant_method)
+            # Accept both attribute spellings across baselines.
+            quant_method = getattr(module, "quant_method", None) or getattr(module, "_quant_method", None)
+            _unwrap_quant_method(quant_method)
 
     try:
         yield
@@ -201,6 +203,18 @@ class ModelNetLoaderElastic(BaseModelLoader):
     def _is_draft_model(model_config: ModelConfig) -> bool:
         """Check whether the model_config corresponds to a draft model for speculative decoding."""
         return getattr(model_config, "runner_type", None) == "draft"
+
+    @staticmethod
+    def _is_dynamic_eplb_enabled(vllm_config: VllmConfig) -> bool:
+        """EPLB rebinding invalidates the donor's cached transfer manifest (same policy as rfork)."""
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        if bool(getattr(parallel_config, "enable_eplb", False)):
+            return True
+
+        from vllm_ascend.ascend_config import get_ascend_config
+
+        eplb_config = get_ascend_config().eplb_config
+        return eplb_config.dynamic_eplb or bool(eplb_config.expert_map_record_path)
 
     @staticmethod
     def _sync_target_netloader_before_draft(vllm_config: VllmConfig) -> None:
@@ -357,7 +371,10 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
             for module in model.modules():
                 if isinstance(module, TorchCompileWithNoGuardsWrapper):
-                    module.cleanup()
+                    # cleanup() is optional on some wrapper versions; call it only if present.
+                    cleanup = getattr(module, "cleanup", None)
+                    if callable(cleanup):
+                        cleanup()
         except Exception as exc:
             logger.warning("Netloader fallback: failed to remove compilation bytecode hooks: %s", exc)
 
@@ -367,9 +384,16 @@ class ModelNetLoaderElastic(BaseModelLoader):
         vllm_config: VllmConfig,
         device_type: str,
     ) -> _FallbackCleanupContext:
-        from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+        # This serves the always-load-a-model fallback path: degrade to no-EPLB
+        # cleanup instead of crashing on import failures.
+        try:
+            from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+        except Exception as exc:
+            logger.debug("Netloader fallback: EPLB adaptor unavailable, skipping: %s", exc)
+            VllmEplbAdaptor = None  # type: ignore[misc, assignment]
 
-        eplb_layers = VllmEplbAdaptor._registered_moe_layers
+        # Some EPLB adaptors expose no static layer registry; treat it as empty.
+        eplb_layers = getattr(VllmEplbAdaptor, "_registered_moe_layers", []) if VllmEplbAdaptor is not None else []
         return _FallbackCleanupContext(
             context_keys=cls._snapshot_static_forward_context_keys(vllm_config),
             static_all_moe_layers=cls._snapshot_static_all_moe_layers(vllm_config),
@@ -477,6 +501,15 @@ class ModelNetLoaderElastic(BaseModelLoader):
             logger.warning(
                 "Target netloader already fell back to DefaultModelLoader; "
                 "skip draft elastic load and use DefaultModelLoader"
+            )
+            model, need_process_weights_after_loading = self.revert_to_default(
+                model_config, vllm_config, device_config, prefix
+            )
+        elif self._is_dynamic_eplb_enabled(vllm_config):
+            # EPLB rebalancing rebinds weight storages, staling the donor's
+            # registered manifest; fall back to the default loader.
+            logger.warning(
+                "Netloader transfer is disabled when dynamic EPLB is enabled; using the default model loader."
             )
             model, need_process_weights_after_loading = self.revert_to_default(
                 model_config, vllm_config, device_config, prefix
@@ -751,7 +784,11 @@ class ModelNetLoaderElastic(BaseModelLoader):
               weights post-processing (e.g. quantization adjustments) still needs to be applied.
         """
         load_config = deepcopy(self.load_config)
-        load_config.model_loader_extra_config = {}
+        # DefaultModelLoader rejects netloader keys (SOURCE/LISTEN_PORT). Keep
+        # multithread-load settings so seed/fallback disk loads stay parallel.
+        load_config.model_loader_extra_config = disk_fallback_loader_extra_config(
+            load_config.model_loader_extra_config,
+        )
         load_config.load_format = "auto"
         default_model_loader = DefaultModelLoader(load_config)
 

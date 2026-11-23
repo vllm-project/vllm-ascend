@@ -6,28 +6,31 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
+from vllm_ascend._310p.worker.v2.sample.random_sample import random_sample
+
 
 def expand_idx_mapping_cpu(
-    idx_mapping: torch.Tensor,
+    idx_mapping_np: np.ndarray,
     total_num_logits: int,
     cu_num_logits_np: np.ndarray,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    device = idx_mapping.device
-    expanded_idx_mapping = idx_mapping.new_empty(total_num_logits)
-    expanded_local_pos = torch.empty(total_num_logits, dtype=torch.int32, device=device)
+    expanded_mapping_np: np.ndarray,
+    expanded_local_pos_np: np.ndarray,
+) -> None:
+    """Expand request metadata into caller-owned persistent host buffers."""
     for req_idx in range(cu_num_logits_np.shape[0] - 1):
         start = int(cu_num_logits_np[req_idx])
         end = int(cu_num_logits_np[req_idx + 1])
         num_tokens = end - start
         if num_tokens <= 0:
             continue
-        expanded_idx_mapping[start:end] = idx_mapping[req_idx]
-        expanded_local_pos[start:end] = torch.arange(num_tokens, dtype=torch.int32, device=device)
-    return expanded_idx_mapping, expanded_local_pos
+        expanded_mapping_np[start:end] = idx_mapping_np[req_idx]
+        expanded_local_pos_np[start:end] = np.arange(num_tokens, dtype=np.int32)
 
 
 def combine_sampled_and_draft_tokens_cpu(
@@ -95,56 +98,63 @@ def combine_sampled_and_draft_tokens_cpu(
 
 
 def get_num_sampled_and_rejected_cpu(
-    num_sampled: torch.Tensor,
-    seq_lens: torch.Tensor,
-    cu_num_logits: torch.Tensor,
+    num_sampled_cpu: torch.Tensor,
+    seq_lens_np: np.ndarray,
+    cu_num_logits_np: np.ndarray,
     idx_mapping_np: np.ndarray,
     prefill_len_np: np.ndarray,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     num_reqs = idx_mapping_np.shape[0]
-    num_rejected = torch.empty_like(num_sampled)
-    cu_np = cu_num_logits.detach().cpu().numpy()
-    seq_np = seq_lens.detach().cpu().numpy()
-    sampled_np = num_sampled.detach().cpu().numpy().copy()
+    num_rejected_cpu = torch.empty_like(num_sampled_cpu)
+    sampled_np = num_sampled_cpu.numpy().copy()
 
     for batch_idx in range(num_reqs):
-        seq_len = int(seq_np[batch_idx])
+        seq_len = int(seq_lens_np[batch_idx])
         prefill_len_i = int(prefill_len_np[batch_idx])
         is_chunked_prefilling = seq_len < prefill_len_i
         if is_chunked_prefilling:
             sampled_np[batch_idx] = 0
-            num_rejected[batch_idx] = 0
+            num_rejected_cpu[batch_idx] = 0
             continue
-        num_logits = int(cu_np[batch_idx + 1] - cu_np[batch_idx])
-        num_rejected[batch_idx] = num_logits - int(sampled_np[batch_idx])
+        num_logits = int(cu_num_logits_np[batch_idx + 1] - cu_num_logits_np[batch_idx])
+        num_rejected_cpu[batch_idx] = num_logits - int(sampled_np[batch_idx])
 
-    num_sampled_out = torch.from_numpy(sampled_np).to(device=num_sampled.device, dtype=num_sampled.dtype)
-    return num_sampled_out, num_rejected.to(device=num_sampled.device)
+    num_sampled_cpu = torch.from_numpy(sampled_np)
+    return (
+        num_sampled_cpu.to(device=device, non_blocking=True),
+        num_rejected_cpu.to(device=device, non_blocking=True),
+        num_sampled_cpu,
+        num_rejected_cpu,
+    )
+
+
+_SAMPLING_EPS = 1e-5
+_UNIFORM_TINY = float(torch.finfo(torch.float32).tiny)
 
 
 def greedy_rejection_sample_cpu(
     target_logits: torch.Tensor,
-    draft_sampled: torch.Tensor,
-    cu_num_logits: torch.Tensor,
+    draft_sampled_cpu: torch.Tensor,
+    cu_num_logits_np: np.ndarray,
     num_speculative_steps: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Greedy (temperature=0) rejection sampling for MTP verify.
 
     Argmax runs on-device so we only D2H token ids (not the full vocab logits).
     Acceptance bookkeeping stays on CPU to avoid per-element NPU syncs.
     """
-    cu_np = cu_num_logits.detach().cpu().numpy()
-    num_reqs = cu_np.shape[0] - 1
+    num_reqs = cu_num_logits_np.shape[0] - 1
     max_tokens = num_speculative_steps + 1
     sampled_cpu = torch.full((num_reqs, max_tokens), -1, dtype=torch.int32)
     num_sampled_cpu = torch.zeros(num_reqs, dtype=torch.int32)
     # Avoid full-vocab logits D2H (dominant cost on 310P MTP verify).
     target_argmax_cpu = target_logits.argmax(dim=-1).to(dtype=torch.int32).detach().cpu().numpy()
-    draft_cpu = draft_sampled.detach().cpu().to(dtype=torch.int32).numpy()
+    draft_np = draft_sampled_cpu.to(dtype=torch.int32).numpy()
 
     for req_idx in range(num_reqs):
-        start = int(cu_np[req_idx])
-        end = int(cu_np[req_idx + 1])
+        start = int(cu_num_logits_np[req_idx])
+        end = int(cu_num_logits_np[req_idx + 1])
         num_logits = end - start
         if num_logits <= 0:
             continue
@@ -156,7 +166,7 @@ def greedy_rejection_sample_cpu(
             target_token = int(target_argmax_cpu[logit_idx])
             is_bonus = logit_idx >= end - 1
             if accepted < num_speculative_steps and not is_bonus:
-                draft_token = int(draft_cpu[logit_idx + 1])
+                draft_token = int(draft_np[logit_idx + 1])
                 if draft_token == target_token:
                     sampled_cpu[req_idx, accepted] = target_token
                     accepted += 1
@@ -172,6 +182,116 @@ def greedy_rejection_sample_cpu(
     return (
         sampled_cpu.to(device=target_logits.device, non_blocking=True),
         num_sampled_cpu.to(device=target_logits.device, non_blocking=True),
+        sampled_cpu,
+        num_sampled_cpu,
+    )
+
+
+def _draw_uniform(generator: torch.Generator | None, device: torch.device) -> float:
+    uniform = torch.rand((1,), dtype=torch.float32, device=device, generator=generator)
+    return float(uniform.clamp_min_(_UNIFORM_TINY).item())
+
+
+def _sample_from_probs_row(probs_row: torch.Tensor, generator: torch.Generator | None) -> int:
+    """Sample on the logits device and return the token for CPU bookkeeping."""
+    generators = {0: generator} if generator is not None else {}
+    # The shared sampler divides probabilities in place. Preserve the caller's
+    # probability row, which may be a view into the rejection sampling batch.
+    sampled = random_sample(probs_row.unsqueeze(0).clone(), generators)
+    return int(sampled.item())
+
+
+def probabilistic_rejection_sample_cpu(
+    target_logits: torch.Tensor,
+    draft_sampled_cpu: torch.Tensor,
+    cu_num_logits_np: np.ndarray,
+    num_speculative_steps: int,
+    temperature_np: np.ndarray,
+    idx_mapping_np: np.ndarray,
+    source_generators: dict[int, torch.Generator],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """MTP rejection with temperature (Leviathan, draft one-hot / IS_NGRAM).
+
+    Treat each draft as a one-hot distribution. Accept it iff
+    ``u < p_target(draft)``. On rejection, sample from the residual distribution.
+    If all drafts are accepted, sample a bonus token from the last logit row.
+    Greedy requests use argmax.
+
+    ``target_logits`` must already include temperature / top-k / top-p processing.
+    """
+    cu_np = cu_num_logits_np
+    num_reqs = cu_np.shape[0] - 1
+    max_tokens = num_speculative_steps + 1
+    sampled_cpu = torch.full((num_reqs, max_tokens), -1, dtype=torch.int32)
+    num_sampled_cpu = torch.zeros(num_reqs, dtype=torch.int32)
+
+    # Softmax once on-device; per-step gathers stay cheap for small K.
+    probs = torch.softmax(target_logits, dim=-1, dtype=torch.float32)
+    target_argmax_cpu = target_logits.argmax(dim=-1).to(dtype=torch.int32).detach().cpu().numpy()
+    draft_cpu = draft_sampled_cpu.to(dtype=torch.int32).numpy()
+
+    for batch_idx in range(num_reqs):
+        start = int(cu_np[batch_idx])
+        end = int(cu_np[batch_idx + 1])
+        if end <= start:
+            continue
+        req_state_idx = int(idx_mapping_np[batch_idx])
+        is_greedy = float(temperature_np[req_state_idx]) < _SAMPLING_EPS
+        gen = source_generators.get(req_state_idx)
+
+        accepted = 0
+        for logit_idx in range(start, end):
+            is_bonus = logit_idx >= end - 1
+            if is_greedy:
+                target_token = int(target_argmax_cpu[logit_idx])
+                if accepted < num_speculative_steps and not is_bonus:
+                    draft_token = int(draft_cpu[logit_idx + 1])
+                    if draft_token == target_token:
+                        sampled_cpu[batch_idx, accepted] = target_token
+                        accepted += 1
+                        continue
+                sampled_cpu[batch_idx, accepted] = target_token
+                accepted += 1
+                break
+
+            # Probabilistic acceptance: u < p(draft).
+            if accepted < num_speculative_steps and not is_bonus:
+                draft_token = int(draft_cpu[logit_idx + 1])
+                if draft_token < 0:
+                    # Invalid pad draft → force recover/bonus path.
+                    row = probs[logit_idx]
+                    sampled_cpu[batch_idx, accepted] = _sample_from_probs_row(row, gen)
+                    accepted += 1
+                    break
+                p_draft = float(probs[logit_idx, draft_token].item())
+                u = _draw_uniform(gen, target_logits.device)
+                if u < p_draft:
+                    sampled_cpu[batch_idx, accepted] = draft_token
+                    accepted += 1
+                    continue
+                # Reject: sample recovered token from residual (zero draft mass).
+                row = probs[logit_idx].clone()
+                row[draft_token] = 0.0
+                sampled_cpu[batch_idx, accepted] = _sample_from_probs_row(row, gen)
+                accepted += 1
+                break
+
+            # Bonus token (all drafts accepted) or final logit.
+            row = probs[logit_idx]
+            sampled_cpu[batch_idx, accepted] = _sample_from_probs_row(row, gen)
+            accepted += 1
+            break
+
+        if accepted == 0:
+            sampled_cpu[batch_idx, 0] = int(target_argmax_cpu[start])
+            accepted = 1
+        num_sampled_cpu[batch_idx] = accepted
+
+    return (
+        sampled_cpu.to(device=target_logits.device, non_blocking=True),
+        num_sampled_cpu.to(device=target_logits.device, non_blocking=True),
+        sampled_cpu,
+        num_sampled_cpu,
     )
 
 
@@ -199,11 +319,19 @@ def prepare_prefill_inputs_cpu(
     if seq_lens_np is None:
         seq_lens_np = input_batch.seq_lens.detach().cpu().numpy()
 
-    # Small metadata only (one sync each); avoid D2H of full token buffers.
-    num_sampled_np = num_sampled[:num_reqs].detach().cpu().numpy()
-    num_rejected_np = num_rejected[:num_reqs].detach().cpu().numpy()
-    last_sampled_np = last_sampled.detach().cpu().numpy()
-    next_prefill_np = next_prefill_tokens.detach().cpu().numpy()
+    # Prefer host mirrors published after rejection synchronize_cpu (no D2H).
+    host_meta = _PREFILL_HOST_META
+    if host_meta is not None and int(host_meta.get("num_reqs", -1)) == num_reqs:
+        num_sampled_np = np.asarray(host_meta["num_sampled_np"])
+        num_rejected_np = np.asarray(host_meta["num_rejected_np"])
+        last_sampled_np = np.asarray(host_meta["last_sampled_np"])
+        next_prefill_np = np.asarray(host_meta["next_prefill_np"])
+    else:
+        # Small metadata only (one sync each); avoid D2H of full token buffers.
+        num_sampled_np = num_sampled[:num_reqs].detach().cpu().numpy()
+        num_rejected_np = num_rejected[:num_reqs].detach().cpu().numpy()
+        last_sampled_np = last_sampled.detach().cpu().numpy()
+        next_prefill_np = next_prefill_tokens.detach().cpu().numpy()
 
     target_input_ids = input_batch.input_ids
     target_positions = input_batch.positions
@@ -234,7 +362,7 @@ def prepare_prefill_inputs_cpu(
         kept_end = query_start + query_len
         if query_len > 1:
             # 310P: NPU slice-assign can corrupt the destination tail element
-            # (see llm_base_proposer_310.set_inputs_first_pass). Save/restore
+            # on the persistent drafter input_ids buffer. Save/restore
             # draft_input_ids[kept_end-1] around the shift copy.
             tail_idx = kept_end - 1
             tail_save = draft_input_ids[tail_idx].clone()
@@ -285,11 +413,16 @@ def prepare_decode_inputs_cpu(
     target_seq_lens: torch.Tensor,
     num_rejected: torch.Tensor,
     input_buffers: InputBuffers,
+    sample_src_positions: torch.Tensor,
     max_model_len: int,
     max_num_reqs: int,
     advance_draft_positions: bool = True,
 ) -> None:
-    """Prepare draft decode inputs with small host syncs (K>1 path)."""
+    """Prepare draft decode inputs with small host syncs (K>1 path).
+
+    Signature matches upstream ``prepare_decode_inputs`` (incl.
+    ``sample_src_positions``) so patched call sites stay compatible.
+    """
     del max_num_reqs
     num_reqs = draft_tokens.shape[0]
     device = input_buffers.input_ids.device
@@ -316,6 +449,8 @@ def prepare_decode_inputs_cpu(
         torch.from_numpy(input_ids_host).to(device=device, dtype=input_buffers.input_ids.dtype, non_blocking=True),
         non_blocking=True,
     )
+    # Align with Triton: always advance the draft sampling key for decode steps.
+    sample_src_positions[:num_reqs].add_(1)
     if advance_draft_positions:
         # positions += 1 on-device for the active rows (avoid full-buffer D2H).
         pos = input_buffers.positions[:num_reqs]
@@ -335,10 +470,32 @@ def prepare_decode_inputs_cpu(
 # is illegal under NPU GLOBAL ACLGraph capture; callers set this before fill_.
 _DRAFT_STEP_HOST: int = 0
 
+# Host mirrors for draft-prefill prepare (filled after rejection synchronize_cpu).
+_PREFILL_HOST_META: dict[str, Any] | None = None
+
 
 def set_draft_step_host(step: int) -> None:
     global _DRAFT_STEP_HOST
     _DRAFT_STEP_HOST = int(step)
+
+
+def set_prefill_host_meta(
+    *,
+    num_reqs: int,
+    num_sampled_np: np.ndarray,
+    num_rejected_np: np.ndarray,
+    last_sampled_np: np.ndarray,
+    next_prefill_np: np.ndarray,
+) -> None:
+    """Publish CPU mirrors so prepare_prefill_inputs_cpu skips D2H syncs."""
+    global _PREFILL_HOST_META
+    _PREFILL_HOST_META = {
+        "num_reqs": int(num_reqs),
+        "num_sampled_np": num_sampled_np,
+        "num_rejected_np": num_rejected_np,
+        "last_sampled_np": last_sampled_np,
+        "next_prefill_np": next_prefill_np,
+    }
 
 
 def update_draft_inputs_cpu(
@@ -348,22 +505,27 @@ def update_draft_inputs_cpu(
     output_draft_tokens: torch.Tensor,
     next_input_hidden_states: torch.Tensor,
     input_buffers: InputBuffers,
+    sample_src_positions: torch.Tensor,
     num_reqs: int,
     max_model_len: int,
     num_speculative_steps: int,
     advance_draft_positions: bool = True,
 ) -> None:
-    """Update draft buffers for the next step using on-device ops where possible."""
-    # ``.item()`` is a sync D2H and is illegal under NPU GLOBAL ACLGraph capture.
-    if torch.npu.is_current_stream_capturing():
-        step = _DRAFT_STEP_HOST
-    else:
-        step = int(current_draft_step.item())
-        set_draft_step_host(step)
+    """Update draft buffers for the next step using on-device ops where possible.
+
+    Signature matches upstream ``update_draft_inputs`` (incl.
+    ``sample_src_positions``).
+    """
+    # Prefer host mirror — ``.item()`` is a sync D2H (illegal under GLOBAL
+    # capture and a steady-state MTP tax). Callers use set_draft_step_host.
+    del current_draft_step
+    step = _DRAFT_STEP_HOST
     tokens = draft_tokens[:num_reqs]
     output_draft_tokens[:num_reqs, step].copy_(tokens)
     if step >= num_speculative_steps - 1:
         return
+    # Align with Triton: advance sampling key before preparing next draft inputs.
+    sample_src_positions[:num_reqs].add_(1)
     input_buffers.input_ids[:num_reqs].copy_(tokens)
     next_input_hidden_states[:num_reqs].copy_(hidden_states[:num_reqs])
     if advance_draft_positions:

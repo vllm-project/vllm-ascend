@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -275,6 +277,10 @@ def _assert_selection_state_matches_full_cache(case: FusedSparseAttentionOverlap
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("topk", [32, 128])
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="Internal-planner overlap regression targets Ascend A2/A3",
+)
 @torch.inference_mode()
 def test_fused_sparse_attention_overlap_internal_planner_miss_then_all_hit_precision(
     dtype: torch.dtype,

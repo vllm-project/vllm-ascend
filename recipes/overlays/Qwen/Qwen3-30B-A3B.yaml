@@ -1,0 +1,53 @@
+# Source: https://github.com/vllm-project/vllm/blob/52a65d7b19e9e3ad86bf1e3b6954e4e11eeec7da/recipes/models/Qwen/Qwen3-30B-A3B.yaml
+# Extracted with vllm-project/recipes@b08ad73889f9e33319d8ac9c887dec6a0975c55d.
+variants:
+  ascend_w8a8:
+    model_id: Eco-Tech/Qwen3-30B-A3B-w8a8
+    precision: int8
+    label: W8A8 (Ascend A3)
+    vram_minimum_gb: 37
+    description: ModelSlim INT8 W8A8 checkpoint for Ascend 910C, verified with TP4 + expert parallelism.
+    supported_hardware:
+      - ascend_910c
+    tp: 4
+    min_vllm_version: 0.23.0
+    extra_args:
+      - '--trust-remote-code'
+      - '--max-num-seqs'
+      - '100'
+      - '--max-model-len'
+      - '40960'
+      - '--max-num-batched-tokens'
+      - '16384'
+      - '--enable-expert-parallel'
+      - '--quantization'
+      - ascend
+      - '--distributed_executor_backend'
+      - mp
+      - '--no-enable-prefix-caching'
+      - '--async-scheduling'
+      - '--compilation-config'
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_flashcomm1": true, "weight_nz_mode": 2}'
+      - '--gpu-memory-utilization'
+      - '0.95'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      HCCL_OP_EXPANSION_MODE: AIV
+      HCCL_BUFFSIZE: '1024'
+      OMP_PROC_BIND: 'false'
+      OMP_NUM_THREADS: '1'
+      TASK_QUEUE_ENABLE: '1'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      VLLM_USE_RUST_FRONTEND: '1'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:v0.23.0-a3
+meta:
+  hardware:
+    ascend_910c: verified
+hardware_opt_in_features:
+  ascend_910c:
+    - tool_calling
+    - reasoning

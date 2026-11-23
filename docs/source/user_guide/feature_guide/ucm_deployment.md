@@ -20,7 +20,7 @@ Unified Cache Manager (UCM) provides an external KV-cache storage layer designed
 
 UCM adopts a **centralized architecture** for KV cache management, constructing a three-tier cache hierarchy:
 
-```bash
+```text
 HBM (GPU Memory) → DRAM (Local Cache) → Storage Backend (SSD/NFS/3FS)
 ```
 
@@ -61,7 +61,7 @@ UCM currently provides the following capabilities:
 - vLLM-Ascend (main branch)
 - SGLang (main branch)
 
-> **Note**: For the complete and latest support matrix, refer to [UCM Support Matrix](https://ucm.readthedocs.io/en/latest/user-guide/support-matrix/support_matrix.html).
+> **Note**: For the complete and latest support matrix, refer to [UCM Support Matrix](https://ucm.readthedocs.io/en/latest/user-guide/support-matrix/).
 
 ## Deployment Guide
 
@@ -74,7 +74,7 @@ UCM currently provides the following capabilities:
 
 ### UCM Installation
 
-**Please refer to the [official UCM installation guide for Ascend NPU](https://ucm.readthedocs.io/en/latest/getting-started/quickstart_vllm_ascend.html)**
+**Please refer to the [official UCM installation guide for Ascend NPU](https://ucm.readthedocs.io/en/latest/user-guide/quick_start/#vllm-ascend)**
 
 ### PD Disaggregation Scenario
 
@@ -114,7 +114,7 @@ Key configuration parameters:
 
 - **storage_backends**: The shared storage directory accessible from all nodes (e.g., NFS-mounted path or 3FS). For cross-node PD disaggregation, this must be a shared storage path.
 
-> **Note**: PipelineStore is the recommended connector for UCM. It chains Cache Store (Device ↔ Host) and Posix Store (Host ↔ Storage backend) for optimal transfer performance. For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/pipeline_store.html).
+> **Note**: PipelineStore is the recommended connector for UCM. It chains Cache Store (Device ↔ Host) and Posix Store (Host ↔ Storage backend) for optimal transfer performance. For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/developer-guide/cache-configuration/pipeline/#pipeline-store).
 
 **Step 2: Run Prefill Servers**
 
@@ -246,7 +246,7 @@ enable_event_sync: true
 use_layerwise: true
 ```
 
-> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/pipeline_store.html).
+> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/developer-guide/cache-configuration/pipeline/#pipeline-store).
 
 **Step 2: Run Prefill Service**
 
@@ -389,7 +389,7 @@ Key configuration parameters:
 
 - **storage_backends**: Directory for KV cache storage. Can be local SSD or NFS-mounted path.
 
-> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/pipeline_store.html).
+> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/developer-guide/cache-configuration/pipeline/#pipeline-store).
 
 **Step 2: Run PD-Mixed Service**
 
@@ -452,7 +452,7 @@ vllm bench serve \
 
 After the second run, a significant reduction in TTFT should be observed due to UCM prefix cache hits. Review the vLLM logs for cache hit information:
 
-```bash
+```output
 INFO ucm_connector.py:xxx: request_id: xxx, total_blocks_num: xxx, hit hbm: 0, hit external: xxx
 ```
 
@@ -514,7 +514,7 @@ Key configuration parameters:
 
 - **storage_backends**: The shared storage directory accessible from all nodes (e.g., NFS-mounted path or 3FS).
 
-> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/pipeline_store.html).
+> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/developer-guide/cache-configuration/pipeline/#pipeline-store).
 
 Prepare `prefill.sh` on Prefill nodes (192.168.10.1-4):
 

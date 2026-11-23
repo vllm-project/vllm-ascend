@@ -18,6 +18,9 @@ class TestAscendW4A4MXFP4LinearMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
     def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
+        mx_profile = patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile")
+        mx_profile.start().return_value.supports_weight_format.return_value = True
+        self.addCleanup(mx_profile.stop)
         self.scheme = AscendW4A4MXFP4DynamicLinearMethod()
 
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
@@ -59,7 +62,9 @@ class TestAscendW4A4MXFP4LinearMethod(TestBase):
         self.assertEqual(layer.weight.shape, (128, 128))
         self.assertEqual(layer.weight_scale.shape[0], 4)
 
-    def test_process_weights_preserves_unaligned_tp_group_phase(self):
+    @patch("vllm_ascend.utils._should_trans_nz", return_value=True)
+    @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
+    def test_process_weights_preserves_unaligned_tp_group_phase(self, mock_cast, mock_should_trans_nz):
         layer = RowParallelLinear.__new__(RowParallelLinear)
         nn.Module.__init__(layer)
         original_weight = torch.randint(1, 255, (2, 264), dtype=torch.uint8)
@@ -74,6 +79,21 @@ class TestAscendW4A4MXFP4LinearMethod(TestBase):
         self.assertEqual(layer.weight.shape, (272, 2))
         torch.testing.assert_close(layer.weight[:8], torch.zeros(8, 2, dtype=torch.uint8))
         torch.testing.assert_close(layer.weight[8:], original_weight.transpose(0, 1))
+        # W4A4 stays in ND even when NZ conversion is enabled globally.
+        mock_cast.assert_not_called()
+        self.assertFalse(layer.weight.data.is_contiguous())
+        self.assertFalse(layer.weight_scale.data.is_contiguous())
+
+    @patch("vllm_ascend.utils._should_trans_nz", return_value=False)
+    def test_process_weights_nz_disabled_keeps_pre_nz_layout(self, mock_should_trans_nz):
+        layer = nn.Module()
+        layer.weight = nn.Parameter(torch.randint(0, 255, (128, 128), dtype=torch.uint8), requires_grad=False)
+        layer.weight_scale = nn.Parameter(torch.randint(0, 255, (128, 8), dtype=torch.uint8), requires_grad=False)
+        self.scheme.process_weights_after_loading(layer)
+        self.assertEqual(layer.weight.shape, (128, 128))
+        self.assertEqual(layer.weight_scale.shape[0], 4)
+        self.assertFalse(layer.weight.data.is_contiguous())
+        self.assertFalse(layer.weight_scale.data.is_contiguous())
 
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.torch_npu")
     def test_apply_3d_input(self, mock_npu):
@@ -116,6 +136,9 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
     def setUp(self, mock_ascend, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
+        mx_profile = patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile")
+        mx_profile.start().return_value.supports_weight_format.return_value = True
+        self.addCleanup(mx_profile.stop)
         self.scheme = AscendW4A4MXFP4DynamicFusedMoEMethod()
 
     @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
@@ -150,7 +173,57 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
             self.assertEqual(result["w13_weight_scale"].dtype, torch.uint8)
             self.assertEqual(result["w2_weight_scale"].dtype, torch.uint8)
 
-    def test_process_weights_transposes_weights(self):
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.use_cann_megamoe", return_value=True)
+    @patch(
+        "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.torch_npu.npu_format_cast",
+        side_effect=lambda weight, _fmt, **_kwargs: weight.clone(),
+    )
+    # The w2 experts go through the shared FP4 recipe, which casts in its own
+    # module and reads torch_npu's FP4 enum there.
+    @patch("vllm_ascend.quantization.nz.torch_npu")
+    def test_megamoe_uses_semantic_e8m0_scale_dtype(self, mock_nz_npu, _mock_cast, _mock_use_megamoe, mock_vllm):
+        mock_nz_npu.npu_format_cast.side_effect = lambda weight, _fmt, **_kwargs: weight.clone()
+        mock_vllm.return_value = create_mock_vllm_config()
+        layer = nn.Module()
+        layer.w13_weight = nn.Parameter(
+            torch.randint(
+                0,
+                255,
+                (self.num_experts, 2 * self.intermediate_size, self.hidden_size // 2),
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+        layer.w2_weight = nn.Parameter(
+            torch.randint(0, 255, (self.num_experts, self.hidden_size, self.intermediate_size // 2), dtype=torch.uint8),
+            requires_grad=False,
+        )
+        layer.w13_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (self.num_experts, 2 * self.intermediate_size, 4), dtype=torch.uint8),
+            requires_grad=False,
+        )
+        layer.w2_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (self.num_experts, self.hidden_size, 8), dtype=torch.uint8),
+            requires_grad=False,
+        )
+        original_scales = (layer.w13_weight_scale.detach().clone(), layer.w2_weight_scale.detach().clone())
+
+        self.scheme.process_weights_after_loading(layer)
+
+        scale_lists = (
+            layer.cann_mega_moe_w13_weight_scale_list,
+            layer.cann_mega_moe_w2_weight_scale_list,
+        )
+        for original, expert_scales in zip(original_scales, scale_lists):
+            for expert_scale, expected in zip(expert_scales, original.unbind(0)):
+                expected = expected.reshape(expected.shape[0], -1, 2)
+                self.assertEqual(expert_scale.dtype, torch.float8_e8m0fnu)
+                torch.testing.assert_close(expert_scale.view(torch.uint8), expected, rtol=0, atol=0)
+
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.use_cann_megamoe", return_value=False)
+    def test_process_weights_transposes_weights(self, mock_use_cann_megamoe, mock_vllm):
         layer = nn.Module()
         layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 256, 64), dtype=torch.uint8), requires_grad=False)
         layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 128), dtype=torch.uint8), requires_grad=False)
@@ -173,7 +246,9 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
             self.assertEqual(weight_view.shape[0], self.num_experts)
             self.assertEqual(weight_view.untyped_storage().data_ptr(), source.untyped_storage().data_ptr())
 
-    def test_process_weights_pads_odd_scale_groups(self):
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.use_cann_megamoe", return_value=False)
+    def test_process_weights_pads_odd_scale_groups(self, mock_use_cann_megamoe, mock_vllm):
         layer = nn.Module()
         layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 256, 64), dtype=torch.uint8), requires_grad=False)
         layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 128), dtype=torch.uint8), requires_grad=False)
@@ -253,3 +328,111 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         kwargs = mock_npu.npu_grouped_matmul.call_args.kwargs
         self.assertEqual(kwargs["x_dtype"], mock_npu.float4_e2m1fn_x2)
         self.assertEqual(kwargs["weight_dtype"], mock_npu.float4_e2m1fn_x2)
+
+    def _run_gmm1_releases_requantized_input_before_operator(self, fused):
+        raw_hidden_states = torch.randn(4, self.hidden_size, dtype=torch.bfloat16)
+        quantized_hidden_states = torch.randint(0, 255, (4, self.hidden_size), dtype=torch.uint8)
+        mlp_compute_input = MagicMock(
+            hidden_states=raw_hidden_states,
+            dynamic_scale=None,
+            layer=MagicMock(),
+            group_list=torch.tensor([4], dtype=torch.int64),
+            group_list_type=0,
+        )
+        events = []
+
+        def grouped_matmul(**_kwargs):
+            events.append("gmm")
+            if fused:
+                return torch.randn(4, self.intermediate_size), torch.ones(4)
+            return [torch.randn(4, self.intermediate_size, dtype=torch.bfloat16)]
+
+        def quantize_hidden_states(*_args):
+            events.append("quantize")
+            return quantized_hidden_states, torch.ones(4)
+
+        def dispose_raw_hidden_states(tensor):
+            self.assertIs(tensor, raw_hidden_states)
+            events.append("dispose")
+
+        operator = "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4." + (
+            "torch_npu.npu_grouped_matmul_swiglu_quant_v2" if fused else "torch_npu.npu_grouped_matmul"
+        )
+        with (
+            patch.object(
+                self.scheme,
+                "_quant_hidden_states",
+                side_effect=quantize_hidden_states,
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.dispose_tensor",
+                side_effect=dispose_raw_hidden_states,
+            ) as mock_dispose,
+            patch(operator, side_effect=grouped_matmul),
+            patch(
+                "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.maybe_normalize_mxfp_scale_layout",
+                side_effect=lambda scale: scale,
+            ),
+        ):
+            if fused:
+                self.scheme.apply_gmm1_act_quant(mlp_compute_input)
+            else:
+                self.scheme.apply_gmm1(mlp_compute_input)
+
+        mock_dispose.assert_called_once_with(raw_hidden_states)
+        self.assertEqual(events, ["quantize", "dispose", "gmm"])
+
+    def test_gmm1_releases_requantized_input_before_operator(self):
+        for fused in (False, True):
+            with self.subTest(fused=fused):
+                self._run_gmm1_releases_requantized_input_before_operator(fused)
+
+    def _run_gmm1_keeps_dispatch_quantized_input_until_operator(self, fused):
+        hidden_states = torch.randint(0, 255, (4, self.hidden_size), dtype=torch.uint8)
+        dynamic_scale = torch.ones(4)
+        mlp_compute_input = MagicMock(
+            hidden_states=hidden_states,
+            dynamic_scale=dynamic_scale,
+            layer=MagicMock(),
+            group_list=torch.tensor([4], dtype=torch.int64),
+            group_list_type=0,
+        )
+        events = []
+
+        def grouped_matmul(**_kwargs):
+            events.append("gmm")
+            if fused:
+                return torch.randn(4, self.intermediate_size), torch.ones(4)
+            return [torch.randn(4, self.intermediate_size, dtype=torch.bfloat16)]
+
+        def dispose_hidden_states(tensor):
+            self.assertIs(tensor, hidden_states)
+            events.append("dispose")
+
+        operator = "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4." + (
+            "torch_npu.npu_grouped_matmul_swiglu_quant_v2" if fused else "torch_npu.npu_grouped_matmul"
+        )
+        with (
+            patch.object(self.scheme, "_quant_hidden_states", return_value=(hidden_states, dynamic_scale)),
+            patch(
+                "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.dispose_tensor",
+                side_effect=dispose_hidden_states,
+            ) as mock_dispose,
+            patch(operator, side_effect=grouped_matmul),
+            patch(
+                "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.maybe_normalize_mxfp_scale_layout",
+                side_effect=lambda scale: scale,
+            ),
+        ):
+            if fused:
+                self.scheme.apply_gmm1_act_quant(mlp_compute_input)
+            else:
+                self.scheme.apply_gmm1(mlp_compute_input)
+
+        mock_dispose.assert_called_once_with(hidden_states)
+        self.assertEqual(events, ["gmm", "dispose"])
+
+    def test_gmm1_keeps_dispatch_quantized_input_until_operator(self):
+        for fused in (False, True):
+            with self.subTest(fused=fused):
+                self._run_gmm1_keeps_dispatch_quantized_input_until_operator(fused)

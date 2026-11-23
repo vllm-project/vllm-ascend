@@ -72,3 +72,10 @@ msgstr "输出如下："
 
 msgid "Finally, press `Ctrl+D` to exit the container."
 msgstr "最后，按 `Ctrl+D` 退出容器。"
+
+msgid ""
+"Confirm that the response contains nonempty generated text in `choices[0].text`.\n"
+"An error response or an empty completion does not confirm successful inference."
+msgstr ""
+"确认响应中 `choices[0].text` 包含非空的生成文本。\n"
+"错误响应或空补全不能确认推理成功。"

@@ -2,6 +2,12 @@
 
 ## 1 Introduction
 
+!!! note
+
+    The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
+
+    **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
+
 Qwen3.8-2.4T-A95B is a large-scale MoE model with 2400 billion total
 parameters and 95 billion activated parameters. It is built on the Qwen3.5
 architecture and improves coding, professional work, scientific research, and
@@ -30,12 +36,11 @@ configuration details.
 
 The following model weights are available:
 
-- `Qwen3.8-2.4T-A95B` (FP16/BF16): approximately 4.89 TB of storage and weight
-  memory. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-2.4T-A95B).
-- `Qwen3.8-2.4T-A95B-w8a8`: approximately 2.33 TiB of storage and weight
-  memory. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w8a8).
-- `Qwen3.8-2.4T-A95B-w4a8`: approximately 1.21 TiB of storage and weight
-  memory. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w4a8).
+|  Weight Version                 | Hardware Requirements                               | Download Links |
+|---------------------------------|-----------------------------------------------------|----------------|
+| `Qwen3.8-2.4T-A95B` (FP16/BF16) | approximately 4.45 TiB of storage and weight memory | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.8-2.4T-A95B) |
+| `Qwen3.8-2.4T-A95B-w8a8`        | approximately 2.33 TiB of storage and weight memory | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w8a8) |
+| `Qwen3.8-2.4T-A95B-w4a8`        | approximately 1.21 TiB of storage and weight memory | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w4a8) |
 
 This guide includes the following validated deployment configurations:
 
@@ -48,8 +53,9 @@ The checkpoint and tokenizer directories must be available at the same paths
 on all serving nodes. The W8A8 deployment uses the lazy Safetensors strategy to
 avoid prefetching the complete checkpoint from shared storage.
 
-It is recommended to download the model weight to the shared directory of
-multiple nodes, such as `/root/.cache/`.
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -105,18 +111,12 @@ node. Refer to [using a prebuilt image](../../getting_started/installation.md#in
       -it $IMAGE bash
     ```
 
-    After entering the container, verify that vLLM and vLLM-Ascend can be imported:
-
-    ```shell
-    python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
-    ```
-
 === "A2 series"
 
     Start the docker image on each node.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0
+    export IMAGE=quay.io/ascend/vllm-ascend:qwen3.8-a2
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -144,11 +144,17 @@ node. Refer to [using a prebuilt image](../../getting_started/installation.md#in
       -it $IMAGE bash
     ```
 
-    After entering the container, verify that vLLM and vLLM-Ascend can be imported:
+After entering the container, verify that vLLM and vLLM-Ascend can be imported:
 
-    ```shell
-    python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
-    ```
+```shell
+python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
+```
+
+Expected output:
+
+```output
+vllm and vllm_ascend are ready
+```
 
 ### 4.2 Source Code Installation
 
@@ -208,6 +214,7 @@ Before starting the service:
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export OPENBLAS_NUM_THREADS=1
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve $MODEL_PATH \
             --host 0.0.0.0 \
             --port $PORT \
@@ -262,6 +269,7 @@ Before starting the service:
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export OPENBLAS_NUM_THREADS=1
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve $MODEL_PATH \
             --headless \
             --host 0.0.0.0 \
@@ -370,6 +378,7 @@ Before starting the service:
         export OMP_NUM_THREADS=1
         export OPENBLAS_NUM_THREADS=1
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve $MODEL_PATH \
             --host 0.0.0.0 \
             --port $PORT \
@@ -433,6 +442,7 @@ Before starting the service:
         export OMP_NUM_THREADS=1
         export OPENBLAS_NUM_THREADS=1
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve $MODEL_PATH \
             --headless \
             --host 0.0.0.0 \
@@ -493,6 +503,18 @@ Before starting the service:
     already running, `--data-parallel-address` resolves to Node 0, all nodes
     use the same RPC port, and every worker uses a unique DP start rank.
 
+During startup, check the logs on all nodes for weight-loading
+and graph-capture progress or errors. Startup time depends on the checkpoint,
+shared-storage performance, and whether caches are warm. Wait until the engine
+finishes loading weights and graph capture. A successful startup includes
+output similar to the following:
+
+```output
+INFO:     Started server process
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
+
 ### 5.2 Prefill-Decode Disaggregation
 
 PD disaggregation separates Prefill and Decode into different service groups.
@@ -506,10 +528,11 @@ a future update. Stay tuned.
 
 After all DP ranks are ready, send a text request to the Node 0 API endpoint.
 The open-weight model always uses thinking mode and does not support
-multimodal input.
+multimodal input. Replace `<SERVICE_PORT>` with the port configured in Section 5
+(`PORT=<SERVICE_PORT>`), and `<server_ip>` with the API endpoint's IP address.
 
 ```shell
-curl http://<server_ip>:8000/v1/chat/completions \
+curl http://<server_ip>:<SERVICE_PORT>/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "qwen3.8",
@@ -518,6 +541,7 @@ curl http://<server_ip>:8000/v1/chat/completions \
     ],
     "temperature": 1.0,
     "top_p": 0.95,
+    "reasoning_effort": "medium",
     "stream": true,
     "chat_template_kwargs": {
       "enable_thinking": true,
@@ -531,7 +555,9 @@ Expected Result: Each response begins with reasoning wrapped in
 200 and a `choices` field containing generated text. Worker nodes are headless
 and do not accept HTTP requests directly.
 
-The model officially supports these reasoning effort levels:
+Set `reasoning_effort` in the top-level Chat Completions request body to adjust
+the model's reasoning depth. The example above uses `medium`; omit the field to
+use the default `xhigh`. The model officially supports these levels:
 
 - `xhigh`: default; deeper reasoning for complex tasks.
 - `medium`: balances accuracy and speed.
@@ -571,8 +597,8 @@ does not affect the serving processes. Refer to
 
 ### 8.2 Performance Service Configuration
 
-Use the deployment in Section 5 as the baseline. Change the following values
-on all four nodes:
+Use the deployment in [Section 5](#5-online-service-deployment) as the baseline. Change the following values
+on all four A3 nodes:
 
 | Parameter | Standard deployment | Performance test |
 | --- | ---: | ---: |
@@ -589,7 +615,7 @@ Run performance evaluation of `Qwen3.8-2.4T-A95B` as an example. Refer to
 vllm bench serve \
   --model Qwen/Qwen3.8-2.4T-A95B \
   --served-model-name qwen3.8 \
-  --base-url http://<server_ip>:8000 \
+  --base-url http://<server_ip>:<SERVICE_PORT> \
   --dataset-name random \
   --random-input-len 8192 \
   --random-output-len 1024 \
@@ -599,7 +625,7 @@ vllm bench serve \
   --result-dir ./
 ```
 
-Record the A3 node count, TP/PP/EP topology, context length, concurrency,
+Record the A3 node count, TP/DP/EP topology, context length, concurrency,
 reasoning effort, and weight revision together with the result.
 
 ## 9 Performance Tuning
@@ -609,7 +635,7 @@ reasoning effort, and weight revision together with the result.
 The following configuration is validated in a specific test environment and
 is for reference only. The optimal configuration depends on maximum
 input/output length, request concurrency, prefix cache hit rate, quantization,
-and workload characteristics. Tune the parameters in Section 9.2 based on your
+and workload characteristics. Tune the parameters in [Section 9.2](#92-tuning-guidelines) based on your
 actual workload.
 
 **Table 1: Scenario Overview**
@@ -627,7 +653,7 @@ actual workload.
 | 8 per DP | 131072 | 16384 | 0.85 | 1 | On | Full decode ACL Graph, Fused MC2, CPU binding |
 
 > For complete startup commands and parameter descriptions, refer to the
-> deployment example in Chapter 5.
+> deployment example in [Section 5](#5-online-service-deployment).
 
 ### 9.2 Tuning Guidelines
 

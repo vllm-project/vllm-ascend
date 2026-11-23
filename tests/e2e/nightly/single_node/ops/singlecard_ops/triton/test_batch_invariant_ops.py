@@ -4,6 +4,8 @@
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.batch_invariant.matmul import (
     addmm_batch_invariant,
     bmm_batch_invariant,
@@ -45,6 +47,9 @@ def assert_kernel_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
     )
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
     ("m", "k", "n", "with_bias"),
@@ -74,6 +79,9 @@ def test_matmul_bias_persistent_kernel_precision(dtype, m, k, n, with_bias):
     assert_kernel_close(actual, expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize(
     ("m", "k", "n"),
@@ -95,6 +103,9 @@ def test_linear_persistent_kernel_precision(dtype, m, k, n):
     assert_kernel_close(actual, expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize(
     ("shape", "dim", "keepdim"),
@@ -115,6 +126,9 @@ def test_mean_kernel_precision(dtype, shape, dim, keepdim):
     assert_kernel_close(actual, expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize(
     ("shape", "eps"),
@@ -140,6 +154,9 @@ def test_rms_norm_kernel_precision(dtype, shape, eps):
     assert_kernel_close(actual, expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize(
     ("shape", "dim"),
@@ -160,6 +177,9 @@ def test_softmax_batch_invariant_precision(dtype, shape, dim):
     assert_kernel_close(actual, expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 def test_softmax_batch_invariant_numerical_stability(dtype):
     """Large logits must remain finite after max subtraction."""
@@ -176,6 +196,9 @@ def test_softmax_batch_invariant_numerical_stability(dtype):
     assert_kernel_close(actual, expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_matmul_wrappers_2d_precision(dtype):
     """Guard mm, addmm, and linear wrappers, including their bias paths."""
@@ -195,6 +218,9 @@ def test_matmul_wrappers_2d_precision(dtype):
     assert_kernel_close(linear_actual, biased_expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
     ("a_shape", "b_shape"),
@@ -217,6 +243,9 @@ def test_matmul_batch_invariant_supported_shapes(dtype, a_shape, b_shape):
     assert_kernel_close(actual, expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("use_matmul", [False, True], ids=["bmm", "matmul"])
 def test_batched_matmul_out_parameter(use_matmul):
     """The out overload must write into and return the supplied tensor."""
@@ -235,6 +264,9 @@ def test_batched_matmul_out_parameter(use_matmul):
     assert_kernel_close(out, expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("keepdim", [False, True])
 def test_mean_batch_invariant_multiple_dims(dtype, keepdim):
@@ -248,6 +280,9 @@ def test_mean_batch_invariant_multiple_dims(dtype, keepdim):
     assert_kernel_close(actual, expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 def test_softmax_batch_invariant_honors_float32_dtype():
     """A requested FP32 output must not be silently cast back to BF16."""
     torch.manual_seed(SEED)
@@ -265,6 +300,9 @@ def test_softmax_batch_invariant_honors_float32_dtype():
     )
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
     "input_shape",
@@ -297,6 +335,9 @@ def test_linear_batch_invariant_nd_precision(dtype, input_shape):
     assert_kernel_close(actual, expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
     ("alpha", "beta"),

@@ -1,6 +1,7 @@
 ---
 name: vllm-ascend-model-adapter
 description: "Adapt and debug existing or new models for vLLM on Ascend NPU. Implement in /vllm-workspace/vllm and /vllm-workspace/vllm-ascend, validate via direct vllm serve from /workspace, and deliver one signed commit in the current repo."
+disable-model-invocation: true
 ---
 
 # vLLM Ascend Model Adapter

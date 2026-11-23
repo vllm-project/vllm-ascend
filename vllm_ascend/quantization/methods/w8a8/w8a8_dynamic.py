@@ -40,6 +40,7 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, dispose_tensor, maybe_trans
 from ..base import (
     AscendLinearScheme,
     AscendMoEScheme,
+    PreparedLinearInput,
     QuantType,
     WeightSwitchGatherSpec,
 )
@@ -90,14 +91,31 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         params_dict["weight_offset"] = torch.empty(output_size, 1, dtype=params_dtype)
         return params_dict
 
-    def apply(
+    def prepare_input_for_overlap(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
+    ) -> PreparedLinearInput | None:
+        if x.dim() != 2:
+            return None
+        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x, dst_type=self.act_quant_type)
+        return PreparedLinearInput(quantized_x, pertoken_scale, x.dtype)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | PreparedLinearInput,
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x, dst_type=self.act_quant_type)
+        if isinstance(x, PreparedLinearInput):
+            quantized_x = x.quantized
+            assert x.scale is not None
+            pertoken_scale = x.scale
+            output_dtype = x.output_dtype
+        else:
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x, dst_type=self.act_quant_type)
+            output_dtype = x.dtype
         need_unsqz = False
         if pertoken_scale.dim() == 2:
             need_unsqz = True
@@ -109,7 +127,7 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
             layer.weight_scale,
             pertoken_scale=pertoken_scale,
             bias=bias if self.act_quant_type == torch.int8 else None,
-            output_dtype=x.dtype,
+            output_dtype=output_dtype,
         )
         if need_unsqz:
             output = output.unsqueeze(dim=1)
@@ -313,6 +331,14 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.cann_mega_moe_fused_w2_scale_list = list(
                 layer.fused_w2_scale.view(layer.w2_weight.shape[0], -1).data.unbind(dim=0)
             )
+            # MegaMoe reads the fused int64 scale lists above exclusively for
+            # activations whose fused MC2 path supports the scale layout.
+            # swigluoai_uninterleave still uses the standard GMM path, which
+            # reads the fp32 scale copy during forward.
+            activation = getattr(layer, "activation", "silu")
+            activation = getattr(activation, "value", activation)
+            if activation != "swigluoai_uninterleave":
+                del layer.w13_weight_scale_fp32
 
     def _get_mlp_weights(self, layer: torch.nn.Module) -> tuple:
         """Return (w1, w1_scale, w2, w2_scale) in the standard MLP layout."""
@@ -334,14 +360,15 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         """Normalized weight payload for the FUSED_MC2 comm path."""
         activation = getattr(layer, "activation", "silu")
         act_name = getattr(activation, "value", activation)
-        fused_scale_flag = (
-            _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
-            and get_ascend_config().enable_fused_mc2 == 1
-            and act_name != "swigluoai_uninterleave"
-        )
-        use_mega_moe = fused_scale_flag and _EXTRA_CTX.use_mega_moe
+        is_fused_mc2 = _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2 and get_ascend_config().enable_fused_mc2 == 1
+        # dispatch_ffn_combine does not support SwiGLU-OAI fused scales.
+        # MegaMoe can still consume the per-expert NZ weight/scale lists.
+        fused_scale_flag = is_fused_mc2 and act_name != "swigluoai_uninterleave"
+        use_mega_moe = is_fused_mc2 and _EXTRA_CTX.use_mega_moe
         if self.use_expert_weight_list:
             if use_mega_moe:
+                shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None)
+                shared = shared_fusion.weights if shared_fusion is not None else None
                 return MoEWeights(
                     w1=layer.w13_weight_list,
                     w2=layer.w2_weight_list,
@@ -349,6 +376,10 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                     w2_scale=[scale.reshape(-1) for scale in layer.fused_w2_scale_list],
                     w1_scale_bias=None,
                     w2_scale_bias=None,
+                    shared_w1=shared.w1 if shared else None,
+                    shared_w2=shared.w2 if shared else None,
+                    shared_w1_scale=shared.w1_scale if shared else None,
+                    shared_w2_scale=shared.w2_scale if shared else None,
                 )
             else:
                 return MoEWeights(
@@ -360,6 +391,13 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                     w2_scale_bias=layer.fused_w2_scale_bias if fused_scale_flag else None,
                 )
         elif use_mega_moe:
+            # MegaMoe shared-expert fusion (enable_fused_mc2=3): forward the
+            # shared weights rebuilt by the shared-expert executor so the
+            # operator computes routed + shared together. Without them the
+            # operator runs routed experts only while the runner skips the
+            # separate shared forward, silently dropping the shared GMM.
+            shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None)
+            shared = shared_fusion.weights if shared_fusion is not None else None
             return MoEWeights(
                 w1=layer.cann_mega_moe_w13_weight_list,
                 w2=layer.cann_mega_moe_w2_weight_list,
@@ -367,6 +405,10 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=layer.cann_mega_moe_fused_w2_scale_list,
                 w1_scale_bias=None,
                 w2_scale_bias=None,
+                shared_w1=shared.w1 if shared else None,
+                shared_w2=shared.w2 if shared else None,
+                shared_w1_scale=shared.w1_scale if shared else None,
+                shared_w2_scale=shared.w2_scale if shared else None,
             )
         return MoEWeights(
             w1=[layer.w13_weight],
@@ -489,7 +531,10 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer = mlp_compute_input.layer
         w1, w1_scale, _, w2_scale = self._get_mlp_weights(layer)
         w2_scale_dtype = w2_scale[0].dtype
-        scale = [w1_scale[0].to(w2_scale_dtype)]
+        # w1 may be a per-expert weight list (MRv2 EPLB: use_expert_weight_list),
+        # then scales must be per-expert too — aclnn grouped_matmul requires
+        # len(scale) == len(weight). The stacked path keeps a single-element list.
+        scale = [s.to(w2_scale_dtype) for s in w1_scale]
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=w1 if isinstance(w1, list) else [w1],

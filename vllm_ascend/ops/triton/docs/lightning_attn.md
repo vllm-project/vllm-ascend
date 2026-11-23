@@ -9,14 +9,14 @@ They have no individual entry point — they only ever run as one pipeline dispa
 
 | Product | Supported |
 | ------------------------------------------------------------ | :------: |
-|<term>Ascend 950PR/Ascend 950DT</term>|      √     |
-|<term>Atlas A3 Training Series Product/Atlas A3 Inference Series Product</term>|      √     |
-|<term>Atlas A2 Training Series Product/Atlas A2 Inference Series Product</term>|      √     |
+|<term>950PR&950DT Products</term>|      √     |
+|<term>Atlas A3 Products</term>|      √     |
+|<term>Atlas A2 Products</term>|      √     |
 |<term>Atlas 200I/500 A2 Inference Product</term>|      ×     |
 |<term>Atlas Inference Series Accelerator Card Product</term>|      ×     |
 |<term>Atlas Training Series Product</term>|      ×     |
 
-> The operator does not go through `DeviceOperator`: A2/A3 and Ascend 950 receive
+> The operator does not go through `DeviceOperator`: A2/A3 and 950PR&950DT Products receive
 > identical launch parameters and there is no adaptor branch.
 > On 310P, `HAS_TRITON` is False and BailingMoE linear attention does not take this path.
 > `_fwd_diag_kernel` additionally passes the Triton-Ascend private compilation options

@@ -1,0 +1,4 @@
+pr: 19785
+entries:
+  - category: bugfix
+    text: Fixed AscendStore engine crashes caused by stale KV pool load plans and save ranges exceeding the worker's allocated blocks.

@@ -31,15 +31,24 @@ from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.expert_transfer.expert_offload_utils import expert_offload_weights
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
+from vllm_ascend.ops.fused_moe.eplb import use_allgather_eplb
 from vllm_ascend.ops.fused_moe.force_eplb import get_force_eplb_topk
-from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
+from vllm_ascend.ops.fused_moe.moe_comm_method import (
+    AllGatherCommImpl,
+    FusedExpertsResult,
+    get_moe_comm_method,
+)
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
-from vllm_ascend.ops.fused_moe.shared_experts import FusedMoEEvents
+from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
+from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
@@ -55,11 +64,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     quant_type = QuantType.NONE
 
-    def __init__(self, moe: FusedMoEConfig = None, tid2eid=None):
+    def __init__(self, moe: FusedMoEConfig = None):
         super().__init__(moe=moe)
         vllm_config = get_current_vllm_config()
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
-        self.tid2eid = tid2eid
         self.lora_context = None
         self._lora_routing = None
 
@@ -118,11 +126,20 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
                 layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
             if use_megamoe or self.dynamic_eplb:
-                layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-                layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-                del layer.w13_weight
-                del layer.w2_weight
-                torch.npu.empty_cache()
+                if use_megamoe and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+                    logger.warning_once(
+                        "Unquantized MoE weights are not supported by the A5 mega moe "
+                        "(FUSED_MC2) operator. Falling back to the original MoE "
+                        "computation for this layer."
+                    )
+                    layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+                    layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+                else:
+                    layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+                    layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+                    del layer.w13_weight
+                    del layer.w2_weight
+                    torch.npu.empty_cache()
         else:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
@@ -316,18 +333,80 @@ def make_eplb_placement_config(eplb_config, num_redundant_experts: int) -> Simpl
     )
 
 
+def _empty_like_preserving_npu_format(tensor: torch.Tensor) -> torch.Tensor:
+    """Allocate an EPLB buffer with the source tensor's NPU storage format."""
+    if tensor.device.type != "npu":
+        return torch.empty_like(tensor)
+
+    # ACLNN-only devices force allow_internal_format=False, so torch.empty_like
+    # silently converts internal formats such as FRACTAL_NZ_C0_16 to ND. Use
+    # the explicit NPU allocator to preserve the expert's storage format.
+    assert tensor.storage_offset() == 0, (
+        "EPLB expert buffer allocation requires an offset-0 source "
+        f"tensor, but got storage_offset={tensor.storage_offset()}"
+    )
+
+    result = torch_npu.empty_with_format(
+        size=tensor.size(),
+        dtype=tensor.dtype,
+        layout=tensor.layout,
+        device=tensor.device,
+        acl_format=int(torch_npu.get_npu_format(tensor)),
+    )
+
+    assert result.stride() == tensor.stride(), (
+        "EPLB expert buffer allocation must preserve the source stride, "
+        f"but got source={tensor.stride()} and buffer={result.stride()}"
+    )
+    return result
+
+
 class EplbExpertTensorList(list[torch.Tensor]):
     """Per-expert tensors exposed through the upstream EPLB weight contract."""
+
+    def __init__(
+        self,
+        tensors: Iterable[torch.Tensor] = (),
+        nz_cast_spec: NzCastSpec | None = None,
+    ) -> None:
+        super().__init__(tensors)
+        # The cast these tensors were built with, when it was parameterized. A
+        # cast with customize_dtype/input_dtype lands on a C0 variant of
+        # FRACTAL_NZ, and whatever rebuilds these weights elsewhere has to
+        # reproduce it. The receive buffers inherit it through empty_like.
+        self.nz_cast_spec: NzCastSpec | None = nz_cast_spec
+
+    @property
+    def is_cuda(self) -> bool:
+        # NPU expert lists take the native per-row copy path rather than the
+        # CUDA kernel, which requires a single contiguous weight allocation.
+        return self[0].is_cuda
 
     @property
     def shape(self) -> torch.Size:
         return torch.Size((len(self), *self[0].shape))
 
+    def element_size(self) -> int:
+        # Upstream registers expert weights via
+        # `w.view(torch.uint8) if w.element_size() == 1 else w`, so the
+        # container must expose the underlying per-expert item size.
+        return self[0].element_size()
+
+    def view(self, dtype: torch.dtype) -> "EplbExpertTensorList":
+        # Mirror Tensor.view for a 1-byte dtype reinterpretation while keeping
+        # the per-expert container (and its aliasing semantics) intact. The
+        # reinterpretation is where upstream registers the weights, so the cast
+        # parameters have to survive it.
+        return type(self)((tensor.view(dtype) for tensor in self), self.nz_cast_spec)
+
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
-        if func is torch.empty_like:
+        if func is torch.empty_like and not kwargs:
             source = args[0]
-            return cls(torch.empty_like(tensor, **(kwargs or {})) for tensor in source)
+            return cls(
+                (_empty_like_preserving_npu_format(tensor) for tensor in source),
+                source.nz_cast_spec,
+            )
         return NotImplemented
 
 
@@ -343,21 +422,15 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     def __init__(
         self,
         *args,
-        tid2eid=None,
         n_shared_experts: int = 0,
         **kwargs,
     ):
-        object.__setattr__(self, "tid2eid", tid2eid)
-        super().__init__(*args, **kwargs)
+        with expert_offload_weights(self, get_ascend_config()):
+            super().__init__(*args, **kwargs)
         if self.quant_config is None:
             # Preserve the pre-refactor BF16 lifecycle: let upstream create
             # weights first, then install the Ascend execution method.
-            self._replace_quant_method(
-                AscendUnquantizedFusedMoEMethod(
-                    self.moe_config,
-                    tid2eid=self.tid2eid,
-                )
-            )
+            self._replace_quant_method(AscendUnquantizedFusedMoEMethod(self.moe_config))
         self.router: FusedMoERouter | None = None
         ascend_config = get_ascend_config()
         vllm_config = get_current_vllm_config()
@@ -379,7 +452,15 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.init_eplb(n_shared_experts)
         self.return_with_event = False
 
-    def get_expert_weights(self) -> Iterable[torch.Tensor]:
+        runner_type = getattr(vllm_config.model_config, "runner_type", None)
+        if runner_type is None:
+            logger.warning_once("The runner_type is not set when initializing the model config in the prefill stage")
+        else:
+            if vllm_config.model_config.runner_type == "draft":
+                draft_model_config = vllm_config.speculative_config.draft_model_config
+                draft_model_config.draft_moe_quant_type = self.quant_type
+
+    def get_expert_weights(self) -> Iterable[torch.Tensor | EplbExpertTensorList]:
         try:
             get_weight_views = self.quant_method.get_eplb_weight_views
         except AttributeError as exc:
@@ -399,7 +480,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                     )
                 if not all(is_weak_contiguous(expert_weight) for expert_weight in weight):
                     raise ValueError("Every tensor in an Ascend EPLB expert tensor list must be weakly contiguous.")
-                flattened_weights.append(EplbExpertTensorList(weight))
+                # A quant method that casts its experts with parameters hands
+                # the cast over on the view itself; keep it rather than
+                # rewrapping the tensors into a bare container.
+                flattened_weights.append(
+                    weight if isinstance(weight, EplbExpertTensorList) else EplbExpertTensorList(weight)
+                )
                 continue
             if weight.shape[0] != self.local_num_experts:
                 raise ValueError(
@@ -508,11 +594,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             return
         delattr(self, name)
         self.register_buffer(name, tensor)
-
-    def _get_quant_method(self, prefix, quant_config, moe_config):
-        if quant_config is None:
-            return super()._get_quant_method(prefix, quant_config, moe_config)
-        return quant_config.get_quant_method(self, prefix, tid2eid=self.tid2eid)
 
     def get_eplb_parameter(self, name: str):
         """Return an expert parameter from the refactored weight owner."""
@@ -632,10 +713,14 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         enable_force_load_balance = _EXTRA_CTX.in_profile_run
 
         lora_context = getattr(self, "_ascend_moe_lora_context", None)
+        moe_comm_method = get_moe_comm_method(_EXTRA_CTX.moe_comm_type, self.moe_config)
+        _EXTRA_CTX.moe_comm_method = moe_comm_method
+        assert moe_comm_method is not None
         if lora_context is not None:
             sync_lora_context(self.quant_method, lora_context)
 
-        prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
+        num_source_tokens = hidden_states.shape[0]
+        prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             # The SP model wrapper already shards and gathers the MoE sequence.
@@ -670,6 +755,27 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
 
+        if self._use_v2_model_runner:
+            eplb_state = self.router.eplb_state
+            if eplb_state is not None:
+                # eplb_state imports vllm_ascend.ops.fused_moe at module scope, so a
+                # top-level import here would close an import cycle.
+                from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
+
+                assert isinstance(eplb_state, AscendEplbLayerState)
+                all_gather_mask = None
+                if use_allgather_eplb():
+                    assert isinstance(moe_comm_method.prepare_finalize, PrepareAndFinalizeWithAllGather)
+                    all_gather_mask = moe_comm_method.prepare_finalize.all_gather_eplb_mask
+                eplb_state.record_load(
+                    fused_experts_results.expert_tokens,
+                    fused_experts_results.group_list_type,
+                    topk_ids=topk_ids,
+                    num_source_tokens=num_source_tokens,
+                    is_sequence_parallel=self.moe_config.is_sequence_parallel,
+                    all_gather_mask=all_gather_mask,
+                )
+
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens
             group_list_type = fused_experts_results.group_list_type
@@ -692,6 +798,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             else:
                 self.moe_load.add_(local_load)
 
+        assert _EXTRA_CTX.moe_comm_method is not None
         routed_out = _EXTRA_CTX.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
             reduce_results=isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl),
@@ -703,12 +810,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             sync_lora_context(self.quant_method, None)
 
         if self.return_with_event:
-            return routed_out, FusedMoEEvents(
-                before_routed_experts=None,
-                after_routed_experts=None,
-                before_dispatch=fused_experts_results.before_dispatch_evt,
-                before_gmm2=fused_experts_results.before_gmm2_evt,
-                before_combine=fused_experts_results.before_combine_evt,
+            return routed_out, RoutedMoEMilestones(
+                routed_dispatch_start=fused_experts_results.before_dispatch_evt,
+                shared_activation_overlap_start=fused_experts_results.shared_activation_overlap_start_evt,
+                routed_combine_start=fused_experts_results.before_combine_evt,
             )
 
         # The vLLM FusedMoE forward_impl does not return events.

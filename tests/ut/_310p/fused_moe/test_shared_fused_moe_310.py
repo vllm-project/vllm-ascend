@@ -14,8 +14,12 @@ from vllm_ascend._310p.fused_moe.fused_moe import (
     AscendUnquantizedFusedMoEMethod310,
 )
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
+    PreparedSharedExpertInput,
+    RoutedMoEMilestones,
+)
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts, FusedMoEEvents
+from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
 
 
 def _build_runner() -> AscendMoERunner310:
@@ -54,7 +58,7 @@ def test_routed_experts_310_uses_parent_unquantized_method_during_init(monkeypat
         specialized_method_factory,
     )
 
-    routed_experts = AscendRoutedExperts310(tid2eid="tid2eid", n_shared_experts=3)
+    routed_experts = AscendRoutedExperts310(n_shared_experts=3)
 
     assert routed_experts.quant_method is specialized_method
     specialized_method_factory.assert_called_once_with(moe_config)
@@ -84,9 +88,8 @@ def test_routed_experts_310_replaces_only_unquantized_method_after_parent_init(m
         specialized_method_factory,
     )
 
-    routed_experts = AscendRoutedExperts310(tid2eid="tid2eid", n_shared_experts=3)
+    routed_experts = AscendRoutedExperts310(n_shared_experts=3)
 
-    assert init_kwargs["tid2eid"] == "tid2eid"
     assert init_kwargs["n_shared_experts"] == 3
     if quant_config is None:
         assert routed_experts.quant_method is specialized_method
@@ -96,13 +99,14 @@ def test_routed_experts_310_replaces_only_unquantized_method_after_parent_init(m
         specialized_method_factory.assert_not_called()
 
 
-def test_runner_310_installs_specialized_comm():
+@pytest.mark.parametrize("with_shared_experts", [False, True])
+def test_runner_310_installs_specialized_comm(with_shared_experts):
     runner = _build_runner()
     moe_config = MagicMock()
     runner.moe_config = moe_config
     runner.gate = None
     routed_experts = SimpleNamespace(quant_config=None, quant_method=None)
-    runner.ascend_shared_experts = SimpleNamespace(multistream_overlap=True)
+    runner.ascend_shared_experts = SimpleNamespace(multistream_overlap=True) if with_shared_experts else None
     upstream_forward_entry = object()
     runner._select_forward = MagicMock(return_value=upstream_forward_entry)
     comm_method = object()
@@ -110,6 +114,7 @@ def test_runner_310_installs_specialized_comm():
     with (
         patch.object(AscendMoERunner, "__init__", return_value=None) as parent_init,
         patch.object(fused_moe_310_module, "AllGatherCommImpl310", return_value=comm_method),
+        patch.object(fused_moe_310_module, "configure_shared_experts_310") as configure,
         patch.dict(fused_moe_310_module._MoECommMethods, clear=False),
     ):
         AscendMoERunner310.__init__(
@@ -121,10 +126,15 @@ def test_runner_310_installs_specialized_comm():
         )
 
         assert routed_experts.quant_method is None
-        assert runner.ascend_shared_experts.multistream_overlap is False
-        assert runner._forward_entry is upstream_forward_entry
-        runner._select_forward.assert_called_once_with()
-        assert fused_moe_310_module._MoECommMethods[MoECommType.ALLGATHER] is comm_method
+        if with_shared_experts:
+            assert runner.ascend_shared_experts is not None
+            assert runner.ascend_shared_experts.multistream_overlap is True
+            configure.assert_called_once_with(runner.ascend_shared_experts)
+        else:
+            configure.assert_not_called()
+        runner._select_forward.assert_not_called()
+        key = fused_moe_310_module._moe_config_key(MoECommType.ALLGATHER, moe_config)
+        assert fused_moe_310_module._MoECommMethods[key] is comm_method
         parent_init.assert_called_once()
 
 
@@ -239,20 +249,15 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
     router_logits = torch.randn(2, 3)
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
+    prepared_shared_input = PreparedSharedExpertInput(hidden_states)
     ascend_shared_experts = SimpleNamespace(
         multistream_overlap=False,
-        local_input_from_gathered=MagicMock(return_value=hidden_states),
+        prepare_input_before_routed=MagicMock(return_value=prepared_shared_input),
         forward=MagicMock(return_value=shared_out),
     )
-    routed_events = FusedMoEEvents(
-        before_routed_experts=None,
-        after_routed_experts=None,
-        before_dispatch=None,
-        before_gmm2=None,
-        before_combine=None,
-    )
+    milestones = RoutedMoEMilestones()
     runner.routed_experts = SimpleNamespace(
-        forward_impl=MagicMock(return_value=(routed_out, routed_events) if has_shared_experts else routed_out)
+        forward_impl=MagicMock(return_value=(routed_out, milestones) if has_shared_experts else routed_out)
     )
     runner.ascend_shared_experts = ascend_shared_experts if has_shared_experts else None
     runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
@@ -264,6 +269,7 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
     result = runner._forward_impl(hidden_states, router_logits, shared_experts_input=None)
 
     if has_shared_experts:
+        ascend_shared_experts.prepare_input_before_routed.assert_called_once_with(hidden_states)
         runner.routed_experts.forward_impl.assert_called_once_with(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -271,7 +277,11 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
         )
         assert result[0] is shared_out
         assert result[1] is routed_out
-        ascend_shared_experts.forward.assert_called_once()
+        ascend_shared_experts.forward.assert_called_once_with(
+            prepared_shared_input,
+            milestones,
+            defer_output_wait=False,
+        )
     else:
         runner.routed_experts.forward_impl.assert_called_once_with(
             hidden_states=hidden_states,

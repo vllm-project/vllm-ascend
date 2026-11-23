@@ -4,9 +4,9 @@
 
 | 产品                                                         | 是否支持 |
 | ------------------------------------------------------------ | :------: |
-|<term>Ascend 950PR/Ascend 950DT</term>                        | √  |
-|<term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>        | √  |
-|<term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>        | √  |
+|<term>Ascend 950PR&Ascend 950DT 系列产品</term>                        | √  |
+|<term>Atlas A3 系列产品</term>        | √  |
+|<term>Atlas A2 系列产品</term>        | √  |
 |<term>Atlas 200I/500 A2推理系列产品</term>                    | ×  |
 |<term>Atlas 推理系列产品</term>                                | ×  |
 |<term>Atlas 训练系列产品</term>                                | ×  |
@@ -236,8 +236,8 @@
   </tbody>
 </table>
 <ul>
-  <li><term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term> ：num_heads_q/num_heads_kv仅支持1、2、4、8、16、32、64、128，不支持seqused_q、cmp_topk_length；SWA稀疏ori_kv场景支持ori_topk_length、ori_topk大于0及ori_mask_mode为0，ori_win_left和ori_win_right支持非负数；其他SWA场景ori_topk为0、ori_mask_mode为4、ori_win_left为127、ori_win_right为0；cmp_topk仅支持0、512、1024，cmp_mask_mode仅支持3，cmp_ratio在SWA支持0、CSA支持1、2或4、HCA支持128。</li>
-  <li><term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term> ：num_heads_q/num_heads_kv仅支持1、2、4、8、16、32、64、128，不支持seqused_q、cmp_topk_length；SWA稀疏ori_kv场景支持ori_topk_length、ori_topk大于0及ori_mask_mode为0，ori_win_left和ori_win_right支持非负数；其他SWA场景ori_topk为0、ori_mask_mode为4、ori_win_left为127、ori_win_right为0；cmp_topk仅支持0、512、1024，cmp_mask_mode仅支持3，cmp_ratio在SWA支持0、CSA支持1、2或4、HCA支持128。</li>
+  <li><term>Atlas A3 系列产品</term> ：num_heads_q/num_heads_kv仅支持1、2、4、8、16、32、64、128，不支持seqused_q、cmp_topk_length；SWA稀疏ori_kv场景支持ori_topk_length、ori_topk大于0及ori_mask_mode为0，ori_win_left和ori_win_right支持非负数；其他SWA场景ori_topk为0、ori_mask_mode为4、ori_win_left为127、ori_win_right为0；cmp_topk仅支持0、512、1024，cmp_mask_mode仅支持3，cmp_ratio在SWA支持0、CSA支持1、2或4、HCA支持128。</li>
+  <li><term>Atlas A2 系列产品</term> ：num_heads_q/num_heads_kv仅支持1、2、4、8、16、32、64、128，不支持seqused_q、cmp_topk_length；SWA稀疏ori_kv场景支持ori_topk_length、ori_topk大于0及ori_mask_mode为0，ori_win_left和ori_win_right支持非负数；其他SWA场景ori_topk为0、ori_mask_mode为4、ori_win_left为127、ori_win_right为0；cmp_topk仅支持0、512、1024，cmp_mask_mode仅支持3，cmp_ratio在SWA支持0、CSA支持1、2或4、HCA支持128。</li>
 </ul>
 
 ## 约束说明
@@ -250,7 +250,7 @@
     - 参数`seqused_q`、`seqused_ori_kv`、`seqused_cmp_kv`要求其值表示每个Batch中的有效token数。
     - `layout_q`和`layout_kv`组合仅支持"BSND"/"BSND"、"TND"/"TND"、"BSND"/"PA_BBND"、"TND"/"PA_BBND"；非PA_BBND场景下`layout_q`和`layout_kv`必须一致。
     - 参数`cmp_residual_kv`需满足`cmp_residual_kv`[i] < `cmp_ratio`。
-- Ascend 950PR/Ascend 950DT约束：
+- Ascend 950PR&950DT 系列产品约束：
     - has_ori_kv为true时，ori_topk大于0认为ori_kv部分是稀疏的，ori_topk为0则认为ori_kv部分是非稀疏的。
     - has_cmp_kv为true时，cmp_topk大于0认为cmp_kv部分是稀疏的，cmp_topk为0则认为cmp_kv部分是非稀疏的。
     - has_ori_kv为true，ori_topk不为0且ori_mask_mode为0时，ori_topk_length必须传入，此时取ori_mask_mode规则与ori_topk_length元素的最小值作为当前q token对应的ori_kv的有效seqlen，其他ori_kv稀疏场景取ori_mask_mode规则与ori_topk的最小值作为当前q token对应的ori_kv的有效seqlen。
@@ -282,11 +282,11 @@
         - layout_kv为BSND时，优先通过seqused_cmp_kv中的元素获取seqlen，seqused_cmp_kv未传入则通过max_seqlen_cmp_kv获取seqlen。
         - layout_kv为TND时，优先通过seqused_cmp_kv中的元素获取seqlen，seqused_cmp_kv未传入则通过cu_seqlens_cmp_kv中的元素获取seqlen。
         - layout_kv为PA_BBND时，优先通过seqused_cmp_kv中的元素获取seqlen，seqused_cmp_kv未传入则通过cmp_topk_length获取seqlen。
-- Atlas A3 训练系列产品/Atlas A3 推理系列产品约束：
+- Atlas A3 系列产品约束：
     - SWA稀疏ori_kv场景下，仅支持SWA模板，`has_ori_kv`为true、`has_cmp_kv`为false、`ori_topk`大于0、`ori_mask_mode`为0，`ori_win_left`和`ori_win_right`为非负数，且必须传入`ori_topk_length`。`ori_topk`应与配套主算子`ori_sparse_indices`最后一维K保持一致；`ori_topk_length`表示每个q token和KV head的左对齐有效索引条目数，取值应在[0, K]范围内；Metadata仅使用`ori_topk_length`生成任务切分。配套主算子在PA_BBND场景仍要求传入`seqused_ori_kv`。
     - `cmp_ratio`表示`cmp_kv`相对于压缩前KV长度的压缩倍率；仅传入`ori_kv`时传0且不参与压缩KV计算。CSA场景传1、2或4，HCA场景传128。
     - `cmp_topk`在CSA场景支持512或1024，SWA、HCA场景传0。
-- Atlas A2 训练系列产品/Atlas A2 推理系列产品约束：
+- Atlas A2 系列产品约束：
     - SWA稀疏ori_kv场景下，仅支持SWA模板，`has_ori_kv`为true、`has_cmp_kv`为false、`ori_topk`大于0、`ori_mask_mode`为0，`ori_win_left`和`ori_win_right`为非负数，且必须传入`ori_topk_length`。`ori_topk`应与配套主算子`ori_sparse_indices`最后一维K保持一致；`ori_topk_length`表示每个q token和KV head的左对齐有效索引条目数，取值应在[0, K]范围内；Metadata仅使用`ori_topk_length`生成任务切分。配套主算子在PA_BBND场景仍要求传入`seqused_ori_kv`。
     - `cmp_ratio`表示`cmp_kv`相对于压缩前KV长度的压缩倍率；仅传入`ori_kv`时传0且不参与压缩KV计算。CSA场景传1、2或4，HCA场景传128。
     - `cmp_topk`在CSA场景支持512或1024，SWA、HCA场景传0。

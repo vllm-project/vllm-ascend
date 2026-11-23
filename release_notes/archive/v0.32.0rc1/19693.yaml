@@ -1,0 +1,6 @@
+pr: 19693
+entries:
+  - category: bugfix
+    text: >-
+      Fixed AscendStore block-table corruption after Model Runner V2 preemption
+      recovery, restoring correct cache saves without the save-suppression workaround.

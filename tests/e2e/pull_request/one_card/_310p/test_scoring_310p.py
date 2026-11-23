@@ -9,7 +9,6 @@ CROSS_ENCODER_MODELS = [
     "BAAI/bge-reranker-v2-m3",  # Roberta
 ]
 
-
 TEXTS_1 = [
     "What is the capital of France?",
     "What is the capital of Germany?",
