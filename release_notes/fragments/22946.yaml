@@ -1,0 +1,4 @@
+pr: 22946
+entries:
+  - category: bugfix
+    text: Fixed a possible hang when SFA prefill context parallelism processes a short prompt tail with speculative decoding.
