@@ -889,8 +889,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 seq_lens = list(base_seq_lens)
             else:
                 seq_lens = [
-                    min(int(seq_len) + step, self.max_model_len)
-                    for seq_len in self.input_batch.seq_lens_np[:num_reqs]
+                    min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
                 ]
                 seq_lens.extend([0] * (num_reqs_padded - num_reqs))
             for layer_name, metadata in draft_attn_metadata.items():
