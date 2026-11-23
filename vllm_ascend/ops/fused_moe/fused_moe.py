@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
@@ -30,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
@@ -84,6 +86,8 @@ direct_register_custom_op(
 
 
 class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
+    _use_single_pair_add: bool = False
+
     def __init__(
         self,
         layer_name,
@@ -125,6 +129,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         )
         self._gate = gate
         self.hidden_size = moe_config.hidden_dim
+
+        config = get_current_vllm_config_or_none()
+        hf_config = getattr(getattr(config, "model_config", None), "hf_config", None)
+        self._use_single_pair_add = (
+            getattr(hf_config, "model_type", None) == "kimi_k31" or getattr(type(hf_config), "is_kimi_k31", False)
+        ) and get_current_hardware_profile().device_adaptor_family is DeviceAdaptorFamily.FP8_OPTIMIZED
 
         self.quant_type = routed_experts.quant_type
         self.routed_experts.router = router
@@ -180,16 +190,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         through the OOT PluggableLayer dispatch of ``MoERunner``).
 
         Upstream inlines the shared+routed output combine, which is not
-        exposed as an overridable hook. On NPU the combine goes through the
-        fused multi-tensor add kernel (``torch._foreach_add``), whose kernel
-        launch count is independent of the tensor-list length and which is
-        the NPU-validated fast path for the MoE combine. Every other step,
-        including the runtime-aware reduction hooks (#16550), is inherited
-        unchanged.
-
-        Future plan: once the aclnnAdd_AddAiCore_Add kernel is available via
-        the superkernel integration, upstream's plain add becomes the fast
-        path and this override can be dropped.
+        exposed as an overridable hook. Kimi K3.1 on A5 adds its single
+        shared/routed tensor pair directly. Other combinations use the fused
+        multi-tensor add kernel. The runtime-aware reduction hooks (#16550)
+        still apply.
         """
         # Apply transform for routed experts (e.g., latent projection for
         # latent MoE). When the caller pre-applies the routed input transform
@@ -278,10 +282,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # Apply output transform (e.g. latent -> full dim)
         fused_output = self.apply_routed_output_transform(fused_output)
 
-        if shared_output is not None:
-            result = torch._foreach_add([shared_output], [fused_output])[0]
-        else:
+        if shared_output is None:
             result = fused_output
+        elif self._use_single_pair_add:
+            result = shared_output + fused_output
+        else:
+            result = torch._foreach_add([shared_output], [fused_output])[0]
 
         result = self._maybe_reduce_final_output(result, og_hidden_dim_post_xform, fused_output_is_reduced)
 

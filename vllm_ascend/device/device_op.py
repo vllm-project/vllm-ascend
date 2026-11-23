@@ -1777,6 +1777,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         cp_interleave: int,
         qli_metadata: torch.Tensor,
         topk: int = 2048,
+        initialize_outputs: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """A5 computes causal prefixes internally and returns local IDs/BF16 scores."""
         return torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
@@ -1802,6 +1803,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             cp_rank=cp_rank,
             cp_kv_cache_interleave_size=cp_interleave,
             causal_seqlens_kv_global=global_seq_lens,
+            initialize_outputs=initialize_outputs,
         )
 
     @staticmethod

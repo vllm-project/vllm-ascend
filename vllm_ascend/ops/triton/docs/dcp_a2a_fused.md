@@ -90,6 +90,8 @@ with the operator is used only by PyTorch FakeTensor/`torch.compile` shape
 propagation. It returns an empty tensor with the local output metadata and does
 not execute a collective.
 
+For quantized Kimi K3.1 NoPE decode on A5, the optional device-side `valid_rows` endpoint passes through to both pack implementations. They emit zero output and zero LSE for padding while preserving the captured collective shape. Warmup covers the endpoint's pointer alignment variants.
+
 ## Validation
 
 The single-card nightly test covers BF16/FP16, both scatter dimensions,

@@ -40,6 +40,7 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.utils import (
     enable_sfa_dcp_force_tmajor_restore,
@@ -525,12 +526,20 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
     """DCP execution, inheriting the shared ordinary and PCP preprocessing."""
 
     can_return_lse_for_decode: bool = True
+    _pack_qsfa_padding: bool = False
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # Legacy MLAPO has no DCP cache writer; K3.1 PROLOG_V3 uses local owned slots.
         self.enable_mlapo = False
         self._sharded_indexer = enable_sfa_dcp_sharded_indexer(self.vllm_config)
+        self._pack_qsfa_padding = (
+            self.is_kimi_k31
+            and self.qk_rope_head_dim == 0
+            and self.enable_sparse_sfa_c8
+            and not self.enable_sparse_sfa_turboquant
+            and get_current_hardware_profile().device_adaptor_family is DeviceAdaptorFamily.FP8_OPTIMIZED
+        )
         # Shared Top-K buffers carry the same coordinates on every layer.
         self._local_topk = use_local_topk_output(
             self._sharded_indexer,
@@ -758,6 +767,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         sfa_output: torch.Tensor,
         softmax_lse: torch.Tensor,
         softmax_sum: torch.Tensor | None = None,
+        valid_rows: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # The replicated MTP draft disables logical PCP, but still shares the
         # target's physical PCP ranks and DCP-sharded KV cache.
@@ -773,6 +783,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 tp_group.unique_name,
                 pcp_group.unique_name,
                 softmax_sum=softmax_sum,
+                valid_rows=valid_rows,
             )
 
         assert self.dcp_group is not None, "DCP output All2All requires dcp_group when dcp_size > 1."
@@ -783,6 +794,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             1,
             self.dcp_group.unique_name,
             softmax_sum=softmax_sum,
+            valid_rows=valid_rows,
         )
 
     def _start_dcp_query_gather(
@@ -957,7 +969,8 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         # additional-config sfa_dcp_force_tmajor_restore=true keeps the
         # t-major materialization selectable for comparison runs.
         packed_query_kwargs = {}
-        if kv_cache[0].dtype in (torch.int8, torch.float8_e4m3fn, torch.float8_e5m2):
+        quantized = kv_cache[0].dtype in (torch.int8, torch.float8_e4m3fn, torch.float8_e5m2)
+        if quantized:
             # Quantized SFA consumes the complete gathered query on A3/A5.
             # The adaptor materializes contiguous TND storage when needed.
             packed_query_kwargs["packed_query"] = self._finish_dcp_packed_gather(
@@ -988,9 +1001,20 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             return_lse=True,
             **packed_query_kwargs,
         )
-        sfa_output, softmax_max, softmax_sum = self._mask_nope_dcp_padding(
-            sfa_output, actual_seq_lengths_query, softmax_max, softmax_sum
-        )
+        # A single KV head lets the stats reshape below remain a view. The
+        # pack reads the endpoint on device and keeps the collective shape.
+        valid_rows = None
+        if (
+            self._pack_qsfa_padding
+            and quantized
+            and softmax_max.shape[0] == 1
+            and actual_seq_lengths_query.dtype == torch.int32
+        ):
+            valid_rows = actual_seq_lengths_query[-1:]
+        else:
+            sfa_output, softmax_max, softmax_sum = self._mask_nope_dcp_padding(
+                sfa_output, actual_seq_lengths_query, softmax_max, softmax_sum
+            )
         # Form LSE while packing on every device; keep max/sum in FP32.
         softmax_lse = softmax_max
         sum_for_pack = softmax_sum.permute(1, 0, 2).reshape(softmax_sum.shape[1], -1, 1)
@@ -1000,5 +1024,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             sfa_output,
             softmax_lse,
             softmax_sum=sum_for_pack,
+            valid_rows=valid_rows,
         )
         return output.to(output_dtype)
