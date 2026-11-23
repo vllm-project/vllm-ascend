@@ -1,4 +1,8 @@
-#include "../../common/sol_attn/tensorutils_cce.h"
+#if __has_include("../../common/op_kernel/sol_attn_tensorutils_cce.h")
+#include "../../common/op_kernel/sol_attn_tensorutils_cce.h"
+#else
+#include "../common/sol_attn_tensorutils_cce.h"
+#endif
 using namespace ascrip;
 #include "sol_attn_fwd_m128_kernel_cube.h"
 #include "sol_attn_fwd_m128_kernel_vec.h"

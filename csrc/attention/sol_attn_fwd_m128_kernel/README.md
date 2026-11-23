@@ -8,7 +8,7 @@ from vllm_ascend.ops.sol_attn import sol_attn
 output, lse = sol_attn(q, k, v, tau=1.0, return_lse=True)
 ```
 
-The output has the same shape and dtype as Q. The optional LSE has shape `[B, H, T]` and dtype FP32. `scale` defaults to `128**-0.5`. `tau` sets the diagonal-statistics routing threshold. `sink_tokens` and `sink_start` specify a range of tokens whose KV blocks are always exact. When `sink_start` is omitted, the range ends at the last token.
+The output has the same shape and dtype as Q. The optional LSE is base-2 log-sum-exp with shape `[B, H, T]` and dtype FP32. `scale` defaults to `128**-0.5`. `tau` sets the diagonal-statistics routing threshold. `sink_tokens` and `sink_start` specify a range of tokens whose KV blocks are always exact. When `sink_start` is omitted, the range ends at the last token.
 
 The Python entry point pads K and V, computes block summaries and diagonal thresholds, and calls `torch.bmm` in head chunks before packing routes and launching the mixed Cube/Vector forward kernel. The four underlying `torch.ops._C_ascend` operators write to caller-owned buffers.
 

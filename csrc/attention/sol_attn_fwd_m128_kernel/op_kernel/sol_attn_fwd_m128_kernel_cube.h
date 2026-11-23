@@ -1,5 +1,4 @@
 #pragma once
-#include "../../common/sol_attn/tensorutils_cce.h"
 using namespace ascrip;
 
 __aicore__ inline void sol_attn_fwd_m128_kernel_cube(GM_ADDR q_, GM_ADDR k_pad_, GM_ADDR v_pad_, GM_ADDR kc_padded_, GM_ADDR vc_padded_, GM_ADDR flat_exact_cnt_, GM_ADDR flat_exact_idx_, GM_ADDR group_approx_mask_, GM_ADDR last_group_lens_, GM_ADDR out_, GM_ADDR lse_, int32_t B, int32_t T, int32_t H, int32_t NT, int32_t NT_Q, int32_t NG, int32_t NPAD, int32_t T_PAD_KV, int32_t NT_Q_PAD8, int32_t T_LSE, float scale_log2, GM_ADDR workspace)

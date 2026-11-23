@@ -1,5 +1,4 @@
 #pragma once
-#include "../../common/sol_attn/tensorutils_cce.h"
 using namespace ascrip;
 
 __aicore__ inline void sol_attn_prepare_route_pack_kernel_vec(GM_ADDR raw_scores_, GM_ADDR thresh_bh_, GM_ADDR group_approx_mask_, GM_ADDR flat_exact_cnt_, GM_ADDR flat_exact_idx_, int32_t HC, int32_t NT, int32_t NT_Q, int32_t NG, int32_t NPAD, int32_t NT_Q_PAD8, int32_t TILE_M, int32_t sink_s0, int32_t sink_s1, float scale_log2, GM_ADDR workspace)

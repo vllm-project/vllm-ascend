@@ -33,7 +33,7 @@ def sol_attn(
     NPU. The default scale is 128**-0.5. Larger tau values increase the
     threshold for exact block attention. A nonempty sink covers a contiguous
     range of exact KV blocks and defaults to the last sink_tokens input tokens.
-    The optional FP32 log-sum-exp tensor has shape [B, H, T].
+    The optional FP32 base-2 log-sum-exp tensor has shape [B, H, T].
     """
     if q.ndim != 4 or q.shape != k.shape or q.shape != v.shape:
         raise ValueError("Sol-Attn requires equal Q/K/V shapes [B, T, H, 128].")

@@ -28,7 +28,7 @@
 #ifndef __aicore__
 #define __aicore__ [aicore]
 #endif
-#include "scalar_math.h"
+#include "sol_attn_scalar_math.h"
 #ifndef GM_ADDR
 #define GM_ADDR __gm__ uint8_t*
 #endif

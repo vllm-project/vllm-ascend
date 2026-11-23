@@ -48,7 +48,8 @@ def test_sol_attn_all_exact(npu_device):
     )
     _assert_relative_l2(out.cpu(), dense.cpu(), 3e-3)
     scores = q.cpu().transpose(1, 2).float() @ k.cpu().permute(0, 2, 3, 1).float()
-    torch.testing.assert_close(lse.cpu(), (scores * scale).logsumexp(dim=-1), rtol=1e-3, atol=3e-3)
+    expected_lse = (scores * scale).logsumexp(dim=-1) * math.log2(math.e)
+    torch.testing.assert_close(lse.cpu(), expected_lse, rtol=1e-3, atol=3e-3)
 
 
 def _sparse_reference(q, k, v, sink_block):

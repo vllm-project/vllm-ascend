@@ -1,5 +1,4 @@
 #pragma once
-#include "../../common/sol_attn/tensorutils_cce.h"
 using namespace ascrip;
 
 __aicore__ inline void sol_attn_prepare_diag_thresh_kernel_vec(GM_ADDR q_bar_f32_, GM_ADDR kc_pad_f32_, GM_ADDR thresh_bh_, int32_t B, int32_t H, int32_t NT, int32_t NG, int32_t NPAD, float scale_log2, float tau, float inv_nt, GM_ADDR workspace)

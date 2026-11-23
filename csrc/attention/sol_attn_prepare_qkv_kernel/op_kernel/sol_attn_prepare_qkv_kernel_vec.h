@@ -1,5 +1,4 @@
 #pragma once
-#include "../../common/sol_attn/tensorutils_cce.h"
 using namespace ascrip;
 
 __aicore__ inline void sol_attn_prepare_qkv_kernel_vec(GM_ADDR q_, GM_ADDR k_, GM_ADDR v_, GM_ADDR k_pad_, GM_ADDR v_pad_, GM_ADDR kc_padded_, GM_ADDR vc_padded_, GM_ADDR kc_pad_f32_, GM_ADDR q_bar_f32_, GM_ADDR last_group_lens_, int32_t B, int32_t T, int32_t H, int32_t NT, int32_t NG, int32_t NPAD, int32_t T_PAD_KV, float inv_tail_len, GM_ADDR workspace)
