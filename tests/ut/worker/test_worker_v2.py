@@ -422,7 +422,7 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
                 if not has_draft:
                     worker.model_runner.get_draft_model = lambda: None
                 self.assertFalse(worker.supports_draft_weight_updates())
-                with self.assertRaisesRegex(RuntimeError, "do not support pipeline parallelism"):
+                with self.assertRaisesRegex(RuntimeError, "without pipeline parallelism"):
                     worker.start_draft_weight_update()
                 worker.weight_transfer_engine.start_weight_update.assert_not_called()
 

@@ -25,7 +25,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from fnmatch import filter as fnmatch_filter
 from threading import RLock
 from types import NoneType
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 from unittest.mock import patch
 
 import torch
@@ -366,22 +366,20 @@ class NPUWorker(GPUWorker):
 
     def start_draft_weight_update(self) -> None:
         self._check_weight_transfer_engine()
-        if self.parallel_config.pipeline_parallel_size > 1:
-            raise RuntimeError("Draft weight updates do not support pipeline parallelism.")
         if self._weight_update_active:
             raise RuntimeError("A weight update is already active. Call finish_weight_update first.")
         if not self.supports_draft_weight_updates():
             raise RuntimeError(
-                "Draft weight updates require Model Runner V2, a configured draft model "
+                "Draft weight updates require Model Runner V2 without pipeline parallelism, a configured draft model "
                 "and a supporting weight transfer engine."
             )
         self._check_nz_disabled()
-        assert self.weight_transfer_engine is not None
+        engine = cast("WeightTransferEngine", self.weight_transfer_engine)
         try:
             self._set_draft_weight_update_target()
-            self.weight_transfer_engine.start_weight_update()
+            engine.start_weight_update()
         except BaseException:
-            self.weight_transfer_engine.reset_weight_update_target()
+            engine.reset_weight_update_target()
             raise
         self._draft_weight_update_active = True
         self._weight_update_active = True
