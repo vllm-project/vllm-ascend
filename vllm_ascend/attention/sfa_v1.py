@@ -68,6 +68,7 @@ from vllm_ascend.quantization.methods import (
     AscendW8A8LinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQuantLatent
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
@@ -904,9 +905,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         # applies only to layers that own an indexer cache.
         self._update_indexer_cache_enabled()
         self.store_kv_cache_on_host = ascend_config.sparse_kv_offload_config.enabled
+        # The draft cache dtype can differ from the target config.
         self.kv_cache_dtype = self.vllm_config.cache_config.cache_dtype
-        self.enable_sparse_sfa_turboquant = ascend_config.enable_sparse_sfa_turboquant
-        self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
+        self.enable_sparse_sfa_turboquant = self.kv_cache_dtype == TURBOQUANT_CACHE_DTYPE
+        self.enable_sparse_sfa_c8 = self.kv_cache_dtype in ("int8", "fp8")
         if self.enable_sparse_sfa_c8:
             self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
                 self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
