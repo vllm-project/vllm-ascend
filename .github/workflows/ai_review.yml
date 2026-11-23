@@ -14,8 +14,16 @@ concurrency:
 jobs:
   ai-review:
     # POC gray release: the workflow only reacts to the explicit `ai-review`
-    # label / @ai-review mentions, and only for allowlisted PR authors.
-    # It runs on the self-hosted CPU pool and never consumes NPU runners.
+    # command family and only for allowlisted PR authors. The job-level if
+    # keeps unrelated PR comments from even starting a job on the CPU pool —
+    # comment-triggered workflows otherwise spin up one container per repo
+    # comment. issue_comment also fires on plain issues, so require a PR.
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (
+        github.event.issue.pull_request != null &&
+        contains(github.event.comment.body, '/ai-review')
+      )
     runs-on: linux-amd64-cpu-2-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:ai-review
