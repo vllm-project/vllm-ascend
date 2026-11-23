@@ -240,8 +240,15 @@ def _pool_kernel(
     NO_PAD: tl.constexpr,
     HAS_PREV_ROWS: tl.constexpr,
     TOKEN_ALIGNED: tl.constexpr = False,
-    store_ptrs=None,
-    STORE_STRIDES: tl.constexpr = (),
+    long_cache=None,
+    long_slots=None,
+    long_cos=None,
+    long_sin=None,
+    CACHE_PAGE_STRIDE: tl.constexpr = 0,
+    CACHE_ROW_STRIDE: tl.constexpr = 0,
+    SLOT_ROW_STRIDE: tl.constexpr = 0,
+    COS_ROW_STRIDE: tl.constexpr = 0,
+    SIN_ROW_STRIDE: tl.constexpr = 0,
     STORE_ROPE_DIM: tl.constexpr = 0,
 ):
     pid = tl.program_id(0)
@@ -347,7 +354,21 @@ def _pool_kernel(
                 latent = pooled.to(tl.bfloat16)
                 if STORE_ROPE_DIM:
                     latent = _normalize_and_store_long_kv(
-                        latent, norm_w, out_row, store_ptrs, STORE_STRIDES, EPS, HEAD_DIM, STORE_ROPE_DIM
+                        latent,
+                        norm_w,
+                        out_row,
+                        long_cache,
+                        long_slots,
+                        long_cos,
+                        long_sin,
+                        CACHE_PAGE_STRIDE,
+                        CACHE_ROW_STRIDE,
+                        SLOT_ROW_STRIDE,
+                        COS_ROW_STRIDE,
+                        SIN_ROW_STRIDE,
+                        EPS,
+                        HEAD_DIM,
+                        STORE_ROPE_DIM,
                     )
                 tl.store(out_ptr + out_row * HEAD_DIM + offs_h, latent)
             else:
@@ -805,11 +826,8 @@ def compressor_from_projected(
     store_args = {}
     norm_weight, eps = out, 0.0
     if cache_store is not None:
-        store_ptrs, store_strides = cache_store.kernel_args()
         norm_weight, eps = cache_store.weight, cache_store.eps
-        store_args = dict(
-            store_ptrs=store_ptrs, STORE_STRIDES=store_strides, STORE_ROPE_DIM=ROPE_DIM, enable_fp_fusion=False
-        )
+        store_args = dict(STORE_ROPE_DIM=ROPE_DIM, enable_fp_fusion=False, **cache_store.kernel_args())
     # Same-stream launch order is required: residual reads precede ring writes.
     _pool_kernel[(min(num_cores, batches * groups),)](
         out,
