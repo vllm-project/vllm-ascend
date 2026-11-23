@@ -119,7 +119,7 @@ Select an image for the deployment platform and host operating system, and start
 
 After starting the container, run `docker ps` in another terminal and confirm that the container specified by `--name` is listed with status `Up`. The commands above use `--rm`, which removes the container when it exits; if startup fails, inspect the output in the launch terminal first. To retain the exit status and logs, rerun without `--rm`, then inspect the container with `docker ps -a` and `docker logs <CONTAINER_NAME>`.
 
-The containers above use privileged mode, host networking, and writable host mounts, and are intended for a controlled deployment environment. Services listen on `0.0.0.0`, and the examples do not configure access authentication; restrict network access to Proxy, engine, and cache service ports. Save scripts, configuration, and logs that must persist in explicitly mounted directories. `--rm` removes files in the container writable layer but does not delete host files in bind-mounted directories.
+The containers above use host networking and writable host mounts, and are intended for a controlled deployment environment. Services listen on `0.0.0.0`, and the examples do not configure access authentication; restrict network access to Proxy, engine, and cache service ports. Save scripts, configuration, and logs that must persist in explicitly mounted directories. `--rm` removes files in the container writable layer but does not delete host files in bind-mounted directories.
 
 ### 4.2 Source Code Installation {: #42-source-code-installation}
 
