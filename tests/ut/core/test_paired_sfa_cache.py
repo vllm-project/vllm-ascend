@@ -9,6 +9,7 @@ import pytest
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
 
+from vllm_ascend.attention import attention_v1
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
@@ -74,10 +75,12 @@ def make_config():
         pytest.param("turboquant", "c4", 4, id="packed-main-replicated-c4-indexer"),
     ],
 )
-def test_paired_sfa_runtime_views(monkeypatch, main_format, indexer_format, replicas):
+@pytest.mark.parametrize("layout", ["NHD", "HND"])
+def test_paired_sfa_runtime_views(monkeypatch, main_format, indexer_format, replicas, layout):
     main_name = "model.layers.0.attn"
     indexer_name = "model.layers.0.indexer.k_cache"
     state_name = "model.layers.1.linear_attn"
+    draft_name = "model.layers.2.attn"
     manager_block_size, kernel_block_size = 256, 128
     main_widths = {"split": (512, 64), "c8": (656,), "turboquant": (386,)}[main_format]
     main_dtype = torch.bfloat16 if main_format == "split" else torch.int8
@@ -119,14 +122,24 @@ def test_paired_sfa_runtime_views(monkeypatch, main_format, indexer_format, repl
         mamba_cache_mode="align",
         page_size_padded=main_spec.page_size_bytes,
     )
+    draft_spec = FullAttentionSpec(
+        block_size=manager_block_size,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.bfloat16,
+        is_draft=True,
+    )
     vllm_config = make_config()
-    specs = {main_name: main_spec, indexer_name: indexer_spec, state_name: state_spec}
+    vllm_config.model_config.max_model_len = 32768
+    vllm_config.parallel_config = SimpleNamespace(decode_context_parallel_size=1)
+    specs = {main_name: main_spec, indexer_name: indexer_spec, state_name: state_spec, draft_name: draft_spec}
     groups = paired_sfa_cache_groups(vllm_config, specs)
     config = paired_sfa_cache_config(vllm_config, groups, 2 * paired_sfa_pool_bytes(groups))
     backends = {
         main_name: AscendSFABackend,
         indexer_name: AscendSFAIndexerBackend,
         state_name: KimiKDAHostMetadataBackend,
+        draft_name: attention_v1.AscendAttentionBackend,
     }
     layers = {
         name: SimpleNamespace(get_attn_backend=lambda backend=backend: backend) for name, backend in backends.items()
@@ -134,6 +147,7 @@ def test_paired_sfa_runtime_views(monkeypatch, main_format, indexer_format, repl
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
     monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
+    monkeypatch.setattr(attention_v1.envs_vllm, "VLLM_KV_CACHE_LAYOUT", layout)
 
     kernel_block_sizes = [kernel_block_size, manager_block_size]
     caches = attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), None, kernel_block_sizes)
@@ -159,6 +173,22 @@ def test_paired_sfa_runtime_views(monkeypatch, main_format, indexer_format, repl
     assert [view.dtype for view in states] == list(state_spec.dtypes)
     assert main[0].data_ptr() == states[0].data_ptr()
     assert indexer[0].data_ptr() - main[0].data_ptr() == 2 * main_spec.page_size_bytes
+
+    draft = caches[draft_name]
+    assert isinstance(draft, tuple) and len(draft) == 2
+    key, value = draft
+    expected_shape = (4, 2, kernel_block_size, 64) if layout == "HND" else (4, kernel_block_size, 2, 64)
+    assert key.shape == value.shape == expected_shape
+    assert key.dtype == value.dtype == draft_spec.dtype
+    descriptor = next(tensor for tensor in config.kv_cache_tensors if tensor.layers == [draft_name])
+    backing_base = main[0].data_ptr() - next(
+        tensor.offset for tensor in config.kv_cache_tensors if tensor.layers == [main_name]
+    )
+    assert key.data_ptr() == backing_base + descriptor.offset
+    assert value.data_ptr() - key.data_ptr() == key[0].nbytes
+    assert (
+        key.stride(0) * key.element_size() == value.stride(0) * value.element_size() == draft_spec.page_size_bytes // 2
+    )
 
 
 def test_token_blocks_unchanged_and_components_share_ids():
