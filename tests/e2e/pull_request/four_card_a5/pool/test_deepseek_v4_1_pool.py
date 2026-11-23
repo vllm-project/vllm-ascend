@@ -126,9 +126,11 @@ def _leg(use_pool: bool, case_name: str):
         "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "PYTHONHASHSEED": "0",
-        # 950PR/950DT uses the UB super plane by default; automatic UB endpoint
-        # generation only needs ASCEND_LOCAL_COMM_RES. Forcing uboe:device here
-        # fails on runners without UBoE endpoints (E19999 GenDefaultUboeEndpoint).
+        # 950PR/950DT runs the UB super plane. Selecting the UBG protocol
+        # explicitly avoids the auto-detect path that aborts the container when
+        # protocol_desc is unset, while UBoE endpoints are not provisioned on
+        # every A5 runner (E19999 GenDefaultUboeEndpointConfig).
+        "ASCEND_GLOBAL_RESOURCE_CONFIG": '{"comm_resource_config.protocol_desc":["ub_rtp:device"]}',
         "ASCEND_LOCAL_COMM_RES": '{"version":"1.3"}',
         # DP8 settings mirrored from PR #22258's known-good A5 config.
         "HCCL_OP_EXPANSION_MODE": "CCU_SCHED",
