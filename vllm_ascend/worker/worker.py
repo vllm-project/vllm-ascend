@@ -436,12 +436,22 @@ class NPUWorker(GPUWorker):
 
     def sleep(self, level: int = 1) -> None:
         backend_name = getattr(self.model_config, "sleep_mode_backend", "cumem")
-        if hasattr(GPUWorker, "_discardable_parameters") and backend_name not in ("cumem", "camem"):
+        if backend_name == "cumem":
+            raise ValueError(
+                "Sleep mode requires the Ascend 'camem' backend; the default "
+                "'cumem' name was not normalized. NPUPlatform.check_and_update_config "
+                "must run before sleep."
+            )
+        if hasattr(GPUWorker, "_discardable_parameters") and backend_name != "camem":
             raise ValueError(
                 "Third-party sleep-mode backends are not supported on this vLLM "
                 "version until discardable support is added; use the in-tree "
                 "camem backend."
             )
+
+        # Resolve the backend before cleanup or KV unregistration so a bad
+        # backend configuration leaves the worker state intact.
+        backend = self.sleep_mode_backend
         self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Level-1 only offloads the weights pool. Persistent metadata such as
@@ -463,7 +473,7 @@ class NPUWorker(GPUWorker):
         self.synchronize_device()
 
         global_te.unregister_buffer()
-        self.sleep_mode_backend.suspend(level)
+        backend.suspend(level)
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
