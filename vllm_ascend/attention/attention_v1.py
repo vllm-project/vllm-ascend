@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -929,7 +930,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             _, _, block_size, _ = key.shape
         return key, value, block_size
 
-    def _materialize_bnsd_pa_read(self, block_table: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _materialize_bnsd_pa_read(
+        self, block_table: torch.Tensor, max_kv_len: int | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Gather the head-major KV cache into the form the FIA kernel reads.
 
         aclnnFusedInferAttentionScore has no kv-cache layout parameter: in
@@ -946,11 +949,25 @@ class AscendAttentionBackendImpl(AttentionImpl):
         device tensor produces a data-dependent output shape, which forces
         the host synchronization AsyncScheduler must avoid, and in the
         common case (requests not sharing physical blocks) every table
-        entry is distinct so there is nothing to remove. The full-table-
-        width gather matches the ACL-graph capture path (a static shape is
-        required there); duplicate blocks are harmless because each row is
-        read by the kernel only up to its seq len, and unfilled entries
-        are clamped to block 0. The gathered size is batch x table-width
+        entry is distinct so there is nothing to remove. Duplicate blocks
+        are harmless because each row is read by the kernel only up to its
+        seq len, and unfilled entries are clamped to block 0.
+
+        The gathered width differs by execution mode. Under ACL-graph
+        capture (_EXTRA_CTX.capturing) the full table width is mandatory:
+        the captured shape must be static, the capture dummy table covers
+        the maximum replay width, and the padding row appended for the
+        synthetic replay request relies on that fixed width, so
+        max_kv_len is ignored there. On the eager path max_kv_len - the
+        batch-maximum live KV length the caller already holds on the host -
+        bounds the gather to ceil(max_kv_len / block_size) columns, copying
+        only the pages this batch actually reads instead of the full
+        block-table width (unused columns, repeated block-0 padding
+        included, would otherwise be copied too and can OOM a wide batch
+        on the first cached read). The bound is a scalar maximum over the
+        batch, so it introduces no device-to-host read and no per-request
+        variable shapes; None keeps the full width for callers without
+        the live lengths. The gathered size is batch x gathered-width
         blocks per layer per step - never more than the dedup worst case,
         only forgoing the shrink of shared prefixes - and is the documented
         read overhead of the HND layout.
@@ -961,14 +978,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
         overhead of the HND layout.
         """
         num_rows, table_width = block_table.shape
+        block_size = self.key_cache.shape[2]
+        if max_kv_len is not None and not _EXTRA_CTX.capturing:
+            # Eager callers hold the live KV lengths on the host, so only
+            # the pages this batch actually reads need gathering. The
+            # batch-maximum scalar keeps one static shape per step and
+            # needs no device-to-host read; capture keeps the full width.
+            needed_width = max(1, math.ceil(max_kv_len / block_size))
+            block_table = block_table[:, : min(table_width, needed_width)]
+            num_rows, table_width = block_table.shape
         # Unfilled table entries can hold negative ids; rows are read by the
         # kernel only up to each request's seq len, so mapping them to block
-        # 0 is safe. Gather the full table width (see the docstring: no
+        # 0 is safe. Gather the selected table width (see the docstring: no
         # device-side dedup, so no host synchronization).
         flat_ids = block_table.reshape(-1).to(torch.int64).clamp(min=0)
         num_gathered = flat_ids.numel()
         remapped = torch.arange(num_gathered, device=flat_ids.device)
-        block_size = self.key_cache.shape[2]
 
         def to_token_major(cache: torch.Tensor) -> torch.Tensor:
             # (U, H, block, D) -> (U, block, H * D); the reshape copies once.
@@ -1038,8 +1063,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if block_table is not None and self.use_bnsd_kv_cache:
             # The head-major (BNSD/HND) cache has no zero-copy form the FIA
             # kernel reads in page-attention mode; gather the referenced
-            # blocks into the token-major layout the kernel accepts.
-            key, value, block_table = self._materialize_bnsd_pa_read(block_table)
+            # blocks into the token-major layout the kernel accepts. Eager
+            # callers bound the gather by the batch-maximum live KV length
+            # from the host-side seq_lens_list, so unused table columns
+            # (repeated block-0 padding included) are not copied; graph
+            # capture keeps the full static width (max_kv_len=None).
+            max_kv_len = None
+            if not _EXTRA_CTX.capturing:
+                # Host-side per-request KV lengths: a scalar batch-maximum
+                # bound avoids any device-to-host read. Absent, empty, or
+                # non-list values fall back to the full table width.
+                seq_lens_list = attn_metadata.seq_lens_list
+                if isinstance(seq_lens_list, (list, tuple)) and seq_lens_list:
+                    max_kv_len = max(seq_lens_list)
+            key, value, block_table = self._materialize_bnsd_pa_read(block_table, max_kv_len)
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
     def forward_fused_infer_attention(

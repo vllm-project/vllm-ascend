@@ -23,6 +23,10 @@ These tests pin the fixed contract:
    via one extra gathered slot holding physical block 0 and one extra
    remapped row mapping to that slot.
 4. The eager path is unchanged: no padding row outside graph capture.
+5. The eager gather is bounded by the live KV lengths (the P2 review of
+   zhaochuang001): the host-side seq_lens_list batch maximum limits the
+   gathered width to the pages the batch actually reads, while graph
+   capture keeps the full static width.
 
 The tests run on CPU tensors only (no NPU device or torch_npu ops are
 executed; the torch_npu symbols referenced by full_graph_fia are stubbed).
@@ -54,6 +58,23 @@ NUM_HEADS = 4
 PHYSICAL_TABLE = torch.tensor([[3, 6], [0, 2]], dtype=torch.int32)
 NUM_ROWS, TABLE_WIDTH = PHYSICAL_TABLE.shape
 NUM_GATHERED = NUM_ROWS * TABLE_WIDTH
+
+# A wide block table (the P2 review scenario): only the first two columns
+# are live; the remaining columns are unfilled (-1) or repeated block-0
+# padding that a full-width eager gather would copy for nothing.
+WIDE_TABLE = torch.tensor(
+    [
+        [0, 1, 0, 0, 0, 0, 0, 0],
+        [2, 3, -1, -1, -1, -1, -1, -1],
+        [4, 5, -1, -1, -1, -1, -1, -1],
+        [6, 0, -1, -1, -1, -1, -1, -1],
+    ],
+    dtype=torch.int32,
+)
+WIDE_ROWS, WIDE_WIDTH = WIDE_TABLE.shape
+# Live KV lengths: the batch maximum is 8 tokens = 2 blocks at BLOCK_SIZE.
+WIDE_SEQ_LENS = [8, 5, 7, 4]
+WIDE_BOUND_WIDTH = 2
 
 
 def _make_backend():
@@ -381,3 +402,122 @@ class TestGatheredLayoutHelper:
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(attention_v1.envs_vllm, "VLLM_KV_CACHE_LAYOUT", layout)
             assert helper() is expected
+
+
+class TestBoundedEagerGather:
+    """Bound the HND gather by the live KV lengths (P2, zhaochuang001).
+
+    PR #22649 review: cached-read eager paths passed the full block-table
+    width, so index_select copied unused entries too - repeated block 0
+    included. At 128 requests x 1,024 table columns, 128 tokens per block,
+    8 KV heads and head dim 128, the BF16 K and V results alone require
+    64 GiB even if every request has a short prefix, which can OOM on the
+    first cached read. The fix uses the eager caller's host-side
+    seq_lens_list batch maximum to bound the gather to the pages this
+    batch actually needs, avoiding a device-to-host read.
+    """
+
+    def test_eager_gather_bounded_by_live_kv_lengths(self):
+        backend = _make_backend()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(attention_v1, "_EXTRA_CTX", SimpleNamespace(capturing=False))
+            key, value, remapped = backend._materialize_bnsd_pa_read(WIDE_TABLE.clone(), max_kv_len=max(WIDE_SEQ_LENS))
+        gathered = WIDE_ROWS * WIDE_BOUND_WIDTH
+        # The bound applies: only the live columns are gathered.
+        assert key.shape == (gathered, BLOCK_SIZE, NUM_KV_HEADS * HEAD_DIM)
+        assert value.shape == (gathered, BLOCK_SIZE, NUM_KV_HEADS * HEAD_DIM)
+        # The FIA contract is unchanged: the remapped table stays the
+        # sequential 0..N-1 mapping, with no padding row outside capture.
+        assert remapped.shape == (WIDE_ROWS, WIDE_BOUND_WIDTH)
+        assert remapped.flatten().tolist() == list(range(gathered))
+        # FIA reads gathered[remapped[r, c]]: it must observe the
+        # token-major view of the live physical block WIDE_TABLE[r, c].
+        for r in range(WIDE_ROWS):
+            for c in range(WIDE_BOUND_WIDTH):
+                physical_slot = torch.tensor([int(WIDE_TABLE[r, c])], dtype=torch.int64)
+                assert torch.equal(
+                    key[int(remapped[r, c])],
+                    _expected_token_major(backend.key_cache, physical_slot)[0],
+                )
+
+    @pytest.mark.parametrize(
+        "state",
+        [
+            AscendAttentionState.DecodeOnly,
+            AscendAttentionState.PrefillCacheHit,
+            AscendAttentionState.ChunkedPrefill,
+        ],
+    )
+    def test_cached_read_states_derive_bound_from_seq_lens_list(self, state):
+        """Every eager cached-read state gets the bound from the host-side
+        seq_lens_list (PrefillNoCache is untouched: block_table is None)."""
+        backend = _make_backend()
+        metadata = SimpleNamespace(
+            attn_state=state,
+            block_tables=WIDE_TABLE.clone(),
+            seq_lens_list=list(WIDE_SEQ_LENS),
+            seq_lens=torch.tensor(WIDE_SEQ_LENS, dtype=torch.int32),
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(attention_v1, "_EXTRA_CTX", SimpleNamespace(capturing=False))
+            key, value, block_size, block_table, actual_seq_lengths_kv = backend._get_fia_params(None, None, metadata)
+        assert actual_seq_lengths_kv == WIDE_SEQ_LENS
+        assert block_size == BLOCK_SIZE
+        assert block_table.shape == (WIDE_ROWS, WIDE_BOUND_WIDTH)
+        assert key.shape == (WIDE_ROWS * WIDE_BOUND_WIDTH, BLOCK_SIZE, NUM_KV_HEADS * HEAD_DIM)
+
+    def test_missing_seq_lens_list_falls_back_to_full_width(self):
+        backend = _make_backend()
+        metadata = SimpleNamespace(
+            attn_state=AscendAttentionState.DecodeOnly,
+            block_tables=WIDE_TABLE.clone(),
+            seq_lens_list=None,
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(attention_v1, "_EXTRA_CTX", SimpleNamespace(capturing=False))
+            key, value, block_size, block_table, actual_seq_lengths_kv = backend._get_fia_params(None, None, metadata)
+        assert block_table.shape == (WIDE_ROWS, WIDE_WIDTH)
+        assert key.shape == (WIDE_ROWS * WIDE_WIDTH, BLOCK_SIZE, NUM_KV_HEADS * HEAD_DIM)
+
+    def test_eager_max_kv_len_none_gathers_full_width(self):
+        backend = _make_backend()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(attention_v1, "_EXTRA_CTX", SimpleNamespace(capturing=False))
+            key, value, remapped = backend._materialize_bnsd_pa_read(WIDE_TABLE.clone())
+        assert key.shape == (WIDE_ROWS * WIDE_WIDTH, BLOCK_SIZE, NUM_KV_HEADS * HEAD_DIM)
+        assert remapped.shape == (WIDE_ROWS, WIDE_WIDTH)
+        assert remapped.flatten().tolist() == list(range(WIDE_ROWS * WIDE_WIDTH))
+
+    def test_capture_ignores_bound_keeps_full_width_and_padding_row(self):
+        """Graph capture keeps the full static width even when the live
+        lengths are known: the captured shape must stay static and the
+        padding row for the synthetic replay request is appended at the
+        full width."""
+        backend = _make_backend()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(attention_v1, "_EXTRA_CTX", SimpleNamespace(capturing=True))
+            key, value, remapped = backend._materialize_bnsd_pa_read(WIDE_TABLE.clone(), max_kv_len=max(WIDE_SEQ_LENS))
+        assert remapped.shape == (WIDE_ROWS + 1, WIDE_WIDTH)
+        assert key.shape[0] == WIDE_ROWS * WIDE_WIDTH + 1
+        assert value.shape[0] == WIDE_ROWS * WIDE_WIDTH + 1
+        assert remapped[WIDE_ROWS].tolist() == [WIDE_ROWS * WIDE_WIDTH] * WIDE_WIDTH
+
+    def test_bound_saturates_at_table_width(self):
+        # A bound needing more blocks than the table has columns keeps
+        # the full width (the bound never grows the table).
+        backend = _make_backend()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(attention_v1, "_EXTRA_CTX", SimpleNamespace(capturing=False))
+            key, value, remapped = backend._materialize_bnsd_pa_read(
+                WIDE_TABLE.clone(), max_kv_len=(WIDE_WIDTH + 1) * BLOCK_SIZE
+            )
+        assert remapped.shape == (WIDE_ROWS, WIDE_WIDTH)
+        assert key.shape[0] == WIDE_ROWS * WIDE_WIDTH
+
+    def test_bound_minimum_is_one_column(self):
+        backend = _make_backend()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(attention_v1, "_EXTRA_CTX", SimpleNamespace(capturing=False))
+            key, value, remapped = backend._materialize_bnsd_pa_read(WIDE_TABLE.clone(), max_kv_len=0)
+        assert remapped.shape == (WIDE_ROWS, 1)
+        assert key.shape[0] == WIDE_ROWS
