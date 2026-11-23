@@ -204,7 +204,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     # commit context. Set per-instance in __init__ based on kda_decode_backend:
     # "triton" for the immediate commit path, "fp32_deferred" for deferred
     # verify (the commit is delayed to the next verify's flush).
-    recoverssm_backend = "triton"
+    recoverssm_backend: str = "triton"
 
     tp_size: int
     head_dim: int
@@ -262,6 +262,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     ) -> None:
         # KDA projections remain BF16 because fp8 checkpoints omit their scales.
         self.use_recoverssm = use_glm_recoverssm(vllm_config)
+        saved_quant_config = vllm_config.quant_config
+        try:
+            vllm_config.quant_config = None
+            super().__init__(config, vllm_config, prefix)
+        finally:
+            vllm_config.quant_config = saved_quant_config
         if self.use_recoverssm:
             backend = vllm_config.additional_config.get("kda_decode_backend", "auto") if vllm_config.additional_config else "auto"
             if backend == "triton":
@@ -273,12 +279,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     self.recoverssm_backend = "fp32_deferred"
                 else:
                     self.recoverssm_backend = "triton"
-        saved_quant_config = vllm_config.quant_config
-        try:
-            vllm_config.quant_config = None
-            super().__init__(config, vllm_config, prefix)
-        finally:
-            vllm_config.quant_config = saved_quant_config
+            logger.info_once(
+                "KDA RecoverSSM backend=%s prefix=%s",
+                self.recoverssm_backend,
+                prefix,
+            )
 
         if config.linear_head_dim != 128 or vllm_config.model_config.dtype != torch.bfloat16:
             raise ValueError("GLM AscendC KDA requires BF16 activations and head_dim=128.")
@@ -453,6 +458,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     def _forward(self, hidden_states: torch.Tensor, output_buffer: torch.Tensor | None) -> torch.Tensor | None:
         attn_metadata_raw = get_forward_context().attn_metadata
         attn_metadata = attn_metadata_raw.get(self.prefix) if isinstance(attn_metadata_raw, dict) else None
+        # Deferred RecoverSSM: on the first KDA layer, enqueue every pending
+        # fold chunk on a side stream so it runs ahead of the forward.
+        # _forward_core joins this layer's chunk before conv/verify reads state.
+        deferred = getattr(attn_metadata, "recoverssm_deferred", None)
+        if (
+            deferred is not None
+            and getattr(attn_metadata, "num_spec_decodes", 0) > 0
+            and getattr(attn_metadata, "spec_state_indices_tensor", None) is not None
+        ):
+            deferred.start_flush(self.prefix)
         pcp_context = getattr(attn_metadata, "pcp_context", None)
         has_pcp_prefill = pcp_context is not None and bool(pcp_context.global_batch.is_prefilling_np.any())
         local_num_tokens = hidden_states.size(0)
@@ -567,6 +582,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         num_accepted_tokens = attn_metadata_narrowed.num_accepted_tokens
         num_spec_decodes = attn_metadata_narrowed.num_spec_decodes
         use_spec = num_spec_decodes > 0 and spec_state_indices_tensor is not None
+        # Join the side-stream fold started in _forward before conv rewrites
+        # conv_state and verify reads the checkpoint.
+        deferred = getattr(attn_metadata_narrowed, "recoverssm_deferred", None)
+        if use_spec and deferred is not None:
+            deferred.wait_layer(self.prefix)
         # Safe-gate checkpoints use the bounded sigmoid variant.
         lower_bound = self.kda_lower_bound
         constant_caches = self.kv_cache
@@ -694,14 +714,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 correction_cache, kg_cache = records
                 # One paged checkpoint per request; verification only records
                 # compact updates. MRV2 commits after rejection sampling.
-                # Deferred RecoverSSM: flush the previous step's pending replays
-                # into the checkpoint before verify, and write this step's
-                # records to each request's record slot (not the batch row).
-                deferred = getattr(attn_metadata_narrowed, "recoverssm_deferred", None)
+                # Deferred RecoverSSM: the previous step's pending replays were
+                # folded (and joined) above; write this step's records to each
+                # request's record slot (not the batch row).
                 record_indices = None
+                replay = None
                 if deferred is not None and num_spec_decodes > 0:
-                    deferred.flush()
                     record_indices = deferred.record_rows[:num_spec_decodes]
+                    replay = deferred.replay_plan()
                 spec_output = kda_recoverssm_verify(
                     rearrange(q_spec),
                     rearrange(k_spec),
@@ -718,6 +738,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     spec_state_indices_tensor[:, 0],
                     self.num_spec + 1,
                     record_indices=record_indices,
+                    replay_commit_lens=replay[0] if replay is not None else None,
+                    replay_final_state_indices=replay[1] if replay is not None else None,
+                    replay_boundary_state_indices=replay[2] if replay is not None else None,
+                    replay_boundary_recovery_lens=replay[3] if replay is not None else None,
                 )
             else:
                 spec_output = recurrent_kda(

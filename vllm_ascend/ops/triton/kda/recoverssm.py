@@ -98,7 +98,10 @@ def _kda_recurrent_step(
 
 
 @triton.heuristics(
-    {"HAS_RECORD_INDICES": lambda args: args["record_indices_ptr"] is not None},
+    {
+        "HAS_RECORD_INDICES": lambda args: args["record_indices_ptr"] is not None,
+        "HAS_REPLAY": lambda args: args["replay_commit_lens_ptr"] is not None,
+    },
 )
 @triton.jit
 def _kda_recoverssm_verify_kernel(
@@ -116,6 +119,10 @@ def _kda_recoverssm_verify_kernel(
     query_start_loc_ptr,
     state_indices_ptr,
     record_indices_ptr,
+    replay_commit_lens_ptr,
+    replay_final_state_indices_ptr,
+    replay_boundary_state_indices_ptr,
+    replay_boundary_recovery_lens_ptr,
     lower_bound,
     null_block_id,
     stride_q_token,
@@ -144,6 +151,9 @@ def _kda_recoverssm_verify_kernel(
     BV: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     HAS_RECORD_INDICES: tl.constexpr,
+    HAS_REPLAY: tl.constexpr,
+    ALIGN_MODE: tl.constexpr,
+    SPEC_QUERY_LEN: tl.constexpr,
 ):
     # Advance a register-held checkpoint and record each token's compact
     # correction/key/gate; persistent checkpoint pages remain read-only.
@@ -158,11 +168,15 @@ def _kda_recoverssm_verify_kernel(
     eos = tl.load(query_start_loc_ptr + (pid_b + 1) * stride_query_start_loc).to(tl.int64)
     query_len = eos - bos
     state_idx = tl.load(state_indices_ptr + pid_b * stride_state_indices).to(tl.int64)
-    # The record row for this request: its batch index, or (deferred
+    # The record row for this request: its state index, or (deferred
     # RecoverSSM) its record slot from record_indices.
-    record_row = pid_b.to(tl.int64)
+    record_row = state_idx
     if HAS_RECORD_INDICES:
         record_row = tl.load(record_indices_ptr + pid_b).to(tl.int64)
+        # Ascend records have no scratch row: skip padding/capture rows (-1)
+        # instead of writing past the last real request's record row.
+        if record_row < 0:
+            return
 
     offs_k = tl.arange(0, BK)
     offs_v = pid_v * BV + tl.arange(0, BV)
@@ -213,6 +227,84 @@ def _kda_recoverssm_verify_kernel(
         mask=mask_k,
         other=0.0 if mask_k is not None else None,
     ).to(tl.float32)
+
+    # Deferred RecoverSSM, fused path: fold the previous step's accepted
+    # tokens into the checkpoint before this verify advances it.  The state is
+    # already in registers, so the replay reuses this load instead of a
+    # separate commit kernel's load + launch.
+    if HAS_REPLAY:
+        commit_len = tl.load(replay_commit_lens_ptr + pid_b)
+        if commit_len > 0:
+            final_state_idx = tl.load(replay_final_state_indices_ptr + pid_b).to(tl.int64)
+            boundary_state_idx = tl.load(replay_boundary_state_indices_ptr + pid_b).to(tl.int64)
+            boundary_recovery_len = tl.load(replay_boundary_recovery_lens_ptr + pid_b)
+            if final_state_idx > null_block_id:
+                initial_state = state
+                replay_correction_ptr = (
+                    correction_cache_ptr
+                    + record_row * stride_correction_block
+                    + pid_h * stride_correction_head
+                )
+                replay_kg_ptr = (
+                    kg_cache_ptr
+                    + record_row * stride_kg_block
+                    + pid_h * stride_kg_head
+                )
+                final_decay = tl.full([BK], 1.0, tl.float32)
+                final_correction = tl.zeros([BV, BK], tl.float32)
+                boundary_decay = tl.full([BK], 1.0, tl.float32)
+                boundary_correction = tl.zeros([BV, BK], tl.float32)
+                for reverse_offset in range(tl.minimum(commit_len, SPEC_QUERY_LEN)):
+                    final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
+                        replay_correction_ptr,
+                        replay_kg_ptr,
+                        commit_len - reverse_offset - 1,
+                        offs_k,
+                        offs_v,
+                        mask_k,
+                        mask_v,
+                        stride_correction_pos,
+                        stride_correction_dim,
+                        stride_kg_pos,
+                        stride_kg_dim,
+                        A,
+                        dt_bias,
+                        lower_bound,
+                        boundary_recovery_len,
+                        final_decay,
+                        final_correction,
+                        boundary_decay,
+                        boundary_correction,
+                        K,
+                        USE_LOWER_BOUND,
+                        ALIGN_MODE,
+                    )
+                state = initial_state * final_decay[None, :] + final_correction
+                final_ptrs = (
+                    state_ptr
+                    + final_state_idx * stride_state_block
+                    + pid_h * stride_state_head
+                    + offs_v[:, None] * stride_state_v
+                    + offs_k[None, :] * stride_state_k
+                )
+                tl.store(final_ptrs, state, mask=mask_state)
+                if ALIGN_MODE:
+                    boundary_ptrs = (
+                        state_ptr
+                        + boundary_state_idx * stride_state_block
+                        + pid_h * stride_state_head
+                        + offs_v[:, None] * stride_state_v
+                        + offs_k[None, :] * stride_state_k
+                    )
+                    boundary_state = initial_state * boundary_decay[None, :] + boundary_correction
+                    tl.store(
+                        boundary_ptrs,
+                        boundary_state,
+                        mask=(boundary_state_idx > null_block_id)
+                        if mask_state is None
+                        else mask_state & (boundary_state_idx > null_block_id),
+                    )
+
     for token_offset in range(tl.maximum(query_len - 1, 0)):
         token = bos + token_offset
         q = tl.load(
@@ -1055,12 +1147,21 @@ def kda_recoverssm_verify(
     spec_query_len: int,
     out: torch.Tensor | None = None,
     record_indices: torch.Tensor | None = None,
+    replay_commit_lens: torch.Tensor | None = None,
+    replay_final_state_indices: torch.Tensor | None = None,
+    replay_boundary_state_indices: torch.Tensor | None = None,
+    replay_boundary_recovery_lens: torch.Tensor | None = None,
+    replay_align: bool = False,
 ) -> torch.Tensor:
-    """Verify a KDA speculative window without modifying its checkpoint.
+    """Verify a KDA speculative window.
 
     Request ``b`` writes its verify records to row ``b`` of the records, or to
     row ``record_indices[b]`` (deferred RecoverSSM: records indexed by request
     slot so they survive batch-order changes between steps).
+
+    With ``replay_commit_lens`` (deferred RecoverSSM, fused path), the kernel
+    first folds the previous step's accepted tokens into the checkpoint using
+    the prepared flush plan, so no separate commit/flush kernel is needed.
     """
     if q.ndim != 4 or q.shape[0] != 1:
         raise ValueError("KDA RecoverSSM q must have shape [1, tokens, heads, dim]")
@@ -1130,6 +1231,19 @@ def kda_recoverssm_verify(
         )
     ) or (record_indices is not None and record_indices.device != device):
         raise ValueError("KDA RecoverSSM inputs must be on the same device")
+    replay_args = (
+        replay_commit_lens,
+        replay_final_state_indices,
+        replay_boundary_state_indices,
+        replay_boundary_recovery_lens,
+    )
+    if any(arg is not None for arg in replay_args):
+        if any(arg is None for arg in replay_args):
+            raise ValueError("KDA RecoverSSM replay plan is incomplete")
+        if any(arg.device != device for arg in replay_args):
+            raise ValueError("KDA RecoverSSM replay inputs must be on the same device")
+        if record_indices is None:
+            raise ValueError("KDA RecoverSSM replay requires record indices")
     if total_tokens == 0:
         return out
 
@@ -1159,6 +1273,10 @@ def kda_recoverssm_verify(
         query_start_loc,
         state_indices,
         record_indices,
+        replay_commit_lens,
+        replay_final_state_indices,
+        replay_boundary_state_indices,
+        replay_boundary_recovery_lens,
         lower_bound or 0.0,
         NULL_BLOCK_ID,
         q.stride(1),
@@ -1186,6 +1304,8 @@ def kda_recoverssm_verify(
         BK=block_k,
         BV=block_v,
         USE_LOWER_BOUND=lower_bound is not None,
+        ALIGN_MODE=replay_align,
+        SPEC_QUERY_LEN=spec_query_len,
         num_warps=4,
         num_stages=2,
     )
@@ -1464,6 +1584,8 @@ class KDARecoverSSMCommitContext:
             _defer_commit_kernel[(batch,)](
                 state_indices,
                 self.commit_lens,
+                self.state_commit_lens,
+                self.boundary_commit_lens,
                 record_rows,
                 pending,
                 eager,
@@ -1475,20 +1597,17 @@ class KDARecoverSSMCommitContext:
                 return
         self._fold(state_indices, batch, block_table is not None, record_rows)
 
-    def flush(
+    def prepare_flush(
         self,
         state_indices: torch.Tensor,
         record_rows: torch.Tensor,
         pending: torch.Tensor,
-    ) -> None:
-        """Deferred RecoverSSM: fold the pending replays of the step's requests
-        (``record_rows[b]``: request b's record slot) into their checkpoints in
-        place, every layer, so a verify that does not replay them starts from
-        the accepted state. ``pending`` is left: the commit after this step's
-        sampling rewrites it."""
+    ) -> int:
+        """Build the step's flush plan once (``commit_lens`` and the per-row
+        destination indices) so each layer can fold independently."""
         batch = state_indices.shape[0]
         if batch == 0:
-            return
+            return 0
         if batch > self.commit_lens.shape[0]:
             raise ValueError("KDA RecoverSSM flush batch exceeds its plan capacity")
         _prepare_flush_plan_kernel[(batch,)](
@@ -1504,7 +1623,43 @@ class KDARecoverSSMCommitContext:
             SPEC_QUERY_LEN=self.spec_query_len,
             num_warps=1,
         )
-        self._fold(state_indices, batch, False, record_rows)
+        self._flush_state_indices = state_indices
+        self._flush_record_rows = record_rows
+        self._flush_batch = batch
+        return batch
+
+    def flush(
+        self,
+        state_indices: torch.Tensor,
+        record_rows: torch.Tensor,
+        pending: torch.Tensor,
+    ) -> None:
+        """Deferred RecoverSSM: fold the pending replays of the step's requests
+        (``record_rows[b]``: request b's record slot) into their checkpoints in
+        place, every layer, so a verify that does not replay them starts from
+        the accepted state. ``pending`` is left: the commit after this step's
+        sampling rewrites it."""
+        if self.prepare_flush(state_indices, record_rows, pending) == 0:
+            return
+        self._fold(state_indices, self._flush_batch, False, record_rows)
+
+    def compact_conv(
+        self,
+        state_indices: torch.Tensor,
+        record_rows: torch.Tensor,
+        pending: torch.Tensor,
+    ) -> None:
+        """Prepare the replay plan and compact the conv history only.
+
+        The fused verify folds the recurrent state replay itself, so the
+        deferred step only needs the conv history shifted before the conv.
+        """
+        if self.prepare_flush(state_indices, record_rows, pending) == 0:
+            return
+        layer_idx, layer_slice, fold_layers = self._layer_range(None, None)
+        self._compact_conv(
+            state_indices, self._flush_batch, False, layer_idx, layer_slice, fold_layers
+        )
 
     def _fold(
         self,
@@ -1512,19 +1667,45 @@ class KDARecoverSSMCommitContext:
         batch: int,
         align: bool,
         record_rows: torch.Tensor | None = None,
+        layer: int | None = None,
+        layer_end: int | None = None,
     ) -> None:
-        """Run a prepared plan: the conv state compaction and the state commit."""
+        """Run a prepared plan: the conv state compaction and the state commit.
+        ``layer``/``layer_end`` fold a layer range (side-stream pipelining);
+        None folds all layers."""
+        layer_idx, layer_slice, fold_layers = self._layer_range(layer, layer_end)
+        self._compact_conv(state_indices, batch, align, layer_idx, layer_slice, fold_layers)
+        self._commit_state(
+            state_indices, batch, align, record_rows, layer_idx, layer_slice, fold_layers
+        )
+
+    def _layer_range(self, layer: int | None, layer_end: int | None):
         num_layers = len(self.checkpoints)
-        conv_ref = self.conv_states[0]
+        if layer is None:
+            return 0, slice(None), num_layers
+        end = layer + 1 if layer_end is None else layer_end
+        return layer, slice(layer, end), end - layer
+
+    def _compact_conv(
+        self,
+        state_indices: torch.Tensor,
+        batch: int,
+        align: bool,
+        layer_idx: int,
+        layer_slice: slice,
+        fold_layers: int,
+    ) -> None:
+        """Compact the conv history of the plan's requests (all or a layer range)."""
+        conv_ref = self.conv_states[layer_idx]
         conv_dim = conv_ref.shape[1]
         block_history = triton.next_power_of_2(self.conv_history_len)
         conv_block_d = _conv_compaction_block_d(self.conv_dim_stride)
-        _compact_conv_state_kernel[(triton.cdiv(conv_dim, conv_block_d), batch, num_layers)](
+        _compact_conv_state_kernel[(triton.cdiv(conv_dim, conv_block_d), batch, fold_layers)](
             conv_ref,
-            self.conv_state_base_addrs,
-            self.conv_state_block_strides,
-            self.conv_state_dim_strides,
-            self.conv_state_token_strides,
+            self.conv_state_base_addrs[layer_slice],
+            self.conv_state_block_strides[layer_slice],
+            self.conv_state_dim_strides[layer_slice],
+            self.conv_state_token_strides[layer_slice],
             state_indices,
             self.commit_lens,
             self.final_state_indices,
@@ -1542,8 +1723,19 @@ class KDARecoverSSMCommitContext:
             num_warps=4,
         )
 
-        state_ref = self.checkpoints[0]
-        correction_ref = self.correction_caches[0]
+    def _commit_state(
+        self,
+        state_indices: torch.Tensor,
+        batch: int,
+        align: bool,
+        record_rows: torch.Tensor | None,
+        layer_idx: int,
+        layer_slice: slice,
+        fold_layers: int,
+    ) -> None:
+        """Fold the plan's accepted records into the recurrent checkpoints."""
+        state_ref = self.checkpoints[layer_idx]
+        correction_ref = self.correction_caches[layer_idx]
         assert correction_ref.dtype == torch.float32
         _, num_heads, value_dim, key_dim = state_ref.shape
         block_k = triton.next_power_of_2(key_dim)
@@ -1574,26 +1766,26 @@ class KDARecoverSSMCommitContext:
         block_v = min(triton.next_power_of_2(value_dim), value_tile)
         # Explicit flat indexing keeps request rows outermost on both 3.2/3.6
         # backends, balancing mixed boundary requests without a new static flag.
-        grid = (triton.cdiv(value_dim, block_v) * num_layers * head_groups * batch,)
+        grid = (triton.cdiv(value_dim, block_v) * fold_layers * head_groups * batch,)
         commit_prefix_args = (
             state_ref,
-            self.state_base_addrs,
-            self.state_block_strides,
+            self.state_base_addrs[layer_slice],
+            self.state_block_strides[layer_slice],
             correction_ref,
-            self.correction_cache_base_addrs,
-            self.correction_cache_block_strides,
-            self.kg_caches[0],
-            self.kg_cache_base_addrs,
-            self.kg_cache_block_strides,
-            self.A_log,
-            self.dt_bias,
+            self.correction_cache_base_addrs[layer_slice],
+            self.correction_cache_block_strides[layer_slice],
+            self.kg_caches[layer_idx],
+            self.kg_cache_base_addrs[layer_slice],
+            self.kg_cache_block_strides[layer_slice],
+            self.A_log[layer_slice],
+            self.dt_bias[layer_slice],
             state_indices,
         )
         commit_suffix_args = (
-            record_rows,
             self.final_state_indices,
             self.boundary_state_indices,
             self.boundary_recovery_lens,
+            record_rows,
             self.lower_bound or 0.0,
             NULL_BLOCK_ID,
             state_ref.stride(1),
@@ -1602,16 +1794,16 @@ class KDARecoverSSMCommitContext:
             correction_ref.stride(1),
             correction_ref.stride(2),
             correction_ref.stride(3),
-            self.kg_caches[0].stride(1),
-            self.kg_caches[0].stride(2),
-            self.kg_caches[0].stride(3),
+            self.kg_caches[layer_idx].stride(1),
+            self.kg_caches[layer_idx].stride(2),
+            self.kg_caches[layer_idx].stride(3),
             self.A_log.stride(0),
             self.A_log.stride(1),
             self.dt_bias.stride(0),
             self.dt_bias.stride(1),
             self.dt_bias.stride(2),
             state_indices.stride(0),
-            num_layers,
+            fold_layers,
         )
         commit_meta = dict(
             K=key_dim,
@@ -1641,7 +1833,7 @@ class KDARecoverSSMCommitContext:
             boundary_tile = min(RECOVERSSM_VALUE_TILE, 1 << (max_rows.bit_length() - 1))
             boundary_block_v = min(triton.next_power_of_2(value_dim), boundary_tile)
             boundary_meta = {**commit_meta, "BV": boundary_block_v}
-            commit_kernel[(triton.cdiv(value_dim, boundary_block_v) * num_layers * head_groups * batch,)](
+            commit_kernel[(triton.cdiv(value_dim, boundary_block_v) * fold_layers * head_groups * batch,)](
                 *commit_prefix_args,
                 self.boundary_commit_lens,
                 *commit_suffix_args,
@@ -1656,6 +1848,8 @@ class KDARecoverSSMCommitContext:
 def _defer_commit_kernel(
     state_indices_ptr,
     commit_lens_ptr,
+    state_commit_lens_ptr,
+    boundary_commit_lens_ptr,
     record_rows_ptr,
     pending_ptr,
     eager_ptr,
@@ -1680,7 +1874,11 @@ def _defer_commit_kernel(
         tl.store(pending_ptr + record_row, 0)
     else:
         tl.store(pending_ptr + record_row, commit_len)
+        # Defer every commit lens the fold kernels read; align mode uses
+        # state_commit_lens/boundary_commit_lens instead of commit_lens.
         tl.store(commit_lens_ptr + spec_idx, 0)
+        tl.store(state_commit_lens_ptr + spec_idx, 0)
+        tl.store(boundary_commit_lens_ptr + spec_idx, 0)
 
 
 @triton.jit
@@ -1718,4 +1916,3 @@ __all__ = [
     "_defer_commit_kernel",
     "_prepare_flush_plan_kernel",
 ]
-
