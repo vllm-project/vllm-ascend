@@ -194,3 +194,45 @@ estimated_times:
   # Conservative scheduling estimate; refine after the first A5 run.
   tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py: 180
   tests/e2e/pull_request/one_card/test_glm5next_pooled_cache_write.py: 30
+
+  # Initial A3 per-file wall times, including pytest startup; 10% buffer, rounded to 10s.
+  tests/e2e/pull_request/two_card/ops/test_attn_res_fwd.py: 30
+  tests/e2e/pull_request/two_card/ops/test_bgmv_expand.py: 30
+  tests/e2e/pull_request/two_card/ops/test_bgmv_shrink.py: 30
+  tests/e2e/pull_request/two_card/ops/test_chunk_gated_delta_rule_fwd_h_vllm.py: 30
+  tests/e2e/pull_request/two_card/ops/test_copy_and_expand_eagle_inputs.py: 30
+  tests/e2e/pull_request/two_card/ops/test_dequant_swiglu_quant.py: 40
+  tests/e2e/pull_request/two_card/ops/test_inplace_partial_rotary_mul.py: 50
+  tests/e2e/pull_request/two_card/ops/test_kda_gate_cumsum_vllm.py: 30
+  tests/e2e/pull_request/two_card/ops/test_kda_layout_swap12.py: 30
+  tests/e2e/pull_request/two_card/ops/test_moe_gating_top_k_hash.py: 30
+  tests/e2e/pull_request/two_card/ops/triton/test_bad_words.py: 40
+  tests/e2e/pull_request/two_card/ops/triton/test_batch_memcpy.py: 30
+  tests/e2e/pull_request/two_card/ops/triton/test_bincount.py: 50
+  tests/e2e/pull_request/two_card/ops/triton/test_chunk_gated_delta_rule.py: 50
+  tests/e2e/pull_request/two_card/ops/triton/test_clear_ssm_states.py: 30
+  tests/e2e/pull_request/two_card/ops/triton/test_compressor_triton.py: 60
+  tests/e2e/pull_request/two_card/ops/triton/test_compute_slot_mapping.py: 40
+  tests/e2e/pull_request/two_card/ops/triton/test_compute_token_logprobs.py: 50
+  tests/e2e/pull_request/two_card/ops/triton/test_compute_topk_logprobs.py: 30
+  tests/e2e/pull_request/two_card/ops/triton/test_dflash_candidate_sampler.py: 60
+  tests/e2e/pull_request/two_card/ops/triton/test_fused_gdn_gating.py: 30
+  tests/e2e/pull_request/two_card/ops/triton/test_gdn_prepare.py: 40
+  tests/e2e/pull_request/two_card/ops/triton/test_glm5next_state_gather_npu.py: 30
+  tests/e2e/pull_request/two_card/ops/triton/test_kda_state_copy_triton.py: 40
+  tests/e2e/pull_request/two_card/ops/triton/test_l2norm.py: 40
+  tests/e2e/pull_request/two_card/ops/triton/test_log_softmax.py: 40
+  tests/e2e/pull_request/two_card/ops/triton/test_lora_linear.py: 70
+  tests/e2e/pull_request/two_card/ops/triton/test_mamba_state_index.py: 40
+  tests/e2e/pull_request/two_card/ops/triton/test_min_p.py: 30
+  tests/e2e/pull_request/two_card/ops/triton/test_mrope_vit_setup.py: 40
+  tests/e2e/pull_request/two_card/ops/triton/test_muls_add.py: 30
+  tests/e2e/pull_request/two_card/ops/triton/test_mxfp_k_scale_scatter.py: 40
+  tests/e2e/pull_request/two_card/ops/triton/test_penality.py: 90
+  tests/e2e/pull_request/two_card/ops/triton/test_qsa_compress_groups_with_ratio.py: 60
+  tests/e2e/pull_request/two_card/ops/triton/test_qsa_rmsnorm_mrope.py: 60
+  tests/e2e/pull_request/two_card/ops/triton/test_qwen4_exp_qsa.py: 40
+  tests/e2e/pull_request/two_card/ops/triton/test_rejection_sample_v2.py: 230
+  tests/e2e/pull_request/two_card/ops/triton/test_resample.py: 70
+  tests/e2e/pull_request/two_card/ops/triton/test_rms_norm.py: 50
+  tests/e2e/pull_request/two_card/ops/triton/test_temperature.py: 30
