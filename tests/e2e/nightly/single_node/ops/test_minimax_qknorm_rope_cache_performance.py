@@ -31,15 +31,16 @@ def constexpr_reference(tmp_path_factory):
     tree = ast.parse(inspect.getsource(fused_module._minimax_qknorm_rope_cache_kernel.fn))
     fn = tree.body[0]
     assert isinstance(fn, ast.FunctionDef)
-    fn.decorator_list = [ast.parse("triton.jit", mode="eval").body]
+    fn.decorator_list = [ast.parse('triton.jit(do_not_specialize=["NUM_TOKENS"])', mode="eval").body]
     argument = next(arg for arg in fn.args.args if arg.arg == "NUM_SLOTS")
     argument.annotation = ast.parse("tl.constexpr", mode="eval").body
     path = tmp_path_factory.mktemp("minimax_constexpr") / "reference.py"
     path.write_text(
         "from vllm.triton_utils import tl, triton\n"
         "from vllm_ascend.ops.triton.triton_utils import extract_slice, insert_slice\n"
-        "from vllm_ascend.ops.triton.msa.minimax_qknorm_rope_cache import _norm_rope, FP8_E4M3_MAX\n"
-        + ast.unparse(tree),
+        "from vllm_ascend.ops.triton.msa.minimax_qknorm_rope_cache import (\n"
+        "    FP8_E4M3_MAX, _norm_rope_with_scale,\n"
+        ")\n" + ast.unparse(tree),
         encoding="utf-8",
     )
     spec = importlib.util.spec_from_file_location("minimax_constexpr_reference", path)
@@ -83,6 +84,10 @@ def test_num_slots_specialization_performance(tokens, q_heads, constexpr_referen
     assert "NUM_SLOTS" in runtime_kernel.do_not_specialize
     assert next(p for p in runtime_kernel.params if p.name == "NUM_SLOTS").is_constexpr is False
     assert next(p for p in constexpr_reference.params if p.name == "NUM_SLOTS").is_constexpr is True
+    assert "NUM_SLOTS" not in constexpr_reference.do_not_specialize
+    for kernel in (runtime_kernel, constexpr_reference):
+        assert "NUM_TOKENS" in kernel.do_not_specialize
+        assert next(p for p in kernel.params if p.name == "NUM_TOKENS").is_constexpr is False
     graphs, outputs = {}, {}
     for name, kernel in (("constexpr", constexpr_reference), ("runtime", runtime_kernel)):
         with monkeypatch.context() as context:

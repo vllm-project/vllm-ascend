@@ -95,7 +95,8 @@ def test_parse_manual_selection_rejects_unknown_value(helper):
         ("INSTALLATION_SOURCE_MARKERS", {"quickstart": [], "installation": ["source"]}),
     ],
 )
-def test_select_doctests_by_marker_group(helper, monkeypatch, group_name, expected):
+@pytest.mark.parametrize("release_changed", [False, True])
+def test_select_doctests_by_marker_group(helper, monkeypatch, group_name, expected, release_changed):
     changed_group = getattr(helper, group_name)
     monkeypatch.setattr(helper, "get_merge_base", lambda base, head: "merge-base")
     monkeypatch.setattr(helper, "get_changed_paths", lambda base, head: set())
@@ -104,7 +105,17 @@ def test_select_doctests_by_marker_group(helper, monkeypatch, group_name, expect
         "any_doctest_blocks_changed",
         lambda base, head, markers, cache: markers == changed_group,
     )
-    monkeypatch.setattr(helper, "read_repo_text", lambda path, ref: "extra:\n  version: same\n")
+    monkeypatch.setattr(
+        helper,
+        "read_repo_text",
+        lambda path,
+        ref: f"extra:\n  release_vllm_ascend_version: {'new' if release_changed and ref == 'head' else 'old'}\n",
+    )
+    if release_changed:
+        expected = {
+            "quickstart": ["a2", "310p"],
+            "installation": list(dict.fromkeys(["source", *expected["installation"]])),
+        }
 
     assert helper.select_doctests("base", "head") == expected
 
@@ -128,7 +139,12 @@ def test_select_doctests_by_marker_group(helper, monkeypatch, group_name, expect
             False,
             {"quickstart": ["a2", "310p"], "installation": ["pip"]},
         ),
-        (set(), True, {"quickstart": ["a2", "310p"], "installation": ["pip"]}),
+        (set(), True, {"quickstart": ["a2", "310p"], "installation": ["source"]}),
+        (
+            {"tests/e2e/doctests/scripts/doctest_helper.py"},
+            True,
+            {"quickstart": ["a2", "310p"], "installation": ["source", "pip"]},
+        ),
         ({"README.md"}, False, {"quickstart": [], "installation": []}),
     ],
 )

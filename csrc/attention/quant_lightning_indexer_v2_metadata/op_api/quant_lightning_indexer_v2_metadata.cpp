@@ -28,26 +28,31 @@ OP_TYPE_REGISTER(VllmAscendQuantLightningIndexerV2Metadata);
 
 const aclTensor *QuantLightningIndexerV2Metadata(
     const aclTensor *cuSeqlensQOptional, const aclTensor *cuSeqlensKOptional, const aclTensor *sequsedQOptional,
-    const aclTensor *sequsedKOptional, const aclTensor *cmpResidualKOptional, int64_t numHeadsQ, int64_t numHeadsK,
-    int64_t headDim, int64_t topk, int64_t quantMode, int64_t batchSize, int64_t maxSeqlenQ, int64_t maxSeqlenK,
-    char *layoutQOptional, char *layoutKOptional, int64_t maskMode, int64_t cmpRatio, int64_t aicCoreNum,
-    int64_t aivCoreNum, const char *socVersion, const aclTensor *metadata, aclOpExecutor *executor)
+    const aclTensor *sequsedKOptional, const aclTensor *cmpResidualKOptional,
+    const aclTensor *causalSeqlensKvGlobalOptional, int64_t numHeadsQ, int64_t numHeadsK, int64_t headDim,
+    int64_t topk, int64_t quantMode, int64_t batchSize, int64_t maxSeqlenQ, int64_t maxSeqlenK, char *layoutQOptional,
+    char *layoutKOptional, int64_t maskMode, int64_t cmpRatio, int64_t enableDcp, int64_t cpWorld, int64_t cpRank,
+    int64_t cpInterleaveSize, int64_t aicCoreNum, int64_t aivCoreNum, const char *socVersion,
+    const aclTensor *metadata, aclOpExecutor *executor)
 {
     L0_DFX(QuantLightningIndexerV2Metadata, cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional, sequsedKOptional,
-        cmpResidualKOptional, numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize, maxSeqlenQ, maxSeqlenK,
-        layoutQOptional, layoutKOptional, maskMode, cmpRatio, aicCoreNum, aivCoreNum, socVersion, metadata);
+        cmpResidualKOptional, causalSeqlensKvGlobalOptional, numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize,
+        maxSeqlenQ, maxSeqlenK, layoutQOptional, layoutKOptional, maskMode, cmpRatio, enableDcp, cpWorld, cpRank,
+        cpInterleaveSize, aicCoreNum, aivCoreNum, socVersion, metadata);
 
     static internal::AicpuTaskSpace space("VllmAscendQuantLightningIndexerV2Metadata");
 
     auto ret = ADD_TO_LAUNCHER_LIST_AICPU(
         VllmAscendQuantLightningIndexerV2Metadata,
         OP_ATTR_NAMES({ "num_heads_q", "num_heads_k", "head_dim", "topk", "quant_mode", "batch_size", "max_seqlen_q",
-                        "max_seqlen_k", "layout_q", "layout_k", "mask_mode", "cmp_ratio", "aic_core_num",
-                        "aiv_core_num", "soc_version" }),
-        OP_INPUT(cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional, sequsedKOptional, cmpResidualKOptional),
+                        "max_seqlen_k", "layout_q", "layout_k", "mask_mode", "cmp_ratio", "enable_dcp", "cp_world",
+                        "cp_rank", "cp_kv_cache_interleave_size", "aic_core_num", "aiv_core_num", "soc_version" }),
+        OP_INPUT(cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional, sequsedKOptional, cmpResidualKOptional,
+                 causalSeqlensKvGlobalOptional),
         OP_OUTPUT(metadata),
         OP_ATTR(numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize, maxSeqlenQ, maxSeqlenK, layoutQOptional,
-            layoutKOptional, maskMode, cmpRatio, aicCoreNum, aivCoreNum, socVersion));
+            layoutKOptional, maskMode, cmpRatio, enableDcp, cpWorld, cpRank, cpInterleaveSize, aicCoreNum, aivCoreNum,
+            socVersion));
 
     OP_CHECK(ret == ACL_SUCCESS,
              OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "QuantLightningIndexerV2Metadata ADD_TO_LAUNCHER_LIST_AICPU failed."),

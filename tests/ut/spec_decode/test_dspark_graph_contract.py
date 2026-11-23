@@ -16,6 +16,9 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 import vllm_ascend.worker.v2.spec_decode.dflash.aclgraph as aclgraph_module
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as speculator_module
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
@@ -27,9 +30,25 @@ class _BackendA:
         return object
 
 
+def test_flash_attn_graph_replay_uses_device_metadata_without_host_updates(monkeypatch):
+    manager = DFlashAclGraphManager.__new__(DFlashAclGraphManager)
+    manager.speculator = SimpleNamespace(
+        attn_backends={f"draft.{i}": AscendFlashAttentionBackend for i in range(6)},
+        build_draft_attn_metadatas=MagicMock(side_effect=AssertionError("unexpected host metadata rebuild")),
+    )
+    replay = MagicMock(return_value=object())
+    monkeypatch.setattr(DFlashCudaGraphManager, "run_fullgraph", replay)
+    desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=24, num_reqs=3)
+
+    assert manager.run_fullgraph(desc) is replay.return_value
+    replay.assert_called_once_with(desc)
+    manager.speculator.build_draft_attn_metadatas.assert_not_called()
+
+
 def _speculator(**attributes):
     speculator = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     speculator.attn_architecture = None
+    speculator.attn_backends = {name: AscendAttentionBackend for name in ("draft.0", "draft.2")}
     for name, value in attributes.items():
         setattr(speculator, name, value)
     return speculator
@@ -75,7 +94,15 @@ def test_set_attn_preserves_cache_group_order(monkeypatch):
 @pytest.mark.parametrize("architecture", ["GQA", "MLA"])
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE])
 def test_draft_metadata_matches_full_or_actual_query_shape(monkeypatch, architecture, graph_mode):
-    metadata = SimpleNamespace(actual_seq_lengths_q=[8, 16, 24, 24])
+    row_count = 5 if graph_mode == CUDAGraphMode.FULL else 4
+    metadata = SimpleNamespace(
+        actual_seq_lengths_q=[8, 16, 24, 24, 32][:row_count],
+        seq_lens_list=[10, 20, 30, 0, 0][:row_count],
+        seq_lens=torch.tensor([10, 20, 30, 0, 0][:row_count], dtype=torch.int32),
+        seq_lens_cpu=torch.tensor([10, 20, 30, 0, 0][:row_count], dtype=torch.int32),
+        block_tables=torch.arange(row_count * 2, dtype=torch.int32).reshape(row_count, 2),
+        block_table=torch.arange(row_count * 2, dtype=torch.int32).reshape(row_count, 2),
+    )
     layer_metadata = SimpleNamespace(decode=metadata) if architecture == "MLA" else metadata
     parent_build = MagicMock(return_value={"draft.0": layer_metadata})
     metadata_factory = MagicMock(return_value=nullcontext())
@@ -86,6 +113,7 @@ def test_draft_metadata_matches_full_or_actual_query_shape(monkeypatch, architec
 
     speculator = _speculator(
         attn_architecture=architecture,
+        attn_backends={"draft.0": AscendMLABackend if architecture == "MLA" else AscendAttentionBackend},
         num_query_per_req=8,
         arange_np=np.arange(5, dtype=np.int32),
         input_buffers=SimpleNamespace(positions=object()),
@@ -107,6 +135,11 @@ def test_draft_metadata_matches_full_or_actual_query_shape(monkeypatch, architec
     np.testing.assert_array_equal(parent_build.call_args.kwargs["query_start_loc_np"], [0, 8, 16, 24])
     assert metadata_factory.call_args.args[1] == (32 if graph_mode == CUDAGraphMode.FULL else 24)
     assert metadata.actual_seq_lengths_q == ([8, 16, 24, 32] if graph_mode == CUDAGraphMode.FULL else [8, 16, 24, 24])
+    expected_rows = row_count if architecture == "MLA" else 4
+    assert metadata.seq_lens_list == [10, 20, 30, 0, 0][:expected_rows]
+    torch.testing.assert_close(metadata.seq_lens, torch.tensor(metadata.seq_lens_list, dtype=torch.int32))
+    table = metadata.block_table if architecture == "MLA" else metadata.block_tables
+    torch.testing.assert_close(table, torch.arange(expected_rows * 2, dtype=torch.int32).reshape(expected_rows, 2))
 
 
 def test_sfa_draft_metadata_passes_through_upstream(monkeypatch):
@@ -134,14 +167,24 @@ def test_sfa_draft_metadata_passes_through_upstream(monkeypatch):
 def test_update_draft_metadata_refreshes_all_padded_query_lengths(query_count, num_reqs_padded):
     speculator = _speculator(num_query_per_req=query_count)
     metadata = {
-        name: SimpleNamespace(actual_seq_lengths_q=[query_count], seq_lens=object()) for name in ("draft.2", "draft.0")
+        name: SimpleNamespace(
+            actual_seq_lengths_q=[query_count],
+            seq_lens_list=list(range(num_reqs_padded)),
+            seq_lens=torch.arange(num_reqs_padded, dtype=torch.int32),
+            seq_lens_cpu=torch.arange(num_reqs_padded, dtype=torch.int32),
+            block_tables=None,
+        )
+        for name in ("draft.2", "draft.0")
     }
-    seq_lens = {name: value.seq_lens for name, value in metadata.items()}
+    original_lengths = {name: value.seq_lens.clone() for name, value in metadata.items()}
 
     assert speculator._update_draft_attn_metadata(metadata, num_reqs_padded) is metadata
     for name, value in metadata.items():
         assert value.actual_seq_lengths_q == [query_count * (i + 1) for i in range(num_reqs_padded)]
-        assert value.seq_lens is seq_lens[name]
+        torch.testing.assert_close(value.seq_lens, original_lengths[name])
+        torch.testing.assert_close(value.seq_lens_cpu, original_lengths[name])
+        assert value.seq_lens_list == original_lengths[name].tolist()
+        assert value.block_tables is None
 
 
 def test_replay_installs_forward_context_before_accessing_extra_ctx(monkeypatch):
@@ -204,8 +247,14 @@ def test_dispatcher_pads_uniform_draft_descriptors(query_count):
     manager.compilation_config = SimpleNamespace(
         cudagraph_capture_sizes=[16, 32, 48, 64, 80, 96, 112, 128],
         max_cudagraph_capture_size=128,
+        prefill_cudagraph_capture_token_sizes=[16, 32, 48, 64, 80, 96, 112, 128],
+        decode_cudagraph_capture_request_sizes=list(range(1, 17)),
+        max_decode_cudagraph_capture_tokens=None,
     )
-    manager.vllm_config = SimpleNamespace(speculative_config=None)
+    manager.vllm_config = SimpleNamespace(speculative_config=None, uniform_decode_query_len=query_count)
+    manager.decode_request_sizes = None
+    manager.decode_max_reqs = {query_count: 16}
+    manager._decode_descs = {}
     manager.max_num_reqs = 16
     manager.decode_query_len = query_count
     manager.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY

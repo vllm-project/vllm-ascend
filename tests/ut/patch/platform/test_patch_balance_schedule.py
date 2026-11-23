@@ -68,6 +68,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
+from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import create_request, create_vllm_config
@@ -99,6 +100,7 @@ from vllm_ascend.patch.platform.patch_balance_schedule import (  # noqa: E402
     BalanceScheduler,
     _balance_scheduling_enabled,
 )
+from vllm_ascend.utils import vllm_version_is  # noqa: E402
 
 # Importing any vLLM module can activate the Ascend platform plugin before this
 # test module finishes importing, so a direct ``Scheduler`` import may already
@@ -157,7 +159,8 @@ def test_balance_scheduler_installs_short_request_first_queue(monkeypatch, balan
         self.vllm_config = args[0]
         self.policy = SchedulingPolicy.FCFS
         self.waiting = create_request_queue(self.policy)
-        self.skipped_waiting = create_request_queue(self.policy)
+        self.kv_holding_waiting = create_request_queue(self.policy)
+        self.deferred_waiting = set()
 
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
@@ -473,8 +476,8 @@ def test_balance_deltas_present_in_schedule():
     assert "max(t.item() for t in self.balance_queue)" in src
     assert "self.max_num_running_reqs" in src
 
-    # delta 3: `if request_queue is None: break` replaces upstream's assert.
-    assert "if request_queue is None:" in src
+    # The shared queue path must stop before peeking an empty request queue.
+    assert "if not request_queue:" in src
 
 
 # ---------------------------------------------------------------------------
@@ -611,9 +614,9 @@ _SCHEDULER_METHOD_SEAMS = [
     "_preempt_request",
     "_try_schedule_encoder_inputs",
     "_mamba_block_aligned_split",
-    "_select_waiting_queue_for_scheduling",
+    "_holds_kv_blocks",
     "_is_blocked_waiting_status",
-    "_try_promote_blocked_waiting_request",
+    "_handle_blocked_waiting_request",
     "_make_cached_request_data",
     "_update_after_schedule",
     "_build_kv_connector_meta",
@@ -673,7 +676,7 @@ def _make_output(scheduler):
     req_ids = [req.request_id for req in scheduler.running]
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        **({"req_id_to_index": {req_id: i for i, req_id in enumerate(req_ids)}} if vllm_version_is("0.33.0") else {}),
         sampled_token_ids=[[1000]] * len(req_ids),
         logprobs=None,
         prompt_logprobs_dict={},
@@ -691,7 +694,6 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_bl
     from vllm.v1.structured_output import StructuredOutputManager
 
     from vllm_ascend.patch.platform import patch_balance_schedule as pbs
-    from vllm_ascend.utils import vllm_version_is
 
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
@@ -711,8 +713,7 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_bl
         stack.enter_context(
             patch.object(ModelConfig, "is_encoder_decoder", new_callable=PropertyMock, return_value=False)
         )
-        if not vllm_version_is("0.27.1"):
-            stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
+        stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
         stack.enter_context(patch.object(pbs, "init_ascend_config", return_value=ascend_config))
         stack.enter_context(patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config))
 
@@ -822,6 +823,138 @@ def test_balance_schedule_waiting_and_running_paths():
     scheduler.schedule(throttle_prefills=True)
 
 
+def test_balance_schedule_records_local_prefix_cache_stats():
+    """A newly admitted request must be reported to the prefix-cache stats.
+
+    Regression guard: this fork of ``schedule()`` used to record only on the
+    mamba + connector fast path, so plain full-attention models (Qwen3,
+    DeepSeek) left ``vllm:prefix_cache_queries_total`` /
+    ``vllm:prefix_cache_hits_total`` at zero even with APC enabled.
+
+    Asserted at the call site rather than on the counters: whether
+    ``record_prefix_cache_stats()`` keeps the values depends on
+    ``CacheConfig.enable_prefix_caching``, which this fixture does not resolve
+    (``VllmConfig.__post_init__`` is mocked). The bug being locked out is the
+    missing call, not the manager's own bookkeeping.
+    """
+    scheduler = _make_balance_scheduler()
+    manager = scheduler.kv_cache_manager
+    recorded = []
+    original = manager.record_prefix_cache_stats
+
+    def _record(request, num_hits):
+        recorded.append((request, num_hits))
+        return original(request, num_hits)
+
+    manager.record_prefix_cache_stats = _record
+
+    request = _create_requests(1, num_tokens=32, max_tokens=8)[0]
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert output.total_num_scheduled_tokens > 0
+    assert request in scheduler.running
+
+    # The lookup ran against an empty cache: every prompt token is a query,
+    # nothing is a hit, and it happens exactly once per admission.
+    assert recorded == [(request, 0)]
+
+
+@pytest.mark.parametrize(
+    "external_tokens, load_kv_async, expected",
+    [
+        # A synchronous external load must be flagged: the KV cache has to be
+        # restored before the forward pass reads it.
+        (16, False, True),
+        # No external hit at all: nothing is loaded, nothing is flagged.
+        (0, False, False),
+        # An asynchronous external load is restored later, not during this
+        # forward pass, so it must not be flagged as a synchronous load.
+        (16, True, False),
+    ],
+)
+def test_balance_schedule_reports_sync_kv_loads(external_tokens, load_kv_async, expected):
+    """A request served by an external KV cache must flag the synchronous load.
+
+    Regression guard for #20725: this fork of ``schedule()`` dropped upstream's
+    ``has_sync_kv_loads`` bookkeeping. The worker derives
+    ``start_after_forward = not scheduler_output.has_sync_kv_loads`` from the
+    flag, so with it left at its ``False`` default the external KV load was
+    deferred until after the forward pass and the model read KV cache that had
+    never been restored.
+
+    The flag tracks synchronous loads only: an asynchronous load
+    (``load_kv_async=True``) leaves the request in ``WAITING_FOR_REMOTE_KVS``
+    instead of admitting it, so it must not raise the flag.
+    """
+    scheduler = _make_balance_scheduler()
+    connector = MagicMock()
+    connector.get_num_new_matched_tokens.return_value = (external_tokens, load_kv_async)
+    scheduler.connector = connector
+
+    request = _create_requests(1, num_tokens=32, max_tokens=8)[0]
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+
+    if load_kv_async:
+        # The async load is still in flight: the request is not admitted in
+        # this step, so this forward pass does not read its KV cache.
+        assert output.total_num_scheduled_tokens == 0
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    else:
+        assert output.total_num_scheduled_tokens > 0
+    assert output.has_sync_kv_loads is expected
+
+
+def test_balance_schedule_reports_sync_kv_loads_for_mixed_batch():
+    """A batch mixing a sync and an async external load must flag the sync one.
+
+    The flag is per-step, not per-request: a single synchronous load in the
+    batch is enough to require the KV cache to be restored before the forward
+    pass, even when the same batch also carries an asynchronous load.
+    """
+    scheduler = _make_balance_scheduler()
+    connector = MagicMock()
+
+    def get_num_new_matched_tokens(request, num_local_tokens):
+        if request.request_id == "0":
+            return 16, False
+        return 16, True
+
+    connector.get_num_new_matched_tokens.side_effect = get_num_new_matched_tokens
+    scheduler.connector = connector
+
+    requests = _create_requests(2, num_tokens=32, max_tokens=8)
+    for request in requests:
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+
+    assert output.total_num_scheduled_tokens > 0
+    assert output.has_sync_kv_loads is True
+
+
+@pytest.mark.parametrize("holds_kv_blocks", [False, True])
+def test_balance_schedule_drained_waiting_queues(holds_kv_blocks):
+    scheduler = _make_balance_scheduler()
+    empty = scheduler.schedule()
+    assert empty.total_num_scheduled_tokens == 0
+    assert not empty.num_scheduled_tokens
+
+    request = _create_requests(1, num_tokens=8)[0]
+    request.num_computed_tokens = 4 if holds_kv_blocks else 0
+    scheduler.add_request(request)
+    scheduler._handle_blocked_waiting_request = MagicMock(return_value=False)
+
+    output = scheduler.schedule()
+
+    scheduler._handle_blocked_waiting_request.assert_called_once_with(request)
+    assert output.total_num_scheduled_tokens == 0
+    assert not output.num_scheduled_tokens
+    assert not scheduler.running
+    assert list(scheduler.kv_holding_waiting) == ([request] if holds_kv_blocks else [])
+    assert list(scheduler.waiting) == ([] if holds_kv_blocks else [request])
+    assert request in scheduler.deferred_waiting
+
+
 def test_balance_schedule_pause_freeze_and_v2():
     import torch
     from vllm.v1.core.sched.interface import PauseState
@@ -875,7 +1008,7 @@ def test_balance_schedule_encoder_lora_preempt_and_blocked():
     scheduler._mamba_block_aligned_split = MagicMock(side_effect=lambda req, n, *_a, **_k: n)
     scheduler.scheduler_config.long_prefill_token_threshold = 8
     scheduler.lora_config = MagicMock(max_loras=1)
-    scheduler._try_schedule_encoder_inputs = MagicMock(return_value=([0], 8, 99, [1]))
+    scheduler._try_schedule_encoder_inputs = MagicMock(return_value=([0], 8, 99, [1], []))
     scheduler.encoder_cache_manager.allocate = MagicMock()
     reqs = _create_requests(2, num_tokens=40, max_tokens=8)
     reqs[0].lora_request = MagicMock(lora_int_id=1)
@@ -896,7 +1029,7 @@ def test_balance_schedule_encoder_lora_preempt_and_blocked():
     scheduler.add_request(blocked)
     blocked.status = RequestStatus.WAITING_FOR_REMOTE_KVS
     scheduler._is_blocked_waiting_status = lambda status: status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    scheduler._try_promote_blocked_waiting_request = MagicMock(return_value=False)
+    scheduler._handle_blocked_waiting_request = MagicMock(return_value=False)
     scheduler.schedule()
 
     preempt = _make_balance_scheduler()
@@ -929,11 +1062,7 @@ def test_balance_engine_core_hooks(monkeypatch):
     from vllm_ascend.patch.platform import patch_engine_core as pe
 
     orig = pe._engine_core_mod.DPEngineCoreProc
-    ascend_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(
-            profiling_chunk_config=SimpleNamespace(enabled=False),
-        )
-    )
+    ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace())
     try:
         with (
             patch.object(pe, "_OriginalRunEngineCore", return_value="ok") as mock_orig,
@@ -991,7 +1120,7 @@ def _make_step_output(output, sampled):
     req_ids = list(output.num_scheduled_tokens)
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        **({"req_id_to_index": {req_id: i for i, req_id in enumerate(req_ids)}} if vllm_version_is("0.33.0") else {}),
         sampled_token_ids=[[1000] if sampled[req_id] else [] for req_id in req_ids],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -1083,3 +1212,82 @@ def test_balance_full_pool_does_not_cascade_preempt_on_deferred_free():
 
     # With balance disabled schedule() delegates to upstream Scheduler.
     assert run(balance_enabled=True) == run(balance_enabled=False)
+
+
+@pytest.mark.parametrize("encoder_only", [False, True])
+@pytest.mark.parametrize("chunked_prefill", [False, True])
+@pytest.mark.parametrize("num_tokens", [512, 2500])
+def test_balance_encoder_only_prefill_budget(encoder_only, chunked_prefill, num_tokens):
+    scheduler = _make_balance_scheduler()
+    token_budget = 1024
+    scheduler.max_num_scheduled_tokens = token_budget
+    scheduler.scheduler_config.max_num_batched_tokens = token_budget
+    scheduler.scheduler_config.enable_chunked_prefill = chunked_prefill
+    scheduler.is_mm_encoder_only = encoder_only
+    request = _create_requests(1, num_tokens=num_tokens)[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    can_chunk = chunked_prefill or encoder_only
+    expected = min(num_tokens, token_budget) if can_chunk or num_tokens <= token_budget else 0
+    assert output.num_scheduled_tokens.get(request.request_id, 0) == expected
+    assert output.total_num_scheduled_tokens == expected
+    assert (request in scheduler.running) == bool(expected)
+    assert (request in scheduler.waiting) == (not expected)
+
+
+# ---------------------------------------------------------------------------
+# M-RoPE multimodal data must survive prefix-cache stripping
+# ---------------------------------------------------------------------------
+
+
+def test_mrope_ascend_schedulers_forward_uses_mrope_to_from_request():
+    """Every ``NewRequestData.from_request`` call in the Ascend schedulers must
+    forward ``uses_mrope``.
+
+    ``from_request`` drops the payload of multimodal items fully covered by a
+    prefix-cache hit (``num_computed_tokens > 0``). With ``uses_mrope=False``
+    (the upstream default) it drops *all* payload fields, including the
+    CPU-side ``image_grid_thw`` / ``video_grid_thw`` kept via ``keep_on_cpu``.
+    An M-RoPE model (e.g. Qwen3.5) then reads ``mm_feature.data`` as ``None``
+    when building positions and the engine dies. See issue #19727.
+    """
+    repo_root = Path(__file__).resolve().parents[4]
+    sources = [
+        repo_root / "vllm_ascend/patch/platform/patch_balance_schedule.py",
+        repo_root / "vllm_ascend/core/dyntra_lb_scheduler.py",
+    ]
+    if not all(path.is_file() for path in sources):
+        pytest.skip("source checkout layout not available")
+
+    for path in sources:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "from_request"
+        ]
+        assert calls, f"{path.name}: no NewRequestData.from_request() call found"
+        for call in calls:
+            assert any(keyword.arg == "uses_mrope" for keyword in call.keywords), (
+                f"{path.name}:{call.lineno}: NewRequestData.from_request() must forward "
+                "uses_mrope=self.model_uses_mrope"
+            )
+
+
+def test_balance_schedule_forwards_uses_mrope_to_new_request_data():
+    """The balance copy of ``schedule()`` must pass the model's real M-RoPE flag
+    into ``NewRequestData.from_request``."""
+    from vllm_ascend.patch.platform import patch_balance_schedule as pbs
+
+    scheduler = _make_balance_scheduler()
+    scheduler.model_uses_mrope = True
+    request = _create_requests(1, num_tokens=32, max_tokens=8)[0]
+    scheduler.add_request(request)
+
+    with patch.object(pbs.NewRequestData, "from_request", wraps=pbs.NewRequestData.from_request) as spy:
+        scheduler.schedule()
+
+    spy.assert_called_once()
+    assert spy.call_args.kwargs["uses_mrope"] is True

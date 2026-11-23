@@ -10,6 +10,24 @@
 
 include(${CMAKE_CURRENT_LIST_DIR}/build_cache.cmake)
 
+function(install_common_kernel_headers destination)
+    install(DIRECTORY "${OPS_ADV_UTILS_KERNEL_INC}/"
+            DESTINATION "${destination}"
+    )
+    install(FILES "${VLLM_ASCEND_CANN_COMPAT_HEADER}"
+            DESTINATION "${destination}"
+    )
+    install(DIRECTORY "${OPS_TRANSFORMER_DIR}/moe/common/kernel_utils"
+            DESTINATION "${destination}"
+    )
+    set(catlass_include_dir "${OPS_TRANSFORMER_DIR}/third_party/catlass/include")
+    if (EXISTS "${catlass_include_dir}/catlass/catlass.hpp")
+        install(DIRECTORY "${catlass_include_dir}/"
+                DESTINATION "${destination}"
+        )
+    endif()
+endfunction()
+
 function(filter_copy_files SELECTED_FILES SELECTED_DIRS)
     set(_selected_files "")
     set(_selected_dirs "")
@@ -371,7 +389,9 @@ function(add_ops_src_copy)
             add_custom_command(OUTPUT ${OPS_UTILS_INC_KERNEL_DIR}
                     COMMAND mkdir -p ${OPS_UTILS_INC_KERNEL_DIR}/regbase
                     COMMAND cp -rf ${OPS_ADV_UTILS_KERNEL_INC}/*.* ${OPS_UTILS_INC_KERNEL_DIR}
-                    DEPENDS ${OPS_UTILS_INC_KERNEL_FILES}
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            ${VLLM_ASCEND_CANN_COMPAT_HEADER} ${OPS_UTILS_INC_KERNEL_DIR}/cann_compat.h
+                    DEPENDS ${OPS_UTILS_INC_KERNEL_FILES} ${VLLM_ASCEND_CANN_COMPAT_HEADER}
             )
 
             add_custom_target(${OPS_UTILS_INC_KERNEL_TARGET}
@@ -651,9 +671,8 @@ function(add_bin_compile_target)
             if (EXISTS ${OPS_ADV_UTILS_KERNEL_INC})
                 list(APPEND _CACHE_SHARED_COMPILER_INPUTS ${SRC_OUT_DIR}/ascendc/common)
             endif()
-            # The generated adapter embeds this absolute -include path. Its
-            # location is normalized by the cache wrapper, but its contents
-            # are a semantic compiler input and must remain identity-sensitive.
+            # Keep compatibility-header contents in the cache identity so header
+            # changes invalidate cached kernels.
             if (EXISTS ${VLLM_ASCEND_CANN_COMPAT_HEADER})
                 list(APPEND _CACHE_SHARED_COMPILER_INPUTS ${VLLM_ASCEND_CANN_COMPAT_HEADER})
             endif()
@@ -681,8 +700,16 @@ function(add_bin_compile_target)
                 TILINGKEY_PAR_COMPILE=1
                 BIN_FILENAME_HASHED=1
             )
+            set(_CACHE_COMMAND_ENV)
             if (ENABLE_OPS_HOST OR ENABLE_HOST_TILING)
-                list(APPEND _CACHE_SET_ENV ASCEND_CUSTOM_OPP_PATH=${CUSTOM_DIR})
+                # Normalize the generated OPP root with the command. Its host
+                # definitions are already covered by the operator source hash.
+                set(_CACHE_COMMAND_ENV env ASCEND_CUSTOM_OPP_PATH=${CUSTOM_DIR})
+            endif()
+
+            set(_CACHE_EXCLUDES "*.md" "*.rst" "README" "docs" "docs/**")
+            if (NOT ENABLE_TEST AND NOT BENCHMARK)
+                list(APPEND _CACHE_EXCLUDES "tests" "tests/**")
             endif()
 
             # Compile every action into a private directory. Multiple
@@ -718,9 +745,10 @@ function(add_bin_compile_target)
                 RECIPE_FILE ${bin_script}
                 ENVIRONMENT_PROFILE ascendc
                 ENVIRONMENT_FILE ${_CACHE_ENVIRONMENT_FILES}
-                NORMALIZE_PATH ${ASCEND_CANN_PACKAGE_PATH}
+                NORMALIZE_PATH ${ASCEND_CANN_PACKAGE_PATH} ${CUSTOM_DIR}
+                EXCLUDE ${_CACHE_EXCLUDES}
                 SET_ENV ${_CACHE_SET_ENV}
-                COMMAND bash ${bin_script} ${OP_SRC_OUT_DIR}/${op_type}.py ${_CACHE_ACTION_STAGE_DIR}
+                COMMAND ${_CACHE_COMMAND_ENV} bash ${bin_script} ${OP_SRC_OUT_DIR}/${op_type}.py ${_CACHE_ACTION_STAGE_DIR}
             )
 
             if(CMAKE_GENERATOR MATCHES "Unix Makefiles")

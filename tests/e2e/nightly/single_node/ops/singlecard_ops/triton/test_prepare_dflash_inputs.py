@@ -9,7 +9,9 @@ import pytest
 import torch
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs
 
 ACCURACY_CASES = [
@@ -293,6 +295,8 @@ def _allocate_outputs(max_num_reqs, max_num_tokens, num_speculative_steps, devic
         positions=torch.full((max_num_tokens,), -12345, dtype=torch.int64, device=device),
         query_start_loc=torch.full((max_num_reqs + 1,), -12345, dtype=torch.int32, device=device),
         seq_lens=torch.full((max_num_reqs,), -12345, dtype=torch.int32, device=device),
+        # Graph capture leaves the buffer all True; the kernel must rewrite it.
+        is_padding=torch.ones((max_num_tokens,), dtype=torch.bool, device=device),
     )
     sample_capacity = max_num_reqs * num_speculative_steps
     return SimpleNamespace(
@@ -501,6 +505,11 @@ def _validate_outputs(data, case, ref):
     _assert_exact(outputs.input_buffers.positions[:total_query], ref.query_positions)
     _assert_exact(outputs.input_buffers.query_start_loc, ref.query_start_loc)
     _assert_exact(outputs.input_buffers.seq_lens, ref.seq_lens)
+    # Same contract as upstream's prepare kernel: query rows real, the rest padding.
+    _assert_exact(
+        outputs.input_buffers.is_padding,
+        [False] * total_query + [True] * (case["max_num_tokens"] - total_query),
+    )
     _assert_exact(outputs.query_slot_mapping, ref.query_slot_mapping)
     _assert_exact(outputs.context_positions[:total_context], ref.context_positions)
     _assert_exact(outputs.context_slot_mapping[:total_context], ref.context_slot_mapping)
@@ -563,11 +572,19 @@ def _run_case(case):
     _cleanup()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("case", ACCURACY_CASES, ids=lambda case: case["name"])
 def test_prepare_dflash_inputs_impl(case):
     _run_case(case)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("num_reqs,context_len", [(39, 9), (40, 9), (41, 9), (48, 9), (8, 1024), (1, 16384)])
 def test_prepare_dflash_inputs_partition_boundaries(num_reqs, context_len):
     case = {
@@ -585,6 +602,10 @@ def test_prepare_dflash_inputs_partition_boundaries(num_reqs, context_len):
     _run_case(case)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_prepare_dflash_inputs_wrapper_forwards_dcp():
     case = next(case for case in ACCURACY_CASES if case["name"] == "dcp_physical384_kernel128")
     data = _build_inputs(case, "npu")

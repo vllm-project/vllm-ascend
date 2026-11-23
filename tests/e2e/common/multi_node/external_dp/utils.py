@@ -227,7 +227,7 @@ def build_benchmark_results(
     commands: list["ServerCommand"],
     results: list[Any],
 ) -> dict[str, Any]:
-    valid_items = [(case["case_name"], case) for case in config.benchmark_cases]
+    valid_items = [(case["benchmark_name"], case) for case in config.benchmark_cases]
     tasks = [build_task_entry(key, case, result) for (key, case), result in zip(valid_items, results)]
     runner = os.environ.get("VLLM_CI_RUNNER", "")
     common_envs = _common_command_envs(commands)
@@ -256,7 +256,7 @@ def write_benchmark_results_json(
     output = build_benchmark_results(config=config, ranks=ranks, commands=commands, results=results)
     job_name = os.environ.get("BENCHMARK_JOB_NAME", "") or config.test_name.replace(" ", "-")
     path = write_results_json(output, job_name=job_name, output_dir=output_dir)
-    valid_items = [(case["case_name"], case) for case in config.benchmark_cases]
+    valid_items = [(case["benchmark_name"], case) for case in config.benchmark_cases]
     postprocess_benchmark_results(
         [(key, case, result) for (key, case), result in zip(valid_items, results)],
         job_name=job_name,

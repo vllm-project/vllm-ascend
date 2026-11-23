@@ -1,0 +1,8 @@
+pr: 20726
+entries:
+  - category: performance
+    text: >-
+      Reduced time to first token on A5 when EPLB runs over the AllGather MoE dispatch. The
+      source-eligibility mask is now gathered once per forward instead of once per MoE layer,
+      since every layer derives the same mask.
+    hardware: [A5]

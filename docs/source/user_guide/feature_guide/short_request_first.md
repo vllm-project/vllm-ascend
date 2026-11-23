@@ -1,6 +1,6 @@
 # ShortRequestFirst Prefill Scheduling
 
-ShortRequestFirst reduces head-of-line blocking during prefill by letting short prompts run before long prompts. It is designed for mixed prompt-length traffic where a few long requests can otherwise delay many short ones.
+ShortRequestFirst reduces head-of-line blocking during prefill by letting short prompts run before long prompts. ShortRequestFirst is designed for mixed prompt-length traffic where a few long requests can otherwise delay many short ones.
 
 ## When to use it
 
@@ -50,7 +50,7 @@ In short: the right threshold is usually the valley between short-request and lo
 
 ## long_max_wait_ms tuning
 
-`long_max_wait_ms` is a fairness gate, not a throughput-optimization knob. It controls when a long request stops waiting under normal short-first behavior and becomes eligible for anti-starvation promotion.
+`long_max_wait_ms` is a fairness gate, not a throughput-optimization knob. It controls when a long request stops waiting under normal short-first behavior and becomes eligible for aged-long promotion.
 
 Tune `threshold` first. If degradation warnings appear frequently, first suspect that `threshold` is too small for the current traffic mix, then consider increasing `long_max_wait_ms`.
 
@@ -102,7 +102,7 @@ ShortRequestFirst also emits an aggregate stats log every 5s so queue behavior i
 
 ## Scheduler compatibility
 
-ShortRequestFirst changes only the waiting-queue policy. It requires FCFS scheduling and supports both synchronous and asynchronous scheduling. It is not supported with batch-job-aware scheduling, profiling-chunk scheduling, or on PD-disaggregated D nodes (`kv_role='kv_consumer'`).
+ShortRequestFirst changes only the waiting-queue policy. It requires FCFS scheduling and supports both synchronous and asynchronous scheduling, including in combination with profiling-chunk scheduling. It is not supported with batch-job-aware scheduling or on PD-disaggregated D nodes (`kv_role='kv_consumer'`).
 
 The `additional_config.scheduler_config.enable_balance_scheduling` setting keeps its existing behavior: it controls balance scheduling's cross-DP admission logic. ShortRequestFirst is installed independently of whether balance scheduling is enabled, so the balance-disabled path continues to delegate scheduling to vLLM while using the ShortRequestFirst waiting queue.
 

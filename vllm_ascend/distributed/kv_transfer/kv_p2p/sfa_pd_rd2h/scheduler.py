@@ -42,7 +42,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots i
     copy_sfa_pool_capacity,
     copy_sfa_prefill_dest_geometry,
 )
-from vllm_ascend.spec_decode.dspark_utils import get_dspark_aux_layer_ids
+from vllm_ascend.worker.dspark_utils import get_dspark_aux_layer_ids
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -105,6 +105,10 @@ class SFAPDRD2HProducerScheduler:
 
     def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int, bool]:
         return 0, False
+
+    def get_loaded_kv_cache_group_ids(self, request: Request) -> tuple[int, ...]:
+        # Prefill keeps its own blocks; it never restores remote KV.
+        return ()
 
     def update_state_after_alloc(
         self,
@@ -295,6 +299,7 @@ class SFAPDRD2HScheduler:
         # can build request_map for get_finished even while async-waiting KV).
         self._reqs_need_recv: set[str] = set()
         self._dspark_pending_recv: set[str] = set()
+        self._d2h_pending_releases: dict[str, int] = {}
         self._deferred_finished_req_ids: set[str] = set()
         self.executor = ThreadPoolExecutor(32)
         self._metaserver_futures = {}
@@ -349,6 +354,22 @@ class SFAPDRD2HScheduler:
             count = max(len(request.prompt_token_ids) - num_computed_tokens, 0)
             return count, count > 0
         return 0, False
+
+    def get_loaded_kv_cache_group_ids(self, request: Request) -> tuple[int, ...]:
+        params = request.kv_transfer_params
+        if params is None or not params.get("do_remote_prefill"):
+            return ()
+        # The pull restores the request's main MLA and indexer blocks and, with
+        # DSpark, its resident draft-context blocks.
+        return tuple(
+            sorted(
+                {
+                    self.main_group_idx,
+                    self.indexer_group_idx,
+                    *getattr(self, "_dspark_context_groups", ()),
+                }
+            )
+        )
 
     def update_state_after_alloc(
         self,
@@ -492,6 +513,8 @@ class SFAPDRD2HScheduler:
                     dspark_draft_group_ids=(self._dspark_context_groups if req_id in context_requests else ()),
                     dspark_draft_block_ids_by_group=context_requests.get(req_id, (None, None))[1],
                 )
+        for req_id, pool_slot in getattr(self, "_d2h_pending_releases", {}).items():
+            meta.add_d2h_release(req_id, pool_slot)
         self._reqs_need_recv.clear()
         return meta
 
@@ -508,13 +531,55 @@ class SFAPDRD2HScheduler:
             # retains the KV blocks; retain the connector's destinations too.
             self._deferred_finished_req_ids.add(request.request_id)
             return True, None
+        allocator = getattr(self, "_copy_sfa_slot_allocator", None)
+        binding = getattr(self, "_copy_sfa_bindings", {}).get(request.request_id)
+        # The delayed-free reservation applies only when the offload config
+        # is enabled (manager-less deployments keep the immediate-free
+        # lifecycle). Read the config instead of querying the manager
+        # singleton: the scheduler runs before/away from the manager's
+        # module-global init window, and a None fallback here would flip
+        # requests to immediate-free mid-flight (observed as late
+        # finished_recving asserting on an already-removed request).
+        try:
+            from vllm_ascend.ascend_config import get_ascend_config
+
+            offload_enabled = get_ascend_config().sparse_kv_offload_config.enabled
+        except RuntimeError:
+            offload_enabled = False
+        if offload_enabled and allocator is not None and binding is not None:
+            # Terminal requests keep both their vLLM blocks and the
+            # request-owned Copy-SFA row until every worker has retired any
+            # D2H batch that can still reference the row. Entries are
+            # released by update_connector_output() on finished_sending.
+            if not hasattr(self, "_d2h_pending_releases"):
+                self._d2h_pending_releases = {}
+            self._d2h_pending_releases[request.request_id] = binding[0]
+            return True, None
         self._cleanup_finished_request(request.request_id)
         return False, None
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        for req_id in connector_output.finished_sending or ():
+            if req_id in getattr(self, "_d2h_pending_releases", {}):
+                # The worker retired every D2H batch referencing the row and
+                # released it; now drop the binding and free the allocator.
+                self._d2h_pending_releases.pop(req_id, None)  # attr guaranteed by membership check above
+                self._cleanup_finished_request(req_id)
         completed = set(connector_output.finished_recving or ())
+        # A dspark request that finished after its transport join took the
+        # delayed-D2H reservation branch instead of the deferred one; its
+        # rows retire with the transport, so drain them here too.
+        for request_id in completed:
+            pending = getattr(self, "_d2h_pending_releases", None)
+            if pending and request_id in pending:
+                pending.pop(request_id, None)
+                self._cleanup_finished_request(request_id)
         self._dspark_pending_recv.difference_update(completed)
         for request_id in completed & self._deferred_finished_req_ids:
+            # The dspark drain path releases the slot allocator without the
+            # finished_sending handshake; drop the delayed D2H release entry
+            # too, or it is resent forever and re-reserves the reused slot.
+            getattr(self, "_d2h_pending_releases", {}).pop(request_id, None)
             self._cleanup_finished_request(request_id)
 
     def _cleanup_finished_request(self, request_id: str) -> None:

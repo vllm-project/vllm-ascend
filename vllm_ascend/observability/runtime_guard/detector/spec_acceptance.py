@@ -116,6 +116,10 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
         self._history.pop(req_id, None)
         self._short_log_ts.pop(req_id, None)
 
+    def on_disabled(self) -> None:
+        self._history.clear()
+        self._short_log_ts.clear()
+
     def check_all(
         self,
         sampled_tokens: torch.Tensor,
@@ -148,6 +152,9 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
         input_batch = getattr(runner, "input_batch", None)
         req_ids = resolve_batch_req_ids(runner, req_ids)
         if not req_ids:
+            return []
+
+        if accepted_token_nums is None:
             return []
 
         num_reqs = len(req_ids)

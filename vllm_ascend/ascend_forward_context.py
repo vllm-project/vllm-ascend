@@ -5,7 +5,6 @@ from enum import Enum
 from typing import Any
 
 import torch
-import vllm.envs as envs_vllm
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
@@ -17,11 +16,28 @@ from vllm_ascend.device.hardware_profile import (
     MoECommPolicy,
     get_current_hardware_profile,
 )
+from vllm_ascend.mrv2_utils import use_v2_model_runner
 from vllm_ascend.quantization.quant_type import A5_SUPPORT_MEGA_MOE_QUANT_TYPES, QuantType
 from vllm_ascend.utils import (
+    get_pcp_profile_num_tokens,
     has_layer_idx,
     is_moe_model,
+    vllm_version_is,
 )
+
+# Dynamo constant-folds this like VLLM_USE_V2_MODEL_RUNNER. Sync from eager
+# setup so compiled FIA/MoE never traces use_v2_model_runner (warning_once).
+_USE_V2_EXTRA_KWARGS = False
+
+
+def sync_v2_extra_kwargs(vllm_config: VllmConfig) -> None:
+    """Cache whether Ascend extras belong in ``additional_kwargs``.
+
+    Call this from eager config / forward-context setup, not from compiled
+    attention. Require an actual bool: MagicMock configs can be truthy.
+    """
+    global _USE_V2_EXTRA_KWARGS
+    _USE_V2_EXTRA_KWARGS = use_v2_model_runner(vllm_config) is True
 
 
 class MoECommType(Enum):
@@ -127,6 +143,7 @@ def set_ascend_forward_context(
     exit, so wrapping only ``load_model`` is not enough; pin it here instead of
     in the Worker.
     """
+    sync_v2_extra_kwargs(vllm_config)
     forward_context_kwargs = {
         "attn_metadata": attn_metadata,
         "vllm_config": vllm_config,
@@ -252,9 +269,37 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     # HCCL comm buffer (HCCL_BUFFSIZE); MegaMoe (use_mega_moe, non-decode-only)
     # uses the symm buffer (separate torch alloc, not HCCL_BUFFSIZE).
     if ascend_config.enable_prefill_mc2 or (use_mega_moe and not _is_decode_only_node(vllm_config)):
-        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        max_num_tokens = get_pcp_profile_num_tokens(
+            vllm_config, vllm_config.scheduler_config.max_num_batched_tokens, max_num_reqs
+        )
     elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
+        compilation_config = vllm_config.compilation_config
+        decode_sizes = None
+        if not vllm_version_is("0.33.0"):
+            decode_sizes = compilation_config.decode_cudagraph_capture_request_sizes
+        if decode_sizes is not None:
+            # Main's shared token union also includes independent one-token
+            # draft graphs up to max_num_seqs (#63406). Keep the communication
+            # threshold tied to target graphs: wider draft batches use the
+            # existing ALLTOALL fallback instead of enlarging the MC2 profile.
+            # This helper is only available with the split-grid main API.
+            from vllm.config.compilation import decode_cudagraph_capture_shapes
+
+            decode_max_tokens = min(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                compilation_config.max_decode_cudagraph_capture_tokens
+                or vllm_config.scheduler_config.max_num_batched_tokens,
+            )
+            target_shapes = decode_cudagraph_capture_shapes(
+                decode_sizes,
+                vllm_config.get_decode_cudagraph_query_lens(uniform_decode_query_len),
+                decode_max_tokens,
+            )
+            max_num_tokens = max(
+                compilation_config.max_prefill_cudagraph_capture_tokens or 0,
+                max((num_reqs * query_len for num_reqs, query_len in target_shapes), default=0),
+            )
     else:
         max_num_tokens = max_num_reqs * uniform_decode_query_len
     tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -355,10 +400,15 @@ def _select_capacity_and_world_size_moe_comm_method(
         "num_experts_per_tok",
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
-    world_size = vllm_config.parallel_config.world_size_across_dp
-    if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
+    # The EP group spans DP x PCP x TP ranks and never includes PP (each PP
+    # stage owns different layers), so divide out pipeline_parallel_size to get
+    # the real EP group size.
+    ep_world_size = (
+        vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
+    )
+    if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and ep_world_size > 1:
         return MoECommType.MC2
-    if world_size <= num_experts_per_tok:
+    if ep_world_size <= num_experts_per_tok:
         return MoECommType.ALLGATHER
     return MoECommType.ALLTOALL
 
@@ -469,7 +519,7 @@ class _ExtraForwardContextProxy:
     def __getattr__(self, name: str) -> Any:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+        if _USE_V2_EXTRA_KWARGS:
             # Unset known extras default to None so optional flags (e.g. `sinks`)
             # can be read with truthiness checks before the V2 path populates them.
             return ctx.additional_kwargs.get(name)
@@ -478,7 +528,7 @@ class _ExtraForwardContextProxy:
     def __setattr__(self, name: str, value: Any) -> None:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+        if _USE_V2_EXTRA_KWARGS:
             ctx.additional_kwargs[name] = value
         else:
             setattr(ctx, name, value)

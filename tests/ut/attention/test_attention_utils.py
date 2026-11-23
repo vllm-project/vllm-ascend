@@ -20,10 +20,12 @@ import pytest
 import torch
 from vllm.v1.kv_cache_interface import CrossAttentionSpec
 
+from vllm_ascend.attention import utils as attention_utils
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
     filter_chunked_req_indices,
+    get_flashmla_ops,
     get_or_register_attention_buffer,
 )
 
@@ -31,6 +33,62 @@ NUM_REQS = 2
 # Distinct values so the selected source (CPU mirror vs NPU tensor) is identifiable.
 CPU_SEQ_LENS = torch.tensor([10, 20, 30], dtype=torch.int32)
 NPU_SEQ_LENS = torch.tensor([99, 99, 99], dtype=torch.int32)
+
+
+def test_get_flashmla_ops_returns_none_without_cann_module(monkeypatch):
+    monkeypatch.setattr(attention_utils, "_has_flashmla_module", lambda: False)
+
+    assert get_flashmla_ops() is None
+
+
+def test_get_flashmla_ops_returns_none_when_ops_submodule_is_missing(monkeypatch):
+    error = ModuleNotFoundError(
+        "No module named 'cann_ops_transformer.ops'",
+        name="cann_ops_transformer.ops",
+    )
+    import_module = MagicMock(side_effect=error)
+    monkeypatch.setattr(attention_utils, "_has_flashmla_module", lambda: True)
+    monkeypatch.setattr(attention_utils, "import_module", import_module)
+
+    assert get_flashmla_ops() is None
+    import_module.assert_called_once_with("cann_ops_transformer.ops")
+
+
+def test_get_flashmla_ops_requires_both_callable_apis(monkeypatch):
+    ops = SimpleNamespace(
+        flash_mla=MagicMock(),
+        flash_mla_metadata=None,
+    )
+    import_module = MagicMock(return_value=ops)
+    monkeypatch.setattr(attention_utils, "_has_flashmla_module", lambda: True)
+    monkeypatch.setattr(attention_utils, "import_module", import_module)
+
+    assert get_flashmla_ops() is None
+
+
+def test_get_flashmla_ops_returns_both_callable_apis(monkeypatch):
+    attention_op = MagicMock()
+    metadata_op = MagicMock()
+    ops = SimpleNamespace(
+        flash_mla=attention_op,
+        flash_mla_metadata=metadata_op,
+    )
+    import_module = MagicMock(return_value=ops)
+    monkeypatch.setattr(attention_utils, "_has_flashmla_module", lambda: True)
+    monkeypatch.setattr(attention_utils, "import_module", import_module)
+
+    assert get_flashmla_ops() == (attention_op, metadata_op)
+    import_module.assert_called_once_with("cann_ops_transformer.ops")
+
+
+def test_get_flashmla_ops_propagates_internal_import_failure(monkeypatch):
+    error = ModuleNotFoundError("No module named 'internal_dependency'", name="internal_dependency")
+    import_module = MagicMock(side_effect=error)
+    monkeypatch.setattr(attention_utils, "_has_flashmla_module", lambda: True)
+    monkeypatch.setattr(attention_utils, "import_module", import_module)
+
+    with pytest.raises(ModuleNotFoundError, match="internal_dependency"):
+        get_flashmla_ops()
 
 
 def _common_attn_metadata() -> AscendCommonAttentionMetadata:
@@ -51,6 +109,7 @@ def _common_attn_metadata() -> AscendCommonAttentionMetadata:
 def _spec_config(method: str, parallel_drafting: bool) -> MagicMock:
     spec_config = MagicMock()
     spec_config.parallel_drafting = parallel_drafting
+    spec_config.speculator_config.parallel_drafting = parallel_drafting
     spec_config.use_dspark.return_value = method == "dspark"
     return spec_config
 
@@ -94,6 +153,38 @@ def test_select_seq_lens_spec_decode(
         _spec_config(method, parallel_drafting),
         _vllm_config(model_type),
     )
+
+    torch.testing.assert_close(seq_lens, expected)
+
+
+@pytest.mark.parametrize("is_release", [False, True])
+@pytest.mark.parametrize(
+    ("method", "model_type", "parallel_drafting", "expected"),
+    [
+        ("dspark", "qwen3", True, NPU_SEQ_LENS),
+        ("dflash", "qwen3", True, NPU_SEQ_LENS),
+        ("dspark", "glm5_next", True, CPU_SEQ_LENS[:NUM_REQS]),
+        ("mtp", "qwen3", False, CPU_SEQ_LENS[:NUM_REQS]),
+    ],
+)
+def test_select_seq_lens_versioned_parallel_capability(
+    monkeypatch,
+    is_release: bool,
+    method: str,
+    model_type: str,
+    parallel_drafting: bool,
+    expected: torch.Tensor,
+) -> None:
+    monkeypatch.setattr(attention_utils, "vllm_version_is", lambda version: is_release, raising=False)
+    # Main leaves the deprecated flag unset. Release has no capability object.
+    spec_config = SimpleNamespace(
+        parallel_drafting=parallel_drafting if is_release else None,
+        use_dspark=lambda: method == "dspark",
+    )
+    if not is_release:
+        spec_config.speculator_config = SimpleNamespace(parallel_drafting=parallel_drafting)
+
+    seq_lens = _select_seq_lens(_common_attn_metadata(), None, spec_config, _vllm_config(model_type))
 
     torch.testing.assert_close(seq_lens, expected)
 
@@ -157,3 +248,11 @@ def test_filter_chunked_req_indices_mixed_mask() -> None:
     )
 
     torch.testing.assert_close(indices, torch.tensor([0, 1, 3, 4, 5]))
+
+
+def test_is_dcp_enabled_tracks_active_target_and_draft_config(monkeypatch):
+    target = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=8))
+    draft = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
+    for config, expected in [(target, True), (draft, False), (target, True)]:
+        monkeypatch.setattr(attention_utils, "get_current_vllm_config", lambda config=config: config)
+        assert attention_utils.is_dcp_enabled() is expected

@@ -2,9 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Per-head INT8 query quantization with the FP16 scales consumed by QLI."""
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+)
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.ops.triton.ascend_jit_warmup import AscendTritonJitKernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
@@ -37,6 +46,62 @@ def _quantize_indexer_query_kernel(
         tl.store(scale_ptr + rows, scale, rows < num_rows)
 
 
+class QuantizeIndexerQueryKernel(AscendTritonJitKernel["QuantizeIndexerQueryKernel.CompileKey"]):
+    BLOCK_ROWS = 16
+    kernel = _quantize_indexer_query_kernel
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        dtype: torch.dtype
+        head_dim: int
+
+    def dispatch(self, *, dtype: torch.dtype, head_dim: int) -> "QuantizeIndexerQueryKernel.CompileKey":
+        return self.CompileKey(dtype=dtype, head_dim=head_dim)
+
+    def get_warmup_keys(self, vllm_config: Any) -> list["QuantizeIndexerQueryKernel.CompileKey"]:
+        # BLOCK_ROWS / QUANT_MAX / MIN_SCALE are fixed; num_rows and
+        # blocks_per_core are do_not_specialize, so the model dtype and the
+        # indexer head dim fully determine the JIT key.
+        head_dim = int(getattr(vllm_config.model_config.hf_text_config, "index_head_dim", 128))
+        return self._trace_dispatch(self.dispatch)(
+            dtype=vllm_config.model_config.dtype,
+            head_dim=head_dim,
+        )
+
+    def warmup_inputs(self, compile_key: "QuantizeIndexerQueryKernel.CompileKey") -> dict[str, Any]:
+        shape = (1, 1, compile_key.head_dim)
+        strides = (compile_key.head_dim, compile_key.head_dim, 1)
+        return dict(
+            query=TritonWarmupTensor(compile_key.dtype, shape=shape, strides=strides),
+            quantized=TritonWarmupTensor(torch.int8, shape=shape, strides=strides),
+            scale=TritonWarmupTensor(torch.float16, shape=(1, 1)),
+            num_rows=1,
+            blocks_per_core=1,
+            grid_size=1,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        query: torch.Tensor,
+        quantized: torch.Tensor,
+        scale: torch.Tensor,
+        *,
+        num_rows: int,
+        blocks_per_core: int,
+        grid_size: int,
+    ) -> LaunchSpec:
+        return (grid_size,), dict(
+            BLOCK_ROWS=self.BLOCK_ROWS,
+            HEAD_DIM=query.shape[-1],
+            QUANT_MAX=127.0,
+            MIN_SCALE=2.0**-24,
+        )
+
+
+_QUANTIZE_INDEXER_QUERY_KERNEL = QuantizeIndexerQueryKernel()
+
+
 def quantize_indexer_query(query: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize [tokens, heads, 128] queries to INT8 and FP16 per-head scales.
 
@@ -56,15 +121,12 @@ def quantize_indexer_query(query: torch.Tensor) -> tuple[torch.Tensor, torch.Ten
     block_rows = 16
     num_blocks = triton.cdiv(num_rows, block_rows)
     grid = min(num_blocks, get_vectorcore_num())
-    _quantize_indexer_query_kernel[(grid,)](
-        query,
-        quantized,
-        scale,
-        num_rows,
+    _QUANTIZE_INDEXER_QUERY_KERNEL(
+        query=query,
+        quantized=quantized,
+        scale=scale,
+        num_rows=num_rows,
         blocks_per_core=triton.cdiv(num_blocks, grid),
-        BLOCK_ROWS=block_rows,
-        HEAD_DIM=query.shape[-1],
-        QUANT_MAX=127.0,
-        MIN_SCALE=2.0**-24,
+        grid_size=grid,
     )
     return quantized, scale

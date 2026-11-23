@@ -1,0 +1,7 @@
+pr: 19877
+entries:
+  - category: bugfix
+    text: >-
+      Fixed memcache KV-pool allocation failures when physical MTP cache layers
+      extend past a pipeline stage's estimated object capacity. Rebuild affected
+      pooled caches when upgrading all readers and writers to the fixed version.

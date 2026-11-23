@@ -11,8 +11,8 @@ The patch ``0001-fix-mtp-prefix-cache-hit-hybrid-pd`` makes three changes to
    the PD prefill producer and on standalone instances. The role is derived
    from ``kv_transfer_config`` (``is_kv_producer and not is_kv_consumer``),
    attached onto ``KVCacheConfig`` by the ``get_kv_cache_config_from_groups``
-   builder in ``patch_kv_cache_utils``, and read back by the coordinator -
-   no role environment variable is involved.
+   builder in ``vllm_ascend.core.kv_cache_config_builder``, and read back by
+   the coordinator - no role environment variable is involved.
 3. ``find_longest_cache_hit_per_group`` applies the same drop gating and
    keeps the ``(block_hashes, max_cache_hit_length)`` call convention used by
    RecomputeScheduler / DyntraLB / BalanceScheduler.
@@ -33,6 +33,7 @@ with ``__new__`` and drive it through recording fake managers, and the
 scheduler wrapper is exercised against one-off scheduler double classes.
 """
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -77,30 +78,34 @@ class _FakeBlockPool:
 
 
 class _FakeFAManager:
-    def __init__(self, **kwargs):
+    def __init__(self):
         self.use_eagle = False
-        self.block_size = kwargs["kv_cache_spec"].block_size
 
 
 class _FakeMambaManager:
-    def __init__(self, **kwargs):
+    def __init__(self):
         self.use_eagle = False
-        self.block_size = kwargs["kv_cache_spec"].block_size
+        self.drop_eagle_checkpoint_block = False
 
 
 def _fake_manager_factory(**kwargs):
     spec = kwargs["kv_cache_spec"]
     if isinstance(spec, MambaSpec):
-        return _FakeMambaManager(**kwargs)
-    return _FakeFAManager(**kwargs)
+        return _FakeMambaManager()
+    return _FakeFAManager()
 
 
-def _hybrid_config(*, mamba_eagle: bool = False) -> KVCacheConfig:
+def _hybrid_config(*, mamba_eagle: bool = False, retention_interval: int | None = None) -> KVCacheConfig:
     groups = [
         KVCacheGroupSpec(["fa-layer"], FA_SPEC, False),
         KVCacheGroupSpec(["mamba-layer"], MAMBA_SPEC, mamba_eagle),
     ]
-    return KVCacheConfig(num_blocks=8, kv_cache_tensors=[], kv_cache_groups=groups)
+    return KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+        prefix_cache_retention_interval=retention_interval,
+    )
 
 
 def _make_coordinator(
@@ -109,10 +114,12 @@ def _make_coordinator(
     use_eagle: bool,
     kv_transfer_config=None,
     mamba_eagle: bool = False,
+    retention_interval: int | None = None,
 ):
     monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
+    monkeypatch.setattr(mod, "MambaManager", _FakeMambaManager)
     monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
-    kv_cache_config = _hybrid_config(mamba_eagle=mamba_eagle)
+    kv_cache_config = _hybrid_config(mamba_eagle=mamba_eagle, retention_interval=retention_interval)
     # The kv-transfer config is attached by the
     # get_kv_cache_config_from_groups builder in real engine startup.
     kv_cache_config.kv_transfer_config = kv_transfer_config
@@ -125,7 +132,14 @@ def _make_coordinator(
         dcp_world_size=1,
         pcp_world_size=1,
         hash_block_size=HASH_BLOCK_SIZE,
+        scheduler_block_size=HASH_BLOCK_SIZE,
     )
+
+
+@pytest.mark.parametrize("retention_interval", [None, 0, 384])
+def test_coordinator_uses_resolved_retention_interval(monkeypatch, retention_interval):
+    coordinator = _make_coordinator(monkeypatch, use_eagle=False, retention_interval=retention_interval)
+    assert coordinator.retention_interval == retention_interval
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +223,30 @@ def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
 
 
 @pytest.mark.parametrize(
+    ("kv_transfer_config", "drop_for_role"),
+    [
+        pytest.param(None, False, id="standalone"),
+        pytest.param(_kv_transfer_config(is_kv_producer=True, is_kv_consumer=False), False, id="producer"),
+        pytest.param(_kv_transfer_config(is_kv_producer=False, is_kv_consumer=True), True, id="consumer"),
+        pytest.param(_kv_transfer_config(is_kv_producer=True, is_kv_consumer=True), True, id="both"),
+    ],
+)
+@pytest.mark.parametrize("use_eagle", [False, True])
+@pytest.mark.parametrize("mamba_eagle", [False, True])
+def test_mamba_checkpoint_drop_follows_lookup_policy(
+    monkeypatch, kv_transfer_config, drop_for_role, use_eagle, mamba_eagle
+):
+    coordinator = _make_coordinator(
+        monkeypatch,
+        use_eagle=use_eagle,
+        kv_transfer_config=kv_transfer_config,
+        mamba_eagle=mamba_eagle,
+    )
+    manager = coordinator.single_type_managers[1]
+    assert manager.drop_eagle_checkpoint_block is (use_eagle and mamba_eagle and drop_for_role)
+
+
+@pytest.mark.parametrize(
     "kv_transfer_config",
     [
         SimpleNamespace(is_kv_producer=True, is_kv_consumer=False),
@@ -216,21 +254,55 @@ def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
     ],
 )
 def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_transfer_config):
-    import vllm.v1.core.kv_cache_utils as kcu
-
-    from vllm_ascend.patch.platform import patch_kv_cache_utils as kcu_patch
+    from vllm_ascend.core import kv_cache_config_builder as builder_module
 
     sentinel_config = SimpleNamespace()
-    vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k3")),
+        kv_transfer_config=kv_transfer_config,
+    )
     monkeypatch.setattr(
-        kcu_patch,
-        "_orig_get_kv_cache_config_from_groups",
+        builder_module,
+        "_upstream_get_kv_cache_config_from_groups",
         lambda *args, **kwargs: sentinel_config,
     )
-    result = kcu_patch._ascend_get_kv_cache_config_from_groups(vllm_config, [], 0)
-    # The builder replaces the upstream entry point, so the coordinator-side
+    result = builder_module.get_ascend_kv_cache_config_from_groups(vllm_config, [], 0)
+    # The builder owns every config it materializes, so the coordinator-side
     # getattr in __init__ sees the attached role on every real engine path.
-    assert kcu.get_kv_cache_config_from_groups is kcu_patch._ascend_get_kv_cache_config_from_groups
+    assert result is sentinel_config
+    assert result.kv_transfer_config is kv_transfer_config
+
+
+@pytest.mark.parametrize(
+    "kv_transfer_config",
+    [
+        SimpleNamespace(is_kv_producer=False, is_kv_consumer=True),
+        None,
+    ],
+)
+def test_public_builder_mounts_kv_transfer_config_on_default_path(monkeypatch, kv_transfer_config):
+    from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
+
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
+    # A generic layout matches no Ascend divisor, so the public builder
+    # returns through the upstream default materializer. The PD consumer
+    # role must ride on that result too: the hybrid coordinator treats a
+    # config without it as standalone and would skip the EAGLE replay block
+    # drop used for external cache loads.
+    sentinel_config = SimpleNamespace()
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="llama")),
+        kv_transfer_config=kv_transfer_config,
+    )
+    monkeypatch.setattr(
+        DefaultKVCacheConfigBuilder,
+        "get_kv_cache_config_from_groups",
+        lambda self, vllm_config, groups, num_blocks: sentinel_config,
+    )
+    result = AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(
+        vllm_config, [KVCacheGroupSpec(["fa-layer"], FA_SPEC, False)], 8
+    )
     assert result is sentinel_config
     assert result.kv_transfer_config is kv_transfer_config
 
@@ -260,7 +332,9 @@ class _RecordingManager:
         dcp_world_size=1,
         pcp_world_size=1,
     ):
-        cls.calls.append({"max_length": max_length, "drop_eagle_block": drop_eagle_block})
+        cls.calls.append(
+            {"max_length": max_length, "drop_eagle_block": drop_eagle_block, "dcp_world_size": dcp_world_size}
+        )
         return (([],), max_length)
 
 
@@ -365,6 +439,19 @@ def test_per_group_lookup_matches_scheduler_call_convention():
     assert len(blocks) == 2
     assert _RecordingFA.calls[-1]["max_length"] == 4095
     assert hit_lengths == (4095, 4095)
+
+
+def test_per_group_lookup_preserves_replicated_draft_positions():
+    coordinator = _make_lookup_coordinator(producer=True)
+    coordinator.dcp_world_size = 2
+    draft_spec = replace(FA_SPEC, is_draft=True, dcp_sharded=False)
+    coordinator.attention_groups = [
+        SpecGroup(FA_SPEC, [0], _RecordingFA, False),
+        SpecGroup(draft_spec, [1], _RecordingMamba, True),
+    ]
+    coordinator.find_longest_cache_hit_per_group([], 2048)
+    assert _RecordingFA.calls[-1]["dcp_world_size"] == 2
+    assert _RecordingMamba.calls[-1]["dcp_world_size"] == 1
 
 
 if __name__ == "__main__":

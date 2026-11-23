@@ -157,7 +157,7 @@ print_summary() {
     echo -e "  ${status}: ${target}"
     echo -e "    log: ${log_file}"
   done
-  if [ "${#failed_logs[@]}" -gt 0 ]; then
+  if [ "${npu_type}" != "cpu" ] && [ "${#failed_logs[@]}" -gt 0 ]; then
     echo -e "\033[1;31m=== FAILED TEST LOGS ===\033[0m"
     for failed in "${failed_logs[@]}"; do
       IFS='|' read -r target log_file <<< "${failed}"
@@ -188,7 +188,11 @@ run_pytest_target() {
     run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}"
   else
     set +e
-    run_logged_command "${log_file}" pytest -sv --color=yes "${target}"
+    if [ "${npu_type}" = "cpu" ]; then
+      run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*,*/ops/triton/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n 8 -sv --color=yes "${target}"
+    else
+      run_logged_command "${log_file}" pytest -sv --color=yes "${target}"
+    fi
   fi
   local status=$?
   set -e
@@ -226,7 +230,6 @@ run_pytest_batch() {
   test_index=$((test_index + 1))
   local log_file="${pytest_log_dir}/${test_index}-cpu-ut.log"
 
-  echo "::group::${target}"
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
   local start_time=0
   if [ "${record_timing}" = true ]; then
@@ -239,7 +242,11 @@ run_pytest_batch() {
     run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}"
   else
     set +e
-    run_logged_command "${log_file}" pytest -sv --color=yes "${batch_targets[@]}"
+    if [ "${npu_type}" = "cpu" ]; then
+      run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*,*/ops/triton/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n 8 -sv --color=yes "${batch_targets[@]}"
+    else
+      run_logged_command "${log_file}" pytest -sv --color=yes "${batch_targets[@]}"
+    fi
   fi
   local status=$?
   set -e
@@ -251,7 +258,6 @@ run_pytest_batch() {
     local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
     timing_entries+=("{\"name\":\"${target}\",\"passed\":$([ ${status} -eq 0 ] && echo true || echo false),\"elapsed\":${elapsed}}")
   fi
-  echo "::endgroup::"
   if [ "${status}" -eq 0 ]; then
     test_results+=("${target}|PASSED|${log_file}")
   else

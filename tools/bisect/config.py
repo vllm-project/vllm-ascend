@@ -165,6 +165,8 @@ class BisectOptions:
     """Tunables that change how the search runs (not what it searches)."""
 
     repo_dir: Path = REPO_ROOT
+    soc: str | None = None
+    mock_tests: bool = False  # prepare candidates but simulate test verdicts
     vllm_dir: Path = field(default_factory=lambda: Path("/vllm-workspace/vllm"))
     work_dir: str = DEFAULT_WORK_DIR
     coord_dir: str = DEFAULT_COORD_DIR
@@ -174,26 +176,15 @@ class BisectOptions:
     # Verify the endpoints before searching (good must PASS, bad must FAIL).
     verify_good: bool = True
     verify_bad: bool = True
-    # Editable reinstall command pieces. --no-input avoids any interactive
-    # prompt that could hang the (silent, log-redirected) build step.
+    # Match the nightly install path when a candidate needs rebuilding.
     pip_install_cmd: list[str] = field(
         default_factory=lambda: [
+            "python3",
+            "-m",
             "pip",
             "install",
             "-e",
             ".",
-            "--no-input",
-            "--disable-pip-version-check",
-        ]
-    )
-    pip_requirements_cmd: list[str] = field(
-        default_factory=lambda: [
-            "pip",
-            "install",
-            "-r",
-            "requirements-dev.txt",
-            "--no-input",
-            "--disable-pip-version-check",
         ]
     )
     # The nightly container is already built+installed at its current HEAD (the

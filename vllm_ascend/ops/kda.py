@@ -9,7 +9,6 @@ import torch
 # KDA operators from the flashserve/flash-linear-attention-npu ecosystem repository.
 # https://github.com/flashserve/flash-linear-attention-npu
 from fla_npu.ops.ascendc import chunk_kda_fwd, recurrent_kda
-from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
 KDA_CHUNK_SIZE = 64
 
@@ -71,11 +70,25 @@ def run_chunk_kda(
     dt_bias: torch.Tensor,
     *,
     lower_bound: float | None,
+    use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Consume preprocessed beta and return output plus the final VK state."""
+    # FLA's import-time capability queries can create an unwanted NPU context
+    # during operator discovery, before the worker selects its device.
+    # TODO: Restore the top-level import once supported vLLM FLA or Triton
+    # Ascend versions make these queries safe before device selection.
+    from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
+
+    if use_qk_l2norm_in_kernel:
+        q = q.contiguous()
+        k = k.contiguous()
+    else:
+        q = l2norm_fwd(q.contiguous())
+        k = l2norm_fwd(k.contiguous())
+
     output, final_state, *_ = chunk_kda_fwd(
-        l2norm_fwd(q.contiguous()),
-        l2norm_fwd(k.contiguous()),
+        q,
+        k,
         v.contiguous(),
         raw_gate.contiguous(),
         beta.contiguous(),
@@ -88,6 +101,7 @@ def run_chunk_kda(
         chunk_indices=chunk_indices,
         safe_gate=lower_bound is not None,
         lower_bound=lower_bound if lower_bound is not None else -5.0,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         use_gate_in_kernel=True,
         A_log=a_log.reshape(-1).contiguous(),
         dt_bias=dt_bias.contiguous(),

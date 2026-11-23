@@ -30,6 +30,8 @@ from itertools import chain
 
 from vllm.logger import logger
 
+from vllm_ascend.utils import vllm_version_is
+
 _PATCHED = False
 _PP_IN_FLIGHT_STEP = 1 << 60
 
@@ -226,12 +228,11 @@ def _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_outp
             request.spec_token_ids = []
             continue
 
-        next_spec_token_ids = spec_token_ids[req_index]
-        if scheduler.structured_output_manager.should_advance(request):
-            metadata = request.structured_output_request
-            assert metadata is not None and metadata.grammar is not None
-            next_spec_token_ids = metadata.grammar.validate_tokens(next_spec_token_ids)
-        request.spec_token_ids = next_spec_token_ids
+        if vllm_version_is("0.33.0"):
+            validated = scheduler.structured_output_manager.validate_tokens(request, spec_token_ids[req_index])
+        else:
+            validated = scheduler.structured_output_manager.trim_spec_tokens(request, spec_token_ids[req_index])
+        request.spec_token_ids = validated
 
 
 def _patch_scheduler_update_from_output() -> None:
@@ -343,7 +344,8 @@ def _apply_patch() -> None:
     _patch_model_runner_output()
     # The patch for engine core has been moved to patch_engine_core.py
     _patch_scheduler_update_after_schedule()
-    _patch_scheduler_make_cached_request_data()
+    if vllm_version_is("0.33.0"):
+        _patch_scheduler_make_cached_request_data()
     _patch_scheduler_update_from_output()
     _patch_model_config_validation()
 

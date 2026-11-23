@@ -310,6 +310,14 @@ class QKNormRopeFusionPass(VllmInductorPass):
             logger.debug("QKNorm and Rope fusion enabled, but no Attention layers were discovered.")
             return
         layer = next(iter(attn_layers.values()))
+        # Models without rotary embedding (e.g. nope MLA such as GLM-5.3-Flash,
+        # whose text config sets qk_rope_head_dim=0) have no QK-Norm+RoPE
+        # subgraph to fuse. Building the pattern would invoke the RoPE kernel
+        # with rope_dim=0, which Triton rejects (arange end must be > start).
+        rope_dim = get_rope_dim(vllm_config)
+        if rope_dim <= 0:
+            logger.debug("QKNorm and Rope fusion not enabled: model has no rotary embedding")
+            return
         for epsilon in [1e-6, 1e-5]:
             if layer.head_size != 128:
                 logger.debug("QKNorm and Rope fusion not enabled: head_dim %d is not equal of 128", layer.head_size)

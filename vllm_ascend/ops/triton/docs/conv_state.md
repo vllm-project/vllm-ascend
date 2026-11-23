@@ -2,11 +2,11 @@
 
 ## Description
 
-- **Function**: Packs the active requests' convolution states from a strided persistent cache into contiguous temporary storage, or writes the updated states back. The public entry point is `copy_conv_state` in `vllm_ascend/ops/triton/kda/conv_state.py`. The GLM `causal_conv1d` wrapper uses it before and after the AscendC convolution when the state view is non-contiguous; contiguous states bypass both copies. The operator owns the private Triton kernel, stride derivation, tile size, and launch-grid policy.
+- **Function**: Packs the active requests' convolution states from a strided persistent cache into contiguous temporary storage, or writes the updated states back. The public entry point is `copy_conv_state` in `vllm_ascend/ops/triton/kda/conv_state.py`. The GLM `causal_conv1d` wrapper uses it before and after the AscendC convolution for unsupported state layouts, such as channel-strided views. Page- and row-strided states with positive strides and contiguous channels bypass both copies. The operator owns the private Triton kernel, stride derivation, tile size, and launch-grid policy.
 - **Formula**: For request `r`, state row `s`, and channel `d`:
     - `slot = cache_indices[r]` and `active = (0 <= slot < cache.shape[0]) and (query_start_loc[r + 1] > query_start_loc[r])`.
     - With `state_len, dim = cache.shape[1:]`, the cache element offset is `slot * cache.stride(0) + s * cache.stride(1) + d * cache.stride(2)`; the packed offset is `(r * state_len + s) * dim + d`. All strides are in elements, and the operator also derives the index stride from `cache_indices`.
-    - Packing (`write_back=False`) copies active states and fills inactive requests with zero. It sets `packed_indices[r] = r` for active requests and `-1` otherwise.
+    - Packing (`write_back=False`) copies active states and fills inactive requests with zero. It sets `packed_indices[r] = r` for active requests and `requests` otherwise, selecting the dedicated final null slot.
     - Writeback (`write_back=True`) copies packed values into active cache slots only. It preserves inactive slots, physical-page padding, and `packed_indices`.
 - **Algorithm flow**:
     1. Derive requests, state dimensions, and strides from the tensors. Return without a launch for an empty request batch. Internally split each state row into `ceil(dim / 256)` channel tiles and launch `min(requests * state_len * ceil(dim / 256), 65535)` programs. These tuning choices are implementation details, not public API arguments.
@@ -48,10 +48,12 @@ All parameters are required; `write_back` is keyword-only. The function mutates 
 
 ## Test Cases
 
-The existing `test_conv_state_copy_masks_invalid_slots_and_preserves_shared_pages` calls the public tensor API and covers both state layouts with `[4, 6, 384]` FP32 cache views, physical-page gaps, negative/out-of-range slots, a zero-length request, and unchanged backing storage outside the updated states. Its deterministic integer-valued FP32 data makes every copied value exactly representable. The test does not reproduce the operator's launch-grid formula; no additional test cases are introduced by this API refactor.
+`test_conv_state_copy_masks_invalid_slots_and_preserves_shared_pages` calls the public tensor API and covers both state layouts with `[4, 6, 384]` FP32 cache views, physical-page gaps, negative/out-of-range slots, a zero-length request, and unchanged backing storage outside the updated states. `test_conv_state_copy_padding_and_graph_replay` adds eight direct-copy cases for FP16/BF16, page-strided/channel-strided layouts, and eager/graph execution. These ten cases call `copy_conv_state` directly and have no FLA convolution import dependency.
 
-This is pure data movement: the correctness criterion is exact copied values and exact zero padding (`rtol=0`, `atol=0` for an independent reference). The existing test uses `torch.testing.assert_close` with its default tolerances. Historical A3 validation and its hardware scope are recorded in PR #17010; this document does not claim a new device run.
+Three wrapper regressions cover the strided adapter path through GLM `causal_conv1d`: first packed row (six cases), decode padding and graph replay (twelve cases), and prefill with empty request rows (two cases). All three use the dimension-first `dim_first` layout with physical-page gaps and a non-unit channel stride, which triggers local packing and writeback around the convolution. The expected values are computed with `torch.nn.functional` convolution. These twenty cases require FLA; the wrapper import is local to these tests so that the ten direct-copy cases do not gain an FLA import dependency.
+
+The file contains 30 cases total: 10 direct operator cases and 20 strided wrapper cases. The other 38 convolution combinations use contiguous or page-strided SD layouts with unit channel stride and do not trigger this repository's `copy_conv_state` path, so they are not restored. The original two direct cases retain their existing tolerances; the other eight direct regressions use exactly representable values with `rtol=0`, `atol=0`. Targeted validation of all 30 cases passed on Ascend910B4-1 (A2) and Ascend950PR (A5), using Python 3.11.10, torch-npu 2.10.0.post7, and Triton Ascend 3.6.0. Historical A3 validation remains recorded in PR #17010.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_glm5next_conv_state.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_copy_conv_state.py
 ```

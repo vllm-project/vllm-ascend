@@ -1,0 +1,9 @@
+pr: 18891
+entries:
+  - category: bugfix
+    text: Fixed DeepSeek V4 on Ascend A5 failing inside the attention operator when `--kv-cache-dtype` was left unset, which is the default. An unset request now selects the bfloat16 KV layout it resolves to, so the cache page and the attention plan agree.
+    model: DeepSeek-V4
+    hardware: [A5]
+  - category: feature
+    text: A KV cache dtype that neither Ascend part can build, such as `fp8_e4m3` or `int8` on A5, is now refused while the attention layers are constructed and the error lists the values that work, instead of failing later during graph capture. The DeepSeek V4 indexer KV dtype is resolved and validated the same way.
+    hardware: [A3, A5]

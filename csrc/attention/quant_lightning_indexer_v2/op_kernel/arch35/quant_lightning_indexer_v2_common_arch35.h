@@ -14,6 +14,7 @@
  */
 #ifndef QUANT_LIGHTNING_INDEXER_V2_COMMON_H
 #define QUANT_LIGHTNING_INDEXER_V2_COMMON_H
+#include "../quant_lightning_indexer_v2_dcp_common.h"
 using namespace AscendC;
 namespace QLIV2Common {
 using FP8E4M3 = fp8_e4m3fn_t;
@@ -80,6 +81,7 @@ struct RunInfo {
     uint32_t actS1Size = 1;
     uint32_t actS2Size = 1;
     uint32_t actS2SizeOrig = 1;
+    uint32_t causalGlobalLen = 0;  // DCP: 当前 bIdx 的全局 exclusive 上界 C
     uint32_t actMBaseSize;
     uint32_t actualSingleProcessSInnerSize;
     uint32_t actualSingleProcessSInnerSizeAlign;
@@ -164,6 +166,26 @@ struct ConstInfo {
     bool isAccumSeqS2 = false;        // 是否累加模式
     bool isLDOpen = false;
     bool returnValue = false;
+    // Private local-candidate mode: outputIdxOffset carries local visible
+    // prefix lengths, never an index offset. Keep this separate from bool.
+    bool useLocalVisibleLengths = false;
+
+    // DCP (Decode Context Parallel, 解码上下文并行)
+    // 与 local-candidate 互斥: DCP 用 causal C + P/r/S 在 kernel 内算可见长度,
+    // local-candidate 用框架传入的 output_idx_offset 逐行可见长度。
+    bool dcpEnable = false;
+    uint32_t cpWorld = 1U;           // P: CP 组大小
+    uint32_t cpRank = 0U;            // r: 当前 rank
+    uint32_t cpInterleaveSize = 1U;  // S: 每 S 个 token 轮换 rank
+    // 预计算的可见长度参数: period = P*S, rankOffset = r*S
+    uint32_t dcpPeriod = 1U;
+    uint32_t dcpRankOffset = 0U;
+    uint32_t dcpPeriodShift = 0U;
+    bool dcpPeriodPow2 = true;
+
+    // 小 Q (max_seqlen_q 0..4) 且总 S2 块数足够大时启用 256-token L1 路径;
+    // 小 batch 下 128 路径的标量/同步开销更低 (2026-10-28 msprof A/B)。
+    bool useS2Block256 = false;
 };
 
 struct LdSplitCoreInfo {
@@ -187,6 +209,11 @@ struct SplitCoreInfo {
     uint32_t bN2End = 0U;
     uint32_t gS1Start = 0U;
     uint32_t gS1End = 0U;
+    // SplitCoreByAICPU 在 s2End==0 时已经算过核尾行组的块数, 缓存给
+    // CalcS2LoopParams 的 isEnd 分支复用, 避免同一行组重复执行 DCP 公式。
+    uint32_t lastGroupS2BlockNum = 0U;
+    uint32_t lastGroupValidS2Len = 0U;
+    bool hasLastGroupSplitInfo = false;
     bool isLD = false; // 当前核是否需要进行Decode归约任务
     bool isCoreEnable = false;
 };

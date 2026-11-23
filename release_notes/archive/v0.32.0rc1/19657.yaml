@@ -1,0 +1,6 @@
+pr: 19657
+entries:
+  - category: performance
+    text: Removed redundant initialization of DeepSeek V4.1 Engram lookup result buffers for device and host-backed tables, reducing local preparation overhead.
+    model: deepseek-v4.1
+    hardware: [A3]

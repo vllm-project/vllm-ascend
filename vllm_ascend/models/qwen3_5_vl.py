@@ -46,7 +46,7 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     Qwen2VLImageProcessor,
     smart_resize,
 )
-from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
+from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm, build_mm_input_norm
 from vllm.model_executor.models.qwen3_5 import (
     Qwen3_5ForConditionalGeneration,
     Qwen3_5MoeForConditionalGeneration,
@@ -205,6 +205,10 @@ class _AscendVLPreprocessMixin:
     def __init__(self, *, vllm_config, prefix="model"):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.input_norm = build_mm_input_norm(self.model_config)
+        # Ascend normalizes before the ViT, including encoder graph selection.
+        # Upstream also installs a normalizer inside the ViT as of v0.32;
+        # retain its dtype conversion but do not normalize our patches again.
+        self.visual.input_norm = IdentityInputNorm()
         vc = self.config.vision_config
         self._c = vc.in_channels
         self._ps = vc.patch_size

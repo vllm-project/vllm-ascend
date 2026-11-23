@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -87,6 +89,38 @@ def test_runtime_binds_complete_layer_storage(monkeypatch, scheduler_device, exp
     assert torch.count_nonzero(caches[mtp][0]) == 0
 
 
+@pytest.mark.parametrize(
+    "transfer",
+    [
+        SimpleNamespace(kv_connector="AscendStoreConnector"),
+        SimpleNamespace(
+            kv_connector="MultiConnector",
+            kv_connector_extra_config={
+                "connectors": [{"kv_connector": "AscendStoreConnector", "kv_connector_extra_config": None}]
+            },
+        ),
+        None,
+    ],
+)
+def test_layerwise_store_detection_accepts_missing_config(transfer):
+    assert kvpp._uses_layerwise_store(transfer) is False
+
+
+@pytest.mark.parametrize("composite", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_detects_layerwise_store_configuration(composite, enabled):
+    connector = {
+        "kv_connector": "AscendStoreConnector",
+        "kv_connector_extra_config": {"use_layerwise": enabled},
+    }
+    transfer = (
+        SimpleNamespace(kv_connector="MultiConnector", kv_connector_extra_config={"connectors": [connector]})
+        if composite
+        else SimpleNamespace(**connector)
+    )
+    assert kvpp._uses_layerwise_store(transfer) is enabled
+
+
 def test_prefetch_sequence_across_forwards(scheduler_device):
     events, compute, transfer = scheduler_device
     transport = Mock()
@@ -153,3 +187,61 @@ def test_hook_propagates_failed_future_without_scheduling_next(scheduler_device)
         scheduler.wait_for_layer(layer_name(0))
     assert raised.value is error
     assert len(scheduler._prefetch_executor.submitted) == 1
+
+
+def test_layerwise_prefetch_waits_for_load_before_every_broadcast(monkeypatch, scheduler_device):
+    events, _, _ = scheduler_device
+    load_entered, load_ready = threading.Event(), threading.Event()
+    connector = Mock()
+
+    def wait_for_load(name):
+        load_entered.set()
+        assert load_ready.wait(timeout=5)
+        events.append(("load_ready", name))
+
+    connector.wait_for_layer_load_ready.side_effect = wait_for_load
+    monkeypatch.setattr(kvpp, "get_kv_transfer_group", lambda: connector)
+    monkeypatch.setattr(kvpp, "ThreadPoolExecutor", ThreadPoolExecutor)
+    transport = Mock()
+    transport.prefetch.side_effect = lambda name, *_args: events.append(("broadcast", name))
+    names = tuple(layer_name(i) for i in range(3))
+    scheduler = kvpp.KVPPScheduler(transport, names, layerwise=True)
+    executor = scheduler._prefetch_executor
+    try:
+        with ThreadPoolExecutor(max_workers=1) as attention:
+            for has_history in (True, False, True):
+                load_entered.clear()
+                load_ready.clear()
+                scheduler.schedule_forward(has_history)
+                assert scheduler._prefetch_future is None
+                first_wait = attention.submit(scheduler.wait_for_layer, names[0])
+                if has_history:
+                    assert load_entered.wait(timeout=5)
+                    assert not first_wait.done()
+                    assert not any(event[0] == "broadcast" for event in events)
+                    load_ready.set()
+                first_wait.result(timeout=5)
+                for name in names[1:]:
+                    scheduler.wait_for_layer(name)
+                if has_history:
+                    for name in names:
+                        assert events.index(("load_ready", name)) < events.index(("broadcast", name))
+                scheduler.complete_forward()
+                assert scheduler._prefetch_future is None
+                events.clear()
+    finally:
+        load_ready.set()
+        executor.shutdown(wait=True)
+    assert transport.prefetch.call_count == 6
+
+
+def test_layerwise_load_failure_prevents_broadcast(monkeypatch, scheduler_device):
+    connector = Mock()
+    connector.wait_for_layer_load_ready.side_effect = RuntimeError("external load failed")
+    monkeypatch.setattr(kvpp, "get_kv_transfer_group", lambda: connector)
+    transport = Mock()
+    scheduler = kvpp.KVPPScheduler(transport, (layer_name(0),), layerwise=True)
+    scheduler.schedule_forward(True)
+    with pytest.raises(RuntimeError, match="external load failed"):
+        scheduler.run_layer_prefetch(layer_name(0), Mock())
+    transport.prefetch.assert_not_called()

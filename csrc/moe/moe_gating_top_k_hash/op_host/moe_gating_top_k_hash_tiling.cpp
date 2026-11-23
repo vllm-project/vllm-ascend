@@ -38,6 +38,7 @@ const static int64_t BIAS_INPUT_INDEX = 1;
 const static int64_t INPUT_IDS_INPUT_INDEX = 2;
 const static int64_t TID_TO_EID_INPUT_INDEX = 3;
 const static int64_t BIAS_VL_INPUT_INDEX = 4;
+const static int64_t ROUTING_TABLE_INPUT_INDEX = 5;
 const static int64_t Y_OUTPUT_INDEX = 0;
 const static int64_t EXPERT_IDX_OUTPUT_INDEX = 1;
 const static int64_t OUT_OUTPUT_INDEX = 2;
@@ -257,6 +258,11 @@ ge::graphStatus MoeGatingTopKHashTilingBase::CheckAttr()
                      GROUP_SELECT_MODE_SUM, GROUP_SELECT_MODE_MAX),
                 return ge::GRAPH_FAILED);
 
+    OPS_ERR_IF(moeGatingTopKTilingData_.get_routingTableRows() > 0 &&
+                   (groupCount_ != 1 || normType_ != NORM_TYPE_SOFTPLUS),
+               OPS_LOG_E(context_, "Fused EPLB mapping requires ungrouped sqrtsoftplus routing"),
+               return ge::GRAPH_FAILED);
+
     OPS_ERR_IF(renorm_ != RENORM_NO,
                 OPS_LOG_E(context_, "renorm is: %ld, but currently only support %ld.", renorm_, RENORM_NO),
                 return ge::GRAPH_FAILED);
@@ -311,6 +317,18 @@ ge::graphStatus MoeGatingTopKHashTilingBase::GetShapeAttrsInfo()
 
     auto biasVlShapePtr = context_->GetOptionalInputShape(BIAS_VL_INPUT_INDEX);
     biasVlShape_ = biasVlShapePtr == nullptr ? nullptr : &biasVlShapePtr->GetStorageShape();
+
+    auto routingShape = context_->GetOptionalInputShape(ROUTING_TABLE_INPUT_INDEX);
+    moeGatingTopKTilingData_.set_routingTableRows(0);
+    if (routingShape != nullptr) {
+        const auto& shape = routingShape->GetStorageShape();
+        OPS_ERR_IF(shape.GetDimNum() != 2 || shape.GetDim(0) <= 0 ||
+                       shape.GetDim(1) != xShape_->GetDim(1),
+                   OPS_LOG_E(context_, "Invalid EPLB routing table shape"), return ge::GRAPH_FAILED);
+        OPS_ERR_IF(context_->GetOptionalInputDesc(ROUTING_TABLE_INPUT_INDEX)->GetDataType() != ge::DT_INT32,
+                   OPS_LOG_E(context_, "EPLB routing table must be int32"), return ge::GRAPH_FAILED);
+        moeGatingTopKTilingData_.set_routingTableRows(shape.GetDim(0));
+    }
 
     // 获取输出shape
     auto yShapePtr = context_->GetOutputShape(Y_OUTPUT_INDEX);

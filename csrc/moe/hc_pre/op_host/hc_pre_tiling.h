@@ -78,7 +78,7 @@ TILING_DATA_FIELD_DEF(int64_t, cubeBlockDimK);
 TILING_DATA_FIELD_DEF(int64_t, kUbSize); // ub一次处理k的size
 TILING_DATA_FIELD_DEF(int64_t, cvLoopKSize); // cv同步使用的k轴长度
 TILING_DATA_FIELD_DEF(int64_t, multCoreSplitKSize); // 多核切K后的单核k处理长度
-TILING_DATA_FIELD_DEF(int64_t, multCoreSplitMSize); // 多核切K后的单核k处理长度
+TILING_DATA_FIELD_DEF(int64_t, multCoreSplitMSize); // 多核切 M 后单核处理的 M 轴长度
 TILING_DATA_FIELD_DEF(int64_t, tailKSizeOfFormerBlock);
 TILING_DATA_FIELD_DEF(int64_t, tailKSizeOfTailBlock);
 
@@ -101,6 +101,24 @@ TILING_DATA_FIELD_DEF(int64_t, bufferPool1Size);
 TILING_DATA_FIELD_DEF(int64_t, mUbSize);
 TILING_DATA_FIELD_DEF(int64_t, hasPreMix);
 TILING_DATA_FIELD_DEF(int64_t, hasPreOut);
+
+TILING_DATA_FIELD_DEF(int64_t, prePostCoreNum);
+TILING_DATA_FIELD_DEF(int64_t, sinkhornCoreNum);
+TILING_DATA_FIELD_DEF(int64_t, prePostRowOfFormerBlock);
+TILING_DATA_FIELD_DEF(int64_t, prePostRowOfTailBlock);
+TILING_DATA_FIELD_DEF(int64_t, prePostRowLoopOfFormerBlock);
+TILING_DATA_FIELD_DEF(int64_t, prePostRowLoopOfTailBlock);
+TILING_DATA_FIELD_DEF(int64_t, prePostRowFactor);
+TILING_DATA_FIELD_DEF(int64_t, prePostTailRowFactorOfFormerBlock);
+TILING_DATA_FIELD_DEF(int64_t, prePostTailRowFactorOfTailBlock);
+TILING_DATA_FIELD_DEF(int64_t, sinkhornUsedCoreNum);
+TILING_DATA_FIELD_DEF(int64_t, sinkhornRowOfFormerBlock);
+TILING_DATA_FIELD_DEF(int64_t, sinkhornRowOfTailBlock);
+TILING_DATA_FIELD_DEF(int64_t, sinkhornRowLoopOfFormerBlock);
+TILING_DATA_FIELD_DEF(int64_t, sinkhornRowLoopOfTailBlock);
+TILING_DATA_FIELD_DEF(int64_t, sinkhornRowFactor);
+TILING_DATA_FIELD_DEF(int64_t, sinkhornTailRowFactorOfFormerBlock);
+TILING_DATA_FIELD_DEF(int64_t, sinkhornTailRowFactorOfTailBlock);
 
 END_TILING_DATA_DEF;
 
@@ -127,7 +145,10 @@ public:
     ge::graphStatus GetAttr();
     ge::graphStatus GetShapeAttrsInfoInner();
     ge::graphStatus CalcOpTiling();
+    void CalcVectorCoreNum();
     ge::graphStatus CalcMKSplitCoreMembasePart2Tiling();
+    ge::graphStatus CalcPremixPart2Tiling();
+    ge::graphStatus CalcSinkhornTiling();
 
 private:
     gert::TilingContext *context_ = nullptr;
@@ -157,6 +178,16 @@ private:
     double hcEps_ = 0.0;
     double normEps_ = 0.0;
     platform_ascendc::SocVersion socVersion_ = platform_ascendc::SocVersion::ASCEND910B;
+    int64_t prePostCoreNum_ = 0;
+    int64_t sinkhornCoreNum_ = 0;
+    int64_t sinkhornUsedCoreNum_ = 0;
+    int64_t sinkhornRowOfFormerBlock_ = 0;
+    int64_t sinkhornRowOfTailBlock_ = 0;
+    int64_t sinkhornRowLoopOfFormerBlock_ = 0;
+    int64_t sinkhornRowLoopOfTailBlock_ = 0;
+    int64_t sinkhornRowFactor_ = 0;
+    int64_t sinkhornTailRowFactorOfFormerBlock_ = 0;
+    int64_t sinkhornTailRowFactorOfTailBlock_ = 0;
 };
 
 }  // namespace optiling

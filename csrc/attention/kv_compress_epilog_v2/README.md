@@ -6,8 +6,7 @@ The original CANN Open Software License notices are preserved in the source file
 
 `torch.ops._C_ascend.kv_compress_epilog_v2` quantizes BF16 rows and writes
 specified slots in a flat or paged cache in place. Negative and out-of-range
-slots leave the cache unchanged. This entry point has its own cache ABI and
-does not replace the existing `kv_compress_epilog` operator.
+slots leave the cache unchanged.
 
 Supported modes are `mxfp8_bf16` with groups of 32 and `mxfp4_bf16` with
 groups of 16 or 32. Each token stores its packed data followed by BF16 scales.

@@ -32,7 +32,7 @@ from tests.ut.kv_offload.utils import (
 
 
 def _num_waiting_requests(scheduler) -> int:
-    return len(scheduler.waiting) + len(scheduler.skipped_waiting)
+    return len(scheduler.waiting) + len(scheduler.kv_holding_waiting)
 
 
 def test_basic_lifecycle():
@@ -62,7 +62,7 @@ def test_basic_lifecycle():
     assert scheduler_output.total_num_scheduled_tokens == 0
 
     assert _num_waiting_requests(scheduler) == 1
-    assert request in scheduler.skipped_waiting
+    assert request in scheduler.kv_holding_waiting
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert request.num_computed_tokens == NUM_TOKENS
 
@@ -71,7 +71,7 @@ def test_basic_lifecycle():
     assert len(block_pool.cached_block_hash_to_block) == 0
     blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[request_id]
     for block in blocks:
-        assert block._block_hash is None
+        assert block.block_hash is None
 
     # (1b): forward()
     model_runner_output = EMPTY_MODEL_RUNNER_OUTPUT
@@ -104,7 +104,7 @@ def test_basic_lifecycle():
     blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[request_id]
     for block in blocks:
         assert block.ref_cnt == 1
-        num_hashed_blocks += 1 if block._block_hash is not None else 0
+        num_hashed_blocks += 1 if block.block_hash is not None else 0
     assert num_hashed_blocks == NUM_EXTERNAL_FULL_BLOCKS
 
     scheduled_req = scheduler_output.scheduled_new_reqs[0]

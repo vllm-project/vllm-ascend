@@ -1103,6 +1103,9 @@ void SMLAInfoParser::GenerateInfo(SMLATilingInfo &smlaInfo)
     smlaInfo.cmpMaskMode = *opParamInfo_.cmpMaskMode;
     smlaInfo.oriKvStride0 = GetOptionalInputStride0(ORI_KV_INDEX);
     smlaInfo.cmpKvStride0 = GetOptionalInputStride0(CMP_KV_INDEX);
+    if (kvLayout_ == SMLALayout::PA_BBND && opParamInfo_.cmpKv.tensor != nullptr) {
+        smlaInfo.cmpKvPhysicalBlockCount = static_cast<uint64_t>(cmpKvShape_.GetDim(0));
+    }
     smlaInfo.oriWinLeft = *opParamInfo_.oriWinLeft;
     smlaInfo.oriWinRight = *opParamInfo_.oriWinRight;
 
@@ -2523,6 +2526,35 @@ ge::graphStatus SparseFlashMlaTiling::DoOpTiling(SMLATilingInfo *tilingInfo)
                               tilingInfo->perfMode == SMLATemplateMode::CSA_TEMPLATE_MODE && tilingInfo->gSize == 1U);
     if (tilingInfo->npuArch == NpuArch::DAV_3510) {
         splitG = static_cast<uint32_t>(tilingInfo->gSize > 64); // 64：分组拆分阈值
+    }
+    if (tilingInfo->npuArch == NpuArch::DAV_2201) {
+        constexpr uint32_t V0_CACHE_MAX_TOPK_NUM = 512U;
+        constexpr uint32_t V0_CACHE_MAX_BLOCK_NUM = 1024U;
+        const int32_t cmpBlockSize = tilingInfo->cmpBlockSize;
+        vectorizeFlag = static_cast<uint32_t>(
+            tilingInfo->perfMode == SMLATemplateMode::CSA_TEMPLATE_MODE &&
+            tilingInfo->qLayout == SMLALayout::TND && tilingInfo->kvLayout == SMLALayout::PA_BBND &&
+            tilingInfo->n1Size <= 64U && tilingInfo->n2Size == 1U && tilingInfo->sparseBlockSize == 1 &&
+            sInnerSize_ == V0_CACHE_MAX_TOPK_NUM && cmpBlockSize > 0 &&
+            (cmpBlockSize & (cmpBlockSize - 1)) == 0 &&
+            tilingInfo->cmpMaxBlockNumPerBatch <= V0_CACHE_MAX_BLOCK_NUM &&
+            tilingInfo->sparseBlockCount == V0_CACHE_MAX_TOPK_NUM);
+        if (vectorizeFlag != 0U) {
+            // Cache int32 element offsets only when the entire physical pool fits.
+            constexpr uint64_t addressLimit = static_cast<uint64_t>(INT32_MAX);
+            const uint64_t rowStride = static_cast<uint64_t>(tilingInfo->n2Size) * tilingInfo->cmpKvHeadDim;
+            const uint64_t lastRow = static_cast<uint64_t>(cmpBlockSize - 1);
+            const uint64_t pageStride = tilingInfo->cmpKvStride0;
+            const uint64_t physicalBlocks = tilingInfo->cmpKvPhysicalBlockCount;
+            bool addressFits = rowStride > 0U && rowStride <= addressLimit &&
+                               lastRow <= addressLimit / rowStride && pageStride > 0U &&
+                               pageStride <= addressLimit && physicalBlocks > 0U;
+            if (addressFits) {
+                const uint64_t innerMax = lastRow * rowStride;
+                addressFits = physicalBlocks - 1U <= (addressLimit - innerMax) / pageStride;
+            }
+            vectorizeFlag = static_cast<uint32_t>(addressFits);
+        }
     }
     tilingKey = GET_TPL_TILING_KEY(0U, qLayout, inputKvLayout, static_cast<uint32_t>(tilingInfo->perfMode), splitG,
                                    headRatioOne, static_cast<uint32_t>(tilingInfo->batchConsistency), vectorizeFlag);

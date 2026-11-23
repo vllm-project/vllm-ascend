@@ -62,9 +62,10 @@ bash format.sh ci
 
 #### Submit the commit
 
+Use `-s` to add the DCO sign-off and write the [commit message](#commit-message-content) in your editor.
+
 ```bash
-# Commit changed files using `-s`
-git commit -sm "your commit info"
+git commit -s
 ```
 
 🎉 Congratulations! You have completed the development environment setup.
@@ -93,6 +94,18 @@ When contributing changes to this project, you must agree to the DCO. Commits mu
 
 Using `-s` with `git commit` will automatically add this header.
 
+## Commit message content
+
+Keep the commit body brief.
+
+- **Problem** — Describe when the issue occurs and how it affects users or developers.
+  For a feature, explain which capability is missing.
+- **Fix** — Explain what this commit changes and why it addresses the problem.
+- **Validation** — Summarize what you checked and the outcome in one sentence. Mention any relevant check still pending.
+
+Put detailed accuracy and performance results under **How was this patch tested?** in the
+[PR template](https://github.com/vllm-project/vllm-ascend/blob/main/.github/PULL_REQUEST_TEMPLATE.md#how-was-this-patch-tested).
+
 ## PR Title and Classification
 
 Only specific types of PRs will be reviewed. The PR title is prefixed appropriately to indicate the type of change. Please use one of the following:
@@ -113,6 +126,20 @@ Only specific types of PRs will be reviewed. The PR title is prefixed appropriat
 !!! note
 
     If the PR spans more than one category, please include all relevant prefixes.
+
+## Release Notes
+
+If users can notice your change, include a release note fragment in the same PR:
+`release_notes/fragments/<PR number>.yaml`. This covers new model, hardware, or operator
+support, new features, changes to user-facing APIs, parameters, or configuration, behavior
+or default changes, dependency and toolchain updates, performance improvements, and
+important bug fixes. Internal changes, such as refactors, tests, CI, tooling, and
+documentation edits, do not need a fragment.
+
+The fragment is reviewed together with the code. When unsure whether a fragment is needed,
+add one: extra entries can be dropped by the release manager at release time, while a missing
+entry is hard to recover later. See `release_notes/README.md` in the repository root for the
+principles, the format, and the template.
 
 ## Others
 

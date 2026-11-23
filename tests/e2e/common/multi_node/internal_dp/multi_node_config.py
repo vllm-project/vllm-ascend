@@ -18,7 +18,7 @@ from tests.e2e.common.multi_node.utils import (
 setup_logger()
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONFIG_BASE_PATH = "tests/e2e/cases/models/configs/DeepSeek/"
+DEFAULT_CONFIG_BASE_PATH = "tests/SIT/cases/models/configs/DeepSeek/"
 DEFAULT_SERVER_PORT = 8080
 
 
@@ -313,10 +313,14 @@ class MultiNodeConfigLoader:
 
     @staticmethod
     def _parse_benchmarks(cfg: dict) -> dict:
-        benchmarks = cfg.get("benchmarks") or {}
-        for name, case in benchmarks.items():
-            case["case_name"] = name
-        return benchmarks
+        return {
+            name: {
+                **case,
+                "benchmark_name": name,
+                "benchmark_artifact_name": f"{cfg.get('test_name', 'untitled_test')}__{name}",
+            }
+            for name, case in (cfg.get("benchmarks") or {}).items()
+        }
 
     @staticmethod
     def _resolve_cluster_ips(cfg: dict, num_nodes: int) -> list[str]:

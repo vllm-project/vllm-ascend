@@ -72,6 +72,7 @@ def set_scheduler_device(parallel_config: ParallelConfig) -> None:
 
 class Backend(ABC):
     store: Any | None = None
+    layerwise_data_plane: str | None = None
     # Whether the connector must filter existing keys before calling put().
     requires_exists_before_put: bool = True
 
@@ -82,6 +83,35 @@ class Backend(ABC):
     @classmethod
     def create_scheduler_client(cls, parallel_config: ParallelConfig):
         return cls(parallel_config)
+
+    def close(self) -> None:
+        """Release backend resources after all store operations have stopped."""
+        return None
+
+    def ensure_initialized(self) -> None:
+        """Initialize the store if this backend supports lazy initialization."""
+        return None
+
+    # The connector and scheduler need these capabilities before a store client exists.
+    @classmethod
+    def bind_layerwise_keys(
+        cls,
+        *,
+        vllm_config: Any,
+        kv_cache_config: Any,
+        model_name: str,
+        use_hybrid: bool,
+        grouped_block_size: list[int],
+    ) -> Any:
+        raise NotImplementedError(f"{cls.__name__} does not support layerwise keys")
+
+    @classmethod
+    def fence_drains_recv(cls) -> bool:
+        return False
+
+    @classmethod
+    def send_fence_backlog(cls) -> int:
+        return 0
 
     @abstractmethod
     def set_device(self):

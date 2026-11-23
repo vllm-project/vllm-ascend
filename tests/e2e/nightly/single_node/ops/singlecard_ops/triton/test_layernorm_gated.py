@@ -2,6 +2,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
@@ -64,6 +66,9 @@ def layer_norm_gated_ref(
     return output.reshape_as(x).to(input_dtype), mean, rstd
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     (
         "shape",
@@ -138,6 +143,9 @@ def test_layer_norm_fwd_npu_correctness(
         torch.testing.assert_close(actual_mean.cpu(), expected_mean, rtol=rtol, atol=atol)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @torch.inference_mode()
 def test_layer_norm_fwd_npu_rejects_invalid_group_size():
     x = torch.empty((2, 10), dtype=torch.float16, device=DEVICE)

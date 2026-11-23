@@ -5,15 +5,23 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.glm5_next_kpool_tail_compress import (
     glm5_next_kpool_tail_compress_and_write_cache_triton as compress,
 )
+
+pytestmark = pytest.mark.skip(reason="Legacy GLM Triton KPool path was replaced by CANN KeyPool in #16730")
 
 HEAD_DIM = 128
 BF16_RTOL = 1e-2
 BF16_ATOL = 1e-2
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("pool,capacity", [(4, 4), (4, 12), (8, 8)])
 @pytest.mark.parametrize("use_graph", [False, True])
 @pytest.mark.parametrize("prefix_tokens", [0, 64])
@@ -105,6 +113,10 @@ def test_tail_prefill_all_chunk_boundaries_decode_padding_and_graph(pool, capaci
     run([pool, pool + 1, pool - 1])
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("empty", ["tokens", "requests"])
 def test_empty_compression_preserves_caches(empty):
     tail = torch.ones(1, 2, 4, HEAD_DIM, device="npu")
@@ -130,6 +142,10 @@ def test_empty_compression_preserves_caches(empty):
     torch.testing.assert_close(cache.cpu(), torch.ones_like(cache, device="cpu"), rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_mtp_rejection_replay_preserves_open_pool_history():
     """Rejected lookahead must not overwrite history needed by replay.
@@ -190,6 +206,10 @@ def test_mtp_rejection_replay_preserves_open_pool_history():
     )
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("shape", [(1, 4, HEAD_DIM), (1, 3, 4, HEAD_DIM), (1, 2, 2, HEAD_DIM)])
 def test_invalid_tail_layout_raises(shape):
     tail = torch.zeros(shape, device="npu")

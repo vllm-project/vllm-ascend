@@ -4,24 +4,16 @@ import pytest
 from vllm.config.compilation import CompilationMode
 from vllm.config.vllm import VllmConfig
 
-from vllm_ascend.patch.platform import patch_use_v2_model_runner
+# Importing the module applies the V2-only runner selection at collection time.
+from vllm_ascend.patch.platform import patch_use_v2_model_runner  # noqa: F401
+from vllm_ascend.utils import vllm_version_is
 
 
-def test_ascend_v1_supported_features_are_not_rejected(monkeypatch):
-    monkeypatch.setattr(
-        patch_use_v2_model_runner,
-        "_original_get_v1_model_runner_unsupported_features",
-        lambda _: [
-            "prefill context parallel",
-            "dspark speculative decoding",
-            "dflash2 drafts",
-            "diffusion models",
-        ],
-    )
+def test_use_v2_model_runner_is_driven_by_ascend_default():
+    assert isinstance(VllmConfig.use_v2_model_runner, property)
+    from vllm_ascend.mrv2_utils import use_v2_model_runner
 
-    unsupported = patch_use_v2_model_runner._patched_get_v1_model_runner_unsupported_features(object())
-
-    assert unsupported == ["prefill context parallel", "diffusion models"]
+    assert VllmConfig.use_v2_model_runner.fget is use_v2_model_runner
 
 
 @pytest.mark.parametrize("method", ["eagle3", "mtp", "dspark"])
@@ -29,7 +21,11 @@ def test_ascend_v1_supported_features_are_not_rejected(monkeypatch):
 def test_native_v2_spec_pp_validation(method, enable_sp):
     config = SimpleNamespace(
         model_config=None,
-        speculative_config=SimpleNamespace(method=method, parallel_drafting=False),
+        speculative_config=SimpleNamespace(
+            method=method,
+            parallel_drafting=False,
+            speculator_config=SimpleNamespace(speculator_class="test.Speculator"),
+        ),
         compilation_config=SimpleNamespace(mode=CompilationMode.NONE, pass_config=SimpleNamespace(enable_sp=enable_sp)),
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=2,
@@ -40,6 +36,12 @@ def test_native_v2_spec_pp_validation(method, enable_sp):
         ),
         cache_config=SimpleNamespace(mamba_cache_mode="none"),
     )
-    unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
+    if vllm_version_is("0.33.0"):
+        unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
+    else:
+        unsupported = VllmConfig._get_model_runner_unsupported_features(config)
     # Spec+PP is natively supported; unrelated upstream guards still apply.
-    assert unsupported == (["sequence parallelism"] if enable_sp else [])
+    # vLLM main (#60517) dropped the PassConfig.enable_sp guard, so the V2
+    # runner no longer rejects sequence parallelism there.
+    expected_sp: list[str] = []
+    assert unsupported == expected_sp

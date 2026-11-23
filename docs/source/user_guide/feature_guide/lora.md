@@ -12,7 +12,7 @@ LoRA on vLLM-Ascend is supported on Atlas 300I Duo, Atlas A2, and Atlas A3.
 
 LoRA applies to both dense models and mixture-of-experts (MoE) models. The base model stays frozen. Each request selects an adapter by the `name` registered at startup. The current MoE support status is as follows:
 
-| MoE mode | Tensor parallel (AllGather) | Expert parallel (All-to-All) |
+| MoE mode | Tensor parallel (AllGather) | Expert parallelism (All-to-All) |
 | --- | --- | --- |
 | Non-quantized | Supported | Supported |
 | W8A8 dynamic quantization | Supported | Supported |
@@ -37,7 +37,7 @@ Other MoE quantization methods, Fused MC2, and dynamic EPLB are not supported wi
 
 `name` is the value the client sends as `model`. `path` is the PEFT adapter directory, which contains `adapter_config.json` and the weight file. `base_model_name` records the base checkpoint the adapter was trained on. The client does not send `base_model_name`.
 
-For a fused PEFT MoE adapter, set `is_3d_lora_weight` to `true`. The expert LoRA weights are then one stacked tensor, such as `experts.gate_up_proj` and `experts.down_proj`. Per-expert keys use `false`. Non-MoE models ignore this field. Layout rules are in the upstream [LoRA guide](https://docs.vllm.ai/en/latest/features/lora/).
+For a fused PEFT MoE adapter, set `is_3d_lora_weight` to `true`. The expert LoRA weights are then one stacked tensor, such as `experts.gate_up_proj` and `experts.down_proj`. Per-expert keys use `false`. Non-MoE models ignore this field. Layout rules are in the upstream [vLLM LoRA guide](https://docs.vllm.ai/en/latest/features/lora/).
 
 ### `--max-loras` and `--max-lora-rank`
 

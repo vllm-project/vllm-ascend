@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import replace
+
 import msgspec
 import pytest
 
@@ -85,3 +87,34 @@ def test_connector_metadata_adds_complete_request() -> None:
     assert request.local_num_prompt_tokens == 32
     assert request.num_computed_tokens == 16
     assert request.remote_request_id == "request-p"
+
+
+@pytest.mark.parametrize("sizes", [[0], [1], [8]])
+def test_transfer_metadata_accepts_indexer_replication_sizes(sizes) -> None:
+    metadata = replace(make_transfer_metadata(), indexer_replication_sizes=sizes)
+    encoded = msgspec.msgpack.encode(metadata)
+    decoded = msgspec.msgpack.decode(encoded, type=type(metadata))
+    assert decoded.indexer_replication_sizes == sizes
+
+
+@pytest.mark.parametrize("sizes", [[-1], [], [0, 1]])
+def test_transfer_metadata_rejects_invalid_indexer_replication_sizes(sizes) -> None:
+    with pytest.raises(ValueError, match="Invalid per-layer indexer replication sizes"):
+        replace(make_transfer_metadata(), indexer_replication_sizes=sizes)
+
+
+@pytest.mark.parametrize("null_field", [False, True])
+def test_transfer_metadata_requires_indexer_replication_sizes(null_field) -> None:
+    payload = msgspec.to_builtins(make_transfer_metadata())
+    if null_field:
+        payload["indexer_replication_sizes"] = None
+    else:
+        del payload["indexer_replication_sizes"]
+    with pytest.raises(msgspec.ValidationError, match="indexer_replication_sizes"):
+        msgspec.msgpack.decode(msgspec.msgpack.encode(payload), type=type(make_transfer_metadata()))
+
+
+@pytest.mark.parametrize("interleave", [0, -1])
+def test_transfer_metadata_rejects_nonpositive_cp_interleave(interleave) -> None:
+    with pytest.raises(ValueError, match="interleave size must be positive"):
+        replace(make_transfer_metadata(), cp_kv_cache_interleave_size=interleave)

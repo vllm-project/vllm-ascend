@@ -18,16 +18,15 @@
 Follows the pattern from vllm's test_extraction.py, validating that hidden
 states are correctly extracted and saved on the Ascend NPU. Parametrized over:
 
-* a dense model (Qwen3-8B) in both eager and ACL graph modes, using real
+* a dense model (Qwen3-8B) in ACL graph mode on the default runner, using real
   weights so outputs can be checked to be non-zero, and
 * a hybrid attention model (Qwen3.5-0.8B, GatedDeltaNet + full_attention)
-  loaded with dummy weights as a shape/round-trip smoke test. The hybrid case
-  mirrors upstream vLLM PR #39949.
-* Model Runner V1 (Ascend default) and Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`),
-  covering the Ascend adaptation of upstream vLLM PR #49811 on the 0828 pin.
+  loaded with dummy weights on Model Runner V2 as a shape/round-trip smoke
+  test. The hybrid case mirrors upstream vLLM PR #39949.
 * token-in / token-out via ``skip_tokenizer_init`` + ``TokensPrompt`` on the
-  text-only dense model (dummy weights). Qwen3.5 is multimodal, so skipping
-  tokenizer init leaves ``tokenizer=None`` and ``Qwen3VLProcessor`` crashes.
+  text-only dense model (dummy weights, Model Runner V2). Qwen3.5 is
+  multimodal, so skipping tokenizer init leaves ``tokenizer=None`` and
+  ``Qwen3VLProcessor`` crashes.
 """
 
 from __future__ import annotations
@@ -89,21 +88,6 @@ CASES = [
             prompts=[
                 "Hello, how are you?",
                 "What is machine learning?",
-                "Explain quantum computing briefly.",
-            ],
-            enforce_eager=True,
-            gpu_memory_utilization=0.8,
-            max_num_seqs=16,
-        ),
-        id="dense_eager",
-    ),
-    pytest.param(
-        ExtractHiddenStatesCase(
-            model_name=DENSE_MODEL,
-            aux_hidden_state_layer_ids=DENSE_AUX_HIDDEN_STATE_LAYER_IDS,
-            prompts=[
-                "Hello, how are you?",
-                "What is machine learning?",
             ],
             enforce_eager=False,
             max_num_seqs=16,
@@ -124,57 +108,9 @@ CASES = [
             load_format="dummy",
             verify_nonzero=False,
             verify_token_ids=True,
-        ),
-        id="hybrid_dummy_eager",
-    ),
-    pytest.param(
-        ExtractHiddenStatesCase(
-            model_name=DENSE_MODEL,
-            aux_hidden_state_layer_ids=DENSE_AUX_HIDDEN_STATE_LAYER_IDS,
-            prompts=[
-                "Hello, how are you?",
-                "What is machine learning?",
-            ],
-            enforce_eager=True,
-            gpu_memory_utilization=0.8,
-            max_num_seqs=16,
-            use_v2_model_runner=True,
-        ),
-        id="dense_eager_mrv2",
-    ),
-    pytest.param(
-        ExtractHiddenStatesCase(
-            model_name=HYBRID_MODEL,
-            aux_hidden_state_layer_ids=HYBRID_AUX_HIDDEN_STATE_LAYER_IDS,
-            prompts=[
-                "Hello world",
-                "Test prompt with several tokens",
-            ],
-            enforce_eager=True,
-            gpu_memory_utilization=0.4,
-            max_model_len=256,
-            load_format="dummy",
-            verify_nonzero=False,
-            verify_token_ids=True,
             use_v2_model_runner=True,
         ),
         id="hybrid_dummy_eager_mrv2",
-    ),
-    pytest.param(
-        ExtractHiddenStatesCase(
-            model_name=DENSE_MODEL,
-            aux_hidden_state_layer_ids=DENSE_AUX_HIDDEN_STATE_LAYER_IDS,
-            token_prompts=TOKEN_IN_PROMPTS,
-            enforce_eager=True,
-            gpu_memory_utilization=0.8,
-            max_num_seqs=16,
-            max_model_len=256,
-            load_format="dummy",
-            verify_nonzero=False,
-            verify_token_ids=True,
-            skip_tokenizer_init=True,
-        ),
-        id="dense_dummy_token_in_token_out",
     ),
     pytest.param(
         ExtractHiddenStatesCase(

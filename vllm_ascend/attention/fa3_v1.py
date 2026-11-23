@@ -16,6 +16,12 @@ class AscendFABackend(AttentionBackend):
     def get_name() -> str:
         return "CUSTOM"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
+
     @staticmethod
     def get_impl_cls() -> type["AscendFAImpl"]:
         return AscendFAImpl
@@ -119,17 +125,20 @@ class AscendFAImpl(AscendAttentionBackendImpl):
                     attn_metadata.block_tables[:num_decodes, :],
                     attn_metadata.query_start_loc[: num_decodes + 1],
                     attn_metadata.seq_lens[:num_decodes].npu(),
-                    False,
+                    num_decode_tokens > num_decodes,
                     max(attn_metadata.seq_lens[:num_decodes]),
                 )
             )
 
         if num_prefills > 0:
+            prefill_query_start_loc = attn_metadata.query_start_loc
+            if num_decode_tokens > 0:
+                prefill_query_start_loc = prefill_query_start_loc[num_decodes:] - num_decode_tokens
             outputs.append(
                 self._flash_attn_with_kvcache(
                     query[num_decode_tokens:],
-                    attn_metadata.block_tables[num_decode_tokens:, :],
-                    attn_metadata.query_start_loc[num_decodes:],
+                    attn_metadata.block_tables[num_decodes:, :],
+                    prefill_query_start_loc,
                     attn_metadata.seq_lens[num_decodes:].npu(),
                     True,  # enable causal for prefill
                     max(attn_metadata.seq_lens[num_decodes:]),
