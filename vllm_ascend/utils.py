@@ -87,6 +87,13 @@ _CUSTOM_OP_BASE_DIR = (
 _IS_ROT_WEIGHT_USED = None
 
 
+def get_max_replicated_pcp_prefill(pcp_size: int) -> int:
+    """Largest prefill that cannot give each rank a full head and a nonempty tail."""
+    # At 3P - 1 tokens the P heads take 2P tokens, leaving only P - 1 tails.
+    # From 3P on, the P tails all fit even when the head width rounds up.
+    return 3 * pcp_size - 1
+
+
 def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max_num_reqs: int) -> int:
     """Keep replicated draft requests when profiling PCP-local prefill.
 
@@ -102,10 +109,9 @@ def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max
     # PCP: bound replicated decodes, including uneven whole-request sharding.
     # Shared config keeps this bound identical across pipeline stages.
     max_replicated_query = 1 + spec.num_speculative_tokens if spec is not None else 1
-    # PCP + DCP: also cover prefills that leave an empty PCP chunk.
-    # For n=2*PCP, (n-1)*ceil(tokens/n) >= tokens holds only up to (n-1)**2.
+    # PCP + DCP also replicates prefills too short for a tail on every rank.
     if vllm_config.parallel_config.decode_context_parallel_size > 1:
-        max_replicated_query = max(max_replicated_query, (2 * pcp_size - 1) ** 2)
+        max_replicated_query = max(max_replicated_query, get_max_replicated_pcp_prefill(pcp_size))
     replicated_tokens = min(max_num_tokens, max_num_reqs * max_replicated_query)
     remaining_tokens = max_num_tokens - replicated_tokens
     # DualChunkSwap rounds two chunks per request on each PCP rank.
