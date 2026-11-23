@@ -740,6 +740,19 @@ def _move_changed_layer_to_workspace(model_state, ep_rank: int) -> None:
         assert result.new_physical_to_logical_map is not None
         assert result.new_logical_to_physical_map is not None
         assert result.new_logical_replica_count is not None
+        # Issue #22199: wait for in-flight readers before overwriting the live
+        # expert weights. This commit is issued on the main thread's current
+        # stream, which orders it after the forward readers that were joined
+        # into that stream. A backend may, however, leave a reader stream
+        # unjoined at the step_eplb_after boundary (e.g. a shared-expert
+        # bypass stream or an ACL-graph replay stream); such a reader can then
+        # observe a half-overwritten expert row and silently corrupt the
+        # forward output. A device-wide barrier here is the only wait that
+        # covers every possible reader stream, and it also makes the overwrite
+        # atomic with respect to the readers enqueued afterwards. Commits are
+        # rare relative to forward compute, so the barrier cost is negligible
+        # (measured within run-to-run noise on the Qwen3 MRV2 4-die setup).
+        torch.npu.synchronize()
         _eplb_state.move_from_buffer(
             expert_weights=model_state.model.expert_weights[result.layer_idx],
             expert_weights_buffers=model_state.expert_buffer,
