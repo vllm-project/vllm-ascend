@@ -1,4 +1,4 @@
-# Configure a Unified Directory for Logs and Runtime Outputs
+# Unified Output Directory
 
 vLLM Ascend and its supporting components generate logs, caches, and diagnostic files in different locations. Organizing these files under a common directory simplifies troubleshooting and operational maintenance by making them easier to locate, collect, and manage.
 
