@@ -17,7 +17,7 @@
 #
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -57,12 +57,8 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     build_dspark_draft_config,
 )
 
-if TYPE_CHECKING:
-    from vllm_ascend.worker.v2.model_states.kimi_recoverssm import KimiDSparkRecoverSSMState
-
 
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
-    kda_recovery: "KimiDSparkRecoverSSMState | None" = None
     _speculator_name = "DSpark"
     _proposal_host_lengths: dict[tuple[int, int], torch.Tensor] | None = None
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
@@ -501,8 +497,4 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         if vllm_version_is("0.33.0") and self.pcp_manager is not None and not dummy_run:
             assert isinstance(self.pcp_manager, AscendPCPManager)
             self.pcp_manager.sync_drafts(draft_tokens, input_batch.idx_mapping, self.draft_logits)
-        # Join after draft graph submission, before the runner publishes drafts
-        # or finalizes the KV transfer for this step.
-        if self.kda_recovery is not None:
-            self.kda_recovery.wait_for_commit()
         return draft_tokens

@@ -62,6 +62,10 @@ def init_speculator(
 
         return ExtractHiddenStatesSpeculator(vllm_config, device)
     if speculative_config.use_dspark():
+        if "K3DSparkModel" in speculative_config.draft_model_config.architectures:
+            from vllm_ascend.models.kimi_k3.dspark_speculator import KimiDSparkSpeculator
+
+            return KimiDSparkSpeculator(vllm_config, device)
         from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
             AscendDSparkSpeculator,
         )

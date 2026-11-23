@@ -10,6 +10,24 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadata
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState, _postprocess_recoverssm_align_kernel
 
 from vllm_ascend.ops.triton.kda.recoverssm import KDARecoverSSMCommitContext, MultiGroupKDACommit
+from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
+
+
+class KimiRecoverSSMModelState(AscendMambaHybridModelState):
+    """Aligned KDA state for a Kimi decoder using RecoverSSM and DSpark."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.recoverssm = KimiDSparkRecoverSSMState(self.device)
+
+    def postprocess_state(
+        self,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor | int,
+        num_computed_tokens: torch.Tensor | None = None,
+    ) -> None:
+        with self.recoverssm.postprocess_stream(idx_mapping, num_sampled, num_computed_tokens):
+            super().postprocess_state(idx_mapping, num_sampled, num_computed_tokens)
 
 
 class KimiDSparkRecoverSSMState(RecoverSSMState):

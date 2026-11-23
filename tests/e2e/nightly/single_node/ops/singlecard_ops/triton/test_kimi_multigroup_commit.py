@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Cross-group recovery must match serial recovery on every physical page."""
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -29,7 +30,8 @@ def make_contexts(module, device, heads, width, shared_slot=False):
                 kv_cache = shared_kv
             else:
                 state = rand(pages * (group + 1), heads, width, width)[:: group + 1]
-                conv = rand(pages, 6, 9)
+                # Kimi convolution pages store Q, K and V in model dtype.
+                conv = rand(pages, 6, 3 * heads * width).bfloat16()
                 kv_cache = (conv.transpose(-1, -2) if is_conv_state_dim_first() else conv, state)
                 if shared_slot and group == 0:
                     shared_kv = kv_cache
@@ -37,7 +39,7 @@ def make_contexts(module, device, heads, width, shared_slot=False):
                 SimpleNamespace(
                     kv_cache=kv_cache,
                     recoverssm_records=SimpleNamespace(
-                        correction=rand(7, heads, 4, width), key_gate=rand(7, heads, 4, width * 2).half()
+                        correction=rand(7, heads, 4, width), key_gate=rand(7, heads, 4, width * 2).bfloat16()
                     ),
                     A_log=rand(heads),
                     dt_bias=rand(heads, width),
@@ -158,14 +160,21 @@ def test_multigroup_commit_matches_serial_on_all_pages(heads, shared_slot):
     check_multi_group(torch.device("npu"), heads, 128, shared_slot=shared_slot)
 
 
-def test_draft_scope_orders_next_state_read():
+def test_draft_scope_orders_next_state_read(monkeypatch):
     from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadata
     from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 
-    from vllm_ascend.worker.v2.model_states.kimi_recoverssm import KimiDSparkRecoverSSMState
+    from vllm_ascend.models.kimi_k3.dspark_speculator import KimiDSparkSpeculator
+    from vllm_ascend.models.kimi_k3.recoverssm import KimiDSparkRecoverSSMState, KimiRecoverSSMModelState
+    from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
     device = torch.device("npu")
     workers = (RecoverSSMState(), KimiDSparkRecoverSSMState(device))
+    target = object.__new__(KimiRecoverSSMModelState)
+    target.recoverssm = workers[1]
+    proposer = object.__new__(KimiDSparkSpeculator)
+    # Enqueue independent draft work inside the real Kimi proposal wrapper.
+    monkeypatch.setattr(AscendDSparkSpeculator, "propose", lambda self, sampled, step: sampled + step)
     groups = [make_contexts(ops, device, 12, 128) for _ in workers]
     states = [torch.full((7,), -1, dtype=torch.int32, device=device) for _ in workers]
     counts = [torch.full_like(state, 11) for state in states]
@@ -189,17 +198,13 @@ def test_draft_scope_orders_next_state_read():
                 item.recoverssm_context, item.recoverssm_commit = ctx, raw.recoverssm_commit
                 metadata[name] = item
             worker.record_step(metadata, attention_groups, for_capture=False)
-            if i == 0:
-                worker.commit_step(sampled, idx, state_indices=states[i], num_accepted_tokens=counts[i])
-            else:
-                with worker.draft_scope():
-                    with worker.postprocess_stream(idx, sampled, None):
-                        worker.commit_step(sampled, idx, state_indices=states[i], num_accepted_tokens=counts[i])
-                    # Stand in for an independent draft consumer on the main stream.
-                    draft_result = sampled + step
-                    worker.wait_for_commit()
-            # Enqueue the next reader immediately, with no host synchronization.
-            next_reads.append([page.clone() for ctx in contexts for page in ctx.checkpoints + ctx.conv_states])
+            with proposer.sampling_scope(target) if i else nullcontext():
+                with worker.postprocess_stream(idx, sampled, None) if i else nullcontext():
+                    worker.commit_step(sampled, idx, state_indices=states[i], num_accepted_tokens=counts[i])
+                if i:
+                    draft_result = proposer.propose(sampled, step)
+                # Read before the outer scope's exception-safe fence, as publication would.
+                next_reads.append([page.clone() for ctx in contexts for page in ctx.checkpoints + ctx.conv_states])
         for a, b in zip(*next_reads, strict=True):
             torch.testing.assert_close(a, b, rtol=0, atol=0)
         torch.testing.assert_close(states[0], states[1], rtol=0, atol=0)

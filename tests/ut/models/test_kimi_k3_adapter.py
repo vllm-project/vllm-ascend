@@ -970,13 +970,39 @@ def test_kimi_lm_initializes_specialized_decode(monkeypatch):
     assert model.specialized_decode is None
 
 
-def test_kimi_lm_uses_ascend_hybrid_model_state():
+@pytest.mark.parametrize(
+    "case", ["decode", "off", "no_spec", "other_draft", "prefill", "no_transfer", "pool", "pp", "pcp", "cache", "a3"]
+)
+def test_kimi_model_selects_recovery_state(monkeypatch, case):
+    from vllm_ascend.models.kimi_k3.recoverssm import KimiRecoverSSMModelState
     from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
-    model = kimi_k3.AscendKimiLinearForCausalLM.__new__(kimi_k3.AscendKimiLinearForCausalLM)
-
-    # Upstream points at the ROCm state, whose attention metadata is invalid on NPU.
-    assert model.get_model_state_cls() is AscendMambaHybridModelState
+    lm = object.__new__(kimi_k3.AscendKimiLinearForCausalLM)
+    nn.Module.__init__(lm)
+    wrapper = object.__new__(kimi_k3.AscendKimiK3ForConditionalGeneration)
+    nn.Module.__init__(wrapper)
+    wrapper.language_model = lm
+    lm.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="kimi_k31", linear_attn_config=True)),
+        cache_config=SimpleNamespace(
+            use_kda_recoverssm=case != "off", mamba_cache_mode="all" if case == "cache" else "align"
+        ),
+        speculative_config=None if case == "no_spec" else SimpleNamespace(use_dspark=lambda: case != "other_draft"),
+        kv_transfer_config=None
+        if case == "no_transfer"
+        else SimpleNamespace(
+            kv_role="kv_producer" if case == "prefill" else "kv_consumer",
+            kv_connector="MultiConnector" if case == "pool" else "MooncakeConnectorV2",
+        ),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=4 if case == "pp" else 1,
+            prefill_context_parallel_size=4 if case == "pcp" else 1,
+            decode_context_parallel_size=8,
+        ),
+    )
+    monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_950", lambda: case != "a3")
+    expected = KimiRecoverSSMModelState if case == "decode" else AscendMambaHybridModelState
+    assert lm.get_model_state_cls() is wrapper.get_model_state_cls() is expected
 
 
 def test_kimi_model_forwards_specialized_decode_step(monkeypatch):
