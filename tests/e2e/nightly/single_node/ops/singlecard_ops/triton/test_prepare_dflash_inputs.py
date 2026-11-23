@@ -3,6 +3,7 @@
 
 import gc
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock
 
 import numpy as np
@@ -681,9 +682,9 @@ def test_prepare_dflash_inputs_num_reqs_override() -> None:
     case["num_reqs_override"] = 1
     data = _build_inputs(case, "npu")
     outputs = data.outputs
-    context_end = case["req_lens"][0]
-    query_end = case["num_query_per_req"]
-    skipped_state = case["idx_mapping"][1]
+    context_end = cast(list[int], case["req_lens"])[0]
+    query_end = cast(int, case["num_query_per_req"])
+    skipped_state = cast(list[int], case["idx_mapping"])[1]
     untouched = (
         outputs.context_positions[context_end:],
         outputs.context_slot_mapping[context_end:],

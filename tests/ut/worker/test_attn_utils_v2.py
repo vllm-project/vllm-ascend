@@ -68,7 +68,6 @@ from vllm_ascend.worker.v2.model_states import default as model_state_module
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
-
 from vllm_ascend.worker.v2.utils import AscendV2KVBlockZeroer
 
 
