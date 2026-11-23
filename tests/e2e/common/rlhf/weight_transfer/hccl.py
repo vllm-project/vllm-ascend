@@ -37,7 +37,7 @@ INFERENCE_WORLD_SIZE = 1
 # Child-server physical visibility is resolved from the parent environment.
 INFERENCE_DEVICE_INDEX = int(os.environ.get("VLLM_RL_TEST_DEVICE_INDEX", "0"))
 TRAINER_DEVICE_INDEX = INFERENCE_DEVICE_INDEX + 1
-GPU_MEMORY_UTILIZATION = 0.75
+GPU_MEMORY_UTILIZATION = float(os.environ.get("VLLM_RL_TEST_GPU_MEM_UTIL", "0.75"))
 
 
 def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):

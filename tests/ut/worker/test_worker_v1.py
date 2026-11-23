@@ -4,7 +4,15 @@ from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
 import torch
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    ParallelConfig,
+    ProfilerConfig,
+    VllmConfig,
+    get_current_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.config.attention import AttentionConfig
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import (
@@ -2162,7 +2170,54 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.model_runner = MagicMock()
         worker.model_runner.model = MagicMock()
         worker.model_config = MagicMock()
+        worker.vllm_config = MagicMock(spec=VllmConfig)
         return worker
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_weight_update_callbacks_have_worker_config(self, ascend_config):
+        ascend_config.return_value.weight_nz_mode = 0
+        for method, args in (
+            ("start_weight_update", ()),
+            ("update_weights", ({"chunk": "bf16"},)),
+            ("finish_weight_update", ()),
+        ):
+            with self.subTest(method=method):
+                engine = MagicMock()
+                worker = self._make_worker(engine)
+                worker._weight_update_active = method != "start_weight_update"
+
+                def postprocess(*args, expected_config=worker.vllm_config):
+                    self.assertIs(get_current_vllm_config(), expected_config)
+
+                getattr(engine, method).side_effect = postprocess
+                outer_config = MagicMock(spec=VllmConfig)
+                with set_current_vllm_config(outer_config):
+                    getattr(worker, method)(*args)
+                    self.assertIs(get_current_vllm_config(), outer_config)
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_weight_update_error_restores_config_context(self, ascend_config):
+        ascend_config.return_value.weight_nz_mode = 0
+        for method, args in (
+            ("start_weight_update", ()),
+            ("update_weights", ({"chunk": "bf16"},)),
+            ("finish_weight_update", ()),
+        ):
+            with self.subTest(method=method):
+                engine = MagicMock()
+                worker = self._make_worker(engine)
+                worker._weight_update_active = method != "start_weight_update"
+
+                def failing_postprocess(*args, expected_config=worker.vllm_config):
+                    self.assertIs(get_current_vllm_config(), expected_config)
+                    raise ValueError("quantization failed")
+
+                getattr(engine, method).side_effect = failing_postprocess
+                outer_config = MagicMock(spec=VllmConfig)
+                with set_current_vllm_config(outer_config):
+                    with self.assertRaisesRegex(ValueError, "quantization failed"):
+                        getattr(worker, method)(*args)
+                    self.assertIs(get_current_vllm_config(), outer_config)
 
     def test_check_engine_raises_when_unconfigured(self):
         worker = self._make_worker(engine=None)
