@@ -39,6 +39,11 @@ from vllm_ascend.ascend_config import (
     init_ascend_config,
     is_draft_config_context,
 )
+from vllm_ascend.attention.context_parallel.topology import (
+    resolve_cp_topology,
+    validate_common_topology,
+    validate_dcp_block_interleave,
+)
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
     DeviceAdaptorFamily,
@@ -365,13 +370,7 @@ class NPUPlatform(Platform):
             return compatibility_backend_map.get(key, compatibility_backend_map[(False, False)])
 
         if attn_selector_config.use_pcp:
-            pcp_backend_map = {
-                (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
-                (False, False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
-                (True, True, False): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
-                (True, False, True): "vllm_ascend.attention.dsa_v1.AscendDSABackend",
-            }
-            pcp_backend = pcp_backend_map.get(backend_key)
+            pcp_backend = backend_map.get(backend_key)
             if pcp_backend is None:
                 raise NotImplementedError(f"Ascend MRV2 PCP does not support attention backend {backend_key}.")
             return pcp_backend
@@ -711,6 +710,20 @@ class NPUPlatform(Platform):
 
         # 9.Validate SFA / DCP / KV and SP consistency (vllm_config)
         _validate_sfa_dcp_kv_sp(vllm_config)
+        # The SFA validator above may rewrite cp_kv_cache_interleave_size, so the
+        # divisibility check runs on the normalised value.
+        #
+        # MLA-family targets resolve the block size themselves: the cache block size
+        # can still move in update_block_size_for_backend, and the MLA DCP metadata
+        # builder derives its attention block size from the settled value
+        # (mla_cp.resolve_dcp_block_layout), which is where that check runs. Using the
+        # pre-resolution value here would reject configurations the backend accepts.
+        # SFA is use_mla too and is skipped by the same gate: it normalises the
+        # interleave to the block size in _validate_sfa_dcp_kv_sp and keeps the
+        # upstream kernel-block-size check, so nothing is left unchecked.
+        # DSA and DSA V4.1 force DCP=1 (supports_dcp=False / explicit guard), so they
+        # never reach this rule.
+        _validate_target_dcp_block_interleave(vllm_config)
 
         # 10.Set pytorch NPU allocator env (vllm_config)
         _set_pytorch_npu_alloc_env(vllm_config)
@@ -2147,14 +2160,26 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
         raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors/rfork), or dummy weights.")
 
 
+def _validate_target_dcp_block_interleave(vllm_config: VllmConfig) -> None:
+    """Validate the DCP interleave for targets that do not resolve the block size.
+
+    The cache block size is not final here: update_block_size_for_backend() can
+    still move it. MLA-family backends therefore own this check and run it on the
+    settled value in their DCP metadata builder (resolve_dcp_block_layout), and
+    validating the pre-resolution value here would reject configurations the
+    backend accepts.
+    """
+    if getattr(getattr(vllm_config, "model_config", None), "use_mla", False):
+        return
+    validate_dcp_block_interleave(resolve_cp_topology(vllm_config), vllm_config.cache_config)
+
+
 def _validate_parallel_config(vllm_config: VllmConfig) -> None:
     parallel_config = vllm_config.parallel_config
-    if not vllm_config.use_v2_model_runner and parallel_config.prefill_context_parallel_size > 1:
-        raise ValueError(
-            "PCP (Prefill Context Parallelism) is not supported by vLLM Ascend. "
-            "Please set --prefill-context-parallel-size to 1. "
-            f"Got prefill_context_parallel_size={parallel_config.prefill_context_parallel_size}."
-        )
+    validate_common_topology(
+        resolve_cp_topology(vllm_config),
+        vllm_config=vllm_config,
+    )
 
     kvpp_config = KVPPConfig.from_vllm_config(vllm_config)
     if kvpp_config.size > 1:

@@ -2288,9 +2288,9 @@ def _make_initialized_sfa_impl(pcp_size, dcp_size, physical_pcp_size=None):
         patch("vllm_ascend.attention.sfa_v1.enable_pcp_o_proj_weight_sharding", return_value=True),
         patch("vllm_ascend.attention.sfa_v1.get_pcp_group", return_value=pcp_group) as get_pcp,
         patch("vllm_ascend.attention.sfa_v1.get_tp_group", return_value=tp_group),
-        patch("vllm_ascend.attention.context_parallel.common_cp.get_pcp_group", return_value=pcp_group),
-        patch("vllm_ascend.attention.context_parallel.common_cp.get_tp_group", return_value=tp_group),
-        patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group", return_value=dcp_group),
+        patch("vllm_ascend.attention.context_parallel.metadata.get_pcp_group", return_value=pcp_group),
+        patch("vllm_ascend.attention.context_parallel.metadata.get_tp_group", return_value=tp_group),
+        patch("vllm_ascend.attention.context_parallel.metadata.get_dcp_group", return_value=dcp_group),
         patch("vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group", return_value=pcp_group),
         patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer", return_value=dcp_size > 1),
         patch.object(

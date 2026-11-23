@@ -31,6 +31,16 @@ from vllm_ascend.utils import AscendDeviceType
 LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_attention"
 
 
+def _cp_config(pcp_size: int = 1, dcp_size: int = 1):
+    """Minimal current-config stub for the registry-based CP selection seam."""
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=pcp_size,
+            decode_context_parallel_size=dcp_size,
+        )
+    )
+
+
 class TestAttentionGraphHelpers(TestBase):
     @patch("vllm_ascend.attention.utils.using_paged_attention", return_value=True)
     def test_pa_contiguous_cache_requirement_is_limited_to_normal_impl(self, mock_using_pa):

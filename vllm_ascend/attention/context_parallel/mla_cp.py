@@ -32,6 +32,8 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPMetadataBuilderMixin,
     use_history_current_split_decode,
 )
+from vllm_ascend.attention.context_parallel.registry import CPBackendProvider, register_cp_backend
+from vllm_ascend.attention.context_parallel.topology import resolve_cp_topology, validate_dcp_block_interleave
 from vllm_ascend.attention.utils import MLAPO_MAX_SUPPORTED_TOKENS, AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
@@ -104,6 +106,30 @@ class AscendMLADCPDecodeMetadata(AscendMLADecodeMetadata):
         self.cp_history_seq_len = cp_history_seq_len + [0] * num_padded
 
 
+def resolve_dcp_block_layout(
+    vllm_config: VllmConfig,
+    block_size: int,
+    dcp_size: int,
+) -> tuple[int, int, int]:
+    """Resolve the MLA DCP block layout and validate the interleave on the final size.
+
+    Returns (local_block_size, virtual_block_size, resolved_block_size). The
+    attention block size is the least common multiple of the cache block size and
+    the DCP virtual block size, so the interleave requirement is checked against
+    the block size this builder actually uses: update_block_size_for_backend can
+    still move the cache block size after the platform validator ran, and
+    validating that stale value rejects configurations the backend accepts.
+    """
+    local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
+    virtual_block_size = local_block_size * dcp_size
+    validate_dcp_block_interleave(
+        resolve_cp_topology(vllm_config),
+        resolved_block_size=block_size,
+    )
+    resolved_block_size = (block_size * virtual_block_size) // np.gcd(block_size, virtual_block_size)
+    return local_block_size, virtual_block_size, resolved_block_size
+
+
 class AscendMlaDCPMetadataBuilder(
     DCPMetadataBuilderMixin,
     AscendMLAMetadataBuilder,
@@ -148,12 +174,11 @@ class AscendMlaDCPMetadataBuilder(
         dcp_ranks = get_dcp_group().ranks
         collective_ranks = sorted(dcp_ranks)
         self.dcp_collective_rank_order = [collective_ranks.index(rank) for rank in dcp_ranks]
-        self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
-        self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size
-        self.block_size = (self.block_size * self.cp_virtual_block_size) // np.gcd(
-            self.block_size,
+        (
+            self.cp_local_block_size,
             self.cp_virtual_block_size,
-        )
+            self.block_size,
+        ) = resolve_dcp_block_layout(vllm_config, self.block_size, self.dcp_size)
 
     def _get_pcp_prefill_kv_inputs(
         self,
@@ -1202,3 +1227,16 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         assert reorganized_k_pe.shape[0] == sum_seq_len
         assert max_seq_len_check == max_seq_len
         return reorganized_kv_c_normed, reorganized_k_pe
+
+
+MLA_CP_BACKEND = register_cp_backend(
+    CPBackendProvider(
+        name="mla",
+        base_builder_cls=AscendMLAMetadataBuilder,
+        base_impl_cls=AscendMLAImpl,
+        cp_builder_cls=AscendMlaDCPMetadataBuilder,
+        cp_impl_cls=AscendMlaDCPImpl,
+        supports_pcp=False,
+        supports_dcp=True,
+    )
+)
