@@ -17,8 +17,9 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
@@ -47,6 +48,7 @@ from vllm_ascend.compilation.updatable_graph import (
     UpdatableGraph,
 )
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import guard_fsa_plan_ipc
 from vllm_ascend.utils import use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -144,9 +146,9 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                     ),
                 ):
                     prepare_engram()
-            if use_updatable_graph(attn_backend):
-                return self._updatable_graph_replay(desc, attn_metadata)
-            else:
+            with guard_fsa_plan_ipc():
+                if use_updatable_graph(attn_backend):
+                    return self._updatable_graph_replay(desc, attn_metadata)
                 # This will be removed once the refactoring is fully complete.
                 return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
         finally:
@@ -216,12 +218,11 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         metadata = getattr(model_state, "device_metadata", None)
-        model = ModelWithContext(model, device_metadata=metadata)
         legacy_kwargs = {"has_lora": has_lora} if vllm_version_is("0.33.0") else {}
         try:
-            with communicator_switch():
+            with guard_fsa_plan_ipc() as ipc, communicator_switch():
                 return super().capture(
-                    model,
+                    ModelWithContext(model, device_metadata=metadata, fsa_plan_ipc=ipc),
                     model_state,
                     input_buffers,
                     intermediate_tensors,
@@ -245,12 +246,21 @@ class ModelWithContext(nn.Module):
     so we can inherit vllm's CudaGraphManager._capture_full_graph.
     """
 
-    def __init__(self, original_model, is_draft_model=False, is_draft_model_prefill=False, device_metadata=None):
+    def __init__(
+        self,
+        original_model,
+        is_draft_model=False,
+        is_draft_model_prefill=False,
+        device_metadata=None,
+        *,
+        fsa_plan_ipc=None,
+    ):
         super().__init__()
         self.original_model = original_model
         self.is_draft_model = is_draft_model
         self.is_draft_model_prefill = is_draft_model_prefill
         self.device_metadata = device_metadata
+        self.fsa_plan_ipc = fsa_plan_ipc
 
     def forward(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -265,10 +275,18 @@ class ModelWithContext(nn.Module):
         if self.is_draft_model_prefill:
             _EXTRA_CTX.is_draft_model_prefill = True
 
+        join_at_tail = self.fsa_plan_ipc is not None and _EXTRA_CTX.capturing
+        join_scope = (
+            patch.object(forward_context, "_fsa_plan_ipc_join", None, create=True) if join_at_tail else nullcontext()
+        )
         try:
             if self.device_metadata is not None:
                 self.device_metadata.begin_forward()
-            return self.original_model(*args, **kwargs)
+            with join_scope:
+                output = self.original_model(*args, **kwargs)
+                if join_at_tail and (join := forward_context._fsa_plan_ipc_join) is not None:
+                    join()
+                return output
         finally:
             # Warmup and actual capture receive separate prepare_attn calls.
             # Retire each submission, including unused producers, after its
@@ -294,8 +312,10 @@ class ModelWithContext(nn.Module):
 @contextmanager
 def model_capture_wrapper(speculator, is_draft_model_prefill):
     """Context manager to override speculator's model for speculator capturing."""
-    try:
-        speculator.model = ModelWithContext(speculator.model, True, is_draft_model_prefill)
-        yield
-    finally:
-        speculator.model = speculator.model.get_original_model()
+    model = speculator.model
+    with guard_fsa_plan_ipc() as ipc:
+        speculator.model = ModelWithContext(model, True, is_draft_model_prefill, fsa_plan_ipc=ipc)
+        try:
+            yield
+        finally:
+            speculator.model = model

@@ -879,6 +879,13 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                 ):
                     rows = cache_tensor.view(-1, cache_tensor.shape[-1])
                     rows.index_copy_(0, device_slots[: value.shape[0]], value.reshape(value.shape[0], -1))
+            # PIECEWISE can execute attention eagerly. Use the same capture flag
+            # as the fused consumer when choosing the KV writeback stream.
+            capturing = (
+                bool(_EXTRA_CTX.capturing)
+                if self.use_fused_overlap and is_forward_context_available()
+                else self._in_graph_runtime()
+            )
             manager.offload_new_kv(
                 layer_name=layer_name,
                 slot_mapping=slots,
@@ -889,7 +896,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                 k=k_nope,
                 v=k_pe,
                 has_prefill=False,
-                capturing=self._in_graph_runtime(),
+                capturing=capturing,
             )
             return k_pe, k_nope
 
@@ -1078,6 +1085,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         cache_blocks_per_row: int,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        manager = get_sparse_kv_offload_manager()
         cache_token_capacity = max(self.max_num_topk_rows, token_count)
         cache_topk_head_capacity = max(topk_head_count, 1)
         cache_topk_capacity = max(self.sfa_sparse_topk, topk)
@@ -1101,7 +1109,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             or self._fused_overlap_selection_capacity[3] < cache_blocks_per_row
             or self.selection_kv_block_table.device != device
             or self.selection_kv_block_status.device != device
-            or self.selection_membership_map.device.type != "cpu"
+            or self.selection_membership_map is not manager.fused_overlap_membership_map
             or self.fused_overlap_last_req_ids.device != device
         )
         if needs_realloc:
@@ -1127,9 +1135,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                 dtype=torch.int32,
                 device=device,
             )
-            self.selection_membership_map = get_sparse_kv_offload_manager().allocate_fused_overlap_membership_map(
-                row_capacity
-            )
+            self.selection_membership_map = manager.allocate_fused_overlap_membership_map(row_capacity)
             self.fused_overlap_last_req_ids = torch.full(
                 (cache_token_capacity,),
                 -1,
@@ -1225,10 +1231,16 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         full_q_actual_seq: torch.Tensor,
         full_kv_actual_seq: torch.Tensor,
     ) -> None:
-        if attn_metadata.token_to_req is None:
+        token_to_req = attn_metadata.token_to_req
+        if token_to_req is None:
             raise RuntimeError(
                 "fused_overlap offload decode requires token_to_req metadata "
                 f"(num_tokens={num_tokens} num_reqs={num_reqs})"
+            )
+        if token_to_req.ndim != 1 or token_to_req.size(0) < num_tokens:
+            raise RuntimeError(
+                f"fused_overlap token_to_req length mismatch: got shape {tuple(token_to_req.shape)} "
+                f"for num_tokens={num_tokens}"
             )
         if full_q_actual_seq.numel() != num_reqs:
             raise RuntimeError(
@@ -1242,11 +1254,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             )
         if _EXTRA_CTX.capturing:
             return
-        token_to_req = attn_metadata.token_to_req[:num_tokens]
-        if token_to_req.numel() != num_tokens:
-            raise RuntimeError(
-                f"fused_overlap token_to_req length mismatch: got {token_to_req.numel()} for num_tokens={num_tokens}"
-            )
+        token_to_req = token_to_req[:num_tokens]
         invalid_req_mapping = (token_to_req < 0) | (token_to_req >= num_reqs)
         if bool(invalid_req_mapping.any().item()):
             raise RuntimeError(
@@ -1317,6 +1325,10 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             topk_indices_decode.ndim,
             topk_indices_decode.dtype,
             topk_indices_decode.device,
+            # Views sharing storage can have different metadata shapes.
+            attn_metadata.token_to_req.shape,
+            actual_seq_lengths_query_decode.numel(),
+            actual_seq_lengths_key_decode.numel(),
             attn_metadata.token_to_req.data_ptr(),
             attn_metadata.req_ids_tensor.data_ptr(),
             attn_metadata.block_table.data_ptr(),
@@ -1336,6 +1348,21 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             return cached_inputs
 
         device = topk_indices_decode.device
+        full_kv_actual_seq = self._to_int32_device(
+            actual_seq_lengths_key_decode,
+            device,
+        )
+        full_q_actual_seq = self._to_int32_device(
+            actual_seq_lengths_query_decode,
+            device,
+        )
+        self._validate_fused_overlap_mtp_decode_metadata(
+            attn_metadata,
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            full_q_actual_seq=full_q_actual_seq,
+            full_kv_actual_seq=full_kv_actual_seq,
+        )
         token_to_req = attn_metadata.token_to_req[:num_tokens].to(
             device=device,
             dtype=torch.long,
@@ -1384,21 +1411,6 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             attn_metadata.block_table[:num_reqs],
             device,
         ).contiguous()
-        full_kv_actual_seq = self._to_int32_device(
-            actual_seq_lengths_key_decode,
-            device,
-        )
-        full_q_actual_seq = self._to_int32_device(
-            actual_seq_lengths_query_decode,
-            device,
-        )
-        self._validate_fused_overlap_mtp_decode_metadata(
-            attn_metadata,
-            num_tokens=num_tokens,
-            num_reqs=num_reqs,
-            full_q_actual_seq=full_q_actual_seq,
-            full_kv_actual_seq=full_kv_actual_seq,
-        )
         if num_tokens != num_reqs:
             full_q_actual_seq, full_kv_actual_seq, full_kv_block_table = self._flatten_fused_overlap_mtp_to_token_batch(
                 attn_metadata,
@@ -1564,9 +1576,11 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             selection_kv_cache=selection_kv_cache,
             selection_k_rope=selection_k_rope,
             capturing=bool(_EXTRA_CTX.capturing),
+            multi_token_decode=num_tokens != num_reqs,
         )
         attn_output = fused_op(**fused_inputs)
         attn_output = attn_output[..., : ql_nope_decode.shape[-1]].contiguous()
+        manager.join_fsa_plan_ipc_if_needed(layer_name, bool(_EXTRA_CTX.capturing))
         manager.wait_for_current_kv_writeback(bool(_EXTRA_CTX.capturing))
         return attn_output
 

@@ -106,6 +106,31 @@ if(SOC_VERSION MATCHES "ascend910_93.*")
   target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
+if(SOC_VERSION MATCHES "ascend910_93.*" AND RUN_MODE STREQUAL "npu")
+  find_program(FSA_PLANNER_BISHENG NAMES bisheng HINTS
+    "${ASCEND_HOME_PATH}/bin"
+    "${ASCEND_HOME_PATH}/compiler/bin"
+    "${ASCEND_HOME_PATH}/compiler/ccec_compiler/bin")
+  if(NOT FSA_PLANNER_BISHENG)
+    message(FATAL_ERROR "The A3 FSA device planner requires BiSheng from the CANN toolkit.")
+  endif()
+
+  set(FSA_PLANNER_SOURCE_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/csrc/attention/fused_sparse_attention_overlap/device_planner")
+  set(FSA_PLANNER_SOURCE "${FSA_PLANNER_SOURCE_DIR}/fsa-mapped-recurrent-planner-a3-abi.asc")
+  file(GLOB FSA_PLANNER_HEADERS CONFIGURE_DEPENDS "${FSA_PLANNER_SOURCE_DIR}/*.h")
+  set(FSA_PLANNER_LIBRARY "${CMAKE_CURRENT_BINARY_DIR}/libfsa_mapped_recurrent_planner.so")
+  add_custom_command(OUTPUT "${FSA_PLANNER_LIBRARY}"
+    COMMAND "${FSA_PLANNER_BISHENG}" -O2 --npu-arch=dav-2201 -fPIC -shared
+      "-I${ASCEND_HOME_PATH}/include" "${FSA_PLANNER_SOURCE}"
+      "-L${ASCEND_HOME_PATH}/lib64" -lacl_rt -o "${FSA_PLANNER_LIBRARY}"
+    DEPENDS "${FSA_PLANNER_SOURCE}" ${FSA_PLANNER_HEADERS}
+    VERBATIM)
+  add_custom_target(vllm_ascend_fsa_device_planner DEPENDS "${FSA_PLANNER_LIBRARY}")
+  add_dependencies(vllm_ascend_C vllm_ascend_fsa_device_planner)
+  install(FILES "${FSA_PLANNER_LIBRARY}" DESTINATION "${VLLM_ASCEND_INSTALL_PATH}")
+endif()
+
 # Detect aclrtMemcpyBatchAsync availability (CANN 8.5+)
 # Can be overridden via VLLM_ASCEND_ENABLE_BATCH_MEMCPY env var (registered
 # in vllm_ascend/envs.py, forwarded by setup.py as a CMake variable):

@@ -309,3 +309,21 @@ def test_fused_sparse_attention_overlap_internal_planner_miss_then_all_hit_preci
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A3, reason="A3 paired KV writeback")
+@torch.inference_mode()
+def test_fused_sparse_attention_overlap_mixed_hit_paired_writeback() -> None:
+    case = _make_case(torch.bfloat16, topk=128)
+    _call_fused(case)
+    torch.npu.synchronize()
+
+    # A hit in the middle of a window makes the next pair of misses start at an odd position.
+    resident = case.topk_indices.cpu().flatten()
+    tokens = torch.arange(case.full_actual_seq.item() - 1, -1, -1, dtype=torch.int32)
+    misses = tokens[~torch.isin(tokens, resident)]
+    topk = torch.cat([misses[:34], resident[:1], misses[34 : case.topk - 1]])
+    case.topk_indices.copy_(topk.reshape_as(case.topk_indices))
+    _call_fused(case)
+    torch.npu.synchronize()
+    _assert_selection_state_matches_full_cache(case)

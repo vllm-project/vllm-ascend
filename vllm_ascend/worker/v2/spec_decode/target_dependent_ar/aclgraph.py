@@ -29,6 +29,7 @@ from vllm_ascend.compilation.updatable_graph import (
     SharedSource,
     UpdatableGraph,
 )
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import guard_fsa_plan_ipc
 from vllm_ascend.utils import is_drafter_moe_model, use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import (
     collect_sorted_captured_token_sizes,
@@ -212,9 +213,9 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             desc.num_tokens,
             self.is_draft_model_prefill,
         )
-        if use_updatable_graph(attn_backend):
-            return self._updatable_graph_replay(desc, draft_attn_metadatas)
-        else:
+        with guard_fsa_plan_ipc():
+            if use_updatable_graph(attn_backend):
+                return self._updatable_graph_replay(desc, draft_attn_metadatas)
             # This will be removed once the refactoring is fully complete.
             return self._graph_replay(desc, attn_backend, num_tokens, draft_vllm_config, draft_attn_metadatas)
 

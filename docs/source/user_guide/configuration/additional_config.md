@@ -377,6 +377,52 @@ Omitting `quant_dtype` selects MXFP8 on 950DT Products:
 }
 ```
 
+## FSA KV plan transport
+
+Set `sparse_kv_offload_config.fsa_planner_mode` in the Decode worker's
+additional configuration. The key is a string and defaults to `cpu`.
+
+| Value | Plan calculation | Plan synchronization |
+| --- | --- | --- |
+| `cpu` | Existing CPU LRU planner | Existing TP broadcast |
+| `hccl` | A3 device planner | HCCL payload broadcast |
+| `notify` | A3 device planner | Shared host DDR and native READY/ACK for host-local TP groups |
+
+For example, enable Notify on a Decode worker with Sparse KV Offload:
+
+```json
+{
+  "sparse_kv_offload_config": {
+    "enabled": true,
+    "use_fused_overlap": true,
+    "fsa_planner_mode": "notify"
+  }
+}
+```
+
+Both device modes require the A3 custom-op build, which installs the planner
+library in the package. Notify requires a host-local TP group with one
+process per rank. With TP size one, the device planner publishes locally.
+
+TP0 signals READY after writing the plan. Each peer publishes the plan to
+its local FSA buffers and signals ACK. TP0 waits for all ACKs before reusing
+the shared payload. Local attention can run as soon as local publication
+completes.
+
+Both device modes reserve HBM before sizing the KV cache. Each rank needs
+a local membership map. TP0 also needs input staging and persistent LRU
+state for each offloaded layer that can produce a plan. The HCCL mode and
+single-rank execution also keep the plan payload in HBM.
+
+When a layer reuses an earlier plan during multi-token decode, a separate
+TP broadcast orders that layer's KV writeback before its peers read the KV.
+Graphs captured with speculative decoding retain this dependency for replay.
+Single-token decode graphs captured without speculation skip this broadcast.
+
+A native enqueue failure aborts the current forward. If the mapping kernel
+was already queued when the planning kernel failed to enqueue, the LRU state
+may have advanced. Restart the worker before retrying the request.
+
 ## GDN internal prefill checkpoints
 
 Enable with `--additional-config '{"gdn_internal_prefill_checkpoints": true}'`.
