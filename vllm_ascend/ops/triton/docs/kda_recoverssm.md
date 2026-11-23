@@ -335,23 +335,24 @@ runtime strides may still trigger Triton type/alignment specialization.
 
 ### A5 verify and state commit latency
 
-Measured at 7a78343 before eliding the raw gate store. Ascend950DT, main 7844c21, BF16 activations and FP32 state. Values are median joint graph latencies in microseconds over 12 paired samples of 16 replays. The graph includes verification for every layer and the first state commit. Plan, convolution, boundary commit and model serving are outside the timed interval.
+Measured on one Ascend950DT with main at `7844c21` and the raw-gate store change at `c08a320`. BF16 activations and FP32 state. Each value is the median of 12 paired samples with 16 graph replays per sample. Each graph includes one verify per layer and the first state commit. State reset, plan and convolution are outside the timed interval. Full means every request accepts Q tokens. The mixed ramp cycles through lengths 0 to Q; the alternating and clustered cases contain equal numbers of zero- and full-acceptance requests.
 
-| B / L / H / K / V / Q | Acceptance per request | main (us) | This PR (us) |
+| B / L / H / K / V / Q | Acceptance per request | main (µs) | This PR (µs) |
 |---|---|---:|---:|
-| 30 / 23 / 12 / 128 / 128 / 4 | full | 1688.16 | 1567.55 |
-| 30 / 23 / 12 / 128 / 128 / 4 | 0/full alternating | 1407.01 | 1347.26 |
-| 30 / 23 / 12 / 128 / 128 / 4 | 0/full clustered | 1413.81 | 1345.21 |
-| 12 / 11 / 32 / 128 / 128 / 6 | full | 1068.68 | 1009.85 |
-| 12 / 11 / 32 / 128 / 128 / 6 | 0/full alternating | 923.48 | 887.20 |
-| 12 / 11 / 32 / 128 / 128 / 6 | 0/full clustered | 911.85 | 878.81 |
-| 12 / 11 / 64 / 128 / 128 / 6 | full | 2062.30 | 1959.47 |
-| 12 / 11 / 64 / 128 / 128 / 6 | 0/full alternating | 1752.65 | 1695.85 |
-| 12 / 11 / 64 / 128 / 128 / 6 | 0/full clustered | 1755.16 | 1696.42 |
-| 8 / 3 / 12 / 128 / 128 / 2 | full | 58.13 | 52.44 |
-| 5 / 3 / 7 / 96 / 72 / 5 | full | 67.30 | 65.27 |
-| 1 / 1 / 12 / 128 / 128 / 1 | full | 14.67 | 14.83 |
-| 1 / 1 / 12 / 128 / 128 / 1 | full (repeat) | 14.88 | 14.92 |
+| 30 / 23 / 12 / 128 / 128 / 4 | full | 1395.09 | 1318.14 |
+| 30 / 23 / 12 / 128 / 128 / 4 | mixed ramp | 1299.83 | 1250.26 |
+| 30 / 23 / 12 / 128 / 128 / 4 | 0/full alternating | 1263.42 | 1215.07 |
+| 30 / 23 / 12 / 128 / 128 / 4 | 0/full clustered | 1394.67 | 1316.90 |
+| 12 / 11 / 32 / 128 / 128 / 6 | full | 901.24 | 867.65 |
+| 12 / 11 / 32 / 128 / 128 / 6 | mixed ramp | 834.46 | 818.86 |
+| 12 / 11 / 32 / 128 / 128 / 6 | 0/full alternating | 827.20 | 807.53 |
+| 12 / 11 / 32 / 128 / 128 / 6 | 0/full clustered | 901.42 | 867.74 |
+| 12 / 11 / 64 / 128 / 128 / 6 | full | 1741.84 | 1678.88 |
+| 12 / 11 / 64 / 128 / 128 / 6 | mixed ramp | 1612.64 | 1585.68 |
+| 12 / 11 / 64 / 128 / 128 / 6 | 0/full alternating | 1587.73 | 1547.29 |
+| 12 / 11 / 64 / 128 / 128 / 6 | 0/full clustered | 1741.89 | 1677.84 |
+
+Across all 12 cases, verify outputs matched main elementwise. Raw keys matched their inputs and all tested raw-gate slots retained the NaN sentinel on the optimized path. Direct and context commit state checks and adjacent page guards passed. Maximum absolute checkpoint difference from main was 1.49e-08. The sampled FP64 recurrence had maximum absolute error 1.77e-08.
 
 ### Extracted-source validation
 
