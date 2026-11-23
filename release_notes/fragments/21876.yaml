@@ -7,4 +7,5 @@ entries:
       and DCP execution paths, including Mooncake V2 pull PD disaggregation
       and single-child MultiConnector wrappers for supported pull connectors.
       Supported target and draft paths use device sequence lengths and skip
-      the per-step host copy and synchronization.
+      the per-step host copy and synchronization, including when Kimi KDA
+      RecoverSSM is enabled with prefill context parallel size one.

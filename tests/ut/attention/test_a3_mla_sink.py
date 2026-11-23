@@ -69,7 +69,7 @@ supports_component_major_mla_pd = ast_symbols(
 )["supports_component_major_mla_pd"]
 
 
-@pytest.mark.parametrize("connector,expected", [("MooncakeConnectorV2", True), ("MultiConnector", False)])
+@pytest.mark.parametrize("connector,expected", [("MooncakeConnectorV2", False), ("MultiConnector", False)])
 def test_a5_preserves_baseline_pd_layout(monkeypatch, connector, expected):
     monkeypatch.setitem(supports_component_major_mla_pd.__globals__, "get_ascend_device_type", lambda: "a5")
     config = selection_impl().vllm_config
@@ -96,7 +96,7 @@ def test_other_a3_deployments_keep_baseline_pd_policy(role, outside_scope):
         config.parallel_config.pipeline_parallel_size = 2
     child = {"kv_connector": "MooncakeConnectorV2", "kv_connector_extra_config": {"use_layerwise": True}}
     config.kv_transfer_config = SimpleNamespace(kv_role=role, **child)
-    assert supports_component_major_mla_pd(config)
+    assert not supports_component_major_mla_pd(config)
     config.kv_transfer_config = SimpleNamespace(
         kv_role=role, kv_connector="MultiConnector", kv_connector_extra_config={"connectors": [child]}
     )
@@ -362,6 +362,7 @@ def test_a3_builder_normalizes_once_and_reuses_schedule_storage(monkeypatch, cau
         dtype=torch.bfloat16,
         use_mla_rope=False,
         dcp_size=dcp_size,
+        pcp_group=SimpleNamespace(world_size=1),
         dcp_rank=0,
         vllm_config=SimpleNamespace(
             speculative_config=object(),
@@ -700,7 +701,20 @@ def test_sync_fallback_for_every_unsupported_consumer(reason):
     assert instance._can_skip_spec_cpu_length_sync() is False
 
 
-@pytest.mark.parametrize("case", ["supported", "unknown", "empty", "draft_only", "state", "recover", "pcp"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "supported",
+        "unknown",
+        "empty",
+        "draft_only",
+        "state",
+        "recover",
+        "custom_recover",
+        "unknown_recover_builder",
+        "pcp",
+    ],
+)
 def test_bind_target_lengths_once(case, monkeypatch):
     from types import ModuleType
 
@@ -709,7 +723,8 @@ def test_bind_target_lengths_once(case, monkeypatch):
         ("attention.context_parallel.sfa_cp", "AscendSFADCPMetadataBuilder"),
         ("attention.sfa_v1", "AscendSFAMetadataBuilder"),
         ("attention.indexer", "AscendSFAIndexerMetadataBuilder"),
-        ("ops.kda_pcp", "KimiKDAHostMetadataBuilder"),
+        ("ops.kimi_kda", "KimiKDAHostMetadataBuilder"),
+        ("models.kimi_k3.recoverssm_metadata", "AscendKimiKDARecoverSSMMetadataBuilder"),
         ("worker.v2.model_states.mamba_hybrid", "AscendMambaHybridModelState"),
     ):
         module = ModuleType("vllm_ascend." + path)
@@ -717,8 +732,24 @@ def test_bind_target_lengths_once(case, monkeypatch):
         setattr(module, name, modules[name])
         monkeypatch.setitem(sys.modules, module.__name__, module)
     state = modules["AscendMambaHybridModelState"]()
-    state.recoverssm = object() if case == "recover" else None
-    builders = [modules[name]() for name in modules if name.endswith("Builder")]
+    recover_module = ModuleType("vllm.v1.worker.gpu.model_states.recoverssm")
+    recover_type = type("RecoverSSMState", (), {})
+    recover_module.RecoverSSMState = recover_type
+    monkeypatch.setitem(sys.modules, recover_module.__name__, recover_module)
+    state.recoverssm = None
+    kda = modules["KimiKDAHostMetadataBuilder"]
+    if case in ("recover", "custom_recover", "unknown_recover_builder"):
+        state.recoverssm = recover_type()
+        kda = modules["AscendKimiKDARecoverSSMMetadataBuilder"]
+    if case == "custom_recover":
+        state.recoverssm = type("CustomRecoverState", (recover_type,), {})()
+    if case == "unknown_recover_builder":
+        kda = type("CustomRecoverBuilder", (kda,), {})
+    builders = [
+        modules[name]()
+        for name in ("AscendSFADCPMetadataBuilder", "AscendSFAMetadataBuilder", "AscendSFAIndexerMetadataBuilder")
+    ]
+    builders.append(kda())
     if case == "unknown":
         builders.append(object())
     group = SimpleNamespace(layer_names=["draft" if case == "draft_only" else "target"], metadata_builders=builders)
@@ -730,9 +761,10 @@ def test_bind_target_lengths_once(case, monkeypatch):
     configure = ast_method(
         "vllm_ascend/worker/v2/model_runner.py", "NPUModelRunner", "_configure_a3_target_lengths", {}
     )
-    assert configure(runner, {"draft"}) is (case == "supported")
+    expected = case in ("supported", "recover")
+    assert configure(runner, {"draft"}) is expected
     for sfa in builders[:2]:
-        assert getattr(sfa, "allow_a3_device_lengths", False) is (case == "supported")
+        assert getattr(sfa, "allow_a3_device_lengths", False) is expected
 
 
 @pytest.mark.parametrize("has_device_metadata", [False, True])
@@ -801,15 +833,14 @@ def test_dspark_does_not_read_host_lengths_when_a3_selected(dcp):
         {"torch": torch},
     )
     # No input buffers or DCP manager are provided: touching either fails.
-    instance = SimpleNamespace(use_a3_mla_sink=True, use_dcp=dcp)
+    instance = SimpleNamespace(use_a3_mla_sink=True, use_flashmla=False, attn_architecture="MLA", use_dcp=dcp)
     lengths, prefilling = method(instance, 2, 4, 8)
     assert lengths is None
     assert prefilling.tolist() == [False] * 4
     # Keep the old FIA path's exact-length copy and the A5 no-copy behavior.
     instance.use_a3_mla_sink = False
     instance.use_dcp = False
-    instance.use_flashmla = False
-    instance.attn_architecture = "MLA"
+    instance._proposal_host_lengths = None
     instance.input_buffers = SimpleNamespace(seq_lens=torch.tensor([17, 33, 9999, 9999]))
     lengths, _ = method(instance, 2, 4, 8)
     assert lengths.tolist() == [17, 33, 0, 0]

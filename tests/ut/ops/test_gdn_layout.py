@@ -63,15 +63,22 @@ def test_head_first_l2norm_fallback_accepts_multiple_heads(backend, sliced):
         meta = SimpleNamespace(cu_seqlens_host=(0, count), chunk_indices_chunk64_host=((0, 0),), keep_meta=None)
 
         def fused(q, k, v, *args, **kwargs):
-            assert kwargs["layout"] == "BNSD"
-            for got, original in zip((q, k), qkv[:2]):
-                expected = torch.nn.functional.normalize(original, dim=-1).transpose(1, 2)
-                torch.testing.assert_close(got, expected)
-            torch.testing.assert_close(v, qkv[2].transpose(1, 2))
-            return output, state.transpose(-1, -2).contiguous()
+            # q/k normalization happens inside the fused kernel, so the adaptor
+            # forwards the tensors untouched and only picks the layout by
+            # contiguity: a sliced head-first view cannot stay contiguous.
+            assert kwargs["use_qk_l2norm_in_kernel"] is True
+            if sliced:
+                assert kwargs["layout"] == "BSND"
+                expected = [x.contiguous() for x in qkv]
+            else:
+                assert kwargs["layout"] == "BNSD"
+                expected = [x.transpose(1, 2) for x in qkv]
+            for got, want in zip((q, k, v), expected):
+                assert got.is_contiguous()
+                torch.testing.assert_close(got, want)
+            return output, state
 
-        with patch("vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd", side_effect=norm):
-            actual, _ = BaseDeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
+        actual, _ = BaseDeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
     else:
 
         def fused(q, k, v, *args, **kwargs):

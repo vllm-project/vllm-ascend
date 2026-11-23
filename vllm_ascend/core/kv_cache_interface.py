@@ -184,20 +184,18 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
         return False
 
     connector = getattr(kv_transfer_config, "kv_connector", None)
-    # Both transfer endpoints select the layout from the deployment config,
-    # before either endpoint has a draft attention implementation.
-    if not (
-        getattr(vllm_config, "use_v2_model_runner", False)
-        and vllm_config.model_config.hf_config.model_type == "kimi_k31"
-        and vllm_config.speculative_config is not None
-        and vllm_config.speculative_config.method == "dspark"
-        and vllm_config.parallel_config.pipeline_parallel_size == 1
-        and vllm_config.parallel_config.prefill_context_parallel_size == 1
-        and get_ascend_device_type() == AscendDeviceType.A3
-    ):
-        return connector in {"MooncakeConnectorV2", "MooncakePullConnector"}
     extra = getattr(kv_transfer_config, "kv_connector_extra_config", {})
     if connector == "MultiConnector":
+        if not (
+            getattr(vllm_config, "use_v2_model_runner", False)
+            and vllm_config.model_config.hf_config.model_type == "kimi_k31"
+            and vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.method == "dspark"
+            and vllm_config.parallel_config.pipeline_parallel_size == 1
+            and vllm_config.parallel_config.prefill_context_parallel_size == 1
+            and get_ascend_device_type() == AscendDeviceType.A3
+        ):
+            return False
         # A single child receives the original cache tensors unchanged. Keep
         # composite/nested/custom connectors on the legacy layout until their
         # transfer and completion contracts have been validated separately.
@@ -390,9 +388,6 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         assert all(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in specs), (
             "All attention layers in the same KV cache group must be AscendSFAIndexerCacheSpec."
         )
-        cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
-        dtype_set = set(spec.dtype for spec in specs)
-        max_tp_shards_set = {spec.max_tp_shards for spec in specs}
         scale_dim_set = set(spec.scale_dim for spec in specs)
         scale_dtype_set = set(spec.scale_dtype for spec in specs)
         cache_sparse_li_c8_set = set(spec.cache_sparse_li_c8 for spec in specs)
@@ -400,10 +395,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         sfa_dcp_replicated_indexer_size_set = set(spec.sfa_dcp_replicated_indexer_size for spec in specs)
         assert len({spec.dcp_sharded for spec in specs}) == 1
         assert (
-            len(cache_dtype_str_set) == 1
-            and len(dtype_set) == 1
-            and len(max_tp_shards_set) == 1
-            and len(scale_dim_set) == 1
+            len(scale_dim_set) == 1
             and len(scale_dtype_set) == 1
             and len(cache_sparse_li_c8_set) == 1
             and len(cache_sparse_li_c4_set) == 1
@@ -413,14 +405,10 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             "the same dtype, scale layout, quantization method, LI quant flags "
             "and DCP replication size."
         )
-        return cls(
-            block_size=specs[0].block_size,
-            dcp_sharded=specs[0].dcp_sharded,
-            num_kv_heads=specs[0].num_kv_heads,
-            head_size=specs[0].head_size,
-            dtype=dtype_set.pop(),
-            max_tp_shards=max_tp_shards_set.pop(),
-            cache_dtype_str=cache_dtype_str_set.pop(),
+        # Preserve Core's role, padding and stride alignment, and reuse its
+        # standard-field validation before restoring the Ascend-only fields.
+        return replace(
+            super().merge(specs),
             scale_dim=scale_dim_set.pop(),
             scale_dtype=scale_dtype_set.pop(),
             cache_sparse_li_c8=cache_sparse_li_c8_set.pop(),

@@ -38,6 +38,8 @@ def kernels():
     # Ascend's interpreter does not rewrite standard-library JIT helpers
     # when Triton was imported earlier without TRITON_INTERPRET=1.
     with pytest.MonkeyPatch.context() as patch:
+        # This interpreter exercises the scalar and batched combine paths.
+        patch.setattr(module, "_rank_tiled_mode", lambda: "off")
         for name, helper in list(vars(tl).items()):
             if isinstance(helper, JITFunction):
                 patch.setattr(tl, name, InterpretedFunction(helper.fn))

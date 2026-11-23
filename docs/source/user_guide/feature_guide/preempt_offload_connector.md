@@ -19,7 +19,7 @@ In a typical Decode deployment, `max_num_batched_tokens` is often sized around
 `max_num_seqs * (1 + num_spec_tokens)` so that the Decode node mainly schedules
 one new token, plus speculative tokens if MTP is enabled, per request. This is
 efficient for decode but too small for recomputing long prompts after
-preemption. Recompute CPU offload avoids sending such requests back through the
+preemption. Preempt offload avoids sending such requests back through the
 full prompt recompute path when their KV state can be preserved locally.
 
 ## Key Concepts
@@ -173,7 +173,7 @@ python3 -m vllm.entrypoints.openai.api_server \
             "kv_connector": "PreemptOffloadConnector",
             "kv_role": "kv_consumer",
             "kv_connector_extra_config": {
-              "cpu_bytes_to_use_per_rank": 17179869184,
+              "cpu_bytes_to_use_per_rank": 17179869184
             }
           }
         ]
@@ -301,7 +301,7 @@ of CPU and GPU KV blocks.
 
 Look for logs similar to:
 
-```text
+```output
 Recompute preemption offload enabled for request ...
 Created preempt offload state for request ...
 Prepared preempt offload H2D load for request ...

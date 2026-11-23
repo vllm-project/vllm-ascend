@@ -15,6 +15,7 @@ from vllm.v1.request import RequestStatus
 from zmq.constants import SocketOption, SocketType
 from zmq.sugar.context import Context
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import push_scheduler as push_scheduler_module
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import utils
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
@@ -229,23 +230,32 @@ def allocate(scheduler, request, blocks=([1], [11])):
     scheduler.update_state_after_alloc(request, SimpleNamespace(get_block_ids=lambda: blocks), 0)
 
 
-def test_producer_snapshots_new_and_cached_prefill_chunks(producer_scheduler):
+@pytest.mark.parametrize("release", [False, True])
+def test_producer_snapshots_new_and_cached_prefill_chunks(producer_scheduler, monkeypatch, release):
+    monkeypatch.setattr(push_scheduler_module, "vllm_version_is", lambda _: release)
+
+    def output(*args, **kwargs):
+        result = step(*args, **kwargs)
+        if not release:
+            del result.scheduled_cached_reqs.resumed_req_ids
+        return result
+
     scheduler = producer_scheduler
     request = prefill_request()
     blocks = ([1], [11])
     allocate(scheduler, request, blocks)
-    first = scheduler.build_connector_meta(step(request, blocks))
+    first = scheduler.build_connector_meta(output(request, blocks))
     assert first.push_send_requests[request.request_id].local_block_ids == ((1,), (11,))
-    second = scheduler.build_connector_meta(step(request, ([2], [12]), computed=16))
+    second = scheduler.build_connector_meta(output(request, ([2], [12]), computed=16))
     chunk = second.push_send_requests[request.request_id]
     assert chunk.local_block_ids == ((1, 2), (11, 12))
     assert (chunk.num_computed_tokens, chunk.num_scheduled_tokens, chunk.num_prompt_tokens) == (16, 16, 48)
     assert chunk.request_id == "d-request-123"
     assert not second.push_requests
-    third = scheduler.build_connector_meta(step(request, ([3], [13]), computed=32, scheduled=20))
+    third = scheduler.build_connector_meta(output(request, ([3], [13]), computed=32, scheduled=20))
     assert third.push_send_requests[request.request_id].num_scheduled_tokens == 16
     assert first.push_send_requests[request.request_id].local_block_ids == ((1,), (11,))
-    assert not scheduler.build_connector_meta(step(request, None, computed=48, scheduled=1)).push_send_requests
+    assert not scheduler.build_connector_meta(output(request, None, computed=48, scheduled=1)).push_send_requests
 
 
 @pytest.mark.parametrize("num_speculative_blocks", [0, 2])

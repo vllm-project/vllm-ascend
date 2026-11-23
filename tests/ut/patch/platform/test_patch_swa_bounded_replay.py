@@ -27,6 +27,7 @@ import pytest
 from vllm.v1.core.sched.output import CachedRequestData
 from vllm.v1.core.sched.scheduler import Scheduler
 
+from tests.ut.patch.platform.release_scheduler_fixture import release_cached_request_abi
 from vllm_ascend.patch.platform import patch_swa_bounded_replay as replay_patch
 from vllm_ascend.patch.platform.patch_swa_bounded_replay import (
     _EXPECTED_PARAMETERS,
@@ -34,6 +35,7 @@ from vllm_ascend.patch.platform.patch_swa_bounded_replay import (
     _patch_make_cached_request_data,
     _upstream_carries_replay_start,
 )
+from vllm_ascend.utils import vllm_version_is
 
 pytestmark = pytest.mark.skipif(
     not _upstream_carries_replay_start(),
@@ -42,6 +44,22 @@ pytestmark = pytest.mark.skipif(
 )
 
 REPLAY_START = 64
+
+
+@pytest.fixture(autouse=True)
+def _release_patch_abi_on_main(monkeypatch, request):
+    if vllm_version_is("0.33.0"):
+        return
+    # These original tests assert the release-only V1 patch contract. Main
+    # transports replay_start with NewRequestData and must stay unpatched.
+    legacy_scheduler, legacy_cached = release_cached_request_abi()
+    monkeypatch.setattr(request.module, "Scheduler", legacy_scheduler)
+    monkeypatch.setattr(request.module, "CachedRequestData", legacy_cached)
+    monkeypatch.setattr(replay_patch, "Scheduler", legacy_scheduler)
+    monkeypatch.setattr(replay_patch, "CachedRequestData", legacy_cached)
+    monkeypatch.setattr(legacy_scheduler, "_mark_prefix_replay", lambda: None, raising=False)
+    _patch_cached_request_data_replay_start()
+    _patch_make_cached_request_data()
 
 
 def test_the_probe_finds_upstreams_rewind():
@@ -161,3 +179,13 @@ def test_expected_parameters_match_the_patched_method():
     """Guards the guard: the tuple above has to describe the method actually
     installed, or the check would pass on a signature it no longer recognizes."""
     assert tuple(inspect.signature(Scheduler._make_cached_request_data).parameters) == _EXPECTED_PARAMETERS
+
+
+def test_native_main_replay_payload_keeps_the_release_patch_inert():
+    from vllm.v1.core.sched.output import NewRequestData
+    from vllm.v1.core.sched.scheduler import Scheduler as NativeScheduler
+
+    assert "replay_start" in NewRequestData.__dataclass_fields__
+    if not vllm_version_is("0.33.0"):
+        assert "resumed_reqs" not in inspect.signature(NativeScheduler._make_cached_request_data).parameters
+        assert not getattr(NativeScheduler._make_cached_request_data, "_vllm_ascend_swa_replay_patched", False)

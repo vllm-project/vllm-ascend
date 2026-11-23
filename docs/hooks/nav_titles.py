@@ -42,10 +42,6 @@ TITLES = {
         "en": "Disaggregated Prefill",
         "zh": "分离式预填充",
     },
-    "developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md": {
-        "en": "Dynamic Chunked Pipeline Parallel",
-        "zh": "动态分块流水线并行",
-    },
     "developer_guide/Design_Documents/kvpp.md": {"en": "KVPP Design", "zh": "KVPP 设计方案"},
     "developer_guide/Design_Documents/model_runner_v2_eplb.md": {
         "en": "Model Runner V2 EPLB Architecture",
@@ -118,7 +114,12 @@ TITLES = {
     "tutorials/models/GLM5.md": {"en": "GLM-5 & GLM-5.1", "zh": "GLM-5 & GLM-5.1"},
     "tutorials/models/Hunyuan-A13B-Instruct.md": {"en": "Hunyuan-A13B-Instruct", "zh": "Hunyuan-A13B-Instruct"},
     "tutorials/models/Hy3-preview.md": {"en": "Hy3-preview", "zh": "Hy3-preview"},
-    "tutorials/models/Hy4-preview.md": {"en": "Hy4-preview (Experimental)", "zh": "Hy4-preview (Experimental)"},
+    "tutorials/models/Hy4-preview.md": {"en": "Hy4-preview (Experimental)", "zh": "Hy4-preview (实验性支持)"},
+    "tutorials/models/Hy4.md": {"en": "Hy4 (Experimental)", "zh": "Hy4 (实验性支持)"},
+    "tutorials/models/HY4-Flash.md": {
+        "en": "Hy4-Flash(Experimental)",
+        "zh": "Hy4-Flash(Experimental)",
+    },
     "tutorials/models/InternVL3.5.md": {"en": "InternVL3.5(38B/241B-A28B)", "zh": "InternVL3.5(38B/241B-A28B)"},
     "tutorials/models/Kimi-K2-Thinking.md": {"en": "Kimi-K2-Thinking", "zh": "Kimi-K2-Thinking"},
     "tutorials/models/Kimi-K2.5.md": {"en": "Kimi-K2.5", "zh": "Kimi-K2.5"},
@@ -199,10 +200,6 @@ TITLES = {
     "user_guide/feature_guide/batch_invariance.md": {"en": "Batch Invariance", "zh": "批次不变性"},
     "user_guide/feature_guide/context_parallel.md": {"en": "Context Parallel", "zh": "上下文并行"},
     "user_guide/feature_guide/cpu_binding.md": {"en": "CPU Binding", "zh": "CPU 绑定"},
-    "user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md": {
-        "en": "Dynamic Chunk Pipeline Parallel",
-        "zh": "动态分块流水线并行",
-    },
     "user_guide/feature_guide/epd_disaggregation.md": {"en": "EPD Disaggregation", "zh": "EPD 分离"},
     "user_guide/feature_guide/encoder_cache_cpu_offload.md": {
         "en": "Encoder Cache CPU Offload",
@@ -214,6 +211,7 @@ TITLES = {
     },
     "user_guide/feature_guide/flash_attention.md": {"en": "Flash Attention", "zh": "Flash 注意力"},
     "user_guide/feature_guide/graph_mode.md": {"en": "Graph Mode", "zh": "图模式"},
+    "user_guide/feature_guide/hisparse.md": {"en": "HiSparse on Ascend", "zh": "昇腾 HiSparse"},
     "user_guide/feature_guide/kv_cache_cpu_offload.md": {"en": "KV Cache CPU Offload", "zh": "KV Cache CPU 卸载"},
     "user_guide/feature_guide/kv_cache_pool_ascend_store.md": {
         "en": "KV Cache Pool (Ascend Store)",

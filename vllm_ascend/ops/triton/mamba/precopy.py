@@ -131,6 +131,7 @@ def precopy_mamba_align_fused_kernel(
     CONV_STATE_DIM_FIRST: tl.constexpr,
     HAS_IDX_MAPPING: tl.constexpr,
     TEMPORAL_TILES: tl.constexpr = 1,
+    ZERO_TEMPORAL_TOKEN_BIAS: tl.constexpr = False,
 ):
     batch_idx = tl.program_id(0)
     state_idx = tl.program_id(1)
@@ -154,6 +155,9 @@ def precopy_mamba_align_fused_kernel(
         return
 
     token_bias = tl.load(token_bias_ptr + req_idx)
+    if ZERO_TEMPORAL_TOKEN_BIAS:
+        conv_width = tl.load(state_conv_widths_ptr + state_idx)
+        token_bias = tl.where(conv_width > 0, token_bias, 0)
 
     _copy_mamba_state_block(
         state_idx,

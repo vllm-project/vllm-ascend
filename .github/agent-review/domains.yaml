@@ -1,0 +1,53 @@
+# Knowledge base domain registry (RFC #21451).
+#
+# Bridges the fine-grained CODEOWNERS entries and the coarse knowledge-base
+# domains: one PR file maps to at most a few review domains via the globs
+# below, and the agent is told which L2 checklists to read.
+#
+# Ownership:
+# - This file is maintained by the repo maintainers (the /.github owner in
+#   CODEOWNERS). Domains must stay coarse; do not split per-file.
+# - Each L2/<domain>/ directory is owned by the same owners as the code it
+#   governs: add a CODEOWNERS entry for the directory when the domain is
+#   created (later entries win, so append at the end of CODEOWNERS).
+#   Until such an entry exists, the /.github owner is the fallback owner.
+#
+# Collect every domain with a matching glob. A file can match multiple domains.
+domains:
+  - name: ci
+    description: CI workflows, bot jobs, runner images, test selection
+    paths:
+      - ".github/**"
+      - "tools/**"
+      - "tests/**"
+  - name: release-note
+    description: release note fragments in release_notes/, and whether a PR
+      needs one at all
+    paths:
+      - "release_notes/**"
+  - name: patch
+    description: upstream monkey-patches under vllm_ascend/patch/ (registration,
+      catalog discipline, upstream removal plan)
+    paths:
+      - "vllm_ascend/patch/**"
+  - name: model-execution
+    description: inheritance surfaces over upstream vLLM (worker, the V2 model
+      runner, the 310P stack, attention, compilation)
+    paths:
+      - "vllm_ascend/worker/**"
+      - "vllm_ascend/_310p/**"
+      - "vllm_ascend/attention/**"
+      - "vllm_ascend/compilation/**"
+  - name: speculative-decoding
+    description: draft dispatch, target verification, and speculative state and parallelism
+    paths:
+      - "vllm_ascend/worker/v2/spec_decode/**"
+      - "vllm_ascend/worker/v2/sample/rejection_greedy.py"
+      - "vllm_ascend/worker/spec_decode_utils.py"
+      - "vllm_ascend/worker/dspark_utils.py"
+      - "vllm_ascend/_310p/worker/v2/spec_decode/**"
+      - "vllm_ascend/_310p/worker/v2/rejection_sampler.py"
+      - "vllm_ascend/ops/triton/spec_decode/**"
+      - "tests/ut/spec_decode/**"
+      - "tests/ut/_310p/spec_decode/**"
+      - "tests/e2e/**/spec_decode/**"

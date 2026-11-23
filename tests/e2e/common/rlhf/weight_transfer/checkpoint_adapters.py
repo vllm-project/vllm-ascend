@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""DeepSeek checkpoint-name conversion."""
+"""Checkpoint-name conversion and metadata missing from HF meta models."""
+
+from typing import Any
 
 import regex as re
+import torch
 
 _DSV4_SELF_ATTN_RENAMES = (
     # Descriptive HF names -> the compact names the checkpoint/loader expect.
@@ -78,3 +81,106 @@ def deepseek_v4_checkpoint_name(name: str) -> str:
         if name.endswith(old):
             return name[: -len(old)] + new
     return name
+
+
+def deepseek_v4_vision_params(config: Any) -> list[tuple[str, tuple[int, ...], torch.dtype]]:
+    """Describe vision and router parameters absent from the HF text meta model.
+
+    The shared weight source enumerates the text backbone, expands expert
+    shards and applies ``deepseek_v4_checkpoint_name``. This adapter adds only
+    missing checkpoint entries; it does not allocate or generate weights.
+
+    Shapes follow the vision checkpoint: fused ViT gate/up projections,
+    downsampled aligner input and four image-marker vectors. Vision-only router
+    biases remain FP32; vision and marker payloads use BF16, including markers whose
+    served parameters are FP32 and are cast by the loader on copy.
+    """
+    dim = int(config.vision_dim)
+    inter = int(config.vision_inter_dim)
+    patch = int(config.vision_patch_size)
+    ratio = int(config.vision_downsample_ratio)
+    hidden = int(config.hidden_size)
+    params: list[tuple[str, tuple[int, ...], torch.dtype]] = [
+        ("vision.patch_embed.proj.weight", (dim, 3 * patch * patch), torch.bfloat16),
+        ("vision.patch_embed.proj.bias", (dim,), torch.bfloat16),
+        ("vision.norm.weight", (dim,), torch.bfloat16),
+    ]
+    for layer in range(int(config.vision_n_layers)):
+        prefix = f"vision.blocks.{layer}"
+        params += [
+            (f"{prefix}.norm1.weight", (dim,), torch.bfloat16),
+            (f"{prefix}.attn.wqkv.weight", (3 * dim, dim), torch.bfloat16),
+            (f"{prefix}.attn.wqkv.bias", (3 * dim,), torch.bfloat16),
+            (f"{prefix}.attn.wo.weight", (dim, dim), torch.bfloat16),
+            (f"{prefix}.attn.wo.bias", (dim,), torch.bfloat16),
+            (f"{prefix}.norm2.weight", (dim,), torch.bfloat16),
+            (f"{prefix}.mlp.w1.weight", (2 * inter, dim), torch.bfloat16),
+            (f"{prefix}.mlp.w2.weight", (dim, inter), torch.bfloat16),
+        ]
+    params += [
+        ("aligner.w1.weight", (hidden, dim * ratio * ratio), torch.bfloat16),
+        ("aligner.w1.bias", (hidden,), torch.bfloat16),
+        ("aligner.w2.weight", (hidden, hidden), torch.bfloat16),
+        ("aligner.w2.bias", (hidden,), torch.bfloat16),
+    ]
+    params += [(name, (hidden,), torch.bfloat16) for name in ("image_start", "image_end", "image_newline", "image_pad")]
+    # HF's text meta model omits the vision-only router bias. Its persistent
+    # e_score_correction_bias buffer is already enumerated by the shared source.
+    expert_shape = (int(config.n_routed_experts),)
+    for layer in range(int(config.num_hidden_layers)):
+        prefix = f"model.layers.{layer}.mlp.gate"
+        params.append((f"{prefix}.bias_vl", expert_shape, torch.float32))
+    return params
+
+
+def minimax_m3_checkpoint_name(name: str) -> str:
+    """Map native HF text tensors to MiniMax's published checkpoint namespace."""
+    if name.startswith("lm_head."):
+        return f"language_model.{name}"
+    name = name.replace(".self_attn.indexer.", ".self_attn.index_")
+    name = name.replace(".mlp.gate.e_score_correction_bias", ".block_sparse_moe.e_score_correction_bias")
+    name = re.sub(r"\.mlp\.(experts|shared_experts|gate)\.", r".block_sparse_moe.\1.", name)
+    match = re.match(r"^(.*\.block_sparse_moe\.experts\.\d+)\.(gate_proj|down_proj|up_proj)\.weight$", name)
+    if match:
+        shard = {"gate_proj": "w1", "down_proj": "w2", "up_proj": "w3"}[match.group(2)]
+        return f"{match.group(1)}.{shard}.weight"
+    return name
+
+
+def expand_fused_expert_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:
+    """Map HF fused routed-expert tensors onto checkpoint-facing per-expert names.
+
+    ``GlmMoeDsaForCausalLM`` keeps routed experts fused as
+    ``mlp.experts.gate_up_proj`` ``[E, 2I, H]`` and ``mlp.experts.down_proj``
+    ``[E, H, I]``, while the published checkpoint - and therefore vLLM's
+    ``expert_params_mapping`` - stores one tensor per expert
+    (``mlp.experts.{e}.gate_proj.weight`` etc.).  Without this expansion the
+    fused names reach ``load_weights`` unmatched and raise
+    ``KeyError: 'layers.N.mlp.experts.gate_up_proj'``.
+    """
+    for suffix, kind in ((".mlp.experts.gate_up_proj", "gate_up"), (".mlp.experts.down_proj", "down")):
+        if not name.endswith(suffix):
+            continue
+        prefix = name[: -len(suffix.rsplit(".", 1)[-1])]  # keeps the trailing dot
+        if kind == "gate_up":
+            num_experts, fused_inter, hidden = shape
+            inter = fused_inter // 2
+            out: list[tuple[str, tuple[int, ...]]] = []
+            for expert in range(num_experts):
+                out.append((f"{prefix}{expert}.gate_proj.weight", (inter, hidden)))
+                out.append((f"{prefix}{expert}.up_proj.weight", (inter, hidden)))
+            return out
+        num_experts, hidden, inter = shape
+        return [(f"{prefix}{expert}.down_proj.weight", (hidden, inter)) for expert in range(num_experts)]
+    return [(name, shape)]
+
+
+def expand_minimax_m3_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:
+    """Expand MiniMax's dense/shared gate-up and routed-expert tensors."""
+    if name.endswith((".mlp.gate_up_proj.weight", ".mlp.shared_experts.gate_up_proj.weight")):
+        fused_intermediate, hidden = shape
+        assert fused_intermediate % 2 == 0, f"{name}: odd fused gate/up dimension"
+        shard_shape = (fused_intermediate // 2, hidden)
+        prefix = name.removesuffix(".gate_up_proj.weight")
+        return [(f"{prefix}.{projection}.weight", shard_shape) for projection in ("gate_proj", "up_proj")]
+    return expand_fused_expert_params(name, shape)

@@ -14,7 +14,7 @@ This document focuses on the Ascend-specific view: how graph mode works on Ascen
 ## Current Status on Ascend
 
 - **ACLGraph** (capture/replay via `torch.npu.NPUGraph`) is the runtime graph execution mechanism used by the default graph path on Ascend.
-- **Npugraph_ex** is a compile-time FX graph optimization layer, enabled by default in FULL/FULL_DECODE_ONLY modes. It optimizes the graph before ACLGraph captures it.
+- **Npugraph_ex** is a compile-time FX graph optimization layer, enabled by default in every graph mode (`NONE` disables it). It optimizes the graph before ACLGraph captures it.
 - **XliteGraph** is an optional graph path for selected model families and environments.
 - In context parallel scenarios, `cudagraph_mode="FULL"` is not sufficiently supported yet.
 
@@ -33,14 +33,14 @@ The default graph path on Ascend involves two stages: **compile-time optimizatio
 
 - **FULL_AND_PIECEWISE**: Default mode, same as the upstream vLLM strategy. The compile-time path follows PIECEWISE compilation, while the runtime may still use full-graph behavior for uniform decode batches.
 - **FULL / FULL_DECODE_ONLY**: Npugraph_ex optimizes the FX graph via npugraph_ex (`force_eager=True`, compile-time only, no capture). The optimized callable is then captured and replayed by ACLGraph at runtime.
-- **PIECEWISE**: Npugraph_ex is disabled. Only basic FX fusion passes are applied at compile-time. ACLGraph captures and replays the resulting callable at runtime.
+- **PIECEWISE**: Npugraph_ex compiles each piece (`force_eager=True`, compile-time only, no capture) and applies the FX fusion passes per piece. ACLGraph captures and replays each piece at runtime.
 - **NONE**: No compilation or graph capture. The model runs in eager mode.
 
 | `cudagraph_mode` | Compile-time | Runtime | Npugraph_ex |
 |---|---|---|---|
-| FULL_AND_PIECEWISE | Piecewise compilation path | Mixed: PIECEWISE for mixed batches, FULL-capable for uniform decode batches | Disabled |
+| FULL_AND_PIECEWISE | Piecewise compilation path (per-piece Npugraph_ex) | Mixed: PIECEWISE for mixed batches, FULL-capable for uniform decode batches | Enabled |
 | FULL / FULL_DECODE_ONLY | Npugraph_ex FX optimization | ACLGraph capture/replay | Enabled |
-| PIECEWISE | Fusion pass only | ACLGraph capture/replay | Disabled |
+| PIECEWISE | Per-piece Npugraph_ex + fusion passes | ACLGraph capture/replay per piece | Enabled |
 | NONE | None | Eager execution | Disabled |
 
 Ascend sets `use_inductor=False` and selects its own compilation backend. That backend applies npugraph_ex optimizations or FX fusion passes according to the configuration.
@@ -68,7 +68,7 @@ Online example:
 vllm serve Qwen/Qwen3-0.6B
 ```
 
-### Explicit `cudagraph_mode` configuration
+### Explicit cudagraph_mode configuration
 
 The generic `cudagraph_mode` options come from upstream vLLM. On Ascend, the final effective mode may still be adjusted according to platform and backend support, so the official vLLM CUDA Graphs document remains the canonical reference for mode semantics.
 
@@ -101,7 +101,6 @@ On Ascend, the current attention backend support levels are:
 | Attention backend | Declared support | Practical meaning |
 |---|---|---|
 | `attention_v1` | `ALWAYS` | Supports graph execution for mixed prefill/decode batches |
-| `context_parallel/attention_cp` | `ALWAYS` | Supports graph execution for mixed prefill/decode batches |
 | `mla_v1` | `UNIFORM_BATCH` | Graph execution is limited to uniform batches; full graph is more restricted |
 | `context_parallel/mla_cp` | `UNIFORM_BATCH` | Graph execution is limited to uniform batches; full graph is more restricted |
 | `sfa_v1` | `UNIFORM_BATCH` | Graph execution is limited to uniform batches; full graph is more restricted |
@@ -122,22 +121,22 @@ This is most likely to appear in `PIECEWISE` or `FULL_AND_PIECEWISE` configurati
 
 ## Using Npugraph_ex
 
-As introduced in the [RFC](https://github.com/vllm-project/vllm-ascend/issues/4715), Npugraph_ex is a compile-time FX graph optimization layer that works together with ACLGraph. It optimizes the model's FX graph before ACLGraph captures it at runtime. Its performance benefits mainly come from fusing multiple operators into single kernels (e.g., add + rms_norm → npu_add_rms_norm) to reduce kernel launch overhead.
+As introduced in the [Npugraph_ex RFC](https://github.com/vllm-project/vllm-ascend/issues/4715), Npugraph_ex is a compile-time FX graph optimization layer that works together with ACLGraph. It optimizes the model's FX graph before ACLGraph captures it at runtime. Its performance benefits mainly come from fusing multiple operators into single kernels (e.g., add + rms_norm → npu_add_rms_norm) to reduce kernel launch overhead.
 
-!!! note "Atlas 300I DUO"
+!!! note "Atlas 300I Duo"
 
-    Atlas 300I DUO and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
+    Atlas 300I Duo and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
 
 ### Default behavior
 
-Npugraph_ex is **enabled by default** on supported hardware when `cudagraph_mode` is `FULL` or `FULL_DECODE_ONLY`. It is automatically disabled in `FULL_AND_PIECEWISE`, `PIECEWISE`, and `NONE` modes.
+Npugraph_ex is **enabled by default** on supported hardware in every graph mode. Under `FULL`/`FULL_DECODE_ONLY` it optimizes the whole FX graph; under `PIECEWISE`/`FULL_AND_PIECEWISE` it compiles each piece with `force_eager=True`. It is automatically disabled in `NONE` mode.
 
-Select a full graph mode to use this default:
+For example, with a full graph mode:
 
 ```python
 from vllm import LLM
 
-# Npugraph_ex is enabled by default in FULL/FULL_DECODE_ONLY mode
+# Npugraph_ex is enabled by default in every graph mode
 llm = LLM(model="path/to/Qwen2-7B-Instruct", compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"})
 outputs = llm.generate("Hello, how are you?")
 ```
@@ -180,6 +179,8 @@ vllm serve Qwen/Qwen2-7B-Instruct \
 
 Static kernel compilation is an **optional** feature that pre-compiles operator binaries with fixed shapes at compile time, reducing runtime overhead for networks with static or near-static shapes. It is **disabled by default** and must be explicitly enabled.
 
+Under `PIECEWISE` and `FULL_AND_PIECEWISE`, static kernels are compiled for the cudagraph capture sizes (pieces are captured and replayed exactly at those shapes); on newer vllm the prefill token grid and the decode request grid are resolved separately and both are covered. Under other modes, the compile set covers decode batch sizes.
+
 !!! note
 
     Enabling static kernel triggers a compilation pass during the graph capture phase at service startup. This may add **several minutes to tens of minutes** to the startup time depending on the number of operators to compile and model complexity. Once completed, subsequent request processing is not affected.
@@ -218,7 +219,7 @@ The recommended way to verify static kernel is in effect is through **Ascend Pro
 
 During the compilation phase, you will see a Python warning (visible by default):
 
-```text
+```output
 Starting static kernel compilation, the build directory is <path>
 ```
 
@@ -284,7 +285,7 @@ Super kernel optimization is enabled for ACL graph capture.
 
 This message confirms that the optimization step was invoked. To verify the resulting fusion coverage and performance benefit, collect an **Ascend Profiling** trace and inspect `kernel_details.csv`. Compare the kernel/task entries and latency with Super Kernel disabled; the profiler also reports the launch core count for generated Super Kernels in the `Block Dim` field.
 
-For more details about Npugraph_ex, see the [npugraph_ex guide](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/overview.md).
+For more details about Npugraph_ex, see the [Npugraph_ex guide](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/overview.md).
 
 ## Using XliteGraph {: #using-xlitegraph }
 

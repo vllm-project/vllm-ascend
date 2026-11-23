@@ -186,7 +186,16 @@ def runtime(monkeypatch):
     )
 
     def builder(
-        *, size=8, rank=0, interleave=1, heads=8, dtype=torch.float16, use_rope=False, speculative=True, a3_adapter=None
+        *,
+        size=8,
+        rank=0,
+        interleave=1,
+        heads=8,
+        dtype=torch.float16,
+        use_rope=False,
+        speculative=True,
+        pcp_size=1,
+        a3_adapter=None,
     ):
         impl = SimpleNamespace(
             a3_mla_adapter=a3_adapter,
@@ -196,6 +205,7 @@ def runtime(monkeypatch):
             use_mla_rope=use_rope,
             dcp_size=size,
             dcp_rank=rank,
+            pcp_group=SimpleNamespace(world_size=pcp_size),
             vllm_config=SimpleNamespace(
                 parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave),
                 speculative_config=SimpleNamespace(method="dspark") if speculative else None,
@@ -279,6 +289,7 @@ def dspark_metadata_class(parent):
     ]
     scope = dict(
         Parent=parent,
+        AscendAttentionBackend=type("AscendAttentionBackend", (), {}),
         torch=torch,
         np=np,
         Any=Any,
@@ -297,6 +308,7 @@ def configure_dspark_metadata(spec, provider):
     spec.use_flashmla = provider == "a5"
     spec.use_a3_mla_sink = provider == "a3"
     spec.attn_architecture = "MLA"
+    spec.attn_backends = {"draft.0": type("AscendMLABackend", (), {})}
     spec.num_query_per_req = 3
     spec.arange_np = np.arange(9, dtype=np.int32)
     spec.input_batch = SimpleNamespace(num_reqs=2)
@@ -436,6 +448,20 @@ def common(lengths, queries, *, tokens=None, causal=True):
         num_input_tokens=tokens or actual,
         causal=causal,
     )
+
+
+@pytest.mark.parametrize("pcp_size,dcp_size,heads", [(1, 8, 12), (8, 8, 96), (8, 1, 96)])
+def test_replicated_pcp_queries_keep_distinct_history_heads(runtime, pcp_size, dcp_size, heads):
+    builder = runtime.builder(size=dcp_size, pcp_size=pcp_size, heads=heads, interleave=1536)
+    flash = builder.build(common([3080], [3], tokens=4), 1, 3, False)
+    assert flash.query.shape == (4, 96, 576)
+    assert flash.adapter.config.num_heads == 96
+    assert builder.dcp_size == dcp_size
+    expected_history = 1536 if dcp_size > 1 else 3080
+    if dcp_size > 1:
+        assert flash.current is not None
+        assert flash.current.query.shape == (4, heads, 576)
+    assert flash.cache_lens[0].item() == expected_history
 
 
 @pytest.mark.parametrize(

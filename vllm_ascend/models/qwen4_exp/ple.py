@@ -23,10 +23,17 @@ from typing import Any, Literal
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.distributed import get_pcp_group
 from vllm.logger import logger
+from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
+from vllm.v1.attention.backends.short_conv_attn import (
+    PleShortConvAttentionBackend,
+    PleShortConvAttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.attention.utils import wait_for_kv_layer_from_connector
+from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin, pcp_gather_tokens, pcp_scatter_tokens
 from vllm_ascend.ops.triton_ple import (
     ple_conv_decode,
     ple_conv_prefill,
@@ -292,19 +299,49 @@ def _wrap_ple_short_conv(original: Callable[..., Any]) -> Callable[..., Any]:
                         f"expect at least {state_capacity}."
                     )
                 conv_state = conv_state[:, -state_capacity:, :]
+            use_pcp = hasattr(layer_attn_metadata, "pcp_restore_idx")
+            conv_inputs = inputs
+            conv_residual = residual
+            if use_pcp:
+                pcp_size = get_pcp_group().world_size
+                conv_inputs = pcp_gather_tokens(inputs, pcp_size, self.prefix)
+                conv_residual = torch.zeros_like(conv_inputs)
             self._short_conv_dilated_dispatch(
-                inputs=inputs,
-                residual=residual,
-                outer_residual=outer_residual,
+                inputs=conv_inputs,
+                residual=conv_residual,
+                outer_residual=None if use_pcp else outer_residual,
                 metadata=layer_attn_metadata,
                 conv_state=conv_state,
                 conv_weights=conv_weights.to(dtype=inputs.dtype),
             )
+            if use_pcp:
+                residual.add_(pcp_scatter_tokens(conv_residual, pcp_size, self.prefix))
+                if outer_residual is not None:
+                    residual.add_(outer_residual)
             return None
         finally:
             _set_allow_internal_format(previous)
 
     return wrapped
+
+
+class AscendPCPPLEMetadataBuilder(PCPRecurrentMetadataBuilderMixin, PleShortConvAttentionMetadataBuilder):
+    pass
+
+
+class AscendPCPPLEBackend(PleShortConvAttentionBackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
+    @staticmethod
+    def get_builder_cls() -> type[AscendPCPPLEMetadataBuilder]:
+        return AscendPCPPLEMetadataBuilder
+
+
+class AscendPCPPLELayer(Qwen4ExpPLELayer):
+    def get_attn_backend(self) -> type[AscendPCPPLEBackend]:
+        return AscendPCPPLEBackend
 
 
 def _patch_legacy_prefill(ple_layer_cls: type[Any]) -> None:
@@ -328,14 +365,8 @@ def patch_upstream_ple_short_conv() -> None:
     """Install Ascend PLE runtime adaptations on the upstream classes."""
     from vllm.models.qwen4_exp.amd import ple_layer as upstream_ple_layer
     from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
-    from vllm.models.qwen4_exp.common.ngram_embedding import (
-        Qwen4ExpPLEEmbeddingMethod,
-        Qwen4ExpPLEUnquantizedEmbeddingMethod,
-    )
 
-    from vllm_ascend.quantization.configs.modelslim_config import (
-        AscendModelSlimConfig,
-    )
+    from vllm_ascend.models.qwen4_exp.ple_quant import patch_modelslim_ple
 
     # The AMD PLE class binds this function at module import time.  Replace
     # only that model-local binding; other platforms keep the upstream kernel.
@@ -347,29 +378,7 @@ def patch_upstream_ple_short_conv() -> None:
         setattr(Qwen4ExpPLELayer, original_attr, original)
         Qwen4ExpPLELayer._short_conv = _wrap_ple_short_conv(original)
 
-    quant_attr = "_ascend_original_from_quant_config"
-    if not hasattr(Qwen4ExpPLEEmbeddingMethod, quant_attr):
-        original_from_quant_config = Qwen4ExpPLEEmbeddingMethod.from_quant_config
-        setattr(
-            Qwen4ExpPLEEmbeddingMethod,
-            quant_attr,
-            original_from_quant_config,
-        )
-
-        def from_quant_config(
-            quant_config: Any,
-            prefix: str,
-            embedding_dtype: str | None = None,
-        ) -> Qwen4ExpPLEEmbeddingMethod:
-            if isinstance(quant_config, AscendModelSlimConfig):
-                return Qwen4ExpPLEUnquantizedEmbeddingMethod()
-            return original_from_quant_config(
-                quant_config,
-                prefix,
-                embedding_dtype,
-            )
-
-        Qwen4ExpPLEEmbeddingMethod.from_quant_config = staticmethod(from_quant_config)
+    patch_modelslim_ple()
 
     _patch_legacy_prefill(Qwen4ExpPLELayer)
 
