@@ -191,32 +191,12 @@ class KimiOProjMMReduceScatterOp(CustomRowParallelOp):
         self.world_size = self.tp_size
 
     def apply_impl(self, input_: torch.Tensor) -> tuple[torch.Tensor, None]:
+        # User-authorized MC2 isolation: retain the established unfused TP path.
+        # sp_reduce_scatter owns token padding and returns the same token shard.
         assert self.quant_method is not None
         input_parallel = self.get_input_parallel(input_)
-        weight = self.layer.weight
-        # Branch only on TP-consistent tensor metadata, before any collective.
-        # The decoder skips its RS and MLA already owns a sharded output buffer,
-        # so the unfused path must return the same token shard as fusion.
-        if not self._can_fuse(input_parallel, weight):
-            output = self.quant_method.apply(self.layer, input_parallel, None)
-            return sp_reduce_scatter(output), None
-        input_parallel = input_parallel.contiguous()
-        # sp_reduce_scatter pads the GEMM result. With bias-free O projections,
-        # padding the input before the fused GEMM gives the same zero rows.
-        sp_pad = (-input_parallel.shape[0]) % self.world_size
-        if sp_pad:
-            input_parallel = torch.nn.functional.pad(input_parallel, (0, 0, 0, sp_pad))
-        # The V2 interface supports BF16 inference without quantization scales.
-        # Keep TP communication on AI CPU, independently of the MoE EP engine.
-        output, _ = torch_npu.npu_quant_mm_reduce_scatter(
-            input_parallel,
-            self.layer.weight.t(),
-            self.hcom,
-            self.world_size,
-            reduce_op="sum",
-            comm_mode="ai_cpu",
-        )
-        return output, None
+        output = self.quant_method.apply(self.layer, input_parallel, None)
+        return sp_reduce_scatter(output), None
 
     def apply_into(self, input_: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         """Write the ordinary decode projection directly into its TP shard."""

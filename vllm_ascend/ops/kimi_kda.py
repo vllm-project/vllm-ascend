@@ -251,6 +251,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
         self.conv1d.quant_method.process_weights_after_loading = process_weights_and_pack
 
+    def process_weights_after_loading(self, dtype: torch.dtype) -> None:
+        """Rebuild the convolution layout after all reload tensors are restored."""
+        self._pack_conv_weights()
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return AscendGDNHostMetadataBackend
 

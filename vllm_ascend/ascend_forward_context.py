@@ -391,6 +391,11 @@ def select_moe_comm_method(
     if not is_moe_model(vllm_config):
         return None
 
+    # Same opt-in policy as the reference Kimi inference launcher.
+    if __import__("os").environ.get("KIMI_MOE_COMM_OVERRIDE") == "ALLGATHER":
+        logger.info_once("KIMI scoped MoE override: ALLGATHER (MC2 disabled)")
+        return MoECommType.ALLGATHER
+
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     moe_comm_policy = get_current_hardware_profile().moe_comm_policy
     lora_config = getattr(vllm_config, "lora_config", None)
