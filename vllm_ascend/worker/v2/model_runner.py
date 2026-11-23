@@ -372,6 +372,8 @@ class NPUModelRunner(GPUModelRunner):
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
         self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
+        if self.speculator is not None and self.speculative_config is not None and self.speculative_config.use_dspark():
+            self.speculator.kda_recovery = getattr(self.model_state, "dspark_recovery", None)
 
     @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
@@ -393,7 +395,14 @@ class NPUModelRunner(GPUModelRunner):
 
         state = self.execute_model_state
         self._lmhead_pad_size = self._get_lmhead_pad_size(state) if state is not None and lmhead_tp_enable() else None
-        output = super().sample_tokens(grammar_output)
+        recovery = getattr(self.speculator, "kda_recovery", None)
+        draft_scope = (
+            recovery.draft_scope()
+            if recovery is not None and state is not None and state.num_spec_tokens_to_schedule
+            else nullcontext()
+        )
+        with draft_scope:
+            output = super().sample_tokens(grammar_output)
         self._lmhead_pad_size = None
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).

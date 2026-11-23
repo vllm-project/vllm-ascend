@@ -40,12 +40,14 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer, vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.model_states.kimi_recoverssm import KimiDSparkRecoverSSMState
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 # Copy block size used by the upstream fused mamba kernels.
@@ -87,6 +89,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     # Annotated locally because mypy (``--follow-imports skip``) does not
     # analyze the upstream base class body where these are defined.
     _mamba_ctx: MambaSpecDecodeGPUContext | None
+    dspark_recovery: "KimiDSparkRecoverSSMState | None"
     _mamba_state_copy_funcs: Any
 
     def __init__(self, *args, **kwargs) -> None:
@@ -94,6 +97,43 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self._layerwise_mamba_copy: _LayerwiseMambaCopyState | None = None
         self._layer_state_ranges: dict[str, tuple[int, int]] | None = None
         self._pending_bulk_copy: tuple[MambaSpecDecodeGPUContext, int, torch.Tensor] | None = None
+
+        self.dspark_recovery = None
+        spec = self.vllm_config.speculative_config
+        transfer = self.vllm_config.kv_transfer_config
+        parallel = self.vllm_config.parallel_config
+        if (
+            self.recoverssm is not None
+            and self._align_mode
+            and spec is not None
+            and spec.use_dspark()
+            and transfer is not None
+            and transfer.kv_role == "kv_consumer"
+            and transfer.kv_connector == "MooncakeConnectorV2"
+            and parallel.pipeline_parallel_size == 1
+            and parallel.prefill_context_parallel_size == 1
+            and model_uses_kimi_kda(self.model_config)
+            and is_950()
+        ):
+            # Import the Kimi metadata and Triton kernels only for this decoder.
+            from vllm_ascend.worker.v2.model_states.kimi_recoverssm import KimiDSparkRecoverSSMState
+
+            self.dspark_recovery = KimiDSparkRecoverSSMState(self.device)
+            self.recoverssm = self.dspark_recovery
+
+    def postprocess_state(
+        self,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor | int,
+        num_computed_tokens: torch.Tensor | None = None,
+    ) -> None:
+        if self.dspark_recovery is not None:
+            # Keep the acceptance scatter, convolution compaction and final
+            # Mamba align/copy on the same stream as the state kernels.
+            with self.dspark_recovery.postprocess_stream(idx_mapping, num_sampled, num_computed_tokens):
+                super().postprocess_state(idx_mapping, num_sampled, num_computed_tokens)
+        else:
+            super().postprocess_state(idx_mapping, num_sampled, num_computed_tokens)
 
     def _get_layer_state_ranges(self, kv_cache_config: KVCacheConfig) -> dict[str, tuple[int, int]]:
         """Map every mamba layer name to its (start, end) range in the

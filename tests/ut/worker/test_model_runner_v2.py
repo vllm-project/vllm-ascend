@@ -718,6 +718,63 @@ def test_execute_model_finalizes_dump_for_pooling_pp_non_last_rank(stub_dp_skip_
     debugger.step.assert_called_once_with()
 
 
+@pytest.mark.parametrize(("num_drafts", "fail"), [(3, False), (0, False), (3, True)])
+def test_kimi_draft_joins_recovery_before_publication(monkeypatch, num_drafts, fail):
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+
+    import vllm_ascend.worker.v2.spec_decode.dspark.speculator as dspark
+    from vllm_ascend.worker.v2.model_states.kimi_recoverssm import KimiDSparkRecoverSSMState
+
+    calls = []
+    recovery = object.__new__(KimiDSparkRecoverSSMState)
+    recovery.device = torch.device("cpu")
+    recovery._active = recovery._submitted = False
+    recovery._done = object()
+    monkeypatch.setattr(recovery, "_can_merge_step", lambda: True)
+    stream = SimpleNamespace(wait_event=lambda event: calls.append("join"))
+    monkeypatch.setattr(torch.npu, "current_stream", lambda device: stream)
+
+    runner = _make_runner()
+    runner.pcp_manager = None
+    runner.execute_model_state = SimpleNamespace(num_spec_tokens_to_schedule=num_drafts)
+    spec = object.__new__(dspark.AscendDSparkSpeculator)
+    runner.speculator = spec
+    spec.kda_recovery = recovery
+    spec.pcp_manager = None
+    spec.input_buffers = SimpleNamespace(positions=torch.zeros(1))
+    spec.max_num_tokens = 1
+    spec.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace())
+    monkeypatch.setattr(type(spec), "attn_vllm_config", property(lambda self: self.vllm_config))
+    monkeypatch.setattr(dspark, "build_attn_metadata_wrapper", nullcontext)
+    monkeypatch.setattr(dspark, "build_attn_metadata_factory", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", lambda: False)
+
+    def propose(*args, **kwargs):
+        calls.append("draft")
+        if fail:
+            raise RuntimeError("draft failed")
+        return torch.zeros(1)
+
+    def sample(*args):
+        assert recovery._active == bool(num_drafts)
+        if recovery._active:
+            recovery._submitted = True
+        batch = SimpleNamespace(num_reqs=1, is_prefilling_np=torch.tensor([False]).numpy())
+        spec.propose(batch, {}, {}, torch.empty(0), None, *[torch.empty(0) for _ in range(6)])
+        calls.append("publish")
+
+    monkeypatch.setattr(DSparkSpeculator, "propose", propose)
+    monkeypatch.setattr(GPUModelRunner, "sample_tokens", sample)
+    if fail:
+        with pytest.raises(RuntimeError, match="draft failed"):
+            runner.sample_tokens(None)
+        assert calls == ["draft", "join"]
+    else:
+        runner.sample_tokens(None)
+        assert calls == (["draft", "join", "publish"] if num_drafts else ["draft", "publish"])
+    assert not recovery._active and not recovery._submitted
+
+
 def test_sample_tokens_closes_dump_cycle_on_last_rank():
     debugger = Mock(spec=["start", "step"])
     runner = _make_dump_runner(debugger)

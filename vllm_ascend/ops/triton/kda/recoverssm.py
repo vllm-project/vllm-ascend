@@ -7,7 +7,7 @@ verify/commit contracts. Q/K normalization follows the AscendC KDA kernel.
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 import torch
@@ -376,9 +376,12 @@ def _prepare_commit_plan_kernel(
     SPEC_QUERY_LEN: tl.constexpr,
     HAS_REQUEST_INDICES: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
+    source_plan_ptr=None,
 ):
     spec_idx = tl.program_id(0)
     source_state_idx = tl.load(state_indices_ptr + spec_idx * stride_state_indices).to(tl.int64)
+    if source_plan_ptr is not None:
+        tl.store(source_plan_ptr + spec_idx, source_state_idx)
     request_idx = spec_idx
     if HAS_REQUEST_INDICES:
         request_idx = tl.load(request_indices_ptr + spec_idx * stride_request_indices).to(tl.int64)
@@ -671,6 +674,8 @@ def _commit_kda_state_kernel(
     ALIGN_MODE: tl.constexpr,
     SPEC_QUERY_LEN: tl.constexpr,
     UNROLL_COMMIT: tl.constexpr,
+    group_by_layer=None,
+    PLAN_GROUP_STRIDE: tl.constexpr = 0,
 ):
     # Explicit one-dimensional indexing gives the same request-major order
     # across Ascend Triton backends with different 3-D grid flattening orders.
@@ -686,15 +691,20 @@ def _commit_kda_state_kernel(
     pid_l = pid_lh // NUM_HEADS
     pid_h = pid_lh % NUM_HEADS
 
-    commit_len = tl.load(commit_lens_ptr + pid_b)
+    # Cache pages are group-local. Verify scratch stays indexed by the
+    # request row within its group even when all layers share a launch.
+    plan_row = pid_b
+    if PLAN_GROUP_STRIDE:
+        plan_row += tl.load(group_by_layer + pid_l) * PLAN_GROUP_STRIDE
+    commit_len = tl.load(commit_lens_ptr + plan_row)
     if commit_len == 0:
         return
-    source_state_idx = tl.load(state_indices_ptr + pid_b * stride_state_indices).to(tl.int64)
+    source_state_idx = tl.load(state_indices_ptr + plan_row * stride_state_indices).to(tl.int64)
     if source_state_idx <= null_block_id:
         return
-    final_state_idx = tl.load(final_state_indices_ptr + pid_b).to(tl.int64)
-    boundary_state_idx = tl.load(boundary_state_indices_ptr + pid_b).to(tl.int64)
-    boundary_recovery_len = tl.load(boundary_recovery_lens_ptr + pid_b)
+    final_state_idx = tl.load(final_state_indices_ptr + plan_row).to(tl.int64)
+    boundary_state_idx = tl.load(boundary_state_indices_ptr + plan_row).to(tl.int64)
+    boundary_recovery_len = tl.load(boundary_recovery_lens_ptr + plan_row)
 
     if final_state_idx <= null_block_id:
         return
@@ -879,6 +889,8 @@ def _commit_kda_state_grouped_kernel(
     ALIGN_MODE: tl.constexpr,
     SPEC_QUERY_LEN: tl.constexpr,
     BH: tl.constexpr = 2,
+    group_by_layer=None,
+    PLAN_GROUP_STRIDE: tl.constexpr = 0,
 ):
     # Commit two independent heads per program.
     tl.static_assert(K == 128)
@@ -895,18 +907,21 @@ def _commit_kda_state_grouped_kernel(
     tl.static_assert(NUM_HEADS % BH == 0)
     pid_l = pid_lh // (NUM_HEADS // BH)
     pid_h = pid_lh % (NUM_HEADS // BH) * BH + tl.arange(0, BH)
-    commit_len = tl.load(commit_lens_ptr + pid_b)
+    plan_row = pid_b
+    if PLAN_GROUP_STRIDE:
+        plan_row += tl.load(group_by_layer + pid_l) * PLAN_GROUP_STRIDE
+    commit_len = tl.load(commit_lens_ptr + plan_row)
     if commit_len == 0:
         return
-    source_state_idx = tl.load(state_indices_ptr + pid_b * stride_state_indices).to(tl.int64)
+    source_state_idx = tl.load(state_indices_ptr + plan_row * stride_state_indices).to(tl.int64)
     if source_state_idx <= null_block_id:
         return
-    final_state_idx = tl.load(final_state_indices_ptr + pid_b).to(tl.int64)
+    final_state_idx = tl.load(final_state_indices_ptr + plan_row).to(tl.int64)
     if final_state_idx <= null_block_id:
         return
     if ALIGN_MODE:
-        boundary_state_idx = tl.load(boundary_state_indices_ptr + pid_b).to(tl.int64)
-        boundary_recovery_len = tl.load(boundary_recovery_lens_ptr + pid_b)
+        boundary_state_idx = tl.load(boundary_state_indices_ptr + plan_row).to(tl.int64)
+        boundary_recovery_len = tl.load(boundary_recovery_lens_ptr + plan_row)
     state_base_addr = tl.load(state_base_addrs_ptr + pid_l)
     state_block_stride = tl.load(state_block_strides_ptr + pid_l)
     state_ptr = state_base_addr.to(tl.pointer_type(state_ref_ptr.dtype.element_ty))
@@ -1383,6 +1398,30 @@ class KDARecoverSSMCommitContext:
         mamba_block_size: int | None = None,
     ) -> None:
         """Fold accepted KDA and convolution inputs into every layer."""
+        self.prepare_commit(
+            num_accepted_tokens,
+            state_indices,
+            query_start_loc,
+            request_indices,
+            block_table,
+            num_computed_tokens,
+            mamba_block_size,
+        )
+        if state_indices.shape[0]:
+            self.commit_states(state_indices, state_indices.shape[0], block_table is not None)
+
+    def prepare_commit(
+        self,
+        num_accepted_tokens: torch.Tensor,
+        state_indices: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        request_indices: torch.Tensor | None = None,
+        block_table: torch.Tensor | None = None,
+        num_computed_tokens: torch.Tensor | None = None,
+        mamba_block_size: int | None = None,
+        source_plan: torch.Tensor | None = None,
+    ) -> None:
+        """Prepare this group's page mapping and compact its convolution state."""
         batch = state_indices.shape[0]
         if batch == 0:
             return
@@ -1446,6 +1485,7 @@ class KDARecoverSSMCommitContext:
             block_table_stride[1],
             num_computed_stride,
             SPEC_QUERY_LEN=self.spec_query_len,
+            source_plan_ptr=source_plan,
             num_warps=1,
         )
         conv_block_d = _conv_compaction_block_d(self.conv_dim_stride)
@@ -1472,6 +1512,15 @@ class KDARecoverSSMCommitContext:
             num_warps=4,
         )
 
+    def commit_states(
+        self,
+        state_indices: torch.Tensor,
+        batch: int,
+        align_mode: bool,
+        group_by_layer: torch.Tensor | None = None,
+        group_stride: int = 0,
+    ) -> None:
+        num_layers = len(self.checkpoints)
         state_ref = self.checkpoints[0]
         correction_ref = self.correction_caches[0]
         assert correction_ref.dtype == torch.float32
@@ -1479,7 +1528,6 @@ class KDARecoverSSMCommitContext:
         block_k = triton.next_power_of_2(key_dim)
         matrix_element_size = correction_ref.element_size()
         is_a5 = is_950()
-        align_mode = block_table is not None
         # Most aligned decode steps do not cross a cache-block boundary. Recover
         # them without boundary matrices; only crossing requests use the full path.
         # Both kernels select requests on-device, without synchronizing graph replay.
@@ -1502,6 +1550,8 @@ class KDARecoverSSMCommitContext:
             head_groups = num_heads
             commit_kernel = _commit_kda_state_kernel
             commit_options = {"UNROLL_COMMIT": is_a5}
+        if group_by_layer is not None:
+            commit_options.update(group_by_layer=group_by_layer, PLAN_GROUP_STRIDE=group_stride)
         block_v = min(triton.next_power_of_2(value_dim), value_tile)
         # Explicit flat indexing keeps request rows outermost on both 3.2/3.6
         # backends, balancing mixed boundary requests without a new static flag.
@@ -1582,4 +1632,102 @@ class KDARecoverSSMCommitContext:
             )
 
 
-__all__ = ["KDARecoverSSMCommitContext", "kda_recoverssm_verify"]
+@dataclass
+class MultiGroupKDACommit:
+    """Persistent descriptors for one regular and one boundary launch over all layers."""
+
+    plans: tuple[KDARecoverSSMCommitContext, ...]
+    all_layers: KDARecoverSSMCommitContext
+    source_pages: torch.Tensor
+    group_by_layer: torch.Tensor
+
+    @classmethod
+    def create(cls, groups: tuple[KDARecoverSSMCommitContext, ...]) -> "MultiGroupKDACommit | None":
+        if len(groups) < 2:
+            return None
+        first = groups[0]
+        capacity = first.commit_lens.numel()
+
+        def state_layout(group):
+            # Page count and outer stride may differ: each layer has its own
+            # base pointer and page stride. Inner strides are kernel arguments.
+            tensors = (group.checkpoints[0], group.correction_caches[0], group.kg_caches[0])
+            return (
+                tuple((t.device, t.dtype, t.shape[1:], t.stride()[1:]) for t in tensors),
+                group.A_log.dtype,
+                group.dt_bias.dtype,
+                group.lower_bound,
+                group.spec_query_len,
+                group.commit_lens.numel(),
+            )
+
+        layout = state_layout(first)
+        if any(state_layout(group) != layout for group in groups[1:]):
+            return None
+        checkpoints = tuple(tensor for group in groups for tensor in group.checkpoints)
+        if len({tensor.data_ptr() for tensor in checkpoints}) != len(checkpoints):
+            return None
+
+        # Allocate group-major plans once. The existing plan/conv kernels use
+        # a single row. State kernels address [group, request] via the layer.
+        source_pages = first.commit_lens.new_empty((len(groups), capacity))
+        plan_names = (
+            "commit_lens",
+            "state_commit_lens",
+            "boundary_commit_lens",
+            "final_state_indices",
+            "boundary_state_indices",
+            "boundary_recovery_lens",
+        )
+        tables = {name: torch.empty_like(source_pages) for name in plan_names}
+        plans = tuple(
+            replace(group, **{name: table[i] for name, table in tables.items()}) for i, group in enumerate(groups)
+        )
+        layer_tables = (
+            "state_base_addrs",
+            "state_block_strides",
+            "correction_cache_base_addrs",
+            "correction_cache_block_strides",
+            "kg_cache_base_addrs",
+            "kg_cache_block_strides",
+            "A_log",
+            "dt_bias",
+        )
+        # This descriptor is used only by commit_states; convolution remains
+        # group-local. Its per-layer pointers stay owned by the group plans.
+        all_layers = replace(
+            first,
+            checkpoints=checkpoints,
+            **{name: table.view(-1) for name, table in tables.items()},
+            **{name: torch.cat([getattr(group, name) for group in groups]) for name in layer_tables},
+        )
+        group_by_layer = first.commit_lens.new_tensor([i for i, group in enumerate(groups) for _ in group.checkpoints])
+        return cls(plans, all_layers, source_pages, group_by_layer)
+
+    def commit(self, metadata, num_sampled: torch.Tensor) -> None:
+        if len(metadata) != len(self.plans):
+            raise ValueError("KDA commit metadata does not match the bound cache groups")
+        batch = metadata[0].num_spec_decodes
+        if any(m.num_spec_decodes != batch or m.recoverssm_commit.state_indices.shape[0] < batch for m in metadata):
+            raise ValueError("KDA commit groups must cover the same number of speculative rows")
+        if not batch:
+            return
+        for i, (group, ctx) in enumerate(zip(metadata, self.plans, strict=True)):
+            commit = group.recoverssm_commit
+            align = commit.align
+            ctx.prepare_commit(
+                num_sampled,
+                commit.state_indices[:batch, 0],
+                commit.query_start_loc[: batch + 1],
+                request_indices=commit.request_indices,
+                block_table=align.block_table,
+                num_computed_tokens=align.num_computed_tokens,
+                mamba_block_size=align.block_size,
+                source_plan=self.source_pages[i],
+            )
+        self.all_layers.commit_states(
+            self.source_pages.view(-1), batch, True, self.group_by_layer, self.source_pages.stride(0)
+        )
+
+
+__all__ = ["KDARecoverSSMCommitContext", "MultiGroupKDACommit", "kda_recoverssm_verify"]
