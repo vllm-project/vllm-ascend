@@ -13,7 +13,7 @@
   unsigned E8M0 scales: byte `s` represents `2**(s - 127)`, including
   `s = 0`; `s = 255` represents NaN. Non-owned IDs produce zero.
 - **Algorithm flow**: One program handles one requested row, checks shard
-  ownership, selects the host allocation chunk through device pointer tables,
+  ownership, selects the host allocation chunk through the device code pointer table,
   loads the requested columns from host and one scale per group from the rank-local NPU parameter, broadcasts scales
   across each group of 32 columns, and writes BF16 results. Columns
   outside the width are masked. The caller owns cross-rank reduction.
@@ -34,7 +34,7 @@ All parameters are required; `is_mxfp8` is keyword-only for `lookup_quantized`.
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
 | `code_chunk_ptrs` | Input | Device addresses of registered host code chunks | NPU INT64 | Contiguous 1-D |
-| `scale_chunk_ptrs` | Input | Local scale shard in HBM, or legacy chunk addresses | NPU UINT8 (MXFP8), FP32 (INT8), or INT64 addresses | Contiguous 2-D scales or 1-D addresses |
+| `scales` | Input | Local scale shard in HBM | NPU UINT8 (MXFP8) or FP32 (INT8) | Contiguous 2-D |
 | `embedding_ids` | Input | Global embedding IDs; non-owned IDs produce zero | NPU INT32/INT64 | Any shape; copied to contiguous if needed |
 | `output` | Output | Requested rows, written in place | NPU BF16 | `(*embedding_ids.shape, width)`, contiguous for quantized lookup |
 | `shard_start`, `shard_end` | Attribute | Inclusive/exclusive global bounds of the owned shard | Python int | `0 <= shard_start < shard_end` |
@@ -49,14 +49,14 @@ fixed tile size and does not use those properties to select its grid or tile.
 
 - Quantized width must be positive and divisible by 32. The target model uses
   width 160 (five scale groups); width 256 is an additional supported test case.
-- All device tensors must be on the same NPU. Each pointer table must contain
+- All device tensors must be on the same NPU. The code pointer table must contain
   at least `ceil((shard_end - shard_start) / chunk_rows)` addresses. Code chunks contain rows of
-  `width` elements; scale chunks contain rows of `width // 32` elements.
+  `width` elements; the scale tensor contains rows of `width // 32` elements.
 - Host code storage is INT8 with FP32 scales, or E4M3FN with UINT8 E8M0 scales.
   Host allocations must remain registered and alive until all eager and graph
   work completes. Pointer-table contents are an owner contract, not validated
   by reading back addresses on the hot path. Metadata errors raise `ValueError`.
-- The output must not alias either pointer table, IDs or host storage. Only the
+- The output must not alias the code pointer table, scales, IDs or host storage. Only the
   output is modified. Empty IDs perform no launch after metadata validation.
 - IDs outside the shard, including negative IDs, are zeroed. No error is raised
   for a non-owned ID because other ranks may own it. Quantized host integration
@@ -99,7 +99,7 @@ results or sampled-row correctness do not replace final-revision model tests.
 
 The reproducible single-rank benchmark compares quantized lookup against the
 existing BF16 host lookup using exactly the same dequantized values and IDs.
-It reports allocated host bytes, graph replay latency and compiler-entry counts.
+It reports logical table bytes, graph replay latency and compiler-entry counts.
 Both buffers remain alive and share the same NUMA placement policy; it does not
 measure full-model throughput, multi-rank reduction or NUMA tuning.
 
@@ -127,7 +127,7 @@ Use `--tokens 1 32 128 256 4096 32768 65536` to cover small and large gathers;
 
 ### Measured operator results
 
-The following results use CANN 9.2.1 r89, torch 2.10.0, torch_npu
+The following historical results used host-resident scales. They were measured using CANN 9.2.1 r89, torch 2.10.0, torch_npu
 2.10.0.post7 and triton-ascend 3.6.0.post2. Full registered host tables remain
 resident in the same process. Codes and scales are synthetic; the BF16 table
 contains exactly their dequantized values. IDs and outputs are checked for

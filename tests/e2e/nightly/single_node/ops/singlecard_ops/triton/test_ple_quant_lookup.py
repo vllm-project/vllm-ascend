@@ -108,16 +108,15 @@ def test_host_lookup_dynamic_shapes_without_recompilation(mxfp8, id_dtype, monke
     device = torch.device("npu", torch.npu.current_device())
     owner = torch.nn.Module()
     codes = HostUvaBuffer((rows, width), method.weight_dtype, device, "codes", owner)
-    scales = None
     graph = None
     try:
-        scales = HostUvaBuffer((rows, width // 32), method.scale_dtype, device, "scales", owner)
+        scales = torch.empty((rows, width // 32), dtype=method.scale_dtype, device=device)
         values = torch.arange(rows * width).reshape(rows, width).remainder(15).sub(7).to(method.weight_dtype)
         codes.tensor.copy_(values)
-        scales.tensor.fill_(127 if mxfp8 else 1)
+        scales.fill_(127 if mxfp8 else 1)
         ids = torch.tensor([0], dtype=id_dtype, device=device)
         output = torch.empty((1, width), dtype=torch.bfloat16, device=device)
-        lookup_quantized(codes.ptrs, scales.ptrs, ids, output, 0, rows, CHUNK_ROWS, is_mxfp8=mxfp8)
+        lookup_quantized(codes.ptrs, scales, ids, output, 0, rows, CHUNK_ROWS, is_mxfp8=mxfp8)
         torch.npu.synchronize()
 
         def forbid_compile(*args, **kwargs):
@@ -133,14 +132,14 @@ def test_host_lookup_dynamic_shapes_without_recompilation(mxfp8, id_dtype, monke
             ids = backing[..., 1]
             ids.copy_(host_ids)
             output = torch.empty((*shape, width), dtype=torch.bfloat16, device=device)
-            lookup_quantized(codes.ptrs, scales.ptrs, ids, output, start, start + rows, CHUNK_ROWS, is_mxfp8=mxfp8)
+            lookup_quantized(codes.ptrs, scales, ids, output, start, start + rows, CHUNK_ROWS, is_mxfp8=mxfp8)
             owned = (host_ids >= start) & (host_ids < start + rows)
             expected = values.float()[(host_ids.long() - start).clamp(0, rows - 1)].bfloat16()
             expected = torch.where(owned.unsqueeze(-1), expected, 0)
             torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
         graph = torch.npu.NPUGraph()
         with torch.npu.graph(graph):
-            lookup_quantized(codes.ptrs, scales.ptrs, ids, output, start, start + rows, CHUNK_ROWS, is_mxfp8=mxfp8)
+            lookup_quantized(codes.ptrs, scales, ids, output, start, start + rows, CHUNK_ROWS, is_mxfp8=mxfp8)
         ids.fill_(start)
         graph.replay()
         torch.testing.assert_close(output.cpu(), values[0].float().bfloat16().expand_as(output.cpu()), rtol=0, atol=0)
@@ -148,8 +147,6 @@ def test_host_lookup_dynamic_shapes_without_recompilation(mxfp8, id_dtype, monke
         torch.npu.synchronize()
         if graph is not None:
             graph.reset()
-        if scales is not None:
-            scales.close()
         codes.close()
 
 
@@ -162,6 +159,8 @@ def test_host_lookup_dynamic_shapes_without_recompilation(mxfp8, id_dtype, monke
         "width",
         "ids_dtype",
         "pointer_dtype",
+        "scale_pointer_table",
+        "scale_dtype",
         "pointer_size",
         "pointer_layout",
         "device",
@@ -173,12 +172,12 @@ def test_host_lookup_dynamic_shapes_without_recompilation(mxfp8, id_dtype, monke
 )
 def test_host_lookup_rejects_unsupported_inputs(invalid):
     # Pointer values are deliberately not valid addresses: every case must be
-    # rejected from metadata before a kernel can dereference either table.
+    # rejected from metadata before a kernel can dereference the code pointer table.
     device = torch.device("npu", torch.npu.current_device())
     pointers = torch.zeros(1, dtype=torch.int64, device=device)
     args = dict(
         code_chunk_ptrs=pointers,
-        scale_chunk_ptrs=pointers,
+        scales=torch.empty((32, 5), dtype=torch.float32, device=device),
         embedding_ids=torch.zeros(2, dtype=torch.int64, device=device),
         output=torch.empty((2, 160), dtype=torch.bfloat16, device=device),
         shard_start=0,
@@ -197,7 +196,11 @@ def test_host_lookup_rejects_unsupported_inputs(invalid):
     elif invalid == "ids_dtype":
         args["embedding_ids"] = args["embedding_ids"].float()
     elif invalid == "pointer_dtype":
-        args["scale_chunk_ptrs"] = pointers.int()
+        args["code_chunk_ptrs"] = pointers.int()
+    elif invalid == "scale_pointer_table":
+        args["scales"] = pointers
+    elif invalid == "scale_dtype":
+        args["scales"] = args["scales"].byte()
     elif invalid == "pointer_size":
         args["code_chunk_ptrs"] = pointers[:0]
     elif invalid == "pointer_layout":

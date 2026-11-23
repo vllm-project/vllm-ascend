@@ -69,13 +69,13 @@ def main(args):
     try:
         for columns, dtype in (
             (args.width, method.weight_dtype),
-            (args.width // 32, method.scale_dtype),
             (args.width, torch.bfloat16),
         ):
             buffers.append(HostUvaBuffer((args.rows, columns), dtype, device, f"table_{len(buffers)}", owner))
-        codes, scales, bf16 = buffers
+        codes, bf16 = buffers
+        scales = torch.empty((args.rows, args.width // 32), dtype=method.scale_dtype, device=device)
         # Production tables contain tens of millions of rows. Bound temporary
-        # CPU allocations while keeping all three registered tables resident.
+        # CPU allocations while keeping both registered tables resident.
         for begin in range(0, args.rows, 65536):
             end = min(begin + 65536, args.rows)
             count = end - begin
@@ -83,10 +83,10 @@ def main(args):
             decoded = torch.linspace(0.25, 2, args.width // 32).expand(count, -1)
             if method.mxfp8:
                 exponents = torch.arange(args.width // 32).remainder(4).add(125).to(torch.uint8)
-                scales.tensor[begin:end].copy_(exponents.expand(count, -1))
+                scales[begin:end].copy_(exponents.expand(count, -1))
                 decoded = torch.exp2(exponents.float() - 127).expand(count, -1)
             else:
-                scales.tensor[begin:end].copy_(decoded)
+                scales[begin:end].copy_(decoded)
             codes.tensor[begin:end].copy_(values)
             bf16.tensor[begin:end].copy_(
                 (values.float().unflatten(-1, (-1, 32)) * decoded.unsqueeze(-1)).flatten(-2).bfloat16()
@@ -96,7 +96,7 @@ def main(args):
             def compact():
                 lookup_quantized(
                     codes.ptrs,
-                    scales.ptrs,
+                    scales,
                     ids,
                     compact_output,
                     args.shard_start,
@@ -133,7 +133,7 @@ def main(args):
                     block=1 << (args.width - 1).bit_length(),
                     samples=args.samples,
                     repeats=args.repeats,
-                    compact_storage_bytes=sum(b.tensor.numel() * b.tensor.element_size() for b in (codes, scales)),
+                    compact_storage_bytes=codes.tensor.nbytes + scales.nbytes,
                     bf16_storage_bytes=bf16.tensor.numel() * bf16.tensor.element_size(),
                     startup_jit_compile_entries=startup_entries,
                 )
