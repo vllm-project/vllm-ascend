@@ -108,6 +108,18 @@ On Ascend, the current attention backend support levels are:
 
 This is why the effective graph mode on Ascend may differ from the mode requested in configuration.
 
+### KV cache layout compatibility
+
+The head-major KV cache layout (`VLLM_KV_CACHE_LAYOUT=HND` or `LBHNC`) restricts the graph modes:
+
+| `cudagraph_mode` | Head-major layout (`HND`/`LBHNC`) | Default layout (`LBNHC`) |
+|---|---|---|
+| `FULL` | **Refused at startup** | Supported |
+| `FULL_DECODE_ONLY` | Supported (the validated mode for this layout) | Supported |
+| `NONE` / `PIECEWISE` / `FULL_AND_PIECEWISE` | Not affected by this restriction | Not affected by this restriction |
+
+With the head-major layout, captured full-graph `npu_fused_infer_attention_score` tasks read the gathered (HND) KV cache, and replaying a token-keyed graph captured for a prefill/mixed batch crashes the NPU stream at the first replay — device error 507011 ("model stream execute failed"), reproduced consistently on Ascend 910C. `FULL_DECODE_ONLY` never replays graphs for prefill/mixed batches (they run eager), and its decode replays were validated as exact against eager outputs, so it is the supported graph mode for this layout. The combination is refused at engine startup with an error naming both knobs; unset `VLLM_KV_CACHE_LAYOUT` to use the default `LBNHC` layout, or switch to `cudagraph_mode=FULL_DECODE_ONLY`.
+
 ### Troubleshooting capture resource exhaustion
 
 If ACLGraph capture fails because the configured graph sizes exceed the runtime resources available on the current stack, vLLM Ascend now raises a dedicated error with mitigation guidance. In practice, the most useful actions are:

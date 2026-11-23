@@ -2,6 +2,7 @@ import argparse
 import importlib
 import logging
 import os
+from contextlib import ExitStack, contextmanager
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -2848,6 +2849,83 @@ class TestNPUPlatform(TestBase):
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
 
+    _FULL_HND_REFUSAL_MATCH = "cudagraph_mode=FULL .* not supported with the head-major KV cache layout"
+
+    def _drive_full_mode_check_and_update_config(self, cudagraph_mode, layout):
+        """Drive the REAL NPUPlatform.check_and_update_config path (mocked
+        hardware externals only; a real CompilationConfig) with vllm.envs'
+        VLLM_KV_CACHE_LAYOUT pinned to layout (None names no layout)."""
+        with (
+            _kv_layout_pinned(layout),
+            patch.multiple(
+                "vllm_ascend.platform",
+                refresh_block_size=MagicMock(),
+                get_current_hardware_profile=MagicMock(return_value=get_hardware_profile(AscendDeviceType.A3)),
+                enable_sp=MagicMock(return_value=False),
+                init_ascend_config=MagicMock(return_value=TestNPUPlatform.mock_vllm_ascend_config()),
+            ),
+            patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization"),
+        ):
+            vllm_config = TestNPUPlatform.mock_vllm_config()
+            vllm_config.additional_config = {}
+            vllm_config.scheduler_config.max_num_seqs = 77
+            vllm_config.scheduler_config.max_num_batched_tokens = 1024
+            vllm_config.compilation_config = CompilationConfig(
+                mode=CompilationMode.VLLM_COMPILE,
+                cudagraph_mode=cudagraph_mode,
+            )
+            vllm_config.uniform_decode_query_len = 1
+            vllm_config.num_speculative_tokens = 0
+            vllm_config.lora_config = None
+            vllm_config.model_config.enforce_eager = False
+            vllm_config.model_config.is_encoder_decoder = False
+            vllm_config.cache_config.kv_cache_layout = None
+            vllm_config.parallel_config.worker_cls = "manual"
+            vllm_config.cache_config.block_size = 1
+            self.platform.apply_config_platform_defaults(vllm_config)
+            vllm_config._set_cudagraph_sizes = lambda: VllmConfig._set_cudagraph_sizes(vllm_config)
+            vllm_config._set_cudagraph_sizes()
+            self.platform.check_and_update_config(vllm_config)
+        return vllm_config
+
+    def test_check_and_update_config_refuses_full_mode_with_hnd_layout(self):
+        """Defect D1 gate, real init config path: cudagraph_mode=FULL with
+        the head-major KV layout is refused with the exact message naming
+        FULL_DECODE_ONLY and the first-replay stream crash (507011, 3/3)."""
+        with self.assertRaisesRegex(RuntimeError, TestNPUPlatform._FULL_HND_REFUSAL_MATCH) as ctx:
+            self._drive_full_mode_check_and_update_config(CUDAGraphMode.FULL, layout="HND")
+        self.assertIn("FULL_DECODE_ONLY", str(ctx.exception))
+        self.assertIn("507011", str(ctx.exception))
+
+    def test_check_and_update_config_allows_full_decode_only_with_hnd_layout(self):
+        """FULL_DECODE_ONLY + HND (the m5-validated combination) passes the
+        real init config path with the mode unchanged."""
+        vllm_config = self._drive_full_mode_check_and_update_config(CUDAGraphMode.FULL_DECODE_ONLY, layout="HND")
+        self.assertEqual(
+            vllm_config.compilation_config.cudagraph_mode,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+        )
+
+    def test_check_and_update_config_allows_full_mode_with_default_layout(self):
+        """FULL with the layout unset (the m5 NBS control) passes the real
+        init config path: the gate must NOT block the default layout."""
+        vllm_config = self._drive_full_mode_check_and_update_config(CUDAGraphMode.FULL, layout=None)
+        self.assertEqual(vllm_config.compilation_config.cudagraph_mode, CUDAGraphMode.FULL)
+
+
+# --- FULL cudagraph mode x head-major KV cache layout (defect D1) gate ---
+#
+# Mission 5 defect D1: cudagraph_mode=FULL (token-keyed graphs replayed for
+# prefill/mixed batches) + the head-major KV layout (HND/LBHNC, whose
+# captured FIA tasks read the gathered HND KV) crashes the NPU stream at
+# the FIRST replayed prefill graph -- device error 507011, reproduced 3/3
+# on 910C -- while the default-layout control with identical batch geometry
+# completes and FULL_DECODE_ONLY is unaffected. The platform refuses the
+# combination at init (check_and_update_config -> _update_compilation_modes)
+# instead of letting it crash the stream.
+
+_FULL_HND_UNIT_MATCH = "cudagraph_mode=FULL .* not supported with the head-major KV cache layout"
+
 
 @pytest.mark.parametrize(
     "enable_sleep_mode, backend, expected",
@@ -2981,3 +3059,122 @@ class TestNarrowVisibleDevices(TestBase):
             args = parser.parse_args(["--device-ids", "1", "--data-parallel-backend", "ray"])
             self.assertEqual(os.environ["ASCEND_RT_VISIBLE_DEVICES"], "4,5")
         self.assertEqual(args.device_ids, [1])
+
+
+def _gate_vllm_config(cudagraph_mode: CUDAGraphMode, *, enforce_eager: bool = False):
+    """A config carrying a REAL CompilationConfig through the real
+    validation function (sibling fields follow the module's fixture
+    pattern of test_setup_compile_backend_scopes_kda_splitting_to_piecewise)."""
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=cudagraph_mode,
+    )
+    return SimpleNamespace(
+        compilation_config=compilation_config,
+        model_config=SimpleNamespace(enforce_eager=enforce_eager, is_encoder_decoder=False),
+        cache_config=SimpleNamespace(kv_cache_layout=None),
+        additional_config={},
+        speculative_config=None,
+    )
+
+
+def _gate_ascend_config():
+    return SimpleNamespace(
+        ascend_compilation_config=None,
+        xlite_graph_config=SimpleNamespace(enabled=False, full_mode=False),
+    )
+
+
+@contextmanager
+def _kv_layout_pinned(layout):
+    """Make vllm.envs' VLLM_KV_CACHE_LAYOUT read as `layout` inside the block.
+
+    vllm.envs serves the variable lazily through the module's __getattr__.
+    Another test of the full suite sets it with monkeypatch.setattr
+    (tests/ut/attention/test_minimax_fa3.py), which leaves it behind as a
+    plain module attribute; from then on the environment variable is never
+    read again. The gate's tests therefore set the attribute themselves and
+    take it away afterwards unless an earlier test had pinned it.
+    """
+    from vllm import envs as envs_vllm
+
+    pinned_before = "VLLM_KV_CACHE_LAYOUT" in vars(envs_vllm)
+    previous = vars(envs_vllm).get("VLLM_KV_CACHE_LAYOUT")
+    envs_vllm.VLLM_KV_CACHE_LAYOUT = layout
+    try:
+        yield
+    finally:
+        if pinned_before:
+            envs_vllm.VLLM_KV_CACHE_LAYOUT = previous
+        else:
+            delattr(envs_vllm, "VLLM_KV_CACHE_LAYOUT")
+
+
+@pytest.fixture
+def pin_kv_layout():
+    """Pin VLLM_KV_CACHE_LAYOUT for the rest of the test (None names no layout)."""
+    with ExitStack() as stack:
+
+        def pin(layout):
+            stack.enter_context(_kv_layout_pinned(layout))
+
+        yield pin
+
+
+@pytest.mark.parametrize("layout", ["HND", "LBHNC"])
+def test_update_compilation_modes_refuses_full_mode_with_hnd_layout(layout, pin_kv_layout):
+    """FULL + HND/LBHNC is refused with the exact message (RED on the
+    unpatched tree: the combination passed validation)."""
+    from vllm_ascend.platform import _update_compilation_modes
+
+    pin_kv_layout(layout)
+    vllm_config = _gate_vllm_config(CUDAGraphMode.FULL)
+    with pytest.raises(RuntimeError, match=_FULL_HND_UNIT_MATCH) as exc_info:
+        _update_compilation_modes(vllm_config, _gate_ascend_config())
+    assert "FULL_DECODE_ONLY" in str(exc_info.value)
+    assert "507011" in str(exc_info.value)
+
+
+def test_update_compilation_modes_refuses_full_mode_with_resolved_hnd_layout(pin_kv_layout):
+    """The gate also honors a layout already resolved onto cache_config
+    (adopted in-process by resolve_kv_cache_layout), not only the env."""
+    from vllm_ascend.platform import _update_compilation_modes
+
+    pin_kv_layout(None)
+    vllm_config = _gate_vllm_config(CUDAGraphMode.FULL)
+    vllm_config.cache_config.kv_cache_layout = "LBHNC"
+    with pytest.raises(RuntimeError, match=_FULL_HND_UNIT_MATCH):
+        _update_compilation_modes(vllm_config, _gate_ascend_config())
+
+
+def test_update_compilation_modes_allows_full_mode_with_default_layout(pin_kv_layout):
+    """The m5 NBS control must NOT be blocked: FULL with the layout unset
+    passes validation with the mode unchanged."""
+    from vllm_ascend.platform import _update_compilation_modes
+
+    pin_kv_layout(None)
+    vllm_config = _gate_vllm_config(CUDAGraphMode.FULL)
+    _update_compilation_modes(vllm_config, _gate_ascend_config())
+    assert vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+
+
+@pytest.mark.parametrize("layout", ["HND", "LBHNC"])
+def test_update_compilation_modes_allows_full_decode_only_with_hnd_layout(layout, pin_kv_layout):
+    """FULL_DECODE_ONLY (the m5-validated HND graph mode) is unaffected."""
+    from vllm_ascend.platform import _update_compilation_modes
+
+    pin_kv_layout(layout)
+    vllm_config = _gate_vllm_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    _update_compilation_modes(vllm_config, _gate_ascend_config())
+    assert vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+
+
+def test_update_compilation_modes_allows_full_mode_hnd_enforce_eager(pin_kv_layout):
+    """enforce_eager runs no graphs at all, so the combination is harmless:
+    the gate must not over-reject it."""
+    from vllm_ascend.platform import _update_compilation_modes
+
+    pin_kv_layout("HND")
+    vllm_config = _gate_vllm_config(CUDAGraphMode.FULL, enforce_eager=True)
+    _update_compilation_modes(vllm_config, _gate_ascend_config())
+    assert vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
