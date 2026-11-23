@@ -1605,7 +1605,7 @@ def _reshape_kv_cache_v2(
 
     vllm_config = get_current_vllm_config()
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
-    use_contiguous_indexer_components = (
+    use_contiguous_components = (
         len(kv_cache_config.kv_cache_groups) == 1 and get_layerwise_reuse_layout(kv_cache_config) is not None
     )
     kv_caches: dict[str, Any] = {}
@@ -1789,7 +1789,7 @@ def _reshape_kv_cache_v2(
                     if group_spec.cache_sparse_li_c4:
                         indexer_scale_cache_shape = (*indexer_scale_cache_shape[:-1], group_spec.scale_dim // 2, 2)
 
-                    if use_contiguous_indexer_components and isinstance(raw_cache, torch.Tensor):
+                    if use_contiguous_components and isinstance(raw_cache, torch.Tensor):
                         # Keep the native K/scale planes for P/D transfer when no other group overlays this slot.
                         k_bytes = math.prod(kv_cache_shape) * get_dtype_size(group_spec.dtype)
                         scale_elem_size = get_dtype_size(group_spec.scale_dtype)
@@ -2063,6 +2063,18 @@ def _reshape_kv_cache_v2(
                     kv_cache_spec.dtype,
                     vllm_config.model_config,
                 )
+
+            if (
+                use_contiguous_components
+                and isinstance(kv_cache_spec, AscendMLAAttentionSpec)
+                and isinstance(raw_cache, torch.Tensor)
+                and enable_sfa(vllm_config)
+                and not packed_sfa_main_cache
+            ):
+                # Expose the same contiguous NoPE and RoPE planes as the native allocation.
+                nope_bytes = math.prod(k_shape) * get_dtype_size(k_dtype)
+                rope_bytes = math.prod(v_shape) * get_dtype_size(v_dtype)
+                raw_cache = raw_cache.split((nope_bytes, rope_bytes))
 
             if packed_sfa_main_cache:
                 raw_k_tensor = raw_cache

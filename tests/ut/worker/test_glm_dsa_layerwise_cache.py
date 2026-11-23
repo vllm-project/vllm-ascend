@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm.config import KVTransferConfig
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -25,9 +26,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 from vllm_ascend.worker.v2 import attn_utils
 
 
-def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch):
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16], ids=["fp8_c8", "bf16"])
+def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
     register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
+    packed = dtype == torch.float8_e4m3fn
+    cache_dtype = "fp8" if packed else "bfloat16"
+    monkeypatch.setitem(STR_DTYPE_TO_TORCH_DTYPE, "fp8", torch.float8_e4m3fn)
     text_config = SimpleNamespace(model_type="glm_moe_dsa", num_hidden_layers=78)
     transfer_config = KVTransferConfig(
         kv_connector="AscendStoreConnector",
@@ -47,7 +52,7 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch):
             get_total_num_hidden_layers=lambda: text_config.num_hidden_layers,
         ),
         cache_config=SimpleNamespace(
-            cache_dtype="fp8",
+            cache_dtype=cache_dtype,
             num_gpu_blocks_override=None,
             prefix_cache_retention_interval=0,
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBNHC,
@@ -58,16 +63,20 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch):
         kv_transfer_config=transfer_config,
     )
     main = AscendMLAAttentionSpec(
-        block_size=128, num_kv_heads=1, head_size=656, dtype=torch.float8_e4m3fn, cache_sparse_sfa_c8=True
+        block_size=128,
+        num_kv_heads=1,
+        head_size=656 if packed else 576,
+        dtype=dtype,
+        cache_sparse_sfa_c8=packed,
     )
     indexer = AscendSFAIndexerCacheSpec(
         block_size=128,
         num_kv_heads=1,
         head_size=128,
-        dtype=torch.float8_e4m3fn,
-        scale_dim=1,
+        dtype=dtype,
+        scale_dim=1 if packed else 0,
         scale_dtype=torch.float32,
-        cache_sparse_li_c8=True,
+        cache_sparse_li_c8=packed,
     )
     main_entries = {layer: f"model.layers.{layer}.self_attn.attn" for layer in range(79)}
     indexer_entries = {layer: f"model.layers.{layer}.self_attn.indexer.k_cache" for layer in (0, 1, *range(2, 79, 4))}
@@ -118,12 +127,26 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch):
         SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=specs[name], layer_names=[name], backend=backend)
         for name in specs
     ]
-    caches = attn_utils._reshape_kv_cache_v2(attn_groups, raw, "fp8", [128], {}, worker_config)
+    caches = attn_utils._reshape_kv_cache_v2(attn_groups, raw, cache_dtype, [128], {}, worker_config)
+    for name in main_entries.values():
+        components = caches[name]
+        expected_widths = (656,) if packed else (512, 64)
+        assert tuple(component.shape[-1] for component in components) == expected_widths
+        assert all(component.is_contiguous() and component.dtype == dtype for component in components)
+        assert components[0].data_ptr() == raw[name].data_ptr()
+        if not packed:
+            nope, rope = components
+            assert rope.data_ptr() == nope.data_ptr() + nope.numel() * nope.element_size()
     for name in indexer_entries.values():
-        key, scale = caches[name]
-        assert key.is_contiguous() and scale.is_contiguous()
+        key, *scales = caches[name]
+        assert key.is_contiguous() and key.dtype == dtype
         assert key.data_ptr() == raw[name].data_ptr()
-        assert scale.data_ptr() == key.data_ptr() + key.numel() * key.element_size()
+        if packed:
+            (scale,) = scales
+            assert scale.is_contiguous()
+            assert scale.data_ptr() == key.data_ptr() + key.numel() * key.element_size()
+        else:
+            assert not scales
 
 
 def test_indexer_reshape_checks_capacity_after_scale_alignment(monkeypatch):

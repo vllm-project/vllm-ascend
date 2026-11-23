@@ -4,8 +4,7 @@
 
 from types import MappingProxyType
 
-import torch
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -25,17 +24,9 @@ GLM5_NEXT_SPEC_REUSE_RULES: SpecReuseRules = MappingProxyType(
 )
 
 
-def _is_fp8_main_cache(spec: KVCacheSpec) -> bool:
-    return isinstance(spec, AscendMLAAttentionSpec) and spec.cache_sparse_sfa_c8 and spec.dtype == torch.float8_e4m3fn
-
-
-def _is_fp8_indexer_cache(spec: KVCacheSpec) -> bool:
-    return isinstance(spec, AscendSFAIndexerCacheSpec) and spec.cache_sparse_li_c8 and spec.dtype == torch.float8_e4m3fn
-
-
 GLM_DSA_SPEC_REUSE_RULES: SpecReuseRules = MappingProxyType(
     {
-        AscendMLAAttentionSpec: _is_fp8_main_cache,
-        AscendSFAIndexerCacheSpec: _is_fp8_indexer_cache,
+        AscendMLAAttentionSpec: True,
+        AscendSFAIndexerCacheSpec: True,
     }
 )
