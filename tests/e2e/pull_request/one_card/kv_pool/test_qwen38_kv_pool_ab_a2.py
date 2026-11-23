@@ -1161,6 +1161,31 @@ def _log_env_diagnostics(case: str) -> None:
         f"migratepages={migratepages} nice_minus5={nice_ok} cpu_isolate={CPU_ISOLATE}",
         flush=True,
     )
+    _log_ubsio_disk(case)
+
+
+def _log_ubsio_disk(case: str) -> None:
+    """Print the tier-3 device state that every skip decision below depends on.
+
+    The workflow's log pipeline mangles pytest skip reasons (observed as
+    ``SKIPPED[INFO] Model cache cleared`` with the real reason dropped), so the
+    disk facts - path, existence, block-device bit, stat mode and symlink
+    target - are printed up front for every memcache tier-3 run.
+    """
+    exists = os.path.exists(MEMCACHE_UBSIO_DISK)
+    if exists:
+        mode = os.stat(MEMCACHE_UBSIO_DISK).st_mode
+        kind = "block" if stat.S_ISBLK(mode) else ("dir" if stat.S_ISDIR(mode) else "file")
+        target = os.path.realpath(MEMCACHE_UBSIO_DISK)
+        detail = f"exists=True type={kind} mode={oct(mode & 0o170000)} real={target}"
+    else:
+        detail = "exists=False (not mounted in this container)"
+    print(
+        f"[kv_pool_a2] {case}: ubsio_disk {MEMCACHE_UBSIO_DISK!r} {detail} "
+        f"tier={MEMCACHE_TIER3_DRAM_TIER} tier_gb={_dram_tier_gb(MEMCACHE_TIER3_DRAM_TIER):g} "
+        f"devices={MEMCACHE_UBSIO_DEVICES}",
+        flush=True,
+    )
 
 
 _LAST_PROGRESS_SECONDS = time.monotonic()
@@ -1321,6 +1346,10 @@ def test_qwen38_kv_pool_ab_a2(backend: str, use_layerwise: bool):
             "memcache scenarios automatically when it is readable; "
             "QWEN38_POOL_ENABLE_MEMCACHE=1 forces them on regardless."
         )
+    if backend == "memcache" and tier_ssd:
+        # Skip-decision inputs, printed before the checks below run (the reason
+        # text is unreliable in the CI log pipeline).
+        _log_ubsio_disk(case)
     if backend == "memcache" and tier_ssd and not os.path.exists(MEMCACHE_UBSIO_DISK):
         pytest.skip(
             f"memcache tier-3 needs the raw UBS IO block device {MEMCACHE_UBSIO_DISK!r} "
