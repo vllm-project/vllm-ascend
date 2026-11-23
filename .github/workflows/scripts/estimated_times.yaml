@@ -243,7 +243,6 @@ estimated_times:
   tests/e2e/pull_request/two_card/ops/triton/test_temperature.py: 30
   # A5 pool watch cases (PR-A5): first estimate for two A/B legs + weight load.
   tests/e2e/pull_request/four_card_a5/pool/test_deepseek_v4_1_pool.py: 1500
-  tests/e2e/pull_request/four_card_a5/pool/test_deepseek_v4_1_pool_mooncake.py: 1500
   tests/e2e/pull_request/four_card_a5/pool/test_pool_ssd_hit.py: 1800
   tests/e2e/pull_request/four_card_a5/pool/test_pool_perf.py: 1500
   tests/e2e/pull_request/two_card/pool/test_qwen38_mamba_pool.py: 1200

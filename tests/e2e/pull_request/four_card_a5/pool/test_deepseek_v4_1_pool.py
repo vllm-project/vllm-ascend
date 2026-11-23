@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-"""Pool A/B watch for DeepSeek-V4.1-Flash TP4 + DSpark5 on four A5 dies."""
+"""Pool A/B watch for DeepSeek-V4.1-Flash TP8 + DSpark5 on eight A5 dies."""
 
 import os
 from contextlib import ExitStack, contextmanager
@@ -27,17 +27,17 @@ MODEL = os.environ.get(
     "Eco-Tech/DeepSeek-V4.1-Flash-w8a8",
 )
 
-TENSOR_PARALLEL_SIZE = 4
+TENSOR_PARALLEL_SIZE = 8
 NUM_SPECULATIVE_TOKENS = 5
 POOL_LCM_BLOCK_SIZE = 16384
 POOL_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + 4
 # Two lcm blocks plus a tail -> 32,768 / 36,408 = 90% partial hit.
 POOL_PERF_PROMPT_TOKENS = 2 * POOL_LCM_BLOCK_SIZE + 2 * POOL_LCM_BLOCK_SIZE // 9
 POOL_MAX_MODEL_LEN = max(POOL_PROMPT_TOKENS, POOL_PERF_PROMPT_TOKENS) + 128
-# A 16K budget does not fit this model on four dies; 4,096 chunked prefill
-# still yields exactly 16,384 reusable tokens for DSpark.
+# A 16K budget does not fit the 4-die slice (a5-4); on a5-8 (TP8) we keep
+# 4,096 chunked prefill, which still yields 16,384 reusable tokens.
 POOL_BATCHED_TOKENS = 4096
-CASE_NAME = "dsv4_1_tp4_dspark_mooncake"
+CASE_NAME = "dsv4_1_tp8_dspark_mooncake"
 
 POOL_KV_TRANSFER_CONFIG = {
     "kv_connector": "AscendStoreConnector",
@@ -115,7 +115,7 @@ def _leg(use_pool: bool, case_name: str):
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_deepseek_v4_1_flash_tp4_dspark_pool_watch() -> None:
+def test_deepseek_v4_1_flash_tp8_dspark_pool_watch() -> None:
     tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
     prompt_ids = build_pool_accuracy_prompt(tokenizer, POOL_PROMPT_TOKENS, POOL_MAX_MODEL_LEN)
 
