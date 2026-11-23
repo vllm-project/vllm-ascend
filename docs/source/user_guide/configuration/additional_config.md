@@ -421,4 +421,7 @@ checkpoint interfaces in the supported vLLM Core revision.
 | `gdn_native_prefill_checkpoints` | Boolean | `false` | Use the fused GDN recurrence to produce internal prefill checkpoints. |
 | `gdn_native_checkpoint_max_tokens` | Integer | `0` | Limit internal checkpoints to prefills ending at or below this token position. Zero adds no limit. |
 | `gdn_native_preserve_physical_prefix` | Boolean | `false` | Prefer reusable physical-page checkpoints on short cold prefills and retain stops at physical page boundaries. |
-| `gdn_elide_singleton_warm_tail` | Boolean | `false` | With the physical-prefix policy and a positive limit, skip a first-seen short suffix checkpoint after a local physical-page hit. |
+| `gdn_elide_singleton_warm_tail` | Boolean | `false` | With the physical-prefix policy and a positive limit, skip a first-seen short suffix checkpoint when the local hit and remaining prompt fit the eligible page window. |
+| `gdn_short_prefill_schedule_interval` | Integer | `1` | Set to `2` to enable adaptive prefill spacing for local partial prefix hits with data parallel size 1. Requires native checkpoints and a positive context limit. |
+
+The adaptive policy applies when active prompt lengths differ by less than one hash block and each prompt plus its requested output fits the configured context limit. It uses interval 3 for uniform prompts that fill one physical cache page. An explicitly configured non-default core prefill interval takes precedence.

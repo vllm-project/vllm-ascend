@@ -87,24 +87,30 @@ def _native_checkpoint_plan(checkpoint, device, fla):
     return plan
 
 
-def _run_single_row(layer, metadata, raw_qkv, tensors, initial_state, scale, fused, fla_fwd):
+def _run_contiguous_tail(layer, metadata, raw_qkv, tensors, initial_state, scale, fused, fla_fwd):
     checkpoint = metadata.checkpoint
-    offset = checkpoint.offsets[0]
-    lengths = getattr(checkpoint, "_ascend_native_single_lengths", None)
+    query_lens = checkpoint.query_lens
+    offset = checkpoint.offsets[-1]
+    split = sum(query_lens[:-1]) + offset
+    lengths = getattr(checkpoint, "_ascend_native_contiguous_lengths", None)
     if lengths is None:
         device = tensors[0].device
         fla = fla_fwd is not None
+        prefix_bounds = list(accumulate([*query_lens[:-1], offset], initial=0))
         lengths = (
-            _partition_metadata([0, offset], device, fla),
-            _partition_metadata([0, checkpoint.query_lens[0] - offset], device, fla),
+            _partition_metadata(prefix_bounds, device, fla),
+            _partition_metadata([0, query_lens[-1] - offset], device, fla),
         )
-        checkpoint._ascend_native_single_lengths = lengths
-    prefix = tuple(tensor[:, :offset] for tensor in tensors)
+        checkpoint._ascend_native_contiguous_lengths = lengths
+    prefix = tuple(tensor[:, :split] for tensor in tensors)
     prefix_output, prefix_state = _apply_recurrence(prefix, initial_state, lengths[0], scale, fused, fla_fwd)
     _export_checkpoint(layer, metadata, raw_qkv, prefix_state)
-    tail = tuple(tensor[:, offset:] for tensor in tensors)
-    tail_output, tail_state = _apply_recurrence(tail, prefix_state, lengths[1], scale, fused, fla_fwd)
-    return torch.cat((prefix_output, tail_output), dim=1), tail_state
+    tail = tuple(tensor[:, split:] for tensor in tensors)
+    tail_output, tail_state = _apply_recurrence(tail, prefix_state[-1:], lengths[1], scale, fused, fla_fwd)
+    if len(query_lens) == 1:
+        return torch.cat((prefix_output, tail_output), dim=1), tail_state
+    prefix_state[-1:].copy_(tail_state)
+    return torch.cat((prefix_output, tail_output), dim=1), prefix_state
 
 
 def _export_checkpoint(layer, metadata, raw_qkv, state):
@@ -126,8 +132,11 @@ def run_gdn_native_checkpoint_prefill(
     assert checkpoint is not None
     tensors = (q, k, v, g, beta)
     scale = k.shape[-1] ** -0.5
-    if len(checkpoint.offsets) == 1:
-        return _run_single_row(layer, metadata, raw_qkv, tensors, initial_state, scale, fused, fla_fwd)
+    if checkpoint.offsets[-1] and not any(checkpoint.offsets[:-1]):
+        if len(checkpoint.offsets) > 1:
+            logger.info_once("Native GDN checkpoints use contiguous batched tails")
+        # Only the final row has a tail, so the packed token order is already contiguous.
+        return _run_contiguous_tail(layer, metadata, raw_qkv, tensors, initial_state, scale, fused, fla_fwd)
 
     plan = _native_checkpoint_plan(checkpoint, q.device, fla_fwd is not None)
 

@@ -37,13 +37,10 @@ class GDNCheckpointPolicy:
     ) -> int:
         if not self.allows_internal_checkpoint(position, end, block_size):
             return 0
-        if (
-            self.preserve_physical_prefix
-            and alignment
-            and block_size % alignment == 0
-            and start == 0
-            and block_size < position < end <= 2 * block_size
-        ):
-            # Preserve the first physical page on a cold, two-page prefill.
-            return block_size
+        if self.preserve_physical_prefix and alignment and block_size % alignment == 0 and start == 0:
+            # A cold prefill has one reserved checkpoint column. Keep the
+            # last reusable physical page there for later conversation turns.
+            last_physical = ((end - 1) // block_size) * block_size
+            if 0 < last_physical < position:
+                return last_physical
         return position

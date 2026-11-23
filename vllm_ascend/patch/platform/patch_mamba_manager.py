@@ -7,6 +7,7 @@
 from collections.abc import Sequence
 
 import vllm.v1.core.single_type_kv_cache_manager as single_type_kv_cache_manager
+from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId
 from vllm.v1.core.single_type_kv_cache_manager import (
     BlockHashList,
     BlockPool,
@@ -14,6 +15,8 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     KVCacheSpec,
     MambaManager,
 )
+from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position
+from vllm.v1.request import Request
 
 from vllm_ascend.core.gdn_checkpoint_policy import GDNCheckpointPolicy
 
@@ -39,6 +42,29 @@ class AscendMambaManager(MambaManager):
             self._gdn_internal_position(checkpoint_position, query_start, query_end),
             prefill_end,
         )
+
+    def _cache_partial_tail_block(
+        self, request: Request, num_tokens: int, retention_interval: int | None
+    ) -> BlockHashWithGroupId | None:
+        checkpoint = self._checkpoints.get(request.request_id)
+        policy = self.gdn_checkpoint_policy
+        if retention_interval is not None and checkpoint is not None and policy is not None:
+            position, column = checkpoint
+            if position > 0 and position == (column + 1) * self.block_size:
+                prompt_end = request.num_prompt_tokens
+                prompt_checkpoint = get_mamba_prefill_checkpoint_position(
+                    prompt_end,
+                    self.cache_hit_alignment_tokens,
+                    self.drop_eagle_checkpoint_block,
+                    num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+                )
+                if position != prompt_checkpoint and position == self._gdn_internal_position(
+                    prompt_checkpoint, 0, prompt_end
+                ):
+                    # This slot holds the exported cold-prefill replay state.
+                    # Sparse retention normally recognizes the unmodified tail.
+                    retention_interval = None
+        return super()._cache_partial_tail_block(request, num_tokens, retention_interval)
 
     @classmethod
     def find_longest_cache_hit(

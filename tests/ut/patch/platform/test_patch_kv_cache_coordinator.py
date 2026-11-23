@@ -456,3 +456,56 @@ def test_per_group_lookup_preserves_replicated_draft_positions():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("prompt_tokens,aligned", [(7000, False), (8000, True)])
+@pytest.mark.parametrize("global_eagle_drop", (False, True))
+def test_local_eagle_attention_keeps_lookahead_replay_tail(prompt_tokens, aligned, global_eagle_drop):
+    groups = [
+        KVCacheGroupSpec(["fa-layer"], replace(FA_SPEC, block_size=2048), True),
+        KVCacheGroupSpec(["mamba-layer"], replace(MAMBA_SPEC, block_size=2048), False),
+    ]
+    config = KVCacheConfig(num_blocks=64, kv_cache_tensors=[], kv_cache_groups=groups)
+    coordinator = AscendHybridKVCacheCoordinator(
+        kv_cache_config=config,
+        max_model_len=16384,
+        use_eagle=global_eagle_drop,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        hash_block_size=64,
+        scheduler_block_size=2048,
+        num_hash_lookahead_tokens=1,
+    )
+    partial_boundary = (prompt_tokens - 1) // 64 * 64
+    request = SimpleNamespace(
+        request_id="replay-tail",
+        num_prompt_tokens=prompt_tokens,
+        block_hashes=[i.to_bytes(8, "little") for i in range(partial_boundary // 64)],
+        shared_prefix_boundary=0,
+        num_computed_tokens=0,
+    )
+    pool = coordinator.block_pool
+    for manager in coordinator.single_type_managers:
+        manager.req_to_blocks[request.request_id] = pool.get_new_blocks(4)
+
+    coordinator.cache_blocks(request, partial_boundary - 1)
+    partial_hash = request.block_hashes[-1]
+    assert pool.get_cached_block(partial_hash, [0]) is None
+
+    coordinator.cache_blocks(request, partial_boundary)
+    assert pool.get_cached_block(partial_hash, [0, 1]) is not None
+    assert coordinator.find_longest_cache_hit(request.block_hashes, prompt_tokens - 1)[1] == partial_boundary
+
+    if aligned:
+        # The hash at the full prompt appears when the first generated token
+        # becomes available. Registering it must preserve the replayable key.
+        full_hash = (partial_boundary // 64).to_bytes(8, "little")
+        request.block_hashes.append(full_hash)
+        coordinator.cache_blocks(request, prompt_tokens + 1)
+        assert pool.get_cached_block(full_hash, [0]) == pool.get_cached_block(partial_hash, [0])
+        assert pool.get_cached_block(full_hash, [0]) is not None
+    else:
+        coordinator.cache_blocks(request, prompt_tokens + 1)
+    assert coordinator.find_longest_cache_hit(request.block_hashes, prompt_tokens - 1)[1] == partial_boundary

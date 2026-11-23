@@ -776,6 +776,7 @@ class AscendConfig:
     gdn_native_preserve_physical_prefix: bool = False
     gdn_native_checkpoint_max_tokens: int = Field(default=0, ge=0, strict=True)
     gdn_elide_singleton_warm_tail: bool = False
+    gdn_short_prefill_schedule_interval: int = Field(default=1, ge=1, le=2, strict=True)
     enable_shared_expert_dp: bool = False
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_turboquant: bool = False
@@ -806,6 +807,10 @@ class AscendConfig:
             not self.gdn_native_preserve_physical_prefix or not self.gdn_native_checkpoint_max_tokens
         ):
             raise ValueError("GDN warm-tail elision requires the native physical-prefix policy and a positive limit")
+        if self.gdn_short_prefill_schedule_interval > 1 and (
+            not self.gdn_native_prefill_checkpoints or not self.gdn_native_checkpoint_max_tokens
+        ):
+            raise ValueError("Short GDN prefill cadence requires native checkpoints and a positive context limit")
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.

@@ -23,6 +23,7 @@ import numpy as np
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
@@ -40,13 +41,18 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer, vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.block_table import BlockTables
+
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+logger = init_logger(__name__)
 
 # Copy block size used by the upstream fused mamba kernels.
 _COPY_BLOCK_SIZE = 1024
@@ -94,6 +100,37 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self._layerwise_mamba_copy: _LayerwiseMambaCopyState | None = None
         self._layer_state_ranges: dict[str, tuple[int, int]] | None = None
         self._pending_bulk_copy: tuple[MambaSpecDecodeGPUContext, int, torch.Tensor] | None = None
+
+    def initialize_gdn_checkpoint_block_mirror(
+        self, kv_cache_config: KVCacheConfig, block_tables: "BlockTables"
+    ) -> None:
+        self._gdn_checkpoint_blocks: dict[int, dict[int, list[int]]] = {}
+        if not get_ascend_config().gdn_native_prefill_checkpoints:
+            return
+        self._gdn_checkpoint_blocks = {
+            group_id: {}
+            for spec, group_ids in get_mamba_groups(kv_cache_config).items()
+            if spec.num_prefill_checkpoint_blocks
+            for group_id in group_ids
+        }
+        logger.info_once("Native GDN checkpoint block mirror groups: %s", tuple(sorted(self._gdn_checkpoint_blocks)))
+        if not self._gdn_checkpoint_blocks:
+            return
+
+        append_block_ids = block_tables.append_block_ids
+
+        def append_and_mirror(req_index: int, new_block_ids: tuple[list[int], ...], overwrite: bool) -> None:
+            append_block_ids(req_index, new_block_ids, overwrite=overwrite)
+            for group_id, requests in self._gdn_checkpoint_blocks.items():
+                blocks = new_block_ids[group_id]
+                if block_tables.redirect_writes_to_null_block:
+                    blocks = [0] * len(blocks)
+                if overwrite:
+                    requests[req_index] = list(blocks)
+                elif req_index in requests:
+                    requests[req_index].extend(blocks)
+
+        block_tables.append_block_ids = append_and_mirror  # type: ignore[method-assign]
 
     def _get_layer_state_ranges(self, kv_cache_config: KVCacheConfig) -> dict[str, tuple[int, int]]:
         """Map every mamba layer name to its (start, end) range in the
@@ -513,6 +550,23 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         max_query_len = getattr(input_batch, "max_query_len", None)
         if max_query_len is None:
             max_query_len = input_batch.num_scheduled_tokens.max().item()
+
+        def attach_gdn_blocks(group_id, common):
+            requests = self._gdn_checkpoint_blocks.get(group_id)
+            if requests is None:
+                return
+            indices = input_batch.idx_mapping_np[: input_batch.num_reqs]
+            if all(index in requests for index in indices):
+                common.gdn_checkpoint_block_rows = tuple(requests[index] for index in indices)
+                logger.info_once("Native GDN prefill metadata received scheduler block rows")
+
+        block_mirror_available = (
+            getattr(self, "_gdn_checkpoint_blocks", None)
+            and not for_capture
+            and not input_batch.is_dummy
+            and pcp_context is None
+            and max_query_len > self.vllm_config.num_speculative_tokens + 1
+        )
         return build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -537,4 +591,5 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             pcp_context=pcp_context,
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             for_cudagraph_capture=for_capture,
+            common_metadata_callback=attach_gdn_blocks if block_mirror_available else None,
         )

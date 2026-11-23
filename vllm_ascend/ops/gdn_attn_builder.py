@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import torch
 from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.distributed import get_pcp_group
+from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
@@ -50,6 +51,9 @@ _GDN_CUMSUM_WORKING_SET = 2**18
 # Accepted-token counts are one-based. The zero-length query segment makes
 # graph-padding rows no-ops, while 1 keeps their count valid for GDN kernels.
 _GDN_GRAPH_DUMMY_ACCEPTED_TOKEN_COUNT = 1
+
+
+_gdn_checkpoint_logger = init_logger(__name__)
 
 
 def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
@@ -776,6 +780,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         num_actual_reqs: int | None = None,
     ) -> GDNAttentionMetadata:
         runtime_batch = num_actual_reqs is not None
+        # The upstream unpadded() returns base metadata without Ascend fields.
+        host_blocks = getattr(common_attn_metadata, "gdn_checkpoint_block_rows", None)
         # Normalize FIA's full-width dummy queries before slicing requests:
         # its common token count may still include those inactive rows.
         if self.use_full_cuda_graph and self.use_spec_decode:
@@ -836,11 +842,48 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             num_spec_decode_tokens,
             non_spec_query_start_loc_cpu,
         ) = batch
-        if runtime_batch and num_actual_reqs > 0 and not (self._ascend_gdn_checkpoints and num_prefills):
+        checkpoint = None
+        host_plan_complete = False
+        checkpoint_prefill = self._ascend_gdn_checkpoints and num_prefills > 0
+        policy = None
+        if checkpoint_prefill and self._ascend_native_gdn_checkpoints:
+            policy = GDNCheckpointPolicy.from_config(self.vllm_config)
+        if checkpoint_prefill:
+            if spec_sequence_masks_cpu is None:
+                prefill_rows = list(range(num_decodes, m.num_reqs))
+            else:
+                non_spec_rows = [i for i, is_spec in enumerate(spec_sequence_masks_cpu.tolist()) if not is_spec]
+                prefill_rows = non_spec_rows[num_decodes:]
+            if self._ascend_native_gdn_checkpoints and runtime_batch and prefill_rows:
+                cache_config = self.vllm_config.cache_config
+                if cache_config.hash_block_size is None or cache_config.cache_hit_alignment_tokens is None:
+                    raise RuntimeError("Native GDN prefill requires the engine's resolved cache alignment")
+
+            # Host block rows can prove that this batch has no checkpoint to
+            # export. Exclude zero-length rows that the generic path compacts.
+            if (
+                runtime_batch
+                and policy is not None
+                and host_blocks is not None
+                and len(host_blocks) >= m.num_reqs
+                and prefill_rows
+                and bool(torch.all(m.query_start_loc_cpu.diff()[prefill_rows] > 0))
+            ):
+                checkpoint = build_gdn_checkpoint_metadata(
+                    self.checkpoint_builder, m, prefill_rows, policy, host_blocks=host_blocks
+                )
+                host_plan_complete = True
+        if (
+            runtime_batch
+            and num_actual_reqs > 0
+            and (not checkpoint_prefill or (host_plan_complete and checkpoint is None))
+        ):
             fused = self._build_fused_metadata(
                 m, num_accepted_tokens, spec_sequence_masks_cpu, num_spec_decodes, graph_request_count, batch
             )
             if fused is not None:
+                if host_plan_complete:
+                    _gdn_checkpoint_logger.info_once("Native GDN prefill without an export uses fused metadata")
                 return fused
 
         query_start_loc = m.query_start_loc
@@ -973,7 +1016,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         prefill_query_start_loc_cpu: torch.Tensor | None = None
         prefill_state_indices: torch.Tensor | None = None
         prefill_has_initial_state: torch.Tensor | None = None
-        checkpoint = None
         active_prefill_rows = None
         non_spec_chunked_prefill_metadata: GDNChunkedPrefillMetadata | None = None
         if num_prefills > 0:
@@ -990,13 +1032,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 prefill_state_indices = non_spec_state_indices_tensor
 
             assert prefill_query_start_loc_cpu is not None
-            if self._ascend_gdn_checkpoints:
+            if checkpoint_prefill:
                 assert prefill_state_indices is not None
-                if spec_sequence_masks_cpu is None:
-                    prefill_rows = list(range(num_decodes, m.num_reqs))
-                else:
-                    non_spec_rows = [i for i, is_spec in enumerate(spec_sequence_masks_cpu.tolist()) if not is_spec]
-                    prefill_rows = non_spec_rows[num_decodes:]
                 # Chunk indices use compact row numbers. Keep the planner and
                 # recurrence aligned when padded requests have no tokens.
                 live_rows = prefill_query_start_loc_cpu.diff() > 0
@@ -1009,19 +1046,25 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                         (prefill_query_start_loc_cpu[:1], prefill_query_start_loc_cpu[1:][live_rows])
                     )
                     prefill_query_start_loc = prefill_query_start_loc_cpu.to(query_start_loc.device, non_blocking=True)
-                if self._ascend_native_gdn_checkpoints and runtime_batch and prefill_rows:
-                    cache_config = self.vllm_config.cache_config
-                    if cache_config.hash_block_size is None or cache_config.cache_hit_alignment_tokens is None:
-                        raise RuntimeError("Native GDN prefill requires the engine's resolved cache alignment")
-                policy = (
-                    GDNCheckpointPolicy.from_config(self.vllm_config) if self._ascend_native_gdn_checkpoints else None
-                )
-                if policy is None:
-                    checkpoint = self.checkpoint_builder.build(m, prefill_rows)
-                else:
-                    checkpoint = build_gdn_checkpoint_metadata(self.checkpoint_builder, m, prefill_rows, policy)
-                if checkpoint is not None:
-                    # Do not round at a boundary without a reserved cache page.
+                if not host_plan_complete:
+                    if runtime_batch and self._ascend_native_gdn_checkpoints and prefill_rows:
+                        if host_blocks is None:
+                            _gdn_checkpoint_logger.info_once(
+                                "Native GDN prefill retains device offsets without host rows"
+                            )
+                        elif policy is None:
+                            _gdn_checkpoint_logger.info_once(
+                                "Native GDN prefill retains device offsets without a host policy"
+                            )
+                    if policy is None:
+                        checkpoint = self.checkpoint_builder.build(m, prefill_rows)
+                    else:
+                        checkpoint = build_gdn_checkpoint_metadata(
+                            self.checkpoint_builder, m, prefill_rows, policy, host_blocks=host_blocks
+                        )
+                host_offsets_validated = policy is not None and host_blocks is not None
+                if checkpoint is not None and not host_offsets_validated:
+                    # The fallback must also reject allocations with a null cache page.
                     checkpoint.checkpoint_offsets.masked_fill_(checkpoint.state_indices == NULL_BLOCK_ID, 0)
                     if self._ascend_native_gdn_checkpoints:
                         # Native packing uses host offsets; the allocator may leave
@@ -1158,6 +1201,7 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         self._conv_layer_name = layer_names[0] if layer_names else None
         self._spec_conv_indices: torch.Tensor | None = None
         self._non_spec_conv_indices: torch.Tensor | None = None
+        self._checkpoint_fused_prefill_only = False
         self._conv_output_buffer: torch.Tensor | None = None
         self._fused_layout_cpu: torch.Tensor | None = None
         self._fused_layout: torch.Tensor | None = None
@@ -1187,8 +1231,13 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         # Resolve the group's representative layer when building metadata.
         # Only opted-in models allocate the additional convolution buffers.
         layers = getattr(self.compilation_config, "static_forward_context", {})
-        if not getattr(layers.get(self._conv_layer_name), "use_contiguous_conv_indices", False):
-            return
+        layer = layers.get(self._conv_layer_name)
+        if not getattr(layer, "use_contiguous_conv_indices", False):
+            if not self._ascend_native_gdn_checkpoints:
+                return
+            # Native-checkpoint GDN layers can use the fused kernel for pure
+            # prefills without changing the convolution layout of decode.
+            self._checkpoint_fused_prefill_only = True
         # Each group owns its buffers, with fixed addresses for graph replay.
         device = self.spec_sequence_masks.device
         self._spec_conv_indices = torch.empty(self.spec_sequence_masks.numel(), dtype=torch.int32, device=device)
@@ -1210,7 +1259,7 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
 
     def _reset_spec_decode_graph_inputs(self, graph_batch_size: int) -> None:
         super()._reset_spec_decode_graph_inputs(graph_batch_size)
-        if self._spec_conv_indices is not None:
+        if self._spec_conv_indices is not None and not self._checkpoint_fused_prefill_only:
             self._spec_conv_indices[:graph_batch_size].fill_(PAD_SLOT_ID)
 
     def _build_fused_metadata(
@@ -1240,8 +1289,27 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             # can redistribute lengths on device; the generic path builds
             # group boundaries and token partitions from those device lengths.
             return None
-        assert not num_spec_decodes or num_accepted_tokens is not None
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens, num_spec_tokens, non_spec_query_cpu = batch
+        if self._checkpoint_fused_prefill_only:
+            if num_prefills != m.num_reqs or num_decodes or num_spec_decodes:
+                return None
+            # Keep the Qwen checkpoint opt-in inside its configured context
+            # range. Originally fused models keep their existing route.
+            options = self.vllm_config.additional_config or {}
+            max_context = options.get("gdn_native_checkpoint_max_tokens", 0)
+            if max_context and m.max_seq_len > max_context:
+                # MRv2 may use the model limit as the batch bound. The host
+                # vector is exact for these prefill rows without a device sync.
+                context_lengths = m.seq_lens_cpu_upper_bound
+                if context_lengths is None:
+                    return None
+                if int(context_lengths[: m.num_reqs].max()) > max_context:
+                    _gdn_checkpoint_logger.info_once(
+                        "Native GDN checkpoint prefill uses generic metadata above %d context tokens",
+                        max_context,
+                    )
+                    return None
+        assert not num_spec_decodes or num_accepted_tokens is not None
         spec_rows = num_spec_decodes
         non_spec_rows = m.num_reqs - num_spec_decodes
         if self.use_full_cuda_graph and num_prefills == 0:
@@ -1394,7 +1462,7 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
                 metadata.spec_decode_metadata.spec_causal_conv1d.output_buffer = self._conv_output_buffer
             if metadata.non_spec_decode_metadata is not None:
                 metadata.non_spec_decode_metadata.causal_conv1d.output_buffer = self._conv_output_buffer
-        if fused or self._spec_conv_indices is None:
+        if fused or self._spec_conv_indices is None or self._checkpoint_fused_prefill_only:
             return metadata
         assert self._non_spec_conv_indices is not None
         # Parent build has finalized request counts and graph padding. Keep
