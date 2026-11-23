@@ -80,6 +80,8 @@ jobs:
       - name: Orchestrate ai-review round
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          # pin the repo so gh never depends on cwd-based inference
+          GH_REPO: ${{ github.repository }}
           # Dedicated credentials for the ai-review agent (same DeepSeek
           # channel as the doc-translate job, separate key so usage is
           # attributable and revocable independently).

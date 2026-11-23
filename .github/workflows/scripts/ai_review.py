@@ -232,7 +232,12 @@ class Orchestrator:
     # ---- thin gh wrappers -------------------------------------------------
 
     def _gh(self, *args: str) -> str:
-        return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout.strip()
+        result = subprocess.run(["gh", *args], capture_output=True, text=True)
+        if result.returncode != 0:
+            # bring-up aid: surface gh's own message instead of losing it
+            print(f"::error::gh {' '.join(args)} failed:\n{result.stderr.strip()}", flush=True)
+            raise SystemExit(1)
+        return result.stdout.strip()
 
     def _gh_json(self, *args: str):
         return json.loads(self._gh(*args))
