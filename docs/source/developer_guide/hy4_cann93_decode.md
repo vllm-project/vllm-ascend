@@ -109,22 +109,23 @@ python -m pytest -q tests/ut/models/test_hy_v4_flash_dfly_dp_graph.py \
 
 ## Contribution checks
 
-On the dependency-matched CANN 9.3 container, CPU-only focused tests passed:
-37 tests covering draft capture eligibility, isolated context, communicator
-scope, eager fallback, Engram fallback, C8 threshold/padding and disabled iHC.
-The initial extended selection passed 63 tests and failed three. The same three
-failures reproduced on unmodified target commit `36c207820` (27 passed): two
-metadata fixtures omit `query_start_loc`, and the shared-memory cleanup fixture
-expects `_shared_buffers` removed by the target branch. These are recorded as
-baseline failures, not passing checks. No active inference source was replaced.
+The correctly bound dependency-matched CANN 9.3 container passed 70 focused
+and extended CPU tests. The three stale target-branch fixtures were updated
+for `query_start_loc` and `_host_buffers`. Tests also cover the private Host UVA
+registration fallback: only the known 507899 registration failure falls back
+to CPU gather; unrelated and cleanup errors propagate.
 
-Historical NPU evidence above predates this integration; this contribution has
-not rerun a full-model NPU benchmark. It remains a draft pending matched
-hardware/accuracy validation and repository CI.
+The integrated optimization-off real-checkpoint baseline completed 128/128
+requests with zero failures, 128000 input and 1024 output tokens per request:
+862.4506 output token/s, mean client TPOT 12.3 ms, draft acceptance 99.4186%,
+and zero preemptions. This is a baseline measurement, not an optimization
+speedup result. The isolated harness uses the same server-specific pageable
+shared-buffer and HIXL resource compatibility for every experimental arm.
 
-Changed Python files pass Ruff 0.14.0 and AST parsing; the added documentation
-and tests pass codespell. Full `bash format.sh ci` was attempted in the isolated
-Linux checkout but hook initialization stalled on GitHub access. The local
-manual-stage pre-commit fallback was also blocked during dependency setup;
-standalone markdownlint installation failed with `SELF_SIGNED_CERT_IN_CHAIN`.
-Full format/Markdown checks remain for CI; they are not reported as passed.
+At merge time the fusion comparison was still running and full-model draft
+graph validation was incomplete. Full Linux `bash format.sh ci` was blocked
+by an uncached offline npm dependency. Local Markdown, spelling and workflow
+checks passed; full repository formatting is not claimed to have passed.
+The user explicitly requested immediate merge without waiting for these
+remaining checks. Historical hardware evidence above remains separate from
+validation of this integrated source.

@@ -282,9 +282,18 @@ class FlashEmbedding(nn.Module):
         if self.map_host_weight and shape[0]:
             from vllm_ascend.models.deepseek_v41.engram.npu import HostUvaBuffer
 
-            buffer = HostUvaBuffer(shape, dtype, torch.device("npu", torch.npu.current_device()))
-            self._host_buffers[leaf] = buffer
-            return buffer.tensor
+            try:
+                buffer = HostUvaBuffer(shape, dtype, torch.device("npu", torch.npu.current_device()))
+            except RuntimeError as exc:
+                # HostUvaBuffer cleans up before re-raising registration errors.
+                # Never hide its cleanup-error subclass or unrelated failures.
+                if type(exc) is not RuntimeError or not str(exc).startswith("aclrtHostRegisterV2 failed: rc=507899 "):
+                    raise
+                self.map_host_weight = False
+                logger.warning("HYV4 Engram host registration unsupported; retaining CPU gather: %s", exc)
+            else:
+                self._host_buffers[leaf] = buffer
+                return buffer.tensor
         parameter = getattr(self.embedding, leaf, None)
         storage = {"device": parameter.device} if parameter is not None else {}
         if self.cpu_offload:
