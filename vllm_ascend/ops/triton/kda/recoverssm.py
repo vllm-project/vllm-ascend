@@ -30,6 +30,10 @@ RECOVERSSM_COMMIT_UB_HEADROOM_ROWS = 2
 RECOVERSSM_VALUE_TILE = 64
 RECOVERSSM_VALUE_TILE_LARGE = 128
 RECOVERSSM_LARGE_TILE_MIN_PROGRAMS = 96
+# Software-pipeline depth for the fused verify's hot loops. The dynamic-bound
+# replay and verify loops need an explicit tl.range(..., num_stages=N) request;
+# the launch-level num_stages default does not pipeline plain range() loops.
+RECOVERSSM_VERIFY_PIPELINE_STAGES = 2
 RECOVERSSM_CONV_TILE = 4096
 RECOVERSSM_CONV_STRIDED_TILE = 256
 
@@ -46,6 +50,17 @@ def recoverssm_replays(num_heads: int, requests: int) -> bool:
     if forced is None:
         return True
     return num_heads * requests >= int(forced)
+
+
+def _recoverssm_prefetch_replay() -> bool:
+    """Whether the fused verify prefetches the whole accepted replay window.
+
+    A/B control for the memory/vector overlap experiment: the prefetch loads
+    every accepted record before the accumulation (a burst the memory engine
+    can drain while the vector engine walks the decay chain). Set the env var
+    to "0" to fall back to the static/dynamic per-token-load variants.
+    """
+    return os.environ.get("VLLM_ASCEND_RECOVERSSM_PREFETCH_REPLAY", "1") != "0"
 
 
 @triton.jit
@@ -170,6 +185,8 @@ def _kda_recoverssm_verify_kernel(
     ALIGN_MODE: tl.constexpr,
     SPEC_QUERY_LEN: tl.constexpr,
     UNROLL_REPLAY: tl.constexpr,
+    PIPELINE_STAGES: tl.constexpr,
+    PREFETCH_REPLAY: tl.constexpr,
 ):
     # Advance a register-held checkpoint and record each token's compact
     # correction/key/gate; persistent checkpoint pages remain read-only.
@@ -273,7 +290,72 @@ def _kda_recoverssm_verify_kernel(
                 # A5 unrolls the replay so the per-token dependency chain and the
                 # dynamic loop bound drop out, matching the commit kernel's
                 # UNROLL_COMMIT; A3 keeps the runtime bound to bound UB use.
-                if UNROLL_REPLAY:
+                if PREFETCH_REPLAY:
+                    # Load every accepted record before the accumulation so the
+                    # strided per-token loads become one burst of independent
+                    # loads. The memory engine can then drain that burst while
+                    # the vector engine walks the decay chain, instead of the
+                    # load/compute serialization that made mte2 + vector equal
+                    # the kernel time. Invalid rows clamp to slot 0 and are
+                    # skipped by the accumulation guard.
+                    k_rows = []
+                    corr_rows = []
+                    raw_g_rows = []
+                    for reverse_offset in tl.static_range(SPEC_QUERY_LEN):
+                        safe_offset = tl.maximum(commit_len - reverse_offset - 1, 0)
+                        k_rows.append(
+                            tl.load(
+                                replay_kg_ptr + safe_offset * stride_kg_pos + offs_k * stride_kg_dim,
+                                mask=mask_k,
+                                other=0.0 if mask_k is not None else None,
+                            ).to(tl.float32)
+                        )
+                        raw_g_rows.append(
+                            tl.load(
+                                replay_kg_ptr + safe_offset * stride_kg_pos + (K + offs_k) * stride_kg_dim,
+                                mask=mask_k,
+                                other=0.0 if mask_k is not None else None,
+                            ).to(tl.float32)
+                        )
+                        corr_rows.append(
+                            tl.load(
+                                replay_correction_ptr + safe_offset * stride_correction_pos + offs_v * stride_correction_dim,
+                                mask=mask_v,
+                                other=0.0 if mask_v is not None else None,
+                            ).to(tl.float32)
+                        )
+                    for reverse_offset in tl.static_range(SPEC_QUERY_LEN):
+                        if reverse_offset < commit_len:
+                            normalized_k = _kda_l2_normalize(k_rows[reverse_offset])
+                            gate = _kda_gate(
+                                raw_g_rows[reverse_offset],
+                                dt_bias,
+                                A,
+                                lower_bound,
+                                USE_LOWER_BOUND,
+                            )
+                            tl.static_assert(gate.dtype == tl.float32)
+                            decay = tl.exp(gate)
+                            final_correction = tl.fma(
+                                corr_rows[reverse_offset][:, None],
+                                normalized_k[None, :] * final_decay,
+                                final_correction,
+                            )
+                            final_decay *= decay
+                            if ALIGN_MODE:
+                                before_boundary = (commit_len - reverse_offset - 1) < boundary_recovery_len
+                                boundary_k = normalized_k * boundary_decay
+                                boundary_correction = tl.where(
+                                    before_boundary,
+                                    tl.fma(
+                                        corr_rows[reverse_offset][:, None],
+                                        boundary_k[None, :],
+                                        boundary_correction,
+                                    ),
+                                    boundary_correction,
+                                )
+                                boundary_decay *= tl.where(before_boundary, decay, 1.0)
+                elif UNROLL_REPLAY:
                     for reverse_offset in tl.static_range(SPEC_QUERY_LEN):
                         if reverse_offset < commit_len:
                             final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
@@ -301,7 +383,7 @@ def _kda_recoverssm_verify_kernel(
                                 ALIGN_MODE,
                             )
                 else:
-                    for reverse_offset in range(tl.minimum(commit_len, SPEC_QUERY_LEN)):
+                    for reverse_offset in tl.range(0, tl.minimum(commit_len, SPEC_QUERY_LEN), num_stages=PIPELINE_STAGES):
                         final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
                             replay_correction_ptr,
                             replay_kg_ptr,
@@ -352,7 +434,7 @@ def _kda_recoverssm_verify_kernel(
                         else mask_state & (boundary_state_idx > null_block_id),
                     )
 
-    for token_offset in range(tl.maximum(query_len - 1, 0)):
+    for token_offset in tl.range(0, tl.maximum(query_len - 1, 0), num_stages=PIPELINE_STAGES):
         token = bos + token_offset
         q = tl.load(
             q_ptr + token * stride_q_token + pid_h * K + offs_k,
@@ -1199,6 +1281,7 @@ def kda_recoverssm_verify(
     replay_boundary_state_indices: torch.Tensor | None = None,
     replay_boundary_recovery_lens: torch.Tensor | None = None,
     replay_align: bool = False,
+    records_pool_size: int | None = None,
 ) -> torch.Tensor:
     """Verify a KDA speculative window.
 
@@ -1229,15 +1312,22 @@ def kda_recoverssm_verify(
         key_dim,
     ):
         raise ValueError("KDA RecoverSSM checkpoint shape is incompatible")
+    batch = state_indices.shape[0]
+    record_blocks = num_blocks if records_pool_size is None else records_pool_size
+    if record_blocks < batch:
+        raise ValueError(
+            f"KDA RecoverSSM records pool ({record_blocks}) is smaller than "
+            f"the batch ({batch})"
+        )
     expected_correction_shape = (
-        num_blocks,
+        record_blocks,
         num_heads,
         spec_query_len,
         value_dim,
     )
     if correction_cache.shape != expected_correction_shape:
         raise ValueError(f"KDA RecoverSSM correction buffer needs shape {expected_correction_shape}")
-    expected_kg_shape = (num_blocks, num_heads, spec_query_len, 2 * key_dim)
+    expected_kg_shape = (record_blocks, num_heads, spec_query_len, 2 * key_dim)
     if kg_cache.shape != expected_kg_shape:
         raise ValueError(f"KDA RecoverSSM key/gate buffer needs shape {expected_kg_shape}")
     if correction_cache.dtype != torch.float32:
@@ -1248,7 +1338,6 @@ def kda_recoverssm_verify(
         raise ValueError("KDA RecoverSSM gate parameters are incompatible")
     if not A_log.is_contiguous() or not dt_bias.is_contiguous():
         raise ValueError("KDA RecoverSSM gate parameters must be contiguous")
-    batch = state_indices.shape[0]
     if query_start_loc.shape[0] != batch + 1:
         raise ValueError("KDA RecoverSSM query metadata is incompatible")
     if total_tokens > batch * spec_query_len:
@@ -1365,8 +1454,10 @@ def kda_recoverssm_verify(
         ALIGN_MODE=replay_align,
         SPEC_QUERY_LEN=spec_query_len,
         UNROLL_REPLAY=is_a5,
+        PIPELINE_STAGES=RECOVERSSM_VERIFY_PIPELINE_STAGES,
+        PREFETCH_REPLAY=_recoverssm_prefetch_replay(),
         num_warps=4,
-        num_stages=2,
+        num_stages=RECOVERSSM_VERIFY_PIPELINE_STAGES,
     )
     return out
 
@@ -1413,6 +1504,7 @@ class KDARecoverSSMCommitContext:
         spec_query_len: int,
         max_num_reqs: int,
         backend: Literal["cute", "triton"] = "triton",
+        records_pool_size: int | None = None,
     ) -> "KDARecoverSSMCommitContext":
         """Bind layer-owned page views and allocate reusable commit-plan buffers.
 
@@ -1420,6 +1512,14 @@ class KDARecoverSSMCommitContext:
         factory on vLLM main, which selects between its CuTe and Triton commit
         kernels. Ascend only implements the Triton plan, so the value is
         ignored.
+
+        ``records_pool_size`` relaxes the default same-pool layout: Ascend
+        packs the correction/key-gate records into the state page pool, so by
+        default the records' first dimension must equal the checkpoint's block
+        count. Upstream vLLM keeps the records in a separate
+        ``max_num_reqs``-sized pool; pass ``records_pool_size`` to reproduce
+        that layout (records rows are then indexed by request slot, and the
+        immediate path must keep every used state index below this size).
         """
         del backend
         if not layers:
@@ -1452,8 +1552,14 @@ class KDARecoverSSMCommitContext:
                 or state.stride()[1:] != state_ref.stride()[1:]
             ):
                 raise ValueError("KDA RecoverSSM layers need matching checkpoint layout")
+        record_blocks = num_blocks if records_pool_size is None else records_pool_size
+        if record_blocks < max_num_reqs:
+            raise ValueError(
+                f"KDA RecoverSSM records pool ({record_blocks}) is smaller than "
+                f"max_num_reqs ({max_num_reqs})"
+            )
         expected_correction_shape = (
-            num_blocks,
+            record_blocks,
             num_heads,
             spec_query_len,
             value_dim,
@@ -1467,7 +1573,7 @@ class KDARecoverSSMCommitContext:
                 or correction_cache.stride()[1:] != correction_ref.stride()[1:]
             ):
                 raise ValueError(f"KDA RecoverSSM correction buffers need float32 shape {expected_correction_shape}")
-        expected_kg_shape = (num_blocks, num_heads, spec_query_len, 2 * key_dim)
+        expected_kg_shape = (record_blocks, num_heads, spec_query_len, 2 * key_dim)
         kg_ref = kg_caches[0]
         for kg_cache in kg_caches:
             if (

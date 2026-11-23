@@ -22,6 +22,12 @@ range of batch sizes and reports where the fused path wins — with
 ``--heads`` set to the model's *local* heads (``num_heads / tp``), the
 ``heads*batch`` crossover is exactly the ``VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS``
 threshold the deferred orchestration uses.
+
+``--blocks`` sizes the paged checkpoint pool, and ``--records`` gives the
+correction/key-gate records their own pool instead of packing them into the
+state pool. Set ``--blocks 492 --records 64`` to reproduce an upstream vLLM
+profile whose checkpoint is ``[492,H,128,128]`` and records are
+``[64,H,4,128]`` (records indexed by request slot, not state block).
 """
 
 from __future__ import annotations
@@ -97,6 +103,7 @@ def _verify_section(
     accept_rate: float | None = None,
     accept_len: int | None = None,
     blocks_override: int | None = None,
+    records_override: int | None = None,
 ) -> tuple[float, float]:
     """Time the stock ``flush + verify`` against ``compact_conv + fused verify``."""
     blocks = batch + 1 if blocks_override is None else blocks_override
@@ -122,7 +129,7 @@ def _verify_section(
         return _make_context(
             num_layers=layers_count, heads=heads, key_dim=key_dim,
             value_dim=value_dim, spec_q=spec_q, blocks=blocks,
-            max_reqs=batch, seed=300,
+            max_reqs=batch, records=records_override, seed=300,
         )
 
     ctx_stock, layers_stock = make_ctx()
@@ -157,6 +164,7 @@ def _verify_section(
                 replay_final_state_indices=replay[1],
                 replay_boundary_state_indices=replay[2],
                 replay_boundary_recovery_lens=replay[3],
+                records_pool_size=records_override,
             )
 
     t_stock = _time(lambda: run(ctx_stock, layers_stock, False), steps, warmup)
@@ -193,6 +201,10 @@ def main() -> None:
     parser.add_argument("--blocks", type=int, default=None,
                         help="state-pool block count (default batch+1); set to "
                              "reproduce a profiled checkpoint shape like 492 blocks")
+    parser.add_argument("--records", type=int, default=None,
+                        help="independent record-pool size (default: share the "
+                             "state pool); set to 64 to reproduce upstream "
+                             "vLLM's max_num_reqs-sized records like [64,H,4,128]")
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--verify", action="store_true",
                         help="also time stock flush+verify vs fused verify")
@@ -222,6 +234,12 @@ def main() -> None:
             f"--blocks ({blocks}) must exceed the batch ({batch}): every request "
             "needs its own state block in the pool"
         )
+    records = args.records
+    if records is not None and records < batch:
+        raise SystemExit(
+            f"--records ({records}) must be at least the batch ({batch}): "
+            "each request needs its own record slot"
+        )
     max_reqs = batch
 
     state_indices = torch.arange(1, batch + 1, dtype=torch.int32, device=DEVICE)
@@ -232,8 +250,11 @@ def main() -> None:
     num_accepted = _accepted_lengths(batch, spec_q, args.accept_rate, args.accept_len)
 
     ckpt_mb = blocks * heads * value_dim * key_dim * 4 / 2**20
+    pool_str = f"blocks={blocks}"
+    if records is not None:
+        pool_str += f" records={records}"
     print(f"config: layers={layers} batch={batch} heads={heads} key_dim={key_dim} "
-          f"value_dim={value_dim} spec_q={spec_q} blocks={blocks}")
+          f"value_dim={value_dim} spec_q={spec_q} {pool_str}")
     if args.accept_len is not None:
         accept = f"accept_len={args.accept_len}"
     elif args.accept_rate is not None:
@@ -249,7 +270,7 @@ def main() -> None:
         for b in batches:
             t_stock, t_fused = _verify_section(
                 layers, heads, key_dim, value_dim, spec_q, b, steps, args.warmup,
-                args.accept_rate, args.accept_len, args.blocks,
+                args.accept_rate, args.accept_len, args.blocks, records,
             )
             rows.append((b, heads * b, t_stock, t_fused))
         print("sweep summary (fused wins when saving > 0)")
@@ -273,7 +294,8 @@ def main() -> None:
     def make_ctx(seed: int):
         return _make_context(
             num_layers=layers, heads=heads, key_dim=key_dim, value_dim=value_dim,
-            spec_q=spec_q, blocks=blocks, max_reqs=max_reqs, seed=seed,
+            spec_q=spec_q, blocks=blocks, max_reqs=max_reqs,
+            records=records, seed=seed,
         )[0]
 
     ctx_imm = make_ctx(100)
@@ -336,7 +358,7 @@ def main() -> None:
     if args.verify:
         _verify_section(
             layers, heads, key_dim, value_dim, spec_q, batch, steps, args.warmup,
-            args.accept_rate, args.accept_len,
+            args.accept_rate, args.accept_len, args.blocks, records,
         )
 
 

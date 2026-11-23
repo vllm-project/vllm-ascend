@@ -59,6 +59,7 @@ def _make_layer(
     value_dim: int = VALUE_DIM,
     spec_q: int = SPEC_QUERY_LEN,
     blocks: int = NUM_BLOCKS,
+    records: int | None = None,
     seed: int = 0,
 ) -> SimpleNamespace:
     """Build a minimal layer compatible with KDARecoverSSMCommitContext.create.
@@ -66,6 +67,10 @@ def _make_layer(
     The context requires ``layer.kv_cache`` to be a 4-tuple of:
         (conv_state, state_checkpoint, correction_cache, key_gate_cache)
     plus A_log, dt_bias, local_num_heads, head_dim, gate_lower_bound.
+
+    ``records`` sizes the correction/key-gate pool independently of the
+    checkpoint's block count (upstream vLLM keeps records in a separate
+    ``max_num_reqs`` pool); when omitted the records share the state pool.
     """
     g = torch.Generator(device=DEVICE).manual_seed(seed)
 
@@ -82,8 +87,9 @@ def _make_layer(
         conv_state = randn(blocks, conv_len, heads * value_dim)
     # State checkpoint: FP32 so the auto backend picks "fp32_deferred".
     checkpoint = randn(blocks, heads, value_dim, key_dim, dtype=torch.float32) * 0.1
-    correction = randn(blocks, heads, spec_q, value_dim, dtype=torch.float32)
-    kg_cache = randn(blocks, heads, spec_q, 2 * key_dim)
+    record_rows_capacity = blocks if records is None else records
+    correction = randn(record_rows_capacity, heads, spec_q, value_dim, dtype=torch.float32)
+    kg_cache = randn(record_rows_capacity, heads, spec_q, 2 * key_dim)
 
     return SimpleNamespace(
         kv_cache=(conv_state, checkpoint, correction, kg_cache),
@@ -103,13 +109,23 @@ def _make_context(
     spec_q: int = SPEC_QUERY_LEN,
     blocks: int = NUM_BLOCKS,
     max_reqs: int = 8,
+    records: int | None = None,
     seed: int = 0,
 ) -> tuple[KDARecoverSSMCommitContext, list[SimpleNamespace]]:
     """Build a fresh context + layers. Each call gets independent tensors."""
-    layers = [_make_layer(heads, key_dim, value_dim, spec_q, blocks, seed + i)
-              for i in range(num_layers)]
+    layers = [
+        _make_layer(
+            heads, key_dim, value_dim, spec_q, blocks,
+            records=records, seed=seed + i,
+        )
+        for i in range(num_layers)
+    ]
     ctx = KDARecoverSSMCommitContext.create(
-        layers, spec_query_len=spec_q, max_num_reqs=max_reqs, backend="triton"
+        layers,
+        spec_query_len=spec_q,
+        max_num_reqs=max_reqs,
+        backend="triton",
+        records_pool_size=records,
     )
     return ctx, layers
 
