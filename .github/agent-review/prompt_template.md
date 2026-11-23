@@ -1,11 +1,13 @@
 {{INSTRUCTIONS}}
 
 {{ENVIRONMENT}}
+
 ## Knowledge base map
 
 {{KB_MAP}}
 
 {{WAIVED_SECTION}}
+
 ## Domains this PR touches
 
 {{DOMAINS}}
