@@ -48,15 +48,14 @@ DRAM prefetch per the official KV pool guide (activated only on mooncake
 builds exposing ``ExistOptions``; on older builds the DRAM-only tier runs and
 the SSD store stays armed-but-idle).
 
-``memcache_layerwise_tier3`` is skipped when ``TP_SIZE < 2``: with a single
-local_service process the whole layerwise save is pre-allocated on one DRAM
-tier, and the 4GB default tier is smaller than the ~4.5GB a single 16128-token
-prefix needs, so the first save is abandoned and the pool reports 0 of 16128
-hits. Sizing the tier to at least the TP=2 aggregate
-(``KV_POOL_MEMCACHE_DRAM_TIER=8GB``, 16GB recommended) makes TP=1 pass
-(verified on 8GB and 16GB tiers); running it still needs the explicit opt-in
-below plus the raw block device. See the skip reason in the test body for the
-root cause and the configurations that were ruled out.
+``memcache_layerwise_tier3`` runs at TP=1 on hosts that pass it the raw UBS IO
+block device (the a2-loop-1 runner mounts its loop device at ``/mnt/boostio``):
+the tier-3 DRAM tier defaults to 8GB, which fits the layerwise save
+pre-allocation of a single 16128-token prefix (~4.5GB; the 4GB tier-2 default
+overflows it and the pool reports 0 of 16128 hits - verified on the 148 box,
+where 8GB and 16GB both pass with full hits). The TP<2 skip therefore fires
+only when the tier is explicitly reduced below 8GB; see the skip reason in the
+test body for the root cause and the configurations that were ruled out.
 
 Environment knobs:
 
@@ -65,9 +64,13 @@ Environment knobs:
 - ``KV_POOL_AB_MODE``: ``gate`` (default, A/B comparison must pass) or
   ``record`` (only log the verdict);
 - ``KV_POOL_MEMCACHE_UBSIO_DISK``: raw block device passed to the container
-  for the memcache tier-3 UBS IO storage (default ``/dev/ubsio0``; loop
+  for the memcache tier-3 UBS IO storage (default ``/mnt/boostio``, the
+  dedicated loop raw device the a2-loop-1 runner mounts into its job
+  containers; loop
   devices are a documented option 鈥?dedicated, unmounted, no filesystem
-  signature);
+  signature) and must be the device node itself, not the backing image
+  file - the ubsio SDK rejects non-block paths late and cryptically, so
+  the test checks it up front. Override with KV_POOL_MEMCACHE_UBSIO_DISK;
 - ``KV_POOL_MEMCACHE_UBSIO_DEVICES``: UBS IO standalone device count (default
   ``TP_SIZE``, one per DRAM-enabled local service);
 - ``KV_POOL_MEMCACHE_DRAM_TIER``: memcache pool DRAM tier size written to
@@ -113,6 +116,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -363,10 +367,37 @@ TTFT_P95_LIMITS = {
 # gate stays an order of magnitude below a real regression (a full miss is ~12x
 # slower at ~0.1x throughput), so 1.75/0.55 still catches pool defects.
 THROUGHPUT_LIMITS = {"default": 0.70, "memcache_bulk_tier2": 0.55, "memcache_layerwise_tier3": 0.30}
-MEMCACHE_UBSIO_DISK = os.environ.get("KV_POOL_MEMCACHE_UBSIO_DISK", "/dev/ubsio0")
+# The a2-loop-1 runner mounts its dedicated loop raw device into the job
+# container at /mnt/boostio; other hosts override via the env var (the 145/148
+# dev boxes pass /dev/loopN).
+MEMCACHE_UBSIO_DISK = os.environ.get("KV_POOL_MEMCACHE_UBSIO_DISK", "/mnt/boostio")
 MEMCACHE_UBSIO_DEVICES = int(os.environ.get("KV_POOL_MEMCACHE_UBSIO_DEVICES", TP_SIZE))
 MEMCACHE_UBSIO_MEM_GB = int(os.environ.get("KV_POOL_MEMCACHE_UBSIO_MEM_GB", "8"))
-MEMCACHE_DRAM_TIER = os.environ.get("KV_POOL_MEMCACHE_DRAM_TIER", DRAM_TIER)
+# Tier-3 default: the layerwise save pre-allocates every layer group of the
+# prefix before writing, and one 16128-token prefix needs ~4.5GB, so the 4GB
+# tier-2 default overflows and the pool reports 0 of 16128 hits. 16GB also
+# covers one prefix plus working set (verified on the 148 box:
+# 8GB and 16GB both pass, 4GB fails; 16GB is the safer choice when several
+MEMCACHE_TIER3_DRAM_TIER = os.environ.get("KV_POOL_MEMCACHE_DRAM_TIER", "8GB")
+
+
+def _dram_tier_gb(spec: str) -> float:
+    """Parse a tier size like ``16GB`` / ``512MB`` / bytes into gigabytes."""
+    raw = spec.strip().upper()
+    try:
+        if raw.endswith("GB"):
+            return float(raw[:-2])
+        if raw.endswith("G"):
+            return float(raw[:-1])
+        if raw.endswith("MB"):
+            return float(raw[:-2]) / 1024.0
+        if raw.endswith("M"):
+            return float(raw[:-1]) / 1024.0
+        return float(raw) / (1024.0**3)
+    except ValueError:
+        return 0.0
+
+
 # Only the keys memcache_hybrid 1.3.0 actually knows are exposed; anything else is
 # dropped by the service silently, which is how an earlier triage lost time on a
 # misspelt watermark. Each is opt-in and written only when set.
@@ -513,7 +544,7 @@ def _memcache_pool_config(tier_ssd: bool) -> MemcacheKVPoolConfig:
         # the defaults never trigger at this utilization and explicit ones
         # only activate the broken eviction path.
         local["ock.mmc.local_service.storage.enabled"] = True
-        local["ock.mmc.local_service.dram.size"] = MEMCACHE_DRAM_TIER
+        local["ock.mmc.local_service.dram.size"] = MEMCACHE_TIER3_DRAM_TIER
         local["ubsio.disk.path"] = MEMCACHE_UBSIO_DISK
         local["ubsio.mem.size_in_gb"] = MEMCACHE_UBSIO_MEM_GB
         local["ubsio.standalone.device_count"] = MEMCACHE_UBSIO_DEVICES
@@ -1209,7 +1240,13 @@ def test_qwen38_kv_pool_ab_a2(backend: str, use_layerwise: bool):
     tier = "tier3-ssd" if tier_ssd else "tier2-dram"
     case = f"qwen38_tp{TP_SIZE}_{backend}_{mode}_{tier}"
 
-    if backend == "memcache" and tier_ssd and TP_SIZE < 2 and not MEMCACHE_TIER3_ALLOW_TP1:
+    if (
+        backend == "memcache"
+        and tier_ssd
+        and TP_SIZE < 2
+        and _dram_tier_gb(MEMCACHE_TIER3_DRAM_TIER) < 8.0
+        and not MEMCACHE_TIER3_ALLOW_TP1
+    ):
         # Root cause of the TP=1 0-hit false negative (memcache_hybrid 1.3.0,
         # traced from the meta debug log on the 80.48.37.148 box): the layerwise
         # save pre-allocates every layer group before writing any blob, and one
@@ -1246,7 +1283,8 @@ def test_qwen38_kv_pool_ab_a2(backend: str, use_layerwise: bool):
             "local_service process, the save is abandoned and the pool reports "
             "0 of 16128 expected hits (tier-2 on the same card reports 16128). "
             "Run it with KV_POOL_MEMCACHE_TIER3_ALLOW_TP1=1 plus "
-            "KV_POOL_MEMCACHE_DRAM_TIER>=8GB (verified passing at 8GB and 16GB)."
+            "KV_POOL_MEMCACHE_DRAM_TIER>=8GB (verified passing at 8GB and 16GB). "
+            "The tier-3 default is 8GB, so this fires only when it is reduced."
         )
 
     _start_stall_watchdog()
@@ -1289,6 +1327,18 @@ def test_qwen38_kv_pool_ab_a2(backend: str, use_layerwise: bool):
             "(no mount point, no filesystem signature; a loop device is fine 鈥?provision "
             "one on the host, e.g. truncate -s 64G file && losetup -f --show file, and "
             "pass it into the container with --device; set KV_POOL_MEMCACHE_UBSIO_DISK)."
+        )
+
+    if backend == "memcache" and tier_ssd and not stat.S_ISBLK(os.stat(MEMCACHE_UBSIO_DISK).st_mode):
+        # Rejected up front because the ubsio SDK aborts late and cryptically on
+        # a non-block path ("Disk path is not available for raw cache ... the
+        # configured path is not a block device") after the local service is
+        # already half-started, which reads like a pool failure.
+        pytest.skip(
+            f"memcache tier-3 UBS IO path {MEMCACHE_UBSIO_DISK!r} is not a block "
+            "device: bind-mount the loop device node itself (e.g. --device "
+            "/dev/loopN or -v /dev/loopN:/mnt/boostio), not the backing image "
+            "file, or point KV_POOL_MEMCACHE_UBSIO_DISK at the device node."
         )
 
     scenario = f"{backend}_{'layerwise' if use_layerwise else 'bulk'}_{'tier3' if tier_ssd else 'tier2'}"
