@@ -218,26 +218,6 @@ to fit the largest checkpoint tensor. Leave additional NPU memory for the
 trainer to stage an input tensor. If memory is tight, use unpacked IPC or move
 the trainer to a separate NPU and use HCCL.
 
-### Speculative draft weight updates
-
-With a model-based speculative decoder and the HCCL weight-transfer backend,
-call `start_draft_weight_update()` instead of
-`start_weight_update()`. Send the draft model's weight chunks through the same
-`update_weights()` interface, then call `finish_weight_update()`. The worker
-selects the draft model and its model configuration for that session and
-restores the transfer engine's target model afterward.
-
-Draft weight updates require Model Runner V2. The worker selects and restores
-the receiver through the transfer engine's public target-selection interfaces.
-Ordinary target updates retain the existing Ascend lifecycle. This feature
-does not enable draft updates for IPC or other transfer backends.
-
-Generation must remain paused throughout the update. Overlapping target and
-draft update sessions are rejected. Failed updates do not roll back partially
-loaded weights or guarantee that the reload state is reusable. After a failed
-weight update, restart the affected inference workers and load a complete,
-known-good checkpoint before resuming generation.
-
 #### Sparse HCCL
 
 For sparse checkpoint updates, follow the upstream [Sparse NCCL guide](https://docs.vllm.ai/en/latest/training/weight_transfer/nccl/#sparse-nccl) for patch semantics and the update lifecycle. On Ascend, select `sparse_hccl` and enable RL mode:
@@ -257,6 +237,46 @@ Sparse HCCL requires unquantized ND weights and static expert placement with
 EPLB disabled. FRACTAL_NZ, fused MC2 expert weight lists, draft models, and packed
 sparse updates are unsupported. Updates apply in place: after a failed update,
 keep generation paused until the baseline is restored or the engine restarts.
+
+### Speculative draft weight updates
+
+Target and draft weights are updated in separate sessions. The current draft
+weight-update support is:
+
+| Transfer backend | Deployment | Draft weight updates | NZ mode |
+| --- | --- | --- | --- |
+| `hccl` | Trainer and rollout server use separate NPUs | Supported; E2E coverage for MTP, EAGLE3, DFlash and DSpark | Unsupported |
+| NPU IPC (`ipc` in server configuration) | Trainer and rollout server share NPUs | Not validated | Unsupported |
+
+Draft updates require `--pipeline-parallel-size 1` and `weight_nz_mode=0`.
+RL mode disables NZ automatically. Use HCCL for the workflow below.
+
+Start an HCCL-enabled server with compatible target and draft checkpoints:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0 VLLM_WORKER_MULTIPROC_METHOD=spawn \
+vllm serve /path/to/target-checkpoint \
+    --speculative-config '{"method": "eagle3", "model": "/path/to/eagle3-draft-checkpoint", "num_speculative_tokens": 2}' \
+    --pipeline-parallel-size 1 \
+    --weight-transfer-config '{"backend": "hccl"}' \
+    --additional-config '{"rl_config": {"enabled": true}}'
+```
+
+Replace the method and draft checkpoint with a compatible `mtp`, `eagle3`,
+`dflash` or `dspark` configuration. Reserve a separate NPU for the trainer.
+
+The control flow is:
+
+1. initialize the HCCL transfer engine;
+2. pause generation;
+3. start the draft weight update;
+4. transfer the draft weights;
+5. finish the weight update;
+6. resume generation only after success.
+
+The repository contains runnable tests for draft weight transfer:
+
+- [`test_draft_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/two_card/rlhf/weight_transfer/hccl/test_draft_hccl.py)
 
 ### Pause and resume generation
 
