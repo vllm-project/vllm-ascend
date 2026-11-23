@@ -1,0 +1,8 @@
+pr: 22823
+entries:
+  - category: bugfix
+    text: >-
+      Fixed DeepSeek-V4.1-Flash startup failures on A5 when pipeline-parallel
+      workers prepare attention metadata in a different execution order.
+    model: deepseek-v4.1
+    hardware: [A5]
