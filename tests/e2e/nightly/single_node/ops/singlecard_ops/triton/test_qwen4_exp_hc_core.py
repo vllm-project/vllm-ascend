@@ -8,7 +8,6 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 from vllm.models.qwen4_exp.amd import hyperconnection as upstream_hc
-from vllm.triton_utils import HAS_TRITON
 
 import vllm_ascend.models.qwen4_exp.model  # noqa: F401
 from vllm_ascend.ops.triton.qwen4_exp.hc import (
@@ -27,9 +26,6 @@ LOWRANK_SIZE = 320
 DTYPE = torch.bfloat16
 ATOL = 3e-2
 RTOL = 3e-2
-
-pytestmark = pytest.mark.skipif(not HAS_TRITON, reason="Triton is not available")
-
 
 def test_qwen4_exp_hc_model_binding_and_custom_op_registration() -> None:
     functions = {
