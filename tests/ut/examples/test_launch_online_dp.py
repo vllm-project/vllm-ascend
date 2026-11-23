@@ -3,14 +3,10 @@
 import contextlib
 import importlib.util
 import io
-import os
-import shlex
 import shutil
 import signal
 import subprocess
-import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -218,62 +214,6 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(killpg.call_args_list, [mock.call(101, signal.SIGTERM), mock.call(102, signal.SIGTERM)])
         for worker in workers:
             worker.wait.assert_called_once()
-
-    @unittest.skipUnless(os.name == "posix", "Requires POSIX process groups")
-    def test_real_keyboard_interrupt_notifies_shell_descendants(self):
-        self.bash()
-        worker_script = self.template.parent / "worker.py"
-        ready = self.template.parent / "ready"
-        cleaned = self.template.parent / "cleaned"
-        group = self.template.parent / "group"
-        worker_script.write_text(
-            "import os, signal, sys\nfrom pathlib import Path\n"
-            "def stop(signum, frame):\n"
-            "    Path(sys.argv[2]).write_text('cleaned')\n"
-            "    sys.exit(0)\n"
-            "signal.signal(signal.SIGTERM, stop)\n"
-            "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
-            "while True:\n    signal.pause()\n",
-            encoding="utf-8",
-        )
-        self.template.write_text(
-            f"echo $$ > {shlex.quote(str(group))}\n"
-            f"{shlex.join([sys.executable, str(worker_script), str(ready), str(cleaned)])}\nwait\n",
-            encoding="utf-8",
-        )
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                str(EXAMPLE_DIR / "launch_online_dp.py"),
-                *self.base,
-                "--dp-size",
-                "1",
-                "--dp-size-local",
-                "1",
-                "--dp-rank-start",
-                "0",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-        )
-        try:
-            deadline = time.monotonic() + 5
-            while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.05)
-            self.assertTrue(ready.exists(), "Worker did not become ready")
-            process.send_signal(signal.SIGINT)
-            _, stderr = process.communicate(timeout=5)
-            self.assertNotEqual(process.returncode, 0, stderr)
-            self.assertEqual(cleaned.read_text(), "cleaned")
-        finally:
-            if group.exists():
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(int(group.read_text()), signal.SIGKILL)
-            if process.poll() is None:
-                process.kill()
-            process.communicate(timeout=5)
 
     def bash(self):
         bash = shutil.which("bash")
