@@ -160,14 +160,16 @@ class TestAgentOutputContract:
 @pytest.mark.parametrize(
     "body,expected",
     [
-        ("@ai-review please re-check", True),
+        ("/ai-review please re-check", True),
+        ("/ai-review\nwhat about this line?", True),
         ("just chatting with humans", False),
-        ("@ai-reviewer is someone else", True),  # substring mention is fine for gate
+        ("/ai-reviewer is someone else", False),  # boundary: longer token
+        ("@ai-review is not an account mention", False),  # @ form no longer matches
         ("", False),
     ],
 )
 def test_mention_gate(body, expected):
-    assert (ai.MENTION_TOKEN in body) == expected
+    assert bool(ai.MENTION_RE.search(body)) == expected
 
 
 @pytest.mark.parametrize(
@@ -175,8 +177,9 @@ def test_mention_gate(body, expected):
     [
         ("/ai-review-stop", True),
         ("text /ai-review-stop trailing", True),
+        ("/ai-review-stopwatch", False),  # boundary: longer token
         ("/ai-review stopped by history", False),
     ],
 )
 def test_stop_gate(body, expected):
-    assert (ai.STOP_COMMAND in body) == expected
+    assert bool(ai.STOP_RE.search(body)) == expected

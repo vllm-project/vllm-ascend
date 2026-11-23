@@ -8,7 +8,7 @@ a machine-readable signature block, no external storage):
 
     labeled(ai-review, by write user)   -> round 1 agent review
     author push (synchronize)           -> revoke `ai-review-passed`, re-review
-    author comment with @ai-review      -> next round (ignores plain comments)
+    author comment with /ai-review      -> next round (ignores plain comments)
     reviewer removes label /ai-review-stop -> stopped, the agent stays silent
 
 Termination: pass verdict (MUST-FIX == 0), per-push round cap (5), reviewer
@@ -31,8 +31,11 @@ import yaml
 
 AI_REVIEW_LABEL = "ai-review"
 AI_REVIEW_PASSED_LABEL = "ai-review-passed"
-MENTION_TOKEN = "@ai-review"
-STOP_COMMAND = "/ai-review-stop"
+# Slash command style, consistent with the repo's other PR commands (/e2e,
+# /rerun, ...): no account is implied. The negative lookahead keeps
+# `/ai-review-stop` and hypothetical `/ai-reviewer` from matching.
+MENTION_RE = re.compile(r"/ai-review(?![\w-])")
+STOP_RE = re.compile(r"/ai-review-stop(?![\w-])")
 BOT_MARKER = "ai-review-orchestrator"
 SIGNATURE_RE = re.compile(r"<!-- ai-review: ([^>]+) -->")
 FIELD_RE = re.compile(r"(\w+)=(\S+)")
@@ -511,7 +514,7 @@ class Orchestrator:
             return 0
 
         # Reviewer stop command.
-        if STOP_COMMAND in body:
+        if STOP_RE.search(body):
             if not self.actor_can_write():
                 print(f"actor {self.actor} lacks write access; ignoring stop", flush=True)
                 return 0
@@ -521,8 +524,8 @@ class Orchestrator:
             )
             return 0
 
-        # Only an explicit mention counts as addressing the agent.
-        if MENTION_TOKEN not in body:
+        # Only an explicit slash command counts as addressing the agent.
+        if not MENTION_RE.search(body):
             return 0
         if self.state.state in ("passed", "none"):
             self.post_notice(
