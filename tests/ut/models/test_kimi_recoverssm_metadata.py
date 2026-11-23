@@ -10,7 +10,7 @@ from vllm.config.compilation import CUDAGraphMode
 from tests.ut.ops.test_gdn_attn_builder import BatchSpec, _make_builder, create_common_attn_metadata
 from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
 from vllm_ascend.models.kimi_k3.recoverssm_metadata import AscendKimiKDARecoverSSMMetadataBuilder
-from vllm_ascend.ops import kda_pcp
+from vllm_ascend.ops import recurrent_pcp
 
 
 def test_context_is_reused_only_while_all_layer_buffers_remain_bound(monkeypatch):
@@ -50,10 +50,7 @@ def test_recoverssm_pcp_builder_allocates_buffers_without_mutating_runner_config
 
     with (
         patch.object(AscendKDARecoverSSMMetadataBuilder, "__init__", init_base),
-        patch(
-            "vllm_ascend.ops.kda_pcp.get_pcp_group",
-            return_value=SimpleNamespace(rank_in_group=1),
-        ),
+        patch.object(recurrent_pcp, "get_pcp_group", return_value=SimpleNamespace(rank_in_group=1)),
     ):
         builder = AscendKimiKDARecoverSSMMetadataBuilder(None, [], config, torch.device("cpu"))
 
@@ -76,13 +73,15 @@ def test_recoverssm_pcp_build_attaches_permutations_and_padding_masks():
         local_num_tokens=2,
         hidden_restore_idx=torch.tensor([0, 2, 1]),
         local_token_indices=torch.tensor([0, 2]),
+        global_batch=SimpleNamespace(num_tokens=3),
     )
+    common = SimpleNamespace(pcp_context=context)
     metadata = SimpleNamespace(pcp_context=context)
 
     with patch.object(AscendKDARecoverSSMMetadataBuilder, "build", return_value=metadata) as build_base:
-        result = builder.build("batch", fast_build=True)
+        result = builder.build(0, common, fast_build=True)
 
-    build_base.assert_called_once_with("batch", fast_build=True)
+    build_base.assert_called_once_with(0, common, fast_build=True)
     assert result.pcp_restore_idx.tolist() == [0, 2, 1, 0]
     assert result.pcp_restore_mask.tolist() == [True, True, True, False]
     assert result.pcp_local_idx.tolist() == [0, 2]
@@ -103,7 +102,7 @@ def test_recoverssm_real_builder_propagates_pcp_context(for_capture):
         assert config.compilation_config.max_cudagraph_capture_size == 2
         return builder
 
-    with patch.object(kda_pcp, "get_pcp_group", return_value=group):
+    with patch.object(recurrent_pcp, "get_pcp_group", return_value=group):
         builder = _make_builder(
             device=device,
             num_heads=32,
