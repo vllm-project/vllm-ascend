@@ -63,14 +63,14 @@ Environment knobs:
   ``Eco-Tech/Qwen3.8-27B-w8a8``);
 - ``KV_POOL_AB_MODE``: ``gate`` (default, A/B comparison must pass) or
   ``record`` (only log the verdict);
-- ``KV_POOL_MEMCACHE_UBSIO_DISK``: raw block device passed to the container
-  for the memcache tier-3 UBS IO storage (default ``/mnt/boostio``, the
-  dedicated loop raw device the a2-loop-1 runner mounts into its job
-  containers; loop
-  devices are a documented option 鈥?dedicated, unmounted, no filesystem
-  signature) and must be the device node itself, not the backing image
-  file - the ubsio SDK rejects non-block paths late and cryptically, so
-  the test checks it up front. Override with KV_POOL_MEMCACHE_UBSIO_DISK;
+- ``KV_POOL_MEMCACHE_UBSIO_DISK``: raw block device used for the memcache
+  tier-3 UBS IO storage. Default ``/mnt/boostio`` (hosts that bind-mount the
+  device node at that path); the a2-loop-1 CI runner's device plugin injects
+  the node at the conventional ``/dev/loop10`` instead, so the workflow sets
+  this variable to ``/dev/loop10`` for job containers. The path must be a
+  *block device* - dedicated, unmounted, no filesystem signature, and not the
+  backing image file: the ubsio SDK rejects non-block paths late and
+  cryptically, so the test checks it up front;
 - ``KV_POOL_MEMCACHE_UBSIO_DEVICES``: UBS IO standalone device count (default
   ``TP_SIZE``, one per DRAM-enabled local service);
 - ``KV_POOL_MEMCACHE_DRAM_TIER``: memcache pool DRAM tier size written to
