@@ -1,0 +1,8 @@
+pr: 22557
+entries:
+  - category: feature
+    text: >-
+      Added do_virtual health probes to MooncakeConnectorV2 in both pull and
+      layerwise push modes. Set do_virtual=true with do_remote_prefill=true in
+      kv_transfer_params to exercise D-side inference without a live P service;
+      generated text is not an accuracy result because historical KV is not transferred.
