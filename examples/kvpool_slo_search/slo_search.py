@@ -134,6 +134,7 @@ def parse_metrics(text, percentile, latency_unit, stage="total", require_cache=F
     result = {}
     counters: dict[str, float] = {}
     labels = {
+        "Concurrency": ("observed_avg_concurrency", None),
         "Output Token Throughput": ("output_tokens_per_s", "token/s"),
         "Total Token Throughput": ("total_tokens_per_s", "token/s"),
         "Prefill Token Throughput": ("prefill_tokens_per_s", "token/s"),
@@ -202,7 +203,10 @@ def parse_metrics(text, percentile, latency_unit, stage="total", require_cache=F
             continue
         if "VALUE" not in header:
             raise TrialError(f"{name} table has no Value column")
-        value, cell_unit = quantity(cells[header.index("VALUE")])
+        cell = cells[header.index("VALUE")]
+        if name == "Concurrency" and (cell.upper() in ("", "N/A") or (stage != "total" and "STAGE" not in header)):
+            continue
+        value, cell_unit = quantity(cell)
         key, expected_unit = labels[name]
         if cell_unit and row_unit and cell_unit != row_unit:
             raise TrialError(f"conflicting units for {name}")
@@ -241,6 +245,7 @@ def metric_text(value):
 def format_trial_metrics(row):
     headers = [
         "Stage",
+        "Average concurrency",
         "TTFT mean (ms)",
         "TTFT P90 (ms)",
         "TPOT mean (ms)",
@@ -251,6 +256,7 @@ def format_trial_metrics(row):
     ]
     values = [
         row["stage"],
+        metric_text(row["observed_avg_concurrency"]),
         metric_text(row["ttft_mean_ms"]),
         metric_text(row["ttft_p90_ms"]),
         metric_text(row["tpot_mean_ms"]),
@@ -278,7 +284,6 @@ class Search:
     def __init__(self, args, forwarded, output):
         self.args, self.forwarded, self.output = args, forwarded, output
         self.history = []
-        self.confirmed = {}
 
     def record(self, row):
         self.history.append(row)
@@ -320,6 +325,7 @@ class Search:
             "returncode",
             "log",
             "error",
+            "observed_avg_concurrency",
         ]
         with (self.output / "history.csv").open("a", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
@@ -362,6 +368,7 @@ class Search:
             trial=trial,
             phase=phase,
             concurrency=concurrency,
+            observed_avg_concurrency=None,
             data_num=count,
             status="error",
             passed=False,
@@ -450,12 +457,20 @@ class Search:
         print(format_trial_metrics(row), flush=True)
         return row
 
+    def probe(self, concurrency, phase):
+        """Require two failed trials before treating a search point as failing."""
+        if self.trial(concurrency, phase)["passed"]:
+            return True
+        if not self.trial(concurrency, phase)["passed"]:
+            return False
+        return self.trial(concurrency, phase)["passed"]
+
     def run(self):
         a = self.args
         low, high = a.min_concurrency - 1, None
         current = a.start_concurrency
         while True:
-            if self.trial(current, "expand")["passed"]:
+            if self.probe(current, "expand"):
                 low = current
                 if current == a.max_concurrency:
                     break
@@ -466,23 +481,19 @@ class Search:
         if high is not None:
             while high - low > 1:
                 mid = (low + high) // 2
-                if self.trial(mid, "bisect")["passed"]:
+                if self.probe(mid, "bisect"):
                     low = mid
                 else:
                     high = mid
 
         if a.confirm_runs:
-            # Fresh repetitions at each neighbor. All repetitions must pass.
             upper = min(a.max_concurrency, max(low, a.min_concurrency) + a.boundary_radius)
-            lower = max(a.min_concurrency, low - a.boundary_radius)
-            for concurrency in range(upper, lower - 1, -1):
-                self.confirm(concurrency)
-            winner = self.winner()
-            while winner is None and lower > a.min_concurrency:
-                lower -= 1
-                self.confirm(lower)
-                winner = self.winner()
-            rows = self.confirmed[winner] if winner is not None else []
+            winner, rows = None, []
+            for concurrency in range(upper, a.min_concurrency - 1, -1):
+                confirmed_rows = self.confirm(concurrency)
+                if confirmed_rows is not None:
+                    winner, rows = concurrency, confirmed_rows
+                    break
         else:
             winner = low if low >= a.min_concurrency else None
             rows = [r for r in self.history if r["passed"] and r["concurrency"] == winner]
@@ -497,6 +508,7 @@ class Search:
             ],
             "min_success_rate": a.min_success_rate,
             "highest_passing_concurrency": winner,
+            "observed_avg_concurrency": None,
             "search_range": [a.min_concurrency, a.max_concurrency],
             "at_search_limit": winner == a.max_concurrency,
             "confirmation_runs": a.confirm_runs,
@@ -514,6 +526,9 @@ class Search:
             + " found under an approximately monotonic SLO assumption; not an exhaustive scan.",
         }
         if winner is not None:
+            observed_concurrencies = [r["observed_avg_concurrency"] for r in rows]
+            if all(value is not None for value in observed_concurrencies):
+                summary["observed_avg_concurrency"] = statistics.mean(observed_concurrencies)
             summary["throughput"] = {
                 "output_tokens_per_s_mean": statistics.mean(r["output_tokens_per_s"] for r in rows),
                 "requests_per_s_mean": statistics.mean(r["requests_per_s"] for r in rows),
@@ -534,11 +549,13 @@ class Search:
         return summary
 
     def confirm(self, concurrency):
-        self.confirmed[concurrency] = [self.trial(concurrency, "confirm") for _ in range(self.args.confirm_runs)]
-
-    def winner(self):
-        passed = [c for c, rows in self.confirmed.items() if all(r["passed"] for r in rows)]
-        return max(passed) if passed else None
+        rows = []
+        for _ in range(self.args.confirm_runs):
+            row = self.trial(concurrency, "confirm")
+            if not row["passed"]:
+                return None
+            rows.append(row)
+        return rows
 
 
 def arguments(argv=None):
@@ -564,9 +581,17 @@ def arguments(argv=None):
     parser.add_argument("--start-concurrency", type=int, default=8)
     parser.add_argument("--max-concurrency", type=int, default=1024)
     parser.add_argument(
-        "--confirm-runs", type=int, default=0, help="repetitions per boundary point; 0 skips confirmation (default)"
+        "--confirm-runs",
+        type=int,
+        default=0,
+        help="consecutive passes required per candidate (0 disables confirmation)",
     )
-    parser.add_argument("--boundary-radius", type=int, default=1)
+    parser.add_argument(
+        "--boundary-radius",
+        type=int,
+        default=1,
+        help="number of points above the search candidate to start confirmation",
+    )
     parser.add_argument("--data-num", type=int, help="fixed request count; otherwise scales with concurrency")
     parser.add_argument("--min-data-num", type=int, default=0, help="optional request-count floor (default: no floor)")
     parser.add_argument("--requests-per-concurrency", type=int, default=4)
@@ -659,7 +684,12 @@ def main(argv=None):
         try:
             summary = search.run()
         except (TrialError, KeyboardInterrupt) as exc:
-            summary = {"status": "aborted", "error": str(exc), "trials": len(search.history)}
+            summary = {
+                "status": "aborted",
+                "error": str(exc),
+                "trials": len(search.history),
+                "observed_avg_concurrency": None,
+            }
         (output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         print(f"Results: {output}")
