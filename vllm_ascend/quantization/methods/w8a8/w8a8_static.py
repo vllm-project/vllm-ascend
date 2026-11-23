@@ -20,6 +20,7 @@ from typing import Any
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.logger import logger
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     expose_input_quant_key,
@@ -122,6 +123,7 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         if isinstance(x, PreparedLinearInput):
             x = x.quantized
         elif qa is not None:
+            logger.info_once("quanted has done...")
             x = x.data
         elif x.dtype != torch.int8:
             # quant
