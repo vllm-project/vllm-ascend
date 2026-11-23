@@ -2316,7 +2316,7 @@ def init_sparse_kv_offload_manager(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
     sparse_kv_offload_config: SparseKVOffloadConfig,
-):
+) -> SparseKVOffloadManager:
     global _SPARSE_KV_OFFLOAD_MANAGER
     if _SPARSE_KV_OFFLOAD_MANAGER is None:
         if get_ascend_device_type() != AscendDeviceType.A3:

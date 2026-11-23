@@ -3153,6 +3153,7 @@ def test_load_failure_closes_unpublished_host_owners(published_model, cleanup_fa
 @pytest.mark.parametrize("parent_fails", [False, True])
 def test_shutdown_closes_sparse_host_allocator_even_if_parent_fails(parent_fails):
     runner = _make_runner()
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     manager = Mock()
     runner.sparse_kv_offload_manager = manager
     parent_class = type(runner).__bases__[0]
@@ -3169,6 +3170,7 @@ def test_shutdown_closes_sparse_host_allocator_even_if_parent_fails(parent_fails
 
 def test_shutdown_closes_sparse_allocator_if_engram_cleanup_fails():
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     embedding = MagicMock()
     embedding._shared_pool_client = object()
     embedding.close_host_offload.side_effect = RuntimeError("engram cleanup failed")

@@ -98,6 +98,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    SparseKVOffloadManager,
     allocate_kv_offload_topk_profile_buffers,
     d2h_record_source_ready,
     d2h_retire,
@@ -179,7 +180,7 @@ class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
-        self.sparse_kv_offload_manager = None
+        self.sparse_kv_offload_manager: SparseKVOffloadManager | None = None
         self.kvpp = KVPPRuntime()
         # Adaptive verification uses this flag to apply FIA-specific query
         # boundary and sequence length padding during FULL graph execution.
