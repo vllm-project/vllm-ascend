@@ -113,12 +113,15 @@ def test_fla_kernel_contract_isolated_by_device_and_chunk_size(
 
 class TestChunk32Prebuilt(TestCase):
     def setUp(self):
-        profile_patch = patch(
-            "vllm_ascend.ops.gdn_attn_builder.get_current_hardware_profile",
-            return_value=get_hardware_profile(AscendDeviceType.A5),
-        )
-        profile_patch.start()
-        self.addCleanup(profile_patch.stop)
+        # Metadata and adaptor look up the profile in their own modules.
+        # Patch both so chunk32 tests do not depend on the host device family.
+        for module in ("vllm_ascend.ops.gdn_attn_builder", "vllm_ascend.device.device_op"):
+            profile_patch = patch(
+                f"{module}.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            )
+            profile_patch.start()
+            self.addCleanup(profile_patch.stop)
 
     def test_non_a5_preserves_chunk64_without_building_chunk32(self):
         from vllm_ascend.ops import gdn_attn_builder
