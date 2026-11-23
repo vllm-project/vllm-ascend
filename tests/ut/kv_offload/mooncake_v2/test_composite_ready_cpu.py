@@ -212,3 +212,25 @@ def test_last_shared_hook_submits_writes_once():
     wait = load(PUSH, "wait_for_layer_reuse", {"wait_futures": wait_futures}, OWNER)
     wait(obj, 0)
     assert waited == [shared_write]
+
+
+@pytest.mark.parametrize("last_layer", [False, True])
+def test_shared_hook_without_new_kv(last_layer):
+    obj = worker()
+    shared = "model.layers.2.long"
+    obj._shared_layer_indices = {shared: 0}
+    if last_layer:
+        obj._last_layer_index = obj._layer_index_by_name[shared]
+    obj._reqs_send_state = {"r": SimpleNamespace(error="Push transfer failed")}
+    obj._submit_shared_layer_writes = Mock()
+    save = load(PUSH, "save_kv_layer", {}, OWNER)
+
+    save(obj, shared)
+
+    obj._submit_shared_layer_writes.assert_not_called()
+    if last_layer:
+        obj._process_sending_requests.assert_called_once_with(layer_hook=True, force=True)
+        obj._send_completions.assert_called_once_with()
+    else:
+        obj._process_sending_requests.assert_not_called()
+        obj._send_completions.assert_not_called()

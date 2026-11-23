@@ -889,7 +889,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         event.record()
                     state.available_layers[cache_name] = end, event
         last_layer = layer_index == self._last_layer_index
-        if shared_names:
+        if shared_names and event is not None:
             self._submit_shared_layer_writes(shared_names)
         elif last_layer or event is not None:
             self._process_sending_requests(layer_hook=True, force=last_layer)
