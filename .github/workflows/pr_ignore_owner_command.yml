@@ -1,0 +1,245 @@
+#
+# Copyright (c) 2026 vLLM Ascend contributors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Handle /ignore-owner Command
+
+# /ignore-owner lets a maintainer waive files from the CODEOWNERS approval
+# gate (ci-gate): `/ignore-owner <path>...` ignores the matching paths,
+# bare `/ignore-owner` ignores the whole PR, `/ignore-owner-clear` revokes.
+#
+# This handler is UX only, never authority. The authoritative decision is
+# made inside ci-gate by codeowner_gate.py, which re-reads the PR comments
+# and re-validates the commenter's permission on every run from the BASE
+# branch checkout - a PR cannot forge or weaken it. What this handler adds:
+# a confirmation reply and a re-run of the failed jobs so an already-finished
+# red gate turns green without waiting for the next CI trigger.
+#
+# Permission: write and above only (no triage, unlike /run). Overriding
+# ownership is a maintainer decision, and the PR-author exemption of /run
+# deliberately does NOT apply: an author without write access cannot waive
+# their own reviewers.
+on:
+  repository_dispatch:
+    types: [ignore-owner-command]
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+permissions:
+  contents: read
+  actions: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  ignore-owner:
+    name: Record ignore-owner and re-run the gate
+    runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    steps:
+      - name: Preflight
+        run: |
+          command -v curl >/dev/null || { echo "::error::curl is missing from the runner image"; exit 1; }
+          if ! command -v jq >/dev/null; then
+            echo "::warning::jq is missing from the runner image; installing it on the fly."
+            if ! sudo apt-get install -y --no-install-recommends jq; then
+              sudo apt-get update -y
+              sudo apt-get install -y --no-install-recommends jq
+            fi
+            command -v jq >/dev/null || { echo "::error::failed to install jq"; exit 1; }
+          fi
+
+      - name: Check user authorization
+        id: auth
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          ACTOR: ${{ github.event.client_payload.github.payload.comment.user.login }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
+        run: |
+          ROLE_NAME=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$REPO/collaborators/$ACTOR/permission" | jq -r '.role_name // empty')
+          case "$ROLE_NAME" in
+            write|maintain|admin)
+              echo "User $ACTOR has $ROLE_NAME role, authorized."
+              echo "authorized=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::User $ACTOR does not have write+ permission ($ROLE_NAME)."
+              echo "authorized=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Post unauthorized comment
+        if: steps.auth.outputs.authorized == 'false'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: ignore-owner command failed: you do not have permission. Only users with **write** permission or above can use /ignore-owner.
+          reactions: confused
+
+      - name: Fail if unauthorized
+        if: steps.auth.outputs.authorized == 'false'
+        run: exit 1
+
+      - name: Re-run failed jobs if the CI run already finished red
+        id: rerun
+        if: steps.auth.outputs.authorized == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          PR_SHA: ${{ github.event.client_payload.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.client_payload.pull_request.number }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
+        run: |
+          # The gate re-reads comments on every run, so only a finished red run
+          # needs help: an in-flight run judges with the ignore already in
+          # place, and a green run has nothing to prove.
+          RUNS=$(curl -sS --compressed -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/runs?head_sha=$PR_SHA&per_page=100")
+
+          # jq's `last` on an empty array yields null, but object construction
+          # turns that into {"id":null,...} rather than plain null - check the
+          # id itself, not the whole object.
+          RUN=$(printf '%s' "$RUNS" | jq -c '[.workflow_runs[]
+            | select(.name == "E2E" and .event == "pull_request")]
+            | sort_by(.created_at) | last // {} | {id, status, conclusion}')
+
+          if [ "$(printf '%s' "$RUN" | jq -r '.id // empty')" = "" ]; then
+            echo "state=no_run" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Same guard as the review retrigger bot: a commit pushed after the
+          # comment started a fresh run anyway; re-running the stale head
+          # would only churn runners for a verdict nobody will merge.
+          CURRENT_HEAD=$(curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$REPO/pulls/$PR_NUMBER" | jq -r '.head.sha // empty')
+          if [ -n "$CURRENT_HEAD" ] && [ "$CURRENT_HEAD" != "$PR_SHA" ]; then
+            echo "state=stale_head" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          STATUS=$(printf '%s' "$RUN" | jq -r '.status')
+          CONCLUSION=$(printf '%s' "$RUN" | jq -r '.conclusion // empty')
+          RUN_ID=$(printf '%s' "$RUN" | jq -r '.id')
+
+          case "$STATUS" in
+            queued|requested|waiting|in_progress)
+              # The ci-gate job runs last and will judge with the ignore comment.
+              echo "state=in_flight" >> "$GITHUB_OUTPUT"
+              exit 0 ;;
+          esac
+
+          if [ "$CONCLUSION" = "success" ]; then
+            echo "state=already_passed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Finished red: re-run the failed jobs. The gate re-judges with the
+          # ignore in place; failures caused by code or tests stay red.
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs")
+          if [ "$CODE" = "200" ] || [ "$CODE" = "409" ]; then
+            # 409: a re-run is already in flight, same effect.
+            echo "state=rerun_started" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::rerun-failed-jobs returned HTTP $CODE"
+            echo "state=rerun_failed" >> "$GITHUB_OUTPUT"
+            echo "http_code=$CODE" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment re-run started on PR
+        if: steps.rerun.outputs.state == 'rerun_started'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: ignore-owner command accepted. The CODEOWNERS approval gate will skip the ignored paths on every CI run of this PR from now on (a bare `/ignore-owner` ignores the whole PR; `/ignore-owner-clear` revokes). The ignore does not waive the CODEOWNERS coverage health check.
+
+            The finished CI run is being re-run so the gate re-judges with this ignore; failures caused by code or tests stay red.
+          reactions: rocket
+
+      - name: Comment in-flight notice on PR
+        if: steps.rerun.outputs.state == 'in_flight'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: ignore-owner command accepted. The CODEOWNERS approval gate will skip the ignored paths on every CI run of this PR from now on (a bare `/ignore-owner` ignores the whole PR; `/ignore-owner-clear` revokes). The ignore does not waive the CODEOWNERS coverage health check.
+
+            A CI run is already in flight; its ci-gate job runs last and will judge with this ignore.
+          reactions: rocket
+
+      - name: Comment already-passed notice on PR
+        if: steps.rerun.outputs.state == 'already_passed'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: ignore-owner command accepted. The CODEOWNERS approval gate will skip the ignored paths on every CI run of this PR from now on (a bare `/ignore-owner` ignores the whole PR; `/ignore-owner-clear` revokes). The ignore does not waive the CODEOWNERS coverage health check.
+
+            The CI run for this commit already passed; nothing to re-run.
+          reactions: rocket
+
+      - name: Comment stale-head notice on PR
+        if: steps.rerun.outputs.state == 'stale_head'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: ignore-owner command accepted, but a newer commit has been pushed since it. The ignore still applies to the PR; comment `/run` on the latest commit (or wait for its run) and the gate will judge with this ignore.
+          reactions: rocket
+
+      - name: Comment no-run notice on PR
+        if: steps.rerun.outputs.state == 'no_run'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: ignore-owner recorded, but there is no E2E run for commit `${{ github.event.client_payload.pull_request.head.sha }}` yet. Comment `/run` to start CI; the gate will then judge with this ignore.
+          reactions: rocket
+
+      - name: Comment rerun failure on PR
+        if: steps.rerun.outputs.state == 'rerun_failed'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: ignore-owner recorded, but re-running the finished CI run failed (HTTP ${{ steps.rerun.outputs.http_code }}). Trigger it manually from the Actions page; the gate will judge with this ignore on the next run either way.
+          reactions: confused
+
+      - name: Fail if the rerun API call failed
+        if: steps.rerun.outputs.state == 'rerun_failed'
+        run: exit 1

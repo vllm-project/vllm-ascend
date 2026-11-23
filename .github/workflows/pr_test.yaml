@@ -932,6 +932,7 @@ jobs:
           UNCLAIMED_OUT: ${{ runner.temp }}/unclaimed_files.txt
           SELF_OWNED_OUT: ${{ runner.temp }}/self_owned_files.txt
           APPROVAL_FAILURES_OUT: ${{ runner.temp }}/approval_failures.txt
+          IGNORED_OUT: ${{ runner.temp }}/ignored_files.txt
         run: |
           python3 .github/workflows/scripts/codeowner_gate.py check-approvals \
             --pr "${{ github.event.pull_request.number }}"
@@ -1112,6 +1113,7 @@ jobs:
             ${{ runner.temp }}/unclaimed_files.txt
             ${{ runner.temp }}/self_owned_files.txt
             ${{ runner.temp }}/approval_failures.txt
+            ${{ runner.temp }}/ignored_files.txt
             ${{ runner.temp }}/coverage_errors.txt
 
       - name: Package gate result

@@ -71,40 +71,46 @@ class TestMatching:
 
 class TestApprovals:
     def test_any_owner_approve_passes(self, rules):
-        failures, _unclaimed, _self_owned = gate.check_approvals(
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
             1, "author", rules, ["vllm_ascend/device/a.py"], {"bob": "APPROVED"}
         )
         assert failures == []
 
     def test_non_owner_approve_does_not_count(self, rules):
-        failures, _unclaimed, _self_owned = gate.check_approvals(
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
             1, "author", rules, ["vllm_ascend/device/a.py"], {"zoe": "APPROVED"}
         )
         assert failures
 
     def test_author_excluded_even_if_owner(self, rules):
-        failures, _unclaimed, _self_owned = gate.check_approvals(
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
             1, "alice", rules, ["vllm_ascend/device/a.py"], {"alice": "APPROVED"}
         )
         assert failures
 
     def test_changes_requested_not_counted(self, rules):
-        failures, _unclaimed, _self_owned = gate.check_approvals(
-            1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "CHANGES_REQUESTED"}
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
+            1,
+            "author",
+            rules,
+            ["vllm_ascend/device/a.py"],
+            {"alice": "CHANGES_REQUESTED"},
         )
         assert failures
 
     def test_unowned_file_fails(self, rules):
         # Policy: unclaimed files are not gate failures; they are surfaced
         # as a notice (PR comment / warnings) instead.
-        failures, unclaimed, _self = gate.check_approvals(1, "author", rules, ["unknown/x.py"], {})
+        failures, unclaimed, _self, _ignored = gate.check_approvals(
+            1, "author", rules, ["unknown/x.py"], {}
+        )
         assert failures == []
         assert unclaimed == ["unknown/x.py"]
 
     def test_todo_owner_approval_counts(self, rules):
         # dave is a TODO owner; the check accepts their approve (gate is
         # permission-model independent on purpose).
-        failures, _unclaimed, _self_owned = gate.check_approvals(
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
             1, "author", rules, ["vllm_ascend/eplb/x.py"], {"dave": "APPROVED"}
         )
         assert failures == []
@@ -112,7 +118,9 @@ class TestApprovals:
 
 class TestCoverage:
     def test_uncovered_file(self, rules):
-        errors, warnings = gate.check_coverage(rules, ["vllm_ascend/device/a.py", "orphan/x.py"])
+        errors, warnings = gate.check_coverage(
+            rules, ["vllm_ascend/device/a.py", "orphan/x.py"]
+        )
         assert any("orphan/x.py" in w for w in warnings)
         assert not any("vllm_ascend/device/a.py" in f for f in errors + warnings)
 
@@ -129,34 +137,49 @@ class TestCoverage:
         # TODO entries are inactive; they must not trigger stale errors.
         rules = gate.parse_codeowners("# TODO(owner): /some_dir\n# /some_dir @a\n")
         errors, warnings = gate.check_coverage(rules, ["other/file.py"])
-        assert errors == [] and warnings == ["file has no CODEOWNERS owner: other/file.py"]
+        assert errors == [] and warnings == [
+            "file has no CODEOWNERS owner: other/file.py"
+        ]
 
     def test_ownerless_todo_does_not_count_as_coverage(self):
         # Strict mode: a file covered only by an ownerless TODO entry is
         # reported as unowned - nobody is accountable for it.
         rules = gate.parse_codeowners("# TODO(owner): /some_dir\n# /some_dir\n")
         errors, warnings = gate.check_coverage(rules, ["some_dir/file.py"])
-        assert errors == [] and warnings == ["file has no CODEOWNERS owner: some_dir/file.py"]
+        assert errors == [] and warnings == [
+            "file has no CODEOWNERS owner: some_dir/file.py"
+        ]
 
     def test_todo_with_owner_counts_as_owned(self):
         # A TODO entry that already names owners counts as owned (it becomes
         # real the moment it is uncommented).
-        rules = gate.parse_codeowners("# TODO(owner): /some_dir @pending\n# /some_dir @pending\n")
+        rules = gate.parse_codeowners(
+            "# TODO(owner): /some_dir @pending\n# /some_dir @pending\n"
+        )
         assert gate.check_coverage(rules, ["some_dir/file.py"]) == ([], [])
 
     def test_coverage_passes(self, rules):
-        tracked = ["vllm_ascend/device/a.py", "vllm_ascend/ops/b.py", "docs/x.md", "tests/ut/t.py"]
+        tracked = [
+            "vllm_ascend/device/a.py",
+            "vllm_ascend/ops/b.py",
+            "docs/x.md",
+            "tests/ut/t.py",
+        ]
         assert gate.check_coverage(rules, tracked) == ([], [])
 
 
 class TestAuthorOnlyOwnership:
     def test_author_is_sole_owner(self, rules):
         rules = gate.parse_codeowners("/mymod @solo\n")
-        failures, _unclaimed, self_owned = gate.check_approvals(1, "solo", rules, ["mymod/x.py"], {"solo": "APPROVED"})
+        failures, _unclaimed, self_owned, _ignored = gate.check_approvals(
+            1, "solo", rules, ["mymod/x.py"], {"solo": "APPROVED"}
+        )
         assert failures == [] and self_owned == ["mymod/x.py"]
 
     def test_waiting_message_lists_eligible_owners(self, rules):
-        failures, _unclaimed, _self_owned = gate.check_approvals(1, "zoe", rules, ["vllm_ascend/device/a.py"], {})
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
+            1, "zoe", rules, ["vllm_ascend/device/a.py"], {}
+        )
         assert "waiting for approval from one of: @alice, @bob" in failures[0]
 
 
@@ -171,7 +194,9 @@ class TestOwnerlessActiveRule:
         # unowned, because GitHub ignores ownerless entries.
         rules = gate.parse_codeowners("/orphan_dir\n/real @a\n")
         errors, warnings = gate.check_coverage(rules, ["orphan_dir/f.py"])
-        assert any("orphan_dir/f.py" in w and "no CODEOWNERS owner" in w for w in warnings)
+        assert any(
+            "orphan_dir/f.py" in w and "no CODEOWNERS owner" in w for w in warnings
+        )
 
 
 class TestNestedOwners:
@@ -189,13 +214,17 @@ class TestNestedOwners:
 
     def test_either_owner_approve_passes(self):
         for reviewer in ("yilunh998", "yangsonglin13"):
-            failures, _unclaimed, _self_owned = gate.check_approvals(
-                1, "author", self.rules(), ["model_loader/rfork/x.py"], {reviewer: "APPROVED"}
+            failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
+                1,
+                "author",
+                self.rules(),
+                ["model_loader/rfork/x.py"],
+                {reviewer: "APPROVED"},
             )
             assert failures == [], (reviewer, failures)
 
     def test_parent_veto_blocks_submodule(self):
-        failures, _unclaimed, _self_owned = gate.check_approvals(
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
             1,
             "author",
             self.rules(),
@@ -205,7 +234,7 @@ class TestNestedOwners:
         assert len(failures) == 1 and "yilunh998" in failures[0]
 
     def test_child_veto_blocks_even_if_parent_approves(self):
-        failures, _unclaimed, _self_owned = gate.check_approvals(
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
             1,
             "author",
             self.rules(),
@@ -215,32 +244,48 @@ class TestNestedOwners:
         assert len(failures) == 1 and "yangsonglin13" in failures[0]
 
     def test_parent_owner_still_owns_uncovered_files(self):
-        failures, _unclaimed, _self_owned = gate.check_approvals(
-            1, "author", self.rules(), ["model_loader/netloader/x.py"], {"yilunh998": "APPROVED"}
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
+            1,
+            "author",
+            self.rules(),
+            ["model_loader/netloader/x.py"],
+            {"yilunh998": "APPROVED"},
         )
         assert failures == []
 
     def test_changes_requested_blocks_despite_approval(self, rules):
-        failures, _unclaimed, _self_owned = gate.check_approvals(
-            1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "CHANGES_REQUESTED", "bob": "APPROVED"}
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
+            1,
+            "author",
+            rules,
+            ["vllm_ascend/device/a.py"],
+            {"alice": "CHANGES_REQUESTED", "bob": "APPROVED"},
         )
         assert any("changes requested by @alice" in f for f in failures)
 
     def test_blocking_owner_re_review_clears_gate(self, rules):
-        failures, _unclaimed, _self_owned = gate.check_approvals(
-            1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "APPROVED", "bob": "APPROVED"}
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
+            1,
+            "author",
+            rules,
+            ["vllm_ascend/device/a.py"],
+            {"alice": "APPROVED", "bob": "APPROVED"},
         )
         assert failures == []
 
     def test_dismissed_review_does_not_block(self, rules):
-        failures, _unclaimed, _self_owned = gate.check_approvals(
-            1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "DISMISSED", "bob": "APPROVED"}
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
+            1,
+            "author",
+            rules,
+            ["vllm_ascend/device/a.py"],
+            {"alice": "DISMISSED", "bob": "APPROVED"},
         )
         assert failures == []
 
     def test_author_requested_changes_not_counted(self):
         rules = gate.parse_codeowners("/a @solo\n")
-        failures, _unclaimed, self_owned = gate.check_approvals(
+        failures, _unclaimed, self_owned, _ignored = gate.check_approvals(
             1, "solo", rules, ["a/x.py"], {"solo": "CHANGES_REQUESTED"}
         )
         assert failures == [] and self_owned == ["a/x.py"]
@@ -278,7 +323,10 @@ class TestGhApi:
     def test_flattens_paginated_arrays(self, monkeypatch):
         self._mock_urlopen(
             monkeypatch,
-            [(["r1", "r2"], '<https://api.github.com/x?page=2>; rel="next"'), (["r3"], "")],
+            [
+                (["r1", "r2"], '<https://api.github.com/x?page=2>; rel="next"'),
+                (["r3"], ""),
+            ],
         )
         monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
         monkeypatch.setenv("GH_TOKEN", "t")
@@ -287,7 +335,10 @@ class TestGhApi:
     def test_object_endpoint_returns_last_page(self, monkeypatch):
         self._mock_urlopen(
             monkeypatch,
-            [({"a": 1}, '<https://api.github.com/y?page=2>; rel="next"'), ({"a": 2}, "")],
+            [
+                ({"a": 1}, '<https://api.github.com/y?page=2>; rel="next"'),
+                ({"a": 2}, ""),
+            ],
         )
         monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
         monkeypatch.setenv("GITHUB_TOKEN", "t")
@@ -305,23 +356,31 @@ class TestSkipInApprovals:
     def test_skip_overrides_active_rule(self):
         # /tests is actively owned, but the later SKIP(owner) /tests/ut/
         # carves out a deliberately-unowned subtree.
-        rules = gate.parse_codeowners("/tests @wenjun91\n# SKIP(owner): /tests/ut/\n# SKIP(owner): /tests/ut/\n")
-        failures, _unclaimed, _self_owned = gate.check_approvals(1, "author", rules, ["tests/ut/foo.py"], {})
+        rules = gate.parse_codeowners(
+            "/tests @wenjun91\n# SKIP(owner): /tests/ut/\n# SKIP(owner): /tests/ut/\n"
+        )
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
+            1, "author", rules, ["tests/ut/foo.py"], {}
+        )
         assert failures == []
 
     def test_active_outside_skip_still_gated(self):
         rules = gate.parse_codeowners("/tests @wenjun91\n# SKIP(owner): /tests/ut/\n")
-        failures, _unclaimed, _self_owned = gate.check_approvals(1, "author", rules, ["tests/e2e/foo.py"], {})
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
+            1, "author", rules, ["tests/e2e/foo.py"], {}
+        )
         assert any("wenjun91" in f for f in failures)
 
     def test_skip_before_active_does_not_win(self):
         # An active rule after the SKIP re-owns the subtree.
-        rules = gate.parse_codeowners("# SKIP(owner): /tests/ut/\n# /tests/ut/\n/tests @wenjun91\n")
+        rules = gate.parse_codeowners(
+            "# SKIP(owner): /tests/ut/\n# /tests/ut/\n/tests @wenjun91\n"
+        )
         owners, skipped = gate.resolve_owners(rules, "tests/ut/foo.py")
         assert not skipped and owners == ["@wenjun91"]
 
     def test_todo_owner_approval_counts(self, rules):
-        failures, _unclaimed, _self_owned = gate.check_approvals(
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
             1, "author", rules, ["vllm_ascend/eplb/x.py"], {"dave": "APPROVED"}
         )
         assert failures == []
@@ -329,26 +388,38 @@ class TestSkipInApprovals:
 
 class TestChangesRequested:
     def test_changes_requested_blocks_despite_approval(self, rules):
-        failures, _unclaimed, _self_owned = gate.check_approvals(
-            1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "CHANGES_REQUESTED", "bob": "APPROVED"}
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
+            1,
+            "author",
+            rules,
+            ["vllm_ascend/device/a.py"],
+            {"alice": "CHANGES_REQUESTED", "bob": "APPROVED"},
         )
         assert any("changes requested by @alice" in f for f in failures)
 
     def test_blocking_owner_re_review_clears_gate(self, rules):
-        failures, _unclaimed, _self_owned = gate.check_approvals(
-            1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "APPROVED", "bob": "APPROVED"}
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
+            1,
+            "author",
+            rules,
+            ["vllm_ascend/device/a.py"],
+            {"alice": "APPROVED", "bob": "APPROVED"},
         )
         assert failures == []
 
     def test_dismissed_review_does_not_block(self, rules):
-        failures, _unclaimed, _self_owned = gate.check_approvals(
-            1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "DISMISSED", "bob": "APPROVED"}
+        failures, _unclaimed, _self_owned, _ignored = gate.check_approvals(
+            1,
+            "author",
+            rules,
+            ["vllm_ascend/device/a.py"],
+            {"alice": "DISMISSED", "bob": "APPROVED"},
         )
         assert failures == []
 
     def test_author_requested_changes_not_counted(self):
         rules = gate.parse_codeowners("/a @solo\n")
-        failures, _unclaimed, self_owned = gate.check_approvals(
+        failures, _unclaimed, self_owned, _ignored = gate.check_approvals(
             1, "solo", rules, ["a/x.py"], {"solo": "CHANGES_REQUESTED"}
         )
         assert failures == [] and self_owned == ["a/x.py"]
@@ -461,7 +532,206 @@ class TestDismissalSurvivesPush:
     def test_approved_still_counts_after_dismissal_in_gate(self, rules):
         # DISMISSED entries in the reviews dict no longer occur (they are
         # filtered upstream), but the gate must remain robust to them.
-        failures, _unclaimed, _self = gate.check_approvals(
-            1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "DISMISSED", "bob": "APPROVED"}
+        failures, _unclaimed, _self, _ignored = gate.check_approvals(
+            1,
+            "author",
+            rules,
+            ["vllm_ascend/device/a.py"],
+            {"alice": "DISMISSED", "bob": "APPROVED"},
         )
         assert failures == []
+
+
+class TestIgnoreOwner:
+    """`/ignore-owner` waive: a write+ maintainer's command comment skips the
+    approval gate for matching paths; the coverage health check is unaffected."""
+
+    def _approvals(self, rules, files, reviews, ignore):
+        return gate.check_approvals(1, "author", rules, files, reviews, ignore)
+
+    def test_ignored_path_skipped(self, rules):
+        failures, _un, _self, ignored = self._approvals(
+            rules,
+            ["vllm_ascend/device/a.py"],
+            {},
+            ("paths", ["vllm_ascend/device/a.py"]),
+        )
+        assert failures == [] and ignored == ["vllm_ascend/device/a.py"]
+
+    def test_partial_ignore_still_gates_others(self, rules):
+        failures, _un, _self, ignored = self._approvals(
+            rules,
+            ["vllm_ascend/device/a.py", "vllm_ascend/ops/b.py"],
+            {},
+            ("paths", ["vllm_ascend/device/a.py"]),
+        )
+        assert ignored == ["vllm_ascend/device/a.py"]
+        assert len(failures) == 1 and "ops/b.py" in failures[0]
+
+    def test_all_ignore_passes_everything(self, rules):
+        failures, _un, _self, ignored = self._approvals(
+            rules, ["vllm_ascend/device/a.py", "vllm_ascend/ops/b.py"], {}, ("all", [])
+        )
+        assert failures == [] and sorted(ignored) == [
+            "vllm_ascend/device/a.py",
+            "vllm_ascend/ops/b.py",
+        ]
+
+    def test_dir_pattern_ignores_subtree(self, rules):
+        failures, _un, _self, ignored = self._approvals(
+            rules,
+            ["vllm_ascend/device/sub/a.py"],
+            {},
+            ("paths", ["vllm_ascend/device"]),
+        )
+        assert failures == [] and ignored == ["vllm_ascend/device/sub/a.py"]
+
+    def test_glob_pattern_matches_single_segment(self, rules):
+        failures, unclaimed, _self, ignored = self._approvals(
+            rules,
+            ["vllm_ascend/ops/a.py", "vllm_ascend/ops/sub/b.py"],
+            {},
+            ("paths", ["vllm_ascend/ops/*.py"]),
+        )
+        assert ignored == ["vllm_ascend/ops/a.py"]
+        # sub/b.py never matched the single-segment glob, and it is unowned
+        # in SAMPLE, so it is a notice rather than a failure.
+        assert failures == [] and unclaimed == ["vllm_ascend/ops/sub/b.py"]
+
+    def test_none_spec_does_not_ignore(self, rules):
+        failures, _un, _self, ignored = self._approvals(
+            rules, ["vllm_ascend/device/a.py"], {}, ("none", [])
+        )
+        assert failures and ignored == []
+
+    def test_clear_spec_does_not_ignore(self, rules):
+        failures, _un, _self, ignored = self._approvals(
+            rules, ["vllm_ascend/device/a.py"], {}, ("clear", [])
+        )
+        assert failures and ignored == []
+
+    def test_ignore_does_not_affect_coverage(self, rules):
+        # The waive is per-PR for the approval gate only; CODEOWNERS health
+        # has no /ignore-owner escape hatch.
+        tracked = [
+            "vllm_ascend/device/a.py",
+            "vllm_ascend/ops/b.py",
+            "docs/x.md",
+            "tests/ut/t.py",
+        ]
+        errors, _warnings = gate.check_coverage(rules, tracked)
+        assert errors == []
+
+
+class TestGetIgnoreSpec:
+    """Parsing of /ignore-owner comments: latest human command wins; the
+    commenter needs write+; invalid commands block rather than fall back."""
+
+    def _comment(self, body, login="alice", user_type="User"):
+        return {"user": {"login": login, "type": user_type}, "body": body}
+
+    def _run(self, monkeypatch, comments, role="write"):
+        # gh_api serves the comments list for the comments endpoint and the
+        # permission object for the collaborators endpoint.
+        def fake_api(endpoint, **kw):
+            return comments if "comments" in endpoint else {"role_name": role}
+
+        monkeypatch.setattr(gate, "gh_api", fake_api)
+        return gate.get_ignore_spec(1)
+
+    def test_no_command(self, monkeypatch):
+        assert self._run(monkeypatch, [self._comment("looks good")]) == ("none", [], "")
+
+    def test_paths_command(self, monkeypatch):
+        kind, paths, by = self._run(
+            monkeypatch, [self._comment("/ignore-owner docs/a.md docs/b.md")]
+        )
+        assert (kind, paths, by) == ("paths", ["docs/a.md", "docs/b.md"], "alice")
+
+    def test_bare_command_ignores_all(self, monkeypatch):
+        assert self._run(monkeypatch, [self._comment("/ignore-owner")]) == (
+            "all",
+            [],
+            "alice",
+        )
+
+    def test_clear_command(self, monkeypatch):
+        assert self._run(monkeypatch, [self._comment("/ignore-owner-clear")]) == (
+            "clear",
+            [],
+            "",
+        )
+
+    def test_command_with_prose_below(self, monkeypatch):
+        kind, paths, _by = self._run(
+            monkeypatch, [self._comment("/ignore-owner docs/a.md\nsmall docs fix")]
+        )
+        assert kind == "paths" and paths == ["docs/a.md"]
+
+    def test_bot_comment_skipped(self, monkeypatch):
+        comments = [self._comment("/ignore-owner", login="bot", user_type="Bot")]
+        assert self._run(monkeypatch, comments) == ("none", [], "")
+
+    def test_latest_command_replaces_earlier(self, monkeypatch):
+        comments = [
+            self._comment("/ignore-owner docs/a.md"),
+            self._comment("/ignore-owner"),
+        ]
+        assert self._run(monkeypatch, comments)[0] == "all"
+
+    def test_other_slash_commands_do_not_match(self, monkeypatch):
+        # Only /ignore-owner and /ignore-owner-clear count; other /-prefixed
+        # lines (e.g. someone commenting /run later) keep the ignore intact.
+        comments = [
+            self._comment("/ignore-owner docs/a.md"),
+            self._comment("/run"),
+        ]
+        assert self._run(monkeypatch, comments) == ("paths", ["docs/a.md"], "alice")
+
+    def test_low_permission_command_invalid_no_fallback(self, monkeypatch):
+        # A triage-level (or below) command invalidates the ignore outright:
+        # falling back to an earlier valid command would resurrect a waiver
+        # after the commenter's permission was revoked.
+        comments = [
+            self._comment("/ignore-owner docs/a.md"),
+            self._comment("/ignore-owner docs/b.md", login="bob"),
+        ]
+        assert self._run(monkeypatch, comments, role="triage") == ("none", [], "")
+
+    def test_write_permission_required(self, monkeypatch):
+        for role in ("read", "triage"):
+            assert (
+                self._run(monkeypatch, [self._comment("/ignore-owner")], role=role)[0]
+                == "none"
+            )
+
+    def test_write_maintain_admin_allowed(self, monkeypatch):
+        for role in ("write", "maintain", "admin"):
+            assert (
+                self._run(monkeypatch, [self._comment("/ignore-owner")], role=role)[0]
+                == "all"
+            )
+
+    def test_non_collaborator_commander_is_invalid(self, monkeypatch):
+        # Anyone can comment on a public repo; the collaborators API returns
+        # 404 for a non-collaborator and that must be "no ignore", never a
+        # gate crash.
+        import urllib.error
+
+        def fake_api(endpoint, **kw):
+            if "comments" in endpoint:
+                return [self._comment("/ignore-owner", login="driveby")]
+            raise urllib.error.HTTPError("url", 404, "not found", {}, None)
+
+        monkeypatch.setattr(gate, "gh_api", fake_api)
+        assert gate.get_ignore_spec(1) == ("none", [], "")
+
+    def test_deleted_account_commander_is_invalid(self, monkeypatch):
+        # `user` is null for a deleted account: the permission check must not
+        # be skipped, or the ignore would resurrect without an owner.
+        comment = {"user": None, "body": "/ignore-owner"}
+        assert self._run(monkeypatch, [comment]) == ("none", [], "")
+
+    def test_path_is_ignored_normalizes_leading_slash(self):
+        assert gate.path_is_ignored("docs/a.md", ("paths", ["/docs/a.md"]))
+        assert gate.path_is_ignored("docs/sub/b.md", ("paths", ["docs/"]))

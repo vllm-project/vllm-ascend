@@ -449,6 +449,16 @@ owners before the PR can merge. Key points:
   handled by maintainers at their own pace).
 - Paths marked `SKIP(owner)` in the file (for example, `tests/ut/`) are
   deliberately unowned and do not require an owner approval.
+- A maintainer with **write** permission or above can waive files from the
+  approval gate with a `/ignore-owner [path ...]` PR comment (paths use
+  CODEOWNERS pattern semantics; a bare `/ignore-owner` waives the whole PR,
+  `/ignore-owner-clear` revokes). The newest valid command replaces earlier
+  ones, and the waiver persists for the lifetime of the PR across pushes. The
+  gate re-validates the commenter's permission on every run, and each waived
+  file is reported as a warning in the job log and in the gate comment, so
+  waivers stay visible. The CODEOWNERS health check is not waivable. This is
+  an escape hatch for cases like small docs fixes a maintainer can judge
+  directly — use it sparingly; a waived file gets no owner review at all.
 - If an owner is unresponsive, contact the module's other owners or a
   maintainer; maintainers can merge with an admin override in exceptional
   cases.

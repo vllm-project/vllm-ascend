@@ -24,7 +24,10 @@ Two subcommands used by the CODEOWNERS gate steps of the ``ci-gate`` job in
     an owner name (owners without write permission or without org membership
     are accepted on purpose; this is why the native
     ``require_code_owner_review`` is not used). The PR author never counts as
-    an approver, even when listed as an owner.
+    an approver, even when listed as an owner. A ``/ignore-owner`` command
+    comment from a user with write+ permission waives files from this check
+    (see ``get_ignore_spec``); waived files are reported as warnings, and the
+    ``check-coverage`` health gate below is never waived.
 
 ``check-coverage``
     CODEOWNERS health check (strict). Fails when:
@@ -48,11 +51,21 @@ import json
 import os
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
 CODEOWNERS_PATH = ".github/CODEOWNERS"
+
+# /ignore-owner: a maintainer escape hatch for the approval gate. The command
+# lives in a PR comment; the gate re-reads comments and re-validates the
+# commenter's permission on every run, so the bot's confirmation reply is UX
+# only, never authority. Requires write+ (the /run command accepts triage+,
+# but overriding ownership is a maintainer decision, not a triage one).
+IGNORE_COMMAND = "/ignore-owner"
+IGNORE_CLEAR_COMMAND = "/ignore-owner-clear"
+IGNORE_ALLOWED_ROLES = ("write", "maintain", "admin")
 
 
 @dataclass
@@ -247,25 +260,110 @@ def get_pr_reviews(pr_number: int) -> dict[str, str]:
     return latest
 
 
+def get_collaborator_role(user: str) -> str:
+    """The user's repository role name ("read", "triage", "write", ...).
+
+    Anyone can comment on a public repo, so a non-collaborator is a 404, not
+    an error: an unknown role means "not write+", never a gate crash.
+    """
+    try:
+        data = gh_api("repos/{owner}/{repo}/collaborators/{user}/permission", user=user)
+    except urllib.error.HTTPError as error:
+        if error.code in (403, 404):
+            return ""
+        raise
+    return data.get("role_name", "")
+
+
+def get_ignore_spec(pr_number: int) -> tuple[str, list[str], str]:
+    """The effective ``/ignore-owner`` state of the PR, from its comments.
+
+    Scans issue comments for the latest command from a human account, then
+    validates that commenter's permission. Returns ``(kind, paths, by)``:
+
+    - ``("paths", [...], user)``: ignore only the listed paths;
+    - ``("all", [], user)``: ignore every file of the PR;
+    - ``("clear", [], "")``: ignores were explicitly revoked;
+    - ``("none", [], "")``: no valid command at all.
+
+    Replacement semantics: the newest matching command wins outright - an
+    invalid one (bot author, or commenter without write+) blocks rather than
+    falls back to older commands, so an ignore never resurrects after the
+    commenter's permission is revoked. Comments arrive oldest-first from the
+    API, so the last match is the newest. The ignore persists for the
+    lifetime of the PR: later commits keep it until it is replaced or cleared.
+    """
+    comments = gh_api("repos/{owner}/{repo}/issues/{pr}/comments", pr=pr_number)
+    latest = None
+    for comment in comments:
+        if (comment.get("user") or {}).get("type") == "Bot":
+            continue
+        body = (comment.get("body") or "").strip()
+        first_line = body.splitlines()[0].strip() if body else ""
+        if first_line in (
+            IGNORE_COMMAND,
+            IGNORE_CLEAR_COMMAND,
+        ) or first_line.startswith(IGNORE_COMMAND + " "):
+            latest = comment
+    if latest is None:
+        return "none", [], ""
+    user = (latest.get("user") or {}).get("login") or ""
+    # An empty login (deleted account) or a missing role must both count as
+    # "not write+": `user and ...` would silently skip the check for a
+    # deleted account and let its command through.
+    if not user or get_collaborator_role(user) not in IGNORE_ALLOWED_ROLES:
+        return "none", [], ""
+    first_line = (latest.get("body") or "").strip().splitlines()[0].strip()
+    if first_line == IGNORE_CLEAR_COMMAND:
+        return "clear", [], ""
+    paths = first_line[len(IGNORE_COMMAND) :].split()
+    if not paths:
+        return "all", [], user
+    return "paths", paths, user
+
+
+def path_is_ignored(path: str, ignore_spec: tuple[str, list[str]]) -> bool:
+    """Whether ``path`` is covered by the effective ignore spec."""
+    kind, patterns = ignore_spec
+    if kind == "all":
+        return True
+    if kind == "paths":
+        return any(pattern_matches(_normalize_pattern(p), path) for p in patterns)
+    return False
+
+
 def check_approvals(
-    pr_number: int, pr_author: str, rules: list[Rule], files: list[str], reviews: dict[str, str]
-) -> tuple[list[str], list[str], list[str]]:
+    pr_number: int,
+    pr_author: str,
+    rules: list[Rule],
+    files: list[str],
+    reviews: dict[str, str],
+    ignore_spec: tuple[str, list[str]] = ("none", []),
+) -> tuple[list[str], list[str], list[str], list[str]]:
     """Gate on owner approvals.
 
-    Returns ``(failures, unclaimed, self_owned)``. Two categories are NOT
-    gate failures by policy, and are surfaced as notices instead:
+    Returns ``(failures, unclaimed, self_owned, ignored)``. Three categories
+    are NOT gate failures by policy, and are surfaced as notices instead:
 
     - ``unclaimed``: files with no CODEOWNERS owner at all - nobody can
       approve them, maintainers handle claiming at their own pace;
     - ``self_owned``: files whose only owner is the PR author - a sole
       owner cannot self-approve, and requiring a second owner before any
       progress would block the module indefinitely. Consider adding a
-      co-owner to CODEOWNERS.
+      co-owner to CODEOWNERS;
+    - ``ignored``: files waived by a valid ``/ignore-owner`` command (see
+      ``get_ignore_spec``) - a maintainer with write+ accepted the change
+      without owner review. Reported for transparency; this never affects
+      ``check_coverage``, which keeps enforcing CODEOWNERS health.
     """
     failures = []
     unclaimed = []
     self_owned = []
+    ignored = []
     for path in files:
+        if path_is_ignored(path, ignore_spec):
+            ignored.append(path)
+            continue
         owners, skipped = resolve_owners(rules, path)
         if skipped:
             # Deliberately unowned path (SKIP(owner)): no approval required.
@@ -283,21 +381,31 @@ def check_approvals(
         # A pending "changes requested" from any owner of the file (excluding
         # the PR author) blocks it even when another owner approved; the
         # author must address the feedback and get the owner to re-review.
-        blocking = [o.lstrip("@") for o in eligible if reviews.get(o.lstrip("@")) == "CHANGES_REQUESTED"]
+        blocking = [
+            o.lstrip("@")
+            for o in eligible
+            if reviews.get(o.lstrip("@")) == "CHANGES_REQUESTED"
+        ]
         if blocking:
             failures.append(
                 f"{path}: changes requested by {', '.join('@' + b for b in blocking)}; "
                 "address the feedback, then ask them to re-review (approve or dismiss)"
             )
             continue
-        approved = [o.lstrip("@") for o in eligible if reviews.get(o.lstrip("@")) == "APPROVED"]
+        approved = [
+            o.lstrip("@") for o in eligible if reviews.get(o.lstrip("@")) == "APPROVED"
+        ]
         if not approved:
-            failures.append(f"{path}: waiting for approval from one of: {', '.join(eligible)}")
-    return failures, unclaimed, self_owned
+            failures.append(
+                f"{path}: waiting for approval from one of: {', '.join(eligible)}"
+            )
+    return failures, unclaimed, self_owned, ignored
 
 
 def list_tracked_files(repo_root: str) -> list[str]:
-    out = subprocess.run(["git", "ls-files"], capture_output=True, text=True, check=True, cwd=repo_root)
+    out = subprocess.run(
+        ["git", "ls-files"], capture_output=True, text=True, check=True, cwd=repo_root
+    )
     return out.stdout.splitlines()
 
 
@@ -315,7 +423,9 @@ def is_contentless_file(path: str) -> bool:
         return False
 
 
-def check_coverage(rules: list[Rule], tracked: list[str]) -> tuple[list[str], list[str]]:
+def check_coverage(
+    rules: list[Rule], tracked: list[str]
+) -> tuple[list[str], list[str]]:
     """CODEOWNERS health: ownership of tracked files + stale entries.
 
     Returns ``(errors, warnings)``:
@@ -345,11 +455,15 @@ def check_coverage(rules: list[Rule], tracked: list[str]) -> tuple[list[str], li
         if rule.status != "active":
             continue
         if not rule.owners:
-            errors.append(f"CODEOWNERS entry has no owner and is ignored by GitHub (line {rule.line}): /{rule.pattern}")
+            errors.append(
+                f"CODEOWNERS entry has no owner and is ignored by GitHub (line {rule.line}): /{rule.pattern}"
+            )
             continue
         hit = any(pattern_matches(rule.pattern, path) for path in tracked_set)
         if not hit:
-            errors.append(f"stale CODEOWNERS entry (line {rule.line}): /{rule.pattern} matches no tracked file")
+            errors.append(
+                f"stale CODEOWNERS entry (line {rule.line}): /{rule.pattern} matches no tracked file"
+            )
     return errors, warnings
 
 
@@ -372,6 +486,9 @@ def main() -> int:
     p_approvals.add_argument("--author", default="", help="PR author login")
     p_approvals.add_argument("--files-json", help="local fixture: changed files JSON")
     p_approvals.add_argument("--reviews-json", help="local fixture: reviews JSON")
+    p_approvals.add_argument(
+        "--ignore-json", help="local fixture: ignore spec [kind, paths] JSON"
+    )
 
     p_cov = sub.add_parser("check-coverage", help="CODEOWNERS health check")
     p_cov.add_argument("--files-json", help="local fixture: tracked files JSON")
@@ -393,7 +510,16 @@ def main() -> int:
             if not args.author:
                 pr_data = gh_api("repos/{owner}/{repo}/pulls/{pr}", pr=args.pr)
                 args.author = pr_data["user"]["login"]
-        failures, unclaimed, self_owned = check_approvals(args.pr or 0, args.author, rules, files, reviews)
+        if args.ignore_json:
+            with open(args.ignore_json) as f:
+                ignore_spec = tuple(json.load(f))
+        elif args.pr:
+            ignore_spec = get_ignore_spec(args.pr)
+        else:
+            ignore_spec = ("none", [])
+        failures, unclaimed, self_owned, ignored = check_approvals(
+            args.pr or 0, args.author, rules, files, reviews, ignore_spec
+        )
         out = os.environ.get("UNCLAIMED_OUT")
         if out is not None:
             with open(out, "w") as f:
@@ -406,10 +532,18 @@ def main() -> int:
         if detail_out is not None:
             with open(detail_out, "w") as f:
                 f.write("\n".join(failures))
+        ignored_out = os.environ.get("IGNORED_OUT")
+        if ignored_out is not None:
+            with open(ignored_out, "w") as f:
+                f.write("\n".join(ignored))
         for path in unclaimed:
             print(f"  ::warning::{path}: no CODEOWNERS owner yet; no approval required")
         for path in self_owned:
-            print(f"  ::warning::{path}: sole owner is the PR author; no additional approval required")
+            print(
+                f"  ::warning::{path}: sole owner is the PR author; no additional approval required"
+            )
+        for path in ignored:
+            print(f"  ::warning::{path}: codeowner approval ignored by /ignore-owner")
         if failures:
             print("codeowner approval check FAILED:")
             for failure in failures:
@@ -437,7 +571,9 @@ def main() -> int:
             for failure in errors:
                 print(f"  ::error::{failure}")
             return 1
-        print(f"codeowner coverage check PASSED ({len(tracked)} files, {len(warnings)} unclaimed-file warnings)")
+        print(
+            f"codeowner coverage check PASSED ({len(tracked)} files, {len(warnings)} unclaimed-file warnings)"
+        )
         return 0
 
     return 2
