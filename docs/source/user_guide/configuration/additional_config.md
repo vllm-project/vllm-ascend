@@ -147,7 +147,8 @@ Both warmups run on a background thread during weight loading. The worker waits 
 
 The accepted fields depend on the model runner:
 
-- **Model Runner V2** accepts `load_collection_phase` and `stair_config` here.
+- **Model Runner V2** accepts `load_collection_phase`, `stair_config`, `mode`
+  and `placement_path` here.
   Configure upstream EPLB through `--enable-eplb` and `--eplb-config`. Ascend
   uses the STAIR policy by default and moves expert weights asynchronously
   over HIXL when it is available on every EPLB rank, falling back to Gloo
@@ -156,11 +157,11 @@ The accepted fields depend on the model runner:
   [EPLB user guide](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions)
   for the advanced STAIR fields and their defaults.
 - **Model Runner V1** accepts the legacy fields below except
-  `load_collection_phase` and `stair_config`.
+  `load_collection_phase`, `stair_config`, `mode` and `placement_path`.
   MRv1 does not accept upstream `--enable-eplb` on Ascend.
 
-Mixing the two schemas fails during startup instead of silently ignoring
-configuration.
+MRv2 warns and ignores legacy controls; MRv1 rejects MRv2-specific fields.
+Invalid combinations of the deployment mode and file path fail at startup.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
@@ -174,6 +175,8 @@ configuration.
 | `eplb_heat_collection_stage`     | str | `"all"`| MRv1 only. Select `"all"`, `"prefill"`, or `"decode"` heat collection. |
 | `load_collection_phase`          | str | `"all"`| MRv2 only. Select `"all"`, `"prefill"`, or `"decode"` load collection. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
 | `stair_config`                   | dict | `{}`   | MRv2 only. Advanced STAIR policy tuning. See the [tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
+| `mode`                          | str | `"dynamic"` | MRv2 only. `"dynamic"` runs online EPLB; `"static"` installs a saved deployment before profiling/capture, retaining routing without runtime recording or rearrangement. |
+| `placement_path`                | str | `None` | MRv2 only. Required with `mode="static"`; all ranks must read the same deployment. Initial support requires PP=1 and no speculative decoding. See [deployment export and static EPLB](../feature_guide/expert_parallelism_load_balancer.md#mrv2-deployment-export-and-static-eplb). |
 
 **scheduler_config**
 

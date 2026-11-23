@@ -1,0 +1,5 @@
+# Draft only: replace PR_NUMBER and move to fragments/<PR_NUMBER>.yaml.
+pr: PR_NUMBER
+entries:
+  - category: feature
+    text: Added collective offline export of committed Model Runner V2 EPLB deployments, including model and parallel-configuration validation and calibration workload metadata.

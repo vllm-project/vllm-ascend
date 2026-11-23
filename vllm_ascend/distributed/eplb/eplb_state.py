@@ -26,6 +26,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
@@ -40,6 +41,7 @@ from vllm_ascend.distributed.eplb.tensor_ops import (
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 _EPLB_CLOSE_TIMEOUT_SECONDS = 300
 _EPLB_EVENT_POLL_SECONDS = 0.1
+_EPLB_COMMIT_POLL_SECONDS = 0.001
 EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar("vllm_ascend_expert_mapping_ep_size", default=1)
 # ForwardContext.additional_kwargs key holding one gathered AllGather source
 # mask per micro-batch. Read directly rather than through _EXTRA_CTX: the
@@ -169,6 +171,7 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         if expert_tokens is None:
             raise RuntimeError("MRV2 EPLB requires operator-provided expert counts")
         expert_load_view = self.expert_load_view
+
         record_enabled = self.should_record_tensor
         if local_load is not None:
             expert_tokens = local_load
@@ -385,6 +388,29 @@ class AscendEplbState(_eplb_state.EplbState):
             if self._hixl_session is not None:
                 self._hixl_session.check_usable()
             super().start_async_loop(*args, **kwargs)
+
+    def finish_pending_commits(self) -> None:
+        """Finish real commits without collecting load or publishing another plan.
+
+        Unlike drain_async (shutdown/elastic cancellation), this installs every
+        result through the patched upstream commit and lookup-refresh boundary.
+        The caller must enter collectively between forwards.
+        """
+        self.raise_if_close_failed()
+        deadline = time.monotonic() + _EPLB_CLOSE_TIMEOUT_SECONDS
+        for model_state in self.model_states.values():
+            while model_state.rebalanced:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("EPLB deployment export timed out while finishing commits")
+                if self._all_ranks_result_ready(model_state):
+                    _eplb_state._move_to_workspace(
+                        model_state=model_state,
+                        ep_rank=get_ep_group().rank_in_group,
+                    )
+                else:
+                    time.sleep(_EPLB_COMMIT_POLL_SECONDS)
+        with gpu_sync_allowed():
+            torch.accelerator.current_stream(self.device).synchronize()
 
     def _initialize_load_stats_state(self, model_state: Any) -> None:
         model_state._last_committed_mean_ratios = np.full(

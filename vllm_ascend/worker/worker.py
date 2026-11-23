@@ -454,6 +454,16 @@ class NPUWorker(WorkerBase):
         self.model_runner.reset_lora_state()
         self._weight_update_active = False
 
+    def export_eplb_placement(self, path: str, workload: str) -> dict[str, Any]:
+        """Export a committed MRv2 deployment via an all-worker offline RPC."""
+        if not self.vllm_config.use_v2_model_runner or not self.vllm_config.parallel_config.enable_eplb:
+            raise ValueError("Deployment export requires Model Runner V2 and --enable-eplb")
+        if (
+            self.vllm_config.parallel_config.pipeline_parallel_size != 1
+        ):
+            raise ValueError("Deployment export currently requires PP=1")
+        return self.model_runner.eplb.export_placement(path, workload)
+
     def shutdown(self) -> None:
         state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
         if isinstance(state, AscendEplbState):

@@ -303,9 +303,16 @@ class EplbConfig:
     # as prefill.
     load_collection_phase: str = "all"
     stair_config: StairConfig = dataclasses.field(default_factory=StairConfig)
+    export_path: str | None = None
+    export_workload: str = "MRv2 dynamic EPLB deployment"
+    export_api_ports: list[int] = dataclasses.field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_config(self):
+        if self.export_path is not None:
+            if not self.export_path:
+                raise ValueError("eplb_config.export_path must be a non-empty path")
+            os.makedirs(os.path.dirname(os.path.abspath(self.export_path)), exist_ok=True)
         if self.expert_map_path is not None:
             logger.info("The expert_map is %s", self.expert_map_path)
             if self.expert_map_path[-5:] != ".json":

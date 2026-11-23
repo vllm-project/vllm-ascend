@@ -95,7 +95,15 @@ _MINIMAX_M3_ARCHITECTURES = frozenset(
         "MiniMaxM3SparseForConditionalGeneration",
     }
 )
-_V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "stair_config"})
+_V2_EPLB_CONFIG_FIELDS = frozenset(
+    {
+        "load_collection_phase",
+        "stair_config",
+        "export_path",
+        "export_workload",
+        "export_api_ports",
+    }
+)
 _V2_STAIR_CONFIG_FIELDS = frozenset(StairConfig.__dataclass_fields__)
 
 
@@ -1163,9 +1171,15 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                 upstream_eplb_config.use_async = True
             if vllm_config.parallel_config.enable_elastic_ep:
                 raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
-    elif {"load_collection_phase", "stair_config"} & eplb_config.keys():
+    elif {
+        "load_collection_phase",
+        "stair_config",
+        "export_path",
+        "export_workload",
+        "export_api_ports",
+    } & eplb_config.keys():
         raise ValueError(
-            "stair_config and load_collection_phase are only supported by Model Runner V2; "
+            "stair_config, load_collection_phase and EPLB export fields are only supported by Model Runner V2; "
             "use eplb_heat_collection_stage with Model Runner V1."
         )
     elif vllm_config.parallel_config.enable_eplb:

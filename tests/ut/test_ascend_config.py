@@ -221,6 +221,18 @@ class TestAscendConfig(TestBase):
     def test_eplb_load_collection_phase_defaults_to_all(self):
         self.assertEqual(EplbConfig().load_collection_phase, "all")
 
+    def test_eplb_export_configuration(self):
+        self.assertIsNone(EplbConfig().export_path)
+        config = EplbConfig(
+            export_path="deployment.json",
+            export_workload="calibration",
+            export_api_ports=[9081, 9082],
+        )
+        self.assertEqual(config.export_workload, "calibration")
+        self.assertEqual(config.export_api_ports, [9081, 9082])
+        with self.assertRaises(ValueError):
+            EplbConfig(export_path="")
+
     def test_eplb_load_collection_phase_validation(self):
         self.assertEqual(
             EplbConfig(load_collection_phase="prefill").load_collection_phase,
