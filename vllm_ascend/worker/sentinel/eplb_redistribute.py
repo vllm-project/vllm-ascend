@@ -3,8 +3,8 @@
 """Expert redistribution and weight reload for fault-tolerance scale-down.
 
 After dead EP ranks are removed, renumber the routing tables so they only
-refer to the live ranks, and copy the moved experts' weights from the
-checkpoint into each rank's per-expert weight tensors.
+refer to the live ranks, and copy the weights of the dead ranks' experts
+from the checkpoint into each rank's per-expert weight tensors.
 """
 
 import os
@@ -33,7 +33,8 @@ __all__ = [
     "reload_experts_from_disk",
 ]
 
-# How many experts are reloaded together as one stacked tensor.
+# Experts are reloaded in batches; stacking a batch lets one H2D copy and one
+# NZ cast cover all of it.
 _EXPERTS_PER_STACK = 32
 
 # Host threads that prepare one stack of expert tensors in parallel.
@@ -47,11 +48,12 @@ def densify_routing_tables(
 ) -> None:
     """Renumber every layer's routing table so it refers to live EP ranks only.
 
-    Each entry is a physical expert id; it becomes
-    ``dense_rank * num_local_experts + slot``, where ``dense_rank`` is the
-    0-based position of the hosting rank among the live ranks (dead ranks are
-    skipped). Entries are updated in place, so captured graphs keep pointing
-    at valid storage.
+    The MC2 dispatch/combine kernels index the table by the rank's position
+    among the live ranks, so the numbering must skip dead ranks. Each entry is
+    a physical expert id; it becomes ``dense_rank * num_local_experts + slot``,
+    where ``dense_rank`` is the 0-based position of the hosting rank among the
+    live ranks (dead ranks are skipped). Entries are updated in place, so
+    captured graphs keep pointing at valid storage.
     """
     for layer in moe_layers:
         routing_table = getattr(getattr(layer, "eplb_state", None), "expert_replica_routing_table", None)
@@ -79,25 +81,30 @@ def _reload_local_expert_slots(
     local_slots: dict[tuple[int, int], int],
     expert_weights: dict[tuple[int, int], dict[str, torch.Tensor]],
 ) -> int:
-    """Store the dead ranks' experts, now redistributed onto this rank, in its local per-expert tensors.
+    """Reload the checkpoint tensors of the dead ranks' experts into this rank's existing per-expert slots.
 
-    Returns the number of experts copied.
+    First groups the experts by target ``slot_signature`` so each batch can be
+    stacked into one tensor, then reloads the batches with
+    ``_reload_expert_stack``. Returns the number of experts written.
     """
-    pairs_by_slot_shape: dict[tuple, list[tuple[int, int]]] = {}
+    slot_signature_to_layer_experts: dict[tuple, list[tuple[int, int]]] = {}
     for (layer_idx, logical_id), slot in sorted(local_slots.items()):
         routed_layer = routed_layers[layer_idx]
         if getattr(routed_layer, "w13_bias", None) is not None or getattr(routed_layer, "w2_bias", None) is not None:
             raise NotImplementedError("[FT] scale_down weight reload does not support MoE expert bias yet.")
         reload_definition = _find_reload_definition(routed_layer)
-        slot_shapes = []
+        # (weight_name, shape, dtype) of the target per-expert tensors.
+        slot_signature = []
         for weight_name in reload_definition.pipelines:
             slot_list = getattr(routed_layer, f"{weight_name}_list", None)
             tensor = slot_list[slot] if slot_list is not None else getattr(routed_layer, weight_name).data[slot]
-            slot_shapes.append((weight_name, tensor.shape, tensor.dtype))
-        pairs_by_slot_shape.setdefault((reload_definition, tuple(slot_shapes)), []).append((layer_idx, logical_id))
+            slot_signature.append((weight_name, tensor.shape, tensor.dtype))
+        slot_signature_to_layer_experts.setdefault((reload_definition, tuple(slot_signature)), []).append(
+            (layer_idx, logical_id)
+        )
 
     reloaded = 0
-    for (reload_definition, _slot_shapes), layer_experts in pairs_by_slot_shape.items():
+    for (reload_definition, _slot_signature), layer_experts in slot_signature_to_layer_experts.items():
         for start in range(0, len(layer_experts), _EXPERTS_PER_STACK):
             expert_stack = layer_experts[start : start + _EXPERTS_PER_STACK]
             reloaded += _reload_expert_stack(
@@ -252,21 +259,21 @@ def _collect_matching_weights(
 def _find_local_expert_slots(
     routed_layers: list,
     moe_layers: list,
-    moved_experts: set[tuple[int, int]],
+    dead_rank_experts: set[tuple[int, int]],
     ep_rank: int,
 ) -> dict[tuple[int, int], int]:
-    """Map each moved expert to the index of its per-expert tensor on this rank.
+    """Map each dead-rank expert to the index of its per-expert tensor on this rank.
 
     An expert may have replicas on several ranks; only the replica hosted by
     this rank is returned.
     """
     local_slots: dict[tuple[int, int], int] = {}
-    for layer_idx, logical_id in moved_experts:
+    for layer_idx, logical_id in dead_rank_experts:
         layer_state = getattr(moe_layers[layer_idx], "eplb_state", None)
         logical_to_physical = getattr(layer_state, "logical_to_physical_map", None)
         if logical_to_physical is None:
             raise RuntimeError(
-                f"[FT] MoE layer {layer_idx} has no EPLB placement map; the moved expert has nowhere to land."
+                f"[FT] MoE layer {layer_idx} has no EPLB placement map; the dead rank's expert has nowhere to land."
             )
         num_local_experts = routed_layers[layer_idx].moe_config.num_local_experts
         start = ep_rank * num_local_experts
@@ -281,9 +288,9 @@ def reload_experts_from_disk(
     model: torch.nn.Module,
     model_config: ModelConfig,
     load_config: LoadConfig,
-    moved_experts: set[tuple[int, int]],
+    dead_rank_experts: set[tuple[int, int]],
 ) -> int:
-    """Reload the moved experts' weights into this rank's per-expert tensors.
+    """Reload the weights of the dead ranks' experts into this rank's per-expert tensors.
 
     The tensors must end up exactly as ``process_weights_after_loading`` leaves
     them (weights transposed and cast to NZ, quant scales converted, one tensor
@@ -291,12 +298,12 @@ def reload_experts_from_disk(
     read with its own checkpoint config and ``hf_to_vllm_mapper``; returns the
     number of (layer, expert) pairs reloaded.
     """
-    if not moved_experts:
+    if not dead_rank_experts:
         return 0
 
     moe_layers = list(model.moe_layers)
     routed_layers = [getattr(layer, "routed_experts", layer) for layer in moe_layers]
-    local_slots = _find_local_expert_slots(routed_layers, moe_layers, moved_experts, get_ep_group().rank_in_group)
+    local_slots = _find_local_expert_slots(routed_layers, moe_layers, dead_rank_experts, get_ep_group().rank_in_group)
     if not local_slots:
         return 0
 
@@ -307,7 +314,7 @@ def reload_experts_from_disk(
     for layer_idx, logical_id in local_slots:
         wanted_experts.setdefault(routed_layers[layer_idx].layer_name, {})[logical_id] = (layer_idx, logical_id)
 
-    logger.info("[FT] Reloading %d moved (layer, expert) pair(s) on this rank from disk.", len(local_slots))
+    logger.info("[FT] Reloading %d dead-rank (layer, expert) pair(s) on this rank from disk.", len(local_slots))
     files = _collect_safetensors_files(model_config, load_config, model)
     expert_weights = _collect_matching_weights(files, name_mapper, wanted_experts)
     # A missing weight would leave the previous expert's weights in that tensor, so fail.

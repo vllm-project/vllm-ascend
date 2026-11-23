@@ -221,11 +221,11 @@ class WorkerSentinel(GPUWorkerSentinel):
     def _redistribute_experts(self, dead_ep_ranks: set[int]) -> None:
         """Redistribute the dead ranks' experts onto the surviving ranks' per-expert tensors.
 
-        Runs the upstream redistribution steps, then reloads the moved experts'
-        weights through the Ascend reloader and renumbers the routing tables the
-        kernels read so dead ranks are skipped. Each EPLB-registered model (main
-        model and drafter) is redistributed against its own placement and
-        reloaded from its own checkpoint.
+        Runs the upstream redistribution steps, then reloads the dead-rank
+        experts' weights through the Ascend reloader and renumbers the routing
+        tables the kernels read so dead ranks are skipped. Each EPLB-registered
+        model (main model and drafter) is redistributed against its own
+        placement and reloaded from its own checkpoint.
         """
         model_runner = self.worker.model_runner
         vllm_config = self.worker.vllm_config
@@ -263,19 +263,19 @@ class WorkerSentinel(GPUWorkerSentinel):
         num_local_experts = _num_local_experts(model_state)
 
         mark_dead_expert_slots_inplace(physical_to_logical, dead_ep_ranks, num_local_experts)
-        moved_experts = redistribute_expert_placement(physical_to_logical, num_logical, num_local_experts)
+        dead_rank_experts = redistribute_expert_placement(physical_to_logical, num_logical, num_local_experts)
         logger.info(
-            "[FT] %s expert redistribution: moe_layers=%d, num_logical=%d, moved_experts=%d",
+            "[FT] %s expert redistribution: moe_layers=%d, num_logical=%d, dead_rank_experts=%d",
             type(model).__name__,
             physical_to_logical.shape[0],
             num_logical,
-            len(moved_experts),
+            len(dead_rank_experts),
         )
         _commit_eplb_maps(model_state, physical_to_logical.cpu())
         # The model's expert map is indexed by physical expert id and no id
         # changes here; the logical-id map must not overwrite it.
-        if moved_experts:
-            reload_experts_from_disk(model, model_config, load_config, moved_experts)
+        if dead_rank_experts:
+            reload_experts_from_disk(model, model_config, load_config, dead_rank_experts)
         refresh_model_routing_tables(model_state)
         densify_routing_tables(
             model_state.model.moe_layers,
