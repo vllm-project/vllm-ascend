@@ -335,6 +335,86 @@ def test_draft_layer_in_non_zero_group_uses_that_group(tmp_path: Path):
     assert torch.equal(draft_snap.payload["tensor"][0], draft[3])
 
 
+def test_dump_skips_when_kv_cache_groups_missing(tmp_path: Path):
+    """Empty layer→group map must not silently dump with group-0 pages."""
+    from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
+
+    cache = torch.arange(0, 4 * 4, dtype=torch.float32).reshape(4, 4)
+    runner = SimpleNamespace(
+        requests={"r1": SimpleNamespace(block_ids=([1],))},
+        kv_caches={"L0": cache},
+        kv_cache_config=None,
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+    )
+    snaps = KvCacheReader(runner).snapshot_request_blocks(
+        req_id="r1",
+        block_ids=[1],
+        out_dir=tmp_path / "kv",
+    )
+    assert snaps == []
+
+
+def test_dump_skips_layer_missing_from_group_map(tmp_path: Path):
+    """Layer not registered in kv_cache_groups is skipped; mapped layers still dump."""
+    from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
+
+    g0 = torch.arange(0, 4 * 4, dtype=torch.float32).reshape(4, 4)
+    orphan = torch.arange(100, 100 + 4 * 4, dtype=torch.float32).reshape(4, 4)
+    runner = SimpleNamespace(
+        requests={"r1": SimpleNamespace(block_ids=([1], [2]))},
+        kv_caches={"L0": g0, "orphan.attn": orphan},
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=["L0"])],
+        ),
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+    )
+    snaps = KvCacheReader(runner).snapshot_request_blocks(
+        req_id="r1",
+        block_ids=[1],
+        out_dir=tmp_path / "kv",
+    )
+    assert [s.payload["layer"] for s in snaps] == ["L0"]
+    assert snaps[0].payload["kv_cache_group"] == 0
+    assert snaps[0].payload["block_ids"] == [1]
+    assert torch.equal(snaps[0].payload["tensor"][0], g0[1])
+
+
+def test_explicit_group0_layer_still_dumps(tmp_path: Path):
+    """True group-0 membership (name in map → 0) must still produce a dump."""
+    from vllm_ascend.observability.runtime_guard.dump import KvCacheReader
+
+    cache = torch.arange(0, 4 * 4, dtype=torch.float32).reshape(4, 4)
+    runner = SimpleNamespace(
+        requests={"r1": SimpleNamespace(block_ids=([2],))},
+        kv_caches={"L0": cache},
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=["L0"])],
+        ),
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+    )
+    snaps = KvCacheReader(runner).snapshot_request_blocks(
+        req_id="r1",
+        block_ids=[2],
+        out_dir=tmp_path / "kv",
+    )
+    assert len(snaps) == 1
+    assert snaps[0].payload["kv_cache_group"] == 0
+    assert snaps[0].payload["block_ids"] == [2]
+    assert torch.equal(snaps[0].payload["tensor"][0], cache[2])
+
+
 def test_expand_manager_block_ids_kernel_ratio():
     from vllm_ascend.observability.runtime_guard.dump import expand_manager_block_ids
 
@@ -397,7 +477,18 @@ def test_snapshot_skips_empty_block_ids(tmp_path: Path):
 
 def test_snapshot_request_blocks_writes_req_slice(tmp_path: Path):
     cache = torch.randn(4, 8, 2)
-    runner = SimpleNamespace(kv_caches={"L0": cache})
+    runner = SimpleNamespace(
+        kv_caches={"L0": cache},
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=["L0"])],
+        ),
+        requests={"r1": SimpleNamespace(block_ids=([0, 2],))},
+        block_tables=SimpleNamespace(blocks_per_kv_block=[1]),
+        compilation_config=None,
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+    )
     reader = KvCacheReader(runner)
     snaps = reader.snapshot_request_blocks(
         req_id="r1",

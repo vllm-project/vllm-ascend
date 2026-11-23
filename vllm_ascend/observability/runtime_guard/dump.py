@@ -456,6 +456,18 @@ def _logical_layer_name(layer_name: str) -> str:
     return layer_name
 
 
+def _group_for_layer(layer_name: str, layer_to_group: dict[str, int]) -> int | None:
+    """Return the layer's ``kv_cache_group`` index, or ``None`` if unknown.
+
+    Distinguishes ``group 0`` from ``not in map`` so dump never silently
+    reuses group-0 page lists for unresolved layers.
+    """
+    logical = _logical_layer_name(layer_name)
+    if logical not in layer_to_group:
+        return None
+    return int(layer_to_group[logical])
+
+
 def _blocks_per_kv_block_for_group(runner: Any, kv_cache_group: int) -> int:
     """Kernel pages per manager block for ``kv_cache_group`` (default 1)."""
     block_tables = getattr(runner, "block_tables", None)
@@ -621,9 +633,16 @@ class KvCacheReader:
         fallback_ids: list[int],
         group_cache: dict[int, list[int]],
         layer_to_group: dict[str, int],
-    ) -> list[int]:
-        logical = _logical_layer_name(layer_name)
-        gid = int(layer_to_group.get(logical, 0))
+    ) -> list[int] | None:
+        """Resolve block ids for ``layer_name``.
+
+        Returns ``None`` when the layer's ``kv_cache_group`` cannot be resolved
+        (empty map or name missing). Callers must skip rather than treat that
+        as group 0.
+        """
+        gid = _group_for_layer(layer_name, layer_to_group)
+        if gid is None:
+            return None
         if gid not in group_cache:
             got = block_ids_for_request(self._runner, req_id, None, kv_cache_group=gid)
             if not got and gid == 0 and fallback_ids:
@@ -671,8 +690,14 @@ class KvCacheReader:
         cp_rank = runner_cp_rank(self._runner)
         names, start = self._list_layer_meta()
         layer_to_group = _layer_name_to_kv_cache_group(self._runner)
+        if not layer_to_group:
+            logger.warning_once(
+                "[runtime_guard dump_kv] kv_cache_groups missing/empty; "
+                "refusing silent group-0 fallback (layers will be skipped)"
+            )
         group_cache: dict[int, list[int]] = {}
         skipped_empty_group = False
+        skipped_unresolved_group = False
         for src_name, kv_caches in self._kv_sources():
             for layer_name, tensor in _iter_kv_tensors(kv_caches, list_names=names, start_layer=start):
                 ids = self._block_ids_for_layer(
@@ -682,6 +707,15 @@ class KvCacheReader:
                     group_cache=group_cache,
                     layer_to_group=layer_to_group,
                 )
+                if ids is None:
+                    skipped_unresolved_group = True
+                    logger.warning(
+                        "[runtime_guard dump_kv] skip layer=%s req_id=%s: "
+                        "kv_cache_group unresolved (not in layer→group map)",
+                        layer_name,
+                        req_id,
+                    )
+                    continue
                 if not ids:
                     skipped_empty_group = True
                     logger.warning(
@@ -704,14 +738,15 @@ class KvCacheReader:
                 safe_layer = layer_name.replace("/", "_")
                 path = out_dir / f"{req_id}_{safe_layer}_req.pt"
                 produced = True
-                logical = _logical_layer_name(layer_name)
+                gid = _group_for_layer(layer_name, layer_to_group)
+                assert gid is not None  # resolved above via _block_ids_for_layer
                 yield KvDumpSnapshot(
                     path=path,
                     payload={
                         "req_id": req_id,
                         "block_ids": used_ids,
                         "layer": layer_name,
-                        "kv_cache_group": int(layer_to_group.get(logical, 0)),
+                        "kv_cache_group": int(gid),
                         "source": src_name,
                         "rank_tag": rank_tag,
                         "tp_rank": tp_rank,
@@ -722,7 +757,7 @@ class KvCacheReader:
                     },
                 )
         if not produced:
-            if not fallback_ids and not skipped_empty_group:
+            if not fallback_ids and not skipped_empty_group and not skipped_unresolved_group:
                 logger.warning(
                     "[runtime_guard dump_kv] skip req_id=%s: empty block_ids (refusing full-cache D2H)",
                     req_id,
