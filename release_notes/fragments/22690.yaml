@@ -1,0 +1,4 @@
+pr: 22690
+entries:
+  - category: hardware
+    text: Added a vLLM-Ascend hardware overlay for qwen3-5-122b-a10b — measured launch configuration (launch arguments, environment, image pin) captured from a live deployment via the platform collection flow.
