@@ -362,6 +362,8 @@ def build_attn_metadata(
     copy_sfa_restore_tails: bool = False,
     draft_layer_names: set[str] | None = None,
     common_metadata_callback=None,
+    mamba_prefill_checkpoints: dict[str, list[tuple[int, int, int]]] | None = None,
+    req_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     if skip_ring_state_update is None:
@@ -463,6 +465,14 @@ def build_attn_metadata(
             if model_specific_attn_metadata is not None
             else {}
         )
+        if mamba_prefill_checkpoints:
+            assert req_ids is not None
+            plans = [(0, 0)] * num_reqs
+            for row, req_id in enumerate(req_ids[:num_reqs]):
+                for group_id, position, block_id in mamba_prefill_checkpoints.get(req_id, ()):
+                    if group_id == i:
+                        plans[row] = (position, block_id)
+            common_attn_metadata_extra_kwargs["mamba_prefill_checkpoints"] = plans
         v41_prefill_override = "is_prefilling" in common_attn_metadata_extra_kwargs
         common_is_prefilling = common_attn_metadata_extra_kwargs.pop(
             "is_prefilling",
