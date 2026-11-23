@@ -304,6 +304,7 @@ def test_adaptive_verification_manager_initialization(cpu_manager_resources, mon
         max_num_tokens=16,
         dcp_size=1,
         dcp_rank=0,
+        batch_sharder=None,
     )
     upstream = patch_model_runner.upstream
     monkeypatch.setattr(
@@ -326,6 +327,7 @@ def test_adaptive_verification_manager_initialization(cpu_manager_resources, mon
         patch_model_runner.initialize_kv_cache(runner, cache_config)
     manager_call.assert_called_once()
     assert manager_call.call_args.kwargs["enable_adaptive_verification"] is enabled
+    assert manager_call.call_args.kwargs["copy_admitted_drafts_to_host"] is False
     assert manager_call.call_args.kwargs["target_layer_names"] == {"target"}
     assert (runner.adaptive_verification is not None) is enabled
     if enabled:

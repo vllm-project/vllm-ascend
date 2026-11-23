@@ -1,44 +1,43 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""KDA head partitions shared by projection loaders and recurrent caches."""
+"""Head sharding across TP and PCP for projections and recurrent state."""
 
 from copy import copy
 
 from vllm.distributed import divide, get_pcp_group, get_tp_group
 from vllm.model_executor.layers.linear import ColumnParallelLinear, MergedColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.kimi_k3.nvidia.kda import _KimiGDNMergedColumnParallelLinear
 
 from vllm_ascend.utils import vllm_version_is
 
 
-def get_kda_parallel_size(parallel_config) -> int:
+def get_head_parallel_size(parallel_config) -> int:
     return parallel_config.tensor_parallel_size * parallel_config.prefill_context_parallel_size
 
 
-def get_kda_parallel_rank() -> int:
+def get_head_parallel_rank() -> int:
     # Mooncake worker IDs use the same TP-major, PCP-minor order.
     return get_tp_group().rank_in_group * get_pcp_group().world_size + get_pcp_group().rank_in_group
 
 
-def get_kda_state_shape(vllm_config, upstream_get_shape):
+def get_head_sharded_state_shape(vllm_config, upstream_get_shape):
     # Let the installed vLLM own state layout and RecoverSSM conventions.
     if vllm_config.parallel_config.prefill_context_parallel_size == 1:
         return upstream_get_shape(vllm_config)
     config = copy(vllm_config)
     config.parallel_config = copy(vllm_config.parallel_config)
-    config.parallel_config.tensor_parallel_size = get_kda_parallel_size(vllm_config.parallel_config)
+    config.parallel_config.tensor_parallel_size = get_head_parallel_size(vllm_config.parallel_config)
     return upstream_get_shape(config)
 
 
-class KDAColumnParallelLinear(ColumnParallelLinear):
+class HeadParallelColumnLinear(ColumnParallelLinear):
     def __init__(self, input_size: int, output_size: int, **kwargs) -> None:
         self.pcp_group = get_pcp_group()
         self.tp_group = get_tp_group()
         super().__init__(
             input_size,
             output_size,
-            tp_rank=get_kda_parallel_rank(),
+            tp_rank=get_head_parallel_rank(),
             tp_size=self.tp_group.world_size * self.pcp_group.world_size,
             **kwargs,
         )
@@ -56,7 +55,7 @@ class KDAColumnParallelLinear(ColumnParallelLinear):
         return output, self.bias if self.skip_bias_add else None
 
 
-class KDAMergedColumnParallelLinear(MergedColumnParallelLinear, KDAColumnParallelLinear):
+class HeadParallelMergedColumnLinear(MergedColumnParallelLinear, HeadParallelColumnLinear):
     def __init__(self, input_size: int, output_sizes: list[int], *, padding_size: int = 0, **kwargs) -> None:
         # #66784 moves padding ownership from the Kimi wrapper to the merged
         # layer. Consume it here rather than forwarding it to ColumnParallelLinear.
@@ -68,7 +67,7 @@ class KDAMergedColumnParallelLinear(MergedColumnParallelLinear, KDAColumnParalle
             parallel_size = get_tp_group().world_size * get_pcp_group().world_size
             self.output_sizes.append(padding_size * parallel_size)
         # Keep the merged checkpoint loaders, but allocate with explicit ranks.
-        KDAColumnParallelLinear.__init__(self, input_size, sum(self.output_sizes), **kwargs)
+        HeadParallelColumnLinear.__init__(self, input_size, sum(self.output_sizes), **kwargs)
         # vLLM #63752: custom allocation bypasses the stacked initializer.
         self.loaded_shard_ids: dict[str, set[str | int]] = {}
         if not vllm_version_is("0.33.0"):
@@ -78,14 +77,7 @@ class KDAMergedColumnParallelLinear(MergedColumnParallelLinear, KDAColumnParalle
                 set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel()})
 
 
-class KDAInputParallelLinear(_KimiGDNMergedColumnParallelLinear, KDAMergedColumnParallelLinear):
-    def __init__(self, input_size: int, output_sizes: list[int], tp_size: int, **kwargs) -> None:
-        # Keep upstream replication/padding setup; the next MRO class allocates
-        # its merged projection using the combined TP/PCP rank.
-        super().__init__(input_size, output_sizes, replicated_shard_id=4, tp_size=tp_size, **kwargs)
-
-
-class KDARowParallelLinear(RowParallelLinear):
+class HeadParallelRowLinear(RowParallelLinear):
     def __init__(self, input_size: int, output_size: int, **kwargs) -> None:
         self.pcp_group = get_pcp_group()
         self.tp_group = get_tp_group()
@@ -95,7 +87,7 @@ class KDARowParallelLinear(RowParallelLinear):
         self.input_size = input_size
         self.disable_tp = False
         self.tp_size = size
-        self.tp_rank = get_kda_parallel_rank()
+        self.tp_rank = get_head_parallel_rank()
         self.update_param_tp_status()
 
     def forward(self, input_):

@@ -1,0 +1,9 @@
+pr: 21196
+entries:
+  - category: performance
+    text: >-
+      Reduced per-step overhead for Qwen3.8 / Qwen3-Next GDN and GLM models on
+      Ascend: the block-table "align" gather in the attention and RecoverSSM
+      metadata builders now runs as one fused Triton kernel instead of seven
+      eager ops, removing six kernel launches per decode step (910B probe:
+      device ~370 -> ~215 us, host ~247 -> ~121 us per call).

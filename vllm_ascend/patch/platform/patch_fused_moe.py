@@ -74,6 +74,9 @@ def _adapt_routed_experts_cls(routed_experts_cls: Any | None) -> Any | None:
 
 
 def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
+    # Preserve BaseRouter's selection flow when TopK already returned physical IDs.
+    if getattr(self, "_use_gating_top_k_with_map", False):
+        return topk_ids
     eplb_state = self.eplb_state
     if eplb_state is None:
         return topk_ids
@@ -137,6 +140,17 @@ def _ascend_FusedMoE(
     image_sentinel_lo: int = 129257,
     **kwargs,
 ):
+    # vLLM 0.33.0's Ling model passes activation="silu" even for a routed layer
+    # with a configured swiglu_limit, which must clamp after SiLU (vllm#65088).
+    # Ling calls this factory directly from its module, which identifies it.
+    if (
+        kwargs.get("activation") == "silu"
+        and kwargs.get("swiglu_limit") is not None
+        and vllm_version_is("0.33.0")
+        and sys._getframe(1).f_globals.get("__name__") == "vllm.model_executor.models.bailing_moe_v3"
+    ):
+        kwargs["activation"] = "swiglustep"
+
     # Ascend-owned model callers retain the release booleans; native main
     # callers pass the enum introduced by vLLM #66859. Normalize before
     # constructing either the router or the native factory to scale once.

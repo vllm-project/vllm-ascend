@@ -33,6 +33,18 @@
 /AGENTS.md @MrZ20
 /CLAUDE.md @MrZ20
 
+# AI review
+/.github/agent-review/ @wangxiyuan
+/.github/workflows/ai_review.yml @wangxiyuan
+/.github/workflows/_schedule_ai_review_image_build.yaml @wangxiyuan
+/.github/workflows/dockerfiles/Dockerfile.ai-review @wangxiyuan
+/.github/workflows/scripts/ai_review.py @wangxiyuan
+/.github/workflows/scripts/test_ai_review.py @wangxiyuan
+/.github/agent-review/L1/ @wangxiyuan
+/.github/agent-review/L2/ci/ @zhangxinyuehfad
+/.github/agent-review/L2/release-note/ @wangxiyuan
+/.github/agent-review/L2/speculative-decoding/ @drslark @slippersss
+
 # Dockerfiles
 /Dockerfile* @zhangxinyuehfad @czydyy @winson-00178005
 
@@ -118,7 +130,7 @@
 /vllm_ascend/ops/fused_moe/force_eplb.py @freyfwt
 /vllm_ascend/ops/kimi_kda.py @Dawn952 @drslark @chenxi-hh @hust17yixuan
 /vllm_ascend/ops/kimi_mla.py @Dawn952 @hust17yixuan
-/vllm_ascend/ops/kda_pcp.py @weiguihua2 @zhenwenqi2024 @pisceskkk @zhaochuang001 @li1how @wzx0726
+/vllm_ascend/ops/recurrent_pcp.py @weiguihua2 @zhenwenqi2024 @pisceskkk @zhaochuang001 @li1how @wzx0726
 
 # quantization
 /vllm_ascend/quantization @kunpengW-code @menogrey @Tflowers-0129 @lcfenglinwan @earthmanylf
@@ -206,7 +218,7 @@
 /vllm_ascend/models/kimi_k3 @Dawn952 @hust17yixuan
 /vllm_ascend/models/kimi_k3/recoverssm_config.py @drslark @chenxi-hh
 /vllm_ascend/models/kimi_k3/recoverssm_metadata.py @drslark @chenxi-hh
-/vllm_ascend/models/step5/ @realliujiaxu
+/vllm_ascend/models/step5/ @realliujiaxu @earthmanylf
 # /vllm_ascend/models/d3.py
 # /vllm_ascend/models/gemma4_mm.py
 # /vllm_ascend/models/llama_eagle3.py

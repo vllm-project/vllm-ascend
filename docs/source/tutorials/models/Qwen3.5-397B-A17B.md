@@ -189,7 +189,7 @@ sysctl kernel.sched_migration_cost_ns=50000
 
 !!! note
 
-    `--shm-size=64g` is recommended for the documented 397B long-context deployment recipes. Use both sufficient shared memory and an unlimited memlock setting: a 1g shared memory or the default 64 MB locked-memory limit is too small, and worker startup and memory profiling can fail with `torch.OutOfMemoryError` / `aclrtMallocHostWithCfg error 207001` (host memory allocation failure) and HCCL link setup can time out. If the container runtime does not permit `--ulimit memlock=-1`, configure the host/runtime policy or grant the minimum required capability. Increasing `--shm-size` alone does not remove the memlock limit.
+    `--shm-size=64g` is recommended for the documented 397B long-context deployment recipes. Use both sufficient shared memory and an unlimited memlock setting: a 1 GB shared memory or the default 64 MB locked-memory limit is too small, and worker startup and memory profiling can fail with `torch.OutOfMemoryError` / `aclrtMallocHostWithCfg error 207001` (host memory allocation failure) and HCCL link setup can time out. If the container runtime does not permit `--ulimit memlock=-1`, configure the host/runtime policy or grant the minimum required capability. Increasing `--shm-size` alone does not remove the memlock limit.
 
     The CPU governor and `sysctl` tuning commands must run on the host before starting the container; see the host preparation block at the top of this section. Do not run them inside the serving container, where `/sys` and `/proc/sys` are read-only.
 
@@ -223,7 +223,7 @@ If you want to deploy a multi-node service, set up the same environment on each 
 
 ### 4.2 Source Code Installation
 
-You can also build and install `vllm-ascend` from source. Refer to [set up using python](../../getting_started/installation.md#installation-existing-cann-install).
+You can also build and install `vllm-ascend` from source. Refer to [set up using Python](../../getting_started/installation.md#installation-existing-cann-install).
 
 If you want to deploy a multi-node service, install the same version of vLLM and vLLM-Ascend on each node.
 
@@ -572,7 +572,7 @@ bash run_p.sh
 
 If the Prefill service starts successfully, information similar to the following example is displayed:
 
-```text
+```output
 INFO:     Started server process [44610]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -683,7 +683,7 @@ bash run_d.sh
 
 If the Decode service starts successfully, information similar to the following example is displayed:
 
-```text
+```output
 INFO:     Started server process [44611]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -841,7 +841,7 @@ bash run_p.sh
 
 If the Prefill service starts successfully, information similar to the following example is displayed:
 
-```text
+```output
 INFO:     Started server process [44610]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -953,7 +953,7 @@ bash run_d.sh
 
 If the Decode service starts successfully, information similar to the following example is displayed:
 
-```text
+```output
 INFO:     Started server process [44611]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -1153,7 +1153,7 @@ Common Issues Tip: If the decode node fails to initialize, check that `--tensor-
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` is recommended on the decode node to reduce decode dispatch overhead.
 
-Run the two scripts on their respective hosts after filling in each host's NIC and IP. The examples use seven argument positions: visible devices, HTTP port, global DP size, DP rank, DP master address, DP RPC port, and TP size. P reads only positions 1–3 and 7; positions 4–6 are unused and retained for invocation compatibility. D uses all seven positions; its argument 5 is the D host's service IP. Use DP1/TP8 to match the fixed KV topology; changing topology also requires updating the connector JSON and device allocation. Set the A2 proxy's `--prefiller-ports` and `--decoder-ports` in [Section 5.6.3](#563-proxy) to the HTTP ports passed as argument 2 to the respective scripts.
+Run the two scripts on their respective hosts after filling in each host's NIC and IP. The examples use seven argument positions: visible devices, HTTP port, global DP size, DP rank, DP master address, DP RPC port, and TP size. P reads only positions 1-3 and 7; positions 4-6 are unused and retained for invocation compatibility. D uses all seven positions; its argument 5 is the D host's service IP. Use DP1/TP8 to match the fixed KV topology; changing topology also requires updating the connector JSON and device allocation. Set the A2 proxy's `--prefiller-ports` and `--decoder-ports` in [Section 5.6.3](#563-proxy) to the HTTP ports passed as argument 2 to the respective scripts.
 
 Prefill uses the self-contained DP1 mode and therefore does not set the DP address or RPC port. Decode explicitly sets `--data-parallel-rank`, so the launcher also supplies its DP control-plane address and RPC port. In this DP1/rank0 example, the Decode address points to the Decode host itself. The Prefill and Decode services are separate vLLM instances and do not share a DP group. Do not mistake the DP RPC port for the HTTP port; the proxy always uses the HTTP ports (argument 2), never the DP RPC port.
 
@@ -1195,8 +1195,8 @@ Use the proxy paired with the actual connector, rather than choosing it by hardw
 
 | Connector | Request Order | Proxy | Scope |
 |-----------|---------------|-------|-------|
-| `MooncakeConnectorV1` | Proxy calls P, then D; D pulls KV | `load_balance_proxy_server_example.py` | A3 and A2 PD recipes in [Section 5.4](#54-prefill-decode-disaggregation-a3) and [Section 5.6](#56-prefill-decode-disaggregation-a2) |
-| `MooncakeConnectorV2` | Proxy calls P, then D; D pulls KV | `load_balance_proxy_server_example.py` | 950DT W4A8C8 unequal-TP recipe in [Section 5.5](#55-prefill-decode-disaggregation-950dt-products) |
+| `MooncakeConnectorV1` | Proxy calls P, then D; D pulls KV. | `load_balance_proxy_server_example.py` | A3 and A2 PD recipes in [Section 5.4](#54-prefill-decode-disaggregation-a3) and [Section 5.6](#56-prefill-decode-disaggregation-a2) |
+| `MooncakeConnectorV2` | Proxy calls P, then D; D pulls KV. | `load_balance_proxy_server_example.py` | 950DT W4A8C8 unequal-TP recipe in [Section 5.5](#55-prefill-decode-disaggregation-950dt-products) |
 
 Equal TP sizes do not make these connectors interchangeable. For unequal TP, verify the direction, divisibility, replicated KV heads, hybrid state layout, and quantization support of the selected implementation. The TP8-to-TP4 example does not imply arbitrary TP ratios or reverse-direction support. Use scripts from the same vLLM-Ascend revision as the serving stack.
 
@@ -1238,7 +1238,7 @@ Expected result: the HTTP status is 200 and the JSON response contains nonempty,
 
 To enable tool calling, append the following options to the `vllm serve` command. For PD deployment, add them to both the Prefill and Decode commands and restart both services.
 
-```text
+```bash
 --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3
 ```
 
@@ -1349,7 +1349,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 The table summarizes the deployment examples in [Section 5](#5-online-service-deployment--5-online-service-deployment-). Follow the linked scripts for the complete configuration, and tune the values for your workload. NPUs are allocated to the listed role on each host; the A3 PD roles share one host with 8 NPUs each. DP is shown as global/local. `Max Num Seqs` and `Max Num Batched Tokens` apply to each DP group.
 
-| Deployment Example | Node Role | NPUs | TP | DP (global/local) | Max Model Len | Max Num Seqs | Max Num Batched Tokens | MTP Tokens | Prefix Cache |
+| Deployment Example | Node Role | NPUs | TP | DP (global/local) | Max Model Len | Max Num Seqs | Max Num Batched Tokens | MTPs | Prefix Cache |
 | ------------------ | --------- | ---- | -- | ----------------- | ------------- | ------------ | ---------------------- | ---------- | ------------ |
 | [5.1 A3 single node](#51-single-node-online-deployment) | Mixed | 16 | 16 | 1/1 | 133000 | 128 | 16384 | 3 | On |
 | [5.1 950DT single node](#51-single-node-online-deployment) | Mixed | 8 | 8 | 1/1 | 133000 | 128 | 8192 | 3 | On |

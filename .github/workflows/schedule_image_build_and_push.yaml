@@ -55,7 +55,7 @@ permissions:
 
 jobs:
   setup-matrix:
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-amd64-cpu-1-hk
     if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'image-build' }}
     outputs:
       build_meta: ${{ steps.matrix.outputs.build_meta }}

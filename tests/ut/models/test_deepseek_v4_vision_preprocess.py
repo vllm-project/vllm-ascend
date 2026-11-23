@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Lock
 from types import SimpleNamespace
 
 import pytest
 import torch
 from PIL import Image
-from transformers import DeepseekV4Config
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from transformers import DeepseekV4Config, PreTrainedTokenizerFast
 from vllm.config.multimodal import MultiModalConfig
 from vllm.models.deepseek_v4.common import mm_preprocess as prep
 from vllm.models.deepseek_v4.common.mm_preprocess import (
@@ -20,6 +25,8 @@ from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing import PromptReplacement, PromptUpdateDetails
 from vllm.multimodal.processing.context import InputProcessingContext, TimingContext
 from vllm.multimodal.processing.inputs import ProcessorInputs
+from vllm.renderers.deepseek_v4 import DeepseekV4Renderer
+from vllm.renderers.params import TokenizeParams
 
 
 class _StubInfo:
@@ -227,3 +234,89 @@ def test_processor_apply_preserves_image_order_and_embedding_masks(processing_in
 
     expected.append(16)
     assert output["prompt_token_ids"] == expected
+
+
+class _ConcurrentTokenizer(PreTrainedTokenizerFast):
+    """Hold the renderer's encoding call open and reject overlapping encoding.
+
+    The guard makes accidental re-tokenization in the image path fail without
+    depending on the timing of the fast tokenizer's Rust borrow checks.
+    Read-only token-ID lookup still uses the real fast tokenizer.
+    """
+
+    def __call__(self, *args, **kwargs):
+        assert self.encoding_lock.acquire(blocking=False), "concurrent tokenizer encoding"
+        try:
+            if self.hold_encoding:
+                self.encoding_started.set()
+                assert self.release_encoding.wait(timeout=10), "image processing did not finish"
+            return super().__call__(*args, **kwargs)
+        finally:
+            self.encoding_lock.release()
+
+
+@pytest.mark.parametrize("num_images", [1, 2])
+@pytest.mark.parametrize("truncate_tokens", [None, 3])
+def test_image_preprocessing_during_renderer_tokenization(processing_info, monkeypatch, num_images, truncate_tokens):
+    # A small local vocabulary keeps this test independent of model downloads.
+    monkeypatch.setattr(prep, "IMAGE_SENTINEL_BASE_ID", 5)
+    tokens = ["[UNK]", "a", "b", "c", prep.IMAGE_PLACEHOLDER, *prep.IMAGE_SENTINEL_TOKEN_NAMES]
+    backend = Tokenizer(WordLevel(dict(zip(tokens, range(len(tokens)), strict=True)), unk_token="[UNK]"))
+    backend.pre_tokenizer = Whitespace()
+    tokenizer = _ConcurrentTokenizer(
+        tokenizer_object=backend,
+        unk_token="[UNK]",
+        additional_special_tokens=tokens[4:],
+    )
+    tokenizer.encoding_lock = Lock()
+    tokenizer.encoding_started = Event()
+    tokenizer.release_encoding = Event()
+    tokenizer.hold_encoding = False
+    renderer = DeepseekV4Renderer.__new__(DeepseekV4Renderer)
+    renderer.tokenizer = tokenizer
+    params = TokenizeParams(max_total_tokens=None, truncate_prompt_tokens=truncate_tokens)
+    text = {"prompt": "a b c a b c"}
+    expected_text = renderer._tokenize_prompt(text, params)
+    image_prompt = renderer._tokenize_prompt(
+        {"prompt": "a " + f"{prep.IMAGE_PLACEHOLDER} b " * num_images},
+        TokenizeParams(max_total_tokens=None),
+    )["prompt_token_ids"]
+    processing_info = prep.DeepseekV4VLProcessingInfo(
+        InputProcessingContext(processing_info.ctx.model_config, tokenizer)
+    )
+    processor = DeepseekV4VLMultiModalProcessor(processing_info, None)
+
+    def process_images():
+        images = [Image.new("RGB", (128 + i * 14, 96), color=(10 + i, 20, 30)) for i in range(num_images)]
+        inputs = ProcessorInputs(
+            prompt=image_prompt.copy(),
+            mm_data_items=processor.data_parser.parse_mm_data({"image": images}),
+        )
+        return processor.apply(inputs, TimingContext(enabled=False))
+
+    expected = process_images()
+    for _ in range(2):
+        tokenizer.encoding_started.clear()
+        tokenizer.release_encoding.clear()
+        tokenizer.hold_encoding = True
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            rendering = executor.submit(renderer._tokenize_prompt, text, params)
+            try:
+                assert tokenizer.encoding_started.wait(timeout=10)
+                actual = executor.submit(process_images).result(timeout=10)
+            finally:
+                tokenizer.release_encoding.set()
+            assert rendering.result(timeout=10) == expected_text
+        assert actual["prompt_token_ids"] == expected["prompt_token_ids"]
+        assert actual["mm_hashes"] == expected["mm_hashes"]
+        for actual_item, expected_item in zip(
+            actual["mm_kwargs"]["image"], expected["mm_kwargs"]["image"], strict=True
+        ):
+            assert actual_item.keys() == expected_item.keys()
+            for name in expected_item:
+                assert torch.equal(actual_item[name].data, expected_item[name].data), name
+        for actual_range, expected_range in zip(
+            actual["mm_placeholders"]["image"], expected["mm_placeholders"]["image"], strict=True
+        ):
+            assert (actual_range.offset, actual_range.length) == (expected_range.offset, expected_range.length)
+            assert torch.equal(actual_range.is_embed, expected_range.is_embed)

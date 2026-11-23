@@ -24,9 +24,9 @@ on:
         required: false
         default: ''
       model:
-        description: 'opencode model name (default: deepseek/deepseek-flash)'
+        description: 'opencode model name (default: deepseek/deepseek-v4.1-flash)'
         required: false
-        default: 'deepseek/deepseek-flash'
+        default: 'deepseek/deepseek-v4.1-flash'
       runner:
         description: 'A3 16-card NPU runner label (linux-aarch64-a3-16-sh-001 or linux-aarch64-a3-800i-16)'
         required: false
@@ -44,7 +44,7 @@ defaults:
 
 env:
   UPSTREAM_REPO: vllm-project/vllm-ascend
-  MAIN2MAIN_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.model || 'deepseek/deepseek-flash' }}
+  MAIN2MAIN_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.model || 'deepseek/deepseek-v4.1-flash' }}
   RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
   RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
   RUNS_ON_S3_FORCE_PATH_STYLE: "false"
@@ -319,6 +319,11 @@ jobs:
       - name: Install opencode + main2main-flow
         env:
           NODE_VERSION: 24.18.0
+          # Unified agent credential, shared with the AI review job (#22319).
+          # The built-in `deepseek` provider reads DEEPSEEK_API_KEY directly
+          # and defaults to https://api.deepseek.com, so no auth.json needed.
+          # AI_REVIEW_API is expected to point at that same DeepSeek channel.
+          DEEPSEEK_API_KEY: ${{ secrets.AI_REVIEW_KEY }}
         run: |
           set -euxo pipefail
 
@@ -343,25 +348,16 @@ jobs:
             --prefix "$HOME/.opencode" \
             --registry https://repo.huaweicloud.com/repository/npm/ \
             opencode-ai
-          # configure opencode auth
-          # DeepSeek official platform; MAIN2MAIN_API_KEY must hold a DeepSeek key.
-          mkdir -p ~/.local/share/opencode
-          cat > ~/.local/share/opencode/auth.json <<EOF
-          {
-            "deepseek": {
-              "type": "api",
-              "key": "${{ secrets.MAIN2MAIN_API_KEY }}"
-            }
-          }
-          EOF
-          # extend opencode's model catalog: models.dev does not list deepseek-flash yet
+
+          # models.dev does not list deepseek-v4.1-flash yet; extend the
+          # built-in deepseek provider catalog with it.
           mkdir -p ~/.config/opencode
           cat > ~/.config/opencode/opencode.json <<EOF
           {
             "provider": {
               "deepseek": {
                 "models": {
-                  "deepseek-flash": {}
+                  "deepseek-v4.1-flash": {}
                 }
               }
             }
@@ -550,6 +546,9 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: True
+          # Same unified agent credential as the install step; the main2main
+          # flow spawns `opencode` and inherits this environment.
+          DEEPSEEK_API_KEY: ${{ secrets.AI_REVIEW_KEY }}
         run: |
           set -euo pipefail
           export PATH="$HOME/.opencode/bin:$PATH"
