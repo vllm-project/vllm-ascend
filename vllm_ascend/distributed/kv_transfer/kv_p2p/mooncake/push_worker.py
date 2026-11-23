@@ -703,7 +703,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         *,
         layer_hook: bool = False,
         force: bool = False,
-        shared_names: list[str] | None = None,
+        wait_for_metadata: bool = False,
     ) -> None:
         """Collect WRITE results and submit ready layers; never send DONE here."""
         pending = []
@@ -751,25 +751,12 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             assert state.consumer_engine_id is not None
             if not (wait or force) and state.consumer_engine_id in self._sending_futures:
                 continue
-            ready_layers = (
-                state.available_layers.keys()
-                if shared_names is None
-                else [name for name in shared_names if name in state.available_layers]
-            )
-            if shared_names is not None and not ready_layers:
-                continue
             for rank, destination in state.destinations.items():
                 if state.error or destination.completion is not None:
                     continue
                 assert destination.metadata_future is not None
                 # Shared sources wait for discovery while their slot is valid.
-                if shared_names is None and not destination.metadata_future.done():
-                    continue
-                if (
-                    shared_names is not None
-                    and destination.required_layers is not None
-                    and destination.required_layers.isdisjoint(ready_layers)
-                ):
+                if not wait_for_metadata and not destination.metadata_future.done():
                     continue
                 try:
                     remote = destination.metadata_future.result()
@@ -789,7 +776,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                             for name in self._layer_indices
                             if self._get_transfer_partition(name, remote, rank) is not None
                         }
-                    for layer_name in ready_layers:
+                    for layer_name in state.available_layers:
                         if layer_name not in destination.required_layers or layer_name in destination.pending_layers:
                             continue
                         task = self._build_layer_transfer_request(request_id, state, destination, layer_name)
@@ -862,7 +849,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
     def _submit_shared_layer_writes(self, shared_names: list[str]) -> None:
         # A busy engine or pending metadata must not defer a shared cache read
         # beyond the point where AscendStore can hand the slot to another layer.
-        self._process_sending_requests(layer_hook=True, force=True, shared_names=shared_names)
+        self._process_sending_requests(layer_hook=True, force=True, wait_for_metadata=True)
         # Only resident caches can be picked up by later hooks. Subsequent
         # chunks restore the unsent part of a shared cache before writing it.
         for request_id in self._prefilling_request_ids:

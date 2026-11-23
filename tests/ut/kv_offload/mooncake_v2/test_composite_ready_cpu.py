@@ -152,39 +152,31 @@ def test_push_advertises_the_worker_layout(configuration):
         get_layout.assert_called_once_with(cache_config)
 
 
-def test_shared_hook_leaves_resident_writes_deferred():
+def test_shared_hook_submits_shared_and_resident_writes():
     obj = worker()
     shared, resident = "model.layers.2.long", "model.layers.2.swa"
     other_shared = "model.layers.3.long"
     obj._shared_layer_indices = {shared: 0, other_shared: 1}
     target = (0, 0, 0)
-    resident_target = (0, 0, 1)
     event = object()
-    write = Future()
+    resident_write, shared_write = Future(), Future()
     metadata_future = Mock()
     metadata_future.done.return_value = False
-    resident_future = Mock()
-    resident_future.done.return_value = False
     destination = SimpleNamespace(
         metadata_future=metadata_future, required_layers={shared, resident}, pending_layers=set(), completion=None
     )
     state = SimpleNamespace(
         available_layers={resident: (32, event), shared: (32, event)},
-        destinations={
-            target: destination,
-            resident_target: SimpleNamespace(
-                metadata_future=resident_future, required_layers={resident}, completion=None
-            ),
-        },
+        destinations={target: destination},
         metadata=object(),
         consumer_engine_id="d",
-        expected_ranks={target, resident_target},
+        expected_ranks={target},
         error=None,
     )
     obj._reqs_send_state = {"r": state}
     obj._pending_sends = []
-    obj._sending_futures = {"d": [Future()]}
-    obj._sender_executor = SimpleNamespace(submit=Mock(return_value=write))
+    obj._sending_futures = {}
+    obj._sender_executor = SimpleNamespace(submit=Mock(side_effect=[resident_write, shared_write]))
     obj._execute_layer_transfer = Mock()
     obj._build_layer_transfer_request = Mock(return_value=(SimpleNamespace(request_id="r"), event))
     process = load(
@@ -196,17 +188,22 @@ def test_shared_hook_leaves_resident_writes_deferred():
     obj._process_sending_requests = MethodType(process, obj)
     submit = load(PUSH, "_submit_shared_layer_writes", {}, OWNER)
 
+    obj._process_sending_requests()
+    metadata_future.result.assert_not_called()
+    assert not obj._pending_sends
+
+    obj._sending_futures["d"] = [Future()]
     submit(obj, [shared])
 
     metadata_future.result.assert_called_once()
-    resident_future.result.assert_not_called()
-    obj._build_layer_transfer_request.assert_called_once_with("r", state, destination, shared)
-    batch = obj._sender_executor.submit.call_args.args[1]
-    assert batch is obj._pending_sends[0][0]
+    assert {batch.layer_name: future for batch, future in obj._pending_sends} == {
+        resident: resident_write,
+        shared: shared_write,
+    }
     assert state.available_layers == {resident: (32, event)}
-    obj._pending_sends.extend((SimpleNamespace(layer_name=name), Future()) for name in (resident, other_shared))
+    obj._pending_sends.append((SimpleNamespace(layer_name=other_shared), Future()))
     waited = []
     wait_futures = Mock(side_effect=waited.extend)
     wait = load(PUSH, "wait_for_layer_reuse", {"wait_futures": wait_futures}, OWNER)
     wait(obj, 0)
-    assert waited == [write]
+    assert waited == [shared_write]
