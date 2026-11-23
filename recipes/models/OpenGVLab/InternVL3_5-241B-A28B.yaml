@@ -91,13 +91,16 @@ compatible_strategies:
 strategy_min_gpus: 8
 hardware_overrides: {}
 strategy_overrides: {}
-notes:
-  - title: A3 release deployment
-    when:
-      hardware:
-        - ascend_910c
+hardware_notes:
+  ascend_910c:
+    title: Tested A3 deployment
     body: >-
-      For this release retest, launch the Docker command in the Guide on the host. It mounts /models, starts in /models and maps devices 0–7. The generated Serve command assumes that container and working directory. Use [Check readiness and run image inference](#check-readiness-and-run-image-inference) in the Guide for 127.0.0.1:2001.
+      Open Install → Docker to start the tested container with 8 devices
+      and the /models mount. Run the Guide's Serve and image request on port 2001.
+      The generated Docker command maps 16 devices and omits the /models mount.
+    link:
+      href: '#check-readiness-and-run-image-inference'
+      label: Verify in Guide
 guide: |-
   ## Atlas 800I A3 / W8A8 / TP4 DP2 EP
 
