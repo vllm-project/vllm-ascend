@@ -275,12 +275,14 @@ class TestEnableFaQuant(TestBase):
 
     @patch("vllm.model_executor.models.utils.get_draft_quant_config", return_value=None)
     @patch("vllm_ascend.quantization.utils.get_current_hardware_profile")
-    def test_dspark_bf16_draft_does_not_inherit_target_c8(self, mock_profile, mock_get_draft_quant):
+    def test_non_kimi_dspark_draft_keeps_fa_quant_validation(self, mock_profile, mock_get_draft_quant):
         mock_profile.return_value.supports.return_value = True
-        draft = SimpleNamespace(use_mla=True, quantization=None)
+        draft = SimpleNamespace(
+            use_mla=True, quantization=None, hf_config=SimpleNamespace(model_type="other_dspark_mla")
+        )
         config = SimpleNamespace(
             model_config=SimpleNamespace(use_mla=True, hf_text_config=SimpleNamespace(index_topk=2048)),
-            speculative_config=SimpleNamespace(method="dspark", draft_model_config=draft),
+            speculative_config=SimpleNamespace(method="dspark", draft_model_config=draft, kv_cache_dtype=None),
             quant_config=MagicMock(enable_fa_quant=False),
             cache_config=SimpleNamespace(cache_dtype="fp8"),
             kv_transfer_config=None,
@@ -291,4 +293,7 @@ class TestEnableFaQuant(TestBase):
             # its config/recipe is missing. Preserve the existing ValueError.
             draft.quantization = "ascend"
             with self.assertRaises(ValueError):
+                enable_fa_quant(config, "model.layers.93.self_attn.attn")
+            mock_get_draft_quant.return_value = AscendModelSlimConfig(W8A8_CONFIG)
+            with self.assertRaisesRegex(ValueError, "corresponding quantized weights are required"):
                 enable_fa_quant(config, "model.layers.93.self_attn.attn")

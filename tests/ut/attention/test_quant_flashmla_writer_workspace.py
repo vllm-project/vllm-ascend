@@ -77,15 +77,15 @@ def test_quant_staging_survives_manager_replanning_and_reload():
     buffers = impl._flashmla_writer_buffers
     scales = impl._quant_flashmla_writer_scales
     addresses = [x.data_ptr() for x in (*buffers, *scales)]
-    torch.testing.assert_close(scales[0], torch.ones_like(scales[0]))
-    torch.testing.assert_close(scales[1], torch.full_like(scales[1], 4.0))
+    torch.testing.assert_close(scales[0], torch.ones(impl.qk_rope_head_dim, dtype=torch.float32))
+    torch.testing.assert_close(scales[1], torch.full((impl.kv_lora_rank,), 4.0, dtype=torch.float32))
     impl.vllm_config.cache_config.block_size = MANAGER_BLOCK_SIZES[-1]
-    impl.fak_descale_reciprocal.fill_(8.0)
+    impl.fak_descale_reciprocal = torch.tensor([8.0])
     AscendMLAImpl._prepare_flashmla_writer_buffers(impl)
     assert impl._flashmla_writer_buffers is buffers
     assert addresses == [x.data_ptr() for x in (*buffers, *impl._quant_flashmla_writer_scales)]
     assert buffers[0].shape[1] == kernel_page
-    torch.testing.assert_close(scales[1], torch.full_like(scales[1], 8.0))
+    torch.testing.assert_close(scales[1], torch.full((impl.kv_lora_rank,), 8.0, dtype=torch.float32))
 
 
 @pytest.mark.parametrize(

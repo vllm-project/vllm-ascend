@@ -281,16 +281,21 @@ def enable_fa_quant(vllm_config, layer_name=None, *, draft_quant_config: "Quanti
     if not is_dspark_draft and enable_sfa(vllm_config):
         return False
     has_fa_recipe = quant_config is not None and getattr(quant_config, "enable_fa_quant", False)
-    # A draft that inherits the target cache dtype can keep floating KV even
-    # with projection quantization. Preserve errors for explicit FP8 KV or
-    # a declared weight quantization method with no recipe.
-    if (
-        is_dspark_draft
-        and getattr(speculative_config, "kv_cache_dtype", None) is None
-        and not has_fa_recipe
-        and (quant_config is not None or getattr(model_config, "quantization", None) is None)
-    ):
-        return False
+    if is_dspark_draft:
+        draft_model_type = getattr(getattr(model_config, "hf_config", None), "model_type", None)
+        has_no_weight_quant = quant_config is None and getattr(model_config, "quantization", None) is None
+        keep_floating_kv = has_no_weight_quant
+        if draft_model_type == "k3_dspark":
+            # Kimi DSpark can keep floating KV when it inherits the target cache dtype,
+            # including with projection quantization. Explicit FP8 or a missing recipe
+            # for declared weight quantization still needs validation.
+            keep_floating_kv = (
+                getattr(speculative_config, "kv_cache_dtype", None) is None
+                and not has_fa_recipe
+                and (quant_config is not None or has_no_weight_quant)
+            )
+        if keep_floating_kv:
+            return False
     cache_config = getattr(vllm_config, "cache_config", None)
     if cache_config is None or cache_config.cache_dtype not in ["fp8", "int8"]:
         return False
