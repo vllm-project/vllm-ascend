@@ -35,7 +35,6 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
@@ -65,6 +64,8 @@ class AscendPCPAttentionContext:
     local_token_indices: torch.Tensor | None = None
     # Padded tensor width consumed by each rank's model forward.
     local_num_tokens: int | None = None
+    # Local request order, including dual-chunk duplicates and graph padding.
+    local_request_state_indices: torch.Tensor | None = None
 
     def gather_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
         """Restore the current step's real tokens in global request order."""
@@ -221,7 +222,7 @@ class AscendPCPManager(PCPManager):
     @property
     def is_decode_sharded(self) -> bool:
         """Use the shared policy after the runner injects vllm_config."""
-        return is_pcp_decode_sharding_enabled(self.vllm_config)
+        return self.vllm_config.parallel_config.pcp_shard_decode_requests
 
     @property
     def global_batch(self) -> AscendInputBatch:
@@ -641,12 +642,16 @@ class AscendPCPManager(PCPManager):
         # make_dummy refreshes the shared RoPE tables from the global
         # positions, but the model consumes the rank-local ones.
         update_cos_sin(input_batch.positions)
+        # Capture and replay consume the same restore-index storage.
+        hidden_restore_idx = self._hidden_restore_idx_buffer[:num_tokens]
+        torch.arange(num_tokens, device=self.device, out=hidden_restore_idx)
         return AscendPCPAttentionContext(
             global_batch=global_batch,
+            local_request_state_indices=input_batch.idx_mapping,
             local_num_tokens=input_batch.num_tokens_after_padding,
             global_block_tables=self._block_tables.get_dummy_block_tables(num_reqs),
             global_slot_mappings=self._global_batch_slot_mappings[:, :num_tokens].fill_(-1),
-            hidden_restore_idx=torch.arange(num_tokens, device=self.device),
+            hidden_restore_idx=hidden_restore_idx,
         )
 
     def build_attention_context(
@@ -668,6 +673,7 @@ class AscendPCPManager(PCPManager):
             restore_start = self.pcp_rank * num_tokens
             return AscendPCPAttentionContext(
                 global_batch=input_batch,
+                local_request_state_indices=input_batch.idx_mapping,
                 local_num_tokens=num_tokens,
                 local_to_global_req_indices=tuple(range(input_batch.num_reqs)),
                 global_block_tables=block_tables,
@@ -700,6 +706,7 @@ class AscendPCPManager(PCPManager):
             )
         return AscendPCPAttentionContext(
             global_batch=global_batch,
+            local_request_state_indices=local_batch.idx_mapping,
             local_num_tokens=local_batch.num_tokens_after_padding,
             local_to_global_req_indices=local_to_global_req_indices,
             local_token_indices=self._local_gather_idx[: local_batch.num_tokens],

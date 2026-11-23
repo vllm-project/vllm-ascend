@@ -7,7 +7,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp as _dispatch_cg_and_sync_dp
 
-from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
@@ -16,7 +15,7 @@ from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 # rank-local request counts.
 def dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs):
     vllm_config = getattr(cudagraph_manager, "vllm_config", None)
-    if uniform_token_count and vllm_config is not None and is_pcp_decode_sharding_enabled(vllm_config):
+    if uniform_token_count and vllm_config is not None and vllm_config.parallel_config.pcp_shard_decode_requests:
         # num_tokens is already the largest rank-local count, and each sharded
         # decode request stays whole on one rank.
         num_reqs = num_tokens // uniform_token_count

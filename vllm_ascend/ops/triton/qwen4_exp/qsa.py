@@ -7,11 +7,6 @@ from __future__ import annotations
 import torch
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
-_FUSED_INDEX_HEAD_DIM = 128
-_FUSED_ROPE_DIM = 64
-_FUSED_COMPRESS_RATIO = 4
-_FUSED_MROPE_SECTIONS = (11, 11, 10)
-
 
 @triton.jit
 def _pack_qsa_group_indices_kernel(
@@ -214,12 +209,11 @@ def _compress_qsa_groups_kernel(
         ).to(tl.float32)
         accumulator += tl.where(use_raw, raw_values, compressor_state_values)
 
-    if not FUSE_NORM_STORE:
-        tl.store(
-            pooled_ptr + row * stride_pooled_row + dims * stride_pooled_dim,
-            accumulator / COMPRESS_RATIO,
-            mask=(row < num_rows) & (dims < HEAD_DIM),
-        )
+    tl.store(
+        pooled_ptr + row * stride_pooled_row + dims * stride_pooled_dim,
+        accumulator / COMPRESS_RATIO,
+        mask=(row < num_rows) & (dims < HEAD_DIM),
+    )
 
     position_dims = tl.arange(0, 4)
     first_position = end_position - COMPRESS_RATIO + 1
@@ -307,12 +301,7 @@ def pack_qsa_group_indices_npu(
     token_topk: int,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Pack LI-v2 groups and the open-group tail into one fixed buffer.
-
-    This index-only operation is independent of attention head/rotary width.
-    The compact output width is token_topk // compress_ratio + compress_ratio - 1;
-    the caller supplies group IDs selected by the indexer, not Q/K vectors.
-    """
+    """Pack LI-v2 groups and the open-group tail into one fixed buffer."""
     if block_indices.device.type != "npu" or not HAS_TRITON:
         raise RuntimeError("QSA NPU compact packing requires Triton")
     if token_topk % compress_ratio:
@@ -407,18 +396,8 @@ def qsa_compress_groups_with_ratio(
     compressed_slots: torch.Tensor,
     compress_ratio: int,
     rope_cache: torch.Tensor | None = None,
-    *,
-    norm_weight: torch.Tensor | None = None,
-    rotary_cache: torch.Tensor | None = None,
-    compressed_cache: torch.Tensor | None = None,
-    norm_eps: float = 1e-6,
-) -> tuple[torch.Tensor, torch.Tensor] | None:
-    """Pool groups, optionally normalizing and storing directly into the cache.
-
-    The fused ABI is BF16, head_dim=128, ratio=4, rotary_dim=64 and
-    interleaved MRoPE sections [11, 11, 10]. Raw rings remain read-only in
-    this launch: their updates must follow completion of all group readers.
-    """
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pool completed groups from the state ring and current token rows."""
     if raw_keys.device.type != "npu" or not HAS_TRITON:
         raise RuntimeError("QSA NPU compression requires Triton")
     rows = token_to_req.numel()
@@ -454,52 +433,19 @@ def qsa_compress_groups_with_ratio(
         raise ValueError("QSA packed position view has an invalid shape or dtype")
     if rows and (not all(compressor_state_cache.shape) or not all(compressor_state_block_table.shape)):
         raise ValueError("QSA compressor-state cache and block table must be nonempty")
-    fuse_norm_store = compressed_cache is not None
-    if compressed_cache is not None:
-        if norm_weight is None or rotary_cache is None:
-            raise ValueError("QSA fused compression requires norm weight and rotary cache")
-        if (
-            raw_keys.dtype != torch.bfloat16
-            or raw_keys.shape[2] != _FUSED_INDEX_HEAD_DIM
-            or compress_ratio != _FUSED_COMPRESS_RATIO
-        ):
-            raise ValueError("QSA fused compression requires BF16 width 128 and ratio 4")
-        if norm_weight.shape != (_FUSED_INDEX_HEAD_DIM,) or not norm_weight.is_contiguous():
-            raise ValueError("QSA fused compression requires a contiguous 128-element norm weight")
-        if (
-            rotary_cache.ndim != 2
-            or rotary_cache.shape[0] == 0
-            or rotary_cache.shape[1] != _FUSED_ROPE_DIM
-            or rotary_cache.stride(1) != 1
-        ):
-            raise ValueError("QSA fused compression requires a rotary cache with width 64")
-        if (
-            compressed_cache.ndim != 4
-            or compressed_cache.shape[2:] != (1, _FUSED_INDEX_HEAD_DIM)
-            or not all(compressed_cache.shape)
-        ):
-            raise ValueError("QSA fused compression requires a nonempty compressed-key cache")
-        if any(
-            t.dtype != raw_keys.dtype or t.device != raw_keys.device
-            for t in (norm_weight, rotary_cache, compressed_cache)
-        ):
-            raise ValueError("QSA fused compression tensors must share BF16 dtype and device")
-        # Unused pointers/strides in the fused specialization; allocate no intermediates.
-        pooled, first_positions = raw_keys, raw_positions[:, 0]
-    else:
-        if norm_weight is not None or rotary_cache is not None:
-            raise ValueError("QSA norm inputs require a compressed-key output cache")
-        pooled = torch.empty((rows, 1, raw_keys.shape[2]), dtype=raw_keys.dtype, device=raw_keys.device)
-        first_positions = torch.empty((rows, 3), dtype=torch.int64, device=raw_keys.device)
+    pooled = torch.empty(
+        (rows, 1, raw_keys.shape[2]),
+        dtype=raw_keys.dtype,
+        device=raw_keys.device,
+    )
+    first_positions = torch.empty((rows, 3), dtype=torch.int64, device=raw_keys.device)
     if not rows:
-        return None if fuse_norm_store else (pooled, first_positions)
+        return pooled, first_positions
     if rope_cache is None:
         rope_cache = compressor_state_cache
         load_rope_positions = False
     else:
         load_rope_positions = True
-    # Reuse the pooling path's fixed 4-warp launch for the fused row program;
-    # this change does not introduce or claim a new hardware-tuned setting.
     _compress_qsa_groups_kernel[(rows,)](
         raw_keys,
         raw_positions,

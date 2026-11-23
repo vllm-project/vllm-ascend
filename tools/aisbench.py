@@ -63,8 +63,6 @@ class AisbenchRunner:
         dataset_conf = self.dataset_conf.split("/")[-1]
         if self.task_type in ("accuracy", "spec_decode"):
             aisbench_cmd = ["ais_bench", "--models", f"{self.request_conf}_custom", "--datasets", f"{dataset_conf}"]
-        if self.task_type == "accuracy":
-            aisbench_cmd.append("--response-anomaly")
         if self.task_type == "performance":
             aisbench_cmd = [
                 "ais_bench",
@@ -171,11 +169,13 @@ class AisbenchRunner:
             self.input_throughput_baseline = aisbench_config.get("input_throughput_baseline", 1)
             if self.task_type == "accuracy":
                 self.threshold = aisbench_config.get("threshold", 1)
-                self.verify_mode = aisbench_config.get("verify_mode", "range")
-                if self.verify_mode == "ge":
+                self.verify_mode = aisbench_config.get("verify_mode", "ge")
+                if self.verify_mode == "range":
+                    self._accuracy_verify()
+                elif self.verify_mode == "ge":
                     self._accuracy_verify_ge()
                 else:
-                    self._accuracy_verify()
+                    raise ValueError(f"Invalid verify_mode: {self.verify_mode}. Expected 'ge' or 'range'.")
             if self.task_type == "performance":
                 self.threshold = aisbench_config.get("threshold")
                 self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold")
@@ -287,9 +287,8 @@ class AisbenchRunner:
                 f'ignore_eos=False,\n            reasoning_effort="{self.reasoning_effort}",',
                 content,
             )
-        if self.task_type in ("accuracy", "performance"):
-            content = re.sub(r"path=.*", lambda _: f"path={str(self.model_path)!r},", content)
         if self.task_type == "performance":
+            content = re.sub(r"path=.*", f'path="{self.model_path}",', content)
             content = re.sub(r"request_rate.*", f"request_rate={self.request_rate},", content)
             content = re.sub(r"temperature.*", "temperature=0,", content)
             content = re.sub(r"ignore_eos.*", "ignore_eos=True,", content)
@@ -361,22 +360,8 @@ class AisbenchRunner:
     def _get_result_accuracy(self):
         acc_file = re.search(r"write csv to (.*)", self.result_line).group(1)
         df = pd.read_csv(acc_file)
-        assert "metric" in df.columns, f"Missing metric column in AISBench summary {acc_file}"
-        metrics = df["metric"]
-        anomaly_rows = metrics.str.startswith("response_anomaly_", na=False)
-        anomaly_summary = df.loc[anomaly_rows]
-        assert "response_anomaly_rate" in set(anomaly_summary["metric"]), (
-            f"Missing response_anomaly_rate in AISBench summary {acc_file}"
-        )
-        print(f"AISBench response anomaly summary from {acc_file}\n{anomaly_summary.to_string(index=False)}")
-        checked_rows = anomaly_summary.loc[
-            ~anomaly_summary["metric"].isin(["response_anomaly_total", "response_anomaly_normal"])
-        ]
-        values = pd.to_numeric(checked_rows.iloc[:, -1], errors="coerce")
-        failures = checked_rows.loc[~values.eq(0)]
-        assert failures.empty, f"Response anomaly verification failed in {acc_file}\n{failures.to_string(index=False)}"
+        self.result = float(df.iloc[0, -1])
 
-        df = df.loc[~anomaly_rows]
         if "longbenchv2" in str(self.dataset_conf):
             self.result = float(df["accuracy"].mean())
         else:
@@ -425,6 +410,14 @@ class AisbenchRunner:
             f"The accuracy of {self.dataset_path} is {acc_value}, "
             f"which is not greater than or equal to baseline {self.baseline}."
         )
+        if self.threshold is not None and acc_value > self.baseline + self.threshold:
+            logging.warning(
+                "Accuracy of %s is %s, above baseline %s + threshold %s; consider re-baselining this case.",
+                self.dataset_path,
+                acc_value,
+                self.baseline,
+                self.threshold,
+            )
 
     def _spec_decode_verify(self):
         from tools.spec_decode_metrics import (

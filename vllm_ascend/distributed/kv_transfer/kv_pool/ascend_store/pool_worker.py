@@ -228,9 +228,8 @@ class BaseKVPoolWorker(ABC):
         self._failed_requests: set[str] = set()
         self._invalid_block_ids_lock = threading.Lock()
         self._retired_store_req_ids: set[str] = set()
-        self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.save_decode_cache = extra_config.get("save_decode_cache", False)
-        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
+        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.save_decode_cache
         self.backend = extra_config.get("backend", "mooncake")
         self.backend_name = self.backend.lower()
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
@@ -400,9 +399,17 @@ class BaseKVPoolWorker(ABC):
         real_backend = getattr(backend_module, backend_name)
 
         backend_kwargs = {}
-        # lazy_init is requested only for compressed models. Each backend owns
-        # the hardware/protocol checks that decide whether it can honor it.
-        backend_kwargs["lazy_init"] = self.use_compress
+        # lazy_init is requested for compressed models and for sparse-indexer
+        # models that run the packed C8 cache path. The v0.26 trigger was
+        # fabric memory with c8_enable_reshape_optim; on main the packed path
+        # is the dtype-derived native default (sparse + fp8/int8), so the gate
+        # tracks that condition instead of the removed knob. Each backend owns
+        # the hardware/protocol checks that decide whether it can honor the
+        # request (Mooncake honors it under fabric memory, Memcache under
+        # device_sdma).
+        cache_dtype = self.vllm_config.cache_config.cache_dtype
+        packed_c8_path = self.use_sparse and cache_dtype in ("fp8", "int8")
+        backend_kwargs["lazy_init"] = self.use_compress or packed_c8_path
         # The connector's extra_config (with MultiConnector the child's own
         # config, not the top-level one) carries the QoS the backends inject.
         backend_kwargs["extra_config"] = extra_config

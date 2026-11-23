@@ -3,11 +3,15 @@
 """CPU boundary checks using the installed Core and Ascend implementations."""
 
 import math
+import mmap
+import sys
 from dataclasses import replace
 from types import SimpleNamespace as NS
 
 import pytest
 import torch
+
+pytest.importorskip("vllm.v1.hisparse.backend")
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
@@ -28,6 +32,7 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.hisparse import cache_ops as hisparse_ops
 from vllm_ascend.hisparse import host_pool
+from vllm_ascend.hisparse.backend import AscendHiSparseBackend  # noqa: E402
 from vllm_ascend.hisparse.binding import (
     _bind_indexer_views,
     align_hisparse_indexer_specs,
@@ -39,9 +44,6 @@ from vllm_ascend.hisparse.c8 import (
     pack_c8_components,
 )
 from vllm_ascend.ops.triton import sfa_indexer_store
-
-pytest.importorskip("vllm.v1.hisparse.backend")
-from vllm_ascend.hisparse.backend import AscendHiSparseBackend  # noqa: E402
 
 
 @pytest.fixture(params=[False, True], ids=["standalone", "profiled"])
@@ -75,6 +77,7 @@ def test_c8_prolog_requires_matching_fp8_weight_scheme(mxfp8, cache_dtype):
     method = AscendW8A8MXFP8DynamicLinearMethod if mxfp8 else AscendW8A8DynamicLinearMethod
     impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
     impl.enable_sparse_sfa_c8 = True
+    impl.pcp_enabled = True
     impl.c8_cache_dtype = cache_dtype
     impl.fused_qkv_a_proj = NS(quant_method=NS(quant_method=method.__new__(method)))
     impl.is_kv_consumer, impl.has_indexer = False, False
@@ -194,6 +197,93 @@ def test_private_host_allocator_keeps_other_backends_on_core_path(monkeypatch):
     assert payload.numel() == 1001 and registered.data_ptr() % 4096 == 0
     payload.fill_(17)
     torch.testing.assert_close(registered[:1001], payload)
+
+
+@pytest.mark.parametrize(
+    "connector, transfer_backend, active_config, nested, expected",
+    [
+        ("HiSparseConnector", "memfabric", True, False, True),
+        ("HiSparseConnector", "memfabric", False, False, True),
+        ("HiSparseConnector", "memfabric", False, True, True),
+        ("HiSparseConnector", None, False, False, False),
+        ("MooncakeConnectorV2", "memfabric", False, True, False),
+        ("MooncakeConnectorV2", "memfabric", False, False, False),
+    ],
+)
+def test_private_host_allocator_selects_explicit_memfabric(
+    monkeypatch, connector, transfer_backend, active_config, nested, expected
+):
+    from vllm import config
+    from vllm.v1.hisparse import backend as core_backend
+    from vllm.v1.hisparse import runtime
+
+    from vllm_ascend import ascend_config
+
+    transfer = NS(
+        kv_connector=connector,
+        kv_connector_extra_config={"transfer_backend": transfer_backend},
+    )
+    if nested:
+        transfer = NS(kv_connector="MultiConnector", kv_connector_extra_config={"connectors": [vars(transfer)]})
+    vllm_config = NS(kv_transfer_config=transfer)
+    monkeypatch.setattr(config, "get_current_vllm_config_or_none", lambda: vllm_config if active_config else None)
+    monkeypatch.setattr(ascend_config, "_INIT_VLLM_CONFIG", None if active_config else vllm_config)
+    monkeypatch.setattr(core_backend, "get_hisparse_backend", AscendHiSparseBackend)
+    monkeypatch.setattr(runtime, "allocate_pinned_host_pool", runtime.allocate_pinned_host_pool)
+    allocation = torch.empty(32, dtype=torch.int8)
+    registration = NS(tensor=allocation)
+    allocation._hisparse_registration = registration
+
+    def allocate_mapped_host(shape, dtype, *, memfabric=False):
+        assert (shape, dtype) == ((17,), torch.int8)
+        assert memfabric is expected
+        return allocation
+
+    monkeypatch.setattr(host_pool, "allocate_mapped_host", allocate_mapped_host)
+    host_pool.install()
+    payload, registered = runtime.allocate_pinned_host_pool(17)
+    payload.fill_(7)
+    assert registered.numel() == 32
+    assert registered._hisparse_registration is registration
+    torch.testing.assert_close(registered[:17], torch.full((17,), 7, dtype=torch.int8))
+
+
+@pytest.mark.parametrize("device_address", [0, 4096])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_memfabric_host_pool_releases_arena(monkeypatch, device_address, legacy):
+    released = []
+    backing = torch.empty(2 * mmap.PAGESIZE, dtype=torch.uint8)
+    offset = -backing.data_ptr() % mmap.PAGESIZE
+    arena = NS(
+        initialize=lambda config: 0,
+        empty=lambda size, **kwargs: backing[offset : offset + size[0]],
+        get_dva=lambda addr: device_address,
+        uninitialize=lambda: released.append(True),
+    )
+    offload = NS(OffloadConfig=NS, Scene=NS(LOCAL=0))
+    if legacy:
+        vars(offload).update(vars(arena))
+    else:
+        offload.Offload = lambda: arena
+    monkeypatch.setitem(sys.modules, "memfabric_hybrid", NS(offload=offload))
+    monkeypatch.setattr(torch, "npu", NS(current_device=lambda: 0), raising=False)
+
+    if not device_address:
+        with pytest.raises(RuntimeError, match="device address"):
+            host_pool.allocate_mapped_host((128,), torch.uint8, memfabric=True)
+    else:
+        tensor = host_pool.allocate_mapped_host((128,), torch.uint8, memfabric=True)
+        mapping = tensor._hisparse_registration
+        assert mapping.address_of(tensor[16:]) == device_address + 16
+        if legacy:
+            with pytest.raises(RuntimeError, match="one HiSparse Host pool"):
+                host_pool.allocate_mapped_host((128,), torch.uint8, memfabric=True)
+        mapping.close()
+        mapping.close()
+        assert mapping.closed
+
+    assert released == [True]
+    assert not host_pool._LEGACY_MEMFABRIC_POOL.locked()
 
 
 def test_mapped_addresses_retain_offsets_and_reject_expired_or_external_views():

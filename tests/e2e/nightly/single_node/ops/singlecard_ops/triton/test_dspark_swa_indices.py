@@ -9,6 +9,8 @@ graph-mode specifics that the integration review called out:
 * capacity grid with max_num_reqs > active num_reqs (pad rows must be
   explicitly reset to -1/0 rather than left stale);
 * out-variant buffers whose extent exceeds the active rows;
+* reused fixed-size buffers with unchanged request-slot count and shrinking
+  active rows, including ACL graph replay;
 * non-contiguous (column-sliced) block tables: the kernel takes the row
   pitch from ``stride(0)``, not ``shape[1]``;
 * int32 metadata inputs (query_start_loc / seq_lens / block_table);
@@ -238,6 +240,86 @@ def test_capacity_grid_padding():
     assert torch.equal(lens_buf[T_active:], torch.zeros_like(lens_buf[T_active:])), (
         "padded lens rows must be 0, found stale values"
     )
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+@pytest.mark.parametrize("use_graph", [False, True], ids=["eager-launch", "acl-graph-replay"])
+@torch.inference_mode()
+def test_reused_buffers_clear_inactive_rows(use_graph):
+    """Keep six request slots and 90 output rows while active rows shrink."""
+    num_reqs, num_speculative_tokens = 6, 14
+    window_size, block_size, max_seq_len, max_num_blocks = 944, 128, 2000, 32
+    if not dspark_swa_indices_supported(block_size, max_num_blocks):
+        pytest.skip("triton fast path not supported in this environment")
+
+    qsl_cpu, seq_lens_cpu, block_table_cpu = _make_inputs(
+        num_reqs, num_speculative_tokens, window_size, block_size, max_seq_len, max_num_blocks
+    )
+    query_start_loc = qsl_cpu.to(dtype=torch.int32, device=DEVICE)
+    seq_lens = seq_lens_cpu.to(DEVICE)
+    block_table = block_table_cpu.to(DEVICE)
+    num_decode_tokens = num_reqs * (num_speculative_tokens + 1)
+    index_width = ((window_size + num_speculative_tokens + 127) // 128) * 128
+    slots_buf = torch.full((num_decode_tokens, 1, index_width), 12345, dtype=torch.int32, device=DEVICE)
+    lens_buf = torch.full((num_decode_tokens,), 777, dtype=torch.int64, device=DEVICE)
+
+    def launch():
+        return build_dspark_swa_slot_indices_triton(
+            block_table,
+            num_speculative_tokens,
+            window_size,
+            block_size,
+            query_start_loc,
+            seq_lens,
+            num_decode_tokens=num_decode_tokens,
+            index_width=index_width,
+            indices_output=slots_buf,
+            lens_output=lens_buf,
+            max_num_reqs=num_reqs,
+        )
+
+    # Compile before capture, then replay using the same input/output addresses.
+    launch()
+    torch.npu.synchronize()
+    if use_graph:
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            out_slots, out_lens = launch()
+
+    for offsets in ([0, 15, 30, 45, 60, 75, 90], [0, 15, 30, 30, 30, 30, 30], [0, 0, 0, 0, 0, 0, 0]):
+        qsl_cpu = torch.tensor(offsets, dtype=torch.int32)
+        current_seq_lens = seq_lens_cpu.clone()
+        current_seq_lens[qsl_cpu.diff() == 0] = 0
+        query_start_loc.copy_(qsl_cpu)
+        seq_lens.copy_(current_seq_lens)
+        if use_graph:
+            graph.replay()
+        else:
+            out_slots, out_lens = launch()
+        torch.npu.synchronize()
+
+        active_rows = offsets[-1]
+        ref_slots, ref_lens = eager_dspark_swa_indices(
+            block_table_cpu,
+            num_speculative_tokens,
+            window_size,
+            block_size,
+            qsl_cpu,
+            current_seq_lens,
+            num_decode_tokens=active_rows,
+            index_width=index_width,
+        )
+        torch.testing.assert_close(out_slots[:active_rows].cpu(), ref_slots, rtol=0, atol=0)
+        torch.testing.assert_close(out_lens[:active_rows].cpu(), ref_lens, rtol=0, atol=0)
+        assert torch.all(slots_buf[active_rows:] == -1)
+        assert torch.all(lens_buf[active_rows:] == 0)
+        assert out_slots.shape == (num_decode_tokens, 1, index_width)
+        assert out_lens.shape == (num_decode_tokens,)
+        assert out_slots.data_ptr() == slots_buf.data_ptr()
+        assert out_lens.data_ptr() == lens_buf.data_ptr()
 
 
 @pytest.mark.skipif(

@@ -1,0 +1,9 @@
+pr: 22592
+entries:
+  - category: performance
+    text: >-
+      Reduced peak NPU memory awaiting reuse by about 6 GB in a long eager
+      DeepSeek V4.1 prefill workload with DeepInfer MegaMoE on Ascend A5.
+      Allocation retries fell from four to zero in that workload.
+    model: deepseek-v4.1
+    hardware: [A5]

@@ -426,6 +426,7 @@ def test_model_construction_rolls_back_first_layer_when_second_attach_fails(pool
         engram_weight_root="unused",
         engram_dp_shared_memory=False,
         layers=[layer, layer],
+        local_engram_layer_ids=(0, 1),
     )
     config = types.SimpleNamespace(engram_layer_ids=[0, 1], engram_num_embeddings=[32, 32], engram_head_dim=256)
     vc = types.SimpleNamespace(load_config=types.SimpleNamespace(load_format="real"), quant_config=object())
@@ -478,6 +479,7 @@ def test_merged_model_initializes_rotation_and_registers_replay():
         engram_root="unused",
         engram_dp_shared_memory=False,
         layers=[layer],
+        local_engram_layer_ids=(0,),
         has_engram=True,
         device="cpu",
         end_layer=1,

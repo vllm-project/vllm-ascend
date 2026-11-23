@@ -320,9 +320,13 @@ class FlashMLAMetadataBuilder:
         self.cp_interleave = impl.vllm_config.parallel_config.cp_kv_cache_interleave_size if self.dcp_size > 1 else 1
         adapter = FlashMLAImpl.load(FlashMLAConfig(impl.num_heads, impl.scale, return_softmax_lse=self.dcp_size > 1))
         self.current_adapter = adapter
+        # Match DCPImplMixin's query gather. PCP ranks replicate Q heads even
+        # when DSpark exposes a PCP=1 config for its global query batch.
+        pcp_size = impl.pcp_group.world_size if self.dcp_size > 1 else 1
+        query_gather_size = max(1, self.dcp_size // pcp_size)
         history_adapter = replace(
             adapter,
-            config=replace(adapter.config, num_heads=impl.num_heads * self.dcp_size, mask_mode=0),
+            config=replace(adapter.config, num_heads=impl.num_heads * query_gather_size, mask_mode=0),
         )
         self.adapters = {True: history_adapter if self.dcp_size > 1 else adapter, False: history_adapter}
         self.device = device

@@ -232,6 +232,10 @@
 #       module so model imports pick up the Ascend runner. `worker/patch_fused_moe.py`
 #       reuses this platform patch to avoid double-wrapping the factory during
 #       worker initialization.
+#       The existing Ascend EPLB mapping hook reads the router's fixed fusion
+#       choice to avoid remapping physical IDs, preserving upstream
+#       BaseRouter._select_experts. Remove this check when upstream exposes
+#       a routing-result contract for IDs already mapped by the backend.
 #    Related PR (if no, explain why):
 #       No, vllm-ascend-specific MoE runner integration.
 #    Future Plan:
@@ -303,36 +307,6 @@
 #    Future Plan:
 #       Remove once upstream exposes the PD role to the coordinator or
 #       removes the EAGLE last-block drop for verified prompt blocks.
-#
-# ** 10. File: platform/patch_kv_cache_utils.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`,
-#      `..._max_memory_usage_bytes_from_groups`, `..._pool_bytes_per_block`
-#    Why:
-#       Ascend cache layouts need platform-specific materialization and memory
-#       accounting.
-#    How:
-#       Both supported versions select AscendKVCacheConfigBuilder through
-#       NPUPlatform. Its default materialization delegates to the patched
-#       planning functions.
-#    Related PR:
-#       https://github.com/vllm-project/vllm/pull/53558
-#   2. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`
-#      `vllm.v1.core.kv_cache_planning._pool_bytes_per_block`
-#    Why:
-#       Ascend dense GQA attention requires contiguous K/V pools. Replicated
-#       draft pages cannot alias block-strided target/Mamba pages with different
-#       scheduler block IDs in hybrid DCP models.
-#    How:
-#       Use dcp_sharded to identify replicated dense attention groups, then
-#       delegate each physical pool's descriptors to the upstream planner.
-#       Sum the pools' bytes per block to keep allocation within the budget.
-#    Related PR:
-#       https://github.com/vllm-project/vllm/pull/56723 supplies dcp_sharded;
-#       the remaining physical-layout restriction is specific to Ascend.
-#    Future Plan:
-#       Remove pool separation when Ascend dense attention supports the
-#       upstream block-strided shared-pool layout.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1557,6 +1531,23 @@
 #       quant config for same-checkpoint drafts.
 #       Remove the draft scope when upstream exposes draft construction context
 #       to the platform validation hook.
+#   2. `vllm.v1.worker.gpu.spec_decode.dspark.speculator.DSparkSpeculator.__init__`,
+#      `vllm.v1.worker.gpu.spec_decode.dflash.speculator.replace`, and
+#      `vllm.v1.worker.gpu.spec_decode.dspark.utils.replace`
+#    Why:
+#       Kimi MLA DSpark replicates draft queries over the target's PCP/DCP KV
+#       group. Upstream validates the replicated PCP=1 view as a worker topology
+#       and rejects configurations such as TP1/PCP8/DCP8.
+#    How:
+#       Scope the physical topology to Kimi MLA DSpark construction and loading.
+#       Validate that topology before exposing the replicated query layout.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/65643
+#    Future Plan:
+#       TODO: Once the upstream fix is in the vLLM versions supported by Ascend,
+#       verify construction and draft loading at TP1/PCP8/DCP8 with the upstream
+#       implementation. Then remove the DSpark constructor wrapper, topology
+#       context, and the two module-local `replace` overrides.
 #
 # ** 31. File: worker/patch_adaptive_verification.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1616,7 +1607,7 @@
 #       the runner still passes the global request count, so no uniform decode
 #       graph matches.
 #    How:
-#       When `is_pcp_decode_sharding_enabled()` holds, derive the request
+#       When `parallel_config.pcp_shard_decode_requests` holds, derive the request
 #       count from the local tokens and the uniform query length.
 #    Related PR (if no, explain why):
 #       No upstream PR yet; vLLM #52162 still passes the global request count.

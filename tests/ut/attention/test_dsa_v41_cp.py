@@ -316,12 +316,12 @@ def builders(monkeypatch):
         monkeypatch.setattr(module, "get_full_cos_and_sin_dsa_for_layer", lambda name: (full_cos, full_sin))
 
     def make(world=2, rank=0, *, max_seqs=2, graph_sizes=(12, 24), dcp=1, decode_sharded=False):
-        monkeypatch.setattr(dsa_v41_cp, "is_pcp_decode_sharding_enabled", lambda config: decode_sharded)
         config = SimpleNamespace(
             parallel_config=SimpleNamespace(
                 tensor_parallel_size=1,
                 prefill_context_parallel_size=world,
                 decode_context_parallel_size=dcp,
+                pcp_shard_decode_requests=decode_sharded,
             ),
             scheduler_config=SimpleNamespace(max_num_seqs=max_seqs, max_num_batched_tokens=64),
             speculative_config=None if decode_sharded else SimpleNamespace(num_speculative_tokens=5),
@@ -1544,3 +1544,110 @@ class TestProjectionLayout:
         expected = torch.zeros_like(output)
         expected[:live] = values.flatten(1)
         torch.testing.assert_close(output, expected)
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_a5_async_plans_use_real_lengths_and_first_consumption_order(builders, rank):
+    owners = builders(rank=rank)
+    builder = owners["swa"]
+    builder.vllm_config.model_config.hf_text_config.compress_ratios = [0, 0, 2, 2, 1, 1]
+    builder._uses_a5_packed_cache = True
+    builder._global_builder._uses_a5_packed_cache = True
+    builder._a5_smla_metadata = torch.empty(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    builder._a5_smla_length_rows = torch.empty(64, 1, dtype=torch.int32)
+    calls = []
+
+    def plan(ori, cmp, **kwargs):
+        calls.append((ori.clone(), cmp.clone(), kwargs))
+        return torch.ones(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+
+    builder._device_backend = SimpleNamespace(mixed_quant_sparse_flash_mla_metadata=plan)
+    addresses = None
+    for scenario in ["prefill", "decode", "mixed", "prefill"]:
+        batch = _batch(2, rank, scenario)
+        with builder.defer_device_metadata(in_graph=batch.graph):
+            result = _build_planes(owners, batch)[PREFIXES["swa"]]
+        tasks = builder.take_device_metadata_tasks()
+        assert len(tasks) == 3
+        assert list(result.a5_smla_plans) == [0, 2, 1]
+        before = len(calls)
+        # Run the same deferred tasks again after the request lengths change.
+        for _ in range(2):
+            for ratio, task in zip([0, 2, 1], tasks):
+                assert task.group_id == id(result.a5_smla_plans[ratio])
+                task.run()
+                ori, cmp, kw = calls[-1]
+                rows = ori.shape[0]
+                torch.testing.assert_close(ori[:, 0], (result.positions[:rows] + 1).clamp(0, 4).int())
+                expected = torch.zeros(rows, dtype=torch.int32)
+                if ratio:
+                    for req in range(result.num_reqs):
+                        lo, hi = result.query_start_loc[req : req + 2].tolist()
+                        for row in range(lo, min(hi, rows)):
+                            visible = max(0, min(int(result.positions[row]) + 1, int(result.seq_lens[req])))
+                            expected[row] = min(3, visible // ratio)
+                torch.testing.assert_close(cmp[:, 0], expected.int())
+                assert kw["has_cmp_kv"] == bool(ratio)
+            result.seq_lens.zero_()
+        assert len(calls) == before + 6
+        current = [result.a5_smla_plans[r].data_ptr() for r in [0, 2, 1]]
+        if addresses is not None:
+            assert current == addresses
+        addresses = current
+
+
+@pytest.mark.parametrize("in_graph", [False, True])
+def test_a5_noncausal_draft_plan_keeps_actual_window_lengths(builders, monkeypatch, in_graph):
+    builder = builders()["swa"]
+    builder._uses_a5_packed_cache = True
+    builder._a5_smla_metadata = torch.empty(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    builder._a5_smla_length_rows = torch.empty(64, 1, dtype=torch.int32)
+    builder.vllm_config.model_config.hf_text_config.compress_ratios = [0, 0, 2, 1]
+    calls = []
+
+    def make_indices(*args, **kwargs):
+        n = args[6]
+        return torch.zeros((n, 1, 8), dtype=torch.int32), torch.full((n, 1), 6, dtype=torch.int32)
+
+    monkeypatch.setattr(dsa_v41, "build_dspark_swa_indices", make_indices)
+
+    def plan(ori, cmp, **kwargs):
+        calls.append((ori.clone(), cmp.clone(), kwargs))
+        return torch.ones(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+
+    builder._device_backend = SimpleNamespace(mixed_quant_sparse_flash_mla_metadata=plan)
+    common = _batch(2, 0, "decode").local.replace(causal=False, pcp_context=None)
+    with dsa_v41.AscendDSAV41MetadataBuilder.defer_device_metadata(builder, in_graph=in_graph):
+        result = dsa_v41.AscendDSAV41MetadataBuilder.build(builder, 0, common)
+    tasks = builder.take_device_metadata_tasks()
+    assert len(tasks) == 1 and list(result.a5_smla_plans) == [0]
+    assert not calls
+    tasks[0].run()
+    ori, cmp, kw = calls[0]
+    assert ori.shape[0] == (common.num_input_tokens if in_graph else common.num_actual_tokens)
+    assert torch.all(ori[: common.num_actual_tokens] == 6)
+    assert torch.count_nonzero(ori[common.num_actual_tokens :]) == 0
+    assert torch.count_nonzero(cmp) == 0
+    assert not kw["has_cmp_kv"]
+
+
+@pytest.mark.parametrize(
+    "ratios,candidate_blocks,candidate_width,error",
+    [([0, 3], 0, 0, "ratios"), ([0, 2, 1], 1, 2, "coverage")],
+)
+def test_a5_async_plans_reject_unsupported_visibility_contract(
+    builders, ratios, candidate_blocks, candidate_width, error
+):
+    builder = builders()["swa"]
+    builder._uses_a5_packed_cache = True
+    builder._a5_smla_metadata = torch.empty(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    builder._a5_smla_length_rows = torch.empty(64, 1, dtype=torch.int32)
+    text = builder.vllm_config.model_config.hf_text_config
+    text.compress_ratios = ratios
+    text.candidate_topk_blocks = candidate_blocks
+    text.candidate_block_size = candidate_width
+    builder._device_backend = Mock()
+    common = _batch(2, 0, "decode").local.replace(pcp_context=None)
+    with pytest.raises(ValueError, match=error):
+        dsa_v41.AscendDSAV41MetadataBuilder.build(builder, 0, common)
+    builder._device_backend.mixed_quant_sparse_flash_mla_metadata.assert_not_called()
