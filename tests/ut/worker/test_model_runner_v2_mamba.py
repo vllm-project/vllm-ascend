@@ -691,8 +691,9 @@ def test_mamba_padding_is_independent_of_pcp_context(
 
 @pytest.mark.parametrize("recover", [False, True])
 @pytest.mark.parametrize("for_capture", [False, True])
-def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests(recover, for_capture):
-    local_batch = SimpleNamespace(is_dummy=False)
+@pytest.mark.parametrize("is_dummy", [False, True])
+def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests(recover, for_capture, is_dummy):
+    local_batch = SimpleNamespace(is_dummy=is_dummy)
     global_batch = SimpleNamespace(num_reqs=1)
     pcp_context = SimpleNamespace(
         global_batch=global_batch,
@@ -700,6 +701,7 @@ def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests(recover, for_c
         global_slot_mappings="global_slots",
     )
     pcp_manager = SimpleNamespace(
+        is_decode_sharded=True,
         is_target_attn_groups=MagicMock(return_value=True),
         build_attention_context=MagicMock(return_value=pcp_context),
     )

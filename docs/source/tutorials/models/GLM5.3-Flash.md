@@ -1569,8 +1569,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
                   "kv_connector_extra_config": {
                     "backend": "memcache",
                     "use_layerwise": false,
-                    "consumer_is_to_load": false,
-                    "consumer_is_to_put": false,
+                    "enable_lookup": false,
                     "lookup_rpc_port": '"$((37100 + $4))"'
                   }
                 }
@@ -1753,8 +1752,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
               "kv_connector_extra_config": {
                 "backend": "memcache",
                 "use_layerwise": false,
-                "consumer_is_to_load": false,
-                "consumer_is_to_put": false,
+                "enable_lookup": false,
                 "lookup_rpc_port": '"$((37100 + $4))"'
               }
             }

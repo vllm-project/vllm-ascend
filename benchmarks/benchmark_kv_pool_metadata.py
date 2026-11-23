@@ -84,7 +84,6 @@ class SchedulerCase:
         self.scheduler = module.KVPoolScheduler.__new__(module.KVPoolScheduler)
         for name, value in {
             "kv_role": "kv_both",
-            "consumer_is_to_put": False,
             "can_put": False,
             "_request_trackers": {},
             "_unfinished_requests": {req_id: (None, []) for req_id in unfinished_ids},

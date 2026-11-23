@@ -9,6 +9,7 @@ import torch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 
 from vllm_ascend.ops.vocab_parallel_embedding import AscendVocabParallelEmbedding, VocabParallelMode
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_states import default
 
 
@@ -174,9 +175,22 @@ def test_dummy_input_ids_use_upstream_lookup_once(monkeypatch, supports_mm_input
 def test_embedding_tp_disabled_preserves_dummy_buffer(monkeypatch, supports_mm_inputs):
     monkeypatch.setattr(default, "embedding_tp_enable", lambda: False)
     state = _make_state(supports_mm_inputs, torch.nn.Identity())
-    result = state.dummy_inputs_embeds(3)
+    result = state.dummy_inputs_embeds(3, None)
     torch.testing.assert_close(result, state.inputs_embeds[:3])
     assert result.data_ptr() == state.inputs_embeds.data_ptr()
+    state.model.modules.assert_not_called()
+
+
+@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="Profile input_ids are only passed by vLLM main")
+def test_dummy_embedding_uses_profile_input_ids(monkeypatch):
+    monkeypatch.setattr(default, "embedding_tp_enable", lambda: True)
+    embedding = torch.nn.Embedding(8, 4)
+    state = _make_state(True, embedding)
+    input_ids = torch.tensor([1, 5, 7])
+
+    result = state.dummy_inputs_embeds(3, input_ids)
+
+    torch.testing.assert_close(result, embedding(input_ids))
     state.model.modules.assert_not_called()
 
 

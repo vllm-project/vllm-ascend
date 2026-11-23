@@ -613,7 +613,7 @@ def build_attn_metadata(
                     if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
                         attn_metadata_extra_kwargs["num_actual_reqs"] = num_actual_reqs
                     metadata = None
-                    if can_group_spec_gdn and type(attn_metadata_builder) is AscendGDNHostMetadataBuilder:
+                    if can_group_spec_gdn and isinstance(attn_metadata_builder, AscendGDNHostMetadataBuilder):
                         accepted = attn_metadata_extra_kwargs.get("num_accepted_tokens")
                         if grouped_spec_gdn is None:
                             from vllm_ascend.attention.sfa_hisparse import supports_flash_resident_decode_graph
