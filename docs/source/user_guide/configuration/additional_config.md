@@ -380,6 +380,31 @@ Omitting `quant_dtype` selects MXFP8 on 950DT Products:
 ## GDN internal prefill checkpoints
 
 Enable with `--additional-config '{"gdn_internal_prefill_checkpoints": true}'`.
+`gdn_checkpoint_policy` is a string, default `"all"`. Set it to `"prefix_only"`
+to prioritize repeated public prefixes independently of the internal export path:
+
+| Option | Type | Default | Behavior |
+|---|---|---|---|
+| `gdn_checkpoint_policy` | string: `all` / `prefix_only` | `all` | `prefix_only` reuses existing cached input states and does not publish newly computed recurrent states for cache-hit requests. |
+
+```bash
+--additional-config '{"gdn_checkpoint_policy": "prefix_only"}'
+```
+
+In `prefix_only` mode, a cold prefix producer still materializes its checkpoint.
+With internal exports disabled, its prefill keeps the existing boundary splits.
+Requests admitted with a local prefix-cache hit reuse that immutable state,
+skip the tail checkpoint split, and publish no new recurrent states, including
+during decode. Their existing prefix remains reusable; an identical full-prompt
+replay may therefore hit only that original prefix. Prewarm public prefixes on
+an empty cache when a particular fine-grained boundary is required. Cold chunked
+prefills keep their normal checkpoint behavior. This mode requires Model Runner
+V2, speculative decoding and KV transfer disabled, and a paired core supporting the policy.
+
+The new policy uses additional config because it controls Ascend's GDN backend
+and changes the cache-retention/performance tradeoff. It is independent of the
+prefix match unit, which continues to control matching granularity.
+
 The option remains disabled by default pending numerical and performance
 qualification of the alternate prefill recurrence on supported NPUs.
 Requires prefix caching in align mode and vLLM with #60050. The optimization is
@@ -390,13 +415,17 @@ KV transfer configurations and legacy EAGLE/MTP block dropping without
 lookahead hashes fall back to existing prefill scheduling: the scheduler and
 worker cannot safely assume the same internal checkpoint boundary in these modes.
 
-Checkpoint-bearing prefill uses the existing Triton recurrence instead of the
-AscendC FwdH implementation to export only selected FP32 chunk-start states.
+With FP32 recurrent caches on A5 and an available fused FLA NPU GDN operator,
+checkpoint-bearing prefill uses two packed fused prefill segments inside one
+model forward. Prefills without a new checkpoint use the ordinary fused path.
+Other supported devices use two batched AscendC recurrence segments, or the
+dense AscendC recurrence when no checkpoint is required. Both segmented paths
+retain the first segment's FP32 final state as the checkpoint and use it to
+initialize the second segment. Packing and state copies add memory traffic.
+Lower-precision recurrent caches continue to use the Triton checkpoint path.
 Convolution history and recurrent state are written through the shared upstream
-checkpoint exporter. Enabled layers use the same Triton recurrence for cold
-prefills and cache-hit tails, including tails without a new checkpoint. At an
-exported boundary, the cold FP32 accumulator is rounded to the configured SSM
-cache dtype before continuing, matching the state restored by a cache hit.
+checkpoint exporter. The Triton path rounds the FP32 accumulator to the
+configured SSM cache dtype at the exported boundary before continuing.
 Decode is unchanged. This backend change needs numerical
 and performance qualification; skipping a model forward does not guarantee a
 net speedup. A persistent FP32 scratch buffer is allocated during profiling, of size
@@ -404,6 +433,13 @@ net speedup. A persistent FP32 scratch buffer is allocated during profiling, of 
 with the same VllmConfig, device and state shape share it; ubatching is excluded.
 Checkpoint export retains a view of the pre-convolution input; the pinned FLA
 convolution allocates its output separately.
+With a paired vLLM core supporting separate prefill checkpoint blocks,
+Model Runner V2 with speculative decoding disabled reserves a private page for
+the checkpoint. Cache-hit
+prefills can then cross their tail boundary even when the positional
+checkpoint slot holds shared state or the prompt is shorter than one
+physical block. Each active checkpoint consumes an additional cache page
+until its request finishes. Older cores retain their existing split rules.
 Small prefix match units can increase checkpoint traffic.
 
 Validate correctness, quality and performance on the deployment hardware before deploying in production.

@@ -38,10 +38,11 @@ except ImportError:
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_scatter
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
-from vllm_ascend.ops.gdn_checkpoint import initialize_gdn_checkpoints
+from vllm_ascend.ops.gdn_checkpoint import initialize_gdn_checkpoints, separate_gdn_checkpoint_spec
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 _GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
+_GDN_ORIGINAL_KV_CACHE_SPEC = _GDN_PATCH_TARGET.get_kv_cache_spec
 
 
 def _flashcomm_switch_enabled(vllm_config) -> bool:
@@ -391,6 +392,10 @@ if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PA
         initialize_packed_conv_weight(self)
         initialize_gdn_checkpoints(self)
 
+    def _gdn_kv_cache_spec_with_private_checkpoint(self, vllm_config):
+        return separate_gdn_checkpoint_spec(self, _GDN_ORIGINAL_KV_CACHE_SPEC(self, vllm_config))
+
+    _GDN_PATCH_TARGET.get_kv_cache_spec = _gdn_kv_cache_spec_with_private_checkpoint
     _GDN_PATCH_TARGET.__init__ = _gdn_init_with_packed_weight
     _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention._forward_core

@@ -34,7 +34,9 @@ def test_standard_gdn_constructor_registers_packed_weight_after_base_init(checkp
         patch.object(patch_qwen3_5, "_GDN_ORIGINAL_INIT", fake_original_init),
         patch(
             "vllm_ascend.ops.gdn_checkpoint.get_ascend_config",
-            return_value=SimpleNamespace(gdn_internal_prefill_checkpoints=checkpoint_enabled),
+            return_value=SimpleNamespace(
+                gdn_internal_prefill_checkpoints=checkpoint_enabled, gdn_checkpoint_policy="all"
+            ),
         ),
     ):
         layer = object.__new__(patch_qwen3_5._GDN_PATCH_TARGET)

@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import PropertyMock, patch
 
+import pytest
 from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -57,6 +58,19 @@ from vllm_ascend.ascend_config import (
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import clear_enable_sp, enable_sp, shared_expert_dp_enabled
+
+
+def test_prefix_only_checkpoint_policy_is_independent_of_internal_exports():
+    baseline = AscendConfig(gdn_checkpoint_policy="prefix_only", sparse_kv_offload_config=SparseKVOffloadConfig())
+    assert not baseline.gdn_internal_prefill_checkpoints
+    config = AscendConfig(
+        gdn_checkpoint_policy="prefix_only",
+        gdn_internal_prefill_checkpoints=True,
+        sparse_kv_offload_config=SparseKVOffloadConfig(),
+    )
+    assert config.gdn_checkpoint_policy == "prefix_only"
+    with pytest.raises(ValueError):
+        AscendConfig(gdn_checkpoint_policy="unknown", sparse_kv_offload_config=SparseKVOffloadConfig())
 
 
 def test_shared_engram_requires_v2_runner():

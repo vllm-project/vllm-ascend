@@ -532,6 +532,8 @@ def test_host_builder_exposes_host_descriptors_without_device_chunks(has_pcp_con
 
 @pytest.mark.parametrize("creates_checkpoint", [False, True])
 def test_host_builder_materializes_device_chunks_for_checkpoint_enabled_prefill(monkeypatch, creates_checkpoint):
+    from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointMetadata
+
     _patch_missing_runtime_cdiv(monkeypatch)
     builder = _make_builder(
         device=torch.device("cpu"),
@@ -541,7 +543,9 @@ def test_host_builder_materializes_device_chunks_for_checkpoint_enabled_prefill(
     )
     builder._ascend_gdn_checkpoints = True
     checkpoint = (
-        SimpleNamespace(checkpoint_offsets=torch.tensor([64]), state_indices=torch.tensor([NULL_BLOCK_ID]))
+        MambaPrefillCheckpointMetadata(
+            checkpoint_offsets=torch.tensor([64]), state_indices=torch.tensor([NULL_BLOCK_ID]), offsets=[64]
+        )
         if creates_checkpoint
         else None
     )
@@ -564,6 +568,92 @@ def test_host_builder_materializes_device_chunks_for_checkpoint_enabled_prefill(
     if checkpoint is not None:
         assert checkpoint.checkpoint_offsets.tolist() == [0]
     builder.checkpoint_builder.build.assert_called_once_with(common, [0])
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize("creates_checkpoint", [False, True])
+def test_private_checkpoint_host_fast_path_matches_generic_metadata(monkeypatch, mixed, creates_checkpoint):
+    from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointMetadata
+
+    _patch_missing_runtime_cdiv(monkeypatch)
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=0,
+        builder_cls=AscendGDNHostMetadataBuilder,
+        block_size=2048,
+        mamba_cache_mode="align",
+    )
+    builder._ascend_gdn_checkpoints = True
+    builder._use_fused_checkpoint_metadata = True
+    builder.compilation_config.static_forward_context = {
+        "layer0": SimpleNamespace(use_contiguous_conv_indices=False),
+    }
+    checkpoint = (
+        MambaPrefillCheckpointMetadata(
+            checkpoint_offsets=torch.tensor([1280]), state_indices=torch.tensor([91]), offsets=[1280]
+        )
+        if creates_checkpoint
+        else None
+    )
+    builder.checkpoint_builder = SimpleNamespace(build=Mock(return_value=checkpoint))
+    common = create_common_attn_metadata(
+        BatchSpec([20, 24, 3512] if mixed else [3512], [1, 1, 1336] if mixed else [1336]),
+        2048,
+        torch.device("cpu"),
+    )
+    common.block_table_tensor.add_(10)
+
+    def cpu_prepare(
+        table,
+        seq,
+        query,
+        accepted,
+        layout,
+        spec_states,
+        non_spec_states,
+        conv_indices,
+        masks,
+        spec_query,
+        non_spec_query,
+        spec_lengths,
+        non_spec_lengths,
+        accepted_out,
+        spec_tokens,
+        non_spec_tokens,
+        initial,
+        prefill_query,
+        conv_output,
+        **kwargs,
+    ):
+        rows = kwargs["num_reqs"]
+        lengths = query.diff()
+        indices = (seq - 1).clamp_min(0) // kwargs["block_size"]
+        non_spec_states[:rows].copy_(table[torch.arange(rows), indices])
+        non_spec_query[: rows + 1].copy_(query)
+        non_spec_lengths[0] = 0
+        non_spec_lengths[1 : rows + 1].copy_(lengths)
+        initial[:rows].copy_(seq > lengths)
+        prefill_query.copy_(query[kwargs["num_decodes"] :] - kwargs["num_decode_tokens"])
+
+    monkeypatch.setattr(ascend_gdn_attn_builder, "prepare_gdn", cpu_prepare)
+    fast = builder.build(0, common, num_actual_reqs=common.num_reqs)
+    assert fast.non_spec_prefill_metadata.chunk.chunk_indices_chunk64 is None
+    assert fast.checkpoint is checkpoint
+    assert (fast.non_spec_prefill_metadata.chunk.ascendc_checkpoint_plan is not None) == creates_checkpoint
+    builder._use_fused_checkpoint_metadata = False
+    generic = builder.build(0, common, num_actual_reqs=common.num_reqs)
+    assert generic.non_spec_prefill_metadata.chunk.chunk_indices_chunk64 is not None
+    for field in ("prefill_query_start_loc", "prefill_state_indices", "prefill_has_initial_state"):
+        torch.testing.assert_close(getattr(fast, field), getattr(generic, field), rtol=0, atol=0)
+    torch.testing.assert_close(
+        fast.non_spec_prefill_metadata.causal_conv1d.cache_indices,
+        generic.non_spec_prefill_metadata.causal_conv1d.cache_indices,
+        rtol=0,
+        atol=0,
+    )
+    expected_rows = [2] if mixed else [0]
+    assert all(call.args[1] == expected_rows for call in builder.checkpoint_builder.build.call_args_list)
 
 
 def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():

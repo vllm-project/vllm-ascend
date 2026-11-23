@@ -102,6 +102,204 @@ def test_shared_exporter_preserves_ascend_conv_layout_and_mtp_slots():
 
 
 @pytest.mark.usefixtures("_init_checkpoint_prefill_ops")
+@pytest.mark.parametrize("offset,length", [(1408, 1464), (1280, 1336), (256, 315)])
+def test_ascendc_segments_preserve_checkpoint_and_final_state(offset, length):
+    from vllm_ascend.ops.gdn_ascendc_checkpoint import (
+        ascendc_checkpoint_recurrence,
+        build_ascendc_checkpoint_plan,
+    )
+
+    torch.manual_seed(31)
+    device = torch.device("npu")
+    k = torch.randn(1, 2, length, 128, device=device, dtype=torch.bfloat16) * 0.01
+    w, u = torch.randn_like(k) * 0.01, torch.randn_like(k) * 0.01
+    g = torch.zeros(1, 2, length, device=device, dtype=torch.float32)
+    initial = torch.randn(1, 2, 128, 128, device=device, dtype=torch.float32) * 0.01
+    states = torch.empty_like(initial)
+    plan = build_ascendc_checkpoint_plan((0, length), [offset], device)
+    _, _, actual_final = ascendc_checkpoint_recurrence(k, w, u, g, initial, states, plan)
+
+    def reference(start, end, state):
+        return torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h_vllm(
+            k[:, :, start:end].contiguous(),
+            w[:, :, start:end].contiguous(),
+            u[:, :, start:end].contiguous(),
+            g=g[:, :, start:end].contiguous(),
+            initial_state=state,
+            output_final_state=True,
+            chunk_size=64,
+            cu_seqlens=(0, end - start),
+            chunk_indices=tuple(value for i in range((end - start + 63) // 64) for value in (0, i)),
+        )[2]
+
+    prefix = reference(0, offset, initial)
+    final = reference(offset, length, prefix)
+    torch.testing.assert_close(states.transpose(-1, -2), prefix, rtol=0, atol=0)
+    torch.testing.assert_close(actual_final, final, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("layout", ["head_first", "token_slice"])
+@pytest.mark.parametrize(
+    "lengths,offsets", [([1464], [1408]), ([1336], [1280]), ([315], [256]), ([145, 0, 65, 209], [128, 0, 0, 192])]
+)
+def test_fused_segments_preserve_checkpoint_and_restored_tail(lengths, offsets, layout):
+    from vllm_ascend.device.device_op import DeviceOperator
+    from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+    from vllm_ascend.ops.gdn_ascendc_checkpoint import build_ascendc_checkpoint_plan
+    from vllm_ascend.ops.gdn_fused_checkpoint import fused_gdn_checkpoint_prefill
+
+    if not get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL):
+        pytest.skip("The fused GDN prefill kernel requires A5")
+    chunk_gated_delta_rule_fwd = getattr(pytest.importorskip("fla_npu.ops.ascendc"), "chunk_gated_delta_rule_fwd", None)
+    if chunk_gated_delta_rule_fwd is None:
+        pytest.skip("The installed FLA NPU package lacks fused GDN prefill")
+    torch.manual_seed(41)
+    device = torch.device("npu")
+    cu = [0]
+    for length in lengths:
+        cu.append(cu[-1] + length)
+    total = cu[-1]
+    if layout == "head_first":
+        q, k, v = [
+            torch.randn(1, heads, total, 128, device=device, dtype=torch.bfloat16).transpose(1, 2) * 0.1
+            for heads in (2, 2, 4)
+        ]
+    else:
+        q, k, v = [
+            (torch.randn(1, total * 2, heads, 128, device=device, dtype=torch.bfloat16) * 0.1)[:, ::2]
+            for heads in (2, 2, 4)
+        ]
+    g = -torch.rand(1, total, 4, device=device) * 0.01
+    beta = torch.rand(1, total, 4, device=device, dtype=torch.bfloat16)
+    initial = torch.randn(len(lengths), 4, 128, 128, device=device, dtype=torch.float32) * 0.01
+    snapshots = torch.full_like(initial, float("nan"))
+    plan = build_ascendc_checkpoint_plan(tuple(cu), offsets, device)
+    output, final = fused_gdn_checkpoint_prefill(q, k, v, g, beta, initial, snapshots, plan, chunk_gated_delta_rule_fwd)
+
+    def reference(start, end, state):
+        metadata = SimpleNamespace(
+            cu_seqlens_host=(0, end - start),
+            chunk_indices_chunk64_host=tuple(value for i in range((end - start + 63) // 64) for value in (0, i)),
+            keep_meta=None,
+        )
+        return DeviceOperator.fla_gdn_prefill(
+            q[:, start:end],
+            k[:, start:end],
+            v[:, start:end],
+            g[:, start:end],
+            beta[:, start:end],
+            state,
+            128**-0.5,
+            metadata,
+            chunk_gated_delta_rule_fwd,
+        )
+
+    for row, (begin, end, offset) in enumerate(zip(cu, cu[1:], offsets)):
+        if begin == end:
+            torch.testing.assert_close(final[row], initial[row], rtol=0, atol=0)
+            continue
+        if offset:
+            prefix_output, prefix = reference(begin, begin + offset, initial[row : row + 1])
+            tail_output, expected_final = reference(begin + offset, end, prefix)
+            torch.testing.assert_close(snapshots[row : row + 1], prefix, rtol=0, atol=0)
+            expected_output = torch.cat((prefix_output, tail_output), dim=1)
+        else:
+            expected_output, expected_final = reference(begin, end, initial[row : row + 1])
+            assert snapshots[row].isnan().all()
+        torch.testing.assert_close(final[row : row + 1], expected_final, rtol=0, atol=0)
+        torch.testing.assert_close(output[:, begin:end], expected_output, rtol=0, atol=0)
+
+
+def test_cache_hit_prefill_exports_tail_in_one_model_step(
+    monkeypatch, model_name="Qwen/Qwen3.5-35B-A3B", *, prefix_only=False, internal_checkpoints=True
+):
+    """Exercise private checkpoint pages through the real two-layer engine."""
+    from vllm import LLM, SamplingParams
+    from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointExporter
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    steps = []
+    exports = []
+    original_schedule = Scheduler.schedule
+    original_export = MambaPrefillCheckpointExporter.export
+
+    def record_export(self, checkpoint, **kwargs):
+        result = original_export(self, checkpoint, **kwargs)
+        exports.append(checkpoint.offsets)
+        return result
+
+    def record_schedule(self, *args, **kwargs):
+        output = original_schedule(self, *args, **kwargs)
+        steps.append(dict(output.num_scheduled_tokens))
+        return output
+
+    def two_layer_config(config):
+        text = getattr(config, "text_config", config)
+        text.num_hidden_layers = 2
+        text.layer_types = ["linear_attention", "full_attention"]
+        text.num_experts = 4
+        text.num_experts_per_tok = 2
+        return config
+
+    monkeypatch.setattr(Scheduler, "schedule", record_schedule)
+    monkeypatch.setattr(MambaPrefillCheckpointExporter, "export", record_export)
+    engine = LLM(
+        model=model_name,
+        load_format="dummy",
+        hf_overrides=two_layer_config,
+        dtype="bfloat16",
+        tensor_parallel_size=1,
+        enable_prefix_caching=True,
+        prefix_match_unit=128,
+        block_size=2048,
+        max_model_len=8192,
+        max_num_batched_tokens=8192,
+        max_num_seqs=4,
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": 0, "video": 0},
+        additional_config={
+            "gdn_internal_prefill_checkpoints": internal_checkpoints,
+            "gdn_checkpoint_policy": "prefix_only" if prefix_only else "all",
+        },
+    )
+    params = SamplingParams(max_tokens=1, ignore_eos=True, temperature=0)
+    for hit, end in [(2048, 3512), (2176, 3512), (896, 1211)]:
+        assert engine.reset_prefix_cache()
+        seed = [i % 1000 + 100 for i in range(hit + 1)]
+        exports.clear()
+        engine.generate([{"prompt_token_ids": seed}], params, use_tqdm=False)
+        assert exports == ([[hit]] if internal_checkpoints else []), exports
+        prompt = seed[:hit] + [2000 + i % 1000 for i in range(end - hit)]
+        steps.clear()
+        exports.clear()
+        output = engine.generate([{"prompt_token_ids": prompt}], params, use_tqdm=False)[0]
+        assert output.num_cached_tokens == hit
+        assert [sum(row.values()) for row in steps if row] == [end - hit]
+        boundary = (end - 1) // 128 * 128
+        assert exports == ([] if prefix_only else [[boundary - hit]]), exports
+        steps.clear()
+        exports.clear()
+        replay = engine.generate([{"prompt_token_ids": prompt}], params, use_tqdm=False)[0]
+        replay_hit = hit if prefix_only else boundary
+        assert replay.num_cached_tokens == replay_hit
+        assert [sum(row.values()) for row in steps if row] == [end - replay_hit]
+        assert exports == []
+
+
+def test_prefix_only_hit_preserves_public_state_without_tail_exports(monkeypatch, model_name="Qwen/Qwen3.5-35B-A3B"):
+    test_cache_hit_prefill_exports_tail_in_one_model_step(monkeypatch, model_name, prefix_only=True)
+
+
+def test_prefix_only_works_without_internal_checkpoint_kernels(monkeypatch, model_name="Qwen/Qwen3.5-35B-A3B"):
+    test_cache_hit_prefill_exports_tail_in_one_model_step(
+        monkeypatch, model_name, prefix_only=True, internal_checkpoints=False
+    )
+
+
+@pytest.mark.usefixtures("_init_checkpoint_prefill_ops")
 @pytest.mark.parametrize("layout", ["head_first", "token_slice"])
 @pytest.mark.parametrize("cache_dtype", [torch.float32, torch.bfloat16, torch.float16])
 def test_checkpoint_prefill_matches_dense_inputs_and_restored_tail(layout, cache_dtype):
