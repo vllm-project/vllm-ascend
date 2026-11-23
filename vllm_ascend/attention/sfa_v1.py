@@ -29,7 +29,6 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
-    is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.indexer import AscendSFAIndexerCache
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
@@ -69,6 +68,7 @@ from vllm_ascend.quantization.methods import (
     AscendW8A8LinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQuantLatent
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
@@ -563,7 +563,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.nope_states: dict[int | None, SparseMLAMetadataState] = {}
 
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
-        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
+        self.is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         if self.speculative_config:
@@ -845,7 +845,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.vllm_config = get_current_vllm_config()
         self.pcp_enabled = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
-        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
+        self.is_pcp_decode_sharded = self.vllm_config.parallel_config.pcp_shard_decode_requests
         # SFA absorbs kv_b_proj (and, for KV consumers on PROLOG_V3, the fused
         # qkv/q projections) and disposes the source parameters. A disposed
         # parameter is no longer a valid destination for the in-place weight
@@ -905,9 +905,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         # applies only to layers that own an indexer cache.
         self._update_indexer_cache_enabled()
         self.store_kv_cache_on_host = ascend_config.sparse_kv_offload_config.enabled
+        # The draft cache dtype can differ from the target config.
         self.kv_cache_dtype = self.vllm_config.cache_config.cache_dtype
-        self.enable_sparse_sfa_turboquant = ascend_config.enable_sparse_sfa_turboquant
-        self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
+        self.enable_sparse_sfa_turboquant = self.kv_cache_dtype == TURBOQUANT_CACHE_DTYPE
+        self.enable_sparse_sfa_c8 = self.kv_cache_dtype in ("int8", "fp8")
         if self.enable_sparse_sfa_c8:
             self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
                 self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config

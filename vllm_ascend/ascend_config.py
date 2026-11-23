@@ -950,6 +950,12 @@ class AscendConfig:
             "MiniMax M3 does not support enable_fused_mc2=1 (dispatch_ffn_combine). "
             "Set additional_config.enable_fused_mc2 to 2 to enable MegaMoe, or 0 to disable fused MC2."
         )
+        # Use regular MoE for per-layer post-SiLU limits. Fall back before the
+        # shared-expert overlap check so the requested overlap is preserved.
+        fallback_for_swiglu_limits = self.enable_fused_mc2 == 1 and self._has_per_layer_swiglu_limit(vc)
+        if fallback_for_swiglu_limits:
+            self.enable_fused_mc2 = 0
+            logger.warning_once("Disabling fused MC2 because per-layer SwiGLU limits require regular MoE.")
         if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(
@@ -1090,6 +1096,10 @@ class AscendConfig:
 
         # sparse KV offload vs packed SFA main cache mutex
         self._validate_sparse_packed_kv_offload_compatibility()
+        if fallback_for_swiglu_limits:
+            # Keep the derived flags until the mode-3 hardware and model checks have run.
+            self._megamoe_supported = False
+            self.megamoe_shared_expert_fusion = False
         return self
 
     @property
@@ -1132,14 +1142,16 @@ class AscendConfig:
             )
 
     def _validate_megamoe_shared_expert_fusion(self, vllm_config: VllmConfig) -> None:
-        """Reject ``enable_fused_mc2=3`` on A3 and latent-MoE models.
+        """Reject ``enable_fused_mc2=3`` on unsupported hardware and latent-MoE models.
 
-        The shared expert is fused into the routed A5 MegaMoe operator, so this
-        contract is A5-only (``CANN_MEGAMOE_SHARED_EXPERT_FUSION``) and assumes
-        the shared expert and routed experts share the residual width. Latent-MoE
-        models (e.g. Kimi K3) project the residual stream before the routed FFN and
-        expose ``routed_expert_hidden_size``; the shared expert cannot be fused in
-        that layout. Fail fast instead of silently downgrading, because a silent
+        The shared expert is fused into the routed MegaMoe operator. The
+        capability ``CANN_MEGAMOE_SHARED_EXPERT_FUSION`` states that the platform
+        can run it; the payload family follows the machine's routed MegaMoe
+        contract (A5 MXFP, A3 arch22 INT8). Both assume the shared expert and the
+        routed experts share the residual width. Latent-MoE models (e.g. Kimi K3)
+        project the residual stream before the routed FFN and expose
+        ``routed_expert_hidden_size``; the shared expert cannot be fused in that
+        layout. Fail fast instead of silently downgrading, because a silent
         downgrade would change results without failing the launch.
         """
         if not self.megamoe_shared_expert_fusion:
@@ -1148,8 +1160,8 @@ class AscendConfig:
         hardware_profile = get_current_hardware_profile()
         if not hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION):
             raise NotImplementedError(
-                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) is only supported on A5; "
-                "the current hardware profile does not support it. "
+                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) is only supported on "
+                "A5 (MXFP) or A3 (INT8); the current hardware profile does not support it. "
                 "Set additional_config.enable_fused_mc2 to 0, 1, or 2."
             )
 
@@ -1198,6 +1210,14 @@ class AscendConfig:
         if self.mix_placement:
             if self.enable_shared_expert_dp or self.multistream_overlap_shared_expert:
                 raise ValueError("Mix placement is not supported with shared expert DP or multistream overlap.")
+
+    @staticmethod
+    def _has_per_layer_swiglu_limit(vllm_config: VllmConfig) -> bool:
+        draft_model_config = getattr(vllm_config.speculative_config, "draft_model_config", None)
+        for model_config in (vllm_config.model_config, draft_model_config):
+            if any(getattr(getattr(model_config, "hf_text_config", None), "expert_swiglu_limit_list", None) or ()):
+                return True
+        return False
 
     @staticmethod
     def _is_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:

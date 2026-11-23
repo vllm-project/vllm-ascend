@@ -20,8 +20,8 @@ if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import LayerPoolKey
 
 
-def is_kv_save_role(kv_role: str, consumer_is_to_put: bool) -> bool:
-    return kv_role in ("kv_producer", "kv_both") or consumer_is_to_put
+def is_kv_save_role(kv_role: str, save_decode_cache: bool) -> bool:
+    return kv_role in ("kv_producer", "kv_both") or save_decode_cache
 
 
 @dataclass(frozen=True)

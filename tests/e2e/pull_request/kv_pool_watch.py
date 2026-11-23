@@ -480,9 +480,7 @@ def _control_hit_outputs(
     outputs = [list(ids) for ids, _ in runner.generate_greedy([prompt], max_tokens)]
     after = _prefix_cache_hits(runner)
     local_hits = after - before
-    assert local_hits > 0, (
-        f"CONTROL_DEFECT: B leg got no local prefix-cache hit (prefix_cache_hits Δ{local_hits:.0f})"
-    )
+    assert local_hits > 0, f"CONTROL_DEFECT: B leg got no local prefix-cache hit (prefix_cache_hits Δ{local_hits:.0f})"
     return outputs, local_hits
 
 
@@ -542,7 +540,7 @@ def _classify(a: LegOutcome, b: LegOutcome, token_diff: bool, perf_bad: bool, ac
 def run_pool_ab(
     case_name: str,
     build_leg: Callable[[bool, str], Any],
-    accuracy: Callable[[Any], None],
+    accuracy: Callable[[Any], Sequence[float] | None],
     hit: Callable[[Any], dict[str, Any]] | None = None,
     *,
     prompt_tokens: int = POOL_PROMPT_TOKENS,

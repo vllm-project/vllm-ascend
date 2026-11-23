@@ -71,6 +71,19 @@ options with:
 These options select KV-cache quantization independently of model-weight
 quantization; keep the weight-quantization options required by the model.
 
+On A3 with HDK 25.5.1, select MemFabric in the HiSparse connector to provide
+AIV Host-memory mapping. The SDK must include the A3 AccOffload extension.
+If the extension is missing, source the CANN environment and build it with
+`mfcli kernel install --soc-version A3`.
+
+```bash
+--kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":4,"transfer_backend":"memfabric"}}'
+```
+
+For a `MultiConnector` configuration, put `transfer_backend` in the
+`HiSparseConnector` child's extra configuration. This setting selects
+the private Host allocator. Omitting it uses native ACL Host-memory registration.
+
 ### Verifying the Feature
 
 Send a request and check the server's metrics endpoint for the HiSparse miss

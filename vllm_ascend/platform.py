@@ -636,7 +636,8 @@ class NPUPlatform(Platform):
         sync_v2_extra_kwargs(vllm_config)
 
         # 1.Configure logging
-        configure_ascend_file_logging()
+        additional_config = vllm_config.additional_config or {}
+        configure_ascend_file_logging(additional_config.get("ascend_log_path"))
         configure_ascend_logging()
 
         # 2.Early exit checks and validate parallel config
@@ -667,8 +668,6 @@ class NPUPlatform(Platform):
                 if ratios:
                     config.compress_ratios = list(ratios)
 
-        # TODO: Remove this guard once GLM-5.3-Flash DFlash2 supports pipeline parallelism.
-        _validate_glm5next_dflash2_pp_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 
         _validate_target_dcp_config(vllm_config)
@@ -1561,6 +1560,7 @@ def _setup_compile_backend(
                 "vllm::dsa_forward",
                 "vllm::minimax_m3_fused_sparse_forward",
                 "vllm::glm5next_kda_forward_with_output",
+                "vllm::step5_sparse_attention_forward",
             ]
         )
         # npugraph_ex compiles each piece (force_eager) and runs the static/
@@ -1583,8 +1583,6 @@ def _setup_worker_and_scheduler(
     ascend_config,
 ) -> None:
     # Select worker class and refresh block size.
-    # Decode sharding is derived by is_pcp_decode_sharding_enabled(); do not
-    # store it on ParallelConfig. Draft replace() rejects undeclared fields.
     parallel_config = vllm_config.parallel_config
     if parallel_config and parallel_config.worker_cls == "auto":
         hardware_profile = get_current_hardware_profile()
@@ -2251,33 +2249,6 @@ def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig) -> None:
     max_tp_size = 16 if variant == "V4 Pro" else 8
     if tp_size > max_tp_size:
         raise ValueError(f"DeepSeek {variant} supports at most TP{max_tp_size}. Got tp_size={tp_size}.")
-
-
-def _validate_glm5next_dflash2_pp_config(vllm_config: VllmConfig) -> None:
-    parallel_config = vllm_config.parallel_config
-    pp_size = parallel_config.pipeline_parallel_size
-    if pp_size <= 1:
-        return
-
-    speculative_config = vllm_config.speculative_config
-    if speculative_config is None or getattr(speculative_config, "method", None) != "dflash":
-        return
-
-    model_config = vllm_config.model_config
-    model_types = {
-        getattr(getattr(model_config, field, None), "model_type", None) for field in ("hf_config", "hf_text_config")
-    }
-    if model_types.isdisjoint({"glm5_next", "glm5_next_text"}):
-        return
-
-    draft_model_config = getattr(speculative_config, "draft_model_config", None)
-    draft_architectures = getattr(draft_model_config, "architectures", None) or ()
-    if "DFlash2DraftModel" not in draft_architectures:
-        return
-
-    raise ValueError(
-        f"GLM-5.3-Flash with DFlash2 currently requires pipeline_parallel_size=1. Got pipeline_parallel_size={pp_size}."
-    )
 
 
 def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> None:
