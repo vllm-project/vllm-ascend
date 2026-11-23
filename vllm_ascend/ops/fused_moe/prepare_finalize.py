@@ -72,6 +72,7 @@ class PrepareAndFinalize(ABC):
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type: QuantType = QuantType.NONE,
+        pre_gathered_input: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> MoEPrepareOutput:
         """
         Prepare tensors before MoE computation. May involve:
@@ -140,6 +141,7 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
+        pre_gathered_input: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> MoEPrepareOutput:
         """
         Preparation steps:
@@ -308,6 +310,7 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
+        pre_gathered_input: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> MoEPrepareOutput:
         """
         Preparation steps:
@@ -445,6 +448,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
+        pre_gathered_input: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> MoEPrepareOutput:
         """
         Preparation steps:
@@ -454,13 +458,35 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             MoEPrepareOutput with global tensors.
         """
         if self._use_ep_sequence_parallel():
-            return self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
+            return self._prepare_with_ep_group(
+                hidden_states, router_logits, quant_type, pre_gathered_input
+            )
 
         return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce)
 
     def _prepare_with_ep_group(
-        self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        quant_type=QuantType.NONE,
+        pre_gathered_input: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> MoEPrepareOutput:
+        if pre_gathered_input is not None:
+            # Shared expert fused AG+MM already TP-gathered + quantized.
+            # Only need the DP dimension of the EP AllGather.
+            gathered_x, gathered_scale = pre_gathered_input
+            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(gathered_x)
+            router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(router_logits)
+            self.num_tokens = hidden_states.shape[0]
+            pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(gathered_scale)
+            return MoEPrepareOutput(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                mc2_mask=None,
+                padded_hidden_states_shape=None,
+                pertoken_scale=pertoken_scale,
+            )
+
         pertoken_scale = None
         if quant_type == QuantType.W8A8:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
