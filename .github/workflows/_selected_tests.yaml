@@ -499,7 +499,7 @@ jobs:
   upload-coverage-to-obs:
       if: ${{ !cancelled() && inputs.enable-coverage }}
       needs: selected-tests
-      runs-on: ubuntu-latest
+      runs-on: linux-amd64-cpu-2-hk
       continue-on-error: true
       env:
         OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
