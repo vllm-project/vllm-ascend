@@ -683,6 +683,14 @@ def compressor_ref(
     return out_full
 
 
+# A conservative starting tile: 128 FP32 values = 512 bytes per source.
+# This is a tuning choice, not an assumed optimum for every Ascend device.
+_PCP_C2_PACK_BLOCK_SIZE = 128
+
+
+# Production Linear projections normally have fixed strides (WIDTH, 1).
+# Keep strides compile-time so the compiler can exploit the fixed layout.
+# Token-count changes alone do not change these strides.
 @triton.jit(do_not_specialize=["num_tokens"])
 def _pack_pcp_c2_rows_kernel(
     kv_ptr,
@@ -696,16 +704,17 @@ def _pack_pcp_c2_rows_kernel(
     SCORE_ROW_STRIDE: tl.constexpr,
     SCORE_COL_STRIDE: tl.constexpr,
     WIDTH: tl.constexpr,
-    BLOCK: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
 ):
     row = tl.program_id(0)
-    columns = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    columns = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     source_row = tl.load(send_indices_ptr + row)
+    # Ascend BOOL loads can be represented as i8: form an explicit predicate.
     valid_flag = tl.load(valid_mask_ptr + row).to(tl.int32)
     valid = (valid_flag != 0) & (source_row >= 0) & (source_row < num_tokens)
     load_mask = valid & (columns < WIDTH)
-    # Mask loads as well as the output values. Empty ranks and padded invalid
-    # indices must never dereference an out-of-bounds projection row.
+    # Invalid/empty ranks must not load projection data. Masking only the
+    # output after an unconditional load would still permit out-of-bounds reads.
     source_row = tl.where(valid, source_row, 0)
     kv = tl.load(
         kv_ptr + source_row * KV_ROW_STRIDE + columns * KV_COL_STRIDE,
@@ -717,21 +726,35 @@ def _pack_pcp_c2_rows_kernel(
         mask=load_mask,
         other=0.0,
     )
-    output = packed_output_ptr + row * (2 * WIDTH) + columns
-    tl.store(output, kv, mask=columns < WIDTH)
-    tl.store(output + WIDTH, scores, mask=columns < WIDTH)
+    output_ptr = packed_output_ptr + row * (2 * WIDTH) + columns
+    # Write invalid rows too: caller-owned storage may contain stale values.
+    tl.store(output_ptr, kv, mask=columns < WIDTH)
+    tl.store(output_ptr + WIDTH, scores, mask=columns < WIDTH)
 
 
 def pack_pcp_c2_rows(kv, scores, send_indices, valid_mask, packed_output):
-    """Pack selected FP32 projections directly into caller-owned [S, 2*D].
+    """Pack FP32 C2 projections into a caller-owned contiguous [S, 2*D].
 
-    Each row is [kv[index, :], scores[index, :]]. Invalid rows are entirely
-    zeroed, including on ranks with no tokens. No intermediate tensors or
-    host reads of device controls are needed. Output must not alias inputs.
+    kv and scores: strided [T, D], FP32, D > 0, on one NPU.
+    send_indices: contiguous INT64 [S]; valid_mask: contiguous BOOL [S].
+    packed_output: contiguous FP32 [S, 2*D] on the same device.
+
+    A row is [kv[index], scores[index]] iff valid_mask is true and
+    0 <= index < T; otherwise all 2*D elements are zero. T=0 and S=0
+    are supported. Every output element is overwritten when S > 0.
+
+    Only packed_output is modified. Nonempty output must not share storage
+    with any input (a conservative no-alias contract). Return the same output
+    object. No output allocation or reads of device control values occur.
+    Graph replay uses the captured tensor addresses and metadata; tensor
+    contents may change between replays.
     """
+    tensors = (kv, scores, send_indices, valid_mask, packed_output)
+    if not all(t.layout == torch.strided for t in tensors):
+        raise ValueError("C2 packing requires strided tensors")
     if kv.ndim != 2 or scores.shape != kv.shape or kv.shape[1] < 1:
         raise ValueError("Expected matching [tokens, width] projections")
-    if kv.dtype != torch.float32 or scores.dtype != torch.float32 or packed_output.dtype != torch.float32:
+    if any(t.dtype != torch.float32 for t in (kv, scores, packed_output)):
         raise ValueError("C2 packing requires FP32 projections and output")
     if send_indices.ndim != 1 or send_indices.dtype != torch.int64:
         raise ValueError("Expected INT64 [send_rows] indices")
@@ -742,26 +765,34 @@ def pack_pcp_c2_rows(kv, scores, send_indices, valid_mask, packed_output):
         raise ValueError("Expected [send_rows, 2*width] packed output")
     if not all(t.is_contiguous() for t in (send_indices, valid_mask, packed_output)):
         raise ValueError("C2 output and controls must be contiguous")
-    if not all(t.device == kv.device for t in (scores, send_indices, valid_mask, packed_output)):
+    if any(t.device != kv.device for t in tensors[1:]):
         raise ValueError("C2 tensors must share one device")
     if kv.device.type != "npu":
         raise ValueError("C2 packing requires an NPU")
-    if send_rows:
-        block = 128
-        _pack_pcp_c2_rows_kernel[(send_rows, triton.cdiv(width, block))](
-            kv,
-            scores,
-            send_indices,
-            valid_mask,
-            packed_output,
-            kv.shape[0],
-            KV_ROW_STRIDE=kv.stride(0),
-            KV_COL_STRIDE=kv.stride(1),
-            SCORE_ROW_STRIDE=scores.stride(0),
-            SCORE_COL_STRIDE=scores.stride(1),
-            WIDTH=width,
-            BLOCK=block,
-        )
+    if send_rows == 0:
+        return packed_output
+
+    # Storage addresses are host metadata; this does not copy device contents
+    # or synchronize the stream. Reject all shared storage, including disjoint
+    # views, so the public no-alias rule has an inexpensive, explicit check.
+    output_storage = packed_output.untyped_storage().data_ptr()
+    if any(t.numel() and t.untyped_storage().data_ptr() == output_storage for t in tensors[:-1]):
+        raise ValueError("C2 output must not share storage with inputs")
+
+    _pack_pcp_c2_rows_kernel[(send_rows, triton.cdiv(width, _PCP_C2_PACK_BLOCK_SIZE))](
+        kv,
+        scores,
+        send_indices,
+        valid_mask,
+        packed_output,
+        kv.shape[0],
+        KV_ROW_STRIDE=kv.stride(0),
+        KV_COL_STRIDE=kv.stride(1),
+        SCORE_ROW_STRIDE=scores.stride(0),
+        SCORE_COL_STRIDE=scores.stride(1),
+        WIDTH=width,
+        BLOCK_SIZE=_PCP_C2_PACK_BLOCK_SIZE,
+    )
     return packed_output
 
 

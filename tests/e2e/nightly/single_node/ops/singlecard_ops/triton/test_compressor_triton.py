@@ -32,7 +32,11 @@ def test_pack_pcp_c2_rows(tokens, send_rows, width, strided, use_graph):
     if strided:
         kv, scores = kv[:, ::2], scores[:, ::2]
     # Include masked valid indices, negative indices, upper-bound indices and duplicates.
-    indices = torch.tensor(([0, tokens - 1, -1, tokens, 0, 10**9] * (send_rows // 6 + 1))[:send_rows], device="npu")
+    indices = torch.tensor(
+        ([0, tokens - 1, -1, tokens, 0, 10**9] * (send_rows // 6 + 1))[:send_rows],
+        device="npu",
+        dtype=torch.int64,
+    )
     valid = torch.ones(send_rows, device="npu", dtype=torch.bool)
     valid[::3] = False
     output = torch.full((send_rows, 2 * width), float("nan"), device="npu", dtype=torch.float32)
@@ -337,3 +341,140 @@ def test_empty_projected_and_ring_writes(empty):
     assert actual.data_ptr() == out.data_ptr()
     torch.testing.assert_close(out.cpu(), torch.zeros(tokens, 128, dtype=torch.bfloat16), rtol=0, atol=0)
     torch.testing.assert_close(ring.cpu(), torch.ones(2, STATE_RING_ROWS, 256), rtol=0, atol=0)
+
+
+def _pack_reference_cpu(kv, scores, indices, valid):
+    """Independent reference: test-only CPU indexing, no Triton code reuse."""
+    expected = torch.zeros(indices.numel(), 2 * kv.shape[1], dtype=torch.float32)
+    for row, (index, enabled) in enumerate(zip(indices.tolist(), valid.tolist())):
+        if enabled and 0 <= index < kv.shape[0]:
+            expected[row, : kv.shape[1]] = kv[index]
+            expected[row, kv.shape[1] :] = scores[index]
+    return expected
+
+
+@pytest.mark.parametrize("width", [1, 127, 128, 129, 512])
+@pytest.mark.parametrize("layout", ["contiguous", "offset", "column_stride", "transposed", "broadcast"])
+@torch.inference_mode()
+def test_pack_pcp_c2_rows_layouts_and_side_effects(width, layout):
+    tokens = 5
+    kv_cpu = torch.randn(tokens, width)
+    if layout == "broadcast":
+        kv_cpu = kv_cpu[:1].expand(tokens, width).clone()
+    scores_cpu = torch.randn(tokens, width)
+
+    def on_device(value, selected_layout):
+        if selected_layout == "broadcast":
+            return value[:1].npu().expand(tokens, width)
+        if selected_layout == "column_stride":
+            storage = torch.empty(tokens, width * 2, device="npu")
+            view = storage[:, ::2]
+        elif selected_layout == "transposed":
+            view = torch.empty(width, tokens, device="npu").T
+        elif selected_layout == "offset":
+            view = torch.empty(tokens * width + 1, device="npu")[1:].view(tokens, width)
+        else:
+            view = torch.empty_like(value, device="npu")
+        view.copy_(value)
+        return view
+
+    kv = on_device(kv_cpu, layout)
+    # Also exercise different KV and score strides.
+    scores = on_device(scores_cpu, "transposed" if layout == "column_stride" else "contiguous")
+    indices_cpu = torch.tensor([0, tokens - 1, -1, tokens, 0, 2**40, 1], dtype=torch.int64)
+    valid_cpu = torch.tensor([True, True, True, True, True, True, False])
+    indices, valid = indices_cpu.npu(), valid_cpu.npu()
+    expected = _pack_reference_cpu(kv_cpu, scores_cpu, indices_cpu, valid_cpu)
+    # An offset output with guards catches writes outside the caller's view.
+    carrier = torch.full((indices.numel() + 2, 2 * width), -123.0, device="npu")
+    output = carrier[1:-1]
+    ptr = output.data_ptr()
+    result = pack_pcp_c2_rows(kv, scores, indices, valid, output)
+    assert result is output and output.data_ptr() == ptr
+    torch.testing.assert_close(output.cpu().view(torch.int32), expected.view(torch.int32), rtol=0, atol=0)
+    assert bool((carrier[[0, -1]] == -123).all().item())
+    torch.testing.assert_close(kv.cpu(), kv_cpu, rtol=0, atol=0)
+    torch.testing.assert_close(scores.cpu(), scores_cpu, rtol=0, atol=0)
+    torch.testing.assert_close(indices.cpu(), indices_cpu, rtol=0, atol=0)
+    torch.testing.assert_close(valid.cpu(), valid_cpu, rtol=0, atol=0)
+
+
+@torch.inference_mode()
+def test_pack_pcp_c2_rows_replay_reads_new_controls_and_projections():
+    tokens, width = 5, 129
+    kv = torch.randn(tokens, width, device="npu")
+    scores = torch.randn_like(kv)
+    indices = torch.tensor([0, 4, -1, 5], device="npu", dtype=torch.int64)
+    valid = torch.ones(4, device="npu", dtype=torch.bool)
+    output = torch.empty(4, 2 * width, device="npu")
+    pack_pcp_c2_rows(kv, scores, indices, valid, output)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        pack_pcp_c2_rows(kv, scores, indices, valid, output)
+    ptr = output.data_ptr()
+    for enabled in (True, False, True):
+        kv.add_(1)
+        scores.sub_(2)
+        indices.copy_(torch.tensor([4, 0, -1, 5], device="npu", dtype=torch.int64))
+        valid.fill_(enabled)
+        output.fill_(float("nan"))
+        expected = _pack_reference_cpu(kv.cpu(), scores.cpu(), indices.cpu(), valid.cpu())
+        graph.replay()
+        assert output.data_ptr() == ptr
+        torch.testing.assert_close(output.cpu().view(torch.int32), expected.view(torch.int32), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "invalid", ["projection_dtype", "index_dtype", "mask_dtype", "output_shape", "output_layout", "alias"]
+)
+@torch.inference_mode()
+def test_pack_pcp_c2_rows_rejects_invalid_interface(invalid):
+    kv = torch.randn(4, 8, device="npu")
+    scores = torch.randn_like(kv)
+    indices = torch.tensor([0, 1], device="npu", dtype=torch.int64)
+    valid = torch.ones(2, device="npu", dtype=torch.bool)
+    output = torch.empty(2, 16, device="npu")
+    if invalid == "projection_dtype":
+        kv = kv.bfloat16()
+    elif invalid == "index_dtype":
+        indices = indices.int()
+    elif invalid == "mask_dtype":
+        valid = valid.int()
+    elif invalid == "output_shape":
+        output = output[:, :8].contiguous()
+    elif invalid == "output_layout":
+        output = torch.empty(2, 32, device="npu")[:, ::2]
+    else:
+        # Same storage, matching shapes and FP32: reject before launch.
+        output = kv.view(2, 16)
+    with pytest.raises(ValueError):
+        pack_pcp_c2_rows(kv, scores, indices, valid, output)
+
+
+@torch.inference_mode()
+def test_pack_pcp_c2_rows_observed_model_cases():
+    """Supply real production metadata; synthetic boundaries are tested above."""
+    import json
+    import os
+
+    path = os.environ.get("VLLM_PCP_C2_CASES_JSON")
+    if path is None:
+        pytest.skip("Set VLLM_PCP_C2_CASES_JSON to observed model cases before merge")
+    with open(path) as handle:
+        cases = json.load(handle)
+    assert cases, "Observed model case list must not be empty"
+    for case in cases:
+        tokens, send_rows, width = (int(case[key]) for key in ("tokens", "send_rows", "width"))
+        # Production nn.Linear projections are contiguous. Boundary tests cover
+        # arbitrary positive strides separately.
+        assert case["kv_stride"] == [width, 1]
+        assert case["score_stride"] == [width, 1]
+        kv = torch.randn(tokens, width, dtype=torch.float32)
+        scores = torch.randn_like(kv)
+        indices = torch.arange(send_rows, dtype=torch.int64) % max(tokens, 1)
+        valid = torch.ones(send_rows, dtype=torch.bool)
+        expected = _pack_reference_cpu(kv, scores, indices, valid)
+        output = torch.empty(send_rows, 2 * width, device="npu")
+        pack_pcp_c2_rows(kv.npu(), scores.npu(), indices.npu(), valid.npu(), output)
+        torch.testing.assert_close(output.cpu().view(torch.int32), expected.view(torch.int32), rtol=0, atol=0)
