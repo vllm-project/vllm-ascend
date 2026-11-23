@@ -759,6 +759,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 assert records is not None
                 # One paged checkpoint per request; verification only records
                 # compact updates. MRV2 commits after rejection sampling.
+                commit_context = getattr(attn_metadata_narrowed, "recoverssm_context", None)
                 spec_output = kda_recoverssm_verify(
                     rearrange(q_spec),
                     rearrange(k_spec),
@@ -776,6 +777,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     self.num_spec + 1,
                     decay_cache=self.recoverssm_decay_cache,
                     normalized_key_cache=self.recoverssm_normalized_key_cache,
+                    store_raw_gate=getattr(commit_context, "decay_base_addrs", None) is None,
                 )
             else:
                 spec_output = recurrent_kda(

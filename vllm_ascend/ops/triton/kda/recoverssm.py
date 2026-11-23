@@ -150,6 +150,7 @@ def _kda_recoverssm_verify_kernel(
     decay_cache_ptr=None,
     normalized_key_cache_ptr=None,
     SPEC_QUERY_LEN: tl.constexpr = 0,
+    STORE_RAW_GATE: tl.constexpr = True,
 ):
     # Advance a register-held checkpoint and record each token's compact
     # correction/key/gate; persistent checkpoint pages remain read-only.
@@ -277,11 +278,12 @@ def _kda_recoverssm_verify_kernel(
                 k,
                 mask=mask_k,
             )
-            tl.store(
-                kg_ptr + (K + offs_k) * stride_kg_dim,
-                raw_g,
-                mask=mask_k,
-            )
+            if STORE_RAW_GATE:
+                tl.store(
+                    kg_ptr + (K + offs_k) * stride_kg_dim,
+                    raw_g,
+                    mask=mask_k,
+                )
     if query_len > 0:
         token_offset = query_len - 1
         token = bos + token_offset
@@ -348,11 +350,12 @@ def _kda_recoverssm_verify_kernel(
                 k,
                 mask=mask_k,
             )
-            tl.store(
-                kg_ptr + (K + offs_k) * stride_kg_dim,
-                raw_g,
-                mask=mask_k,
-            )
+            if STORE_RAW_GATE:
+                tl.store(
+                    kg_ptr + (K + offs_k) * stride_kg_dim,
+                    raw_g,
+                    mask=mask_k,
+                )
 
 
 @triton.heuristics(
@@ -905,6 +908,8 @@ def kda_recoverssm_verify(
     out: torch.Tensor | None = None,
     decay_cache: torch.Tensor | None = None,
     normalized_key_cache: torch.Tensor | None = None,
+    *,
+    store_raw_gate: bool = True,
 ) -> torch.Tensor:
     """Verify a KDA speculative window without modifying its checkpoint."""
     if q.ndim != 4 or q.shape[0] != 1:
@@ -1040,6 +1045,7 @@ def kda_recoverssm_verify(
         USE_LOWER_BOUND=lower_bound is not None,
         USE_NORM_EPS=not is_a5,
         SPEC_QUERY_LEN=spec_query_len,
+        STORE_RAW_GATE=store_raw_gate or decay_cache is None or not is_a5,
         decay_cache_ptr=decay_cache,
         normalized_key_cache_ptr=normalized_key_cache,
         num_warps=4,

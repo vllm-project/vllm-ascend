@@ -186,14 +186,19 @@ def test_request_records_recover_permuted_pages_and_sampler_rows(capacity, heads
     torch.testing.assert_close(conv_view, expected_conv, atol=0, rtol=0)
 
 
-def assert_verify_records(correction, kg, records, blocks, record_property):
+def assert_verify_records(correction, kg, records, blocks, record_property, *, raw_gate_stored=True):
     for row, block in enumerate(blocks):
         if block not in records:
             continue
         expected_correction, expected_kg = records[block]
         length = expected_correction.shape[1]
         assert_accuracy(correction[row, :, :length], expected_correction, record_property, f"correction_block{block}")
-        torch.testing.assert_close(kg[row, :, :length].cpu().double(), expected_kg, atol=0, rtol=0)
+        actual = kg[row, :, :length]
+        if not raw_gate_stored:
+            key_dim = actual.shape[-1] // 2
+            assert actual[..., key_dim:].isnan().all()
+            actual, expected_kg = actual[..., :key_dim], expected_kg[..., :key_dim]
+        torch.testing.assert_close(actual.cpu().double(), expected_kg, atol=0, rtol=0)
 
 
 def kda_recoverssm_commit(state, correction, kg, a_log, bias, bound, starts, indices, counts):
@@ -1243,9 +1248,10 @@ def test_commit_window_uses_device_path(
             span,
             decay_cache=decay,
             normalized_key_cache=normalized_key,
+            store_raw_gate=False,
         )
         assert_accuracy(output, golden_output, record_property, f"window_layer{layer_no}_verify")
-        assert_verify_records(correction, kg, records, blocks, record_property)
+        assert_verify_records(correction, kg, records, blocks, record_property, raw_gate_stored=decay is None)
         if decay is not None:
             # Commit must read both FP32 records even if raw keys and gates are overwritten.
             kg.fill_(float("nan"))

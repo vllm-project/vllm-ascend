@@ -158,6 +158,8 @@ for single-layer calls; it does not introduce a layer-count constexpr.
   and normalized key once per valid record, and commit reuses both. Together
   the buffers require `8 * capacity * H * Q * K` bytes per layer. Callers
   that omit these optional buffers can still commit from the raw records.
+  When the A5 model commit context has a complete decay address table, verify leaves the raw gate half of the
+  key/gate record untouched. Its allocation and strides are preserved. The standalone verify default writes both halves.
   Input/output buffers must not alias these write regions unexpectedly.
 - `block_table`, `num_computed_tokens` and `mamba_block_size` must either all be
   absent or all be supplied. Low-level align can additionally write a boundary
@@ -333,7 +335,7 @@ runtime strides may still trigger Triton type/alignment specialization.
 
 ### A5 verify and state commit latency
 
-Ascend950DT, main 7844c21, BF16 activations and FP32 state. Values are median joint graph latencies in microseconds over 12 paired samples of 16 replays. The graph includes verification for every layer and the first state commit. Plan, convolution, boundary commit and model serving are outside the timed interval.
+Measured at 7a78343 before eliding the raw gate store. Ascend950DT, main 7844c21, BF16 activations and FP32 state. Values are median joint graph latencies in microseconds over 12 paired samples of 16 replays. The graph includes verification for every layer and the first state commit. Plan, convolution, boundary commit and model serving are outside the timed interval.
 
 | B / L / H / K / V / Q | Acceptance per request | main (us) | This PR (us) |
 |---|---|---:|---:|
