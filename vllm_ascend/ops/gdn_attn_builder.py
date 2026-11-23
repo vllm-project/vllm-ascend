@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.config import VllmConfig, get_current_vllm_config_or_none
@@ -43,6 +44,9 @@ from vllm_ascend.ops.triton.mamba.align_block_table import (
     mamba_get_block_table_tensor,
 )
 from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
+
+if TYPE_CHECKING:
+    from vllm_ascend.ops.kda import KimiK31FlashKDASchedule
 
 _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
@@ -142,6 +146,7 @@ class GDNChunkedPrefillMetadata:
     cu_seqlens_kern: tuple[int, ...] | None = None
     keep_meta: torch.Tensor | None = None
     head_sharded_pcp: bool = False
+    kimi_k31_flash_kda: "KimiK31FlashKDASchedule | None" = None
 
 
 @dataclass

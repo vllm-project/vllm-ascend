@@ -1,0 +1,7 @@
+pr: 22959
+entries:
+  - category: feature
+    text: >-
+      Kimi K3.1 BF16 prefill on Ascend 950 automatically uses CANNBot FlashKDA
+      when a compatible operator package is installed. FlashKDA handles Q/K
+      normalization and gate activation inside the kernel.
