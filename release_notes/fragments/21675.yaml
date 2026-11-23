@@ -48,3 +48,11 @@ entries:
       window now fails fast at startup with a clear error, instead of
       silently dropping the window, because the Ascend MLA decode path only applies
       the sliding-window band in the causal branch.
+  - category: bugfix
+    text: Fixed the DFlash2 MLA draft sliding window right-aligning to the
+      optimistic CPU sequence-length upper bound after partial rejections,
+      which pulled up to num_speculative_tokens stale rows into the window
+      band. The draft metadata now mirrors the rejection-adjusted device
+      lengths to host (the DSpark pattern) and builds with
+      attn_state=ChunkedPrefill, so both eager and full-graph FIA calls see
+      the accepted context and apply the configured sliding window.

@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping
+from contextlib import contextmanager, nullcontext
 from typing import Any, cast
 
+import numpy as np
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
@@ -16,10 +18,10 @@ from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculato
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 from vllm_ascend.ascend_config import draft_config_context
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory, build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_draft_profile_inputs
 
@@ -217,6 +219,21 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             model.post_process(self.vllm_config)
         return model
 
+    def _prepare_rejection_adjusted_host_lengths(self, num_reqs, num_reqs_padded):
+        """Zero-padded host copy of the per-step device seq_lens (DSpark pattern).
+
+        The input-prep kernel rewrites input_buffers.seq_lens every step with
+        min(last_valid_pos + 1 + num_query_per_req, max_model_len), i.e. the
+        accepted context plus this step's queries. Feeding these exact lengths
+        through build_attn_metadata_factory keeps the FIA seq_lens_list at the
+        rejection-adjusted values in both eager and FULL-graph replay; the
+        optimistic CPU upper bound would drag up to num_speculative_tokens
+        stale rows into the right-aligned sliding window after a rejection.
+        """
+        seq_lens_cpu = torch.zeros(num_reqs_padded, dtype=torch.int32, device="cpu")
+        seq_lens_cpu[:num_reqs].copy_(self.input_buffers.seq_lens[:num_reqs])
+        return seq_lens_cpu
+
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         assert self.input_batch is not None
         num_reqs = getattr(self, "_draft_metadata_num_reqs", None)
@@ -224,7 +241,22 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             num_reqs = self.input_batch.num_reqs
         assert 0 <= num_reqs <= num_reqs_padded, "draft requests exceed graph capacity"
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
-        with build_attn_metadata_wrapper():
+        # MLA drafts share DSpark's metadata preparation: the factory feeds
+        # the rejection-adjusted host lengths and pins
+        # attn_state=ChunkedPrefill, so the eager build also takes the
+        # sliding-window FIA branch (sparse_mode=4) instead of defaulting
+        # attn_state to None and silently dropping the window.
+        metadata_context = nullcontext()
+        if getattr(self, "_mla_draft", False):
+            metadata_context = build_attn_metadata_factory(
+                self.input_buffers.positions,
+                num_tokens_padded,
+                is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool, device="cpu"),
+                seq_lens_cpu=self._prepare_rejection_adjusted_host_lengths(num_reqs, num_reqs_padded),
+                attn_state=AscendAttentionState.ChunkedPrefill,
+                parallel_config=self.attn_vllm_config.parallel_config,
+            )
+        with build_attn_metadata_wrapper(), metadata_context:
             # vLLM main (#56181) replaced _build_draft_attn_metadata with
             # _build_uniform_attn_metadata (BatchExecutionDescriptor).
             batch_desc = BatchExecutionDescriptor(
@@ -240,8 +272,69 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 step=self.num_query_per_req,
                 causal=self._group_causal,
             )
-        self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
         return [attn_metadata]
+
+    def _build_attn_metadata(
+        self,
+        num_reqs: int,
+        batch_desc: BatchExecutionDescriptor,
+        query_start_loc_np: np.ndarray,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
+        causal: bool | Mapping[int, bool] = True,
+        dcp_local_seq_lens: torch.Tensor | None = None,
+    ) -> dict[str, Any] | None:
+        """Build Ascend draft metadata through the upstream attention hook.
+
+        Eager propose() reaches the builder through this hook with only
+        ``build_attn_metadata_wrapper()`` outside, so the MLA factory context
+        (``attn_state=ChunkedPrefill`` plus the rejection-adjusted host
+        lengths) must live here; ``build_draft_attn_metadatas`` alone only
+        covers FULL-graph replay.
+        """
+        if not getattr(self, "_mla_draft", False):
+            # GQA DFlash drafts keep the upstream metadata path unchanged.
+            return super()._build_attn_metadata(
+                num_reqs=num_reqs,
+                batch_desc=batch_desc,
+                query_start_loc_np=query_start_loc_np,
+                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                step=step,
+                causal=causal,
+                dcp_local_seq_lens=dcp_local_seq_lens,
+            )
+
+        num_reqs_padded = batch_desc.num_reqs or num_reqs
+        # The draft forward may process padded inputs outside FULL graphs, but
+        # attention only consumes the tokens owned by real requests there.
+        num_tokens = (
+            batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
+        )
+        with (
+            build_attn_metadata_wrapper(),
+            build_attn_metadata_factory(
+                self.input_buffers.positions,
+                num_tokens,
+                is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool, device="cpu"),
+                seq_lens_cpu=self._prepare_rejection_adjusted_host_lengths(num_reqs, num_reqs_padded),
+                attn_state=AscendAttentionState.ChunkedPrefill,
+                parallel_config=self.attn_vllm_config.parallel_config,
+            ),
+        ):
+            attn_metadata = super()._build_attn_metadata(
+                num_reqs=num_reqs,
+                batch_desc=batch_desc,
+                query_start_loc_np=query_start_loc_np,
+                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                step=step,
+                causal=causal,
+                dcp_local_seq_lens=dcp_local_seq_lens,
+            )
+        if batch_desc.cg_mode == CUDAGraphMode.FULL and attn_metadata is not None:
+            # FULL replay uses the captured padded Q, so FIA needs cumulative
+            # query lengths through every padded request slot.
+            self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
+        return attn_metadata
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
         """Rebuild ``actual_seq_lengths_q`` from the padded request count,
@@ -337,6 +430,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             decode_context_parallel_size=self.vllm_config.parallel_config.decode_context_parallel_size,
             mla_draft=mla_draft,
         )
+        self._mla_draft = mla_draft
 
     def propose(
         self,

@@ -1469,8 +1469,9 @@ class NPUModelRunner(GPUModelRunner):
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or [])
         ):
             # K3.1's KDA layers and SFA indexer read device lengths or the CPU
-            # upper bound only, and DFlash draft metadata is built from the
-            # upper bound by design. Keep unverified paths on exact host counts.
+            # upper bound only, and the DFlash MLA draft mirrors the
+            # rejection-adjusted device lengths to host inside the speculator
+            # (the DSpark pattern). Keep unverified paths on exact host counts.
             parallel_config = self.parallel_config
             return (
                 parallel_config.pipeline_parallel_size == 1
