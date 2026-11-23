@@ -2011,15 +2011,9 @@ def use_updatable_graph(
 
     if issubclass(attn_backend, AscendAttentionBackend):
         return True
-
-    from vllm.distributed import get_dcp_group
-
     from vllm_ascend.attention.mla_v1 import AscendMLABackend
 
-    # Non-DCP MLA now registers decode FIA tasks during capture. Keep DCP MLA
-    # on its specialized graph-parameter path until its grouped update logic is
-    # migrated separately.
-    return issubclass(attn_backend, AscendMLABackend) and get_dcp_group().world_size == 1
+    return issubclass(attn_backend, AscendMLABackend)
 
 
 def _is_glm_model(model_config) -> bool:
