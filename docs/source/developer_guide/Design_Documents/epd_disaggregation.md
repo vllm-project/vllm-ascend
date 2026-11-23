@@ -57,11 +57,16 @@ interface and the model-runner integration described below.
 | E+P+D | P | `ec_role: ec_consumer` plus `--kv-transfer-config` with `MooncakeLayerwiseConnector` in the `kv_producer` role | `--gpu-memory-utilization 0.7` |
 | E+P+D | D | no EC configuration | `--kv-transfer-config` with `MooncakeLayerwiseConnector` in the `kv_consumer` role |
 
-Setting `ec_role: ec_producer` marks the instance as encoder-only
-(`mm_encoder_only`): it runs the multimodal encoder and the EC save path
-instead of the language model decode loop, so its KV-cache allocation is
-minimal. Consumer instances keep the normal generation path and only add the
-EC load path.
+`ec_role: ec_producer` only selects the connector role; it does not enable the
+model runner's encoder-only mode. The E instance is a regular vLLM instance: it
+runs the multimodal encoder and the EC save path and answers the proxy's
+one-token encoding request, started with `--gpu-memory-utilization 0.01` (a
+tiny KV cache), `--enforce-eager` and `--no-enable-prefix-caching`. A genuine
+encoder-only instance requires the upstream `--mm-encoder-only` flag
+(`MultiModalConfig.mm_encoder_only`), which makes `NPUWorker` build the
+upstream `MMEncoderModelRunner` (`vllm_ascend/worker/worker.py`); no vLLM
+Ascend code or example passes that flag. Consumer instances keep the normal
+generation path and only add the EC load path.
 
 ### 3. Data plane
 
@@ -75,7 +80,7 @@ not derived from `request_id`, so:
   different key, so reuse across preprocessing configurations is not guaranteed;
 - repeated items inside one request are deduplicated before encoding.
 
-**E side.** The encoder-only instance runs the multimodal encoder. The model
+**E side.** The E (producer) instance runs the multimodal encoder. The model
 runner saves each encoded result with
 `ECConnector.save_caches(encoder_cache, mm_hash)`; the connector serializes it
 to its backend (a safetensors file for `ECExampleConnector`, a Mooncake buffer
@@ -127,9 +132,9 @@ Model Runner V1 has been removed from vllm-ascend, so Model Runner V2 is the
 only runner and the encoder-cache integration has a single implementation: the
 runner delegates the encoder-cache contract to the upstream V2 interfaces.
 Ascend pieces live in
-`vllm_ascend/worker/worker.py`: encoder-only instances use the upstream
-`MMEncoderModelRunner`; `ensure_ec_transfer_initialized` registers the
-connector during worker distributed initialization;
+`vllm_ascend/worker/worker.py`: instances started with `--mm-encoder-only`
+use the upstream `MMEncoderModelRunner`; `ensure_ec_transfer_initialized`
+registers the connector during worker distributed initialization;
 `start_worker_services()` starts connector services after model load, and
 `ensure_ec_transfer_shutdown()` stops them during worker shutdown.
 
@@ -336,6 +341,13 @@ script (`disagg_1e1pd_example.sh`) redirects them to files under `LOG_PATH`.
 - **ECMooncakeConnector** needs a Mooncake deployment and shared storage.
 - **ECExampleConnector** needs a shared filesystem with identical absolute paths
   on E and P/D.
-- **E+P+D** is a supported design with example scripts. End-to-end test cases
-  for E+P+D are included in the test suite but have not been validated on
-  hardware yet.
+- **End-to-end coverage**: E+P+D is a supported design with example scripts,
+  but none of the end-to-end suites has been validated on hardware yet. The
+  E+PD suites (`tests/e2e/pull_request/two_card/epd/`) cover the E node serving
+  independently, proxy semantics against a non-EPD baseline, encoder
+  disconnect/restart and graceful shutdown; the four-card suite
+  (`tests/e2e/pull_request/four_card/epd/`) covers E+P+D with MooncakeLayerwise
+  KV transfer; a single-node E+PD case is registered for weekly SIT. All of
+  these use `ECExampleConnector` only, so `ECMooncakeConnector`,
+  `ECCPUConnector`, `ECMemcacheConnector` and EC + Pipeline Parallel have no
+  end-to-end coverage.

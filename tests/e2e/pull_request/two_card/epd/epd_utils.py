@@ -205,7 +205,7 @@ def encoder_server_args(
     shared_storage_path: str,
     mm_limit: int = 2,
 ) -> list[str]:
-    """Return the CLI args of the E (mm_encoder_only, EC producer) instance."""
+    """Return the CLI args of the E (EC producer, tiny KV cache) instance."""
     return [
         "--port",
         str(port),

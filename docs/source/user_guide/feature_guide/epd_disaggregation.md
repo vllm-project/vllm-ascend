@@ -16,11 +16,14 @@ commands use the `ascend` Mooncake protocol in both setups.
 Disaggregated Encoder (EPD) splits the multimodal path of a vision-language
 model into up to three stages, each running in its own vLLM instance group:
 
-- **E (encoder)** runs only the multimodal encoder (for example the ViT of
-  Qwen3-VL) and writes the encoder cache (EC) to a shared backend. An E
-  instance is encoder-only: it is marked `mm_encoder_only` by the
-  `ec_role: ec_producer` configuration, runs the encoder and the EC save path,
-  and does not allocate a KV cache.
+- **E (encoder)** is a regular vLLM instance configured as the EC producer
+  (`ec_role: ec_producer`). It runs the vision encoder, writes the encoder
+  cache (EC) to the shared backend, and answers the proxy's one-token encoding
+  request; the examples start it with `--gpu-memory-utilization 0.01` (a tiny
+  KV cache), `--enforce-eager` and `--no-enable-prefix-caching`. Genuine
+  encoder-only serving is the upstream `--mm-encoder-only` mode
+  (`MultiModalConfig.mm_encoder_only`); `ec_role` does not enable it and the
+  EPD examples do not pass it.
 - **P (prefill)** is optional. It consumes the encoder cache, computes the
   prompt KV cache, and transfers that KV cache to D through a prefill-decode
   connection such as `MooncakeLayerwiseConnector`.
@@ -159,9 +162,10 @@ side and there is no V1 fallback to select. Do **not** set
 `VLLM_USE_V2_MODEL_RUNNER=0`: the setting cannot be honored and the vLLM
 process fails at startup with a `ValueError` (`vllm_ascend/mrv2_utils.py`).
 
-Runner selection lives in `vllm_ascend/mrv2_utils.py`; E nodes use the upstream
-`MMEncoderModelRunner` for the encoder-only instance, and P/D nodes use the
-Ascend V2 model runner and the upstream encoder-cache contract.
+Runner selection lives in `vllm_ascend/mrv2_utils.py`; an instance started with
+the upstream `--mm-encoder-only` flag uses the upstream
+`MMEncoderModelRunner`, while the other instances use the Ascend V2 model
+runner and the upstream encoder-cache contract.
 
 **The VL encoder graph is supported on MRV2**: setting
 `--compilation-config '{"cudagraph_mm_encoder": true}'` enables the encoder ACL
@@ -987,9 +991,13 @@ disconnects before the first streamed chunk. Stop in this order:
   multimodal processor cache, so processed multimodal inputs are not reused.
   This cache is independent of the encoder-cache transfer described here.
 - **310P**: multi-process EPD is not committed on 310P.
-- **E+P+D** is documented as a supported deployment design. End-to-end test
-  cases for E+P+D are included in the test suite but have not been validated
-  on hardware yet.
+- **End-to-end coverage**: cases exist for E+PD (the E node serving
+  independently, proxy semantics against a non-EPD baseline, encoder
+  disconnect/restart and graceful shutdown) and for E+P+D (MooncakeLayerwise KV
+  transfer through the proxy); a single-node E+PD case is registered for weekly
+  CI. These cases have not been validated on hardware yet, and they use only
+  `ECExampleConnector`: `ECMooncakeConnector`, `ECCPUConnector`,
+  `ECMemcacheConnector` and EC + Pipeline Parallel have no end-to-end coverage.
 
 ## Related guides
 
