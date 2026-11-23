@@ -1434,6 +1434,14 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaises(ValueError):
             AscendCompilationConfig(unknown_key=1)
 
+    def test_ascend_compilation_config_prefill_graph_padding_limits(self):
+        cfg = AscendCompilationConfig(**json.loads('{"prefill_graph_padding_limits": {"1453": 2}}'))
+        self.assertEqual(cfg.prefill_graph_padding_limits, {1453: 2})
+        with self.assertRaises(ValueError):
+            AscendCompilationConfig(prefill_graph_padding_limits={1453: -1})
+        with self.assertRaises(ValueError):
+            AscendCompilationConfig(prefill_graph_padding_limits={0: 2})
+
     def test_short_request_first_config_unknown_key_forbidden(self):
         # Was hand-written unknown-key check; now extra="forbid".
         with self.assertRaises(ValueError):

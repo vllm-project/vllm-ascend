@@ -9,14 +9,40 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
     AutoRegressiveAclGraphManager,
     CudaGraphManager,
     SpeculatorCudaGraphManager,
 )
+
+
+@pytest.mark.parametrize(
+    "mode,captured_tokens,actual_tokens,eager",
+    [
+        (CUDAGraphMode.PIECEWISE, 2048, 2047, True),
+        (CUDAGraphMode.PIECEWISE, 2048, 2048, False),
+        (CUDAGraphMode.PIECEWISE, 3501, 3499, False),
+        (CUDAGraphMode.PIECEWISE, 3501, 3498, True),
+        (CUDAGraphMode.PIECEWISE, 64, 63, False),
+        (CUDAGraphMode.FULL, 2048, 2047, False),
+    ],
+)
+def test_model_aclgraph_dispatch_respects_prefill_padding_limit(mode, captured_tokens, actual_tokens, eager):
+    manager = ModelAclGraphManager.__new__(ModelAclGraphManager)
+    manager._prefill_graph_padding_limits = {2048: 0, 3501: 2}
+    descriptor = BatchExecutionDescriptor(cg_mode=mode, num_tokens=captured_tokens, num_reqs=None, num_active_loras=2)
+    with patch.object(ModelCudaGraphManager, "dispatch", return_value=descriptor):
+        chosen = manager.dispatch(3, actual_tokens, uniform_token_count=None, num_active_loras=2)
+    if eager:
+        assert chosen.cg_mode == CUDAGraphMode.NONE
+        assert (chosen.num_tokens, chosen.num_reqs, chosen.num_active_loras) == (actual_tokens, 3, 2)
+    else:
+        assert chosen is descriptor
 
 
 def _parent_init(
