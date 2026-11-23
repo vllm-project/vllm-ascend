@@ -94,7 +94,13 @@ def _prepare_dflash_inputs_with_block_stride(
     )
 
 
-def validate_grouped_draft_attn(model: Any, kv_cache_config: Any) -> None:
+def validate_grouped_draft_attn(
+    model: Any,
+    kv_cache_config: Any,
+    *,
+    decode_context_parallel_size: int = 1,
+    mla_draft: bool = False,
+) -> None:
     """Reject draft layers with mismatched attention modes in one KV cache group.
 
     The pinned upstream DFlash speculator stores draft causality per KV cache
@@ -111,6 +117,17 @@ def validate_grouped_draft_attn(model: Any, kv_cache_config: Any) -> None:
     the last layer's window in the shared metadata, so they are rejected
     as well. Models without the per-layer hooks keep the upstream
     per-group fallback unchanged.
+
+    Decode context parallelism (DCP) selects ``AscendMlaDCPImpl`` for
+    every MLA attention group, and that decode path applies no
+    ``pre_tokens`` band (``sparse_mode=0`` with only the causal spec
+    mask), so a windowed MLA draft would silently attend the full
+    DCP-local KV and corrupt draft attention. The non-DCP FIA decode
+    path applies the ``sparse_mode=4`` window band only in the causal
+    branch, so a non-causal windowed MLA draft would equally lose the
+    window there. Both combinations are refused at startup; it is the
+    same restriction upstream vLLM #68214 encodes by refusing DCP for
+    windowed DFlash2 drafts.
     """
     get_layer_names = getattr(model, "get_draft_kv_cache_layer_names", None)
     get_causal = getattr(model, "get_draft_attn_causal", None)
@@ -154,6 +171,32 @@ def validate_grouped_draft_attn(model: Any, kv_cache_config: Any) -> None:
                 "homogeneous draft sliding windows."
             )
         window_by_gid[gid] = window
+
+    if mla_draft:
+        for gid, window in window_by_gid.items():
+            if window is not None and causal_by_gid.get(gid) is False:
+                raise ValueError(
+                    "Windowed MLA draft layers must be causal: the Ascend MLA "
+                    f"decode path applies the sliding-window band only in the "
+                    "causal branch (FIA sparse_mode=4), so a non-causal "
+                    "windowed draft would silently attend the full context "
+                    f"(KV cache group {gid}). Use a causal windowed draft, or "
+                    "a non-windowed draft for bidirectional attention."
+                )
+
+    if (
+        decode_context_parallel_size > 1
+        and mla_draft
+        and any(window is not None for window in window_by_gid.values())
+    ):
+        raise ValueError(
+            "DFlash draft layers carry a sliding window, but decode context "
+            "parallelism routes MLA draft attention through AscendMlaDCPImpl, "
+            "which applies no pre_tokens band and would silently drop the "
+            "window onto the full DCP-local KV. Run the draft without DCP "
+            "(or use a non-windowed draft); this matches upstream vLLM "
+            "#68214 refusing DCP for windowed DFlash2 drafts."
+        )
 
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
@@ -284,7 +327,16 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
 
         self.attn_backends = attn_backends
         install_ascend_dflash_input_preparation()
-        validate_grouped_draft_attn(self.model, kv_cache_config)
+        mla_draft = any(
+            getattr(backend, "get_name", lambda: None)() == "ASCEND_MLA"
+            for backend in attn_backends.values()
+        )
+        validate_grouped_draft_attn(
+            self.model,
+            kv_cache_config,
+            decode_context_parallel_size=self.vllm_config.parallel_config.decode_context_parallel_size,
+            mla_draft=mla_draft,
+        )
 
     def propose(
         self,

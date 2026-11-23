@@ -22,11 +22,23 @@ entries:
       tracking dict on the plain column-parallel path used by the MLA draft.
   - category: bugfix
     text: DFlash2 draft checkpoints whose layers mix causal and non-causal
-      attention now fail fast at startup when those layers would share one KV
-      cache group, instead of silently applying the last layer's causality to
-      the whole group and corrupting draft attention.
+      attention, or declare different sliding windows, now fail fast at
+      startup when those layers would share one KV cache group, instead of
+      silently applying the last layer's attention mode to the whole group
+      and corrupting draft attention.
   - category: bugfix
     text: Fixed the Kimi K3.1 target model not building its input embedding on
       the last pipeline-parallel stage when a speculative draft that reads
       target embeddings runs with pipeline parallelism, which left the stage
       without embedding weights to share with the draft.
+  - category: bugfix
+    text: Starting a sliding-window DFlash2 MLA draft (e.g.
+      Kimi-K3.1-Dflash2-Preview) with decode context parallelism now fails
+      fast at startup with a clear error, instead of silently dropping the
+      draft sliding window that the DCP attention path does not enforce
+      (matching the restriction upstream vLLM#68214 encodes).
+  - category: bugfix
+    text: Starting a non-causal DFlash2 MLA draft that declares a sliding
+      window now fails fast at startup with a clear error, instead of
+      silently dropping the window, because the Ascend MLA decode path only applies
+      the sliding-window band in the causal branch.
