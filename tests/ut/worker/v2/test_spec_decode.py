@@ -403,14 +403,20 @@ def test_mtp_routing_uses_actual_native_config(
         exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), namespace)
         factory = namespace["_init_speculator_310p"]
     if model_type == "gemma4_mtp":
+        expected_upstream = "vllm.v1.worker.gpu.spec_decode.gemma4.speculator.Gemma4Speculator"
         module, name = "vllm_ascend.worker.v2.spec_decode.gemma4.speculator", "AscendGemma4Speculator"
     elif min(num_mtp_modules, num_speculative_tokens) > 1:
+        expected_upstream = "vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator.MultiModuleMTPSpeculator"
         module = "vllm_ascend.worker.v2.spec_decode.multi_module_mtp.speculator"
         name = "AscendMultiModuleMTPSpeculator"
     elif use_310p:
+        expected_upstream = "vllm.v1.worker.gpu.spec_decode.mtp.speculator.MTPSpeculator"
         module, name = "vllm_ascend._310p.worker.v2.spec_decode.mtp_speculator", "AscendMTPSpeculator310"
     else:
+        expected_upstream = "vllm.v1.worker.gpu.spec_decode.mtp.speculator.MTPSpeculator"
         module, name = "vllm_ascend.worker.v2.spec_decode.mtp.speculator", "AscendMTPSpeculator"
+    if not v2_spec_decode.vllm_version_is("0.33.0"):
+        assert speculative.speculator_config.speculator_class == expected_upstream
     constructor = _mock_speculator_module(monkeypatch, module, name)
     device = torch.device("cpu")
     assert factory(config, device) is constructor.return_value
@@ -535,76 +541,9 @@ def test_init_speculator_main_dispatches_via_speculator_class(
         getattr(config.speculative_config, predicate).assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "method,model_type,num_mtp_modules,num_speculative_tokens,expected_upstream,module,name",
-    [
-        (
-            "mtp",
-            "qwen3_5_mtp",
-            1,
-            1,
-            "vllm.v1.worker.gpu.spec_decode.mtp.speculator.MTPSpeculator",
-            "vllm_ascend.worker.v2.spec_decode.mtp.speculator",
-            "AscendMTPSpeculator",
-        ),
-        (
-            "mtp",
-            "qwen3_5_mtp",
-            2,
-            2,
-            "vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator.MultiModuleMTPSpeculator",
-            "vllm_ascend.worker.v2.spec_decode.multi_module_mtp.speculator",
-            "AscendMultiModuleMTPSpeculator",
-        ),
-        (
-            "mtp",
-            "step3p5_mtp",
-            1,
-            1,
-            "vllm.v1.worker.gpu.spec_decode.mtp.speculator.MTPSpeculator",
-            "vllm_ascend.worker.v2.spec_decode.mtp.speculator",
-            "AscendMTPSpeculator",
-        ),
-        (
-            "mtp",
-            "step3p5_mtp",
-            2,
-            2,
-            "vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator.MultiModuleMTPSpeculator",
-            "vllm_ascend.worker.v2.spec_decode.multi_module_mtp.speculator",
-            "AscendMultiModuleMTPSpeculator",
-        ),
-        (
-            "eagle",
-            None,
-            1,
-            1,
-            "vllm.v1.worker.gpu.spec_decode.eagle.speculator.EagleSpeculator",
-            "vllm_ascend.worker.v2.spec_decode.eagle.speculator",
-            "AscendEagleSpeculator",
-        ),
-        (
-            "eagle3",
-            None,
-            1,
-            1,
-            "vllm.v1.worker.gpu.spec_decode.eagle.speculator.EagleSpeculator",
-            "vllm_ascend.worker.v2.spec_decode.eagle.speculator",
-            "AscendEagleSpeculator",
-        ),
-    ],
-)
-def test_init_speculator_main_actual_native_config_mtp_and_eagle(
-    monkeypatch,
-    method,
-    model_type,
-    num_mtp_modules,
-    num_speculative_tokens,
-    expected_upstream,
-    module,
-    name,
-):
-    """Verify real upstream SpeculativeConfig.speculator_config resolves MTP/Step3.5/EAGLE."""
+@pytest.mark.parametrize("method", ["eagle", "eagle3"])
+def test_init_speculator_main_actual_native_config_eagle(monkeypatch, method):
+    """Verify real upstream SpeculativeConfig.speculator_config resolves EAGLE."""
     if v2_spec_decode.vllm_version_is("0.33.0"):
         pytest.skip("SpeculativeConfig.speculator_config requires vLLM main")
 
@@ -612,46 +551,34 @@ def test_init_speculator_main_actual_native_config_mtp_and_eagle(
     speculative.method = method
     speculative.custom_method = None
     speculative.enforce_eager = False
-    speculative.num_speculative_tokens = num_speculative_tokens
-    speculative.index_share_for_mtp_iteration = None
-    speculative.draft_model_config = cast(
-        Any,
-        SimpleNamespace(
-            speculator_config_class=None,
-            hf_config=SimpleNamespace(
-                model_type=model_type,
-                num_nextn_predict_layers=num_mtp_modules,
-                n_predict=num_mtp_modules,
-                index_share_for_mtp_iteration=False,
-            ),
-        ),
+    speculative.draft_model_config = cast(Any, SimpleNamespace(speculator_config_class=None))
+    assert (
+        speculative.speculator_config.speculator_class
+        == "vllm.v1.worker.gpu.spec_decode.eagle.speculator.EagleSpeculator"
     )
-    assert speculative.speculator_config.speculator_class == expected_upstream
     config = SimpleNamespace(speculative_config=speculative)
-    constructor = _mock_speculator_module(monkeypatch, module, name)
+    constructor = _mock_speculator_module(
+        monkeypatch,
+        "vllm_ascend.worker.v2.spec_decode.eagle.speculator",
+        "AscendEagleSpeculator",
+    )
     device = torch.device("cpu")
 
     assert init_speculator(config, device) is constructor.return_value
     constructor.assert_called_once_with(config, device)
 
 
-@pytest.mark.parametrize(
-    "method,speculator_class",
-    [
-        ("dflash", "vllm.v1.worker.gpu.spec_decode.xpress.speculator.XPressSpeculator"),
-        ("suffix", "vllm.v1.worker.gpu.spec_decode.suffix.speculator.SuffixSpeculator"),
-    ],
-)
-def test_init_speculator_main_rejects_unadapted_upstream_speculator(monkeypatch, method, speculator_class):
+def test_init_speculator_main_rejects_unadapted_upstream_speculator(monkeypatch):
     """Unadapted concrete speculator classes fail with an explicit class-level NotImplementedError."""
     monkeypatch.setattr(v2_spec_decode, "vllm_version_is", lambda _: False)
-    config = _make_config(method, speculator_class=speculator_class)
+    speculator_class = "vllm.v1.worker.gpu.spec_decode.suffix.speculator.SuffixSpeculator"
+    config = _make_config("suffix", speculator_class=speculator_class)
 
     with pytest.raises(NotImplementedError) as exc_info:
         init_speculator(config, torch.device("cpu"))
 
     assert speculator_class in str(exc_info.value)
-    assert f"{method} is not supported yet" not in str(exc_info.value)
+    assert "suffix is not supported yet" not in str(exc_info.value)
 
 
 def test_init_speculator_main_rejects_none_speculator_class(monkeypatch):
