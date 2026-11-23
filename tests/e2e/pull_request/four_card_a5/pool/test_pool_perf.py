@@ -23,7 +23,7 @@ from tests.e2e.pull_request.kv_pool_watch import (
 
 MODEL = os.environ.get(
     "DEEPSEEK_V4_1_FLASH_MODEL_PATH",
-    "Eco-Tech/DeepSeek-V4.1-Flash-w8a8",
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017",
 )
 
 TENSOR_PARALLEL_SIZE = 8
@@ -70,11 +70,15 @@ def _leg(use_pool: bool, case_name: str):
             enable_expert_parallel=True,
             max_model_len=POOL_MAX_MODEL_LEN,
             max_num_batched_tokens=POOL_BATCHED_TOKENS,
-            tokenizer_mode="deepseek_v4",
+            max_num_seqs=64,
+            tokenizer_mode="deepseek_v41",
             block_size=128,
             distributed_executor_backend="mp",
             gpu_memory_utilization=0.9,
-            quantization="ascend",
+            quantization="deepseek_v4_fp8",
+            engram_config={"cpu_offload": True, "dp_shared_memory": False},
+            additional_config={"multistream_overlap_shared_expert": True, "combine_quant_mode": 4},
+            compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
             enable_prefix_caching=not use_pool,
             disable_log_stats=False,
         )
@@ -93,7 +97,7 @@ def _leg(use_pool: bool, case_name: str):
     parallel="TP,EP",
     deploy="pd_mix",
     hardware="A5",
-    quantization="W8A8",
+    quantization="FP8",
     graph_mode="full_decode_only",
 )
 @patch.dict(
