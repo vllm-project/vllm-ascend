@@ -54,7 +54,7 @@ Steps to follow to enable SP currently:
 
 - `tensor_parallel_size > 1`.
 - `enable_expert_parallel` is set (MoE models only).
-- `--additional-config '{"enable_flashcomm1": true}'` sets `flashcomm1`
+- `--additional-config '{"enable_flashcomm1": true}'` sets `flashcomm1`.
 
 > [!NOTE]
 > **Difference from upstream.** Upstream vLLM enables MoE sequence parallelism only when `data_parallel_size > 1`, together with a supported all2all backend, expert parallelism, and `tensor_parallel_size > 1`. On vLLM Ascend, `data_parallel_size > 1` is not part of the enablement condition. Ascend FlashComm also supports the TP/EP topology with `data_parallel_size = 1`, so SP MoE can be enabled when DP is 1 as long as the conditions above are met. `data_parallel_size > 1` remains supported.
