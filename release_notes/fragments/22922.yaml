@@ -1,4 +1,0 @@
-pr: 22922
-entries:
-  - category: bugfix
-    text: Qwen4Exp deployments using both data parallelism and prefill context parallelism now avoid a redundant host embedding allocation that could cause model startup to fail under host memory pressure.
