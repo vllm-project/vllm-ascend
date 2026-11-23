@@ -2087,6 +2087,8 @@ def _reshape_kv_cache_v2(
                 # so the same (NoPE, RoPE) reshape path can be used.
                 nope_bytes = math.prod(k_shape) * get_dtype_size(k_dtype)
                 rope_bytes = math.prod(v_shape) * get_dtype_size(v_dtype)
+                # NoPE and RoPE use the same dtype. Adding nope_bytes to the aligned
+                # slot start keeps the RoPE offset aligned for v_dtype.
                 raw_cache = raw_cache.split((nope_bytes, rope_bytes))
 
             if packed_sfa_main_cache:
