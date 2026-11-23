@@ -6,9 +6,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from vllm_ascend.device.fla import is_fla_gdn_chunk32_supported
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.device.hardware_profile import get_hardware_profile, is_fla_gdn_chunk32_supported
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, _get_fla_gdn_prefill_op
 
 
@@ -27,7 +26,10 @@ def test_chunk32_requires_a5_but_not_fla_version(device):
     with (
         patch.dict(sys.modules, {module.__name__: module}),
         patch("vllm_ascend.ops.gdn.get_current_hardware_profile", return_value=get_hardware_profile(device)),
-        patch("vllm_ascend.device.fla.get_current_hardware_profile", return_value=get_hardware_profile(device)),
+        patch(
+            "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+            return_value=get_hardware_profile(device),
+        ),
         patch("importlib.metadata.version", side_effect=AssertionError("FLA version must not be queried")),
     ):
         op = _get_fla_gdn_prefill_op()

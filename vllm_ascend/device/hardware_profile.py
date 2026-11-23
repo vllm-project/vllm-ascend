@@ -574,3 +574,8 @@ def get_current_hardware_profile() -> HardwareProfile:
     """Return the profile selected by the current device configuration."""
 
     return _CURRENT_HARDWARE_PROFILE
+
+
+def is_fla_gdn_chunk32_supported() -> bool:
+    """Enable chunk32 on A5."""
+    return get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32)
