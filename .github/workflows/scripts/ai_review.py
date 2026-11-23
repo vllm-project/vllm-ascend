@@ -434,6 +434,23 @@ class Orchestrator:
                 ),
             )
             return
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            # Same contract as the timeout: engine-side failures (bad API
+            # key, harness crash) must not consume the round budget or
+            # crash the whole job with a traceback.
+            print(f"::error::agent engine failed: {exc}", flush=True)
+            self.post_notice(
+                "⚠️ AI review round aborted: the review engine failed "
+                "(see the workflow log for the exact error). No review was "
+                "produced and the round budget was not consumed. "
+                "Retry with `/ai-review` once the engine issue is fixed.",
+                new_state=State(
+                    state=self.state.state,
+                    round=self.state.round,
+                    total=self.state.total,
+                ),
+            )
+            return
         print(
             f"::notice::agent round finished in {time.monotonic() - started:.0f}s",
             flush=True,
