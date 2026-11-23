@@ -323,6 +323,8 @@ class HardwareProfile:
 
     # Operator availability alone does not determine which model route to use.
     flash_attn_npu_3_models: frozenset[FlashAttentionNpu3Model] = frozenset()
+    # Internal ACLGraph input-row cutoff; zero keeps GDN projections serial.
+    gdn_projection_overlap_max_tokens: int = 0
 
     # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
     requires_2d_nz_linear_input: bool = False
@@ -409,12 +411,15 @@ _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
     HardwareCapability.RMS_NORM_CAST,
 }
+# Conservative internal cutoff, counted after ACLGraph input padding.
+_A2_A3_GDN_PROJECTION_OVERLAP_MAX_TOKENS = 8
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
 _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyType(
     {
         AscendDeviceType.A2: HardwareProfile(
             _device_type=AscendDeviceType.A2,
             flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX}),
+            gdn_projection_overlap_max_tokens=_A2_A3_GDN_PROJECTION_OVERLAP_MAX_TOKENS,
             # A2 BF16 native verification produced NaNs with 8 drafts (9 queries).
             # Nine is the first observed failing configuration, not a proven
             # universal kernel bound. Remove after native recurrent parity is
@@ -441,6 +446,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
             flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX}),
+            gdn_projection_overlap_max_tokens=_A2_A3_GDN_PROJECTION_OVERLAP_MAX_TOKENS,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
             default_worker_cls=_DEFAULT_WORKER_CLS,

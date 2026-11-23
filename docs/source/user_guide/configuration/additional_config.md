@@ -407,3 +407,28 @@ convolution allocates its output separately.
 Small prefix match units can increase checkpoint traffic.
 
 Validate correctness, quality and performance on the deployment hardware before deploying in production.
+
+## GDN input projection overlap
+
+On A2/A3, eligible Qwen GDN layers automatically overlap the QKVZ and BA
+input projections during ACLGraph execution for **1–8 input rows after graph
+padding**. The cutoff is an internal hardware policy, not an additional-config
+option. A5 and 310P retain serial projections.
+
+This requires an uncompiled forward (`mode: 0`) captured in `FULL` or
+`FULL_DECODE_ONLY` ACLGraph mode. It applies only to plain BF16 projections
+with no LoRA, dual batch overlap, prefill context parallelism, output gather,
+or custom communication operator. Larger buckets, eager execution, piecewise
+graphs and other ineligible paths retain serial projections.
+
+For Model Runner V2, a compatible graph configuration is:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <qwen-bf16-model> --dtype bfloat16 \
+  --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}'
+```
+
+The projections use the same weights and operators as the serial path.
+The internal cutoff of 8 is a conservative default, not a claim of optimal
+performance across all A2/A3 models and TP configurations. Validate accuracy,
+latency, and memory use on the deployment configuration.
