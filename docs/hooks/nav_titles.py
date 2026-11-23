@@ -195,7 +195,7 @@ TITLES = {
     "user_guide/configuration/runtime_config.md": {"en": "Runtime Configuration", "zh": "运行时配置"},
     "user_guide/configuration/unified_output_directory.md": {
         "en": "Unified Output Directory",
-        "zh": "统一日志与输出目录",
+        "zh": "统一输出目录",
     },
     "user_guide/deployment_guide/using_mindie_motor.md": {"en": "Using MindIE Motor", "zh": "使用 MindIE Motor"},
     "user_guide/deployment_guide/using_volcano_kthena.md": {"en": "Using Volcano Kthena", "zh": "使用 Volcano Kthena"},
