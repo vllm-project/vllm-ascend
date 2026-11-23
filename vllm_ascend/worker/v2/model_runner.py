@@ -513,7 +513,10 @@ class NPUModelRunner(GPUModelRunner):
         if policy != "repair":
             return
         try:
-            from vllm.v1.worker.gpu.repair_executor import (
+            # The module exists only in vLLM builds carrying the repair
+            # stack (PR #68377); the ignore keeps mypy quiet on bases
+            # without it, and the guard keeps the check dormant there.
+            from vllm.v1.worker.gpu.repair_executor import (  # type: ignore[import-not-found]
                 _repair_block_size,
                 find_repair_fence_layer,
             )
