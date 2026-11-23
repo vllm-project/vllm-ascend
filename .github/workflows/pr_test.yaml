@@ -688,7 +688,7 @@ jobs:
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
             --curated a5 \
-            --runner-label-override linux-aarch64-a5-4
+            --runner-label-override linux-aarch64-a5-8
 
       - name: Set no-tests output for A5 when not requested or source paths unchanged
         id: noop-a5
