@@ -8,16 +8,24 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTens
 from vllm.triton_utils import triton
 
 from vllm_ascend.ops.triton.dcp.dcp_a2a import (
+    A3_DECODE_TOKEN_BUCKETS,
     _fused_dcp_lse_combine_kernel,
     _launch_fused_dcp_lse_combine,
     _launch_pack_dcp_output_lse,
     _lse_pack_dim,
     _pack_dcp_output_lse_kernel,
+    _rank_tiled_mode,
     _use_fast_exchange,
+    begin_a3_static_warmup,
+    end_a3_static_warmup,
 )
 from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
     _fused_dcp_lse_combine_batched_kernel,
     _pack_dcp_output_lse_batched_kernel,
+)
+from vllm_ascend.ops.triton.dcp.dcp_a2a_rank_tiled import (
+    _fused_dcp_lse_combine_rank_tiled_kernel,
+    _fused_dcp_lse_combine_rank_tiled_static_kernel,
 )
 from vllm_ascend.ops.triton.dcp.dcp_jit import DcpJitKernel
 from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import (
@@ -37,6 +45,8 @@ _DCP_KERNELS = (
     DcpJitKernel(_pack_dcp_output_lse_kernel),
     DcpJitKernel(_pack_dcp_output_lse_batched_kernel),
     DcpJitKernel(_fused_dcp_lse_combine_kernel),
+    DcpJitKernel(_fused_dcp_lse_combine_rank_tiled_kernel, ("num_heads", "num_tokens")),
+    DcpJitKernel(_fused_dcp_lse_combine_rank_tiled_static_kernel),
     DcpJitKernel(_fused_dcp_lse_combine_batched_kernel),
     DcpJitKernel(_pack_t1_peer),
     DcpJitKernel(_pack_token_peer, ("tokens",)),
@@ -62,7 +72,10 @@ def _token_representatives(max_tokens, heads, local_heads, head_dim, vector_core
     pointer-alignment keys. No capture-size list or Cartesian stride product is
     needed. Include integer-width boundaries for large configured capacities.
     """
+    ranks = heads // local_heads
+    rank_min_rows = max(triton.cdiv(2 * vector_cores, ranks), ranks)
     cuts = {
+        triton.cdiv(rank_min_rows, local_heads),
         1,
         2,
         128,
@@ -177,12 +190,18 @@ def _record_dcp_layout(
         _launch_fused_dcp_lse_combine(recv, output, head_dim, 1, False, local_output, local_lse, vector_cores, record)
 
 
-def register_dcp_warmup(*, dtype, local_heads, head_dim, scatter_size, pcp_size, max_tokens, from_stats, mla=False):
+def register_dcp_warmup(
+    *, dtype, local_heads, head_dim, scatter_size, pcp_size, max_tokens, from_stats, mla=False, decode_buckets=None
+):
     """Register SFA and MLA owners' reachable output-merge layouts.
 
     Native/QSFA allocates contiguous TND outputs and FP32 statistics. MLA also
     uses transposed FlashMLA output/LSE and singleton-batch BSND LSE views.
     The split MLA route defers history combine and may add one local result.
+
+    ``decode_buckets`` should be the engine's ACLGraph capture sizes; graph
+    padding makes those the token counts the combine sees. The fixed DCP budget
+    list is only a fallback when the caller cannot provide them.
     """
     init_device_properties_triton()
     vector_cores = get_vectorcore_num()
@@ -194,21 +213,38 @@ def register_dcp_warmup(*, dtype, local_heads, head_dim, scatter_size, pcp_size,
         owner = owners[kernel]
         keys[owner][owner.key_from_launch(*args, **kwargs)] = None
 
+    # A3 decode buckets: pre-register the candidate shapes so the dispatcher
+    # selects the static rank-tiled kernel while recording, then install only
+    # the full launch signatures it actually produced.
+    dcp_size = scatter_size * pcp_size
+    static_shapes: set[tuple[int, int, int, int]] = set()
+    if _rank_tiled_mode() == "static" and 8 <= dcp_size <= 16 and head_dim >= 512:
+        buckets = decode_buckets if decode_buckets else A3_DECODE_TOKEN_BUCKETS
+        static_shapes = {(local_heads, token, head_dim, dcp_size) for token in buckets if 1 <= token <= max_tokens}
+        begin_a3_static_warmup(static_shapes)
+
+    token_list = sorted(
+        set(_token_representatives(max_tokens, heads, local_heads, head_dim, vector_cores))
+        | {key[1] for key in static_shapes}
+    )
     layouts = ("token_major", "head_major_lse", "head_major") if mla else ("token_major",)
-    for tokens in _token_representatives(max_tokens, heads, local_heads, head_dim, vector_cores):
-        for layout in layouts:
-            _record_dcp_layout(
-                dtype,
-                tokens,
-                local_heads,
-                head_dim,
-                scatter_size,
-                pcp_size,
-                from_stats,
-                mla,
-                layout,
-                vector_cores,
-                record,
-            )
+    try:
+        for tokens in token_list:
+            for layout in layouts:
+                _record_dcp_layout(
+                    dtype,
+                    tokens,
+                    local_heads,
+                    head_dim,
+                    scatter_size,
+                    pcp_size,
+                    from_stats,
+                    mla,
+                    layout,
+                    vector_cores,
+                    record,
+                )
+    finally:
+        end_a3_static_warmup()
     for owner, owner_keys in keys.items():
         owner.register_warmup(tuple(owner_keys))

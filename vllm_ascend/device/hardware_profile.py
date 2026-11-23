@@ -68,9 +68,12 @@ class HardwareCapability(Enum):
     CANN_MEGAMOE = auto()
     # Allow A5 MegaMoe's MXFP-only path and its A5-specific calling conventions.
     CANN_MEGAMOE_MXFP = auto()
-    # Fuse the shared expert into the A5 MegaMoe operator (enable_fused_mc2=3).
-    # A5 only: the fused shared-expert calling convention assumes the shared and
-    # routed experts share a residual width, which A3 does not provide.
+    # Fuse the shared expert into the MegaMoe operator (enable_fused_mc2=3).
+    # The capability states that the platform can run the shared expert inside
+    # the operator; which weight/scale family that payload uses is a property of
+    # the machine, taken from its routed MegaMoe contract: A5 keeps the MXFP
+    # layouts (CANN_MEGAMOE_MXFP), A3 (arch22) uses the INT8 W8A8 layout. Both
+    # assume the shared and routed experts share a residual width.
     CANN_MEGAMOE_SHARED_EXPERT_FUSION = auto()
     # Split a mixed chunked-prefill batch into separate prefill and decode FIA calls.
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
@@ -93,6 +96,8 @@ class HardwareCapability(Enum):
     DSV41_PACKED_CACHE = auto()
     # Triton RMS/dot/gate/residual fusion for unrotated Engram inputs.
     ENGRAM_UNROTATED_GATE = auto()
+    # Triton gate fusion after a separate FP32 rotation GEMM.
+    ENGRAM_ROTATED_GATE = auto()
     # Decode native FP8 codes and E8M0 group scales in Engram table lookups.
     ENGRAM_MXFP8 = auto()
     # Node-local shared INT8 Engram tables can use the A3 Host VMM backend.
@@ -393,6 +398,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.ENGRAM_ROTATED_GATE,
     HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
     HardwareCapability.KDA_INT8_QUANT_OVERLAP,
     HardwareCapability.NATIVE_INT8_SPARSE,
@@ -447,6 +453,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             capabilities=_A3_CAPABILITIES
             | {
                 HardwareCapability.CANN_MEGAMOE,
+                HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
                 HardwareCapability.FLASH_ATTN_NPU_3,
                 HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                 HardwareCapability.NPU_TOP_K_TOP_P,

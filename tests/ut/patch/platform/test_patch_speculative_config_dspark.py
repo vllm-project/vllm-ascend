@@ -117,7 +117,7 @@ class _DraftModelConfig(SimpleNamespace):
 
 @pytest.fixture
 def initialize_dspark(monkeypatch):
-    def initialize(hf_config, *, dcp_size=8, model="/test/local-draft", num_heads=8):
+    def initialize(hf_config, *, dcp_size=8, pcp_size=1, tp_size=8, model="/test/local-draft", num_heads=8):
         arch = ModelArchitectureConfig(
             architectures=hf_config.architectures,
             model_type=hf_config.model_type,
@@ -150,7 +150,8 @@ def initialize_dspark(monkeypatch):
         )
         draft.registry.inspect_model_cls.side_effect = lambda architectures, _: ("model-info", architectures[0])
         target_pc = ParallelConfig(
-            tensor_parallel_size=8,
+            tensor_parallel_size=tp_size,
+            prefill_context_parallel_size=pcp_size,
             decode_context_parallel_size=dcp_size,
             distributed_executor_backend="mp",
         )
@@ -194,7 +195,8 @@ def initialize_dspark(monkeypatch):
         assert created == [target_pc]
         assert config.target_parallel_config is target_pc
         assert config.draft_parallel_config is not target_pc
-        assert config.draft_parallel_config.tensor_parallel_size == 8
+        assert config.draft_parallel_config.tensor_parallel_size == tp_size
+        assert config.draft_parallel_config.prefill_context_parallel_size == 1
         assert config.draft_parallel_config.decode_context_parallel_size == 1
         assert validated == [(list(draft.architectures), draft.use_mla, 1)]
         return config
@@ -202,14 +204,17 @@ def initialize_dspark(monkeypatch):
     return initialize
 
 
-@pytest.mark.parametrize("dcp_size", [1, 8])
-def test_k3_dspark_preserves_target_dcp_during_real_initialization(initialize_dspark, dcp_size):
+@pytest.mark.parametrize("tp_size,pcp_size,dcp_size", [(8, 1, 1), (8, 1, 8), (1, 2, 2), (1, 8, 1), (1, 8, 8)])
+def test_k3_dspark_preserves_target_topology_during_real_initialization(initialize_dspark, tp_size, pcp_size, dcp_size):
     config = initialize_dspark(
         PretrainedConfig(architectures=["K3DSparkModel"], model_type="k3_dspark", dspark_noise_token_id=1023),
+        tp_size=tp_size,
+        pcp_size=pcp_size,
         dcp_size=dcp_size,
     )
     assert config.draft_model_config.use_mla
     assert config.draft_model_config.hf_config.ptd_token_id == 1023
+    assert config.target_parallel_config.prefill_context_parallel_size == pcp_size
     assert config.target_parallel_config.decode_context_parallel_size == dcp_size
 
 

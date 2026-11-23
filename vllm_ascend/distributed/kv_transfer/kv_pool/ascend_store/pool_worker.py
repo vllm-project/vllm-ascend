@@ -199,9 +199,8 @@ class BaseKVPoolWorker(ABC):
         self._failed_requests: set[str] = set()
         self._invalid_block_ids_lock = threading.Lock()
         self._retired_store_req_ids: set[str] = set()
-        self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.save_decode_cache = extra_config.get("save_decode_cache", False)
-        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
+        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.save_decode_cache
         self.backend = extra_config.get("backend", "mooncake")
         self.backend_name = self.backend.lower()
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None

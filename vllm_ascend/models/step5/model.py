@@ -19,8 +19,6 @@ only the compute that upstream pins to CUDA is swapped:
   falls back to its eager path on NPU automatically.
 """
 
-from __future__ import annotations
-
 from collections.abc import Iterable
 from copy import copy
 from typing import Any
@@ -28,6 +26,8 @@ from typing import Any
 import torch
 from torch import nn
 from torch.nn.parameter import Parameter
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_dp_group,
@@ -83,6 +83,7 @@ from vllm.models.step5.nvidia.model import (
     make_layers,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector, wait_for_kv_layer_from_connector
@@ -134,6 +135,72 @@ def _kv_cache_torch_dtype(cache_config, vllm_config) -> torch.dtype:
     if cache_dtype in ("float16", "fp16", "half"):
         return torch.float16
     raise ValueError(f"Unsupported step5-ascend KV cache dtype: {cache_dtype}")
+
+
+@eager_break_during_capture
+def step5_sparse_attention_forward(
+    hidden_states: torch.Tensor,
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    index_q_raw: torch.Tensor,
+    index_k_raw: torch.Tensor,
+    index_z_raw: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Eager sparse compute behind an opaque op boundary (torch.compile-safe).
+
+    Everything downstream of the projections owns python-side per-layer
+    state: the indexer norm+rope+scoring (``_finish_indexer``), the
+    KV-connector handoff, the KV cache write and the region-sparse
+    attention kernels. The layer is resolved at runtime from the forward
+    context -- ``no_compile_layers`` is the static forward context the
+    module registered itself into.
+    """
+    layer = get_forward_context().no_compile_layers[layer_name]
+    index_q, index_k, index_z, weights = layer._finish_indexer(
+        positions, hidden_states, index_q_raw, index_k_raw, index_z_raw
+    )
+    wait_for_kv_layer_from_connector(layer.layer_name)
+    layer._write_kv(key, value)
+    layer.impl.forward(
+        layer,
+        query,
+        layer.kv_cache,
+        index_q,
+        index_k,
+        index_z,
+        weights,
+        output,
+        positions,
+    )
+    maybe_save_kv_layer_to_connector(layer.layer_name, list(layer.kv_cache))
+
+
+def step5_sparse_attention_forward_fake(
+    hidden_states: torch.Tensor,
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    index_q_raw: torch.Tensor,
+    index_k_raw: torch.Tensor,
+    index_z_raw: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="step5_sparse_attention_forward",
+    op_func=step5_sparse_attention_forward,
+    mutates_args=["output"],
+    fake_impl=step5_sparse_attention_forward_fake,
+    dispatch_key="PrivateUse1",
+)
 
 
 class AscendStep5RMSNorm(Step5RMSNorm):
@@ -277,6 +344,9 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
             params_dtype=self.params_dtype,
             index_tp_size=int(sparse_config.index_tp_size),
             prefix=f"{prefix}.sparse_indexer_w",
+        )
+        self._gate_col_offset = (
+            self.qkv_indexer_proj.qkv_size + self.qkv_indexer_proj.indexer_size - self.qkv_indexer_proj.local_gate_size
         )
 
         self.ssmax_s = Parameter(
@@ -503,34 +573,22 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
                 q, k = self.rotary_emb(positions, q, k)
 
         index_q_raw, index_k_raw, index_z_raw, gate = self.qkv_indexer_proj.split_indexer(qkzg)
-        index_q, index_k, index_z, weights = self._finish_indexer(
-            positions, hidden_states, index_q_raw, index_k_raw, index_z_raw
+        query = q.view(-1, self.num_heads, self.head_dim)
+        output = q.new_empty((q.shape[0], self.num_heads, self.head_dim))
+        torch.ops.vllm.step5_sparse_attention_forward(
+            hidden_states,
+            positions,
+            query,
+            k,
+            v,
+            index_q_raw,
+            index_k_raw,
+            index_z_raw,
+            output,
+            self.layer_name,
         )
 
-        num_tokens = int(hidden_states.shape[0])
-        query = q.view(num_tokens, self.num_heads, self.head_dim)
-        output = torch.empty(
-            (num_tokens, self.num_heads, self.head_dim),
-            dtype=q.dtype,
-            device=q.device,
-        )
-        # Load main KV and CSA summary before writing the prompt remainder.
-        wait_for_kv_layer_from_connector(self.layer_name)
-        self._write_kv(k, v)
-        self.impl.forward(
-            self,
-            query,
-            self.kv_cache,
-            index_q,
-            index_k,
-            index_z,
-            weights,
-            output,
-            positions,
-        )
-        # Summary writes and attention have completed submission for this layer.
-        maybe_save_kv_layer_to_connector(self.layer_name, list(self.kv_cache))
-        attn_output = output.view(num_tokens, self.num_heads * self.head_dim)
+        attn_output = output.view(-1, self.num_heads * self.head_dim)
         if gate is not None:
             # The gate is the tail of the fused qkv+indexer GEMM row. Address
             # it through the offset-0 qkv view of the same storage so no
@@ -539,7 +597,7 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
             attn_output = gated_scale(
                 attn_output,
                 qkv,
-                gate.storage_offset(),
+                self._gate_col_offset,
                 gate.shape[-1],
             )
         output_tensor, _ = self.o_proj(attn_output)
@@ -1143,11 +1201,10 @@ class AscendStep5DecoderLayer(Step5DecoderLayer):
         return ffn_output, residual
 
 
+@support_torch_compile
 class AscendStep5Model(Step5Model):
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
-        # The DSA modules hold python-side per-layer state; stay eager.
-        self.do_not_compile = True
         self.vllm_config = vllm_config
         # Switched like the other Ascend MoE models; drives the shard-at-
         # entry / gather-at-exit forward below and the per-layer SP wiring.

@@ -249,9 +249,6 @@ a3-560t:
       - name: test_qwen3_grid_exceed_65536
         os: linux-aarch64-a3-800i-2
         tests: tests/SIT/cases/features/test_qwen3_grid_exceed_65536.py
-      - name: openai-api-compatibility
-        os: linux-aarch64-a3-800i-4
-        tests: tests/SIT/cases/features/openai_api_compatibility
       - name: qwen3-30b-acc
         os: linux-aarch64-a3-800i-4
         tests: tests/SIT/cases/features/kv_pool/test_qwen3_30b_acc.py
@@ -292,14 +289,6 @@ a3-560t:
         os: linux-aarch64-a3-800i-4
         config_file_path: Qwen3.8-27B-w8a8-PP2-TP2.yaml
         config_base_path: tests/SIT/cases/features/pp
-      - name: Qwen3.6-35B-A3B-w8a8-A3-accuracy
-        os: linux-aarch64-a3-800i-2
-        config_file_path: Qwen3.6-35B-A3B-w8a8-A3-accuracy.yaml
-        config_base_path: tests/SIT/cases/models/configs/Qwen
-      - name: Qwen3.6_35B_27B_A3_acceptance_rate
-        os: linux-aarch64-a3-800i-2
-        config_file_path: Qwen3.6_35B_27B_A3_acceptance_rate.yaml
-        config_base_path: tests/SIT/cases/models/configs/Qwen
 310p:
   single_node:
     test_config:

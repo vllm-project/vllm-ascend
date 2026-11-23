@@ -507,7 +507,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.layer_load_finished_events = [threading.Event() for i in range(self.num_layers)]
         self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
         self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
-        can_save = is_kv_save_role(self.kv_role, self.consumer_is_to_put)
+        can_save = is_kv_save_role(self.kv_role, self.save_decode_cache)
         if (self.use_block_key_layerwise or self.use_layerwise_transfer) and can_save:
             ready_event_sending = threading.Event()
             self.kv_send_thread = KVCacheStoreLayerSendingThread(
@@ -697,7 +697,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         return self.tp_rank == min(peers)
 
     def _is_layerwise_save_owner(self, group_id: int = 0) -> bool:
-        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
+        if not is_kv_save_role(self.kv_role, self.save_decode_cache):
             return False
 
         # Each rank must save its own Mamba state shard.
@@ -1484,7 +1484,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
     def _submit_attention_save(self, layer_id: int) -> None:
         """Start current-layer put only once KV is ready at attention entry."""
-        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
+        if not is_kv_save_role(self.kv_role, self.save_decode_cache):
             return
         assert self.sync_save_events is not None
         assert self.layer_save_finished_events is not None
@@ -1716,7 +1716,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self._layer_load_aborted.is_set() or self.current_layer == self.num_layers - 1
         ):
             self._data_plane.finish_sessions()
-        if hasattr(self, "kv_role") and not is_kv_save_role(self.kv_role, getattr(self, "consumer_is_to_put", False)):
+        if hasattr(self, "kv_role") and not is_kv_save_role(self.kv_role, getattr(self, "save_decode_cache", False)):
             self.current_layer += 1
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:

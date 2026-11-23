@@ -47,7 +47,7 @@ def worker():
     w.use_layerwise = w.use_layerwise_transfer = w.layerwise_offload = True
     w.use_block_key_layerwise = False
     w.tp_size = 16
-    w.kv_role, w.consumer_is_to_put = "kv_producer", False
+    w.kv_role, w.save_decode_cache = "kv_producer", False
     w.can_put = True
     w.num_kv_cache_groups, w.num_layers = 1, 2
     w.grouped_block_size, w.hash_block_size = [128], 128

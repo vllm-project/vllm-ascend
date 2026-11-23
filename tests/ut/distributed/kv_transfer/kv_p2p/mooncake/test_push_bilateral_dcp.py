@@ -343,7 +343,7 @@ def test_invalid_producer_interleave_is_rejected(worker, monkeypatch, p_dcp, d_d
     worker.start_load_kv(metadata(0, 8, prompt=8, tp=d_dcp))
     worker.wait_for_save()
     worker.engine.batch_transfer_sync_write.assert_not_called()
-    assert worker._send_done.call_count == d_dcp
+    assert len(worker._send_done.call_args_list) == d_dcp
     assert all("P page size" in call.args[1] for call in worker._send_done.call_args_list)
 
 

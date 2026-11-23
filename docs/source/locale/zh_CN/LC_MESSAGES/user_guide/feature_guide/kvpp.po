@@ -220,11 +220,6 @@ msgstr ""
 "`max_num_batched_tokens=32768`、`max_num_seqs=12`、`gpu_memory_utilization=0.90`"
 " | 与单节点相同 |"
 
-msgid ""
-"MTP and SFA-C8 were not enabled. All measurements below use a 32K scheduling"
-" token budget."
-msgstr "未启用 MTP 和 SFA-C8。以下所有测量均使用 32K 调度 token 预算。"
-
 msgid "### KV Cache Capacity"
 msgstr "### KV 缓存容量"
 
@@ -261,44 +256,11 @@ msgstr ""
 "EP（38/40 层）。其他服务设置遵循上述测试配置。"
 
 msgid ""
-"Input lengths are 32K, 64K, and 128K tokens. Prefix cache hit rate was 0%, "
-"with 1 output token. Each result is the mean TTFT of 4 requests at client "
-"concurrency 1. A positive change indicates increased latency."
-msgstr ""
-"输入长度为 32K、64K 和 128K tokens。前缀缓存命中率为 0%，输出 1 个 token。每个结果是客户端并发为 1 时 4 "
-"个请求的平均 TTFT。正值变化表示时延增加。"
-
-msgid ""
 "| Deployment | Input length | KVPP disabled | KVPP enabled | TTFT change |"
 msgstr "| 部署 | 输入长度 | KVPP 关闭 | KVPP 开启 | TTFT 变化 |"
 
-msgid "| Single node | 32K | 2.623 s | 2.614 s | -0.33% |"
-msgstr "| 单节点 | 32K | 2.623 s | 2.614 s | -0.33% |"
-
-msgid "| Single node | 64K | 5.295 s | 5.375 s | +1.52% |"
-msgstr "| 单节点 | 64K | 5.295 s | 5.375 s | +1.52% |"
-
-msgid "| Single node | 128K | 10.901 s | 11.268 s | +3.36% |"
-msgstr "| 单节点 | 128K | 10.901 s | 11.268 s | +3.36% |"
-
-msgid "| Dual-node PP | 32K | 2.900 s | 2.905 s | +0.19% |"
-msgstr "| 双节点 PP | 32K | 2.900 s | 2.905 s | +0.19% |"
-
-msgid "| Dual-node PP | 64K | 4.503 s | 4.887 s | +8.53% |"
-msgstr "| 双节点 PP | 64K | 4.503 s | 4.887 s | +8.53% |"
-
-msgid "| Dual-node PP | 128K | 7.805 s | 8.665 s | +11.01% |"
-msgstr "| 双节点 PP | 128K | 7.805 s | 8.665 s | +11.01% |"
-
 msgid "### Non-Pooling Prefill Throughput"
 msgstr "### 非池化 Prefill 吞吐量"
-
-msgid ""
-"Each run contained 40 requests at client concurrency 12, with 128K input "
-"tokens and 1 output token per request. KV pooling was disabled in both "
-"configurations."
-msgstr ""
-"每次运行包含 40 个请求，客户端并发为 12，每个请求 128K 输入 tokens 和 1 个输出 token。两种配置中均禁用了 KV 池化。"
 
 msgid ""
 "| Deployment | Prefix cache hit rate | KVPP disabled (input tokens/s) | KVPP"
@@ -545,3 +507,41 @@ msgstr ""
 " prefill 节点上启用 KVPP。对于 Push 模式，请使用[分层 Push "
 "代理](../../developer_guide/Design_Documents/disaggregated_prefill.md#mooncake-v2-layerwise-"
 "push-connector)。"
+
+msgid ""
+"MTP and SFA-C8 were not enabled. All measurements below use a 32k scheduling"
+" token budget."
+msgstr "未启用 MTP 和 SFA-C8。以下所有测量均使用 32k 调度 token 预算。"
+
+msgid ""
+"Input lengths are 32k, 64k, and 128k tokens. Prefix cache hit rate was 0%, "
+"with 1 output token. Each result is the mean TTFT of 4 requests at client "
+"concurrency 1. A positive change indicates increased latency."
+msgstr ""
+"输入长度分别为 32k、64k 和 128k token。前缀缓存命中率为 0%，输出 1 个 token。每个结果为客户端并发度为 1 时 4 "
+"个请求的平均 TTFT。正变化表示延迟增加。"
+
+msgid "| Single node | 32k | 2.623 s | 2.614 s | -0.33% |"
+msgstr "| 单节点 | 32k | 2.623 s | 2.614 s | -0.33% |"
+
+msgid "| Single node | 64k | 5.295 s | 5.375 s | +1.52% |"
+msgstr "| 单节点 | 64k | 5.295 s | 5.375 s | +1.52% |"
+
+msgid "| Single node | 128k | 10.901 s | 11.268 s | +3.36% |"
+msgstr "| 单节点 | 128k | 10.901 s | 11.268 s | +3.36% |"
+
+msgid "| Dual-node PP | 32k | 2.900 s | 2.905 s | +0.19% |"
+msgstr "| 双节点 PP | 32k | 2.900 s | 2.905 s | +0.19% |"
+
+msgid "| Dual-node PP | 64k | 4.503 s | 4.887 s | +8.53% |"
+msgstr "| 双节点 PP | 64k | 4.503 s | 4.887 s | +8.53% |"
+
+msgid "| Dual-node PP | 128k | 7.805 s | 8.665 s | +11.01% |"
+msgstr "| 双节点 PP | 128k | 7.805 s | 8.665 s | +11.01% |"
+
+msgid ""
+"Each run contained 40 requests at client concurrency 12, with 128k input "
+"tokens and 1 output token per request. KV pooling was disabled in both "
+"configurations."
+msgstr ""
+"每次运行包含 40 个请求，客户端并发度为 12，每个请求的输入为 128k token，输出 1 个 token。两种配置下均禁用了 KV 池化。"

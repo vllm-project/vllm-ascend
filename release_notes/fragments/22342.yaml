@@ -1,0 +1,6 @@
+pr: 22342
+entries:
+  - category: feature
+    text: Add support_torch_compile for Step5 to enable FULL_AND_PIECEWISE
+    model: Step-5-Preview
+    hardware: [A5]
