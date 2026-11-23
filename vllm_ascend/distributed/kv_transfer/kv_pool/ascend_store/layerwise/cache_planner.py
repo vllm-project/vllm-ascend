@@ -91,12 +91,15 @@ def _validate_mooncake_offload_connectors(kv_transfer_config: Any, extra: dict[s
         store = next(child for child in children if child.get("kv_connector_extra_config") is extra)
         role = store.get("kv_role", role)
         siblings = [child for child in children if child is not store]
-        if siblings and (
-            len(siblings) != 1
-            or siblings[0].get("kv_connector") != "MooncakePushConnector"
-            or siblings[0].get("kv_role", role) != "kv_producer"
-        ):
-            raise ValueError("Mooncake shared KV buffers require a standalone Store or Mooncake Push")
+        if siblings:
+            peer = siblings[0]
+            name = peer.get("kv_connector")
+            peer_extra = peer.get("kv_connector_extra_config") or {}
+            is_push = name == "MooncakePushConnector" or (
+                name == "MooncakeConnectorV2" and peer_extra.get("use_layerwise", False)
+            )
+            if len(siblings) != 1 or not is_push or peer.get("kv_role", role) != "kv_producer":
+                raise ValueError("Mooncake shared KV buffers require a standalone Store or a Mooncake Push producer")
     if role != "kv_producer":
         raise ValueError("Mooncake shared KV buffers require kv_role=kv_producer")
 

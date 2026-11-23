@@ -29,9 +29,11 @@ synchronous scheduling, chunked prefill and `--mamba-cache-mode align`.
 Native MTP is supported during prefill. Run speculative decode on a
 separate decoder with shared buffers disabled.
 
-For disaggregated P/D, pair AscendStore with `MooncakePushConnector` in
-`MultiConnector` on the producer. Use Push on the decoder and the D-first
-layerwise proxy. Example configurations are in
+For disaggregated P/D, pair AscendStore with a Mooncake Push child in
+`MultiConnector` on the producer. Select Push with `MooncakePushConnector`
+or with `MooncakeConnectorV2` and `use_layerwise: true` in its connector
+extra config. Use Push on the decoder and the D-first layerwise proxy.
+Example configurations are in
 `examples/disaggregated_prefill_v1/glm53_mooncake_offload/`.
 
 ## Cache lifecycle

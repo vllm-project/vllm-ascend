@@ -176,6 +176,40 @@ def test_reuse_config_is_scoped_to_layerwise_backend_connector():
 
 
 @pytest.mark.parametrize(
+    ("peer_name", "peer_extra", "peer_role", "accepted"),
+    [
+        ("MooncakePushConnector", {}, "kv_producer", True),
+        ("MooncakeConnectorV2", {"use_layerwise": True}, "kv_producer", True),
+        ("MooncakeConnectorV2", {"use_layerwise": False}, "kv_producer", False),
+        ("MooncakeConnectorV2", {}, "kv_producer", False),
+        ("MooncakeConnectorV2", {"use_layerwise": True}, "kv_consumer", False),
+        ("MooncakePullConnector", {"use_layerwise": True}, "kv_producer", False),
+    ],
+)
+def test_mooncake_offload_accepts_only_push_producer_peer(peer_name, peer_extra, peer_role, accepted):
+    store_extra = {"backend": "mooncake", "use_layerwise": True, "layerwise_num_shared_buffers": 2}
+    config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_producer",
+        kv_connector_extra_config={
+            "connectors": [
+                {
+                    "kv_connector": "AscendStoreConnector",
+                    "kv_role": "kv_producer",
+                    "kv_connector_extra_config": store_extra,
+                },
+                {"kv_connector": peer_name, "kv_role": peer_role, "kv_connector_extra_config": peer_extra},
+            ]
+        },
+    )
+    if accepted:
+        assert get_layerwise_offload_config(config) == store_extra
+    else:
+        with pytest.raises(ValueError, match="Mooncake Push producer"):
+            get_layerwise_offload_config(config)
+
+
+@pytest.mark.parametrize(
     ("layer_name", "expected"),
     [
         ("model.mtp.0.self_attn", 4),
