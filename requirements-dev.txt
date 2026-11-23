@@ -22,6 +22,3 @@ xlite==0.2.0rc5
 uc-manager
 ninja
 coverage
-slipcover>=1.0.18
-pytest-xdist
-diff-cover
