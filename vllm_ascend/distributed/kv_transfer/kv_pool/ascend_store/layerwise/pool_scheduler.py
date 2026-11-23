@@ -49,10 +49,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.load_async = False
-        self.layerwise_offload = (
-            self.layerwise_data_plane in ("block_key", "gva")
-            and get_layerwise_reuse_backing_bytes(kv_cache_config) is not None
-        )
+        self.layerwise_offload = self.use_layerwise and get_layerwise_reuse_backing_bytes(kv_cache_config) is not None
         self._prefix_probe: tuple[str, int] | None = None
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.layerwise_keys = (

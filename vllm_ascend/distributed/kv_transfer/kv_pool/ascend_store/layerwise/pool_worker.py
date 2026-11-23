@@ -186,7 +186,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             )
 
     def _init_layerwise_config(self) -> None:
-        self._layerwise_reuse_layout = None
+        reuse_layout = get_layerwise_reuse_layout(self.kv_cache_config)
 
         # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
         # layer_idx_in_group is the index of the physical layer within the
@@ -230,17 +230,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             draft_names = getattr(self, "_dspark_draft_layer_names", ())
             layer_specs = get_layerwise_kv_cache_specs(self.kv_cache_config)
             target_specs = {name: spec for name, spec in layer_specs.items() if name not in draft_names}
-            if self.use_layerwise_transfer or self.use_block_key_layerwise:
-                self._layerwise_reuse_layout = get_layerwise_reuse_layout(self.kv_cache_config)
-                if (
-                    draft_names
-                    and self._layerwise_reuse_layout is None
-                    and getattr(self, "_dspark_prefix_keys", None) is None
-                ):
-                    # Without scratch reuse, retain the original target+draft
-                    # pool for prefix storage and load/save addressing.
-                    self._dspark_draft_layer_names = draft_names = set()
-                    target_specs = layer_specs
+            if draft_names and reuse_layout is None and getattr(self, "_dspark_prefix_keys", None) is None:
+                # Without scratch reuse, retain the original target+draft
+                # pool for prefix storage and load/save addressing.
+                self._dspark_draft_layer_names = draft_names = set()
+                target_specs = layer_specs
             physical_layers = {
                 self._extract_physical_layer_index(layer_name)
                 for group_spec in self.kv_cache_config.kv_cache_groups
@@ -307,32 +301,31 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.next_layer_to_submit = 0
         self.layerwise_offload = False
         self.prefetch_layer_map: dict[int, tuple[int, ...]] = {}
-        if self.use_layerwise_transfer or self._layerwise_reuse_layout is not None:
-            if self._layerwise_reuse_layout is None:
-                stage_start = self.layerwise_key_layer_offset
-                stage_layers = range(stage_start, stage_start + stage_num_layers)
-                total_layers = getattr(self, "total_layers", None)
-                base_layers = getattr(self.hf_config, "num_hidden_layers", stage_num_layers)
-                layerwise_settings = LayerwiseCacheConfig.parse(
-                    total_layers if isinstance(total_layers, int) else base_layers,
-                    self._extra_config,
-                    stage_layers=stage_layers,
-                )
-                self.num_prefetch_layers = layerwise_settings.num_prefetch_layers
-            else:
-                self.prefetch_layer_map = self._remap_layout_to_stage_local(
-                    self._layerwise_reuse_layout.prefetch_layer_map, self._global_to_local_layer
-                )
-                self.layerwise_offload = self._layerwise_reuse_layout.has_layer_reuse
-                self.num_prefetch_layers = self._layerwise_reuse_layout.num_prefetch_layers
-                for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups):
-                    layers = {
-                        self._global_to_local_layer[self._layerwise_reuse_layout.cache_layer_indices[name]]
-                        for name in group.layer_names
-                        if name in self._layerwise_reuse_layout.reused_cache_names
-                    }
-                    if layers:
-                        self._reused_layers_by_group[group_id] = layers
+        if reuse_layout is not None:
+            self.prefetch_layer_map = self._remap_layout_to_stage_local(
+                reuse_layout.prefetch_layer_map, self._global_to_local_layer
+            )
+            self.layerwise_offload = reuse_layout.has_layer_reuse
+            self.num_prefetch_layers = reuse_layout.num_prefetch_layers
+            for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups):
+                layers = {
+                    self._global_to_local_layer[reuse_layout.cache_layer_indices[name]]
+                    for name in group.layer_names
+                    if name in reuse_layout.reused_cache_names
+                }
+                if layers:
+                    self._reused_layers_by_group[group_id] = layers
+        elif self.use_layerwise_transfer:
+            stage_start = self.layerwise_key_layer_offset
+            stage_layers = range(stage_start, stage_start + stage_num_layers)
+            total_layers = getattr(self, "total_layers", None)
+            base_layers = getattr(self.hf_config, "num_hidden_layers", stage_num_layers)
+            layerwise_settings = LayerwiseCacheConfig.parse(
+                total_layers if isinstance(total_layers, int) else base_layers,
+                self._extra_config,
+                stage_layers=stage_layers,
+            )
+            self.num_prefetch_layers = layerwise_settings.num_prefetch_layers
         else:
             self.num_prefetch_layers = 2
             if self.use_layerwise:
