@@ -54,13 +54,23 @@ presets:
       frontend: python
     remove_args: [--trust-remote-code]
 
+hardware_notes:
+  ascend_910c:
+    title: Tested A3 deployment
+    body: >-
+      Use the Guide to serve the pinned checkpoint from /models.
+      The generated Docker command uses the Hugging Face cache mount
+      and awaits an A3 smoke test.
+    link:
+      href: '#single-node-a3-release-retest'
+      label: Open tested A3 Guide
 guide_sections:
   ascend: |-
     ## Single-node A3 release retest
 
     Hy3-preview is Tencent's sparse MoE model for reasoning, coding and tool use. It has 295B total parameters, 21B active parameters and 3.8B parameters in the MTP layer.
 
-    The A3 deployment uses BF16 weights, TP16, expert parallelism and one MTP draft token on a single 16-device node. Start the Guide's Docker container and use its Python serving command. The automatic cards above describe the GPU configuration.
+    The A3 deployment uses BF16 weights, TP16, expert parallelism and one MTP draft token on a single 16-device node. Start the Guide's Docker container and use its Python serving command. The steps below use the tested `/models` layout.
 
     The tested image is vLLM Ascend v0.30.0, with a serving limit of 32,768 tokens. The draft step runs eagerly because full decode graph capture failed in an earlier test. The target model still uses ACLGraph.
 
