@@ -1240,6 +1240,7 @@ def test_default_model_state_preserves_varlen_capture_query_bound(monkeypatch, p
         num_scheduled_tokens=torch.tensor([1]),
         max_query_len=promised,
         is_prefilling_np=np.array([False]),
+        prefill_runs_as_decode_np=None,
         seq_lens=torch.tensor([1]),
         seq_lens_np=np.array([1]),
         dcp_local_seq_lens=None,

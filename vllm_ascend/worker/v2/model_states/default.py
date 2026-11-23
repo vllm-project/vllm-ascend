@@ -594,9 +594,8 @@ class AscendModelState(DefaultModelState):
                     stable_prefixes.np[:num_real_reqs] = manager.d2h_stable_prefixes_cpu[active_slots]
                 pool_generations.copy_to_gpu(num_reqs)
                 stable_prefixes.copy_to_gpu(num_reqs)
-        prefill_runs_as_decode = getattr(input_batch, "prefill_runs_as_decode_np", None)
         is_prefilling = torch.from_numpy(
-            apply_prefill_as_decode_mask(input_batch.is_prefilling_np, prefill_runs_as_decode)
+            apply_prefill_as_decode_mask(input_batch.is_prefilling_np, input_batch.prefill_runs_as_decode_np)
         )
         # Varlen graphs capture one-token dummy requests but may replay wider
         # verification rows. Preserve the descriptor's promised bound for C2
