@@ -54,7 +54,13 @@ def _moe_config_key(
     moe_comm_type: MoECommType | None, moe_config: FusedMoEConfig | None
 ) -> tuple[MoECommType | None, tuple[int, ...]]:
     """Return the execution shape that owns mutable MoE comm state."""
-    _CONFIG_KEY_FIELDS = ("num_experts", "num_local_experts")
+    _CONFIG_KEY_FIELDS = (
+        "num_experts",
+        "num_local_experts",
+        "hidden_dim",
+        "intermediate_size_per_partition",
+        "experts_per_token",
+    )
     return (moe_comm_type, tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS))
 
 
