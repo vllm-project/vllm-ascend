@@ -3,13 +3,25 @@
 
 from contextlib import AbstractContextManager
 
+from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp as _dispatch_cg_and_sync_dp
 
+from vllm_ascend.ascend_config import get_initialized_ascend_config
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
+
+_set_forward_context = upstream.set_forward_context
+
+
+def set_forward_context(attn_metadata, vllm_config, *args, **kwargs):
+    if kwargs.get("cudagraph_runtime_mode") == CUDAGraphMode.NONE:
+        config = get_initialized_ascend_config(vllm_config)
+        if config is not None and config.ascend_compilation_config.bypass_compiled_eager_steps:
+            kwargs["skip_compiled"] = True
+    return _set_forward_context(attn_metadata, vllm_config, *args, **kwargs)
 
 
 # TODO: Remove once upstream GPUModelRunner dispatches sharded PCP decode with
@@ -243,5 +255,7 @@ def initialize_kv_cache(
 upstream.copy_kv_cache_blocks_inplace = copy_kv_cache_blocks_inplace
 
 upstream.dispatch_cg_and_sync_dp = dispatch_cg_and_sync_dp
+
+upstream.set_forward_context = set_forward_context
 
 upstream.GPUModelRunner.initialize_kv_cache = initialize_kv_cache
