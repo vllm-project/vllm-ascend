@@ -40,7 +40,7 @@
 /docs @liqian79
 /docs/source/getting_started @MrZ20
 /docs/source/user_guide/feature_guide/rfork.md @yangsonglin13
-/docs/source/user_guide/feature_guide/rl.md @Ronald1995 @Liccol
+/docs/source/user_guide/feature_guide/rl.md @Ronald1995 @Liccol @wangx700
 /docs/source/user_guide/feature_guide/batch_invariance.md @Ronald1995
 /docs/source/community/contributors.md @wangxiyuan
 /.readthedocs.yaml @liqian79 @MrZ20
@@ -49,7 +49,7 @@
 
 # examples
 /examples/ @MrZ20
-/examples/rl/ @Ronald1995 @Liccol
+/examples/rl/ @Ronald1995 @Liccol @wangx700
 /examples/eplb/ @freyfwt
 /examples/rfork/ @yangsonglin13
 
