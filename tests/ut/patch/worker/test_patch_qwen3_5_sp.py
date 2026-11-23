@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Dense sequence parallelism for the Qwen3.5 family (FlashComm SP switch)."""
 
+from __future__ import annotations
+
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -378,3 +380,152 @@ class TestPatchInstallation:
             patch_qwen3_5.Qwen3_5DecoderLayer.__init__(layer, config, "full_attention", prefix="model.layers.0")
 
         assert calls == [(config, "full_attention", "model.layers.0")]
+
+
+@pytest.fixture
+def mxfp8_mlp_runtime():
+    from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+    from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+
+    def linear(n, k, **kwargs):
+        scheme = object.__new__(AscendW8A8MXFP8DynamicLinearMethod)
+        scheme.group_size = 32
+        scheme.dynamic_mx_quant_scale_alg = 1
+        return SimpleNamespace(
+            weight=torch.empty(n, k, dtype=torch.float8_e4m3fn),
+            weight_scale=torch.empty(n, k // 32, dtype=torch.uint8),
+            quant_method=AscendLinearMethod(scheme),
+            bias=None,
+            custom_op=None,
+            tp_size=2,
+            **kwargs,
+        )
+
+    mlp = SimpleNamespace(
+        gate_up_proj=linear(512, 256, gather_output=False),
+        down_proj=linear(256, 256, input_is_parallel=True, reduce_results=False),
+        act_fn=lambda value: value[:, : value.shape[1] // 2],
+    )
+    config = _make_vllm_config()
+    config.compilation_config = SimpleNamespace(pass_config=SimpleNamespace(fuse_gemm_comms=True))
+    config.lora_config = None
+    with (
+        patch.object(patch_qwen3_5, "is_950", return_value=True),
+        patch.object(patch_qwen3_5, "dense_mxfp8_sp_available", return_value=True),
+        patch.object(patch_qwen3_5, "get_tp_group", return_value=SimpleNamespace(world_size=2)),
+    ):
+        yield mlp, config
+
+
+class TestDenseMxfp8Sp:
+    def test_opt_in_marks_both_linears_before_loading(self, mxfp8_mlp_runtime):
+        mlp, config = mxfp8_mlp_runtime
+        patch_qwen3_5._configure_dense_mxfp8_sp(mlp, config)
+        assert mlp.gate_up_proj._mxfp8_keep_nd
+        assert mlp.down_proj._mxfp8_keep_nd
+        assert mlp._dense_mxfp8_sp_tp_size == 2
+        assert mlp._dense_mxfp8_sp_scale_algs == (1, 1)
+
+    @pytest.mark.parametrize("reason", ["switch", "lora", "device", "kernels", "tp"])
+    def test_configuration_fallback_preserves_original_weights(self, mxfp8_mlp_runtime, reason):
+        mlp, config = mxfp8_mlp_runtime
+        if reason == "switch":
+            config.compilation_config.pass_config.fuse_gemm_comms = False
+        elif reason == "lora":
+            config.lora_config = object()
+        elif reason == "device":
+            patch_qwen3_5.is_950.return_value = False
+        elif reason == "kernels":
+            patch_qwen3_5.dense_mxfp8_sp_available.return_value = False
+        else:
+            patch_qwen3_5.get_tp_group.return_value.world_size = 1
+        patch_qwen3_5._configure_dense_mxfp8_sp(mlp, config)
+        assert not hasattr(mlp, "_dense_mxfp8_sp_tp_size")
+        assert not hasattr(mlp.gate_up_proj, "_mxfp8_keep_nd")
+        assert not hasattr(mlp.down_proj, "_mxfp8_keep_nd")
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "bias",
+            "custom_op",
+            "group_size",
+            "weight_dtype",
+            "scale_dtype",
+            "scale_shape",
+            "tp",
+            "layout",
+            "gather",
+            "input",
+            "reduce",
+            "k",
+        ],
+    )
+    def test_invalid_pair_does_not_partially_enable(self, mxfp8_mlp_runtime, reason):
+        mlp, config = mxfp8_mlp_runtime
+        down = mlp.down_proj
+        if reason == "bias":
+            down.bias = torch.zeros(256)
+        elif reason == "custom_op":
+            down.custom_op = object()
+        elif reason == "group_size":
+            down.quant_method.quant_method.group_size = 64
+        elif reason == "weight_dtype":
+            down.weight = down.weight.to(torch.bfloat16)
+        elif reason == "scale_dtype":
+            down.weight_scale = down.weight_scale.float()
+        elif reason == "scale_shape":
+            down.weight_scale = down.weight_scale[:, :1]
+        elif reason == "tp":
+            down.tp_size = 1
+        elif reason == "layout":
+            down._mxfp8_transformed = True
+        elif reason == "gather":
+            mlp.gate_up_proj.gather_output = True
+        elif reason == "input":
+            down.input_is_parallel = False
+        elif reason == "reduce":
+            down.reduce_results = True
+        else:
+            down.weight = torch.empty(256, 128, dtype=torch.float8_e4m3fn)
+            down.weight_scale = torch.empty(256, 4, dtype=torch.uint8)
+        patch_qwen3_5._configure_dense_mxfp8_sp(mlp, config)
+        assert not hasattr(mlp, "_dense_mxfp8_sp_tp_size")
+        assert not hasattr(mlp.gate_up_proj, "_mxfp8_keep_nd")
+        assert not hasattr(down, "_mxfp8_keep_nd")
+
+    def test_dense_constructor_wires_fusion_only_when_flashcomm_is_active(self, mxfp8_mlp_runtime):
+        mlp, config = mxfp8_mlp_runtime
+        layer = _make_layer(mlp=mlp)
+        _run_layer_init(layer, config, "full_attention", dense_sp=False)
+        assert not hasattr(mlp, "_dense_mxfp8_sp_tp_size")
+        _run_layer_init(layer, config, "full_attention", dense_sp=True)
+        assert mlp._dense_mxfp8_sp_tp_size == 2
+
+    def test_forward_owns_each_collective_once_and_preserves_scale_algorithms(self, mxfp8_mlp_runtime):
+        mlp, config = mxfp8_mlp_runtime
+        mlp.down_proj.quant_method.quant_method.dynamic_mx_quant_scale_alg = 0
+        patch_qwen3_5._configure_dense_mxfp8_sp(mlp, config)
+        x = torch.zeros(128, 256, dtype=torch.bfloat16)
+        gate_output = torch.randn(256, 512, dtype=torch.bfloat16)
+        expected = torch.randn_like(x)
+        with (
+            patch.object(
+                torch.ops.vllm, "dense_mxfp8_all_gather_mm", return_value=gate_output, create=True
+            ) as gather_mm,
+            patch.object(
+                torch.ops.vllm, "dense_mxfp8_mm_reduce_scatter", return_value=expected, create=True
+            ) as mm_scatter,
+            patch.object(patch_qwen3_5, "sp_all_gather") as gather,
+            patch.object(patch_qwen3_5, "sp_reduce_scatter") as scatter,
+        ):
+            result = patch_qwen3_5._sequence_parallel_dense_mlp_forward(mlp, x)
+        assert result is expected
+        assert gather_mm.call_args.args[0] is x
+        assert gather_mm.call_args.args[-2:] == (1, 2)
+        assert mm_scatter.call_args.args[-2:] == (0, 2)
+        torch.testing.assert_close(mm_scatter.call_args.args[0], mlp.act_fn(gate_output))
+        gather_mm.assert_called_once()
+        mm_scatter.assert_called_once()
+        gather.assert_not_called()
+        scatter.assert_not_called()
