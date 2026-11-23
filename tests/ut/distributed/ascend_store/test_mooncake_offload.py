@@ -63,19 +63,16 @@ class TestMooncakeOffload(unittest.TestCase):
             reused_cache_names=frozenset(names[:4]),
             draft_entry_names=frozenset(names[4:]),
         )
-        with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.get_layerwise_reuse_layout",
-            return_value=layout,
-        ):
-            worker = make_worker(
-                self,
-                num_layers=4,
-                num_hidden_layers=4,
-                kv_cache_config=config,
-                use_layerwise=True,
-                cache_block_size=block_size,
-                extra_config={"backend": "mooncake", "use_layerwise": True},
-            )
+        config.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={"_layerwise_reuse_layout": layout})
+        worker = make_worker(
+            self,
+            num_layers=4,
+            num_hidden_layers=4,
+            kv_cache_config=config,
+            use_layerwise=True,
+            cache_block_size=block_size,
+            extra_config={"backend": "mooncake", "use_layerwise": True},
+        )
         worker.vllm_config.speculative_config = None
         worker.m_store = MemoryRangeStore()
         arrays = [np.zeros((num_blocks, block_size * 2), dtype=np.uint8) for _ in range(buffers)]
