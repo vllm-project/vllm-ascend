@@ -117,6 +117,21 @@ def _is_ray_backend(value: Any) -> bool:
     return value == "ray" or getattr(value, "value", None) == "ray"
 
 
+def _is_ray_deployment(engine_args) -> bool:
+    """Whether this launch will resolve to the Ray executor.
+
+    ``--distributed-executor-backend`` is the explicit switch, but vLLM also
+    selects Ray when ``--data-parallel-backend ray`` is set without an explicit
+    executor: ``ParallelConfig.__post_init__`` applies that default *after*
+    ``parse_args``. This parse-time hook must therefore inspect both fields,
+    otherwise it rewrites ``ASCEND_RT_VISIBLE_DEVICES`` for a launch that ends up
+    on Ray even though vLLM ignores ``device_ids`` there.
+    """
+    if _is_ray_backend(getattr(engine_args, "distributed_executor_backend", None)):
+        return True
+    return getattr(engine_args, "data_parallel_backend", None) == "ray"
+
+
 def _narrow_visible_devices_to_device_ids(engine_args) -> None:
     """Restrict ``ASCEND_RT_VISIBLE_DEVICES`` to the chips named by ``device_ids``.
 
@@ -138,8 +153,9 @@ def _narrow_visible_devices_to_device_ids(engine_args) -> None:
         return
 
     # Ray selects devices through placement groups; --device-ids is ignored and
-    # vLLM already warns about it.
-    if _is_ray_backend(getattr(engine_args, "distributed_executor_backend", None)):
+    # vLLM already warns about it. ``--data-parallel-backend ray`` selects Ray
+    # implicitly (ParallelConfig.__post_init__), so check that path too.
+    if _is_ray_deployment(engine_args):
         return
 
     # UUIDs need the CANN-side translation, which already resolves them to the

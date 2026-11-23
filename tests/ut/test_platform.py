@@ -2930,8 +2930,12 @@ def test_normalize_sleep_backend_rejects_third_party():
 
 
 class TestNarrowVisibleDevices(TestBase):
-    def _namespace(self, device_ids, backend=None):
-        return SimpleNamespace(device_ids=device_ids, distributed_executor_backend=backend)
+    def _namespace(self, device_ids, backend=None, data_parallel_backend="mp"):
+        return SimpleNamespace(
+            device_ids=device_ids,
+            distributed_executor_backend=backend,
+            data_parallel_backend=data_parallel_backend,
+        )
 
     def _visible_devices_env(self, value):
         if value is None:
@@ -2974,6 +2978,17 @@ class TestNarrowVisibleDevices(TestBase):
             self.assertEqual(os.environ["ASCEND_RT_VISIBLE_DEVICES"], "4,5")
         self.assertEqual(args.device_ids, [1])
 
+    def test_skips_implicit_ray_without_explicit_executor(self):
+        # --data-parallel-backend ray with --distributed-executor-backend left
+        # unset: vLLM only resolves the Ray default inside
+        # ParallelConfig.__post_init__, which runs after this parse-time hook, so
+        # the hook must not narrow.
+        args = self._namespace([1], data_parallel_backend="ray")
+        with self._visible_devices_env("4,5"):
+            _narrow_visible_devices_to_device_ids(args)
+            self.assertEqual(os.environ["ASCEND_RT_VISIBLE_DEVICES"], "4,5")
+        self.assertEqual(args.device_ids, [1])
+
     def test_skips_uuid_device_ids(self):
         args = self._namespace(["0000:00:00.0"])
         with self._visible_devices_env("4,5"):
@@ -3006,3 +3021,13 @@ class TestNarrowVisibleDevices(TestBase):
             self.assertEqual(os.environ["ASCEND_RT_VISIBLE_DEVICES"], "4")
             self.assertEqual(extras, [])
         self.assertEqual(args.device_ids, [0])
+
+    def test_parser_wrapper_skips_implicit_ray(self):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--device-ids", type=lambda value: [int(item) for item in value.split(",")])
+        parser.add_argument("--data-parallel-backend", default="mp")
+        _install_device_id_narrowing(parser)
+        with self._visible_devices_env("4,5"):
+            args = parser.parse_args(["--device-ids", "1", "--data-parallel-backend", "ray"])
+            self.assertEqual(os.environ["ASCEND_RT_VISIBLE_DEVICES"], "4,5")
+        self.assertEqual(args.device_ids, [1])
