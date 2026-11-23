@@ -415,14 +415,16 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         self,
         caches: tuple[torch.Tensor, ...],
     ) -> tuple[int, int, int, tuple[int, ...], int] | None:
-        """Describe a contiguous span of views within each physical page.
+        """Describe the enclosing span of one layer's page components.
 
         Sharing a storage alone is insufficient: conventional planar K/V
         views can share one allocation while their first blocks are many pages
         apart. A packed layout must place every view's first block inside one
         common page stride and use the same physical block count and stride.
-        Their block spans must form one contiguous range within that stride,
-        but need not cover trailing padding or other shared-page components.
+        Copy internal padding along with the components, but exclude leading
+        and trailing shared-page regions. This relies on the cache binding's
+        page ownership and matching component offsets on P and D, just like
+        whole-page transfers; tensor geometry alone cannot establish ownership.
         """
         if not caches or len({tensor_storage_key(cache) for cache in caches}) != 1:
             return None
@@ -441,25 +443,19 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         block_lens = [math.prod(cache.shape[1:]) * cache.element_size() for cache in caches]
         # Storage capacity does not prove that this layer owns a whole page:
         # its views may occupy only a subregion of a larger shared allocation.
-        # Merge only internally contiguous blocks whose union has no holes.
-        # Transfer the covered bytes, not unused space up to the next block.
+        # Each component must be dense. Include padding between components,
+        # but do not extend the transfer up to the next block's start.
         # Overlapping aliases are allowed.
         if any(block_len == 0 or not cache[0].is_contiguous() for cache, block_len in zip(caches, block_lens)):
             return None
-        block_ranges = sorted(
-            (cache.data_ptr() - page_base_addr, cache.data_ptr() - page_base_addr + block_len)
-            for cache, block_len in zip(caches, block_lens)
-        )
-        covered_end = 0
-        for start, end in block_ranges:
-            if start > covered_end or end > page_stride:
-                return None
-            covered_end = max(covered_end, end)
+        block_len = max(cache.data_ptr() - page_base_addr + block_len for cache, block_len in zip(caches, block_lens))
+        if block_len > page_stride:
+            return None
 
         storage = caches[0].untyped_storage()
         storage_base_addr = storage.data_ptr()
         storage_end_addr = storage_base_addr + storage.nbytes()
-        transfer_end_addr = page_base_addr + (num_tensor_blocks - 1) * page_stride + covered_end
+        transfer_end_addr = page_base_addr + (num_tensor_blocks - 1) * page_stride + block_len
         if page_base_addr < storage_base_addr or transfer_end_addr > storage_end_addr:
             return None
 
@@ -470,7 +466,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         return (
             page_base_addr,
             page_stride,
-            covered_end,
+            block_len,
             tuple(selected_cache.shape[1:]),
             num_tensor_blocks // self.num_blocks,
         )

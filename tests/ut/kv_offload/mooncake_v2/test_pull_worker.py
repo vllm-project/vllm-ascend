@@ -1460,23 +1460,26 @@ def test_worker_run_marks_only_failed_requests_and_finishes_the_batch(
     request_queue.task_done.assert_called_once_with()
 
 
-@pytest.mark.parametrize("local_stride,remote_stride", [(40, 40), (64, 64), (64, 80)])
+@pytest.mark.parametrize("local_padding,remote_padding", [(0, 0), (24, 24), (24, 40)])
+@pytest.mark.parametrize("gap", [0, 8])
 @pytest.mark.parametrize("offset", [0, 16])
 @pytest.mark.parametrize("local_spare,remote_spare", [(0, 64), (64, 0)])
-def test_merged_mla_spans_preserve_padding_and_coalesce_only_full_pages(
-    local_stride, remote_stride, offset, local_spare, remote_spare
+def test_merged_mla_spans_copy_internal_padding_and_coalesce_only_full_pages(
+    local_padding, remote_padding, gap, offset, local_spare, remote_spare
 ) -> None:
     # Build real K/scale views on peers with different backing capacities,
     # including a final destination block ending exactly at the storage bound.
-    local_raw = torch.full((offset + 3 * local_stride + 40 + local_spare,), 255, dtype=torch.uint8)
-    remote_raw = torch.full((offset + 3 * remote_stride + 40 + remote_spare,), 127, dtype=torch.uint8)
+    block_len = 40 + gap
+    local_stride, remote_stride = block_len + local_padding, block_len + remote_padding
+    local_raw = torch.full((offset + 3 * local_stride + block_len + local_spare,), 255, dtype=torch.uint8)
+    remote_raw = torch.full((offset + 3 * remote_stride + block_len + remote_spare,), 127, dtype=torch.uint8)
     local_caches = (
         local_raw.as_strided((4, 32), (local_stride, 1), offset),
-        local_raw.as_strided((4, 8), (local_stride, 1), offset + 32),
+        local_raw.as_strided((4, 8), (local_stride, 1), offset + 32 + gap),
     )
     remote_caches = (
         remote_raw.as_strided((4, 32), (remote_stride, 1), offset),
-        remote_raw.as_strided((4, 8), (remote_stride, 1), offset + 32),
+        remote_raw.as_strided((4, 8), (remote_stride, 1), offset + 32 + gap),
     )
     for index, cache in enumerate(remote_caches):
         for block in range(4):
@@ -1488,7 +1491,7 @@ def test_merged_mla_spans_preserve_padding_and_coalesce_only_full_pages(
     assert local_metadata is not None and remote_metadata is not None
     local_base, local_stride, local_len, local_shape, _ = local_metadata
     remote_base, remote_stride, remote_len, remote_shape, _ = remote_metadata
-    assert local_len == remote_len == 40
+    assert local_len == remote_len == block_len
     thread = make_thread(
         kv_cache_specs=[MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=32, dtype=torch.uint8)],
         kv_caches_base_addr=[[local_base]],
@@ -1506,22 +1509,25 @@ def test_merged_mla_spans_preserve_padding_and_coalesce_only_full_pages(
     thread._append_spec_transfer_addresses(
         0, 0, 0, 1, 1, 1, {(0, 0): [("request", [2, 3], [0, 1])]}, remote, src, dst, lengths
     )
-    if local_stride == remote_stride == 40:
+    if local_stride == remote_stride == block_len:
         assert src == [local_base + 2 * local_stride]
         assert dst == [remote_base]
-        assert lengths == [80]
+        assert lengths == [2 * block_len]
     else:
         assert src == [local_base + block * local_stride for block in (2, 3)]
         assert dst == [remote_base + block * remote_stride for block in (0, 1)]
-        assert lengths == [40, 40]
+        assert lengths == [block_len, block_len]
 
     # Mooncake READ takes local addresses first. Apply the generated ranges
-    # to CPU buffers and verify all bytes outside the target views survive.
+    # to CPU buffers. Internal padding is copied; leading/trailing regions
+    # and unselected blocks must survive unchanged.
     expected = local_raw.clone()
     for local_block, remote_block in ((2, 0), (3, 1)):
         for local_cache, remote_cache in zip(local_caches, remote_caches):
             start = local_cache[local_block].data_ptr() - local_raw.data_ptr()
             expected[start : start + local_cache.shape[1]].copy_(remote_cache[remote_block])
+        gap_start = offset + local_block * local_stride + 32
+        expected[gap_start : gap_start + gap].fill_(127)
     for local_addr, remote_addr, length in zip(src, dst, lengths):
         local_start = local_addr - local_raw.data_ptr()
         remote_start = remote_addr - remote_raw.data_ptr()

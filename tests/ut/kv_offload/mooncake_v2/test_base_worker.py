@@ -192,14 +192,16 @@ def test_transfer_block_shape_rejects_invalid_packed_head_major_gqa(shape, step,
         pytest.param(40, 0, 32, 8, True, id="full-page"),
         pytest.param(64, 0, 32, 8, True, id="trailing-padding"),
         pytest.param(64, 16, 48, 8, True, id="shared-page-subregion"),
-        pytest.param(64, 0, 40, 24, False, id="interior-gap"),
+        pytest.param(64, 0, 40, 24, True, id="interior-gap-full-page"),
+        pytest.param(64, 0, 40, 8, True, id="interior-gap-partial-page"),
+        pytest.param(64, 16, 56, 8, True, id="interior-gap-subregion"),
         pytest.param(64, 0, 16, 32, True, id="overlapping-partial-page"),
         pytest.param(64, 0, 24, 40, True, id="overlapping-full-page"),
         pytest.param(64, 0, 32, 40, False, id="span-exceeds-stride"),
         pytest.param(64, 0, 32, 0, False, id="empty-view"),
     ],
 )
-def test_register_kv_caches_merges_contiguous_spans(
+def test_register_kv_caches_merges_page_spans(
     monkeypatch, spare, reverse, num_blocks, page_stride, k_offset, scale_offset, scale_len, merged
 ) -> None:
     spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=32, dtype=torch.float16)
@@ -280,15 +282,23 @@ def test_shared_page_rejects_noncontiguous_blocks() -> None:
 
 
 @pytest.mark.parametrize("scale_len", [2, 4])
-def test_shared_page_handles_mixed_dtype_views(scale_len) -> None:
-    block_len = 48 + scale_len * 4
-    raw_cache = torch.empty(3 * 64 + block_len, dtype=torch.uint8)
-    k_cache = raw_cache.as_strided((4, 48), (64, 1))
-    scale_cache = raw_cache.view(torch.float32).as_strided((4, scale_len), (16, 1), 12)
+@pytest.mark.parametrize("gap", [0, 4])
+def test_shared_page_handles_mixed_dtype_views(scale_len, gap) -> None:
+    block_len = 48 + gap + scale_len * 4
+    page_stride = 64 + gap
+    raw_cache = torch.empty(3 * page_stride + block_len, dtype=torch.uint8)
+    k_cache = raw_cache.as_strided((4, 48), (page_stride, 1))
+    scale_cache = raw_cache.view(torch.float32).as_strided((4, scale_len), (page_stride // 4, 1), (48 + gap) // 4)
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
     worker.num_blocks = 4
 
-    assert worker._get_shared_page_metadata((k_cache, scale_cache)) == (raw_cache.data_ptr(), 64, block_len, (48,), 1)
+    assert worker._get_shared_page_metadata((k_cache, scale_cache)) == (
+        raw_cache.data_ptr(),
+        page_stride,
+        block_len,
+        (48,),
+        1,
+    )
 
 
 @pytest.mark.parametrize("padding", [0, 64])
