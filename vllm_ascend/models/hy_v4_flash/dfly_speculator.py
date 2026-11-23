@@ -16,6 +16,8 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
+from vllm_ascend.worker.v2.utils import communicator_switch
+
 from .dfly import CHECKPOINT_PREFIX, MODEL_PREFIX, FlashDFlyDraft
 
 logger = init_logger(__name__)
@@ -104,9 +106,22 @@ class FlashDFlySpeculator(DraftModelSpeculator):
         self.model_state = model_state
 
     def init_cudagraph_manager(self, cudagraph_mode):
-        # Independently scheduled DP replicas can propose different batch sizes.
-        if not cudagraph_mode.has_full_cudagraphs() or self.speculative_config.enforce_eager or self.dp_size > 1:
+        if not cudagraph_mode.has_full_cudagraphs() or self.speculative_config.enforce_eager:
             return
+        enable_dp_graph = self.vllm_config.additional_config.get("hy4flash_dfly_dp_graph", False)
+        if not isinstance(enable_dp_graph, bool):
+            raise ValueError("hy4flash_dfly_dp_graph must be a boolean")
+        # DP replicas propose independently, including empty batches. Only a
+        # local dense draft can replay without matching calls on other ranks.
+        if self.dp_size > 1:
+            if not enable_dp_graph:
+                return
+            if not self._dp_graph_is_local():
+                logger.warning_once(
+                    "HYV4 DFly DP ACLGraph requires TP1 with local Embedding, LMHead and draft projections; "
+                    "keeping eager drafting for this parallel layout."
+                )
+                return
         compilation = self.vllm_config.compilation_config
         width = self.num_query_per_req
         max_reqs = min(self.max_num_reqs, self.max_num_tokens // width)
@@ -115,8 +130,14 @@ class FlashDFlySpeculator(DraftModelSpeculator):
         )
         if not graph_batches:
             return
+        # The draft has dense FFNs, even though the target is MoE. Do not let
+        # set_forward_context coordinate draft capture batches across DP.
+        # Copy the config: the target still needs its original DP/EP metadata.
+        self.graph_vllm_config = copy(self.vllm_config)
+        self.graph_vllm_config.parallel_config = copy(self.vllm_config.parallel_config)
+        self.graph_vllm_config.parallel_config.is_moe_model = False
         self.cudagraph_manager = CudaGraphManager(
-            self.vllm_config,
+            self.graph_vllm_config,
             self.device,
             CUDAGraphMode.FULL_DECODE_ONLY,
             {width: max_reqs},
@@ -131,6 +152,36 @@ class FlashDFlySpeculator(DraftModelSpeculator):
         self.graph_source_rows = torch.empty(capacity, dtype=torch.long, device=self.device)
         self.graph_query_positions = torch.empty_like(self.graph_ids)
         self.graph_rope_dims = getattr(getattr(self.model_state, "rope_state", None), "num_dims", 0)
+        if self.dp_size > 1:
+            logger.info(
+                "HYV4 DFly local DP ACLGraph enabled for %d replicas; capture request sizes: %s.",
+                self.dp_size,
+                graph_batches,
+            )
+
+    def _dp_graph_is_local(self):
+        for parallel in (self.vllm_config.parallel_config, self.speculative_config.draft_parallel_config):
+            if any(
+                getattr(parallel, field) != 1
+                for field in (
+                    "tensor_parallel_size",
+                    "pipeline_parallel_size",
+                    "prefill_context_parallel_size",
+                    "decode_context_parallel_size",
+                )
+            ):
+                return False
+        # Fine-grained Embedding/LMHead TP can communicate across the DP axis
+        # even when the model's TP size is one. Inspect the loaded modules.
+        embedding = self.target.model.embed_tokens
+        if any(getattr(module, "tp_size", None) != 1 for module in (embedding, self.target.lm_head)):
+            return False
+        if getattr(embedding, "token_exchange_group", None) is not None:
+            return False
+        reduce_group = getattr(embedding, "output_reduce_group", None)
+        if reduce_group is not None and reduce_group.world_size > 1:
+            return False
+        return all(getattr(module, "tp_size", 1) == 1 for module in self.model.modules())
 
     def capture(self):
         if self.cudagraph_manager is None:
@@ -162,14 +213,15 @@ class FlashDFlySpeculator(DraftModelSpeculator):
             result = self.draft_tokens[:batch]
 
             def forward(mode):
-                with set_forward_context(None, self.vllm_config, num_tokens=count, cudagraph_runtime_mode=mode):
+                with set_forward_context(None, self.graph_vllm_config, num_tokens=count, cudagraph_runtime_mode=mode):
                     self._forward_queries(
                         ids, positions, target_hidden, active, result, source_rows, query_positions, tables
                     )
 
             return forward
 
-        self.cudagraph_manager.capture(prepare, progress_bar_desc="Capturing HYV4 DFly ACLGraphs")
+        with communicator_switch():
+            self.cudagraph_manager.capture(prepare, progress_bar_desc="Capturing HYV4 DFly ACLGraphs")
 
     def _forward_queries(
         self, ids, positions, target_hidden, active, result, source_rows, query_positions, block_tables
