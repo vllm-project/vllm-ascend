@@ -986,7 +986,13 @@ def _allocate_kv_cache(
                 kv_cache_raw_tensors[name] = backing
         return kv_cache_raw_tensors
     if _uses_single_device_backing(kv_cache_config):
-        backing = _allocate_single_cache_backing(kv_cache_config, device)
+        tensors = kv_cache_config.kv_cache_tensors
+        if any(tensor.host_resident for tensor in tensors):
+            raise ValueError("Single-device KV cache backing cannot contain host-resident descriptors.")
+        sizes = {tensor.size for tensor in tensors}
+        if len(sizes) != 1:
+            raise ValueError("Unified KV cache descriptors must share one backing allocation.")
+        backing = _allocate_int8_cache_tensor(sizes.pop(), alignment, device)
         return {
             name: _slice_cache_layer(backing, tensor, index, layer_kv_cache_spec[name], kv_cache_config.num_blocks)
             for tensor in kv_cache_config.kv_cache_tensors
@@ -1401,18 +1407,6 @@ def create_cache_component_views(
     return views
 
 
-def _allocate_single_cache_backing(kv_cache_config: KVCacheConfig, device: torch.device) -> torch.Tensor:
-    tensors = kv_cache_config.kv_cache_tensors
-    if _uses_single_device_backing(kv_cache_config) and any(tensor.host_resident for tensor in tensors):
-        raise ValueError("Single-device KV cache backing cannot contain host-resident descriptors.")
-    sizes = {tensor.size for tensor in tensors}
-    if len(sizes) != 1:
-        raise ValueError("Unified KV cache descriptors must share one backing allocation.")
-    (size,) = sizes
-    logger.info("Allocating unified KV cache: %d bytes", size)
-    return _allocate_int8_cache_tensor(size, KV_CACHE_BUFFER_ALIGNMENT, device)
-
-
 def _slice_cache_layer(
     backing: torch.Tensor,
     descriptor: KVCacheTensor,
@@ -1508,12 +1502,22 @@ def unified_allocate_kv_cache(
     Backends interpret each layer's page through their runtime view interface;
     allocation and component construction do not use the legacy reshape path.
     """
-    if not kv_cache_config.kv_cache_tensors:
+    tensors = kv_cache_config.kv_cache_tensors
+    if not tensors:
         return {}
+    if _uses_single_device_backing(kv_cache_config) and any(tensor.host_resident for tensor in tensors):
+        raise ValueError("Single-device KV cache backing cannot contain host-resident descriptors.")
+    sizes = {tensor.size for tensor in tensors}
+    if len(sizes) != 1:
+        raise ValueError("Unified KV cache descriptors must share one backing allocation.")
     vllm_config = get_current_vllm_config()
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = get_shared_kv_cache_layers(vllm_config)
-    backing = _allocate_single_cache_backing(kv_cache_config, device)
+    backing_size = sizes.pop()
+
+    # Preserve the existing 2 MiB base-address alignment for KV transfer.
+    logger.info("Allocating unified KV cache: %d bytes", backing_size)
+    backing = _allocate_int8_cache_tensor(backing_size, KV_CACHE_BUFFER_ALIGNMENT, device)
     return create_kv_cache_runtime_views(
         kv_cache_config,
         backing,
