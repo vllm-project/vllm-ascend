@@ -58,11 +58,22 @@ def require_aligned_batch_results(
 
 
 def get_scheduler_device_id(parallel_config: ParallelConfig) -> int:
-    """Resolve a scheduler's device without creating an NPU context."""
+    """Resolve a scheduler's device without creating an NPU context.
+
+    Each DP shard owns a device range. A scheduler-side store client must use
+    the first device of its own shard, not always logical device 0: every
+    fabric-memory HIXL client reserves device virtual memory, and putting all
+    DP schedulers on one device exhausts that address space at DP>8.
+    """
     assigned_ids = parallel_config.assigned_physical_gpu_ids
-    if assigned_ids is not None:
+    if assigned_ids:
         set_assigned_physical_gpu_ids(assigned_ids)
-        return current_platform.logical_device_id_to_visible_device_id(0)
+        dp_rank = getattr(parallel_config, "data_parallel_rank_local", None)
+        if dp_rank is None:
+            dp_rank = getattr(parallel_config, "data_parallel_rank", 0) or 0
+        tp_size = max(int(getattr(parallel_config, "tensor_parallel_size", 1) or 1), 1)
+        logical_id = min(int(dp_rank) * tp_size, len(assigned_ids) - 1)
+        return current_platform.logical_device_id_to_visible_device_id(logical_id)
     return torch.npu.current_device()
 
 
@@ -75,6 +86,11 @@ class Backend(ABC):
     layerwise_data_plane: str | None = None
     # Whether the connector must filter existing keys before calling put().
     requires_exists_before_put: bool = True
+    # Whether an owner-sharded (VMM) KV range must be staged through a local
+    # registered buffer before the transport engine can read or write it. The
+    # default is the safe choice: backends that can address the VMM range
+    # directly (for example fabric-memory mode) override this to False.
+    requires_owner_transport_staging: bool = True
 
     @abstractmethod
     def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):

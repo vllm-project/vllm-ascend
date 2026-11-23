@@ -395,7 +395,13 @@ class AclVmmBackend:
             raise ValueError("reserved size must be a positive 2-MiB multiple")
         self.set_device(device_index)
         virtual_address = ctypes.c_void_p()
-        self._call("aclrtReserveMemAddress", ctypes.byref(virtual_address), size_bytes, 0, None, 0)
+        try:
+            self._call("aclrtReserveMemAddress", ctypes.byref(virtual_address), size_bytes, 0, None, 0)
+        except PcpOwnerVmmError as error:
+            raise PcpOwnerVmmError(
+                f"aclrtReserveMemAddress(size={size_bytes}, device={device_index})",
+                error.status,
+            ) from error
         base_address = int(virtual_address.value or 0)
         if base_address <= 0 or base_address % CANN_VMM_GRANULARITY_BYTES:
             invalid = ValueError(

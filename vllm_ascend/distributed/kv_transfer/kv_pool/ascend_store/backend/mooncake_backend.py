@@ -420,6 +420,9 @@ class MooncakeBackend(Backend):
         # operates independently of the global transfer engine; setup goes through store
         # and buffers are registered via store.register_buffer() instead of global_te.
         self._use_store_independent_te = bool(os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG")) and not self._use_fabric_mem
+        # Fabric-memory mode hands the transport engine the full logical VA and
+        # does not register KV ranges, so the owner slab needs no staging.
+        self.requires_owner_transport_staging = not self._use_fabric_mem
         self._lazy_init = lazy_init and self._use_fabric_mem
         self._contribute_memory = contribute_memory
         self._store_initialized = False

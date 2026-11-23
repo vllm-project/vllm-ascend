@@ -252,7 +252,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                     if client is not None:
                         client.close()
                 finally:
-                    self.connector_scheduler.store_scheduler.close()
+                    store_scheduler = self.connector_scheduler.store_scheduler
+                    if store_scheduler is not None:
+                        store_scheduler.close()
         finally:
             if hasattr(self, "lookup_server"):
                 self.lookup_server.close()

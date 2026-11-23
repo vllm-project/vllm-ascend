@@ -1588,6 +1588,29 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(stats.data["load_get_keys"], 1)
         self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
 
+    def test_start_load_kv_syncs_compute_stream_before_mooncake_get(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker as pool_worker_module
+
+        worker = self._make_worker(kv_role="kv_consumer", extra_config={"backend": "mooncake", "load_async": False})
+        worker.m_store.get = MagicMock(return_value=[0])
+        worker.token_database.set_group_buffers({0: [1000, 2000]}, {0: [160]})
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=True, token_len=16)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
+            block_hashes=["h0"],
+            load_spec=load_spec,
+        )
+        meta = AscendConnectorMetadata(set(), set())
+        meta.add_request(req)
+        with patch.object(pool_worker_module.torch, "npu", create=True) as npu:
+            worker.start_load_kv(meta)
+        # MRV2 queues new-block zeroing on the compute stream; the pool GET must
+        # not be overtaken by a later zero kernel that wipes restored pages.
+        npu.current_stream.return_value.synchronize.assert_called_once_with()
+        worker.m_store.get.assert_called_once()
+
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",
         autospec=True,
