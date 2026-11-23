@@ -61,6 +61,9 @@ from vllm_ascend.worker.device_metadata import (
 )
 
 V41_METADATA_BUFFER_SIZE = 1024
+# Short output buckets benefit from fusion. Use the fixed graph output shape
+# so the selected path stays stable even when replay has fewer live tokens.
+V41_FUSED_EPILOGUE_MAX_TOKENS = 384
 
 
 @eager_break_during_capture
@@ -529,7 +532,14 @@ class AscendDSAV41Impl:
         if output.shape[0] != hidden_states.shape[0]:
             padded = output.new_zeros((hidden_states.shape[0], output.shape[1], output.shape[2]))
             padded[: output.shape[0]] = output
-        attn.dsa_attn.dsa_attn.impl._forward_o_proj(padded, projected)
+        projector = attn.dsa_attn.dsa_attn.impl
+        if attn.fused_attn_epilogue is not None:
+            # The shared WoB weight is a transposed view. Use its normal
+            # Linear dispatch, which accepts that layout on the split path.
+            grouped = padded.reshape(padded.shape[0], attn.n_local_groups, -1)
+            projected.copy_(attn.wo_b(projector._wo_a_bmm(grouped).flatten(1)))
+        else:
+            projector._forward_o_proj(padded, projected)
         return projected
 
     def _multistream_qkv(self, attn, hidden_states, cos, sin, swa_metadata):
@@ -824,8 +834,35 @@ class AscendDSAV41Impl:
                 attn, positions, metadata, prepared_indexer=prepared_indexer
             )
             attention_output = self._forward_attention(attn, q, metadata, compressed_indices)
+            if attn.fused_attn_epilogue is not None and output.shape[0] <= V41_FUSED_EPILOGUE_MAX_TOKENS:
+                # The fused kernel applies inverse RoPE and both projections.
+                # It writes the live rows and clears the graph bucket tail.
+                attn.fused_attn_epilogue(
+                    attention_output,
+                    attn.wo_a.weight.data,
+                    attn.wo_b.weight.data.t(),
+                    attn.wo_a.weight_scale.view(torch.float8_e8m0fnu),
+                    attn.wo_b.weight_scale.transpose(0, 1).view(torch.float8_e8m0fnu),
+                    sin.view(num_tokens, attn.rope_head_dim),
+                    cos.view(num_tokens, attn.rope_head_dim),
+                    output,
+                )
+                if not torch.npu.is_current_stream_capturing():
+                    from torch_npu.npu.utils import _erase_stream
+
+                    # DSL records this temporary again after MLA retired it.
+                    # Retire its last consumer before same-stream allocation
+                    # reuse; the device event preserves execution ordering.
+                    stream = torch.npu.current_stream(attention_output.device)
+                    submitted = stream.record_event()
+                    stream.wait_event(submitted)
+                    _erase_stream(attention_output, stream)
+                return output
             AscendDSAV41Impl._apply_rotary(attn, attention_output, cos, sin, inverse=True)
         else:
+            if attn.fused_attn_epilogue is not None:
+                output.zero_()
+                return output
             heads = attn.n_local_heads
             attention_output = hidden_states.new_empty((0, heads, attn.head_dim))
         self._project_output(attn, attention_output, hidden_states, projected=output)

@@ -820,6 +820,7 @@ def runtime(builders, monkeypatch):
         attn = SimpleNamespace(
             v41_layer_name=LAYER,
             rotary_emb=SimpleNamespace(layername=LAYER),
+            fused_attn_epilogue=None,
             n_heads=2,
             n_local_heads=2,
             head_dim=2,
@@ -1354,7 +1355,9 @@ class TestPCPProjectionPartition:
                     world_size=2, rank_in_group=rank, all_reduce=lambda value: torch.full_like(value, 21.0)
                 ),
             )
-            attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=projector)))
+            attn = SimpleNamespace(
+                fused_attn_epilogue=None, dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=projector))
+            )
             hidden = torch.tensor([values])
             output = torch.empty_like(hidden)
             impl = dsa_v41_cp.AscendDSAV41PCPImpl.__new__(dsa_v41_cp.AscendDSAV41PCPImpl)
@@ -1529,15 +1532,22 @@ class TestSparseLayerReuse:
 
 class TestProjectionLayout:
     @pytest.mark.parametrize("live,padded", [(4, 4), (3, 8), (0, 8)])
-    def test_base_projection_preserves_local_output_buffer(self, live, padded):
+    @pytest.mark.parametrize("shared_nd", [False, True])
+    def test_base_projection_preserves_local_output_buffer(self, live, padded, shared_nd):
         values = torch.arange(live * 4, dtype=torch.float32).view(live, 2, 2) + 1
         output = torch.full((padded, 4), -777.0)
         attn = SimpleNamespace(
+            fused_attn_epilogue=object() if shared_nd else None,
+            n_local_groups=2,
+            wo_b=lambda value: value,
             dsa_attn=SimpleNamespace(
                 dsa_attn=SimpleNamespace(
-                    impl=SimpleNamespace(_forward_o_proj=lambda value, out: out.copy_(value.flatten(1)))
+                    impl=SimpleNamespace(
+                        _forward_o_proj=lambda value, out: out.copy_(value.flatten(1)),
+                        _wo_a_bmm=lambda value: value,
+                    )
                 )
-            )
+            ),
         )
         impl = dsa_v41.AscendDSAV41Impl.__new__(dsa_v41.AscendDSAV41Impl)
         assert impl._project_output(attn, values, torch.empty(padded, 4), projected=output) is output
