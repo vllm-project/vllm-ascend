@@ -1,0 +1,22 @@
+# Release note fragment. See release_notes/README.md.
+pr: 19776
+entries:
+  - category: feature
+    text: >
+      Gate vLLM Ascend MS service metrics by a two-value metric level
+      (basic, detail; accepted as names or the numerics 0 and 1, where 0
+      is basic). The level is read from the metrics.level runtime config
+      key and can be changed at runtime through runtime_config.json hot
+      reload. Detail-level series stay unregistered until the level rises
+      so expensive metrics are never sampled implicitly.
+  - category: feature
+    text: >
+      Add the POST /set_metrics_level endpoint to change the metric level of
+      a running service. The level fans out to every EngineCore and worker
+      and is applied in memory only; runtime_config.json is not written back.
+  - category: feature
+    text: >
+      Add Ascend-owned symbol-hook metrics for scheduling and execution: the
+      executor:sample_tokens:duration_ms histogram (detail level). No
+      scheduler or model runner code is edited; the handlers only wrap
+      existing symbols.

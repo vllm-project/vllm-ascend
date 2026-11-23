@@ -1,0 +1,4 @@
+pr: 21547
+entries:
+  - category: bugfix
+    text: Fixed `dp_shared_memory` being auto-enabled when `cpu_offload=False` with DP>1 on Model Runner V2, which conflicted with the upstream constraint that `dp_shared_memory` requires `cpu_offload=True`.

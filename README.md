@@ -56,13 +56,13 @@ It is the recommended approach for supporting the Ascend backend within the vLLM
 
 By using vLLM Ascend plugin, popular open-source models, including Transformer-like, Mixture-of-Experts (MoE), Embedding, Multi-modal LLMs can run seamlessly on the Ascend NPU.
 
-For detailed information on supported models and features, please refer to the [support matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/).
+For detailed information on supported models and features, please refer to the [Support Matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/).
 
 ## DeepWiki
 
 [**DeepWiki**](https://deepwiki.com/vllm-project/vllm-ascend) is a dynamic knowledge base collaboratively maintained by the community and AI, designed to provide you with deeper technical insights beyond conventional documentation. If official documentation serves as a "quick start" guide to help you get going, the DeepWiki is your technical companion for "deep understanding". Here, you can explore: core architecture and design principles, key source code interpretations, technical context, and decision-making logic.
 
-Whether you are a performance tuner looking to deploy vLLM-Ascend in production or a contributor aiming to build upon it for secondary development, DeepWiki offers invaluable references for you. Welcome to explore now and join us in delving deep into the technical core of vLLM-Ascend.
+Whether you are a performance tuner looking to deploy vllm-ascend in production or a contributor aiming to build upon it for secondary development, DeepWiki offers invaluable references for you. Welcome to explore now and join us in delving deep into the technical core of vLLM-Ascend.
 
 ## Prerequisites
 
@@ -85,7 +85,7 @@ Please use the following recommended versions to get started quickly:
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
 | v0.30.0 | Latest stable version | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.30.0/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.30.0/installation.html) for more details |
-| v0.23.0 | stable version | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.23.0/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/installation.html) for more details |
+| v0.23.0 | Stable version | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.23.0/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/installation.html) for more details |
 
 ## Branch
 
@@ -100,9 +100,9 @@ Below are the maintained branches:
 |------------------|--------------|--------------------------------------|
 | main             | Maintained   | CI commitment for vLLM main branch and vLLM v0.33.0 tag |
 | releases/v0.13.0 | Maintained   | Only bug fixes are allowed, and no new release tags anymore. |
-| releases/v0.18.0 | Maintained   | CI commitment for vLLM 0.18.0 version |
-| releases/v0.23.0 | Maintained   | CI commitment for vLLM 0.23.0 version |
-| releases/v0.30.0 | Maintained   | CI commitment for vLLM 0.30.0 version |
+| releases/v0.18.0 | Maintained   | CI commitment for vLLM v0.18.0 version |
+| releases/v0.23.0 | Maintained   | CI commitment for vLLM v0.23.0 version |
+| releases/v0.30.0 | Maintained   | CI commitment for vLLM v0.30.0 version |
 | rfc/<feature-name> | Maintained   | [Feature branches](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html#feature-branches) for collaboration |
 
 Please refer to [Versioning policy](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html) for more details.
@@ -113,7 +113,7 @@ See [CONTRIBUTING](https://docs.vllm.ai/projects/ascend/en/latest/developer_guid
 
 We welcome and value any contributions and collaborations:
 
-- Please let us know if you encounter a bug by [filing an issue](https://github.com/vllm-project/vllm-ascend/issues)
+- Please let us know if you encounter a bug by [filing an issue](https://github.com/vllm-project/vllm-ascend/issues).
 - Please use [User forum](https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support) for usage questions and help.
 
 ## Weekly Meeting

@@ -62,6 +62,15 @@ def runtime(monkeypatch, local_weights):
     types = load("types")
     config = load("config")
     load("manifest")
+    # tensor_layout imports the shared weight_state enumeration module. Mirror
+    # the fresh instance onto the parent package attribute as well: the
+    # module-handle import in tensor_layout (from vllm_ascend.model_loader
+    # import weight_state) resolves the parent getattr first, which otherwise
+    # still references the process-wide weight_state imported at vllm_ascend
+    # package init (via bigtensorloader), and monkeypatches on the fixture
+    # instance would be invisible to it.
+    weight_state = _load_module(monkeypatch, "vllm_ascend.model_loader.weight_state", "../weight_state.py")
+    monkeypatch.setattr(sys.modules["vllm_ascend.model_loader"], "weight_state", weight_state, raising=False)
     load("tensor_layout")
     load("seed_client")
     client = load("planner_client")
@@ -106,11 +115,18 @@ def tensor_runtime(monkeypatch, local_weights):
 
     _stub(monkeypatch, "vllm_ascend.model_loader.rfork.types", SeedTransferInfo=_SeedTransferInfo)
     _load_module(monkeypatch, "vllm_ascend.model_loader.rfork.manifest", "manifest.py")
+    # tensor_layout imports the shared weight_state enumeration module; the
+    # walker (collect_transferable_tensors) resolves its predicates in the
+    # weight_state namespace, so tests monkeypatch them there. The parent-attr
+    # mirror keeps the module-handle resolution consistent with sys.modules.
+    weight_state = _load_module(monkeypatch, "vllm_ascend.model_loader.weight_state", "../weight_state.py")
+    monkeypatch.setattr(sys.modules["vllm_ascend.model_loader"], "weight_state", weight_state, raising=False)
     tensor_layout = _load_module(monkeypatch, "vllm_ascend.model_loader.rfork.tensor_layout", "tensor_layout.py")
     transfer_backend = _load_module(
         monkeypatch, "vllm_ascend.model_loader.rfork.transfer_backend", "transfer_backend.py"
     )
     return SimpleNamespace(
+        weight_state=weight_state,
         tensor_layout=tensor_layout,
         transfer_backend=transfer_backend,
         RForkTransferBackend=transfer_backend.RForkTransferBackend,
@@ -203,13 +219,6 @@ def rfork_helpers(monkeypatch, local_weights):
         RForkSeedServiceStartResult=types_module.RForkSeedServiceStartResult,
     )
 
-    package("vllm_ascend.eplb")
-    package("vllm_ascend.eplb.adaptor")
-
-    class VllmEplbAdaptor:
-        _registered_moe_layers = []
-
-    adaptor_module = install("vllm_ascend.eplb.adaptor.vllm_adaptor", VllmEplbAdaptor=VllmEplbAdaptor)
     package("vllm_ascend.ops")
     package("vllm_ascend.ops.fused_moe")
 
@@ -219,11 +228,6 @@ def rfork_helpers(monkeypatch, local_weights):
             self._quant_method = quant_method
 
     install("vllm_ascend.ops.fused_moe.fused_moe", AscendMoERunner=AscendMoERunner)
-
-    class AscendRoutedExperts:
-        moe_counter = -1
-
-    routed_experts_module = install("vllm_ascend.ops.fused_moe.routed_experts", AscendRoutedExperts=AscendRoutedExperts)
     rotary_module = install(
         "vllm_ascend.ops.rotary_embedding",
         _cos_sin_cache=None,
@@ -242,10 +246,44 @@ def rfork_helpers(monkeypatch, local_weights):
         loader=loader,
         safety=safety,
         AscendMoERunner=AscendMoERunner,
-        adaptor_module=adaptor_module,
-        routed_experts_module=routed_experts_module,
         rotary_module=rotary_module,
         dynamo_hooks=dynamo_hooks,
         rope_dict=rope_dict,
         mtp_module=mtp_module,
+    )
+
+
+@pytest.fixture
+def checkpoint_loader(monkeypatch, rfork_helpers):
+    @dataclass
+    class CheckpointSource:
+        model_or_path: str
+        revision: str | None
+        subfolder: str | None = None
+        prefix: str = ""
+        fall_back_to_pt: bool = True
+        allow_patterns_overrides: list[str] | None = None
+
+    calls = []
+    folders: dict[str, str] = {}
+    selections: dict[str, tuple[list[str], bool]] = {}
+    configs = []
+
+    class DefaultModelLoader:
+        Source = CheckpointSource
+
+        def __init__(self, load_config):
+            configs.append(load_config)
+
+        def _prepare_weights(self, *args):
+            calls.append(args)
+            return folders.get(args[0], "unused"), *selections[args[0]], "model.safetensors.index.json"
+
+    _stub(monkeypatch, "vllm.model_executor.model_loader.default_loader", DefaultModelLoader=DefaultModelLoader)
+    return SimpleNamespace(
+        Source=CheckpointSource,
+        calls=calls,
+        folders=folders,
+        selections=selections,
+        configs=configs,
     )

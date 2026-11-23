@@ -39,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeTransferMetadataGroups,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import zmq_ctx
+from vllm_ascend.distributed.kv_transfer.utils.utils import truncate_block_hashes_fallback
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -224,6 +225,7 @@ class MooncakeMetadataThread(threading.Thread):
                     for local_layer_index, layer_name in enumerate(worker_metadata.layer_names):
                         layer_signature = (
                             worker_metadata.group_indices[local_layer_index],
+                            worker_metadata.dcp_sharded[local_layer_index],
                             worker_metadata.layer_block_sizes[local_layer_index],
                             worker_metadata.block_strides[local_layer_index],
                             worker_metadata.block_lens[local_layer_index],
@@ -235,6 +237,7 @@ class MooncakeMetadataThread(threading.Thread):
                         if previous_signature is not None and previous_signature != layer_signature:
                             layer_field_names = (
                                 "group_indices",
+                                "dcp_sharded",
                                 "layer_block_sizes",
                                 "block_strides",
                                 "block_lens",
@@ -259,6 +262,7 @@ class MooncakeMetadataThread(threading.Thread):
             layer_names = sorted(layer_source_by_name)
             layer_block_sizes: list[int] = []
             group_indices: list[int] = []
+            dcp_sharded: list[bool] = []
             block_strides: list[list[int]] = []
             block_lens: list[list[int]] = []
             block_shapes: list[list[tuple[int, ...]]] = []
@@ -268,6 +272,7 @@ class MooncakeMetadataThread(threading.Thread):
                 worker_metadata, local_layer_index = layer_source_by_name[layer_name]
                 layer_block_sizes.append(worker_metadata.layer_block_sizes[local_layer_index])
                 group_indices.append(worker_metadata.group_indices[local_layer_index])
+                dcp_sharded.append(worker_metadata.dcp_sharded[local_layer_index])
                 block_strides.append(worker_metadata.block_strides[local_layer_index])
                 block_lens.append(worker_metadata.block_lens[local_layer_index])
                 block_shapes.append(worker_metadata.block_shapes[local_layer_index])
@@ -304,6 +309,7 @@ class MooncakeMetadataThread(threading.Thread):
                 layer_names=layer_names,
                 layer_block_sizes=layer_block_sizes,
                 group_indices=group_indices,
+                dcp_sharded=dcp_sharded,
                 block_strides=block_strides,
                 block_lens=block_lens,
                 block_shapes=block_shapes,
@@ -448,7 +454,12 @@ class MooncakeBaseConnectorScheduler:
         has_state_group = any(
             isinstance(spec, MambaSpec) for group_specs in self.group_unique_specs for spec in group_specs
         )
-        return uses_compressed_cache or has_state_group
+        has_sliding_window_group = any(
+            isinstance(spec, SlidingWindowSpec) for group_specs in self.group_unique_specs for spec in group_specs
+        )
+        # D replays the final prompt token. P must retain SWA pages for that
+        # same position rather than retire them for the next token's window.
+        return uses_compressed_cache or has_state_group or has_sliding_window_group
 
     @staticmethod
     def _get_group_unique_specs(group: Any) -> list[Any]:
@@ -492,11 +503,7 @@ class MooncakeBaseConnectorScheduler:
                 )
                 transfer_block_ids.append(blocks[:-num_speculative_blocks] if num_speculative_blocks else blocks)
             else:
-                # SWA remains TP-sharded/replicated and keeps its original
-                # logical block size even when FullAttention uses DCP.
-                cp_size = (
-                    1 if all(isinstance(spec, SlidingWindowSpec) for spec in group_specs) else max(1, self.dcp_size)
-                )
+                cp_size = max(1, self.dcp_size) if any(spec.dcp_sharded for spec in group_specs) else 1
                 num_prompt_blocks = cdiv(prompt_len, block_size * cp_size)
                 transfer_block_ids.append(blocks[:num_prompt_blocks])
         return tuple(transfer_block_ids)
@@ -528,9 +535,14 @@ class MooncakeBaseConnectorScheduler:
         request._all_token_ids.pop()
         request.num_prompt_tokens -= 1
         request.max_tokens = 1
-        # Request already hashed the full prompt. Rebuild for the shortened one.
-        request.block_hashes.clear()
-        request.update_block_hashes()
+        hash_block_size = self.kv_cache_config.hash_block_size
+        assert hash_block_size is not None
+        lookahead = self.vllm_config.num_hash_lookahead_tokens
+        truncate_hashes = getattr(request, "truncate_block_hashes", None)
+        if callable(truncate_hashes):
+            truncate_hashes(hash_block_size, lookahead)
+        else:
+            truncate_block_hashes_fallback(request, hash_block_size, lookahead)
         params["_p_side_truncated"] = True
 
     def on_new_request(self, request: "Request") -> None:

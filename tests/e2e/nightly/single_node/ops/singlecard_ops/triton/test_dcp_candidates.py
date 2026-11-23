@@ -103,11 +103,12 @@ def test_candidate_pipeline_and_changed_graph_inputs(world, rows, topk, local_k,
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("world,rows", [(8, 128), (16, 48)])
-def test_sorted_pack_preserves_score_bits_and_large_integer_payloads(dtype, world, rows):
+def test_sorted_pack_preserves_score_bits_at_local_id_limit(dtype, world, rows):
     torch.npu.set_device(0)
     k, rank, interleave = 2048, world - 1, 768
     ids = torch.arange(k, dtype=torch.int32).repeat(rows, 1).view(rows, 1, k)
-    ids[..., -1] = 1 << 24
+    # Exercise the supported local-ID limit and its mapped global ID.
+    ids[..., -1] = (1 << 20) - 1
     scores = torch.randn(ids.shape).to(dtype)
     scores[..., :7] = torch.tensor([torch.nan, torch.inf, -torch.inf, 0.0, -0.0, 1.0, -1.0], dtype=dtype)
     valid = (ids >= 0) & scores.isfinite()

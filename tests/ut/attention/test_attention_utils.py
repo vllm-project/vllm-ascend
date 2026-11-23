@@ -109,6 +109,7 @@ def _common_attn_metadata() -> AscendCommonAttentionMetadata:
 def _spec_config(method: str, parallel_drafting: bool) -> MagicMock:
     spec_config = MagicMock()
     spec_config.parallel_drafting = parallel_drafting
+    spec_config.speculator_config.parallel_drafting = parallel_drafting
     spec_config.use_dspark.return_value = method == "dspark"
     return spec_config
 
@@ -152,6 +153,38 @@ def test_select_seq_lens_spec_decode(
         _spec_config(method, parallel_drafting),
         _vllm_config(model_type),
     )
+
+    torch.testing.assert_close(seq_lens, expected)
+
+
+@pytest.mark.parametrize("is_release", [False, True])
+@pytest.mark.parametrize(
+    ("method", "model_type", "parallel_drafting", "expected"),
+    [
+        ("dspark", "qwen3", True, NPU_SEQ_LENS),
+        ("dflash", "qwen3", True, NPU_SEQ_LENS),
+        ("dspark", "glm5_next", True, CPU_SEQ_LENS[:NUM_REQS]),
+        ("mtp", "qwen3", False, CPU_SEQ_LENS[:NUM_REQS]),
+    ],
+)
+def test_select_seq_lens_versioned_parallel_capability(
+    monkeypatch,
+    is_release: bool,
+    method: str,
+    model_type: str,
+    parallel_drafting: bool,
+    expected: torch.Tensor,
+) -> None:
+    monkeypatch.setattr(attention_utils, "vllm_version_is", lambda version: is_release, raising=False)
+    # Main leaves the deprecated flag unset. Release has no capability object.
+    spec_config = SimpleNamespace(
+        parallel_drafting=parallel_drafting if is_release else None,
+        use_dspark=lambda: method == "dspark",
+    )
+    if not is_release:
+        spec_config.speculator_config = SimpleNamespace(parallel_drafting=parallel_drafting)
+
+    seq_lens = _select_seq_lens(_common_attn_metadata(), None, spec_config, _vllm_config(model_type))
 
     torch.testing.assert_close(seq_lens, expected)
 
@@ -215,3 +248,11 @@ def test_filter_chunked_req_indices_mixed_mask() -> None:
     )
 
     torch.testing.assert_close(indices, torch.tensor([0, 1, 3, 4, 5]))
+
+
+def test_is_dcp_enabled_tracks_active_target_and_draft_config(monkeypatch):
+    target = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=8))
+    draft = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
+    for config, expected in [(target, True), (draft, False), (target, True)]:
+        monkeypatch.setattr(attention_utils, "get_current_vllm_config", lambda config=config: config)
+        assert attention_utils.is_dcp_enabled() is expected

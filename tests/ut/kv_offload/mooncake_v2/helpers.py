@@ -50,6 +50,7 @@ def make_sliding_spec(block_size: int = 16) -> SlidingWindowSpec:
         head_size=8,
         dtype=torch.float16,
         sliding_window=64,
+        dcp_sharded=False,
     )
 
 
@@ -110,6 +111,7 @@ def make_transfer_metadata(
     block_lens: list[list[int]] | None = None,
     block_shapes: list[list[tuple[int, ...]]] | None = None,
     block_size_scales: list[list[int]] | None = None,
+    dcp_sharded: list[bool] | None = None,
 ) -> MooncakeTransferMetadata:
     layer_names = layer_names or ["model.layers.0.self_attn"]
     num_layers = len(layer_names)
@@ -128,6 +130,7 @@ def make_transfer_metadata(
         block_shapes=block_shapes or [[(1, 16, 4)] for _ in range(num_layers)],
         block_size_scales=block_size_scales or [[1] for _ in range(num_layers)],
         indexer_replication_sizes=[0] * num_layers,
+        dcp_sharded=dcp_sharded if dcp_sharded is not None else [True] * num_layers,
         local_ip=local_ip,
         handshake_port=handshake_port,
     )
@@ -141,6 +144,7 @@ def make_pp_metadata(
     block_strides: list[list[int]] | None = None,
     block_lens: list[list[int]] | None = None,
     block_size_scales: list[list[int]] | None = None,
+    dcp_sharded: list[bool] | None = None,
     tp_base_addrs: dict[int, list[list[int]]] | None = None,
     pcp_tp_base_addrs: dict[int, dict[int, list[list[int]]]] | None = None,
     tp_layer_indices: dict[int, list[int]] | None = None,
@@ -163,6 +167,7 @@ def make_pp_metadata(
         block_shapes=block_shapes or [[(1, 16, 4)] for _ in range(num_layers)],
         block_size_scales=block_size_scales or [[1] for _ in range(num_layers)],
         indexer_replication_sizes=[0] * num_layers,
+        dcp_sharded=dcp_sharded if dcp_sharded is not None else [True] * num_layers,
         metadata_by_pcp_rank={
             pcp_rank: MooncakePCPTransferMetadata(
                 metadata_by_tp_rank={
@@ -218,16 +223,10 @@ def make_request(**overrides: Any) -> SimpleNamespace:
         "_all_token_ids": list(range(32)),
         "max_tokens": 16,
         "block_hashes": [],
+        "truncate_block_hashes": MagicMock(),
     }
     values.update(overrides)
-    request = SimpleNamespace(**values)
-    if "update_block_hashes" not in overrides:
-
-        def update_block_hashes() -> None:
-            request.block_hashes.append(tuple(request._all_token_ids))
-
-        request.update_block_hashes = update_block_hashes
-    return request
+    return SimpleNamespace(**values)
 
 
 def make_blocks(

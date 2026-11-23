@@ -1,0 +1,4 @@
+pr: 21887
+entries:
+  - category: bugfix
+    text: Fixed permissions on operator packages and selected CANN runtime files in container images so non-root users can load them without receiving write access.

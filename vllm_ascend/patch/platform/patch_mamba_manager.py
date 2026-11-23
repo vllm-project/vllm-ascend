@@ -13,15 +13,10 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     KVCacheBlock,
     KVCacheSpec,
     MambaManager,
-    MambaSpec,
 )
 
 
 class AscendMambaManager(MambaManager):
-    def __init__(self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs) -> None:
-        super().__init__(kv_cache_spec, block_pool, **kwargs)
-        self.block_size = kv_cache_spec.block_size
-
     @classmethod
     def find_longest_cache_hit(
         cls,
@@ -35,8 +30,8 @@ class AscendMambaManager(MambaManager):
         pcp_world_size: int = 1,
         drop_eagle_block: bool = False,
     ) -> tuple[list[KVCacheBlock], ...] | tuple[tuple[list[KVCacheBlock], ...], int]:
-        # Mamba recurrent states are replicated across DCP ranks (see
-        # __init__), so their prefix-cache lookup keeps the ordinary logical
+        # Mamba recurrent states are replicated across DCP ranks, so
+        # their prefix-cache lookup keeps the ordinary logical
         # block layout. Only attention groups shard their KV cache for DCP.
         return super().find_longest_cache_hit(
             block_hashes=block_hashes,

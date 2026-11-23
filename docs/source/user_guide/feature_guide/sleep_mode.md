@@ -72,7 +72,7 @@ llm.wake_up(tags=["kv_cache"])
 
 With extra cleanup enabled, ACL graphs are recaptured only when `tags` is `None` or contains `"kv_cache"`. This avoids recapturing graphs before externally reloaded weights and KV-cache state are ready.
 
-## Prepare Model Weights
+## Prepare model weights
 
 Use the `Qwen2.5-0.5B-Instruct` model weights. With `VLLM_USE_MODELSCOPE=True`, the model will be downloaded automatically from ModelScope.
 
@@ -132,9 +132,10 @@ The following is a simple example of how to use sleep mode.
     ```
 
 - Online serving:
+
     !!! note
 
-            Considering there may be a risk of malicious access, please make sure you are under a dev-mode, and explicitly specify the dev environment `VLLM_SERVER_DEV_MODE` to expose these endpoints (sleep/wake up).
+        Considering there may be a risk of malicious access, please make sure you are under a dev-mode, and explicitly specify the dev environment `VLLM_SERVER_DEV_MODE` to expose these endpoints (sleep/wake up).
 
     ```bash
     export VLLM_SERVER_DEV_MODE="1"

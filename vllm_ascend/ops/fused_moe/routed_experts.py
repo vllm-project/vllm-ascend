@@ -32,6 +32,7 @@ from vllm.model_executor.utils import replace_parameter
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.expert_transfer.expert_offload_utils import expert_offload_weights
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
@@ -47,6 +48,7 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
 )
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
+from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
@@ -362,6 +364,24 @@ def _empty_like_preserving_npu_format(tensor: torch.Tensor) -> torch.Tensor:
 class EplbExpertTensorList(list[torch.Tensor]):
     """Per-expert tensors exposed through the upstream EPLB weight contract."""
 
+    def __init__(
+        self,
+        tensors: Iterable[torch.Tensor] = (),
+        nz_cast_spec: NzCastSpec | None = None,
+    ) -> None:
+        super().__init__(tensors)
+        # The cast these tensors were built with, when it was parameterized. A
+        # cast with customize_dtype/input_dtype lands on a C0 variant of
+        # FRACTAL_NZ, and whatever rebuilds these weights elsewhere has to
+        # reproduce it. The receive buffers inherit it through empty_like.
+        self.nz_cast_spec: NzCastSpec | None = nz_cast_spec
+
+    @property
+    def is_cuda(self) -> bool:
+        # NPU expert lists take the native per-row copy path rather than the
+        # CUDA kernel, which requires a single contiguous weight allocation.
+        return self[0].is_cuda
+
     @property
     def shape(self) -> torch.Size:
         return torch.Size((len(self), *self[0].shape))
@@ -374,14 +394,19 @@ class EplbExpertTensorList(list[torch.Tensor]):
 
     def view(self, dtype: torch.dtype) -> "EplbExpertTensorList":
         # Mirror Tensor.view for a 1-byte dtype reinterpretation while keeping
-        # the per-expert container (and its aliasing semantics) intact.
-        return type(self)(tensor.view(dtype) for tensor in self)
+        # the per-expert container (and its aliasing semantics) intact. The
+        # reinterpretation is where upstream registers the weights, so the cast
+        # parameters have to survive it.
+        return type(self)((tensor.view(dtype) for tensor in self), self.nz_cast_spec)
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         if func is torch.empty_like and not kwargs:
             source = args[0]
-            return cls(_empty_like_preserving_npu_format(tensor) for tensor in source)
+            return cls(
+                (_empty_like_preserving_npu_format(tensor) for tensor in source),
+                source.nz_cast_spec,
+            )
         return NotImplemented
 
 
@@ -400,7 +425,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         n_shared_experts: int = 0,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        with expert_offload_weights(self, get_ascend_config()):
+            super().__init__(*args, **kwargs)
         if self.quant_config is None:
             # Preserve the pre-refactor BF16 lifecycle: let upstream create
             # weights first, then install the Ascend execution method.
@@ -454,7 +480,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                     )
                 if not all(is_weak_contiguous(expert_weight) for expert_weight in weight):
                     raise ValueError("Every tensor in an Ascend EPLB expert tensor list must be weakly contiguous.")
-                flattened_weights.append(EplbExpertTensorList(weight))
+                # A quant method that casts its experts with parameters hands
+                # the cast over on the view itself; keep it rather than
+                # rewrapping the tensors into a bare container.
+                flattened_weights.append(
+                    weight if isinstance(weight, EplbExpertTensorList) else EplbExpertTensorList(weight)
+                )
                 continue
             if weight.shape[0] != self.local_num_experts:
                 raise ValueError(

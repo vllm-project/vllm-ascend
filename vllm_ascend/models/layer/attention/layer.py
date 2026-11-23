@@ -187,6 +187,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         ]
         self.kv_cache_dtype = kv_cache_dtype
 
+        self.act_dtype = torch.get_default_dtype()
         self.use_sparse = True
 
     def forward(
@@ -198,7 +199,10 @@ class DSAAttention(nn.Module, AttentionLayerBase):
     ) -> torch.Tensor:
         return q
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
+    def process_weights_after_loading(self, act_dtype: torch.dtype | None = None):
+        # #57678 calls attention hooks without arguments on main.
+        if act_dtype is None:
+            act_dtype = self.act_dtype
         if hasattr(self.impl, "process_weights_after_loading"):
             self.impl.process_weights_after_loading(act_dtype)
 

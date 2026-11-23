@@ -7,6 +7,8 @@ from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
+from vllm_ascend.models.step5.sparse_attention import AscendStep5CSATailRing, AscendStep5SparseSummaryCacheLayer
+from vllm_ascend.utils import vllm_version_is
 
 
 # Without this patch, it will raise an exception when initialize kv_cache.
@@ -17,6 +19,7 @@ def bind_kv_cache(
     runner_kv_caches: list[torch.Tensor],
     num_attn_module: int = 1,
     kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+    layer_kv_caches: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so
@@ -51,10 +54,12 @@ def bind_kv_cache(
             ordered_layer_names.append(layer_name)
 
     # Bind kv_caches to forward context
-    for layer_name, kv_cache in kv_caches.items():
+    for layer_name, kv_cache in (layer_kv_caches or kv_caches).items():
         forward_context[layer_name].kv_cache = kv_cache
-    # vLLM #52506 adds ReplaySSM ring trackers on main.
-    utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
+    # #55688 moves ReplaySSM tracker ownership out of cache binding. Older
+    # vLLM versions still require the legacy sharing hook after binding.
+    if vllm_version_is("0.33.0"):
+        utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 
 def bind_kv_cache_to_layers(
@@ -71,11 +76,13 @@ def bind_kv_cache_to_layers(
     allocates per-layer (k, v) tuples, so assign the raw allocation directly,
     matching the Ascend bind_kv_cache patch above.
     """
+    unpacking_layers = (DeepseekV41CacheLayer, AscendStep5CSATailRing, AscendStep5SparseSummaryCacheLayer)
     for layer_name, kv_cache in kv_caches.items():
         layer = forward_context[layer_name]
-        if isinstance(layer, DeepseekV41CacheLayer):
+        if isinstance(layer, unpacking_layers):
             layer.bind_kv_cache(kv_cache)
         else:
             layer.kv_cache = kv_cache
     ordered_layer_names = sorted(kv_caches, key=lambda name: extract_layer_index(name, num_attn_module))
-    utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
+    if vllm_version_is("0.33.0"):
+        utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)

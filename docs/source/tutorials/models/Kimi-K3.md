@@ -262,15 +262,15 @@ Select an image based on your host operating system and start it on every node. 
 
 If you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
+- Install `vllm-ascend` from source; refer to [installation](../../getting_started/installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-Kimi K3 configuration, multimodal processing, reasoning parsing, and tool parsing are registered by vLLM-Ascend. Use a vLLM and vLLM-Ascend source revision that matches the validated version in this document.
+Kimi K3 configuration, multimodal processing, reasoning parsing, and tool parsing are registered by vLLM Ascend. Use a vLLM and vLLM Ascend source revision that matches the validated version in this document.
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
-The A2 capabilities have not changed in this release and remain consistent with **vLLM-Ascend 0.23.0**; no iterative updates have been made.
+The A2 capabilities have not changed in this release and remain consistent with **vLLM Ascend 0.23.0**; no iterative updates have been made.
 
 ### 5.1 Mixed Prefill/Decode Deployment
 
@@ -335,7 +335,6 @@ The A2 capabilities have not changed in this release and remain consistent with 
             --mm-processor-cache-gb 0 \
             --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --limit-mm-per-prompt '{"vision_chunk": 2}' \
             --enable-auto-tool-choice \
             --reasoning-parser kimi_k3 \
@@ -395,7 +394,6 @@ The A2 capabilities have not changed in this release and remain consistent with 
             --mm-processor-cache-gb 0 \
             --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --limit-mm-per-prompt '{"vision_chunk": 2}' \
             --enable-auto-tool-choice \
             --reasoning-parser kimi_k3 \
@@ -471,7 +469,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
 
     The validated mixed deployment uses four Atlas 800I A3 (64GB × 16) nodes. vLLM data parallelism spans the four nodes, each node runs one DP rank, and tensor parallelism uses all 16 NPUs in the node. The resulting topology is DP4/TP16/EP64.
 
-    On Atlas 800I A3, a mixed Prefill/Decode deployment follows the Prefill execution mode. HCCL therefore uses AICPU by default; leave `HCCL_OP_EXPANSION_MODE` unset.
+    On Atlas 800I A3, a mixed Prefill/Decode deployment follows the Prefill execution mode. HCCL therefore uses AI CPU by default; leave `HCCL_OP_EXPANSION_MODE` unset.
 
     Kimi K3 on Atlas 800I A3 does not support jemalloc.
 
@@ -528,7 +526,6 @@ The A2 capabilities have not changed in this release and remain consistent with 
             --mm-processor-cache-gb 0 \
             --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --limit-mm-per-prompt '{"vision_chunk": 2}' \
             --enable-auto-tool-choice \
             --reasoning-parser kimi_k3 \
@@ -588,7 +585,6 @@ The A2 capabilities have not changed in this release and remain consistent with 
             --mm-processor-cache-gb 0 \
             --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --limit-mm-per-prompt '{"vision_chunk": 2}' \
             --enable-auto-tool-choice \
             --reasoning-parser kimi_k3 \
@@ -799,7 +795,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
     | `--data-parallel-size 8`       | Creates eight global DP ranks across eight nodes.                               |
     | `--data-parallel-size-local 1` | Runs one DP rank on the current node.                                           |
     | `--language-model-only`        | Disables the multimodal encoder for this validated A2 baseline.                 |
-    | `--max-model-len 262144`       | Sets a 256K combined input and output context limit.                            |
+    | `--max-model-len 262144`       | Sets a 256k combined input and output context limit.                            |
     | `--compilation-config`         | Uses `FULL_DECODE_ONLY` graph replay with capture sizes `1`, `2`, `4`, and `8`. |
     | `--additional-config`          | Enables NPU graph execution and CPU binding while keeping FlashComm1 disabled.  |
 
@@ -813,7 +809,7 @@ Refer to [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncak
 
 Please refer to the [KV Cache Pool (Ascend Store) Deployment Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_pool_ascend_store.html) for the KV Cache Pool startup method and the Mooncake configuration file.
 
-On 950DT products, use CCU communication on both Prefill and Decode by setting `HCCL_OP_EXPANSION_MODE="CCU_SCHED"`, with `HCCL_BUFFSIZE=800`. On A3, Prefill uses AICPU by default, so leave `HCCL_OP_EXPANSION_MODE` unset in the Prefill command; Decode uses `HCCL_OP_EXPANSION_MODE=AIV`. Both A3 roles use `HCCL_BUFFSIZE=1024`.
+On 950DT products, use CCU communication on both Prefill and Decode by setting `HCCL_OP_EXPANSION_MODE="CCU_SCHED"`, with `HCCL_BUFFSIZE=800`. On A3, Prefill uses AI CPU by default, so leave `HCCL_OP_EXPANSION_MODE` unset in the Prefill command; Decode uses `HCCL_OP_EXPANSION_MODE=AIV`. Both A3 roles use `HCCL_BUFFSIZE=1024`.
 
 This deployment supports DSpark speculative decoding. Select the DSpark checkpoint for your platform from [Section 3.1](#31-model-weight), and configure the same draft-model path and `num_speculative_tokens` on both Prefill and Decode nodes. The configuration uses draft TP8 on 950DT products or draft TP16 on A3, greedy drafting, and seven speculative tokens. On both platforms, Prefill keeps eager execution, while Decode sets the draft model's `enforce_eager` to `false` and retains `FULL_DECODE_ONLY` for the target model. The seventh argument of the engine template is the tensor-parallel size: `8` for 950DT products and `16` for A3.
 
@@ -821,7 +817,7 @@ Kimi K3 on Atlas 800I A3 and 950DT products does not support jemalloc.
 
 The Prefill and Decode templates below assume equal tensor-parallel sizes on both sides. Both `prefill.tp_size` and `decode.tp_size` are taken from the seventh template argument (`$7`) and must match the engine TP: `8` for 950DT products or `16` for A3.
 
-Both platforms use Model Runner V2 and MooncakeConnectorV2 with a maximum model length of `262144` (256K). GPU memory utilization is `0.80` for Prefill and `0.90` for Decode on 950DT products, and `0.80` for both stages on A3. Prefill enables MegaMoE and shared expert DP with shared-expert multistream overlap disabled. Decode enables the recompute scheduler and MLAPO. KV block/interleave sizes are `768` on 950DT products and `384` on A3. On 950DT products with MooncakeConnectorV2, specify the Prefill layer partition only through `VLLM_PP_LAYER_PARTITION`. On A3, retain `VLLM_PP_LAYER_PARTITION="25,25,24,19"` on Prefill and `"pp_layer_partition": "25,25,24,19"` in the KV connector's `prefill` configuration on both Prefill and Decode, including pooled deployment.
+Both platforms use Model Runner V2 and MooncakeConnectorV2 with a maximum model length of `262144` (256k). GPU memory utilization is `0.80` for Prefill and `0.90` for Decode on 950DT products, and `0.80` for both stages on A3. Prefill enables MegaMoE and shared expert DP with shared-expert multistream overlap disabled. Decode enables the recompute scheduler and MLAPO. KV block/interleave sizes are `768` on 950DT products and `384` on A3. On 950DT products with MooncakeConnectorV2, specify the Prefill layer partition only through `VLLM_PP_LAYER_PARTITION`. On A3, retain `VLLM_PP_LAYER_PARTITION="25,25,24,19"` on Prefill and `"pp_layer_partition": "25,25,24,19"` in the KV connector's `prefill` configuration on both Prefill and Decode, including pooled deployment.
 
 The basic templates leave DCP disabled (its default size is `1`).
 
@@ -893,7 +889,6 @@ The basic templates leave DCP disabled (its default size is `1`).
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --enable-prefix-caching \
@@ -971,7 +966,6 @@ The basic templates leave DCP disabled (its default size is `1`).
             --gpu-memory-utilization 0.90 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -1064,7 +1058,6 @@ The basic templates leave DCP disabled (its default size is `1`).
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --enable-prefix-caching \
@@ -1143,7 +1136,6 @@ The basic templates leave DCP disabled (its default size is `1`).
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -1224,7 +1216,7 @@ Key PD settings:
 | KV block / interleave size | Default | `768` / `768` | Default | `384` / `384` |
 | `--max-num-batched-tokens` | `16384` | `768` | `8192` | `8192` |
 | `HCCL_BUFFSIZE` | `800` | `800` | `1024` | `1024` |
-| `HCCL_OP_EXPANSION_MODE` | `CCU_SCHED` | `CCU_SCHED` | Unset (AICPU) | `AIV` |
+| `HCCL_OP_EXPANSION_MODE` | `CCU_SCHED` | `CCU_SCHED` | Unset (AI CPU) | `AIV` |
 | `--max-model-len` | `262144` | `262144` | `262144` | `262144` |
 | `--gpu-memory-utilization` | `0.80` | `0.90` | `0.80` | `0.80` |
 | `enable_fused_mc2` | `2` (MegaMoE) | Omitted | `2` (MegaMoE) | Omitted |
@@ -1236,7 +1228,7 @@ Key PD settings:
 
 ### 5.3 Long-Context and 1M PD Separation Deployment
 
-This deployment uses the same eight-node topology as [Section 5.2](#52-basic-eight-node-pd-separation-deployment): four Prefill nodes and four Decode nodes. Compared with the basic 256K configuration, set `--max-model-len 1048576` on both roles and enable DCP on Decode (`8` on 950DT products or `16` on A3). All other service parameters remain the same.
+This deployment uses the same eight-node topology as [Section 5.2](#52-basic-eight-node-pd-separation-deployment): four Prefill nodes and four Decode nodes. Compared with the basic 256k configuration, set `--max-model-len 1048576` on both roles and enable DCP on Decode (`8` on 950DT products or `16` on A3). All other service parameters remain the same.
 
 When the total input and output length is greater than **65536 tokens**, we recommend enabling DCP on Decode. The 1M limit of `1048576` tokens includes both input and output; reserve space for the generated response.
 
@@ -1306,7 +1298,6 @@ Use the platform-specific DSpark weights from [Section 3.1](#31-model-weight). T
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --enable-prefix-caching \
@@ -1385,7 +1376,6 @@ Use the platform-specific DSpark weights from [Section 3.1](#31-model-weight). T
             --gpu-memory-utilization 0.90 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -1478,7 +1468,6 @@ Use the platform-specific DSpark weights from [Section 3.1](#31-model-weight). T
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --enable-prefix-caching \
@@ -1558,7 +1547,6 @@ Use the platform-specific DSpark weights from [Section 3.1](#31-model-weight). T
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -1639,7 +1627,7 @@ Key PD settings:
 | KV block / interleave size | Default | `768` / `768` | Default | `384` / `384` |
 | `--max-num-batched-tokens` | `16384` | `768` | `8192` | `8192` |
 | `HCCL_BUFFSIZE` | `800` | `800` | `1024` | `1024` |
-| `HCCL_OP_EXPANSION_MODE` | `CCU_SCHED` | `CCU_SCHED` | Unset (AICPU) | `AIV` |
+| `HCCL_OP_EXPANSION_MODE` | `CCU_SCHED` | `CCU_SCHED` | Unset (AI CPU) | `AIV` |
 | `--max-model-len` | `1048576` | `1048576` | `1048576` | `1048576` |
 | `--gpu-memory-utilization` | `0.80` | `0.90` | `0.80` | `0.80` |
 | `enable_fused_mc2` | `2` (MegaMoE) | Omitted | `2` (MegaMoE) | Omitted |
@@ -1697,7 +1685,7 @@ ock.mmc.local_service.dram.size = 0GB
 ock.mmc.local_service.max.dram.size = 1024GB
 ```
 
-Use [`mem_scan.py`](https://gitcode.com/Ascend/memfabric_hybrid/blob/master/src/smem/python/memfabric_hybrid/memfabric_hybrid/mem_scan.py) to determine the available memory on every node. Assuming the scan reports at least 600 GB of available memory, manually create `<MEMCACHE_CONFIG_DIR>/mmc-local-standalone.conf` on every node with the following content. Replace `<META_SERVICE_IP>` with the MetaService node IP and change the DRAM capacity to values validated for that node:
+Use [`mem_scan.py`](https://gitcode.com/Ascend/memfabric_hybrid/blob/master/src/smem/python/memfabric_hybrid/memfabric_hybrid/mem_scan.py) to determine the available memory on every node. Assuming the scan reports at least 600 GB of available memory, manually create `<MEMCACHE_CONFIG_DIR>/mmc-local-standalone.conf` on every node with the following content; Replace `<META_SERVICE_IP>` with the MetaService node IP and change the DRAM capacity to values validated for that node:
 
 ```ini
 # MetaService node IP
@@ -1836,7 +1824,6 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --enable-prefix-caching \
@@ -1934,7 +1921,6 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
             --gpu-memory-utilization 0.90 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -2045,7 +2031,6 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --enable-prefix-caching \
@@ -2144,7 +2129,6 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
             --gpu-memory-utilization 0.80 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
-            --no-mm-device-do-normalize \
             --mm-processor-cache-gb 1 \
             --skip-mm-profiling \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -2324,7 +2308,7 @@ After all engines are ready, start the load-balancing proxy as described in [PD 
 
 ## 7 Accuracy Evaluation
 
-Here is one accuracy evaluation method for Kimi K3.
+Here is one accuracy evaluation method for Kimi K3:
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 | ----- | ----- | ----- | ----- | ----- | ----- |
@@ -2381,7 +2365,7 @@ vllm bench serve \
 
 ### 9.1 Recommended Configurations
 
-The recommended configurations are the same as those specified in [Chapter 5, “Online Service Deployment”](#5-online-service-deployment).
+The recommended configurations are the same as those specified in [Section 5](#5-online-service-deployment).
 
 ### 9.2 Tuning Guide
 
@@ -2401,6 +2385,3 @@ A: Configure `--tokenizer-mode kimi_k3`, `--enable-auto-tool-choice`, `--reasoni
 A: TP size must divide the checkpoint's attention-head count. It also affects KDA state layout and expert placement, so validate memory capacity and communication performance together.
 - **Q: How is DSpark enabled in PD separation?**
 A: Download the platform-specific DSpark checkpoint listed in [Section 3.1](#31-model-weight), and set `DRAFT_MODEL_PATH` on both Prefill and Decode nodes to its local directory. Use the role-specific `--speculative-config` shown in Sections 5.2, 5.3, or 5.4, keeping the same draft checkpoint and `num_speculative_tokens` on both sides. Prefill must retain `--enforce-eager`.
-
-- **Q: Which option is required for multimodal image input?**
-A: Add `--no-mm-device-do-normalize` to every engine startup command, including Prefill, Decode, and headless workers. This keeps image pixel rescaling and normalization on the CPU, because the current Ascend Kimi vision wrapper does not apply device-side normalization. Omitting this option can degrade image accuracy.

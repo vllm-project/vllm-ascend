@@ -185,6 +185,10 @@ separate images.
 
 === "950DT products"
 
+    Prepare Ascend HDK `{{ release_hdk_version_a5 }}` on each host and verify
+    the driver and firmware with `npu-smi info`. See the
+    [validated software stack](../../getting_started/installation.md#installation-hardware-software-stack).
+
     On each participating server, pull the 950DT Ubuntu release image. Set
     `MODEL_ROOT` to the parent directory of the checkpoint.
 
@@ -287,6 +291,7 @@ vLLM Ascend revision.
         --reasoning-parser deepseek_v41 \
         --enable-auto-tool-choice \
         --trust-remote-code \
+        --no-swa-bounded-replay \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --speculative-config '{"method":"dspark","num_speculative_tokens":5}' \
         --additional-config '{
@@ -337,8 +342,9 @@ vLLM Ascend revision.
         --quantization ascend \
         --block-size 128 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --speculative-config '{"method":"dspark","num_speculative_tokens":5}' \
         --async-scheduling \
-        --swa-bounded-replay \
+        --no-swa-bounded-replay \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
             "ascend_compilation_config":{
@@ -373,8 +379,8 @@ vLLM Ascend revision.
         Decode path while Prefill remains outside the captured graph.
     - `--safetensors-load-strategy lazy` avoids eagerly materializing the whole
         checkpoint during loading.
-    - `--swa-bounded-replay` enables SWA bounded replay.
-    - `enable_flashcomm1: false` disables FlashComm for compatibility with SWA bounded replay.
+    - `--no-swa-bounded-replay` disables SWA bounded replay.
+    - `enable_flashcomm1: false` keeps FlashComm disabled for this A3 configuration.
     - `enable_fused_mc2` and `enable_shared_expert_dp` enable the A3 MoE and
         communication optimizations
         used by this configuration. `enable_cpu_binding` pins worker processes to
@@ -831,7 +837,7 @@ vLLM Ascend revision.
     the Decode template. Increasing global DP to 16 gives EP16. Retain its
     batch limits, graph mode, DSpark, and other model settings as a starting point.
 
-    Verify [cross-node communication](../../getting_started/installation.md#installation-multi-node-interconnect)
+    Verify [Verify Multi-node Communication](../../getting_started/installation.md#installation-multi-node-interconnect)
     first. Set the Decode template's local IP and network interface separately
     on each Decode server. Both servers use the first Decode server's IP as
     the DP master:
@@ -2305,7 +2311,7 @@ Select the tab for the target hardware.
       is not supported by the layerwise path.
 
     For Memcache configuration, capacity tuning, and troubleshooting, refer to the
-    [KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+    [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
 
 ### 5.4 1P1D Deployment with Mooncake KV Cache Pool
 
@@ -2370,8 +2376,6 @@ zero contributed capacity and SSD offload disabled:
 }
 ```
 
-Start mooncake_master:
-
 After the configurations are ready, start the mooncake_master process on the
 Prefill node; the validated configuration runs it there, and any node reachable
 from both roles works as well. Wait until the process stays alive and port
@@ -2381,14 +2385,11 @@ from both roles works as well. Wait until the process stays alive and port
 mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_ratio 0.1 --default_kv_lease_ttl 11000 --enable_offload=true --offload_on_evict=true --offload_force_evict=false --client_ttl=120
 ```
 
-eviction_high_watermark_ratio determines the watermark where Mooncake Store will perform eviction.
-eviction_ratio determines the portion of stored objects that would be evicted.
-default_kv_lease_ttl controls the default lease TTL for KV objects (milliseconds).
-configure it via --default_kv_lease_ttl and keep it larger than ASCEND_CONNECT_TIMEOUT and ASCEND_TRANSFER_TIMEOUT.
-`--enable_offload` and `--offload_on_evict` enable the SSD tier, so objects
-evicted from pool DRAM are written under the Prefill node's `ssd_offload_path`
-instead of being dropped. `--client_ttl=120` keeps a slow-compiling worker from
-being removed from the pool during startup.
+- `eviction_high_watermark_ratio`: Determines the high watermark where Mooncake Store triggers eviction.
+- `eviction_ratio`: Determines the share of stored objects to be evicted.
+- `default_kv_lease_ttl`: Controls the default lease TTL (milliseconds) for KV objects. Configured via `--default_kv_lease_ttl`, and should be larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
+- `--enable_offload` and `--offload_on_evict`: Enable the SSD tier. Objects evicted from the DRAM pool are written to the Prefill node's `ssd_offload_path` rather than dropped.
+- `--client_ttl=120`: Avoid slow-compiling workers from being removed from the pool during startup.
 
 #### 5.4.2 Start the Prefill Node with Pooling
 

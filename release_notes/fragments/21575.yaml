@@ -1,0 +1,8 @@
+pr: 21575
+entries:
+  - category: bugfix
+    text: >-
+      Fixed missed prefix-cache reuse during chunked prefill for Mamba/KDA
+      models on KV consumers using mamba_cache_mode="align".
+      Preserving reusable cache boundaries may require additional prefill
+      scheduling iterations.

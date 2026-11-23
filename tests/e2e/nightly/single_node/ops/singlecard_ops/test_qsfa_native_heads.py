@@ -64,14 +64,20 @@ def _make_case(heads, rope_dim, query_tokens, count):
     return inputs, key, dequant[selected, 0].float()
 
 
-def _check_reference(result, query, key, value, scale, return_lse):
+def _check_reference(result, query, key, value, scale, return_lse, *, empty_sparse_length=None):
     output, maximum, total = (tensor.cpu().float() for tensor in result)
     assert torch.isfinite(output).all()
     if value.shape[0] == 0:
         assert torch.count_nonzero(output) == 0
         if return_lse:
-            assert torch.count_nonzero(total) == 0
-            assert torch.isneginf(maximum + total.log()).all()
+            if get_ascend_device_type() in (AscendDeviceType.A2, AscendDeviceType.A3):
+                # Arch22 preserves the masked logits' raw MAX/SUM, unlike A5.
+                assert empty_sparse_length is not None
+                torch.testing.assert_close(maximum, torch.full_like(maximum, -2e38), rtol=0, atol=0)
+                torch.testing.assert_close(total, torch.full_like(total, empty_sparse_length), rtol=0, atol=0)
+            else:
+                assert torch.count_nonzero(total) == 0
+                assert torch.isneginf(maximum + total.log()).all()
         return
     scores = query.float() @ key.T * scale
     expected = scores.softmax(-1) @ value
@@ -85,8 +91,9 @@ def _run_adaptor(inputs, return_lse, *, packed=False):
     rope_dim = inputs["rope_head_dim"]
     query = inputs["query"]
     nope, rope = query.split((512, rope_dim), dim=-1)
+    # Native heads and the three-result contract require Kimi's custom QSFA path.
     return get_device_adaptor()._execute_kv_quant_sparse_flash_attention_vllm(
-        SimpleNamespace(scale=inputs["scale_value"], qk_rope_head_dim=rope_dim),
+        SimpleNamespace(scale=inputs["scale_value"], qk_rope_head_dim=rope_dim, is_kimi_k31=True),
         nope,
         rope,
         inputs["key"],
@@ -108,7 +115,15 @@ def test_native_heads(heads, rope_dim, query_tokens, count, sparse_mode, return_
     inputs, key, value = _make_case(heads, rope_dim, query_tokens, count)
     inputs["sparse_mode"] = sparse_mode
     result = _run_adaptor(inputs, return_lse)
-    _check_reference(result, inputs["query"].cpu(), key, value, inputs["scale_value"], return_lse)
+    _check_reference(
+        result,
+        inputs["query"].cpu(),
+        key,
+        value,
+        inputs["scale_value"],
+        return_lse,
+        empty_sparse_length=min(inputs["sparse_indices"].shape[-1], inputs["key"].shape[0] * inputs["key"].shape[1]),
+    )
 
 
 @pytest.mark.parametrize("heads", [12, 24, 65, 96, 97, 128])
@@ -135,6 +150,9 @@ def test_mixed_empty_and_nonempty_rows(heads, return_lse):
             value[:count],
             inputs["scale_value"],
             return_lse,
+            empty_sparse_length=min(
+                inputs["sparse_indices"].shape[-1], inputs["key"].shape[0] * inputs["key"].shape[1]
+            ),
         )
 
 

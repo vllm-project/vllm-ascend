@@ -6,6 +6,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import Mock
 
 import pytest
+import torch
 
 from vllm_ascend.models.qwen4_exp import cpu_length_sync as policy
 
@@ -13,10 +14,8 @@ from vllm_ascend.models.qwen4_exp import cpu_length_sync as policy
 @pytest.fixture
 def runner():
     try:
-        from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSAMetadataBuilder
-
         from vllm_ascend.models.qwen4_exp.model_state import AscendQwen4ExpModelState
-        from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend
+        from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend, AscendQSAMetadataBuilder
         from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
     except ModuleNotFoundError as exc:
         if exc.name == "vllm.models.qwen4_exp" or (exc.name or "").startswith("vllm.models.qwen4_exp."):
@@ -25,7 +24,7 @@ def runner():
 
     group = NS(
         backend=AscendQSABackend,
-        get_metadata_builder=lambda _: object.__new__(Qwen4ExpQSAMetadataBuilder),
+        get_metadata_builder=lambda _: object.__new__(AscendQSAMetadataBuilder),
     )
     draft = object.__new__(AscendMTPSpeculator)
     draft.attn_groups = [[group]]
@@ -47,9 +46,37 @@ def test_incomplete_runtime_keeps_exact_lengths():
         assert policy.can_skip_qwen_cpu_length_sync(runtime) is False
 
 
+def test_ple_context_uses_each_pcp_segment_start(runner):
+    state = runner.model_state
+    state.ngram_context = torch.empty((3, 2), dtype=torch.int32)
+    state.ngram_context_offsets = torch.tensor([-2, -1])
+    state.ngram_eos_token_id = 99
+    batch = NS(
+        pcp=object(),
+        num_reqs=2,
+        num_reqs_after_padding=3,
+        seq_lens=torch.tensor([2, 8]),
+        query_start_loc=torch.tensor([0, 2, 4]),
+        idx_mapping=torch.tensor([0, 0]),
+    )
+    req_states = NS(all_token_ids=NS(gpu=torch.arange(10, 18, dtype=torch.int32).view(1, -1)))
+
+    context = state._prepare_ngram_context(batch, req_states)
+
+    torch.testing.assert_close(context, torch.tensor([[99, 99], [14, 15], [99, 99]], dtype=torch.int32))
+
+
 def test_supported_model_enables_policy_by_default(runner):
     runner.model_state.initialize_spec_cpu_length_sync(runner)
     assert runner.model_state.can_skip_spec_cpu_length_sync() is True
+
+
+def test_upstream_qsa_builder_remains_supported(runner):
+    from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSAMetadataBuilder
+
+    group = runner.attn_groups[0][0]
+    group.get_metadata_builder = lambda _: object.__new__(Qwen4ExpQSAMetadataBuilder)
+    assert policy.can_skip_qwen_cpu_length_sync(runner) is True
 
 
 @pytest.mark.parametrize("multimodal", [False, True])

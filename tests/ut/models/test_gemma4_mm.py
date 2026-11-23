@@ -113,7 +113,9 @@ def test_mxfp4_vit_linear_registers_and_loads_weight_scale():
             "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config",
             return_value=current_config,
         ),
+        patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile") as mx_profile,
     ):
+        mx_profile.return_value.supports_weight_format.return_value = True
         linear = AscendReplicatedLinear(
             input_size=96,
             output_size=64,
@@ -175,7 +177,9 @@ def test_mxfp8_vit_linear_uses_mxfp8_quant_method():
             "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
             return_value=current_config,
         ),
+        patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile") as mx_profile,
     ):
+        mx_profile.return_value.supports_weight_format.return_value = True
         linear = AscendReplicatedLinear(
             input_size=96,
             output_size=64,

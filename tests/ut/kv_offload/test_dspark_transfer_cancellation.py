@@ -147,12 +147,16 @@ def _fixture(names=("cancel",), *, admit=True):
     upstream.waiting = Mock()
     upstream.skipped_waiting = Mock()
     upstream.kv_holding_waiting = Mock()
+    upstream.async_kv_waiting = Mock()
+    upstream._aborted_kv_loads = set()
     upstream.deferred_waiting = set()
     upstream.finished_recving_kv_req_ids = set()
     upstream.failed_recving_kv_req_ids = set()
     upstream.finished_req_ids = set()
     upstream.finished_req_ids_dict = None
     upstream._inflight_prefills = set()
+    upstream._parked_reservations = {}
+    upstream._parked_reserved_blocks = 0
     upstream._kv_fetch_stages = None
     upstream.aux_output_connector = None
     upstream.ec_connector = None

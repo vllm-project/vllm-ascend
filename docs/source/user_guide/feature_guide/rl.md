@@ -171,10 +171,7 @@ Ascend configuration.
 
 #### Sparse HCCL
 
-For sparse checkpoint updates, follow the upstream [Sparse NCCL
-guide](https://docs.vllm.ai/en/latest/training/weight_transfer/nccl/#sparse-nccl)
-for patch semantics and the update lifecycle. On Ascend, select `sparse_hccl`
-and enable RL mode:
+For sparse checkpoint updates, follow the upstream [Sparse NCCL guide](https://docs.vllm.ai/en/latest/training/weight_transfer/nccl/#sparse-nccl) for patch semantics and the update lifecycle. On Ascend, select `sparse_hccl` and enable RL mode:
 
 ```bash
 vllm serve /path/to/checkpoint \

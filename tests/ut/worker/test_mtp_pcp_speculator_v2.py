@@ -3,8 +3,8 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import json
-from contextlib import nullcontext
-from copy import deepcopy
+from contextlib import ExitStack, nullcontext
+from copy import copy, deepcopy
 from dataclasses import replace as dataclass_replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -21,24 +21,24 @@ from vllm.config import (
     VllmConfig,
     replace,
 )
+from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.spec_decode import utils as spec_utils
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as target_speculator_module
 
 from vllm_ascend.attention.mla_v1 import AscendMLADecodeMetadata, AscendMLAMetadata
+from vllm_ascend.patch.worker import patch_dspark
 from vllm_ascend.platform import _validate_eplb_config
 from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.worker.v2.spec_decode.eagle import (
-    speculator as eagle_speculator_module,
-)
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
     AscendMTPSpeculator,
 )
-from vllm_ascend.worker.v2.spec_decode.pcp_utils import build_dspark_draft_config, disable_profiling_chunk_for_draft
+from vllm_ascend.worker.v2.spec_decode.pcp_utils import build_dspark_draft_config
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import (
     speculator as speculator_module,
 )
@@ -119,10 +119,12 @@ def eplb_worker_config(tmp_path):
             "vllm.model_executor.models.ModelRegistry.inspect_model_cls",
             return_value=(model_info, model_info.architecture),
         ),
-        patch("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True),
-        patch("vllm.config.vllm.HAS_TRITON", True),
+        ExitStack() as legacy_runner,
         patch("vllm.config.parallel.current_platform.is_cuda_alike", return_value=True),
     ):
+        if vllm_version_is("0.33.0"):
+            legacy_runner.enter_context(patch("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True))
+            legacy_runner.enter_context(patch("vllm.config.vllm.HAS_TRITON", True))
         # Keep the model dtype float-compatible with the bfloat16 KV cache the
         # draft loader override below sets: vLLM main rejects a mismatched
         # explicit float KV dtype.
@@ -233,6 +235,45 @@ def test_dspark_draft_config_leaves_dcp_to_upstream(eplb_worker_config):
     assert config.parallel_config.enable_eplb
 
 
+def test_dspark_loader_reconstructs_physical_topology_then_exposes_query_view(eplb_worker_config, monkeypatch):
+    parallel = replace(
+        eplb_worker_config.parallel_config,
+        decode_context_parallel_size=8,
+        cp_kv_cache_interleave_size=4,
+        dcp_kv_cache_interleave_size=4,
+        enable_eplb=False,
+        eplb_config=dataclass_replace(eplb_worker_config.parallel_config.eplb_config, num_redundant_experts=0),
+    )
+    config = replace(eplb_worker_config, parallel_config=parallel)
+    spec = config.speculative_config
+    spec.method = "dspark"
+    spec.draft_model_config.hf_config.model_type = "k3_dspark"
+    spec.target_parallel_config = parallel
+    assert spec.draft_parallel_config.prefill_context_parallel_size == 1
+    assert spec.draft_parallel_config.decode_context_parallel_size == 1
+
+    # The loader receives the PCP=1 query view created by DFlash's constructor.
+    config.parallel_config = copy(parallel)
+    config.parallel_config.prefill_context_parallel_size = 1
+    if vllm_version_is("0.33.0"):
+        monkeypatch.setattr(spec_utils, "get_pp_group", lambda: SimpleNamespace(world_size=1))
+    with (
+        patch(
+            "vllm.model_executor.model_loader.get_model", side_effect=RuntimeError("reached model construction")
+        ) as get_model,
+        pytest.raises(RuntimeError, match="reached model construction"),
+    ):
+        patch_dspark.speculator_module.load_dspark_model(torch.nn.Module(), config)
+
+    loaded = get_model.call_args.kwargs["vllm_config"].parallel_config
+    assert loaded.pipeline_parallel_size == loaded.prefill_context_parallel_size == 1
+    assert loaded.decode_context_parallel_size == 8
+    assert loaded.cp_kv_cache_interleave_size == loaded.dcp_kv_cache_interleave_size == 4
+    assert parallel.prefill_context_parallel_size == parallel.decode_context_parallel_size == 8
+    with pytest.raises(ValueError, match="must be divisible"):
+        patch_dspark.dspark_utils.replace(parallel, prefill_context_parallel_size=1)
+
+
 def test_mtp_draft_config_keeps_target_pcp_topology(eplb_worker_config):
     """Sharded MTP drafts attend with the target's PCP partition (upstream #56107)."""
     speculator = object.__new__(AscendMTPSpeculator)
@@ -268,11 +309,16 @@ def test_mtp_eplb_draft_reaches_inherited_loader(eplb_worker_config, validate_ep
         raise RuntimeError("reached model construction")
 
     with (
-        patch.object(spec_utils, "get_pp_group", return_value=SimpleNamespace(world_size=2)),
+        ExitStack() as pp_context,
         patch.object(eagle_utils, "get_model", side_effect=get_draft_model) as get_model,
         pytest.raises(RuntimeError, match="reached model construction"),
     ):
+        if vllm_version_is("0.33.0"):
+            pp_context.enter_context(
+                patch.object(spec_utils, "get_pp_group", return_value=SimpleNamespace(world_size=2))
+            )
         speculator.load_draft_model(torch.nn.Module(), set())
+    assert speculator.vllm_config is eplb_worker_config
     loading_config = get_model.call_args.kwargs["vllm_config"]
     assert loading_config.parallel_config.enable_eplb
     assert loading_config.parallel_config.enable_expert_parallel
@@ -280,7 +326,8 @@ def test_mtp_eplb_draft_reaches_inherited_loader(eplb_worker_config, validate_ep
     assert loading_config.kernel_config.moe_backend == "auto"
     assert loading_config.cache_config.cache_dtype == "bfloat16"
     assert loading_config.attention_config.backend == AttentionBackendEnum.CUSTOM
-    assert loading_config.load_config.load_format == "auto"
+    expected_format = "auto" if vllm_version_is("0.33.0") else "fastsafetensors"
+    assert loading_config.load_config.load_format == expected_format
     assert speculator.draft_vllm_config.parallel_config.enable_eplb
     assert eplb_worker_config.parallel_config.enable_eplb
     assert eplb_worker_config.parallel_config.prefill_context_parallel_size == 8
@@ -322,7 +369,7 @@ def _mla_pcp_decode_metadata(num_tokens, query_ends):
 def test_pcp_draft_mla_query_lengths_match_real_decode_rows(num_tokens, query_ends, expected):
     target = _mla_pcp_decode_metadata(num_tokens, query_ends)
     target_metadata = {"mtp": target}
-    draft = AscendMTPSpeculator._get_pcp_draft_prefill_metadata(target_metadata)["mtp"]
+    draft = AscendMTPSpeculator._get_draft_prefill_metadata(target_metadata)["mtp"]
 
     # This is the FIA TND contract that failed on PCP1 with Q=4, offsets=[4, 8].
     assert draft.decode.actual_seq_lengths_q == expected
@@ -344,8 +391,83 @@ def test_pcp_draft_metadata_preserves_other_attention_paths():
     prefill_only.decode = None
     other_backend = SimpleNamespace(num_decode_tokens=4, decode=SimpleNamespace(actual_seq_lengths_q=[4, 8]))
     metadata = {"prefill": prefill_only, "other": other_backend, "missing": None}
-    assert AscendMTPSpeculator._get_pcp_draft_prefill_metadata(metadata) == metadata
+    assert AscendMTPSpeculator._get_draft_prefill_metadata(metadata) == metadata
     assert other_backend.decode.actual_seq_lengths_q == [4, 8]
+
+
+@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
+@pytest.mark.parametrize("query_ends", [[2, 4, 6, 8], [2]])
+def test_non_pcp_propose_handles_target_graph_padding(mode, query_ends):
+    speculator = object.__new__(AscendMTPSpeculator)
+    speculator.pcp_manager = None
+    speculator.draft_attn_layer_names = {"mtp"}
+    speculator.dp_size = 1
+    speculator.dp_rank = 0
+    speculator.max_num_reqs = 4
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=32), parallel_config=object())
+    speculator.can_reuse_target_attn_metadata = True
+    speculator.input_buffers = object()
+    speculator.last_token_indices = torch.zeros(4, dtype=torch.int64)
+    speculator.current_draft_step = torch.tensor(0)
+    speculator.hidden_states = torch.zeros(8, 1)
+    speculator.draft_tokens = torch.zeros(4, 1, dtype=torch.int64)
+    speculator.prefill_cudagraph_manager = MagicMock()
+    batch = SimpleNamespace(
+        num_reqs=1,
+        num_tokens=2,
+        num_tokens_after_padding=8,
+        num_scheduled_tokens=torch.tensor([2]),
+        seq_lens_cpu_upper_bound=torch.tensor([2]),
+        idx_mapping=torch.tensor([0]),
+        decode_graph_eligible=True,
+    )
+    target = _mla_pcp_decode_metadata(2, query_ends)
+    other = SimpleNamespace()
+    target_metadata = {"mtp": target, "target_only": other}
+    speculator.model_state = SimpleNamespace(attn_metadata=target_metadata)
+    slots = {"mtp": target.slot_mapping}
+    batch_desc = SimpleNamespace(cg_mode=mode, num_tokens=8)
+
+    with (
+        patch.object(speculator_module, "build_attn_metadata_wrapper", return_value=nullcontext()),
+        patch.object(speculator_module, "torch_gather_wrapper", return_value=nullcontext()),
+        patch.object(speculator, "_lmhead_pad_size_context", return_value=nullcontext()),
+        patch.object(speculator, "_copy_request_inputs"),
+        patch.object(speculator, "_prepare_eplb_forward"),
+        patch.object(speculator, "on_prefill_begin"),
+        patch.object(speculator, "on_prefill_end"),
+        patch.object(target_speculator_module, "prepare_prefill_inputs"),
+        patch.object(target_speculator_module, "dispatch_cg_and_sync_dp", return_value=(batch_desc, None)),
+        patch.object(speculator_module.TargetDependentARSpeculator, "_prefill") as parent,
+    ):
+        speculator.propose(batch, target_metadata, slots, torch.zeros(8, 1), *[None] * 7, num_speculative_tokens=1)
+
+    assert speculator.model_state.attn_metadata is target_metadata
+    assert target_metadata == {"mtp": target, "target_only": other}
+    assert target.decode.actual_seq_lengths_q == query_ends
+
+    replay = speculator.prefill_cudagraph_manager.run_fullgraph
+    if mode == CUDAGraphMode.FULL:
+        replay.assert_called_once_with(batch_desc)
+        parent.assert_not_called()
+        return
+
+    replay.assert_not_called()
+    parent.assert_called_once()
+    passed_metadata = parent.call_args.args[2]
+    assert set(passed_metadata) == {"mtp"}
+    draft = passed_metadata["mtp"]
+    expected = [2] * len(query_ends)
+    assert draft.decode.actual_seq_lengths_q == expected
+    assert draft.slot_mapping is target.slot_mapping
+    assert draft.decode.seq_lens_list is target.decode.seq_lens_list
+    assert parent.call_args.args[0:2] == (1, 8)
+    assert parent.call_args.args[3] is slots
+    assert parent.call_args.args[5] == mode
+    if expected != query_ends:
+        assert draft is not target and draft.decode is not target.decode
+    else:
+        assert draft is target
 
 
 @pytest.mark.parametrize("pcp_enabled", [False, True])
@@ -353,6 +475,7 @@ def test_pcp_draft_metadata_preserves_other_attention_paths():
 @pytest.mark.parametrize("dummy_run", [False, True])
 def test_propose_renegotiates_pcp_draft_dp_sync(pcp_enabled, mismatch, dummy_run) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
+    speculator.enable_adaptive_verification = False
     speculator.dp_size = 2
     speculator.pcp_manager = object() if pcp_enabled else None
     input_batch = object()
@@ -388,7 +511,7 @@ def test_propose_renegotiates_pcp_draft_dp_sync(pcp_enabled, mismatch, dummy_run
     assert parent.call_args.args[11] is (None if pcp_enabled else dp_sync)
     assert speculator.input_batch is input_batch
     passed_metadata = parent.call_args.args[1]["mtp"]
-    assert passed_metadata.decode.actual_seq_lengths_q == ([4, 4] if pcp_enabled else [4, 8])
+    assert passed_metadata.decode.actual_seq_lengths_q == [4, 4]
     assert attn_metadata["mtp"].decode.actual_seq_lengths_q == [4, 8]
 
 
@@ -452,111 +575,11 @@ def test_capture_follows_upstream_contract() -> None:
     assert all(n == 4 for name, n in events if name.startswith("on_"))
 
 
-def test_eagle_draft_config_disables_profiling_chunk() -> None:
-    additional_config = {"scheduler_config": {"profiling_chunk_config": {"enabled": "yes"}}}
-    target_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            pipeline_parallel_size=2,
-            prefill_context_parallel_size=2,
-            enable_expert_parallel=True,
-            enable_eplb=True,
-        ),
-        additional_config=additional_config,
-    )
-    speculator = object.__new__(AscendEagleSpeculator)
-    # Delegation to the base's _create_draft_vllm_config reads these too.
-    speculator.vllm_config = target_config
-    target_config.cache_config = SimpleNamespace()
-    target_config.parallel_config.decode_context_parallel_size = 1
-    speculator.draft_model_config = SimpleNamespace(is_moe=False)
-
-    with (
-        patch.object(eagle_speculator_module, "replace", side_effect=_fake_config_replace),
-        patch.object(speculator_module, "replace", side_effect=_fake_config_replace),
-    ):
-        draft_config = speculator._create_draft_vllm_config()
-
-    assert draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is False
-    assert target_config.additional_config is additional_config
-    assert additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] == "yes"
-    assert draft_config.parallel_config.pipeline_parallel_size == 1
-    assert draft_config.parallel_config.is_moe_model is False
-    # Eagle drafts shard prefill with the target, so they keep its PCP topology.
-    assert draft_config.parallel_config.prefill_context_parallel_size == 2
-
-
-@pytest.mark.parametrize(("enabled", "legacy"), [(True, False), ("yes", True)])
-def test_disable_profiling_chunk_for_draft_accepts_pydantic_true_values(enabled, legacy):
-    profiling_chunk = {"enabled": enabled, "min_chunk": 128}
-    if legacy:
-        additional_config = {"profiling_chunk_config": profiling_chunk, "enable_cpu_binding": True}
-    else:
-        additional_config = {
-            "scheduler_config": {"profiling_chunk_config": profiling_chunk},
-            "enable_cpu_binding": True,
-        }
-    config = _config(additional_config)
-
-    with disable_profiling_chunk_for_draft(config):
-        draft_additional_config = config.additional_config
-        draft_profiling_chunk = (
-            draft_additional_config["profiling_chunk_config"]
-            if legacy
-            else draft_additional_config["scheduler_config"]["profiling_chunk_config"]
-        )
-        assert draft_profiling_chunk == {"enabled": False, "min_chunk": 128}
-        assert draft_additional_config is not additional_config
-        assert draft_profiling_chunk is not profiling_chunk
-
-    assert config.additional_config is additional_config
-    assert profiling_chunk["enabled"] == enabled
-
-
-@pytest.mark.parametrize(("pp_size", "enabled"), [(1, True), (2, "off")])
-def test_disable_profiling_chunk_for_draft_noop(pp_size, enabled):
-    additional_config = {"profiling_chunk_config": {"enabled": enabled}}
-    config = _config(additional_config, pp_size=pp_size)
-
-    with disable_profiling_chunk_for_draft(config):
-        assert config.additional_config is additional_config
-
-
-def test_disable_profiling_chunk_for_draft_uses_nested_precedence():
-    additional_config = {
-        "scheduler_config": {"profiling_chunk_config": {"enabled": False}},
-        "profiling_chunk_config": {"enabled": True},
-    }
-    config = _config(additional_config)
-
-    with disable_profiling_chunk_for_draft(config):
-        assert config.additional_config is additional_config
-
-
-def test_disable_profiling_chunk_for_draft_restores_after_failure():
-    additional_config = {"scheduler_config": {"profiling_chunk_config": {"enabled": True}}}
-    config = _config(additional_config)
-    expected_context = pytest.raises(RuntimeError, match="draft failed")
-
-    with expected_context, disable_profiling_chunk_for_draft(config):
-        assert config.additional_config is not additional_config
-        raise RuntimeError("draft failed")
-
-    assert config.additional_config is additional_config
-
-
-def test_disable_profiling_chunk_for_draft_rejects_invalid_boolean():
-    config = _config({"profiling_chunk_config": {"enabled": "sometimes"}})
-
-    with (
-        pytest.raises(ValueError, match="additional_config.profiling_chunk_config.enabled must be a boolean"),
-        disable_profiling_chunk_for_draft(config),
-    ):
-        pass
-
-
 def test_eagle_inherited_loader_keeps_upstream_construction_tag(eplb_worker_config):
     speculator = object.__new__(AscendEagleSpeculator)
     speculator.vllm_config = eplb_worker_config
+    speculator.draft_model_config = eplb_worker_config.speculative_config.draft_model_config
+    speculator.draft_vllm_config = speculator._create_draft_vllm_config()
     original_tag = backends.model_tag
     seen = []
 
@@ -568,10 +591,15 @@ def test_eagle_inherited_loader_keeps_upstream_construction_tag(eplb_worker_conf
         raise RuntimeError("observed actual inherited EAGLE loader")
 
     with (
-        patch.object(spec_utils, "get_pp_group", return_value=SimpleNamespace(world_size=1)),
+        ExitStack() as pp_context,
         patch.object(eagle_utils, "get_model", side_effect=inspect_construction),
         pytest.raises(RuntimeError, match="observed actual inherited EAGLE loader"),
     ):
+        if vllm_version_is("0.33.0"):
+            pp_context.enter_context(
+                patch.object(spec_utils, "get_pp_group", return_value=SimpleNamespace(world_size=1))
+            )
         speculator.load_draft_model(torch.nn.Module(), set())
+    assert speculator.vllm_config is eplb_worker_config
     assert seen == ["eagle_head"]
     assert backends.model_tag == original_tag

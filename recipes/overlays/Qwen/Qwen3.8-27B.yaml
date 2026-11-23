@@ -8,6 +8,11 @@ variants:
     vram_minimum_gb: 39
     supported_hardware:
       - ascend_950pr
+      - ascend_910b
+    # TP2 on Atlas 800I A2 (the layout verified in the vLLM Ascend tutorial);
+    # 950PR keeps the single-NPU auto fit.
+    tp:
+      ascend_910b: 2
     default_modes:
       spec_decoding: qwen3_5_mtp
     extra_args:
@@ -27,6 +32,31 @@ variants:
     hardware_overrides:
       ascend_950pr:
         docker_image: quay.io/ascend/vllm-ascend:qwen3.8-a5
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        install:
+          pip: false
+        docker_serve_command: vllm serve
+        extra_args:
+          - '--served-model-name'
+          - qwen3.8
+          - '--max-num-seqs'
+          - '32'
+          - '--max-model-len'
+          - '133120'
+          - '--trust-remote-code'
+          - '--dtype'
+          - bfloat16
+          - '--mm-processor-cache-gb'
+          - '0'
+          - '--mm-processor-cache-type'
+          - shm
+          - '--gpu-memory-utilization'
+          - '0.85'
+          - '--compilation-config'
+          - '{"cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128],"cudagraph_mode": "FULL_DECODE_ONLY"}'
+        extra_env:
+          VLLM_USE_MODELSCOPE: 'True'
     description: 'ModelSlim INT8 W8A8 for Ascend NPU — 32.1 GB: 1 NPU. Requires --quantization ascend.'
   fp8:
     hardware_overrides:
@@ -34,9 +64,37 @@ variants:
         docker_image: quay.io/ascend/vllm-ascend:nightly-main-a5
     supported_hardware:
       - ascend_950pr
+# The Ascend images ship no vllm-rs binary, so the Rust frontend aborts at
+# startup (FileNotFoundError: vllm-rs). The preset below pins the Python
+# frontend on 910B only — presets match their hardware exactly, so 950PR
+# renderings keep whatever the core recipe selects for them.
+presets:
+  ascend_910b_python:
+    label: Python frontend (no vllm-rs in the A2 image)
+    hardware: ascend_910b
+    default: true
+    variants: [ascend_w8a8]
+    source:
+      label: vLLM Ascend tutorial — Qwen3.8-27B on Atlas 800I A2
+      href: https://docs.vllm.ai/projects/ascend/zh-cn/main/tutorials/models/Qwen3.8-27B.html
+    select:
+      frontend: python
+features:
+  spec_decoding:
+    modes:
+      qwen3_5_mtp:
+        hardware_overrides:
+          # On 910B the draft head replays the aclgraph too — the tutorial's
+          # Atlas 800I A2 launch line carries no enforce_eager.
+          ascend_910b:
+            args:
+              - '--speculative-config'
+              - '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'
 meta:
+  date_updated: 2026-11-17
   hardware:
     ascend_950pr: verified
+    ascend_910b: verified
 guide_sections:
   ascend: |
     ### Huawei Ascend 950PR-w8a8 (vLLM Ascend)
@@ -107,3 +165,47 @@ guide_sections:
       --mm-encoder-tp-mode data \
       --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
     ```
+
+    ### Huawei Ascend 910B-w8a8 (vLLM Ascend)
+
+    Verified on Atlas 800I A2 (8x Ascend 910B, 64 GB each), TP2, vLLM Ascend from the
+    `quay.io/ascend/vllm-ascend:v0.32.0rc1` image.
+
+    The same ModelSlim INT8 build as on 950PR serves here at TP2. `--dtype bfloat16` is
+    required on 910B (the 950PR default auto-selection picks a dtype the A2 tutorial
+    explicitly pins). The MTP head works the same way, spelled `qwen3_5_mtp` with three
+    draft tokens and no `enforce_eager` on this generation.
+
+    Both the weight and the image come from ModelScope, not HuggingFace: set
+    `VLLM_USE_MODELSCOPE=True` or pass a local path.
+
+    ```bash
+    export VLLM_USE_MODELSCOPE=True
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=512
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+
+    vllm serve Eco-Tech/Qwen3.8-27B-w8a8 \
+      --tensor-parallel-size 2 \
+      --quantization ascend \
+      --served-model-name qwen3.8 \
+      --max-num-seqs 32 \
+      --max-model-len 133120 \
+      --max-num-batched-tokens 16384 \
+      --trust-remote-code \
+      --dtype bfloat16 \
+      --reasoning-parser qwen3 \
+      --mm-processor-cache-gb 0 \
+      --mm-encoder-tp-mode data \
+      --mm-processor-cache-type shm \
+      --enable-prefix-caching \
+      --gpu-memory-utilization 0.85 \
+      --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
+      --compilation-config '{"cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128],"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+      --additional-config '{"enable_cpu_binding":true}'
+    ```
+
+    `--reasoning-parser qwen3` is not optional in practice: the chat template opens every
+    assistant turn with `<think>`, so without it the entire reasoning block lands in
+    `message.content` and a 2048-token budget can be spent before the answer starts.
