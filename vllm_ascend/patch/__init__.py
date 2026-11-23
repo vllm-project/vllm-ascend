@@ -1602,6 +1602,17 @@
 #    Future Plan:
 #       Remove once upstream dispatches sharded PCP decode with local counts.
 #
+#   4. `vllm.v1.worker.gpu.model_runner.set_forward_context`
+#    Why:
+#       The NONE dispatch mode still enters the compiled model, adding host
+#       dispatch overhead for some long prefills.
+#    How:
+#       Forward the opt-in eager compilation policy through skip_compiled.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; the policy is being validated on Ascend.
+#    Future Plan:
+#       Remove once upstream exposes an eager compilation policy for the runner.
+#
 # ** 33. File: platform/patch_vision.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.vision.FusedInputNorm.forward`

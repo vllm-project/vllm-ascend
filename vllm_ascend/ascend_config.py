@@ -128,6 +128,7 @@ class AscendCompilationConfig:
     """
 
     enable_npugraph_ex: bool = True
+    bypass_compiled_eager_steps: bool = False
     enable_static_kernel: bool = False
     enable_super_kernel: bool = False
     fuse_norm_quant: bool = True
@@ -2115,3 +2116,10 @@ def get_ascend_config():
     if _ASCEND_CONFIG is None or not _is_ascend_config_initialized(_ASCEND_CONFIG):
         raise RuntimeError("Ascend config is not initialized. Please call init_ascend_config first.")
     return _ASCEND_CONFIG
+
+
+def get_initialized_ascend_config(vllm_config: VllmConfig) -> AscendConfig | None:
+    """Return the initialized worker config associated with this vLLM config."""
+    if _INIT_VLLM_CONFIG is vllm_config and _is_ascend_config_initialized(_ASCEND_CONFIG):
+        return _ASCEND_CONFIG
+    return None
