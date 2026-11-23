@@ -486,9 +486,13 @@ def compressor(
     """
     hidden_dim = x.shape[-1]
     head_dim = wkv.shape[0]
-    assert hidden_dim == 5120 and head_dim == 512, f"规格约束 hidden=5120/D=512, got {hidden_dim}/{head_dim}"
+    if hidden_dim != 5120 or head_dim != 512:
+        raise ValueError(
+            f"compressor requires hidden_dim=5120 and head_dim=512, got hidden_dim={hidden_dim} and head_dim={head_dim}"
+        )
     ratio = int(cmp_ratio)
-    assert 2 <= ratio <= 128
+    if not 2 <= ratio <= 128:
+        raise ValueError(f"compressor requires 2 <= cmp_ratio <= 128, got cmp_ratio={ratio}")
     # Normalize layouts to obtain the batch count and per-segment lengths.
     cu_list = _ints(cu_seqlens)
     if cu_list is not None:
