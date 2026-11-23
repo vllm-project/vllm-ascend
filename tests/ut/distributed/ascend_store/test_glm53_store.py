@@ -486,6 +486,8 @@ class TestGLM53Store(unittest.TestCase):
             prefetch_layer_map={},
             kv_send_thread=SimpleNamespace(request_queue=pending, raise_if_failed=MagicMock()),
         )
+        worker.layerwise_backend = MagicMock()
+        worker._drain_attention_transfers = MethodType(LayerwiseKVPoolWorker._drain_attention_transfers, worker)
         worker._wait_for_final_layer_save = MethodType(LayerwiseKVPoolWorker._wait_for_final_layer_save, worker)
         worker.sync_save_events[1].record.side_effect = entered.set
 
@@ -529,6 +531,8 @@ class TestGLM53Store(unittest.TestCase):
                 raise_if_failed=MagicMock(side_effect=[None, RuntimeError("save failed")]),
             ),
         )
+        worker.layerwise_backend = MagicMock()
+        worker._drain_attention_transfers = MethodType(LayerwiseKVPoolWorker._drain_attention_transfers, worker)
         worker._wait_for_final_layer_save = MethodType(LayerwiseKVPoolWorker._wait_for_final_layer_save, worker)
         with self.assertRaisesRegex(RuntimeError, "save failed"):
             LayerwiseKVPoolWorker.save_kv_layer(worker, AscendConnectorMetadata(set()))

@@ -185,6 +185,10 @@ separate images.
 
 === "950DT products"
 
+    Prepare Ascend HDK `{{ release_hdk_version_a5 }}` on each host and verify
+    the driver and firmware with `npu-smi info`. See the
+    [validated software stack](../../getting_started/installation.md#installation-hardware-software-stack).
+
     On each participating server, pull the 950DT Ubuntu release image. Set
     `MODEL_ROOT` to the parent directory of the checkpoint.
 

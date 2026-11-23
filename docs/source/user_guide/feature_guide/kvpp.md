@@ -187,7 +187,7 @@ The following measurements of GLM-5.2 on 950DT Products show the impact on cache
 | Common settings | chunked prefill, prefix caching, asynchronous scheduling, LI-C8, eager mode | Same as single node |
 | Scheduling and memory | `max_num_batched_tokens=32768`, `max_num_seqs=12`, `gpu_memory_utilization=0.90` | Same as single node |
 
-MTP and SFA-C8 were not enabled. All measurements below use a 32K scheduling token budget.
+MTP and SFA-C8 were not enabled. All measurements below use a 32k scheduling token budget.
 
 ### KV Cache Capacity
 
@@ -204,20 +204,20 @@ Equivalent KV memory savings are estimated from the capacity ratio and do not re
 
 This test measures long-input, zero-prefix-hit, low-concurrency requests. The single-node deployment uses GLM-5.2-W4A8C8 with eight 950DT Products and TP8 + EP. The dual-node deployment uses GLM-5.2-W8A8C8-mxfp8 with eight 950DT Products per node and TP8 + PP2 + EP (38/40 layers). Other service settings follow the test configuration above.
 
-Input lengths are 32K, 64K, and 128K tokens. Prefix cache hit rate was 0%, with 1 output token. Each result is the mean TTFT of 4 requests at client concurrency 1. A positive change indicates increased latency.
+Input lengths are 32k, 64k, and 128k tokens. Prefix cache hit rate was 0%, with 1 output token. Each result is the mean TTFT of 4 requests at client concurrency 1. A positive change indicates increased latency.
 
 | Deployment | Input length | KVPP disabled | KVPP enabled | TTFT change |
 | --- | --- | ---: | ---: | ---: |
-| Single node | 32K | 2.623 s | 2.614 s | -0.33% |
-| Single node | 64K | 5.295 s | 5.375 s | +1.52% |
-| Single node | 128K | 10.901 s | 11.268 s | +3.36% |
-| Dual-node PP | 32K | 2.900 s | 2.905 s | +0.19% |
-| Dual-node PP | 64K | 4.503 s | 4.887 s | +8.53% |
-| Dual-node PP | 128K | 7.805 s | 8.665 s | +11.01% |
+| Single node | 32k | 2.623 s | 2.614 s | -0.33% |
+| Single node | 64k | 5.295 s | 5.375 s | +1.52% |
+| Single node | 128k | 10.901 s | 11.268 s | +3.36% |
+| Dual-node PP | 32k | 2.900 s | 2.905 s | +0.19% |
+| Dual-node PP | 64k | 4.503 s | 4.887 s | +8.53% |
+| Dual-node PP | 128k | 7.805 s | 8.665 s | +11.01% |
 
 ### Non-Pooling Prefill Throughput
 
-Each run contained 40 requests at client concurrency 12, with 128K input tokens and 1 output token per request. KV pooling was disabled in both configurations.
+Each run contained 40 requests at client concurrency 12, with 128k input tokens and 1 output token per request. KV pooling was disabled in both configurations.
 
 | Deployment | Prefix cache hit rate | KVPP disabled (input tokens/s) | KVPP enabled (input tokens/s) | Throughput change |
 | --- | --- | ---: | ---: | ---: |

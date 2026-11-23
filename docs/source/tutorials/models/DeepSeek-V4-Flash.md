@@ -1950,9 +1950,10 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         - `MultiConnector` combines live P-to-D transfer through
           `MooncakeHybridConnector` with reusable prefix storage through
           `AscendStoreConnector`. In this example, both children and the parent use
-          `kv_producer` on Prefill and `kv_consumer` on Decode. Decode does not put or
-          load pool entries unless `consumer_is_to_put` or `consumer_is_to_load` is
-          explicitly enabled.
+          `kv_producer` on Prefill and `kv_consumer` on Decode. Decode neither saves
+          to nor loads from the pool by default. `save_decode_cache` enables saving
+          complete Decode blocks and missing Prefill ancestors at the first Decode
+          save; `enable_lookup` separately enables loading from the pool.
         - `PYTHONHASHSEED=0` must match across all engines. Prefill enables prefix
           caching; Decode disables it.
         - Keep `--no-disable-hybrid-kv-cache-manager` on both roles and the top-level
@@ -2357,7 +2358,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
                     "backend": "mooncake",
                     "lookup_rpc_port": "'"$((global_rank + 2))"'",
                     "use_layerwise": false,
-                    "consumer_is_to_load": true
+                    "enable_lookup": true
                   }
                 }
               ]
@@ -2399,7 +2400,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         wait
         ```
 
-        The two disk limits are 32 GiB per participating client/rank and the offload buffer is 1 GiB; budget their sum across the node. Clearing `ASCEND_GLOBAL_RESOURCE_CONFIG` belongs to this measured Mooncake Store path, not to pooling in general. The environment variables alone do not enable SSD: the JSON switch and master offload settings are also required. In this profile P **and D** use `--enable-prefix-caching`; the pooled scripts replace the ordinary D `--no-enable-prefix-caching` flag. D's Store child sets `consumer_is_to_load=true`.
+        The two disk limits are 32 GiB per participating client/rank and the offload buffer is 1 GiB; budget their sum across the node. Clearing `ASCEND_GLOBAL_RESOURCE_CONFIG` belongs to this measured Mooncake Store path, not to pooling in general. The environment variables alone do not enable SSD: the JSON switch and master offload settings are also required. In this profile P **and D** use `--enable-prefix-caching`; the pooled scripts replace the ordinary D `--no-enable-prefix-caching` flag. D's Store child sets `enable_lookup=true`.
 
         **Memcache backend**
 
@@ -2472,7 +2473,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
                     "backend": "memcache",
                     "lookup_rpc_port": "'"$((global_rank + 2))"'",
                     "use_layerwise": false,
-                    "consumer_is_to_load": true
+                    "enable_lookup": true
                   }
                 }
               ]

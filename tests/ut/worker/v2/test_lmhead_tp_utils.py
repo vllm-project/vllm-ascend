@@ -198,7 +198,7 @@ def test_compute_draft_logits_forwards_module_index(monkeypatch, lmhead_enabled)
         (AscendGemma4Speculator, True),
         (AscendDFlashSpeculator, True),
         (AscendDSparkSpeculator, True),
-        (AscendDFlash2Speculator, False),
+        (AscendDFlash2Speculator, True),
         (AscendLiLiCorrSpeculator, False),
     ],
 )

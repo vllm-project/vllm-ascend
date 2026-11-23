@@ -30,8 +30,8 @@ class LmheadTPDraftSamplingMixin:
     use_local_argmax_reduction: bool
 
     # Speculators bypassing this compute_draft_logits hook need their own
-    # alignment (DSpark wraps its model's compute_draft_logits). Paths without
-    # such alignment opt out, e.g. DFlash2's get_top_k_tokens on the sharded head.
+    # alignment (DSpark wraps compute_draft_logits; DFlash2 aligns rows in
+    # compute_candidates). Paths without such alignment opt out, e.g. LiLiCorr.
     _lmhead_tp_sample_draft_supported = True
 
     def _lmhead_tp_max_num_logits(self) -> int:

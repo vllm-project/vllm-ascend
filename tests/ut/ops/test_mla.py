@@ -11,6 +11,7 @@ from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from tests.ut.base import TestBase
 from vllm_ascend.attention.indexer import (
     AscendSFAIndexerBackend,
+    AscendSFAIndexerMetadata,
 )
 from vllm_ascend.attention.sfa_v1 import PreprocessType
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention, IndexerWrapper
@@ -131,6 +132,7 @@ class TestAscendSFAIndexerBackend(TestBase):
 
     def _make_forward_indexer(self):
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+        indexer.topk_tokens = 2048
         indexer.head_dim = 128
         indexer.n_head = 2
         indexer.qk_rope_head_dim = 64
@@ -150,8 +152,12 @@ class TestAscendSFAIndexerBackend(TestBase):
         return indexer
 
     def _make_indexer_metadata(self):
-        return SimpleNamespace(
+        return AscendSFAIndexerMetadata(
+            num_actual_tokens=2,
             slot_mapping=MagicMock(name="slot_mapping"),
+            seq_lens=torch.tensor([2], dtype=torch.int32),
+            cum_query_lens=torch.tensor([2], dtype=torch.int32),
+            block_table=torch.tensor([[0]], dtype=torch.int32),
             cache_scatter_indices=MagicMock(name="cache_scatter_indices"),
             uses_pcp_sharded_layout=False,
             num_decode_tokens=0,
@@ -178,8 +184,9 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer.write_cache = MagicMock(side_effect=lambda *args, **kwargs: calls.append("write_cache"))
         expected_topk = torch.zeros(2, 2048, dtype=torch.int32)
 
-        def _select(*args):
+        def _select(*args, topk):
             calls.append("select")
+            self.assertEqual(topk, expected_topk.shape[-1])
             return expected_topk
 
         hidden_states = torch.zeros(2, 32)
