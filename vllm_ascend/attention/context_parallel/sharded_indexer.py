@@ -27,7 +27,9 @@ def gathered_candidate_row_tile(rows: int, world_size: int, local_k: int) -> int
     return max(MIN_SINGLE_TILE_ROWS, MAX_GATHERED_CANDIDATE_BYTES // row_bytes)
 
 
-def distributed_topk(indices, scores, group, topk: int, interleave: int, *, return_local: bool = False):
+def distributed_topk(
+    indices, scores, group, topk: int, interleave: int, *, return_local: bool = False, max_model_len: int | None = None
+):
     from vllm_ascend.ops.triton.sharded_indexer import MAX_FUSED_TOPK, merge_packed_candidates, pack_local_candidates
 
     # Exchange candidates only. Never gather an indexer's token-history cache.
@@ -38,6 +40,12 @@ def distributed_topk(indices, scores, group, topk: int, interleave: int, *, retu
     # The merge may omit local sorts only when pack established their order.
     # This contract depends on shared shapes, never rank-local candidate data.
     presorted = topk == MAX_FUSED_TOPK and local_k <= MAX_FUSED_TOPK
+    compact = False
+    if return_local and presorted and local_k == topk and scores.dtype == torch.bfloat16 and max_model_len is not None:
+        # Rank zero owns the longest local prefix in a partial interleave cycle.
+        # All ranks choose the wire format from identical host configuration.
+        cycles, tail = divmod(max_model_len, group.world_size * interleave)
+        compact = cycles * interleave + min(tail, interleave) <= 1 << 16
     query_tile = gathered_candidate_row_tile(rows, group.world_size, local_k)
     for start in range(0, rows, query_tile):
         end = min(start + query_tile, rows)
@@ -49,6 +57,7 @@ def distributed_topk(indices, scores, group, topk: int, interleave: int, *, retu
             interleave,
             sort_candidates=presorted,
             fuse_sort=return_local and presorted,
+            compact=compact,
         )
         gathered = group.all_gather(packed, dim=0)
         merge_packed_candidates(
