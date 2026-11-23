@@ -10,6 +10,7 @@ test_cases:
       HCCL_OP_EXPANSION_MODE: "AIV"
       HCCL_CONNECT_TIMEOUT: "3600"
       VLLM_ENGINE_READY_TIMEOUT_S: "3000"
+      ASCEND_PROCESS_LOG_PATH: "/root/ascend/log"
     server_cmd:
       - "--port"
       - "$SERVER_PORT"

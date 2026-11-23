@@ -23,6 +23,7 @@ test_cases:
       VLLM_USE_MODELSCOPE: "true"
       SERVER_PORT: "DEFAULT_PORT"
       VLLM_ENGINE_READY_TIMEOUT_S: "1800"
+      ASCEND_PROCESS_LOG_PATH: "/root/ascend/log"
     server_cmd:
       - "--port"
       - "$SERVER_PORT"

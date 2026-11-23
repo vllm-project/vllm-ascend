@@ -19,6 +19,7 @@ test_cases:
       VLLM_USE_MODELSCOPE: "true"
       SERVER_PORT: "DEFAULT_PORT"
       VLLM_ENGINE_READY_TIMEOUT_S: "3000"
+      ASCEND_PROCESS_LOG_PATH: "/root/ascend/log"
     server_cmd:
       - "--tensor-parallel-size"
       - "4"
