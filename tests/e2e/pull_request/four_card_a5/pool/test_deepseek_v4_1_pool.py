@@ -7,6 +7,7 @@ from contextlib import ExitStack, contextmanager
 from typing import Any
 from unittest.mock import patch
 
+import psutil
 import pytest
 from transformers import AutoTokenizer
 from vllm import SamplingParams
@@ -50,13 +51,24 @@ POOL_KV_TRANSFER_CONFIG = {
 }
 
 
+def _host_memory() -> str:
+    """Summarize host memory so a pod-level kill leaves a trace in the log."""
+    memory = psutil.virtual_memory()
+    shm = psutil.disk_usage("/dev/shm") if os.path.isdir("/dev/shm") else None
+    shm_text = f" shm_total={shm.total >> 30}GiB shm_free={shm.free >> 30}GiB" if shm else ""
+    return f"mem_available={memory.available >> 30}GiB mem_total={memory.total >> 30}GiB{shm_text}"
+
+
 def _build_mooncake_pool_config() -> MooncakeKVPoolConfig:
+    # Each DP rank contributes its own segment and local buffer to the pool, so
+    # the size is per card. 16K/36K prompts need well under 1GiB of KV per rank;
+    # 2GiB + 1GiB keeps host memory low enough for the Engram offload.
     return MooncakeKVPoolConfig(
         config={
             "metadata_server": "P2PHANDSHAKE",
             "protocol": "ascend",
-            "global_segment_size": "5GB",
-            "local_buffer_size": "5GB",
+            "global_segment_size": "2GB",
+            "local_buffer_size": "1GB",
             "preferred_segment": False,
             "prefer_alloc_in_same_node": True,
         },
@@ -94,7 +106,7 @@ def _leg(use_pool: bool, case_name: str):
             pool = stack.enter_context(SingleNodeMooncakeManager(_build_mooncake_pool_config(), case_name))
             stack.enter_context(patch.dict(os.environ, pool.server_envs))
             kwargs["kv_transfer_config"] = POOL_KV_TRANSFER_CONFIG
-        print(f"[kv_pool_leg] {case_name} pool={use_pool}", flush=True)
+        print(f"[kv_pool_leg] {case_name} pool={use_pool} {_host_memory()}", flush=True)
         yield stack.enter_context(DPVllmRunner(MODEL, **kwargs))
 
 
@@ -157,4 +169,7 @@ def test_deepseek_v4_1_flash_dp8_tp1_dspark_pool_watch() -> None:
         prompt_ids=prompt_ids,
         perf_prompt_tokens=POOL_PERF_PROMPT_TOKENS,
         token_identity=False,
+        # Build the pool leg first so a pool-side pod kill surfaces without
+        # paying for the control leg.
+        pool_first=True,
     )
