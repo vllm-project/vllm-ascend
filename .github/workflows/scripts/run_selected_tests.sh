@@ -168,79 +168,103 @@ print_summary() {
   fi
 }
 
-pytest_report_all_skipped() {
-  python - "$1" <<'PY'
-import sys
-from xml.etree import ElementTree
-
-try:
-    cases = ElementTree.parse(sys.argv[1]).findall(".//testcase")
-except (OSError, ElementTree.ParseError):
-    sys.exit(1)
-
-skips = [case.find("skipped") for case in cases]
-# pytest also uses <skipped> for xfail outcomes in JUnit XML.
-all_skipped = skips and all(skip is not None and skip.get("type") != "pytest.xfail" for skip in skips)
-sys.exit(0 if all_skipped else 1)
-PY
+run_pytest_target() {
+  local target="$1"
+  test_index=$((test_index + 1))
+  local log_name="${target}"
+  log_name="${log_name#tests/}"
+  log_name="${log_name%.py}"
+  log_name="${log_name//[^a-zA-Z0-9_.-]/_}"
+  local log_file="${pytest_log_dir}/${test_index}-${log_name}.log"
+  echo "::group::${target}"
+  echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
+  local start_time=0
+  if [ "${record_timing}" = true ]; then
+    start_time=$(date +%s%N)
+  fi
+  if [ "${enable_coverage}" = "true" ]; then
+    setup_coverage "${target}"
+    set +e
+    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}"
+  else
+    set +e
+    if [ "${npu_type}" = "cpu" ]; then
+      run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*,*/ops/triton/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n 8 -sv --color=yes "${target}"
+    else
+      run_logged_command "${log_file}" pytest -sv --color=yes "${target}"
+    fi
+  fi
+  local status=$?
+  set -e
+  # When a target fails, mark its covdata dir so the downstream coverage
+  # assembler treats it as unusable and backfills from the OBS history
+  # instead of shipping the failed run's partial coverage.
+  if [ "${status}" -ne 0 ] && [ "${enable_coverage}" = "true" ]; then
+    echo "1" > "$(dirname "${COVERAGE_FILE}")/FAILED"
+  fi
+  if [ "${record_timing}" = true ]; then
+    local elapsed_ns=$(( $(date +%s%N) - start_time ))
+    local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
+    timing_entries+=("{\"name\":\"${target}\",\"passed\":$([ ${status} -eq 0 ] && echo true || echo false),\"elapsed\":${elapsed}}")
+  fi
+  echo "::endgroup::"
+  if [ "${status}" -eq 0 ]; then
+    test_results+=("${target}|PASSED|${log_file}")
+  elif [ "${status}" -eq 5 ] && grep -Eq 'collected 0 items / [1-9][0-9]* skipped[[:space:]]*$' "${log_file}"; then
+    # A collection skip can yield exit 5 even when the target is valid.
+    test_results+=("${target}|SKIPPED|${log_file}")
+  else
+    test_results+=("${target}|FAILED|${log_file}")
+    failed_logs+=("${target}|${log_file}")
+    if [ "${overall_status}" -eq 0 ]; then
+      overall_status="${status}"
+    fi
+    if [ "${record_timing}" != true ] && [ "${continue_on_error}" != true ]; then
+      print_summary
+      exit "${status}"
+    fi
+  fi
 }
 
-run_pytest() {
+run_pytest_batch() {
   local target="$1"
   shift
-  local log_name="cpu-ut"
-  local coverage_target="cpu-ut"
-  if [ "${npu_type}" != "cpu" ]; then
-    log_name="${target#tests/}"
-    log_name="${log_name%.py}"
-    log_name="${log_name//[^a-zA-Z0-9_.-]/_}"
-    coverage_target="${target}"
-    echo "::group::${target}"
-  fi
+  local batch_targets=("$@")
   test_index=$((test_index + 1))
-  local log_file="${pytest_log_dir}/${test_index}-${log_name}.log"
-  local report_file
-  report_file=$(mktemp "${pytest_log_dir}/pytest-report.XXXXXX")
-  local pytest_args=(-sv --color=yes --junitxml="${report_file}" "$@")
+  local log_file="${pytest_log_dir}/${test_index}-cpu-ut.log"
 
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
   local start_time=0
   if [ "${record_timing}" = true ]; then
     start_time=$(date +%s%N)
   fi
-  local status=0
   if [ "${enable_coverage}" = "true" ]; then
-    setup_coverage "${coverage_target}"
-    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest "${pytest_args[@]}" || status=$?
-  elif [ "${npu_type}" = "cpu" ]; then
-    run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*,*/ops/triton/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n 8 "${pytest_args[@]}" || status=$?
+    echo "DEBUG: Go to the [Coverage Branch] page."
+    setup_coverage "cpu-ut"
+    set +e
+    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}"
   else
-    run_logged_command "${log_file}" pytest "${pytest_args[@]}" || status=$?
+    set +e
+    if [ "${npu_type}" = "cpu" ]; then
+      run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*,*/ops/triton/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n 8 -sv --color=yes "${batch_targets[@]}"
+    else
+      run_logged_command "${log_file}" pytest -sv --color=yes "${batch_targets[@]}"
+    fi
   fi
-  local result="FAILED"
-  # A module-level skip can leave pytest with zero collected items (exit 5).
-  # Require a recorded skip so an empty target still fails.
-  if { [ "${status}" -eq 0 ] || [ "${status}" -eq 5 ]; } && pytest_report_all_skipped "${report_file}"; then
-    result="SKIPPED"
-  elif [ "${status}" -eq 0 ]; then
-    result="PASSED"
-  fi
-  rm -f -- "${report_file}"
-
-  # Tests that failed or were entirely skipped have no usable coverage.
-  if [ "${result}" != "PASSED" ] && [ "${enable_coverage}" = "true" ]; then
+  local status=$?
+  set -e
+  if [ "${status}" -ne 0 ] && [ "${enable_coverage}" = "true" ]; then
     echo "1" > "$(dirname "${COVERAGE_FILE}")/FAILED"
   fi
   if [ "${record_timing}" = true ]; then
     local elapsed_ns=$(( $(date +%s%N) - start_time ))
     local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
-    timing_entries+=("{\"name\":\"${target}\",\"passed\":$([ "${result}" = "PASSED" ] && echo true || echo false),\"elapsed\":${elapsed}}")
+    timing_entries+=("{\"name\":\"${target}\",\"passed\":$([ ${status} -eq 0 ] && echo true || echo false),\"elapsed\":${elapsed}}")
   fi
-  if [ "${npu_type}" != "cpu" ]; then
-    echo "::endgroup::"
-  fi
-  test_results+=("${target}|${result}|${log_file}")
-  if [ "${result}" = "FAILED" ]; then
+  if [ "${status}" -eq 0 ]; then
+    test_results+=("${target}|PASSED|${log_file}")
+  else
+    test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
     if [ "${overall_status}" -eq 0 ]; then
       overall_status="${status}"
@@ -274,7 +298,7 @@ print_test_info
 setup_vllm_cache_root
 
 if [ "${npu_type}" = "cpu" ]; then
-  run_pytest "cpu-ut (${#targets[@]} targets)" "${targets[@]}"
+  run_pytest_batch "cpu-ut (${#targets[@]} targets)" "${targets[@]}"
 elif [ "${mode}" = "with-device" ]; then
   aclgraph_capture_replay="tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py"
   run_aclgraph_capture_replay=0
@@ -283,15 +307,15 @@ elif [ "${mode}" = "with-device" ]; then
       run_aclgraph_capture_replay=1
       continue
     fi
-    run_pytest "${target}" "${target}"
+    run_pytest_target "${target}"
   done
   if [ "${run_aclgraph_capture_replay}" = "1" ]; then
     pip uninstall -y triton-ascend triton
-    run_pytest "${aclgraph_capture_replay}" "${aclgraph_capture_replay}"
+    run_pytest_target "${aclgraph_capture_replay}"
   fi
 else
   for target in "${targets[@]}"; do
-    run_pytest "${target}" "${target}"
+    run_pytest_target "${target}"
   done
 fi
 
