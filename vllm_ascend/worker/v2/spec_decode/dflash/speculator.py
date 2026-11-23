@@ -27,16 +27,16 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_draft
 
 
 # TODO: Remove this helper and build_draft_attn_metadatas once tiling
-# eliminates replay-time metadata rebuilding. The rebuild currently needs
-# this count because it cannot access the effective num_reqs from upstream propose().
+# eliminates replay-time metadata rebuilding. Upstream passes only the padded
+# graph descriptor to run_fullgraph.
 @contextmanager
-def draft_metadata_request_count(speculator: Any, num_reqs: int):
-    previous = getattr(speculator, "_draft_metadata_num_reqs", None)
-    speculator._draft_metadata_num_reqs = num_reqs
+def draft_graph_replay_inputs(speculator: Any, num_reqs: int, seq_lens_cpu_upper_bound: torch.Tensor):
+    previous = getattr(speculator, "_draft_graph_replay_inputs", None)
+    speculator._draft_graph_replay_inputs = (num_reqs, seq_lens_cpu_upper_bound)
     try:
         yield
     finally:
-        speculator._draft_metadata_num_reqs = previous
+        speculator._draft_graph_replay_inputs = previous
 
 
 def prepare_dflash_inputs_factory(
@@ -232,11 +232,9 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             model.post_process(self.vllm_config)
         return model
 
-    def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
-        assert self.input_batch is not None
-        num_reqs = getattr(self, "_draft_metadata_num_reqs", None)
-        if num_reqs is None:
-            num_reqs = self.input_batch.num_reqs
+    def build_draft_attn_metadatas(
+        self, *, num_reqs: int, num_reqs_padded: int, seq_lens_cpu_upper_bound: torch.Tensor
+    ):
         assert 0 <= num_reqs <= num_reqs_padded, "draft requests exceed graph capacity"
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         with build_attn_metadata_wrapper():
@@ -378,14 +376,16 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             input_batch, last_hidden_states, aux_hidden_states = prepare_replicated_draft_profile_inputs(
                 input_batch, last_hidden_states, aux_hidden_states, self.input_buffers
             )
-        self.input_batch = input_batch
         # Upstream trims DP dummy draft requests before selecting its graph,
         # while input_batch still describes the padded target batch. Replay
         # metadata must use the same count without mutating the target batch.
         num_draft_reqs = input_batch.num_reqs
         if dummy_run and sync_state is not None:
             num_draft_reqs = min(num_draft_reqs, sync_state.num_reqs)
-        with draft_metadata_request_count(self, num_draft_reqs), build_attn_metadata_wrapper():
+        with (
+            draft_graph_replay_inputs(self, num_draft_reqs, input_batch.seq_lens_cpu_upper_bound),
+            build_attn_metadata_wrapper(),
+        ):
             draft_tokens = super().propose(
                 input_batch,
                 attn_metadata,

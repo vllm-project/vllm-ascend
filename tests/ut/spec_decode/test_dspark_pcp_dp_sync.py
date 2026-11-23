@@ -36,6 +36,7 @@ def test_dspark_global_requests_do_not_reuse_local_pcp_dp_capacity(monkeypatch, 
     batch = SimpleNamespace(
         num_reqs=draft_reqs,
         idx_mapping=torch.arange(draft_reqs),
+        seq_lens_cpu_upper_bound=torch.ones(draft_reqs, dtype=torch.int32),
         is_prefilling_np=np.zeros(draft_reqs, dtype=np.bool_),
     )
     sync_kwargs = {} if vllm_version_is("0.33.0") else {"max_query_len": None}
@@ -85,7 +86,12 @@ def test_dspark_syncs_finished_proposals_once_across_runner_versions(monkeypatch
     logits_buffer = torch.arange(24, dtype=torch.float32).reshape(6, 2, 2) if logits_kind != "none" else None
     spec.draft_logits = SimpleNamespace(values=logits_buffer) if logits_kind == "cache" else logits_buffer
     original_logits = logits_buffer.clone() if logits_buffer is not None else None
-    batch = SimpleNamespace(num_reqs=2, idx_mapping=torch.tensor([4, 1]), is_prefilling_np=np.zeros(2, dtype=np.bool_))
+    batch = SimpleNamespace(
+        num_reqs=2,
+        idx_mapping=torch.tensor([4, 1]),
+        is_prefilling_np=np.zeros(2, dtype=np.bool_),
+        seq_lens_cpu_upper_bound=torch.ones(2, dtype=torch.int32),
+    )
     token_buffer = torch.tensor([[9, 8], [7, 6], [5, 4]])
     local_tokens = token_buffer[:2]
     assert local_tokens.is_contiguous()

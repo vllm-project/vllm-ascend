@@ -104,9 +104,14 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             # Length preparation and FlashAttn tiling run inside the graph,
             # reading the draft's persistent device buffers on every replay.
             return super().run_fullgraph(desc)
+        replay_inputs = getattr(self.speculator, "_draft_graph_replay_inputs", None)
+        if replay_inputs is None:
+            raise RuntimeError("Draft ACL graph replay requires the request count and CPU sequence-length upper bound.")
+        num_reqs, seq_lens_cpu_upper_bound = replay_inputs
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
-            desc.num_reqs,
-            self.speculator.input_batch.seq_lens_cpu_upper_bound,
+            num_reqs=num_reqs,
+            num_reqs_padded=desc.num_reqs,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
         )
         if use_updatable_graph(attn_backend):
             return self._updatable_graph_replay(desc, draft_attn_metadatas)

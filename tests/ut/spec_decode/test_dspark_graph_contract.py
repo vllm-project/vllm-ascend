@@ -216,8 +216,7 @@ def test_replay_installs_forward_context_before_accessing_extra_ctx(monkeypatch)
 
     speculator = SimpleNamespace(
         num_query_per_req=7,
-        input_batch=SimpleNamespace(seq_lens_cpu_upper_bound=object()),
-        build_draft_attn_metadatas=lambda *args: {"draft.0": object()},
+        build_draft_attn_metadatas=lambda **kwargs: {"draft.0": object()},
         attn_backends={"draft.0": _BackendA},
         dp_size=1,
         model_state=SimpleNamespace(attn_metadata={}),
@@ -237,7 +236,8 @@ def test_replay_installs_forward_context_before_accessing_extra_ctx(monkeypatch)
     monkeypatch.setattr(DFlashCudaGraphManager, "run_fullgraph", lambda self, desc: "replayed")
 
     desc = SimpleNamespace(num_tokens=7, num_reqs=1, cg_mode=object())
-    assert manager.run_fullgraph(desc) == "replayed"
+    with dflash_module.draft_graph_replay_inputs(speculator, 1, torch.tensor([8])):
+        assert manager.run_fullgraph(desc) == "replayed"
     assert proxy.active is False
 
 
@@ -327,7 +327,6 @@ def test_dflash_updatable_replay_resolves_current_metadata_before_replay(monkeyp
     manager = DFlashAclGraphManager.__new__(DFlashAclGraphManager)
     manager.speculator = SimpleNamespace(
         attn_backends={"draft.0": _BackendA},
-        input_batch=SimpleNamespace(seq_lens_cpu_upper_bound=torch.tensor([8])),
         build_draft_attn_metadatas=MagicMock(return_value=[metadata]),
     )
     manager.graphs = {desc: graph if valid_graph else object()}
@@ -347,17 +346,21 @@ def test_dflash_updatable_replay_resolves_current_metadata_before_replay(monkeyp
         return tasks
 
     monkeypatch.setattr(DFlashCudaGraphManager, "run_fullgraph", replay)
+    seq_lens = torch.tensor([8])
+    replay_inputs = dflash_module.draft_graph_replay_inputs(manager.speculator, 1, seq_lens)
     if not valid_graph:
-        with pytest.raises(AssertionError):
+        with pytest.raises(AssertionError), replay_inputs:
             manager.run_fullgraph(desc)
         assert events == []
     else:
         graph.resolve_tasks.side_effect = resolve_tasks
         graph.update.side_effect = lambda update_stream, resolved: events.append(("update", resolved))
-        assert manager.run_fullgraph(desc) is result
+        with replay_inputs:
+            assert manager.run_fullgraph(desc) is result
         assert events == [("resolve", metadata), ("wait", stream), ("replay", desc), ("update", tasks)]
         context_source.assert_called_once_with(metadata)
         graph.update.assert_called_once_with(manager.update_stream, tasks)
     manager.speculator.build_draft_attn_metadatas.assert_called_once_with(
-        2, manager.speculator.input_batch.seq_lens_cpu_upper_bound
+        num_reqs=1, num_reqs_padded=2, seq_lens_cpu_upper_bound=seq_lens
     )
+    assert manager.speculator._draft_graph_replay_inputs is None

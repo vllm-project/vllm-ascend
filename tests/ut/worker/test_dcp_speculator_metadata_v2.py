@@ -206,7 +206,9 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
 def test_dspark_common_dcp_preparation(monkeypatch, architecture, padded, width, full_rebuild):
     spec, original_target, device_lengths = _speculator(monkeypatch, "dspark", architecture, width, padded, width)
     if full_rebuild:
-        result = spec.build_draft_attn_metadatas(padded, spec.input_batch.seq_lens_cpu_upper_bound)[0]
+        result = spec.build_draft_attn_metadatas(
+            num_reqs=2, num_reqs_padded=padded, seq_lens_cpu_upper_bound=spec.input_batch.seq_lens_cpu_upper_bound
+        )[0]
     else:
         result = spec._build_attn_metadata(
             num_reqs=2,
@@ -277,7 +279,9 @@ def test_non_dcp_uses_per_request_length_bounds(monkeypatch, kind, architecture,
     spec.dcp_manager.prepare_draft_dcp_metadata_inputs = unexpected
     if full_rebuild:
         # Called directly by the graph manager, without an outer wrapper.
-        result = spec.build_draft_attn_metadatas(2, spec.input_batch.seq_lens_cpu_upper_bound)[0]
+        result = spec.build_draft_attn_metadatas(
+            num_reqs=2, num_reqs_padded=2, seq_lens_cpu_upper_bound=spec.input_batch.seq_lens_cpu_upper_bound
+        )[0]
     else:
         with attn_utils.build_attn_metadata_wrapper() if kind == "mtp" else nullcontext():
             if kind == "mtp":

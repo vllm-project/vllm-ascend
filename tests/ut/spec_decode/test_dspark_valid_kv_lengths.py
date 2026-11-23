@@ -85,7 +85,6 @@ def test_regular_and_graph_metadata_get_same_exact_cpu_view(monkeypatch, entrypo
     spec = _spec([22666, 99999, 99999, 99999], use_dcp=use_dcp)
     spec.num_query_per_req = 8
     spec.arange_np = np.arange(5, dtype=np.int32)
-    spec.input_batch = SimpleNamespace(num_reqs=1)
     spec._group_causal = False
     spec.vllm_config = SimpleNamespace(parallel_config=object())
     monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
@@ -112,7 +111,7 @@ def test_regular_and_graph_metadata_get_same_exact_cpu_view(monkeypatch, entrypo
     # Ascend factory must supply the independent, exact draft-length view.
     upper_bound = torch.tensor([22666], dtype=torch.int32)
     if entrypoint == "ACL_update":
-        result = spec.build_draft_attn_metadatas(4, upper_bound)[0]
+        result = spec.build_draft_attn_metadatas(num_reqs=1, num_reqs_padded=4, seq_lens_cpu_upper_bound=upper_bound)[0]
     else:
         result = spec._build_uniform_attn_metadata(
             num_reqs=1,
