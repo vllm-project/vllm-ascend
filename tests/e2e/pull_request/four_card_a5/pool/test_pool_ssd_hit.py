@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-"""Pool A/B watch for DeepSeek-V4.1-Flash DP8 x TP1 memcache GVA layerwise + optional SSD.
+"""Pool A/B watch for DeepSeek-V4.1-Flash DP8 x TP1 memcache GVA + optional SSD.
+
+DeepSeek-V4.1-Flash uses CED hybrid attention, which does not support the
+layerwise pool path, so ``use_layerwise`` stays false (see the model tutorial).
 
 The SSD tier is behind ``KV_POOL_SSD_ENABLE`` (default off): the standalone
 memcache runtime it needs is not in the #22849 base yet. With the switch off
-the case still runs the layerwise DRAM hit sequence and the A/B perf gate.
+the case still runs the DRAM hit sequence and the A/B perf gate.
 """
 
 import os
@@ -45,7 +48,7 @@ POOL_MAX_MODEL_LEN = max(POOL_PROMPT_TOKENS, POOL_PERF_PROMPT_TOKENS) + 128
 POOL_BATCHED_TOKENS = 4096
 SSD_PREFIX_COUNT = 8
 SSD_MAIN_REQUESTS = 32
-CASE_NAME = "dsv4_1_memcache_layerwise_ssd"
+CASE_NAME = "dsv4_1_memcache_ssd"
 
 POOL_KV_TRANSFER_CONFIG = {
     "kv_connector": "AscendStoreConnector",
@@ -53,7 +56,7 @@ POOL_KV_TRANSFER_CONFIG = {
     "kv_connector_extra_config": {
         "backend": "memcache",
         "lookup_rpc_port": "1",
-        "use_layerwise": True,
+        "use_layerwise": False,
     },
 }
 
@@ -70,7 +73,9 @@ def _build_memcache_pool_config() -> MemcacheKVPoolConfig:
                     "ock.mmc.log_level": "error",
                     "ock.mmc.local_service.world_size": 256,
                     "ock.mmc.local_service.protocol": "device_sdma",
-                    "ock.mmc.local_service.dram.size": "10GB",
+                    # Per engine; 16K/36K prompts need well under 1GB of KV, and
+                    # 8 DP engines each reserve this much host memory.
+                    "ock.mmc.local_service.dram.size": "4GB",
                 },
             },
         )

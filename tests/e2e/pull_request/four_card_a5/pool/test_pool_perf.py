@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-"""Pool A/B performance watch for DeepSeek-V4.1-Flash DP8 x TP1 memcache GVA layerwise."""
+"""Pool A/B performance watch for DeepSeek-V4.1-Flash DP8 x TP1 memcache GVA.
+
+DeepSeek-V4.1-Flash uses CED hybrid attention, which does not support the
+layerwise pool path, so ``use_layerwise`` stays false (see the model tutorial).
+"""
 
 import os
 from contextlib import ExitStack, contextmanager
@@ -35,7 +39,7 @@ POOL_MAX_MODEL_LEN = max(POOL_PROMPT_TOKENS, POOL_PERF_PROMPT_TOKENS) + 128
 # Keep 4,096 chunked prefill on a5-8: each DP8 rank owns a whole die, so the
 # 16K prefill chunk no longer splits across TP ranks.
 POOL_BATCHED_TOKENS = 4096
-CASE_NAME = "dsv4_1_memcache_layerwise_perf"
+CASE_NAME = "dsv4_1_memcache_perf"
 
 POOL_KV_TRANSFER_CONFIG = {
     "kv_connector": "AscendStoreConnector",
@@ -43,7 +47,7 @@ POOL_KV_TRANSFER_CONFIG = {
     "kv_connector_extra_config": {
         "backend": "memcache",
         "lookup_rpc_port": "1",
-        "use_layerwise": True,
+        "use_layerwise": False,
     },
 }
 
@@ -58,7 +62,9 @@ def _build_memcache_pool_config() -> MemcacheKVPoolConfig:
                 "ock.mmc.log_level": "error",
                 "ock.mmc.local_service.world_size": 256,
                 "ock.mmc.local_service.protocol": "device_sdma",
-                "ock.mmc.local_service.dram.size": "10GB",
+                # Per engine; 16K/36K prompts need well under 1GB of KV, and
+                # 8 DP engines each reserve this much host memory.
+                "ock.mmc.local_service.dram.size": "4GB",
             },
         },
     )
