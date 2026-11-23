@@ -22,71 +22,149 @@
 # This file is a part of the vllm-ascend project
 #
 
-"""Generate a compact PR comment from diff-cover output.
+"""Generate a compact PR comment from diff-cover and slipcover output.
 
-diff-cover produces a markdown report like:
-
-    # Diff Coverage
-    ## Diff: origin/main...HEAD, staged and unstaged changes
-
-    - vllm_ascend/foo.py (50.0%): Missing lines 10-12
+diff-cover produces a markdown report containing a Summary section:
 
     ## Summary
 
-    - **Total**: 20 lines
-    - **Missing**: 10 lines
-    - **Coverage**: 50%
+    - **Total**: 191 lines
+    - **Missing**: 85 lines
+    - **Coverage**: 55%
 
-    ## vllm_ascend/foo.py
-    ...
+With --input-json, the overall coverage from a slipcover coverage.json
+supplies the Total Coverage column; the diff-cover summary supplies the
+Diff Coverage column. The output is a 4x3 markdown table:
 
-This script extracts the H1 title and the three summary bullet points
-(Total, Missing, Coverage) and writes them to the output file as a
-compact PR comment.
+    |              | Total Coverage   | Diff Coverage |
+    | ------------ | --------------   | ------------- |
+    | **Total**    | 145055 lines     | 191 lines     |
+    | **Missing**  | 41592 lines      | 85 lines      |
+    | **Coverage** | 71% | <mark>~~***55%***~~<mark> |
+
+Coverage cells render as highlighted strikethrough-bold-italic when below
+the threshold (Total < 70%, Diff < 80%), plain when at/above.
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
+import regex as re
 
-def extract_lines(markdown: str) -> list[str]:
-    """Extract the H1 title and the Summary section bullet points.
 
-    Returns a list of lines in the order: title, total, missing, coverage.
+def _parse_bullet(line: str) -> tuple:
+    """Extract (label, value_str, percent_or_None) from a bullet like
+    '- **Total**: 191 lines' or '- **Coverage**: 55%'."""
+    m = re.match(r"- \*\*(\w+)\*\*:\s*(.+)", line.strip())
+    if not m:
+        return None
+    label = m.group(1)
+    value = m.group(2).strip()
+    pct = None
+    pm = re.search(r"(\d+(?:\.\d+)?)%", value)
+    if pm:
+        pct = float(pm.group(1))
+    return label, value, pct
+
+
+def extract_diff_summary(markdown: str) -> dict | None:
+    """Extract Total/Missing/Coverage from the diff-cover Summary section.
+
+    Returns {"total": str, "missing": str, "coverage_data": float, "coverage_pct": float} or None.
     """
-    title = None
-    summary_bullets = []
-
+    result: dict = {}
     in_summary = False
     for line in markdown.splitlines():
         stripped = line.strip()
-
-        # Capture the top-level title (# Diff Coverage)
-        if title is None and stripped.startswith("# ") and not stripped.startswith("## "):
-            title = stripped
-            continue
-
-        # Enter the Summary section
         if stripped.startswith("## Summary"):
             in_summary = True
             continue
+        if not in_summary:
+            continue
+        if stripped.startswith("#"):
+            break
+        if not stripped.startswith("- **"):
+            continue
+        parsed = _parse_bullet(stripped)
+        if not parsed:
+            continue
+        key = parsed[0].lower()
+        if key not in ("total", "missing", "coverage"):
+            continue
+        result[key] = parsed[1]
+        if parsed[2] is not None:
+            result["coverage_data"] = parsed[2]
+            result["coverage_pct"] = parsed[2]
+    if "total" not in result or "missing" not in result or "coverage_data" not in result:
+        return None
+    return result
 
-        # Once in Summary, collect bullet lines until next heading
-        if in_summary:
-            if stripped.startswith("#"):
-                break
-            if stripped.startswith("- **"):
-                summary_bullets.append(stripped)
 
-    return [line for line in (title,) + tuple(summary_bullets) if line is not None]
+def extract_total_coverage(json_text: str) -> dict | None:
+    """Extract Total/Missing/Coverage from slipcover coverage.json.
+
+    Returns {"total": str, "missing": str, "coverage_data": float, "coverage_pct": float | None}
+    or None. coverage_data is the raw percentage (percent_covered) used for the
+    threshold comparison; coverage_pct is percent_covered_display kept for
+    display. Parsing the fallback inside the guard keeps a summary that lacks a
+    field from raising uncaught.
+    """
+    try:
+        summary = json.loads(json_text)["summary"]
+        covered = int(summary["covered_lines"])
+        missing = int(summary["missing_lines"])
+        coverage_data = float(summary["percent_covered"])
+        display = summary.get("percent_covered_display")
+        coverage_pct = float(display) if display is not None else coverage_data
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+    return {
+        "total": f"{covered + missing} lines",
+        "missing": f"{missing} lines",
+        "coverage_data": coverage_data,
+        "coverage_pct": coverage_pct,
+    }
 
 
-def build_comment(lines: list[str], summary_url: str = "") -> str:
-    """Render the extracted lines as a markdown PR comment."""
-    if not lines:
-        return "## Diff Coverage\n\nNo coverage data found.\n"
-    out = "\n".join(lines) + "\n"
+def _fmt_coverage(display: float, data: float, threshold: float) -> str:
+    """Format a coverage cell.
+
+    The threshold comparison uses the raw ``data`` percentage; the cell text
+    shows ``display`` (rounded for readability). Highlight when below threshold.
+    """
+    pct = display
+    pct_str = f"{pct}%"
+    if isinstance(pct, float) and pct.is_integer():
+        pct_str = f"{int(pct)}%"
+    if data < threshold:
+        return f"<mark>~~***{pct_str}***~~<mark>"
+    return pct_str
+
+
+def build_table(total: dict, diff: dict | None, summary_url: str = "") -> str:
+    """Render the 4x3 markdown table with conditional formatting."""
+    # Threshold is judged on the raw percentage (coverage_data); the cell shows
+    # the display percentage (coverage_pct) when available, else the raw value.
+    total_cell = _fmt_coverage(total["coverage_pct"], total["coverage_data"], 70)
+
+    if diff:
+        diff_cell = _fmt_coverage(diff["coverage_pct"], diff["coverage_data"], 80)
+    else:
+        diff_cell = "N/A"
+
+    diff_total = diff["total"] if diff else "N/A"
+    diff_missing = diff["missing"] if diff else "N/A"
+
+    out = (
+        "## Coverage\n"
+        "|              | Total Coverage  | Diff Coverage |\n"
+        "| ------------ | --------------- | ------------- |\n"
+        f"| **Total**    | {total['total']}         | {diff_total} |\n"
+        f"| **Missing**  | {total['missing']}     | {diff_missing} |\n"
+        f"| **Coverage** | {total_cell}       | {diff_cell} |\n"
+    )
     if summary_url:
         out += f"\nMore info see: [Summary]({summary_url})\n"
     return out
@@ -94,24 +172,34 @@ def build_comment(lines: list[str], summary_url: str = "") -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", required=True, help="Path to diff_coverage.md")
+    parser.add_argument("--input-json", required=True, help="Path to coverage.json produced by slipcover")
+    parser.add_argument("--input-diff", required=True, help="Path to diff_coverage.md")
     parser.add_argument("--output", required=True, help="Path to write coverage_comment.md")
     parser.add_argument("--summary-url", default="", help="URL to the cpu-ut job execution page")
     args = parser.parse_args()
 
-    in_path = Path(args.input)
-    if not in_path.exists():
-        print(f"::warning::input file {in_path} not found; no coverage comment generated", file=sys.stderr)
+    json_path = Path(args.input_json)
+    if not json_path.exists():
+        print(f"::warning::input json file {json_path} not found; no coverage comment generated", file=sys.stderr)
+        return 0
+    total = extract_total_coverage(json_path.read_text(encoding="utf-8"))
+    if not total:
+        print(f"::warning::no top-level summary in {json_path}; no coverage comment generated", file=sys.stderr)
         return 0
 
-    markdown = in_path.read_text(encoding="utf-8")
-    lines = extract_lines(markdown)
-    comment = build_comment(lines, args.summary_url)
+    diff_path = Path(args.input_diff)
+    diff = None
+    if diff_path.exists():
+        diff = extract_diff_summary(diff_path.read_text(encoding="utf-8"))
+    else:
+        print(f"::warning::input file {diff_path} not found; diff coverage will show N/A", file=sys.stderr)
+
+    comment = build_table(total, diff, args.summary_url)
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(comment, encoding="utf-8")
-    print(f"Wrote {out_path} ({len(lines)} lines)")
+    print(f"Wrote {out_path}")
     return 0
 
 
