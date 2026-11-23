@@ -5,11 +5,22 @@ import torch
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.models.qwen4_exp.gbsa_union import build_qsa_union_inputs_from_compact
+from vllm_ascend.utils import enable_custom_op
 
 pytestmark = pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A3/A5",
 )
+
+
+def test_qsa_union_inputs_meta_rejects_non_power_of_two_width():
+    enable_custom_op()
+    compact = torch.empty((8, 11), device="meta", dtype=torch.int32)
+    visible = torch.empty(8, device="meta", dtype=torch.int32)
+    row_map = torch.empty((1, 8), device="meta", dtype=torch.int32)
+    with pytest.raises(RuntimeError, match="positive power of two"):
+        build_qsa_union_inputs_from_compact(compact, visible, row_map)
 
 
 @pytest.mark.parametrize("input_groups", [7, 511])

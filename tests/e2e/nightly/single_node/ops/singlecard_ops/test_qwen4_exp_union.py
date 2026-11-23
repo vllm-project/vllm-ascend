@@ -10,17 +10,7 @@ from vllm_ascend.models.qwen4_exp.attention_dispatch import (
     dispatch_qsa_attention,
     prepare_qsa_union_batches,
 )
-from vllm_ascend.models.qwen4_exp.gbsa_union import build_qsa_union_inputs_from_compact, qsa_union_gbsa_attention
-from vllm_ascend.utils import enable_custom_op
-
-
-def test_qsa_union_inputs_meta_rejects_non_power_of_two_width():
-    enable_custom_op()
-    compact = torch.empty((8, 11), device="meta", dtype=torch.int32)
-    visible = torch.empty(8, device="meta", dtype=torch.int32)
-    row_map = torch.empty((1, 8), device="meta", dtype=torch.int32)
-    with pytest.raises(RuntimeError, match="positive power of two"):
-        build_qsa_union_inputs_from_compact(compact, visible, row_map)
+from vllm_ascend.models.qwen4_exp.gbsa_union import qsa_union_gbsa_attention
 
 
 @pytest.mark.parametrize("query_lengths", [(1, 7, 8, 9, 15, 16, 17, 19), (512,) * 8])
