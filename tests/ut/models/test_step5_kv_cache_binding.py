@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm import envs
+from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -83,7 +84,7 @@ def _orig_groups(vllm_config, kv_cache_spec):
     return groups
 
 
-def _plan(num_blocks: int = 3):
+def _plan(num_blocks, layout, with_aux):
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
             max_model_len=8192,
@@ -96,10 +97,17 @@ def _plan(num_blocks: int = 3):
             num_gpu_blocks_override=num_blocks,
             prefix_cache_retention_interval=None,
             cache_dtype="auto",
+            get_resolved_kv_cache_layout=lambda: layout,
         ),
+        attention_config=SimpleNamespace(hisparse_config=None),
         additional_config={},
         kv_transfer_config=None,
     )
+    if not with_aux:
+        # This worker only owns sliding-window layers from the global plan.
+        groups = [KVCacheGroupSpec([L0, L1], _specs()[L1])]
+        config = DefaultKVCacheConfigBuilder().get_kv_cache_config_from_groups(vllm_config, groups, num_blocks)
+        return vllm_config, groups, config
     groups = get_step5_kv_cache_groups(vllm_config, _specs(), _orig_groups)
     config = get_step5_kv_cache_config_from_groups(
         vllm_config, groups, num_blocks * get_step5_pool_bytes_per_block(groups)
@@ -127,11 +135,16 @@ def _snapshot(caches, backing):
 
 
 @pytest.mark.parametrize(
-    ("num_blocks", "kv_transfer", "layout"),
-    [(1, False, KVCacheLayout.LBNHC), (3, False, KVCacheLayout.LBNHC), (3, True, KVCacheLayout.LBHNC)],
+    ("num_blocks", "kv_transfer", "layout", "with_aux"),
+    [
+        (1, False, KVCacheLayout.LBNHC, True),
+        (3, False, KVCacheLayout.LBNHC, True),
+        (3, True, KVCacheLayout.LBHNC, True),
+        (3, False, KVCacheLayout.LBNHC, False),
+    ],
 )
-def test_step5_shared_allocator_matches_legacy_views(monkeypatch, num_blocks, kv_transfer, layout):
-    runtime, groups, config = _plan(num_blocks)
+def test_step5_shared_allocator_matches_legacy_views(monkeypatch, num_blocks, kv_transfer, layout, with_aux):
+    runtime, groups, config = _plan(num_blocks, layout, with_aux)
     runtime.kv_transfer_config = object() if kv_transfer else None
     monkeypatch.setattr(envs, "VLLM_KV_CACHE_LAYOUT", layout.name)
     monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime)
@@ -145,6 +158,8 @@ def test_step5_shared_allocator_matches_legacy_views(monkeypatch, num_blocks, kv
         SUMMARY0: AscendStep5SparseSummaryBackend,
         SUMMARY2: AscendStep5SparseSummaryBackend,
     }
+    if not with_aux:
+        backends = {name: AscendAttentionBackend for name in (L0, L1)}
     layers = {
         name: SimpleNamespace(get_attn_backend=lambda backend=backend: backend) for name, backend in backends.items()
     }
@@ -179,15 +194,17 @@ def test_step5_shared_allocator_matches_legacy_views(monkeypatch, num_blocks, kv
     monkeypatch.setattr(attn_utils_v2, "_reshape_kv_cache_v2", reject_legacy)
     actual = attn_utils_v2.allocate_kv_cache_main(config, device, layout, block_sizes)
     (backing,) = allocations
-    assert backing.nbytes == legacy_backing.nbytes == num_blocks * get_step5_pool_bytes_per_block(groups)
+    assert backing.nbytes == legacy_backing.nbytes == config.kv_cache_tensors[0].size
     assert backing.untyped_storage().nbytes() == legacy_backing.untyped_storage().nbytes()
     if kv_transfer:
         assert backing.data_ptr() % KV_CACHE_BUFFER_ALIGNMENT == 0
         assert legacy_backing.data_ptr() % KV_CACHE_BUFFER_ALIGNMENT == 0
 
     assert actual.keys() == legacy.keys() == backends.keys()
-    assert all(isinstance(actual[name], tuple) and len(actual[name]) == 2 for name in (L0, L1, L2))
-    assert all(isinstance(actual[name], torch.Tensor) for name in (RING, SUMMARY0, SUMMARY2))
+    attention_names = (L0, L1, L2) if with_aux else (L0, L1)
+    assert all(isinstance(actual[name], tuple) and len(actual[name]) == 2 for name in attention_names)
+    if with_aux:
+        assert all(isinstance(actual[name], torch.Tensor) for name in (RING, SUMMARY0, SUMMARY2))
     views = _snapshot(actual, backing)
     assert views == _snapshot(legacy, legacy_backing)
     assert all(shares_backing for _, components in views.values() for shares_backing, *_ in components)

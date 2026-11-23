@@ -107,7 +107,6 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     make_qsa_kernel_page_cache,
     make_slab_view,
 )
-from vllm_ascend.models.step5.cache_config import is_step5_groups
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.cache import uses_turboquant_groups
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -1577,10 +1576,9 @@ def unified_allocate_kv_cache(
 
 
 def _can_use_step5_unified_cache(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> bool:
-    """Select the native Step5 envelope, including its per-layer page layout."""
+    """Select Step5 caches that fit one backing with contiguous per-layer pages."""
     if (
-        not is_step5_groups(kv_cache_config.kv_cache_groups)
-        or KVPPConfig.from_vllm_config(vllm_config).size > 1
+        KVPPConfig.from_vllm_config(vllm_config).size > 1
         or get_layerwise_reuse_layout(kv_cache_config) is not None
         or is_c8_mxfp_kv_quant(vllm_config)
     ):
