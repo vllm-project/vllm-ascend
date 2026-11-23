@@ -20,7 +20,9 @@
 # 运行期所需依赖全部固化进镜像，不依赖外网。
 #
 # 构建上下文要求：
-#   ./offline/motor/*.whl   MindIE-Motor 官方 wheel（PD 分离服务，必需）
+#   ./offline/motor/*.whl   MindIE-Motor 官方 wheel（PD 分离服务）
+#                           正式交付请传 --build-arg MOTOR_REQUIRED=1，缺 wheel 即失败；
+#                           缺省 MOTOR_REQUIRED=0 时仅告警并跳过，便于 CI 构建基础镜像。
 #
 # mooncake 与客户环境一致：不做 pip 安装，从源码编译 0.3.12.post1
 # memfabric / memcache 由 requirements.txt 固定版本（1.3.0）随 vllm-ascend 安装。
@@ -182,15 +184,22 @@ RUN set -e; \
     rm -rf /tmp/etcd.tgz "/tmp/${ETCD_PKG}"; \
     etcd --version; etcdctl version
 
-# 11) MindIE-Motor（PD 分离服务）：官方 wheel 打入镜像，运行期离线可用
+# 11) MindIE-Motor（PD 分离服务）：官方 wheel 打进镜像，运行期离线可用
+#     wheel 放在构建上下文 offline/motor/；官方交付请用 MOTOR_REQUIRED=1 强制校验。
+ARG MOTOR_REQUIRED=0
 COPY offline/motor/ /opt/offline/motor/
 RUN set -e; \
-    ls /opt/offline/motor/*.whl >/dev/null 2>&1 || { \
-        echo "ERROR: 缺少 MindIE-Motor wheel，请把官方 wheel 放到构建上下文 offline/motor/"; \
-        exit 1; \
-    }; \
-    python3 -m pip install /opt/offline/motor/*.whl && \
-    python3 -m pip cache purge && \
+    WHEELS="$(ls /opt/offline/motor/*.whl 2>/dev/null || true)"; \
+    if [ -z "$WHEELS" ]; then \
+        if [ "${MOTOR_REQUIRED}" = "1" ]; then \
+            echo "ERROR: 缺少 MindIE-Motor wheel，请把官方 wheel 放到构建上下文 offline/motor/"; \
+            exit 1; \
+        fi; \
+        echo "WARN: 未提供 MindIE-Motor wheel，跳过 PD 分离组件安装"; \
+    else \
+        python3 -m pip install $WHEELS && \
+        python3 -m pip cache purge; \
+    fi; \
     rm -rf /opt/offline/motor
 
 CMD ["/bin/bash"]
