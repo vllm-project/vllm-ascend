@@ -15,9 +15,14 @@ from vllm.distributed import (
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.triton_utils import HAS_TRITON
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.hy_v4_flash.reference import decode_e4m3fn, hash_ngrams
+
+from vllm_ascend.device.device_config import is_950
+
+from .pd_role import uses_prefill_ops
 
 
 class FlashEngramLayout:
@@ -82,6 +87,7 @@ def head_range(sizes, tp, rank):
 
 
 class FlashNgramHashState(nn.Module):
+    use_fused_prefill = False
     def __init__(self, config, *, dummy=False):
         super().__init__()
         layout = FlashEngramLayout(config)
@@ -128,7 +134,26 @@ class FlashNgramHashState(nn.Module):
         if not isinstance(metadata, dict) or layer_name not in metadata:
             output.fill_(-1)
             return
-        self.prepare_batch_hashes(input_ids, lookback, metadata[layer_name].query_start_loc, output)
+        batch = metadata[layer_name]
+        starts = batch.query_start_loc
+        starts_device = batch.query_start_loc_device
+        if (self.use_fused_prefill and HAS_TRITON and input_ids.device.type == "npu"
+                and starts_device is not None and starts_device.device == input_ids.device
+                and self.layout.lookup_table is not None and lookback is not None
+                and batch.prefill_reqs and all(batch.prefill_reqs)
+                and 128 <= starts[-1] <= input_ids.numel()
+                and lookback.shape == (len(starts) - 1, self.lookback_depth)
+                and self.lookback_depth == 2 and self.primes.shape[-1] == 8
+                and all(t.is_contiguous() for t in (input_ids, lookback, output))):
+            from vllm_ascend.ops.triton.engram_hash import flash_prefill_hash
+
+            flash_prefill_hash(input_ids, lookback, starts_device, starts[-1],
+                               self.token_map, self.multipliers, self.primes,
+                               self.offsets, output, self.pad_id,
+                               self.layout.pad_token_id, self.visual_token_ids)
+            logger.info_once("HYV4 Prefill uses the fused Engram hash")
+            return
+        self.prepare_batch_hashes(input_ids, lookback, starts, output)
 
     def prepare_batch_hashes(self, input_ids, lookback, query_start_loc, output):
         output.fill_(-1)
@@ -155,7 +180,7 @@ class FlashNgramHashState(nn.Module):
 
 
 class FlashEmbedding(nn.Module):
-    def __init__(self, sizes, dim, dtype, cpu_offload, dp_shared_memory=False):
+    def __init__(self, sizes, dim, dtype, cpu_offload, dp_shared_memory=False, *, map_host_weight=False):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.head_start, self.head_end = head_range(sizes, self.tp_size, get_tensor_model_parallel_rank())
@@ -166,7 +191,8 @@ class FlashEmbedding(nn.Module):
         self.dim = dim
         self.cpu_offload = cpu_offload
         self._shared_group = None
-        self._shared_buffers = {}
+        self._host_buffers = {}
+        self.map_host_weight = map_host_weight
         if dp_shared_memory:
             if not cpu_offload:
                 raise ValueError("Flash Engram dp_shared_memory requires CPU offload")
@@ -200,7 +226,7 @@ class FlashEmbedding(nn.Module):
             from vllm_ascend.models.deepseek_v41.engram.npu import SharedUvaBuffer
 
             buffer = SharedUvaBuffer(shape, dtype, torch.device("npu", torch.npu.current_device()), self._shared_group)
-            self._shared_buffers[leaf] = buffer
+            self._host_buffers[leaf] = buffer
             logger.info(
                 "HYV4 Flash Engram DP shared table: dp_rank=%d tp_rank=%d field=%s rows=%d bytes=%d backing=%s",
                 self._shared_group.rank_in_group,
@@ -210,6 +236,12 @@ class FlashEmbedding(nn.Module):
                 buffer.tensor.numel() * buffer.tensor.element_size(),
                 buffer.shm.name,
             )
+            return buffer.tensor
+        if self.map_host_weight and shape[0]:
+            from vllm_ascend.models.deepseek_v41.engram.npu import HostUvaBuffer
+
+            buffer = HostUvaBuffer(shape, dtype, torch.device("npu", torch.npu.current_device()))
+            self._host_buffers[leaf] = buffer
             return buffer.tensor
         parameter = getattr(self.embedding, leaf, None)
         storage = {"device": parameter.device} if parameter is not None else {}
@@ -236,11 +268,11 @@ class FlashEmbedding(nn.Module):
             raise RuntimeError(f"Flash Engram shared table loading failed: {errors}")
 
     def close_host_offload(self):
-        for leaf, buffer in tuple(self._shared_buffers.items()):
+        for leaf, buffer in tuple(self._host_buffers.items()):
             buffer.close()
             parameter = getattr(self.embedding, leaf)
             parameter.data = torch.empty(0, dtype=parameter.dtype, device="cpu")
-            del self._shared_buffers[leaf]
+            del self._host_buffers[leaf]
 
     def load_weight(self, leaf, value):
         if leaf == "weight_scale_inv" and self.embedding.weight_scale_inv is None:
@@ -283,6 +315,15 @@ class FlashEmbedding(nn.Module):
             )
             set_weight_attrs(self.embedding.weight_scale_inv, {"weight_loader": self._load_shard})
 
+    def prefetch_rows(self, hashes):
+        from .engram_prefetch import gather_mapped_rows
+
+        return gather_mapped_rows(
+            hashes, self._host_buffers["weight"],
+            self._host_buffers.get("weight_scale_inv") if self.fp8 else None,
+            self.head_start, self.head_end, self.vocab_start, self.vocab_end,
+        )
+
     def gather_rows(self, hashes):
         indices = hashes[:, self.head_start : self.head_end].long() - self.vocab_start
         local = indices.clamp(0, self.vocab_end - self.vocab_start - 1)
@@ -315,7 +356,8 @@ class FlashEngram(nn.Module):
                 raise ValueError("Flash Engram DP shared memory requires checkpoint loading")
             dtype = torch.float8_e4m3fn if config.engram_fp8_embedding else torch.bfloat16
         self.multi_head_embedding = FlashEmbedding(
-            sizes, layout.head_dim, dtype, storage.cpu_offload, storage.dp_shared_memory
+            sizes, layout.head_dim, dtype, storage.cpu_offload, storage.dp_shared_memory,
+            map_host_weight=storage.cpu_offload and HAS_TRITON and is_950() and uses_prefill_ops(vllm_config),
         )
         self.hidden_size, self.hc_mult = config.hidden_size, config.hc_mult
         local = self.multi_head_embedding.head_end - self.multi_head_embedding.head_start

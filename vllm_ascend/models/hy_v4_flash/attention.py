@@ -99,6 +99,7 @@ class FlashAttentionMetadata:
     precise_decode_reqs: tuple[bool, ...] = ()
     decode_seq_lens: torch.Tensor | None = None
     prefill_reqs: tuple[bool, ...] = ()
+    query_start_loc_device: torch.Tensor | None = None
 
 
 def get_flash_attention_metadata() -> FlashAttentionMetadata | None:
@@ -129,6 +130,7 @@ class FlashMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetadata]):
             meta.slot_mapping,
             precise_decode_reqs,
             prefill_reqs=prefill_reqs,
+            query_start_loc_device=meta.query_start_loc,
         )
 
     def build_for_cudagraph_capture(self, common_attn_metadata):

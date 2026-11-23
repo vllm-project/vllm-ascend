@@ -152,3 +152,67 @@ def _hash_ids_kernel(
                 None, :
             ]
             tl.store(output + out_offset, hashed, valid[:, None] & (head < num_heads))
+
+
+@triton.jit(do_not_specialize=["num_tokens", "num_reqs", "num_valid"])
+def _flash_prefill_hash_kernel(
+    input_ids, lookback, starts, req_ids, token_map, multipliers, primes,
+    offsets, output, num_tokens, num_reqs, num_valid, vocab_size, pad_id,
+    pad_token_id, MAX_NGRAM: tl.constexpr, HEADS: tl.constexpr,
+    VISUAL_IDS: tl.constexpr, BLOCK_T: tl.constexpr,
+):
+    token = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
+    layer = tl.program_id(1)
+    valid = token < num_valid
+    req = tl.load(req_ids + token, valid, other=0)
+    start = tl.load(starts + req, valid & (req < num_reqs), other=0)
+    current = tl.load(input_ids + token, valid, other=-1)
+    invalid = ~valid | (current < 0) | (current >= vocab_size) | (current == pad_token_id)
+    for visual_id in tl.static_range(len(VISUAL_IDS)):
+        invalid |= current == VISUAL_IDS[visual_id]
+
+    rolling = tl.full((BLOCK_T,), 0, tl.int64)
+    blocked = tl.full((BLOCK_T,), False, tl.int1)
+    head = tl.arange(0, HEADS)
+    width: tl.constexpr = (MAX_NGRAM - 1) * HEADS
+    for shift in tl.static_range(MAX_NGRAM):
+        index = token - shift
+        in_batch = index >= start
+        previous = tl.load(input_ids + index, valid & in_batch, other=-1)
+        history_index = start - 1 - index
+        history = tl.load(
+            lookback + req * (MAX_NGRAM - 1) + history_index,
+            valid & ~in_batch,
+            other=-1,
+        )
+        ids = tl.where(in_batch, previous, history)
+        blocked |= (ids < 0) | (ids >= vocab_size)
+        source = tl.load(token_map + ids, valid & ~blocked, other=pad_id).to(tl.int64)
+        multiplier = tl.load(multipliers + layer * MAX_NGRAM + shift)
+        rolling ^= source * multiplier
+        if shift > 0:
+            col = (shift - 1) * HEADS + head
+            prime = tl.load(primes + layer * width + col)
+            offset = tl.load(offsets + layer * width + col)
+            remainder = rolling[:, None] % prime[None, :]
+            result = tl.where(remainder < 0, remainder + prime[None, :], remainder) + offset[None, :]
+            result = tl.where(invalid[:, None], -1, result).to(tl.int32)
+            tl.store(output + (layer * num_tokens + token[:, None]) * width + col[None, :],
+                     result, token[:, None] < num_tokens)
+
+
+def flash_prefill_hash(input_ids, lookback, starts, num_valid, token_map, multipliers,
+                       primes, offsets, output, pad_id, pad_token_id, visual_ids):
+    num_tokens = input_ids.numel()
+    num_reqs = lookback.shape[0]
+    layers, max_ngram = multipliers.shape
+    block_t = 32
+    req_ids = input_ids.new_empty((num_tokens,), dtype=starts.dtype)
+    _engram_req_index_kernel[(triton.cdiv(num_valid, block_t),)](
+        starts, req_ids, num_valid, num_reqs, starts.stride(0), BLOCK_T=block_t,
+    )
+    _flash_prefill_hash_kernel[(triton.cdiv(num_tokens, block_t), layers)](
+        input_ids, lookback, starts, req_ids, token_map, multipliers, primes,
+        offsets, output, num_tokens, num_reqs, num_valid, token_map.numel(),
+        pad_id, pad_token_id, max_ngram, primes.shape[-1], visual_ids, block_t,
+    )

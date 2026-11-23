@@ -4,6 +4,7 @@
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_ep_group, get_tp_group
+from vllm.forward_context import get_forward_context
 from vllm.models.hy_v4_flash.model import HYV4FlashDecoderLayer, HYV4FlashForCausalLM, HYV4FlashModel
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -14,8 +15,10 @@ from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_sh
 from .attention import AscendHYV4FlashAttention, FlashAttentionBackend
 from .dfly_config import METHOD
 from .engram import FlashEngram, FlashNgramHashState
+from .engram_prefetch import PrefetchedEngramRows
 from .ihc import FlashHCHeadLayer, FlashHCLayer
 from .moe import AscendFlashMoE
+from .pd_role import uses_prefill_ops
 
 FLASHCOMM_950_PEER_BYTES = 768 * 1024
 
@@ -172,6 +175,50 @@ class AscendHYV4FlashModel(HYV4FlashModel):
                 group.device_communicator.max_sequence_collective_peer_bytes = FLASHCOMM_950_PEER_BYTES
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.uses_dfly = vllm_config.speculative_config is not None
+        self._engram_prefetch_stream = None
+        if self.engram_hash is not None:
+            self.engram_hash.use_fused_prefill = is_950() and uses_prefill_ops(vllm_config)
+
+    def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None,
+                lookback_token_ids=None, prepared_engram=None):
+        if (prepared_engram is None and self.engram_hash is not None
+                and self.engram_hash.use_fused_prefill and input_ids is not None
+                and lookback_token_ids is not None and input_ids.device.type == "npu"):
+            metadata = get_forward_context().attn_metadata
+            layer_name = self.layers[0].self_attn.layer_name
+            batch = metadata.get(layer_name) if isinstance(metadata, dict) else None
+            if batch is not None and batch.prefill_reqs and all(batch.prefill_reqs):
+                embeddings = [self.layers[i - 1].engram_layer.multi_head_embedding
+                              for i in self.config.engram_layer_ids]
+                if all(embedding.map_host_weight for embedding in embeddings):
+                    prepared_engram = self._prefetch_engram(
+                        input_ids, lookback_token_ids, layer_name, batch, embeddings)
+        return super().forward(input_ids, positions, intermediate_tensors, inputs_embeds,
+                               lookback_token_ids, prepared_engram)
+
+    def _prefetch_engram(self, input_ids, lookback, layer_name, batch, embeddings):
+        if self._engram_prefetch_stream is None:
+            self._engram_prefetch_stream = torch.npu.Stream(device=input_ids.device)
+        stream = self._engram_prefetch_stream
+        compute_stream = torch.npu.current_stream(device=input_ids.device)
+        stream.wait_stream(compute_stream)
+        with torch.npu.stream(stream):
+            hashes = input_ids.new_empty(
+                (len(embeddings), input_ids.numel(), self.engram_hash.offsets.shape[1]),
+                dtype=torch.int32,
+            )
+            self.engram_hash.prepare_hashes_with_output(input_ids, lookback, layer_name, hashes)
+            for tensor in (input_ids, lookback, batch.query_start_loc_device):
+                if tensor is not None and tensor.device == input_ids.device:
+                    tensor.record_stream(stream)
+            outputs = []
+            for index, embedding in enumerate(embeddings):
+                rows = embedding.prefetch_rows(hashes[index])
+                ready = torch.npu.Event()
+                ready.record(stream)
+                outputs.append((rows, ready))
+        hashes.record_stream(compute_stream)
+        return hashes, PrefetchedEngramRows(outputs)
 
     def embed_input_ids(self, input_ids):
         # Async speculative batches can contain -1 at discarded query slots.
