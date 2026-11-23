@@ -180,7 +180,9 @@ class TestPrepareAndFinalize(unittest.TestCase):
         context.mc2_mask = mc2_mask
         context.padded_num_tokens = padded_num_tokens
         context.in_profile_run = False
-        self.enterContext(override_forward_context(context))
+        forward_context = override_forward_context(context)
+        forward_context.__enter__()
+        self.addCleanup(forward_context.__exit__, None, None, None)
         return context
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=2)
