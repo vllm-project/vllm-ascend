@@ -89,6 +89,10 @@ def _leg(use_pool: bool, case_name: str):
             compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
             enable_prefix_caching=not use_pool,
             disable_log_stats=False,
+            # Bound pool-side hangs: workers start sequentially, and a hung
+            # generate should surface as ENV_BLOCKED instead of the job timeout.
+            dp_start_timeout=600,
+            dp_request_timeout=600,
         )
         if use_pool:
             pool = stack.enter_context(SingleNodeMemcacheManager(_build_memcache_pool_config(), case_name))
@@ -158,4 +162,7 @@ def test_deepseek_v4_1_flash_memcache_layerwise_perf() -> None:
         prompt_ids=prompt_ids,
         perf_prompt_tokens=POOL_PERF_PROMPT_TOKENS,
         replicas=DATA_PARALLEL_SIZE,
+        # Build the pool leg first so a pool-side failure surfaces without
+        # paying for the control leg.
+        pool_first=True,
     )
