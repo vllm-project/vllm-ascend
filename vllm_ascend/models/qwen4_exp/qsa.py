@@ -341,7 +341,8 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
 
             raw_metadata, compressed_metadata = metadata
             num_tokens = raw_metadata.num_actual_tokens
-            if getattr(raw_metadata, "pcp_context", None) is None:
+            pcp_active = getattr(raw_metadata, "pcp_context", None) is not None
+            if not pcp_active:
                 hidden_states = hidden_states[:num_tokens]
                 positions = positions[..., :num_tokens]
             query, token_k = self.project_qk(hidden_states, positions)
@@ -356,7 +357,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 if out is None:
                     raise RuntimeError("QSA top-k reuse requires an output buffer")
                 return out
-            return self._select(query[:num_tokens], compressed_metadata, out)
+            return self._select(query[:num_tokens] if pcp_active else query, compressed_metadata, out)
 
     else:
 
@@ -393,7 +394,8 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
 
             raw_metadata, compressed_metadata = metadata
             num_tokens = raw_metadata.num_actual_tokens
-            if getattr(raw_metadata, "pcp_context", None) is None:
+            pcp_active = getattr(raw_metadata, "pcp_context", None) is not None
+            if not pcp_active:
                 hidden_states = hidden_states[:num_tokens]
                 positions = positions[..., :num_tokens]
             query, token_k = self.project_qk(hidden_states, positions)
@@ -408,7 +410,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 if out is None:
                     raise RuntimeError("QSA top-k reuse requires an output buffer")
                 return out, None
-            return self._select(query[:num_tokens], compressed_metadata, out), None
+            return self._select(query[:num_tokens] if pcp_active else query, compressed_metadata, out), None
 
     def project_qk(
         self,
