@@ -137,6 +137,7 @@ def test_precise_decode_metadata_excludes_short_prefills():
     common = SimpleNamespace(
         num_reqs=3,
         query_start_loc_cpu=torch.tensor([0, 3, 9, 10]),
+        query_start_loc=torch.tensor([0, 3, 9, 10]),
         seq_lens_cpu=torch.tensor([64, 134, 22]),
         is_prefilling=torch.tensor([True, False, False]),
         block_table_tensor=torch.empty(0),
@@ -154,6 +155,7 @@ def test_full_decode_metadata_uses_live_device_lengths():
     common = SimpleNamespace(
         num_reqs=2,
         query_start_loc_cpu=torch.tensor([0, 6, 12]),
+        query_start_loc=torch.tensor([0, 6, 12]),
         seq_lens_cpu=seq_lens.clone(),
         seq_lens=seq_lens,
         block_table_tensor=torch.empty(0),

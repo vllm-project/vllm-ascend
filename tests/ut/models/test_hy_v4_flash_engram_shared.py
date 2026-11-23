@@ -114,7 +114,7 @@ def test_shared_table_rejects_unsupported_topologies(shared_embedding, monkeypat
 def test_shared_table_cleanup_keeps_alias_on_unregister_failure(shared_embedding, monkeypatch):
     embedding = engram.FlashEmbedding([3, 4], 2, None, True, True)
     embedding.load_weight("weight", torch.zeros(7, 2, dtype=torch.bfloat16))
-    buffer = embedding._shared_buffers["weight"]
+    buffer = embedding._host_buffers["weight"]
     pointer = embedding.embedding.weight.data_ptr()
 
     def fail():
@@ -125,12 +125,12 @@ def test_shared_table_cleanup_keeps_alias_on_unregister_failure(shared_embedding
         with pytest.raises(RuntimeError, match="unregister failed"):
             embedding.close_host_offload()
     assert embedding.embedding.weight.data_ptr() == pointer
-    assert embedding._shared_buffers["weight"] is buffer
+    assert embedding._host_buffers["weight"] is buffer
     embedding.close_host_offload()
     embedding.close_host_offload()
     assert buffer.closed
     assert embedding.embedding.weight.numel() == 0
-    assert not embedding._shared_buffers
+    assert not embedding._host_buffers
 
 
 def test_private_table_load_preserves_parameter_device(shared_embedding):
@@ -140,3 +140,36 @@ def test_private_table_load_preserves_parameter_device(shared_embedding):
         embedding.load_weight("weight", weight)
     assert embedding.embedding.weight.device.type == "cpu"
     torch.testing.assert_close(embedding.embedding.weight, weight[:3], atol=0, rtol=0)
+
+
+@pytest.mark.parametrize(
+    "message, fallback",
+    [
+        ("aclrtHostRegisterV2 failed: rc=507899 size=12", True),
+        ("aclrtHostRegisterV2 failed: rc=1 size=12", False),
+        ("aclrtMallocHost failed: rc=507899 size=12", False),
+    ],
+)
+def test_private_mapped_table_registration_fallback(shared_embedding, monkeypatch, message, fallback):
+    def fail(*args):
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(npu, "HostUvaBuffer", fail)
+    original_empty = torch.empty
+
+    def cpu_empty(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return original_empty(*args, **kwargs)
+
+    monkeypatch.setattr(engram.torch, "empty", cpu_empty)
+    embedding = engram.FlashEmbedding([3, 4], 2, None, True, False, map_host_weight=True)
+    weight = torch.arange(14).reshape(7, 2).bfloat16()
+    if fallback:
+        embedding.load_weight("weight", weight)
+        assert not embedding.map_host_weight
+        assert not embedding._host_buffers
+        torch.testing.assert_close(embedding.embedding.weight, weight[:3], rtol=0, atol=0)
+    else:
+        with pytest.raises(RuntimeError, match="failed"):
+            embedding.load_weight("weight", weight)
+        assert embedding.map_host_weight

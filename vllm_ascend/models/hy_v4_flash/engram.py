@@ -5,6 +5,7 @@
 import numpy as np
 import torch
 import torch.distributed as dist
+import torch_npu
 from torch import nn
 from vllm.distributed import (
     get_dp_group,
@@ -15,14 +16,36 @@ from vllm.distributed import (
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
-from vllm.triton_utils import HAS_TRITON
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.hy_v4_flash.reference import decode_e4m3fn, hash_ngrams
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.device_config import is_950
 
 from .pd_role import uses_prefill_ops
+
+_CANN_ENGRAM_MAX_TOKENS = 512
+_CANN_RMS_ALIGNMENT = 32
+
+
+def _engram_inverse_rms(value, weight, epsilon, use_cann):
+    if (
+        use_cann
+        and value.device.type == "npu"
+        and value.dtype == weight.dtype == torch.float32
+        and value.ndim in (2, 3)
+        and 0 < value.shape[0] <= _CANN_ENGRAM_MAX_TOKENS
+        and value.shape[-1] % _CANN_RMS_ALIGNMENT == 0
+        and value.is_contiguous()
+        and weight.shape == (value.shape[-1],)
+        and weight.device == value.device
+        and weight.is_contiguous()
+        and not torch.is_autocast_enabled("npu")
+    ):
+        # gamma does not affect rstd. Keep the original multiply order below.
+        return torch_npu.npu_rms_norm(value, weight, epsilon)[1]
+    return (value.square().mean(-1, keepdim=True) + epsilon).rsqrt()
 
 
 class FlashEngramLayout:
@@ -88,6 +111,7 @@ def head_range(sizes, tp, rank):
 
 class FlashNgramHashState(nn.Module):
     use_fused_prefill = False
+
     def __init__(self, config, *, dummy=False):
         super().__init__()
         layout = FlashEngramLayout(config)
@@ -137,20 +161,38 @@ class FlashNgramHashState(nn.Module):
         batch = metadata[layer_name]
         starts = batch.query_start_loc
         starts_device = batch.query_start_loc_device
-        if (self.use_fused_prefill and HAS_TRITON and input_ids.device.type == "npu"
-                and starts_device is not None and starts_device.device == input_ids.device
-                and self.layout.lookup_table is not None and lookback is not None
-                and batch.prefill_reqs and all(batch.prefill_reqs)
-                and 128 <= starts[-1] <= input_ids.numel()
-                and lookback.shape == (len(starts) - 1, self.lookback_depth)
-                and self.lookback_depth == 2 and self.primes.shape[-1] == 8
-                and all(t.is_contiguous() for t in (input_ids, lookback, output))):
+        if (
+            self.use_fused_prefill
+            and HAS_TRITON
+            and input_ids.device.type == "npu"
+            and starts_device is not None
+            and starts_device.device == input_ids.device
+            and self.layout.lookup_table is not None
+            and lookback is not None
+            and batch.prefill_reqs
+            and all(batch.prefill_reqs)
+            and 128 <= starts[-1] <= input_ids.numel()
+            and lookback.shape == (len(starts) - 1, self.lookback_depth)
+            and self.lookback_depth == 2
+            and self.primes.shape[-1] == 8
+            and all(t.is_contiguous() for t in (input_ids, lookback, output))
+        ):
             from vllm_ascend.ops.triton.engram_hash import flash_prefill_hash
 
-            flash_prefill_hash(input_ids, lookback, starts_device, starts[-1],
-                               self.token_map, self.multipliers, self.primes,
-                               self.offsets, output, self.pad_id,
-                               self.layout.pad_token_id, self.visual_token_ids)
+            flash_prefill_hash(
+                input_ids,
+                lookback,
+                starts_device,
+                starts[-1],
+                self.token_map,
+                self.multipliers,
+                self.primes,
+                self.offsets,
+                output,
+                self.pad_id,
+                self.layout.pad_token_id,
+                self.visual_token_ids,
+            )
             logger.info_once("HYV4 Prefill uses the fused Engram hash")
             return
         self.prepare_batch_hashes(input_ids, lookback, starts, output)
@@ -240,9 +282,18 @@ class FlashEmbedding(nn.Module):
         if self.map_host_weight and shape[0]:
             from vllm_ascend.models.deepseek_v41.engram.npu import HostUvaBuffer
 
-            buffer = HostUvaBuffer(shape, dtype, torch.device("npu", torch.npu.current_device()))
-            self._host_buffers[leaf] = buffer
-            return buffer.tensor
+            try:
+                buffer = HostUvaBuffer(shape, dtype, torch.device("npu", torch.npu.current_device()))
+            except RuntimeError as exc:
+                # HostUvaBuffer cleans up before re-raising registration errors.
+                # Never hide its cleanup-error subclass or unrelated failures.
+                if type(exc) is not RuntimeError or not str(exc).startswith("aclrtHostRegisterV2 failed: rc=507899 "):
+                    raise
+                self.map_host_weight = False
+                logger.warning("HYV4 Engram host registration unsupported; retaining CPU gather: %s", exc)
+            else:
+                self._host_buffers[leaf] = buffer
+                return buffer.tensor
         parameter = getattr(self.embedding, leaf, None)
         storage = {"device": parameter.device} if parameter is not None else {}
         if self.cpu_offload:
@@ -319,9 +370,13 @@ class FlashEmbedding(nn.Module):
         from .engram_prefetch import gather_mapped_rows
 
         return gather_mapped_rows(
-            hashes, self._host_buffers["weight"],
+            hashes,
+            self._host_buffers["weight"],
             self._host_buffers.get("weight_scale_inv") if self.fp8 else None,
-            self.head_start, self.head_end, self.vocab_start, self.vocab_end,
+            self.head_start,
+            self.head_end,
+            self.vocab_start,
+            self.vocab_end,
         )
 
     def gather_rows(self, hashes):
@@ -345,6 +400,17 @@ class FlashEngram(nn.Module):
     def __init__(self, vllm_config, layout, layer_id, prefix):
         super().__init__()
         config = vllm_config.model_config.hf_text_config
+        use_cann = vllm_config.additional_config.get("hy4flash_cann_engram_rms", False)
+        if not isinstance(use_cann, bool):
+            raise ValueError("hy4flash_cann_engram_rms must be a boolean")
+        transfer = vllm_config.kv_transfer_config
+        self.use_cann_inverse_rms = (
+            use_cann
+            and is_950()
+            and hasattr(torch_npu, "npu_rms_norm")
+            and transfer is not None
+            and transfer.kv_role == "kv_consumer"
+        )
         index = layout.layer_ids.index(layer_id)
         sizes = [p for order in layout.primes[index] for p in order]
         storage = vllm_config.engram_config
@@ -356,7 +422,11 @@ class FlashEngram(nn.Module):
                 raise ValueError("Flash Engram DP shared memory requires checkpoint loading")
             dtype = torch.float8_e4m3fn if config.engram_fp8_embedding else torch.bfloat16
         self.multi_head_embedding = FlashEmbedding(
-            sizes, layout.head_dim, dtype, storage.cpu_offload, storage.dp_shared_memory,
+            sizes,
+            layout.head_dim,
+            dtype,
+            storage.cpu_offload,
+            storage.dp_shared_memory,
             map_host_weight=storage.cpu_offload and HAS_TRITON and is_950() and uses_prefill_ops(vllm_config),
         )
         self.hidden_size, self.hc_mult = config.hidden_size, config.hc_mult
@@ -395,7 +465,8 @@ class FlashEngram(nn.Module):
         local = self.multi_head_embedding
         local_hashes = hashes[:, local.head_start : local.head_end]
         x = rows.masked_fill(local_hashes.unsqueeze(-1) < 0, 0)
-        x = (x * (x.square().mean(-1, keepdim=True) + eps).rsqrt() * gamma).to(hidden.dtype)
+        inverse = _engram_inverse_rms(x, gamma[0], eps, self.use_cann_inverse_rms)
+        x = (x * inverse * gamma).to(hidden.dtype)
         x = x.flatten(1)
         gates = []
         for channel in range(self.hc_mult):
@@ -410,7 +481,9 @@ class FlashEngram(nn.Module):
         if local.tp_size > 1:
             value = tensor_model_parallel_all_reduce(value)
         value = value.float()
-        signal = self.unified_pre_gamma.float() * value * (value.square().mean(-1, keepdim=True) + eps).rsqrt()
+        gamma = self.unified_pre_gamma.float()
+        inverse = _engram_inverse_rms(value, gamma, eps, self.use_cann_inverse_rms)
+        signal = gamma * value * inverse
         scales = torch.stack(list(self.unified_per_hc_scales)).float()
         result = ((gate.float().unsqueeze(-1) + scales) * signal.unsqueeze(1)).to(hidden.dtype)
         return hidden + result.masked_fill((hashes < 0).all(-1)[:, None, None], 0)
