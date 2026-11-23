@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 import os
 from importlib import import_module, util
-from typing import TYPE_CHECKING, Any, get_args
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import torch
@@ -42,6 +42,7 @@ from vllm_ascend.ascend_config import (
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
     DeviceAdaptorFamily,
+    FlashAttentionNpu3Model,
     HardwareCapability,
     QuantizationBackendFamily,
     get_current_hardware_profile,
@@ -60,6 +61,7 @@ from vllm_ascend.utils import (
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
     is_moe_model,
+    model_supports_dcp,
     model_uses_kpool_indexer,
     model_uses_sfa_sparse,
     refresh_block_size,
@@ -71,12 +73,16 @@ from vllm_ascend.utils import (
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
+    from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+    from vllm.v1.attention.backends.mla.prefill.selector import MLAPrefillSelectorConfig
     from vllm_ascend.ascend_config import AscendConfig
 else:
     ModelConfig = None
     SpeculativeConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
+    MLAPrefillBackend = None
+    MLAPrefillSelectorConfig = None
     AscendConfig = None
 
 # Keep Breakable CUDAGraph opt-in on Ascend. Upstream may auto-enable it
@@ -395,6 +401,14 @@ class NPUPlatform(Platform):
 
         adapt_patch(is_global_patch=True)
 
+        # Eager side-effect import: registers the Ascend KV-cache dtype
+        # handlers (fp8 -> torch.float8_e4m3fn, int8, mxfp8) via vLLM's
+        # register_kv_cache_dtype mechanism. This runs in the launcher
+        # process, so CacheConfig._validate_cache_dtype sees the registered
+        # dtypes. Worker processes re-run the registration through the eager
+        # import in vllm_ascend/worker/worker.py.
+        from vllm_ascend.core import kv_cache_dtype_handlers  # noqa: F401
+
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".
@@ -404,13 +418,13 @@ class NPUPlatform(Platform):
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
             # Same pattern for --kv-cache-dtype: the argparse choices were
-            # built from the upstream CacheDType Literal before this patch
-            # widened it, so append the Ascend-only dtypes here.
+            # built before the Ascend handlers were registered, so append
+            # every registered dtype here (including int8/mxfp8).
             dtype_action = parser._option_string_actions.get("--kv-cache-dtype")
             if dtype_action and hasattr(dtype_action, "choices") and dtype_action.choices:
-                from vllm.config.cache import CacheConfig
+                from vllm.config.cache import KV_CACHE_DTYPES
 
-                for dtype in get_args(CacheConfig.__dataclass_fields__["cache_dtype"].type):
+                for dtype in KV_CACHE_DTYPES:
                     if dtype not in dtype_action.choices:
                         dtype_action.choices.append(dtype)
 
@@ -495,6 +509,15 @@ class NPUPlatform(Platform):
             else:
                 return
             cache_config.mamba_page_size_padded = cache_config.block_size * token_bytes
+
+    @classmethod
+    def get_mla_prefill_backend_cls(cls, mla_selector_config: MLAPrefillSelectorConfig) -> type[MLAPrefillBackend]:
+        # Ascend's AscendSFAImpl/AscendMLAImpl handles the full MLA forward
+        # pass (including prefill) via impl.forward(), so return the no-op
+        # Ascend backend instead of the CUDA capability-based selection.
+        from vllm_ascend.attention.mla_prefill import AscendMLAPrefillBackend
+
+        return AscendMLAPrefillBackend
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
@@ -613,7 +636,8 @@ class NPUPlatform(Platform):
         sync_v2_extra_kwargs(vllm_config)
 
         # 1.Configure logging
-        configure_ascend_file_logging()
+        additional_config = vllm_config.additional_config or {}
+        configure_ascend_file_logging(additional_config.get("ascend_log_path"))
         configure_ascend_logging()
 
         # 2.Early exit checks and validate parallel config
@@ -648,7 +672,8 @@ class NPUPlatform(Platform):
         _validate_glm5next_dflash2_pp_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 
-        _validate_pcp_dcp_config(vllm_config)
+        _validate_target_dcp_config(vllm_config)
+        _validate_deepseek_v41_adaptive_config(vllm_config)
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
         _validate_engram_config(vllm_config)
@@ -855,8 +880,12 @@ def _configure_minimax_m3_a5_mixed_kv_cache(vllm_config: VllmConfig) -> None:
         return
 
     sparse_config = getattr(text_config, "sparse_attention_config", None) or {}
-    sparse_freq = sparse_config.get("sparse_attention_freq") or []
-    sparse_layer_ids = {layer_idx for layer_idx, freq in enumerate(sparse_freq) if freq != 0}
+    if sparse_config:
+        sparse_freq = sparse_config.get("sparse_attention_freq") or []
+        sparse_layer_ids = {layer_idx for layer_idx, freq in enumerate(sparse_freq) if freq != 0}
+    else:
+        layer_types = getattr(text_config, "layer_types", None) or ()
+        sparse_layer_ids = {i for i, layer_type in enumerate(layer_types) if layer_type == "minimax_m3_sparse"}
     gqa_layer_ids = [str(layer_idx) for layer_idx in range(num_hidden_layers) if layer_idx not in sparse_layer_ids]
     if not gqa_layer_ids:
         return
@@ -1535,9 +1564,9 @@ def _setup_compile_backend(
                 "vllm::glm5next_kda_forward_with_output",
             ]
         )
-        additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
-        additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
-        additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
+        # npugraph_ex compiles each piece (force_eager) and runs the static/
+        # super kernel passes per piece; keep the user's
+        # ascend_compilation_config flags untouched for PIECEWISE.
     elif compilation_config.cudagraph_mode.has_full_cudagraphs():
         # Don't split the FX graph for static kernel; it would compile multiple times.
         compilation_config.splitting_ops = []
@@ -1760,12 +1789,14 @@ def _disable_expandable_segments() -> None:
         logger.info("Removed expandable_segments from PYTORCH_NPU_ALLOC_CONF: %s", updated_configs)
 
 
-def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str) -> bool:
+def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str | None) -> bool:
     """Match supported target/draft pairs against the live loader tag."""
     # V2 keeps the target model_config while loading the draft. Match the live
     # loader tag so the target and other auxiliary models retain their backend.
     target = spec.target_model_config
     if spec.method == "dflash":
+        # Keep automatic FA3 selection within the validated eager-draft scope.
+        # The target may still use graph execution.
         return (
             bool(spec.enforce_eager)
             and model_tag == "dflash_head"
@@ -1853,7 +1884,7 @@ def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
 
 
 def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
-    """Select the optional A2/A3 FA3 ABI only for compatible MiniMax attention."""
+    """Select optional FA3 for compatible MiniMax, Step5 and local GLM DFlash2 drafts."""
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.FLASH_ATTN_NPU_3
     ):
@@ -1867,7 +1898,16 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
     spec = config.speculative_config if config is not None else None
     if spec is None or spec.draft_model_config is None:
         return False
-    if config is None or config.model_config is None or not _uses_minimax_fa3(config):
+    if config is None or config.model_config is None:
+        return False
+    from vllm.compilation import backends
+
+    local_glm_dflash = (
+        spec.method == "dflash"
+        and _is_supported_flash_attn_draft(spec, getattr(backends, "model_tag", None))
+        and not getattr(selector, "use_pcp", False)
+    )
+    if not (local_glm_dflash or _uses_minimax_fa3(config) or _uses_step5_fa3(config)):
         return False
     parallel = config.parallel_config
     return (
@@ -1887,13 +1927,26 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
                 "use_rswa",
             )
         )
-        and parallel.pipeline_parallel_size == 1
-        and parallel.prefill_context_parallel_size == 1
-        and parallel.decode_context_parallel_size == 1
+        and (
+            local_glm_dflash
+            or (
+                parallel.pipeline_parallel_size == 1
+                and parallel.prefill_context_parallel_size == 1
+                and parallel.decode_context_parallel_size == 1
+            )
+        )
         and config.cache_config.cache_dtype in ("auto", "float16", "bfloat16")
-        and not getattr(config.quant_config, "enable_c8_quant", False)
+        and (local_glm_dflash or not getattr(config.quant_config, "enable_c8_quant", False))
         and not getattr(spec, "enable_adaptive_verification", False)
         and util.find_spec("flash_attn_npu_3") is not None
+    )
+
+
+def _uses_step5_fa3(config) -> bool:
+    """Select Step5 attention on hardware profiles that enable this model family."""
+    architectures = config.model_config.hf_config.architectures or ()
+    return FlashAttentionNpu3Model.STEP5 in get_current_hardware_profile().flash_attn_npu_3_models and bool(
+        {"Step5ForCausalLM", "Step5ForConditionalGeneration", "Step5MTP"}.intersection(architectures)
     )
 
 
@@ -1910,7 +1963,8 @@ def _uses_minimax_fa3(config) -> bool:
         "Qwen3OmniDSparkModel",
     }
     return (
-        getattr(spec, "method", None) in ("dspark",)
+        FlashAttentionNpu3Model.MINIMAX in get_current_hardware_profile().flash_attn_npu_3_models
+        and getattr(spec, "method", None) in ("dspark",)
         and bool(draft_architectures.intersection(architectures))
         and bool(_MINIMAX_M3_ARCHITECTURES.intersection(getattr(target_hf, "architectures", None) or ()))
     )
@@ -2085,10 +2139,9 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
     if (
         parallel_config.enable_elastic_ep
         or parallel_config.tensor_parallel_size not in (1, 2, 4, 8)
-        or parallel_config.pipeline_parallel_size != 1
         or parallel_config.decode_context_parallel_size != 1
     ):
-        raise ValueError("Ascend Engram requires TP=1/2/4/8 with PP=DCP=1.")
+        raise ValueError("Ascend Engram requires TP=1/2/4/8 with DCP=1.")
     load_format = vllm_config.load_config.load_format
     if load_format not in ("auto", "safetensors", "rfork", "dummy"):
         raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors/rfork), or dummy weights.")
@@ -2132,42 +2185,14 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
             )
 
 
-def _validate_model_pcp_dcp_config(
-    model_config: ModelConfig,
-    pcp_size: int,
-    dcp_size: int,
-) -> None:
-    """Require equal PCP/DCP sizes for GQA/MQA stacking."""
-    if model_config.use_mla or pcp_size <= 1 or dcp_size <= 1:
-        return
-    if pcp_size != dcp_size:
-        raise ValueError(
-            "GQA/MQA PCP+DCP requires prefill_context_parallel_size "
-            "to equal decode_context_parallel_size; "
-            f"got PCP={pcp_size}, DCP={dcp_size}."
-        )
-
-
-def _validate_pcp_dcp_config(vllm_config: VllmConfig) -> None:
-    """Validate GQA/MQA PCP+DCP sizes for the target model."""
-    parallel_config = vllm_config.parallel_config
-    model_config = vllm_config.model_config
-    if (
-        parallel_config.decode_context_parallel_size > 1
-        and not getattr(model_config, "use_mla", False)
-        and not model_uses_sfa_sparse(model_config)
+def _validate_target_dcp_config(vllm_config: VllmConfig) -> None:
+    """Validate DCP support for the target model."""
+    if vllm_config.parallel_config.decode_context_parallel_size > 1 and not model_supports_dcp(
+        vllm_config.model_config
     ):
-        logger.warning_once(
-            "Decode Context Parallelism (DCP) for GQA models is deprecated as of v0.32.0 "
-            "and has entered the sunset process. It will be removed in a future release. "
-            "GQA draft models can maintain native TP sharding under target DCP. "
-            "See RFC #21305 (https://github.com/vllm-project/vllm-ascend/issues/21305) for details."
+        raise ValueError(
+            "Decode Context Parallelism (DCP) is not supported for GQA/MQA models. Only MLA and SFA models support DCP."
         )
-    _validate_model_pcp_dcp_config(
-        vllm_config.model_config,
-        parallel_config.prefill_context_parallel_size,
-        parallel_config.decode_context_parallel_size,
-    )
 
 
 def _get_deepseek_v4_variant(model_config: ModelConfig) -> str | None:
@@ -2196,6 +2221,26 @@ def _get_deepseek_v4_variant(model_config: ModelConfig) -> str | None:
     if num_experts == 384:
         return "V4 Pro"
     return None
+
+
+def _validate_deepseek_v41_adaptive_config(vllm_config: VllmConfig) -> None:
+    spec = vllm_config.speculative_config
+    if spec is None or not spec.enable_adaptive_verification:
+        return
+    if _get_deepseek_v4_variant(vllm_config.model_config) != "V4.1":
+        return
+    parallel = vllm_config.parallel_config
+    pcp_size = parallel.prefill_context_parallel_size
+    dcp_size = parallel.decode_context_parallel_size
+    # CP partitions from host boundaries, which do not describe the per-request
+    # draft budgets allocated on device by adaptive verification.
+    if pcp_size > 1 or dcp_size > 1:
+        raise ValueError(
+            "DeepSeek V4.1 adaptive verification on Ascend does not support "
+            f"context parallelism (PCP={pcp_size}, DCP={dcp_size}). "
+            "Set --prefill-context-parallel-size 1 and --decode-context-parallel-size 1, "
+            "or set enable_adaptive_verification=false in --speculative-config."
+        )
 
 
 def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig) -> None:
@@ -2253,61 +2298,4 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
             "--decode-context-parallel-size to 1 or remove "
             "num_speculative_tokens_per_batch_size from "
             "--speculative-config."
-        )
-
-    draft_model_config = speculative_config.draft_model_config
-    if draft_model_config is None:
-        return
-
-    # Upstream DFlashSpeculator runs dense DSpark drafts at DCP=1 and the
-    # target runner marks their KV groups with dcp_sharded=False.
-    if vllm_config.use_v2_model_runner and speculative_config.use_dspark() and not draft_model_config.use_mla:
-        return
-
-    # MLA draft models do not use the GQA/MQA head-sharding rules below.
-    if draft_model_config.use_mla:
-        return
-
-    pcp_size = parallel_config.prefill_context_parallel_size
-    if pcp_size > 1:
-        _validate_model_pcp_dcp_config(draft_model_config, pcp_size, decode_context_parallel_size)
-        return
-
-    draft_parallel_config = speculative_config.draft_parallel_config
-    if draft_parallel_config is not None:
-        draft_tensor_parallel_size = draft_parallel_config.tensor_parallel_size
-    elif speculative_config.draft_tensor_parallel_size is not None:
-        draft_tensor_parallel_size = speculative_config.draft_tensor_parallel_size
-    else:
-        draft_tensor_parallel_size = parallel_config.tensor_parallel_size
-
-    total_num_attention_heads = draft_model_config.model_arch_config.total_num_attention_heads
-    total_num_kv_heads = draft_model_config.get_total_num_kv_heads()
-
-    if draft_tensor_parallel_size <= total_num_kv_heads:
-        raise ValueError(
-            "Invalid draft model parallel config for speculative decoding: "
-            f"tensor parallel size {draft_tensor_parallel_size} must be "
-            f"greater than total num kv heads {total_num_kv_heads} when "
-            "enable decode context parallel for GQA/MQA draft model"
-        )
-
-    max_dcp_size = draft_tensor_parallel_size // total_num_kv_heads
-    if decode_context_parallel_size > max_dcp_size:
-        raise ValueError(
-            "Invalid draft model parallel config for speculative decoding: "
-            "decode context parallel size must less than or equal to "
-            f"(draft tensor parallel size {draft_tensor_parallel_size} // "
-            f"draft total num kv heads {total_num_kv_heads}) = "
-            f"{max_dcp_size}, but got {decode_context_parallel_size}"
-        )
-
-    num_q_per_kv = total_num_attention_heads // total_num_kv_heads
-    if num_q_per_kv % decode_context_parallel_size != 0:
-        raise ValueError(
-            "Invalid draft model parallel config for speculative decoding: "
-            f"total number of q per kv attn heads ({num_q_per_kv}) must "
-            "be divisible by dcp world size when enable decode context "
-            f"parallel for GQA draft model "
-            f"({decode_context_parallel_size})."
         )

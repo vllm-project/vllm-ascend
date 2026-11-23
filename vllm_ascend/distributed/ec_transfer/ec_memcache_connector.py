@@ -176,6 +176,10 @@ class ECMemcacheConnector(ECConnectorBase):
     def ensure_cache_available(self, request: "Request", num_computed_tokens: int) -> bool:
         seen_mm_hashes_in_current_request: list[str] = []
         for feature in request.mm_features:
+            position = feature.mm_position
+            # Inputs before num_computed_tokens are already in the KV cache.
+            if position.offset + position.length <= num_computed_tokens:
+                continue
             current_image_mm_hash = feature.identifier
             if (
                 current_image_mm_hash in self._mm_hash_hits

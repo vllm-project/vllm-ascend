@@ -23,6 +23,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+"""[Role] DeepSeek V4 model integration.
+[Invariants] Projection weights follow their linear method's layout policy.
+[Timeouts & Locks] Model runner owns execution synchronization.
+[Side-Effect Policy] Parameters are prepared at load time.
+"""
+
 import math
 import typing
 from collections.abc import Callable, Iterable
@@ -544,10 +550,6 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_a",
             return_bias=False,
         )
-        # Every DSA o_proj path consumes wo_a.weight directly via
-        # npu_transpose_batchmatmul / npu_transpose_quant_batchmatmul,
-        # so the weight must remain ND.
-        self.wo_a.skip_weight_nz_conversion = True
         self.wo_b = RowParallelLinear(
             self.n_groups * config.o_lora_rank,
             self.dim,

@@ -223,7 +223,7 @@ In the PD separation scenario, we provide an optimized configuration. You can us
 
 ### Start Distributed DP Server for prefill-decode disaggregation
 
-Execute the following Python file on all nodes to use the distributed DP server. (We recommend using this feature on the v0.9.1 official release)
+Execute the following Python file on all nodes to use the distributed DP server. (We recommend using this feature on the v0.9.1 official release.)
 
 === "Prefiller node"
 
@@ -289,7 +289,7 @@ Execute the following Python file on all nodes to use the distributed DP server.
       process.join()
     ```
 
-Note that the prefiller nodes and the decoder nodes may have different configurations. In this example, each prefiller node is deployed as a master node independently, while the decoder nodes use the 192.0.0.5 node as the master node. This leads to differences in 'dp_size_local' and 'dp_rank_start'
+Note that the prefiller nodes and the decoder nodes may have different configurations. In this example, each prefiller node is deployed as a master node independently, while the decoder nodes use the 192.0.0.5 node as the master node. This leads to differences in 'dp_size_local' and 'dp_rank_start'.
 
 ## Example proxy for Distributed DP Server
 
@@ -336,11 +336,11 @@ python load_balance_proxy_server_example.py \
 | --decoder-ports | Ports of decoder nodes |
 | --decoder-ports-inc | Number of increments for decoder node ports |
 
-You can get the proxy program in the repository's examples, [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/load_balance_proxy_server_example.py)
+You can get the proxy program in the repository's examples, [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/load_balance_proxy_server_example.py).
 
 ## Benchmark
 
-We recommend using aisbench tool to assess performance. [aisbench](https://github.com/AISBench/benchmark). Execute the following commands to install aisbench
+We recommend using AISBench tool to assess performance. [AISBench](https://github.com/AISBench/benchmark). Execute the following commands to install AISBench:
 
 ```shell
 git clone https://github.com/AISBench/benchmark.git
@@ -357,7 +357,7 @@ unset https_proxy
 ```
 
 - You can place your datasets in the directory: `benchmark/ais_bench/datasets`
-- You can change the configuration in the directory :`benchmark/ais_bench/benchmark/configs/models/vllm_api` Take `vllm_api_stream_chat.py` as an example:
+- You can change the configuration in the directory:`benchmark/ais_bench/benchmark/configs/models/vllm_api`. Take `vllm_api_stream_chat.py` as an example:
 
 ```python
 models = [
@@ -389,7 +389,7 @@ models = [
 ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf  --debug  --mode perf
 ```
 
-- For more details on commands and parameters for aisbench, refer to [aisbench](https://github.com/AISBench/benchmark)
+- For more details on commands and parameters for AISBench, refer to [AISBench](https://github.com/AISBench/benchmark).
 
 ## Prefill & Decode Configuration Details
 
@@ -446,7 +446,7 @@ In the PD separation scenario, we provide an optimized configuration.
    - **"enable_prefill_optimizations"**: Whether to enable DeepSeek models' prefill optimizations.
      <br>
 
-2. Enable MTP
+2. Enable MTP:
 Add the following command to your configurations.
 
     ```shell

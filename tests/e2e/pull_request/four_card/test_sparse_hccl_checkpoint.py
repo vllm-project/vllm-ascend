@@ -302,6 +302,11 @@ def test_sparse_checkpoint_matches_native_dense(tmp_path, tp_size, dp_size):
                     indent=2,
                 )
             )
+        except BaseException:
+            # Runtime RPC failures otherwise expose only HTTP 500; retain the
+            # server's original traceback before the temporary directory exits.
+            print((tmp_path / "server.log").read_text(errors="replace"), flush=True)
+            raise
         finally:
             if engine is not None:
                 engine.shutdown()

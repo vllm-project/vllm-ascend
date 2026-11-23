@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 # ruff: noqa: E402
-"""Dispatch contract of ``AscendKVCacheConfigBuilder`` (main-only).
+"""Dispatch contract of ``AscendKVCacheConfigBuilder``.
 
-Locks the grouping precedence (GLM-Next, Ascend shared-tuple layouts, Kimi-K3
-DSpark, then vLLM's generic grouping) and the TurboQuant pool accounting: the
-surface most likely to drift between the pluggable builder on main and the
-release-lane monkey patches.
+Locks the grouping precedence (GLM-Next, Qwen4-Exp MTP, Ascend shared-tuple
+layouts, Kimi-K3 DSpark, then vLLM's generic grouping) and the TurboQuant pool
+accounting, all of which now live in the builder rather than in a monkey patch.
 """
 
 from types import SimpleNamespace
@@ -16,10 +15,11 @@ import pytest
 
 pytest.importorskip(
     "vllm.v1.core.kv_cache_config_builder",
-    reason="the pluggable KV cache builder is main-only",
+    reason="the pluggable KV cache builder requires the v0.33.0 lane or newer",
 )
 
 import torch
+from vllm.config import KVTransferConfig
 from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
@@ -28,12 +28,18 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from vllm_ascend.core import kv_cache_config_builder as builder_module
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     register_ascend_kv_cache_specs,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise import cache_planner
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    LAYERWISE_REUSE_BACKING_BYTES,
+    get_layerwise_reuse_backing_bytes,
 )
 from vllm_ascend.quantization.methods.kv_cache.turboquant import (
     SLOT_BYTES,
@@ -120,6 +126,34 @@ def test_generic_uniform_spec_falls_back_to_default_grouping():
     assert result == expected
     assert len(result) == 1
     assert set(result[0].layer_names) == {"layer.a", "layer.b"}
+
+
+def test_layerwise_offload_budget_uses_one_block_backing(monkeypatch):
+    runtime = make_runtime()
+    runtime.cache_config = SimpleNamespace(
+        num_gpu_blocks_override=None,
+        prefix_cache_retention_interval=0,
+        get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBHNC,
+    )
+    runtime.model_config.get_total_num_hidden_layers = lambda: 4
+    runtime.kv_transfer_config = KVTransferConfig(
+        kv_connector="AscendStoreConnector",
+        kv_role="kv_producer",
+        kv_connector_extra_config={"use_layerwise": True, "layerwise_num_shared_buffers": 1},
+    )
+    builder = AscendKVCacheConfigBuilder()
+    spec = generic_specs()["layer.a"]
+    groups = [KVCacheGroupSpec([f"model.layers.{layer}.attn" for layer in range(4)], spec)]
+    rules = {FullAttentionSpec: True}
+    monkeypatch.setattr(builder_module, "get_spec_reuse_rules", lambda _: rules)
+    monkeypatch.setattr(cache_planner, "get_spec_reuse_rules", lambda _: rules)
+
+    backing_bytes_per_block = builder._get_pool_bytes_per_block(runtime, groups)
+    assert backing_bytes_per_block is not None and backing_bytes_per_block == 2 * spec.page_size_bytes
+    native_config = builder.get_kv_cache_config_from_groups(runtime, groups, num_blocks=3)
+    assert native_config.num_blocks == 3
+    assert get_layerwise_reuse_backing_bytes(native_config) == 3 * backing_bytes_per_block
+    assert LAYERWISE_REUSE_BACKING_BYTES not in runtime.kv_transfer_config.kv_connector_extra_config
 
 
 def test_glm_next_layout_takes_precedence_over_ascend_grouping(monkeypatch):

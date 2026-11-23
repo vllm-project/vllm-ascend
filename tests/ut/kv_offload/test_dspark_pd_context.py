@@ -81,7 +81,7 @@ def test_scheduler_does_not_require_dspark_groups_on_legacy_paths(method):
 def test_scheduler_conversion_retains_resident_draft_in_shared_block_group():
     from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 
-    from vllm_ascend.patch.platform import patch_kv_cache_utils
+    from vllm_ascend.core import kv_cache_config_builder
 
     host_spec = AscendMLAAttentionSpec(
         block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16, store_on_host=True
@@ -101,11 +101,17 @@ def test_scheduler_conversion_retains_resident_draft_in_shared_block_group():
     with (
         pytest.MonkeyPatch.context() as monkeypatch,
     ):
-        monkeypatch.setattr(patch_kv_cache_utils, "_orig_get_kv_cache_config_from_groups", lambda *a, **k: config)
-        monkeypatch.setattr(patch_kv_cache_utils, "is_deepseek_v41_cache", lambda *a, **k: False)
-        monkeypatch.setattr(patch_kv_cache_utils, "_get_glm5_next_cache_layout", lambda *a, **k: None)
-        monkeypatch.setattr(patch_kv_cache_utils, "_is_deepseek_v4_groups", lambda *a, **k: False)
-        physical = patch_kv_cache_utils._ascend_get_kv_cache_config_from_groups(vllm_config, config.kv_cache_groups, 1)
+        monkeypatch.setattr(
+            kv_cache_config_builder,
+            "_upstream_get_kv_cache_config_from_groups",
+            lambda *a, **k: config,
+        )
+        monkeypatch.setattr(kv_cache_config_builder, "is_deepseek_v41_cache", lambda *a, **k: False)
+        monkeypatch.setattr(kv_cache_config_builder, "_get_glm5_next_cache_layout", lambda *a, **k: None)
+        monkeypatch.setattr(kv_cache_config_builder, "_is_deepseek_v4_groups", lambda *a, **k: False)
+        physical = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(
+            vllm_config, config.kv_cache_groups, 1
+        )
     assert physical.dspark_context_group_ids == (0,)
     assert physical.dspark_draft_only_group_ids == ()
     scheduler_config = generate_scheduler_kv_cache_config([physical])
@@ -663,15 +669,11 @@ def test_p_runner_excludes_persistent_draft_from_target_scratch_plan(monkeypatch
     register = Mock()
     monkeypatch.setattr(module, "configure_dspark_kv_transfer", register)
 
-    class PlanReached(Exception):
-        pass
+    def check_plan(config):
+        assert config is not original
+        register.assert_called_once_with(runner.vllm_config, runner.speculator, config, is_last_pp_rank=True)
+        return SimpleNamespace(reused_cache_names={"draft.layers.0.attn"})
 
-    def check_plan(config, runtime, *, excluded_layer_names):
-        assert config is not original and runtime is runner.vllm_config
-        register.assert_called_once_with(runtime, runner.speculator, config, is_last_pp_rank=True)
-        assert excluded_layer_names == {"draft.layers.0.attn"}
-        raise PlanReached
-
-    monkeypatch.setattr(module, "apply_layerwise_kv_cache_plan", check_plan)
-    with pytest.raises(PlanReached):
+    monkeypatch.setattr(module, "get_layerwise_reuse_layout", check_plan)
+    with pytest.raises(ValueError, match="Persistent draft caches cannot rotate"):
         runner.initialize_kv_cache(original)
