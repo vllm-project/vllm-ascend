@@ -11,6 +11,7 @@ import torch
 import vllm.v1.worker.gpu.cp_utils as _cp_utils
 from vllm.config import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -25,6 +26,7 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask, TargetDeviceMetadata
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
@@ -43,6 +45,19 @@ if not hasattr(_cp_utils, "prepare_dcp_local_seq_lens") and hasattr(_cp_utils, "
     _cp_utils.prepare_dcp_local_seq_lens = (
         lambda dcp_local_seq_lens, seq_lens, num_reqs, dcp_size, dcp_rank, cp_interleave: None
     )
+
+
+class _FakeAttentionBackend:
+    uses_descriptor_cache_view = False
+
+    @staticmethod
+    def customize_spec(spec):
+        return spec
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(spec):
+        # These layout tests use arbitrary block sizes without kernel alignment.
+        return [MultipleOf(1)]
 
 
 def _mock_vllm_config():
@@ -252,16 +267,34 @@ def test_ensure_align_ctx_lazily_recreates_mamba_ctx():
         patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.validate_mamba_state_copy_funcs"),
         patch(
             "vllm_ascend.worker.v2.model_states.mamba_hybrid.MambaSpecDecodeGPUContext.create",
+            autospec=True,
             return_value=ctx,
         ) as mock_create,
     ):
-        result = state._ensure_align_ctx(kv_cache_config, [0], (torch.zeros(3, dtype=torch.int32),))
+        block_table = torch.zeros(3, dtype=torch.int32)
+        result = state._ensure_align_ctx(kv_cache_config, [0], (block_table,))
+        ctx.is_initialized = True
+        assert state._ensure_align_ctx(kv_cache_config, [0], (block_table,)) is ctx
 
     assert result is ctx
     assert state._mamba_ctx is ctx
     assert state._mamba_state_copy_funcs is copy_funcs
     mock_create.assert_called_once()
-    ctx.initialize_from_forward_context.assert_called_once()
+    # Enforce the installed upstream signature, rather than accepting any
+    # keyword/omitted argument through an unconstrained MagicMock.
+    if not vllm_version_is("0.33.0"):
+        assert (
+            mock_create.call_args.kwargs["forward_context"]
+            is state.vllm_config.compilation_config.static_forward_context
+        )
+    else:
+        assert "forward_context" not in mock_create.call_args.kwargs
+    ctx.initialize_from_forward_context.assert_called_once_with(
+        kv_cache_config,
+        state.vllm_config.compilation_config.static_forward_context,
+        copy_funcs,
+        [block_table],
+    )
 
 
 @patch("vllm.v1.worker.mamba_utils.precopy_mamba_align_fused_kernel")
@@ -486,6 +519,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(
 def test_kimi_pcp_metadata_respects_target_and_draft_groups(is_target):
     context = SimpleNamespace(global_batch=object(), global_block_tables=object(), global_slot_mappings=object())
     state = SimpleNamespace(
+        _uses_global_mamba_pcp=lambda: True,
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(model_type="kimi_linear", linear_attn_config={"num_heads": 96})
@@ -546,7 +580,8 @@ def test_kimi_pcp_metadata_respects_target_and_draft_groups(is_target):
     ],
 )
 @pytest.mark.parametrize("is_dummy", [False, True])
-def test_kimi_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_capture, is_dummy):
+@pytest.mark.parametrize("is_decode_sharded", [False, True])
+def test_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_capture, is_dummy, is_decode_sharded):
     owner = TargetDeviceMetadata()
     produce = MagicMock()
     task = DeviceMetadataTask(DeviceMetadataStage.ATTENTION, produce, 0)
@@ -558,8 +593,15 @@ def test_kimi_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_captur
         [SimpleNamespace(kv_cache_spec=object(), get_metadata_builder=lambda _: provider)],
         [SimpleNamespace(kv_cache_spec=_mamba_spec(), get_metadata_builder=lambda _: provider)],
     ]
-    context = SimpleNamespace(global_batch=object(), global_block_tables=object(), global_slot_mappings=object())
+    local_batch = SimpleNamespace(is_dummy=is_dummy)
+    use_global_mamba = not is_dummy or is_decode_sharded
+    context = SimpleNamespace(
+        global_batch=object() if use_global_mamba else local_batch,
+        global_block_tables=object(),
+        global_slot_mappings=object(),
+    )
     state = SimpleNamespace(
+        _uses_global_mamba_pcp=lambda: True,
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(model_type="kimi_linear", linear_attn_config={"num_heads": 96})
@@ -576,11 +618,11 @@ def test_kimi_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_captur
     with patch.object(
         AscendMambaHybridModelState,
         "_build_attn_metadata_for_batch",
-        side_effect=[{"sfa": sfa, "kda": kda}] if is_dummy else [{"sfa": sfa}, {"kda": kda}],
+        side_effect=[{"sfa": sfa}, {"kda": kda}] if use_global_mamba else [{"sfa": sfa, "kda": kda}],
     ) as build:
         result = AscendMambaHybridModelState.prepare_attn(
             state,
-            SimpleNamespace(is_dummy=is_dummy),
+            local_batch,
             graph_mode,
             (),
             object(),
@@ -589,7 +631,9 @@ def test_kimi_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_captur
             for_capture=for_capture,
         )
     assert result == {"sfa": sfa, "kda": kda}
-    assert build.call_count == (1 if is_dummy else 2)
+    assert build.call_count == (2 if use_global_mamba else 1)
+    if use_global_mamba:
+        assert build.call_args.args[1] is context.global_batch
     assert sfa.device_metadata_executor is owner.executor
     assert kda.device_metadata_executor is owner.executor
     provider.take_device_metadata_tasks.assert_called_once_with()
@@ -658,8 +702,9 @@ def test_mamba_padding_is_independent_of_pcp_context(
 
 @pytest.mark.parametrize("recover", [False, True])
 @pytest.mark.parametrize("for_capture", [False, True])
-def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests(recover, for_capture):
-    local_batch = SimpleNamespace(is_dummy=False)
+@pytest.mark.parametrize("is_dummy", [False, True])
+def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests(recover, for_capture, is_dummy):
+    local_batch = SimpleNamespace(is_dummy=is_dummy)
     global_batch = SimpleNamespace(num_reqs=1)
     pcp_context = SimpleNamespace(
         global_batch=global_batch,
@@ -667,10 +712,12 @@ def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests(recover, for_c
         global_slot_mappings="global_slots",
     )
     pcp_manager = SimpleNamespace(
+        is_decode_sharded=True,
         is_target_attn_groups=MagicMock(return_value=True),
         build_attention_context=MagicMock(return_value=pcp_context),
     )
-    state = SimpleNamespace(
+    state = object.__new__(AscendMambaHybridModelState)
+    vars(state).update(
         pcp_manager=pcp_manager,
         vllm_config=SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=4))),
         recoverssm=SimpleNamespace(record_step=MagicMock()) if recover else None,
@@ -724,7 +771,8 @@ def test_glm_kpool_pcp_advances_mamba_align_state_once_per_global_request(mock_k
     pcp_context = SimpleNamespace(global_batch=global_batch, global_block_tables=global_tables)
     pcp_manager = SimpleNamespace(build_attention_context=MagicMock(return_value=pcp_context))
     spec = _mamba_spec()
-    state = SimpleNamespace(
+    state = object.__new__(AscendMambaHybridModelState)
+    vars(state).update(
         _align_mode=True,
         pcp_manager=pcp_manager,
         vllm_config=SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=4))),
@@ -752,7 +800,9 @@ def test_glm_kpool_pcp_advances_mamba_align_state_once_per_global_request(mock_k
 
 @patch(
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
-    return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
+    return_value=SimpleNamespace(
+        kv_transfer_config=None, additional_config={}, model_config=SimpleNamespace(hf_config=SimpleNamespace())
+    ),
 )
 def test_mamba_cache_reshape_uses_page_strided_state_tensors(_mock_config):
     spec = _mamba_spec()
@@ -794,7 +844,9 @@ def test_mamba_cache_reshape_uses_page_strided_state_tensors(_mock_config):
 
 @patch(
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
-    return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
+    return_value=SimpleNamespace(
+        kv_transfer_config=None, additional_config={}, model_config=SimpleNamespace(hf_config=SimpleNamespace())
+    ),
 )
 def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     attention_spec = FullAttentionSpec(
@@ -1023,7 +1075,7 @@ def test_mamba_spec_follows_aligned_attention_spec(
             return attention_spec
 
         def get_attn_backend(self):
-            return SimpleNamespace(uses_descriptor_cache_view=False)
+            return _FakeAttentionBackend
 
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
@@ -1079,7 +1131,7 @@ def test_get_kv_cache_spec_rejects_nondivisible_hybrid_attention_pages(
             return self.spec
 
         def get_attn_backend(self):
-            return SimpleNamespace(uses_descriptor_cache_view=False)
+            return _FakeAttentionBackend
 
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
@@ -1140,13 +1192,12 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
         name: SimpleNamespace(
             is_draft_layer=name.startswith("draft."),
             get_kv_cache_spec=lambda _config, spec=spec: spec,
-            get_attn_backend=lambda: SimpleNamespace(uses_descriptor_cache_view=False),
+            get_attn_backend=lambda: _FakeAttentionBackend,
         )
         for name, spec in original_specs.items()
     }
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
-    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _config: False)
     specs = get_kv_cache_spec(config)

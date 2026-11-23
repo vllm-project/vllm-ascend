@@ -1,0 +1,9 @@
+pr: 22131
+entries:
+  - category: feature
+    text: >-
+      GLM-5.3-Flash on Model Runner V2 now automatically distributes decode
+      requests across PCP ranks when --prefill-context-parallel-size is greater
+      than 1 and --decode-context-parallel-size is 1. This also supports
+      decode graph capture when the combined batch exceeds the per-rank
+      capture limit. No new switch is required.

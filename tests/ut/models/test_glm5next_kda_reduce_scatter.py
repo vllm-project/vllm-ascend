@@ -25,10 +25,12 @@ def test_pcp_output_reduction_matches_allreduce_then_local_mapping(rank, use_map
     weight = torch.arange(6, dtype=torch.float32).reshape(2, 3)
     layer.quant_method = SimpleNamespace(apply=lambda _, inputs, bias: inputs @ weight)
     group = SimpleNamespace(
+        world_size=4,
         all_reduce=Mock(side_effect=lambda values: values * 4),
         reduce_scatter=Mock(side_effect=lambda values, dim: (values * 4).chunk(4, dim=dim)[rank]),
     )
-    layer.tp_group = group
+    layer.pcp_group = group
+    layer.tp_group = SimpleNamespace(world_size=1)
     inputs = torch.arange(16, dtype=torch.float32).reshape(8, 2)
     mapping = torch.tensor([0, 7, 1, 6, 2, 5, 3, 4])
     output, bias = layer(inputs, pcp_output_indices=mapping if use_mapping else None)

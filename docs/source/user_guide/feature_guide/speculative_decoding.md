@@ -490,7 +490,7 @@ for a BF16 draft.
 !!! warning
 
     When `enable_adaptive_verification` is enabled, vLLM Ascend does not support fully eager execution or pure `PIECEWISE` graph mode for the target model. The same restriction applies in vLLM.
-    In vLLM Ascend, adaptive verification cannot be combined with PP, PCP, DCP, LM head TP, or LoRA.
+    In vLLM Ascend, adaptive verification cannot be combined with PP, PCP, DCP, or LoRA.
     Commercial use is restricted.
 
 - Offline inference
@@ -769,8 +769,8 @@ To use Batch-size based Dynamic SD, add `num_speculative_tokens_per_batch_size` 
 
 implies that:
 
-- K=3 will be used when the concurrency is in range [1, 64]
-- K=1 will be used when the concurrency is in range [65, 128]
+- K=3 will be used when the concurrency is in range [1, 64].
+- K=1 will be used when the concurrency is in range [65, 128].
 - K=0 will be used when the concurrency is in range [129, 512], i.e., no draft tokens will be produced.
 
 #### Online examples
@@ -900,8 +900,9 @@ and devices:
 ```
 
 RecoverSSM requires speculative decoding, PP=1 and DCP=1. PCP is limited to
-Prefill producers with TP=1;
-PCP Decode consumers and colocated PCP execution are not supported.
+Prefill producers and supports joint TP × PCP head sharding. The KDA head count
+must be divisible by TP × PCP. PCP Decode consumers and colocated PCP execution
+are not supported.
 Stochastic rounding must be disabled.
 
 For direct prefill-to-decode transfer, use `MooncakeConnectorV2` or

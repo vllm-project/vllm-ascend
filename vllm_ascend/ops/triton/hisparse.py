@@ -111,6 +111,33 @@ def invalidate_kernel(
     tl.store(ptr, _INVALID_INDEX, mask=valid & (cached == value))
 
 
+@triton.jit(do_not_specialize=["ROWS"])
+def invalidate_written_slots_batched(
+    tables,
+    states,
+    requests,
+    written,
+    ROWS,
+    REQUESTS: tl.constexpr,
+    STATE_ROWS: tl.constexpr,
+    REGION: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    dgi = tl.load(tables + tl.program_id(1)).to(tl.pointer_type(tl.int32))
+    offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    # One program owns this tile across all states. Process writes in order
+    # so a contiguous store preserves other tags without cross-program races.
+    for token in range(ROWS):
+        request = tl.load(requests + token)
+        state = tl.load(states + request, mask=(request >= 0) & (request < REQUESTS), other=_INVALID_INDEX)
+        value = tl.load(written + token)
+        valid = (state >= 0) & (state < STATE_ROWS) & (value >= 0) & (value <= _MAX_HOST_SLOT) & (offset < REGION)
+        ptr = dgi + state.to(tl.int64) * REGION + offset
+        cached = tl.load(ptr, mask=valid, other=_INVALID_INDEX)
+        # Tags are INT32; reject out-of-range writes before narrowing INT64.
+        tl.store(ptr, tl.where(cached == value.to(tl.int32), _INVALID_INDEX, cached), mask=valid)
+
+
 @triton.jit(do_not_specialize=["ROWS", "REQUESTS", "STATES"])
 def pack_written_slot_keys(
     states,
@@ -142,6 +169,7 @@ def invalidate_written_slots_sorted(
     HOT: tl.constexpr,
     TILE: tl.constexpr,
     STEPS: tl.constexpr,
+    UNROLL_SEARCH: tl.constexpr = True,
 ):
     table = tl.load(tables + tl.program_id(0)).to(tl.pointer_type(tl.int32))
     state = tl.program_id(1)
@@ -153,7 +181,10 @@ def invalidate_written_slots_sorted(
         query = (state.to(tl.int64) << _HOST_SLOT_BITS) | cached.to(tl.int64)
         low = tl.full((TILE,), 0, tl.int32)
         high = tl.full((TILE,), ROWS, tl.int32)
-        for _ in tl.static_range(STEPS):
+        # Keep low/high loop-carried on arch22: fully unrolling this masked
+        # binary search fails Triton-Ascend's TritonToUnstructure pass.
+        # Ascend 950 retains the existing unrolled search.
+        for _ in tl.range(STEPS, loop_unroll_factor=STEPS if UNROLL_SEARCH else 1):
             active = valid & (low < high)
             mid = low + (high - low) // 2
             value = tl.load(keys + mid, mask=active, other=_INVALID_SORTED_SLOT_KEY)

@@ -170,8 +170,8 @@ class PushReqMeta:
 class PushSendReqMeta:
     """P source blocks and the prefill range scheduled for this step.
 
-    num_computed_tokens includes the cached prefix; the worker may publish
-    that prefix immediately, but must wait for layer events for new tokens.
+    num_computed_tokens includes the cached prefix. Locally resident prefixes
+    are ready immediately; external prefixes and new tokens need layer events.
     """
 
     # Full D request ID, also used by completion messages.
@@ -187,6 +187,8 @@ class PushSendReqMeta:
     remote_num_computed_tokens: int
     remote_num_external_tokens: int
     remote_worker_addresses: tuple[tuple[int, int, int, str], ...]
+    # External prefix adopted on P, distinct from D's requested transfer range.
+    num_external_tokens: int = 0
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -248,6 +250,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         num_computed_tokens: int,
         num_scheduled_tokens: int,
         kv_transfer_params: dict[str, Any],
+        num_external_tokens: int = 0,
     ) -> None:
         """Snapshot one scheduled P chunk for the layerwise worker."""
         self.push_send_requests[request_id] = PushSendReqMeta(
@@ -256,6 +259,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             num_prompt_tokens=num_prompt_tokens,
             num_computed_tokens=num_computed_tokens,
             num_scheduled_tokens=num_scheduled_tokens,
+            num_external_tokens=num_external_tokens,
             remote_engine_id=kv_transfer_params["remote_engine_id"],
             remote_host=kv_transfer_params["remote_host"],
             remote_port=kv_transfer_params["remote_port"],

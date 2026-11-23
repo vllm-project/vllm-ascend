@@ -1,0 +1,4 @@
+pr: 21769
+entries:
+  - category: config
+    text: Added `additional_config.sparse_kv_offload_config.store_port_base` to choose the base TCP port of the MemFabric sparse KV offload store. The data parallel group `i` binds `store_port_base + i`, and the default stays 8500.

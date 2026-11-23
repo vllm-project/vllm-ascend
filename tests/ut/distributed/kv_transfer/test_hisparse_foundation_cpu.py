@@ -3,11 +3,15 @@
 """CPU boundary checks using the installed Core and Ascend implementations."""
 
 import math
+import mmap
+import sys
 from dataclasses import replace
 from types import SimpleNamespace as NS
 
 import pytest
 import torch
+
+pytest.importorskip("vllm.v1.hisparse.backend")
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
@@ -28,6 +32,7 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.hisparse import cache_ops as hisparse_ops
 from vllm_ascend.hisparse import host_pool
+from vllm_ascend.hisparse.backend import AscendHiSparseBackend  # noqa: E402
 from vllm_ascend.hisparse.binding import (
     _bind_indexer_views,
     align_hisparse_indexer_specs,
@@ -39,9 +44,6 @@ from vllm_ascend.hisparse.c8 import (
     pack_c8_components,
 )
 from vllm_ascend.ops.triton import sfa_indexer_store
-
-pytest.importorskip("vllm.v1.hisparse.backend")
-from vllm_ascend.hisparse.backend import AscendHiSparseBackend  # noqa: E402
 
 
 @pytest.fixture(params=[False, True], ids=["standalone", "profiled"])
@@ -66,14 +68,17 @@ def prepare_workspaces(request):
         reset_workspace_manager()
 
 
+@pytest.mark.parametrize("cache_dtype", [torch.int8, torch.float8_e4m3fn])
 @pytest.mark.parametrize("mxfp8", [False, True])
-def test_c8_prolog_requires_matching_fp8_weight_scheme(mxfp8):
+def test_c8_prolog_requires_matching_fp8_weight_scheme(mxfp8, cache_dtype):
     from vllm_ascend.attention.utils import PreprocessType
     from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8MXFP8DynamicLinearMethod
 
     method = AscendW8A8MXFP8DynamicLinearMethod if mxfp8 else AscendW8A8DynamicLinearMethod
     impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
     impl.enable_sparse_sfa_c8 = True
+    impl.pcp_enabled = True
+    impl.c8_cache_dtype = cache_dtype
     impl.fused_qkv_a_proj = NS(quant_method=NS(quant_method=method.__new__(method)))
     impl.is_kv_consumer, impl.has_indexer = False, False
     impl.dcp_group = None
@@ -81,32 +86,65 @@ def test_c8_prolog_requires_matching_fp8_weight_scheme(mxfp8):
     impl.q_a_layernorm = impl.kv_a_layernorm = NS()
     impl.q_proj = NS(_chunk_size=0)
     impl.enable_sparse_sfa_turboquant = False
-    expected = PreprocessType.PROLOG_V3 if mxfp8 else None
+    expected = PreprocessType.PROLOG_V3 if mxfp8 == (cache_dtype == torch.float8_e4m3fn) else None
     assert impl._fused_preprocess_type() is expected
 
 
-@pytest.mark.parametrize("hisparse", [False, True])
-def test_indexer_backend_choice_survives_model_construction_context(hisparse):
-    from vllm.config import CacheConfig, VllmConfig, set_current_vllm_config
+@pytest.mark.parametrize("hisparse", [False, True], ids=["sfa", "hisparse"])
+def test_indexer_backend_choice_survives_model_construction_context(hisparse, monkeypatch):
+    from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
     from vllm.config.attention import HiSparseConfig
+    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 
-    from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+    from vllm_ascend.attention import indexer as indexer_module
+    from vllm_ascend.attention.indexer import (
+        AscendHiSparseIndexerMetadataBuilder,
+        AscendSFAIndexerBackend,
+        AscendSFAIndexerMetadataBuilder,
+    )
+    from vllm_ascend.ops.mla import IndexerWrapper
     from vllm_ascend.patch.worker import patch_attn_utils  # noqa: F401
 
-    config = VllmConfig()
+    config = VllmConfig(cache_config=CacheConfig(block_size=128))
     config.attention_config.hisparse_config = HiSparseConfig() if hisparse else None
+    hf_config = NS(model_type="deepseek_v32", index_topk=2048)
+    config.model_config = NS(dtype=torch.bfloat16, hf_config=hf_config, hf_text_config=hf_config)
+    monkeypatch.setattr(
+        indexer_module,
+        "get_ascend_config",
+        lambda: NS(is_sparse_li_c4_layer=lambda _: False, is_sparse_li_c8_layer=lambda _: False),
+    )
     expected = AscendHiSparseIndexerBackend if hisparse else AscendSFAIndexerBackend
+    expected_builder = AscendHiSparseIndexerMetadataBuilder if hisparse else AscendSFAIndexerMetadataBuilder
+    prefix = "model.layers.0.self_attn.indexer.k_cache"
+    head_dim = 128
     with set_current_vllm_config(config):
-        cache = DeepseekV32IndexerCache(132, torch.uint8, "regression.indexer.k_cache", CacheConfig())
-        assert cache.get_attn_backend() is expected
-    # Core's post-load block-size discovery runs after the construction context
-    # exits. A later model's context must not change an existing cache either.
-    assert cache.get_attn_backend() is expected
+        cache = DeepseekV32IndexerCache(head_dim + 4, torch.uint8, prefix, config.cache_config)
+        indexer = NS(
+            n_head=64,
+            head_dim=head_dim,
+            topk_tokens=hf_config.index_topk,
+            q_lora_rank=1536,
+            wq_b=None,
+            wk_weights_proj=None,
+            k_norm=None,
+            softmax_scale=head_dim**-0.5,
+            k_cache=cache,
+        )
+        wrapper = IndexerWrapper(indexer, qk_rope_head_dim=64)
+        assert type(wrapper.impl) is expected
+
+    # Worker metadata discovery uses the registered owner after construction.
+    owner = get_layers_from_vllm_config(config, AttentionLayerBase, [prefix])[prefix]
+    assert owner is wrapper.k_cache
+    assert owner.get_attn_backend() is expected
+    assert owner.get_attn_backend().get_builder_cls() is expected_builder
+    # Another model's configuration must not change this owner's backend.
     other = VllmConfig()
     other.attention_config.hisparse_config = None if hisparse else HiSparseConfig()
     with set_current_vllm_config(other):
-        assert cache.get_attn_backend() is expected
+        assert owner.get_attn_backend() is expected
 
 
 def test_failed_unregister_retains_host_owner_for_safe_retry(monkeypatch):
@@ -159,6 +197,93 @@ def test_private_host_allocator_keeps_other_backends_on_core_path(monkeypatch):
     assert payload.numel() == 1001 and registered.data_ptr() % 4096 == 0
     payload.fill_(17)
     torch.testing.assert_close(registered[:1001], payload)
+
+
+@pytest.mark.parametrize(
+    "connector, transfer_backend, active_config, nested, expected",
+    [
+        ("HiSparseConnector", "memfabric", True, False, True),
+        ("HiSparseConnector", "memfabric", False, False, True),
+        ("HiSparseConnector", "memfabric", False, True, True),
+        ("HiSparseConnector", None, False, False, False),
+        ("MooncakeConnectorV2", "memfabric", False, True, False),
+        ("MooncakeConnectorV2", "memfabric", False, False, False),
+    ],
+)
+def test_private_host_allocator_selects_explicit_memfabric(
+    monkeypatch, connector, transfer_backend, active_config, nested, expected
+):
+    from vllm import config
+    from vllm.v1.hisparse import backend as core_backend
+    from vllm.v1.hisparse import runtime
+
+    from vllm_ascend import ascend_config
+
+    transfer = NS(
+        kv_connector=connector,
+        kv_connector_extra_config={"transfer_backend": transfer_backend},
+    )
+    if nested:
+        transfer = NS(kv_connector="MultiConnector", kv_connector_extra_config={"connectors": [vars(transfer)]})
+    vllm_config = NS(kv_transfer_config=transfer)
+    monkeypatch.setattr(config, "get_current_vllm_config_or_none", lambda: vllm_config if active_config else None)
+    monkeypatch.setattr(ascend_config, "_INIT_VLLM_CONFIG", None if active_config else vllm_config)
+    monkeypatch.setattr(core_backend, "get_hisparse_backend", AscendHiSparseBackend)
+    monkeypatch.setattr(runtime, "allocate_pinned_host_pool", runtime.allocate_pinned_host_pool)
+    allocation = torch.empty(32, dtype=torch.int8)
+    registration = NS(tensor=allocation)
+    allocation._hisparse_registration = registration
+
+    def allocate_mapped_host(shape, dtype, *, memfabric=False):
+        assert (shape, dtype) == ((17,), torch.int8)
+        assert memfabric is expected
+        return allocation
+
+    monkeypatch.setattr(host_pool, "allocate_mapped_host", allocate_mapped_host)
+    host_pool.install()
+    payload, registered = runtime.allocate_pinned_host_pool(17)
+    payload.fill_(7)
+    assert registered.numel() == 32
+    assert registered._hisparse_registration is registration
+    torch.testing.assert_close(registered[:17], torch.full((17,), 7, dtype=torch.int8))
+
+
+@pytest.mark.parametrize("device_address", [0, 4096])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_memfabric_host_pool_releases_arena(monkeypatch, device_address, legacy):
+    released = []
+    backing = torch.empty(2 * mmap.PAGESIZE, dtype=torch.uint8)
+    offset = -backing.data_ptr() % mmap.PAGESIZE
+    arena = NS(
+        initialize=lambda config: 0,
+        empty=lambda size, **kwargs: backing[offset : offset + size[0]],
+        get_dva=lambda addr: device_address,
+        uninitialize=lambda: released.append(True),
+    )
+    offload = NS(OffloadConfig=NS, Scene=NS(LOCAL=0))
+    if legacy:
+        vars(offload).update(vars(arena))
+    else:
+        offload.Offload = lambda: arena
+    monkeypatch.setitem(sys.modules, "memfabric_hybrid", NS(offload=offload))
+    monkeypatch.setattr(torch, "npu", NS(current_device=lambda: 0), raising=False)
+
+    if not device_address:
+        with pytest.raises(RuntimeError, match="device address"):
+            host_pool.allocate_mapped_host((128,), torch.uint8, memfabric=True)
+    else:
+        tensor = host_pool.allocate_mapped_host((128,), torch.uint8, memfabric=True)
+        mapping = tensor._hisparse_registration
+        assert mapping.address_of(tensor[16:]) == device_address + 16
+        if legacy:
+            with pytest.raises(RuntimeError, match="one HiSparse Host pool"):
+                host_pool.allocate_mapped_host((128,), torch.uint8, memfabric=True)
+        mapping.close()
+        mapping.close()
+        assert mapping.closed
+
+    assert released == [True]
+    assert not host_pool._LEGACY_MEMFABRIC_POOL.locked()
 
 
 def test_mapped_addresses_retain_offsets_and_reject_expired_or_external_views():
@@ -313,7 +438,10 @@ def test_indexer_page_alignment_preserves_input_specs(indexer_spec, c8):
         for name in ("resident", "hot"):
             assert specs[name].block_stride_alignment == 128
             assert packed_row_bytes is not None
-            assert result[name].block_stride_alignment == math.lcm(128, packed_row_bytes)
+            # Core #64562 includes whole-page Hot alignment in the accessor.
+            assert result[name].get_block_stride_alignment() == math.lcm(
+                specs[name].get_block_stride_alignment(), packed_row_bytes
+            )
     else:
         assert result["indexer"].get_block_stride_alignment() == math.lcm(3, indexer_spec.page_size_bytes)
 
@@ -342,20 +470,22 @@ def test_capture_metadata_prevents_warmup_host_mirrors(monkeypatch):
     assert submitted == [True]
 
 
-def test_c8_packing_preserves_opaque_rope_scale_and_nan_payloads():
+@pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
+def test_c8_packing_preserves_opaque_rope_scale_and_nan_payloads(dtype):
     rows = 3
     raw = [torch.arange(rows * width).to(torch.uint8).reshape(rows, width) for width in (512, 128, 16)]
-    components = [values.view(torch.float8_e4m3fn) for values in raw]
+    components = [values.view(dtype) for values in raw]
     packed = pack_c8_components(*components)
     assert packed.dtype == torch.uint8 and packed.shape == (rows, 656)
     torch.testing.assert_close(packed, torch.cat(raw, dim=-1), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("stride_rows", [128, 136])
-def test_c8_storage_mapping_preserves_shared_slab_offsets(stride_rows):
+@pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
+def test_c8_storage_mapping_preserves_shared_slab_offsets(stride_rows, dtype):
     pages, block, width, offset = 3, 128, 656, 1312
     backing = torch.full((offset + pages * stride_rows * width,), 17, dtype=torch.uint8)
-    cache = backing.view(torch.float8_e4m3fn).as_strided(
+    cache = backing.view(dtype).as_strided(
         (pages, block, width), (stride_rows * width, width, 1), storage_offset=offset
     )
     view, actual_block, actual_stride, capacity = c8_storage_view(cache)
@@ -374,8 +504,9 @@ def test_c8_storage_mapping_preserves_shared_slab_offsets(stride_rows):
 
 
 @pytest.mark.parametrize("pages,stride_rows,max_rows", [(2, 128, 9), (3, 136, 37)])
+@pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
 def test_c8_decode_lengths_follow_binding_geometry_and_survive_rebind(
-    monkeypatch, pages, stride_rows, max_rows, prepare_workspaces
+    monkeypatch, pages, stride_rows, max_rows, prepare_workspaces, dtype
 ):
     monkeypatch.setattr(
         hisparse_ops, "_load_resolver", lambda: NS(hisparse_resolver_validate_scratch=lambda hot, union: None)
@@ -388,14 +519,14 @@ def test_c8_decode_lengths_follow_binding_geometry_and_survive_rebind(
         region_stride=128,
         max_union_rows=64,
         device=torch.device("cpu"),
-        kv_dtype=torch.float8_e4m3fn,
+        kv_dtype=dtype,
         registered_host_pool=NS(_hisparse_registration=object()),
     )
     group.shared_topk = NS(device_topk_rows=torch.empty((max_rows, runtime.max_union_rows), dtype=torch.int32))
     group.leader = runtime
 
     def bind(num_pages):
-        backing = torch.empty(num_pages * stride_rows * 656, dtype=torch.float8_e4m3fn)
+        backing = torch.empty(num_pages * stride_rows * 656, dtype=dtype)
         cache = backing.as_strided((num_pages, 128, 656), (stride_rows * 656, 656, 1))
         runtime.hot = NS(cache=cache, attention_cache=cache, block_size=128)
         if prepare_workspaces is not None:
@@ -456,14 +587,19 @@ def test_bf16_hisparse_indexer_passes_through_page_scatter_indices(monkeypatch):
 
 
 @pytest.mark.parametrize("padding", [0, 256])
-def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(monkeypatch, indexer_spec, padding):
+@pytest.mark.parametrize("dtype,scale_dtype", [(torch.int8, torch.float16), (torch.float8_e4m3fn, torch.float32)])
+def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(
+    monkeypatch, indexer_spec, padding, dtype, scale_dtype
+):
+    scale_size = scale_dtype.itemsize
+    scale_bits = torch.int16 if scale_size == 2 else torch.int32
     spec = replace(
         indexer_spec,
         block_size=128,
         head_size=128,
-        dtype=torch.float8_e4m3fn,
+        dtype=dtype,
         scale_dim=1,
-        scale_dtype=torch.float32,
+        scale_dtype=scale_dtype,
         cache_sparse_li_c8=True,
     )
     pages, offset = 3, 256
@@ -474,7 +610,7 @@ def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(monkeypatch
         size=raw.numel(), layers=["indexer"], layer_stride=spec.page_size_bytes, block_stride=stride, offset=offset
     )
     (cache,) = create_kv_cache_views(raw.view(torch.int8), spec, pages, KVCacheLayout.BLHNC, tensor_config)
-    assert cache.shape == (pages, 1, 128, 132)
+    assert cache.shape == (pages, 1, 128, 128 + scale_size)
     layer = NS()
     caches = {"indexer": cache}
     _bind_indexer_views(caches, {"indexer": spec}, {"indexer": layer})
@@ -483,14 +619,14 @@ def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(monkeypatch
     assert layer.hisparse_block_stride == 1
     slots = torch.tensor([127, 0, 128, 383, -1, 256], dtype=torch.int32)
     values_raw = torch.arange(6 * 128).to(torch.uint8).reshape(6, 128)
-    values = values_raw.view(torch.float8_e4m3fn)
+    values = values_raw.view(dtype)
     scales = torch.arange(6, dtype=torch.float32).reshape(6, 1) + 0.5
 
     def store(quant, scales, slots, cache, scale_cache, *, block_size, key_block_stride, scale_block_stride):
         # Emulate only the device-store boundary; production views and addresses
         # are checked against the independent byte oracle below.
-        assert block_size == 128 and key_block_stride == stride and scale_block_stride == stride // 4
-        assert cache.dtype == torch.int8 and scale_cache.dtype == torch.int32
+        assert block_size == 128 and key_block_stride == stride and scale_block_stride == stride // scale_size
+        assert cache.dtype == torch.int8 and scale_cache.dtype == scale_bits
         for i, slot in enumerate(slots.tolist()):
             if 0 <= slot < pages * block_size:
                 page, row = divmod(slot, block_size)
@@ -504,15 +640,15 @@ def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(monkeypatch
     writer.enable_sparse_li_c8 = True
     writer.enable_sparse_li_c4 = False
     expected = raw.clone()
-    scale_bytes = scales.view(torch.uint8).reshape(6, 4)
+    scale_bytes = scales.to(scale_dtype).view(torch.uint8).reshape(6, scale_size)
     for i, slot in enumerate(slots.tolist()):
         if slot < 0:
             continue
         page, row = divmod(slot, 128)
         start = offset + page * stride + row * 128
         expected[start : start + 128] = values_raw[i]
-        start = offset + page * stride + key_bytes + row * 4
-        expected[start : start + 4] = scale_bytes[i]
+        start = offset + page * stride + key_bytes + row * scale_size
+        expected[start : start + scale_size] = scale_bytes[i]
     scatter_indices = torch.stack((slots // spec.block_size, slots % spec.block_size), dim=-1)
     writer.write_cache(values, scales, slots, scatter_indices)
     torch.testing.assert_close(raw, expected, rtol=0, atol=0)

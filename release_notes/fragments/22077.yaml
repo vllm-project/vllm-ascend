@@ -1,0 +1,6 @@
+pr: 22077
+entries:
+  - category: feature
+    text: Added ModelSlim group-32 INT8 and MXFP8 PLE embedding support for Qwen3.8-Flash-Next, with selected-row dequantization and registered-host lookup for both formats.
+    model: Qwen3.8-Flash-Next
+    hardware: [A3, A5]

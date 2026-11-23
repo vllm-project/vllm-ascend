@@ -13,7 +13,10 @@ def _build_window_indices_kernel(
     positions_ptr,
     indices_ptr,
     lengths_ptr,
+    visible_lengths_ptr,
     num_tokens,
+    num_visible_lengths,
+    HAS_VISIBLE_LENGTHS: tl.constexpr,
     WINDOW_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -22,6 +25,13 @@ def _build_window_indices_kernel(
     valid_token = token < num_tokens
     position = tl.load(positions_ptr + token, mask=valid_token, other=-1)
     length = tl.minimum(position + 1, WINDOW_SIZE)
+    if HAS_VISIBLE_LENGTHS:
+        visible_length = tl.load(
+            visible_lengths_ptr + token,
+            mask=valid_token & (token < num_visible_lengths),
+            other=0,
+        )
+        length = tl.minimum(length, tl.maximum(visible_length, 0))
     start = position + 1 - length
     indices = tl.where(columns < length, start + columns, -1)
     tl.store(
@@ -36,10 +46,14 @@ def build_window_indices_triton(
     positions: torch.Tensor,
     window_size: int,
     *,
+    visible_lengths: torch.Tensor | None = None,
     indices_output: torch.Tensor | None = None,
     lengths_output: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return causal indices ``[T,1,W]`` and lengths ``[T,1]`` as INT32."""
+    """Return causal indices ``[T,1,W]`` and lengths ``[T,1]`` as INT32.
+
+    When visible lengths are supplied, rows beyond their length are padding.
+    """
     if positions.ndim != 1:
         raise ValueError(f"positions must be rank 1, got {tuple(positions.shape)}")
     if window_size <= 0:
@@ -67,13 +81,18 @@ def build_window_indices_triton(
         raise ValueError(
             f"lengths_output must be INT32{expected_lengths}, got {lengths_output.dtype}{tuple(lengths_output.shape)}"
         )
+    if visible_lengths is not None:
+        visible_lengths = visible_lengths.contiguous()
     if tokens:
         block_size = triton.next_power_of_2(window_size)
         _build_window_indices_kernel[(tokens,)](
             positions.contiguous(),
             indices_output,
             lengths_output,
+            visible_lengths,
             tokens,
+            visible_lengths.numel() if visible_lengths is not None else 0,
+            HAS_VISIBLE_LENGTHS=visible_lengths is not None,
             WINDOW_SIZE=window_size,
             BLOCK_SIZE=block_size,
         )

@@ -61,8 +61,14 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_index_prefill as minimax_m3_index_prefill_ascendc,
 )
+from vllm_ascend.models.minimax_m3.ops.msa_m3_union import (
+    UNION_SIZE,
+    minimax_m3_sparse_attn_union,
+    prepare_union_gbsa_metadata,
+)
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
+from vllm_ascend.utils import vllm_version_is
 
 # Minimum used by heterogeneous-KV alignment; the final FP8 cache block is 128.
 _MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE = 64
@@ -115,6 +121,44 @@ else:
 
 # CANN GenericBlockSparseAttentionMetadata returns exactly 1024 int32 values.
 _GBSA_METADATA_SIZE = 1024
+
+
+@lru_cache
+def _can_use_union_attention(
+    kv_cache_dtype: str | torch.dtype,
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    block_size: int,
+) -> bool:
+    """Select Union prefill for supported geometry and device-specific KV dtypes."""
+    if not (
+        (
+            kv_cache_dtype in ("auto", "bfloat16", "float16", torch.bfloat16, torch.float16)
+            or (
+                get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+                and kv_cache_dtype in ("fp8", "fp8_e4m3", torch.float8_e4m3fn)
+            )
+        )
+        and num_kv_heads == 1  # UnionSparseGen currently supports one KV head.
+        and 1 <= num_heads <= 16  # Supported local query-head range in Union GBSA.
+        and head_size == _MSA_INDEX_BLOCK_SIZE
+        and block_size == _MSA_INDEX_BLOCK_SIZE
+    ):
+        return False
+    try:
+        from cann_ops_nn.ops.index.union_sparse_gen.union_sparse_gen import union_sparse_gen_builder
+        from cann_ops_transformer.ops.attention.generic_block_sparse_attention.generic_block_sparse_attention import (
+            generic_block_sparse_attention_op_builder,
+        )
+
+        # Optional wrappers JIT-load their native backend before graph capture.
+        union_sparse_gen_builder.load()
+        generic_block_sparse_attention_op_builder.load()
+    except (ImportError, OSError, RuntimeError):
+        # An unavailable Union extension retains the existing native fallback.
+        return False
+    return True
 
 
 def _active_decode_num_reqs(
@@ -768,6 +812,9 @@ class AscendMiniMaxM3SparsePrefillMetadata:
     max_seq_len: int
     total_kv_blocks: int
     max_kv_blocks: int
+    num_union_groups: int = 0
+    cu_seqlens_q_int64: torch.Tensor | None = None
+    union_gbsa_metadata: dict[tuple[int, int], torch.Tensor] | None = None
 
 
 @dataclass
@@ -816,6 +863,20 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
             device=device,
         )
         self.prefill_cu_seqlens_q_buffer = torch.empty_like(self.context_len_buffer)
+        self.prefill_cu_seqlens_q_int64_buffer = torch.empty_like(self.context_len_buffer, dtype=torch.int64)
+        union_configs: set[tuple[int, int]] = set()
+        context = vllm_config.compilation_config.static_forward_context
+        for name in layer_names:
+            layer = context[name]
+            if _can_use_union_attention(
+                kv_cache_spec.dtype, layer.num_heads, layer.num_kv_heads, layer.head_dim, self.block_size
+            ):
+                union_configs.add((layer.num_heads, layer.topk_blocks))
+        # Like decode metadata, keep stable addresses for graph capture.
+        # All layers with matching head count/topk share a schedule per build.
+        self.union_gbsa_metadata_buffers = {
+            config: torch.empty(_GBSA_METADATA_SIZE, dtype=torch.int32, device=device) for config in union_configs
+        }
         # Retain buffers for the builder lifetime: captured graphs keep these
         # addresses. Different speculative query lengths must not overwrite one
         # another's prefix. Uniform padding follows the previous decode path.
@@ -986,7 +1047,27 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
                 max_seq_len=common_attn_metadata.max_seq_len,
                 total_kv_blocks=total_kv_blocks,
                 max_kv_blocks=max_kv_blocks,
+                num_union_groups=int(((prefill_query_lens_cpu + UNION_SIZE - 1) // UNION_SIZE).sum().item()),
             )
+            if self.union_gbsa_metadata_buffers:
+                cu_q_int64 = self.prefill_cu_seqlens_q_int64_buffer[: active_prefills + 1]
+                cu_q_int64.copy_(cu_seqlens_q)
+                prefill_metadata.cu_seqlens_q_int64 = cu_q_int64
+                prefill_metadata.union_gbsa_metadata = self.union_gbsa_metadata_buffers
+                for (num_heads, topk), buffer in self.union_gbsa_metadata_buffers.items():
+                    buffer.copy_(
+                        prepare_union_gbsa_metadata(
+                            cu_q_int64,
+                            prefill_kv_lens,
+                            prefill_metadata.num_union_groups,
+                            max_kv_blocks,
+                            prefill_metadata.max_query_len,
+                            prefill_metadata.max_seq_len,
+                            num_heads,
+                            topk,
+                            self.decode_gbsa_kv_dtype,
+                        )
+                    )
 
         decode_metadata: AscendMiniMaxM3SparseDecodeMetadata | None = None
         active_decodes = 0
@@ -1036,6 +1117,10 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         topk_blocks: int,
         sparse_block_size: int,
     ) -> None:
+        if kv_cache_dtype.startswith("fp8") and not get_current_hardware_profile().supports(
+            HardwareCapability.FP8_ATTENTION
+        ):
+            raise TypeError("MiniMax-M3 FP8 sparse attention is not supported on this device")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = scale
@@ -1044,6 +1129,10 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         self.topk_blocks = topk_blocks
         self.block_size = sparse_block_size
         self._dequant_scale: torch.Tensor | None = None
+        # Load optional native backends before graph capture.
+        self.use_union_attention = _can_use_union_attention(
+            kv_cache_dtype, num_heads, self.num_kv_heads, head_size, sparse_block_size
+        )
 
     def forward(
         self,
@@ -1109,22 +1198,41 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         if main_md.num_prefills > 0:
             p = main_md.prefill
             assert p is not None and prefill_topk is not None
-            minimax_m3_sparse_attn(
-                q[num_decode_tokens:],
-                kv_cache,
-                prefill_topk,
-                p.block_table,
-                p.cu_seqlens_q,
-                p.seq_lens,
-                p.context_lens,
-                p.max_query_len,
-                self.num_kv_heads,
-                self.scale,
-                out[num_decode_tokens:],
-                block_size=self.block_size,
-                total_kv_blocks=p.total_kv_blocks,
-                max_kv_blocks=p.max_kv_blocks,
-            )
+            # Prefill priority: Union -> KV-gather-Q -> Q-gather-KV.
+            if self.use_union_attention:
+                assert p.union_gbsa_metadata is not None
+                minimax_m3_sparse_attn_union(
+                    q[num_decode_tokens:],
+                    kv_cache,
+                    prefill_topk,
+                    p.block_table,
+                    p.cu_seqlens_q_int64,
+                    p.seq_lens,
+                    p.num_union_groups,
+                    p.max_kv_blocks,
+                    p.max_query_len,
+                    p.max_seq_len,
+                    self.scale,
+                    out[num_decode_tokens:],
+                    p.union_gbsa_metadata[(self.num_heads, self.topk_blocks)],
+                )
+            else:
+                minimax_m3_sparse_attn(
+                    q[num_decode_tokens:],
+                    kv_cache,
+                    prefill_topk,
+                    p.block_table,
+                    p.cu_seqlens_q,
+                    p.seq_lens,
+                    p.context_lens,
+                    p.max_query_len,
+                    self.num_kv_heads,
+                    self.scale,
+                    out[num_decode_tokens:],
+                    block_size=self.block_size,
+                    total_kv_blocks=p.total_kv_blocks,
+                    max_kv_blocks=p.max_kv_blocks,
+                )
         return output
 
     @staticmethod
@@ -1148,6 +1256,8 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
 
 class AscendMiniMaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
     """Fused [q | k | v | index_q | index_k] column-parallel GEMM for M3 sparse layers."""
+
+    shard_ids = ("q", "k", "v", "index_q", "index_k")
 
     def __init__(
         self,
@@ -1181,6 +1291,8 @@ class AscendMiniMaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
             self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
             self.num_kv_head_replicas = 1
         self.num_index_heads = self.num_kv_heads
+        # #63752: this class bypasses StackedColumnParallelLinear.__init__.
+        self.loaded_shard_ids: dict[str, set[str | int]] = {}
 
         q = self.num_heads * self.head_size
         kv = self.num_kv_heads * self.head_size
@@ -1210,15 +1322,18 @@ class AscendMiniMaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
             return self.custom_op.apply(input_)
         return super().forward(input_)
 
-    def validate_shard_id(self, loaded_shard_id: str | None) -> None:
-        if loaded_shard_id is None:
-            return
-        if loaded_shard_id not in ("q", "k", "v", "index_q", "index_k"):
+    def validate_shard_id(self, shard_id: Any, param: Parameter | None = None) -> bool:
+        if not vllm_version_is("0.33.0"):
+            return super().validate_shard_id(shard_id, param)
+        if shard_id is None:
+            return True
+        if shard_id not in self.shard_ids:
             raise ValueError(
                 "Shard id for AscendMiniMaxM3QKVParallelLinearWithIndexer must be "
                 "one of 'q', 'k', 'v', 'index_q', 'index_k'; got "
-                f"{loaded_shard_id}."
+                f"{shard_id}."
             )
+        return True
 
     def _get_shard_offset_mapping(self, loaded_shard_id: str) -> int | None:
         h = self.head_size
@@ -1247,7 +1362,7 @@ class AscendMiniMaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         loaded_weight,
         loaded_shard_id: str | None = None,
     ) -> None:
-        self.validate_shard_id(loaded_shard_id)
+        self.validate_shard_id(loaded_shard_id, param)
         assert loaded_shard_id in ("q", "k", "v", "index_q", "index_k")
 
         shard_offset = self._get_shard_offset_mapping(loaded_shard_id)
@@ -1273,7 +1388,7 @@ class AscendMiniMaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         loaded_weight,
         loaded_shard_id: str | None = None,
     ) -> None:
-        self.validate_shard_id(loaded_shard_id)
+        self.validate_shard_id(loaded_shard_id, param)
         assert loaded_shard_id in ("q", "k", "v", "index_q", "index_k")
         output_dim = getattr(param, "output_dim", None)
         assert output_dim is not None

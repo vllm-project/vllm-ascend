@@ -25,7 +25,9 @@ def _builder(
             get_head_size=lambda: 512,
             hf_text_config=SimpleNamespace(num_attention_heads=4, kv_lora_rank=512),
         ),
-        parallel_config=SimpleNamespace(tensor_parallel_size=tp_size, prefill_context_parallel_size=1),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tp_size, prefill_context_parallel_size=1, pcp_shard_decode_requests=False
+        ),
         scheduler_config=SimpleNamespace(max_num_seqs=2, max_num_batched_tokens=32 if speculative else 4),
         speculative_config=SimpleNamespace(num_speculative_tokens=5) if speculative else None,
         compilation_config=SimpleNamespace(

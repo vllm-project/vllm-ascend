@@ -181,10 +181,11 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
     if getattr(kv_transfer_config, "kv_connector_module_path", None) is not None:
         return False
 
-    return getattr(kv_transfer_config, "kv_connector", None) in {
-        "MooncakeConnectorV2",
-        "MooncakePullConnector",
-    }
+    connector_name = getattr(kv_transfer_config, "kv_connector", None)
+    if connector_name == "MooncakeConnectorV2":
+        extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", {})
+        return not extra_config.get("use_layerwise", False)
+    return connector_name == "MooncakePullConnector"
 
 
 @dataclass(frozen=True, kw_only=True)
