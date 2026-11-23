@@ -220,6 +220,10 @@
 #       module so model imports pick up the Ascend runner. `worker/patch_fused_moe.py`
 #       reuses this platform patch to avoid double-wrapping the factory during
 #       worker initialization.
+#       The existing Ascend EPLB mapping hook reads the router's fixed fusion
+#       choice to avoid remapping physical IDs, preserving upstream
+#       BaseRouter._select_experts. Remove this check when upstream exposes
+#       a routing-result contract for IDs already mapped by the backend.
 #    Related PR (if no, explain why):
 #       No, vllm-ascend-specific MoE runner integration.
 #    Future Plan:
@@ -242,6 +246,19 @@
 #       Remove this DeepSeek-V4-specific argument bridge once upstream exposes
 #       a backend-neutral router configuration object or MoE factory extension
 #       hook that carries vision routing metadata into the Ascend runner.
+#
+#   3. `vllm.model_executor.layers.fused_moe.FusedMoEFactory` (vLLM 0.33.0 only)
+#    Why:
+#       The 0.33.0 Ling model always passes `activation="silu"`, so a routed
+#       layer with a configured `swiglu_limit` is clamped before SiLU instead of
+#       taking the swiglustep path that clamps after SiLU.
+#    How:
+#       `_ascend_FusedMoE` switches such a call made directly from
+#       `bailing_moe_v3` to `swiglustep`, the rule the fixed upstream model applies.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/65088
+#    Future Plan:
+#       Remove this check when vLLM 0.33.0 support ends.
 #
 # ** 9. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1515,6 +1532,23 @@
 #       quant config for same-checkpoint drafts.
 #       Remove the draft scope when upstream exposes draft construction context
 #       to the platform validation hook.
+#   2. `vllm.v1.worker.gpu.spec_decode.dspark.speculator.DSparkSpeculator.__init__`,
+#      `vllm.v1.worker.gpu.spec_decode.dflash.speculator.replace`, and
+#      `vllm.v1.worker.gpu.spec_decode.dspark.utils.replace`
+#    Why:
+#       Kimi MLA DSpark replicates draft queries over the target's PCP/DCP KV
+#       group. Upstream validates the replicated PCP=1 view as a worker topology
+#       and rejects configurations such as TP1/PCP8/DCP8.
+#    How:
+#       Scope the physical topology to Kimi MLA DSpark construction and loading.
+#       Validate that topology before exposing the replicated query layout.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/65643
+#    Future Plan:
+#       TODO: Once the upstream fix is in the vLLM versions supported by Ascend,
+#       verify construction and draft loading at TP1/PCP8/DCP8 with the upstream
+#       implementation. Then remove the DSpark constructor wrapper, topology
+#       context, and the two module-local `replace` overrides.
 #
 # ** 31. File: worker/patch_adaptive_verification.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1574,7 +1608,7 @@
 #       the runner still passes the global request count, so no uniform decode
 #       graph matches.
 #    How:
-#       When `is_pcp_decode_sharding_enabled()` holds, derive the request
+#       When `parallel_config.pcp_shard_decode_requests` holds, derive the request
 #       count from the local tokens and the uniform query length.
 #    Related PR (if no, explain why):
 #       No upstream PR yet; vLLM #52162 still passes the global request count.

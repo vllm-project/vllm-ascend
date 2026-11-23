@@ -423,7 +423,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
                         is_last_chunks=[False],
                     ),
                 )
-                load_task = LayerLoadTask(wait_for_save_layer=None, transfer_tasks=[task], layer_id=1)
+                load_task = LayerLoadTask(wait_for_save_layers=(), transfer_tasks=[task], layer_id=1)
                 thread.request_queue.put(load_task)
 
                 thread._handle_request(load_task)
@@ -448,7 +448,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         )
         transfer_tasks = [task]
         load_task = LayerLoadTask(
-            wait_for_save_layer=None,
+            wait_for_save_layers=(),
             transfer_tasks=transfer_tasks,
             layer_id=1,
         )
@@ -462,7 +462,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         thread, load_finished, save_finished, sync_events = self._make_thread()
         save_finished[0].set()
         load_task = LayerLoadTask(
-            wait_for_save_layer=0,
+            wait_for_save_layers=(0,),
             transfer_tasks=[],
             layer_id=1,
         )
@@ -471,7 +471,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         thread._handle_request(load_task)
 
         sync_events[0].synchronize.assert_called_once_with()
-        self.assertFalse(save_finished[0].is_set())
+        self.assertTrue(save_finished[0].is_set())
         self.assertTrue(load_finished[1].is_set())
 
     def test_source_save_failure_stops_receiver_wait(self):
@@ -480,7 +480,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         save_finished[0] = MagicMock()
         save_finished[0].wait.return_value = False
         load_task = LayerLoadTask(
-            wait_for_save_layer=0,
+            wait_for_save_layers=(0,),
             transfer_tasks=[],
             layer_id=1,
         )
@@ -514,12 +514,12 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
                 is_last_chunks=[False],
             ),
         )
-        load_task = LayerLoadTask(wait_for_save_layer=0, transfer_tasks=[task], layer_id=1)
+        load_task = LayerLoadTask(wait_for_save_layers=(0,), transfer_tasks=[task], layer_id=1)
         thread.request_queue.put(load_task)
 
         thread._handle_request(load_task)
 
-        self.assertEqual(call_order, [("save", 0), ("reuse", 1), ("h2d", 1)])
+        self.assertEqual(call_order, [("save", 0), ("reuse", 0), ("reuse", 1), ("h2d", 1)])
 
     def test_empty_load_waits_for_target_layer_reuse_before_finish(self):
         load_finished_observed: list[bool] = []
@@ -530,7 +530,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             load_finished_observed.append(thread.layer_load_finished_events[layer_id].is_set())
 
         thread, load_finished, _, _ = self._make_thread(external_slot_release_waiter=wait_for_reuse)
-        load_task = LayerLoadTask(wait_for_save_layer=None, transfer_tasks=[], layer_id=1)
+        load_task = LayerLoadTask(wait_for_save_layers=(), transfer_tasks=[], layer_id=1)
         thread.request_queue.put(load_task)
 
         thread._handle_request(load_task)

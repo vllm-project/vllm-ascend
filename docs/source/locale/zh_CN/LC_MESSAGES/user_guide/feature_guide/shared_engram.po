@@ -19,7 +19,7 @@ msgstr ""
 "Generated-By: detect_po_changes.py\n"
 
 msgid "# Shared host-backed Engram"
-msgstr ""
+msgstr "# 共享主机后端 Engram"
 
 msgid ""
 "This opt-in path lets independent DeepSeek V4.1 instances map the same\n"

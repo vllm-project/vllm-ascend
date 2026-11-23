@@ -33,6 +33,18 @@
 /AGENTS.md @MrZ20
 /CLAUDE.md @MrZ20
 
+# AI review
+/.github/agent-review/ @wangxiyuan
+/.github/workflows/ai_review.yml @wangxiyuan
+/.github/workflows/_schedule_ai_review_image_build.yaml @wangxiyuan
+/.github/workflows/dockerfiles/Dockerfile.ai-review @wangxiyuan
+/.github/workflows/scripts/ai_review.py @wangxiyuan
+/.github/workflows/scripts/test_ai_review.py @wangxiyuan
+/.github/agent-review/L1/ @wangxiyuan
+/.github/agent-review/L2/ci/ @zhangxinyuehfad
+/.github/agent-review/L2/release-note/ @wangxiyuan
+/.github/agent-review/L2/speculative-decoding/ @drslark @slippersss
+
 # Dockerfiles
 /Dockerfile* @zhangxinyuehfad @czydyy @winson-00178005
 
@@ -40,7 +52,7 @@
 /docs @liqian79
 /docs/source/getting_started @MrZ20
 /docs/source/user_guide/feature_guide/rfork.md @yangsonglin13
-/docs/source/user_guide/feature_guide/rl.md @Ronald1995
+/docs/source/user_guide/feature_guide/rl.md @Ronald1995 @Liccol
 /docs/source/user_guide/feature_guide/batch_invariance.md @Ronald1995
 /docs/source/community/contributors.md @wangxiyuan
 /.readthedocs.yaml @liqian79 @MrZ20
@@ -49,7 +61,7 @@
 
 # examples
 /examples/ @MrZ20
-/examples/rl/ @Ronald1995
+/examples/rl/ @Ronald1995 @Liccol
 /examples/eplb/ @freyfwt
 /examples/rfork/ @yangsonglin13
 
@@ -91,7 +103,7 @@
 /vllm_ascend/distributed/eplb @freyfwt
 /vllm_ascend/distributed/expert_transfer/ @LookAround0301 @florian0125 @gjc0824 @xuanbozzz
 /vllm_ascend/distributed/kvpp.py @weiguihua2 @pisceskkk @zhaochuang001 @recky-c @li1how
-/vllm_ascend/distributed/weight_transfer @Ronald1995 @Annarine
+/vllm_ascend/distributed/weight_transfer @Ronald1995 @Annarine @Liccol
 /vllm_ascend/distributed/kv_transfer @weijinqian0
 /vllm_ascend/distributed/kv_transfer/kv_pool @weijinqian0 @HF-001
 /vllm_ascend/distributed/kv_transfer/kv_p2p @wangxiaoteng888 @nwpu-zxr
@@ -118,7 +130,7 @@
 /vllm_ascend/ops/fused_moe/force_eplb.py @freyfwt
 /vllm_ascend/ops/kimi_kda.py @Dawn952 @drslark @chenxi-hh @hust17yixuan
 /vllm_ascend/ops/kimi_mla.py @Dawn952 @hust17yixuan
-/vllm_ascend/ops/kda_pcp.py @weiguihua2 @zhenwenqi2024 @pisceskkk @zhaochuang001 @li1how @wzx0726
+/vllm_ascend/ops/recurrent_pcp.py @weiguihua2 @zhenwenqi2024 @pisceskkk @zhaochuang001 @li1how @wzx0726
 
 # quantization
 /vllm_ascend/quantization @kunpengW-code @menogrey @Tflowers-0129 @lcfenglinwan @earthmanylf
@@ -206,7 +218,7 @@
 /vllm_ascend/models/kimi_k3 @Dawn952 @hust17yixuan
 /vllm_ascend/models/kimi_k3/recoverssm_config.py @drslark @chenxi-hh
 /vllm_ascend/models/kimi_k3/recoverssm_metadata.py @drslark @chenxi-hh
-/vllm_ascend/models/step5/ @realliujiaxu
+/vllm_ascend/models/step5/ @realliujiaxu @earthmanylf
 # /vllm_ascend/models/d3.py
 # /vllm_ascend/models/gemma4_mm.py
 # /vllm_ascend/models/llama_eagle3.py
@@ -230,7 +242,7 @@
 # tests
 /tests/ @wenjun91
 # RLHF e2e tests
-/tests/e2e/common/rlhf/ @Ronald1995
+/tests/e2e/common/rlhf/ @Ronald1995 @Liccol
 /tests/e2e/nightly @wenjun91
 /tests/e2e/nightly/single_node/ops @Foriv
 /tests/e2e/nightly/single_node/ops/singlecard_ops/triton/ @Foriv @ShyRa1n

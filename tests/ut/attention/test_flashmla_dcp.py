@@ -181,7 +181,9 @@ def runtime(monkeypatch):
         classmethod(lambda cls, config: cls(config, attention_op, metadata_op)),
     )
 
-    def builder(*, size=8, rank=0, interleave=1, heads=8, dtype=torch.float16, use_rope=False, speculative=True):
+    def builder(
+        *, size=8, rank=0, interleave=1, heads=8, dtype=torch.float16, use_rope=False, speculative=True, pcp_size=1
+    ):
         impl = SimpleNamespace(
             num_heads=heads,
             scale=0.125,
@@ -189,6 +191,7 @@ def runtime(monkeypatch):
             use_mla_rope=use_rope,
             dcp_size=size,
             dcp_rank=rank,
+            pcp_group=SimpleNamespace(world_size=pcp_size),
             vllm_config=SimpleNamespace(
                 parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave),
                 speculative_config=SimpleNamespace(method="dspark") if speculative else None,
@@ -273,6 +276,20 @@ def common(lengths, queries, *, tokens=None, causal=True):
         num_input_tokens=tokens or actual,
         causal=causal,
     )
+
+
+@pytest.mark.parametrize("pcp_size,dcp_size,heads", [(1, 8, 12), (8, 8, 96), (8, 1, 96)])
+def test_replicated_pcp_queries_keep_distinct_history_heads(runtime, pcp_size, dcp_size, heads):
+    builder = runtime.builder(size=dcp_size, pcp_size=pcp_size, heads=heads, interleave=1536)
+    flash = builder.build(common([3080], [3], tokens=4), 1, 3, False)
+    assert flash.query.shape == (4, 96, 576)
+    assert flash.adapter.config.num_heads == 96
+    assert builder.dcp_size == dcp_size
+    expected_history = 1536 if dcp_size > 1 else 3080
+    if dcp_size > 1:
+        assert flash.current is not None
+        assert flash.current.query.shape == (4, heads, 576)
+    assert flash.cache_lens[0].item() == expected_history
 
 
 @pytest.mark.parametrize(

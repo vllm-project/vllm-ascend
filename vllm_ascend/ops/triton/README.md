@@ -48,6 +48,7 @@ examples and links together.
 | [spec_decode/prepare_dflash_inputs.py](spec_decode/prepare_dflash_inputs.py) | `worker/v2/spec_decode/dflash/speculator.py` | [prepare_dflash_inputs.md](docs/prepare_dflash_inputs.md) |
 | [spec_decode/resample.py](spec_decode/resample.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [resample.md](docs/resample.md) |
 | [mamba/gdn_prepare.py](mamba/gdn_prepare.py) | `attention/gdn_attn_builder.py` | [gdn_prepare.md](docs/gdn_prepare.md) |
+| [mamba/align_block_table.py](mamba/align_block_table.py) | `ops/gdn_attn_builder.py`, `models/glm5next/recoverssm_metadata.py` | [mamba_align_block_table.md](docs/mamba_align_block_table.md) |
 | [spec_decode/entropy_verify.py](spec_decode/entropy_verify.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [entropy_verify.md](docs/entropy_verify.md) |
 
 ## Shared runner support
@@ -83,6 +84,7 @@ configuration rather than the runner input or sampling interface.
 | [compressor/compressor_triton.py](compressor/compressor_triton.py) | Model compression |
 | [dcp/dcp_a2a.py](dcp/dcp_a2a.py) | Distributed attention |
 | [dcp/dcp_a2a_batched.py](dcp/dcp_a2a_batched.py) | Distributed attention |
+| [dcp/dcp_a2a_rank_tiled.py](dcp/dcp_a2a_rank_tiled.py) | Distributed attention |
 | [dcp/sfa_dcp_exchange.py](dcp/sfa_dcp_exchange.py) | Model/attention primitive or shared utility |
 | [dcp/sfa_dcp_merge.py](dcp/sfa_dcp_merge.py) | Model/attention primitive or shared utility |
 | [sharded_indexer.py](sharded_indexer.py) | DCP candidate transport and causal metadata |
@@ -126,7 +128,7 @@ configuration rather than the runner input or sampling interface.
 | [layernorm_gated.py](layernorm_gated.py) | Model/attention primitive or shared utility |
 | [linearnorm/fused_eh_norm.py](linearnorm/fused_eh_norm.py) | Normalization/rotary fusion |
 | [linearnorm/qsa_rmsnorm_mrope.py](linearnorm/qsa_rmsnorm_mrope.py) | Model/attention primitive or shared utility |
-| [linearnorm/split_qkv_rmsnorm_mrope.py](linearnorm/split_qkv_rmsnorm_mrope.py) | Normalization/rotary fusion; [interface and modes](docs/split_qkv_rmsnorm_mrope.md) |
+| [linearnorm/split_qkv_rmsnorm_mrope.py](linearnorm/split_qkv_rmsnorm_mrope.py) | Normalization/rotary fusion |
 | [linearnorm/split_qkv_rmsnorm_rope.py](linearnorm/split_qkv_rmsnorm_rope.py) | Normalization/rotary fusion |
 | [linearnorm/split_qkv_rmsnorm_rope_simt.py](linearnorm/split_qkv_rmsnorm_rope_simt.py) | Normalization/rotary fusion |
 | [linearnorm/split_qkv_rmsnorm_rope_vnorm.py](linearnorm/split_qkv_rmsnorm_rope_vnorm.py) | Normalization/rotary fusion |
@@ -152,9 +154,8 @@ configuration rather than the runner input or sampling interface.
 | [query_gather_prep.py](query_gather_prep.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/fia.py](qwen4_exp/fia.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/gbsa.py](qwen4_exp/gbsa.py) | Model/attention primitive or shared utility |
-| [qwen4_exp/hc.py](qwen4_exp/hc.py) | Model/attention primitive or shared utility |
-| [qwen4_exp/lightning_v2_prepare.py](qwen4_exp/lightning_v2_prepare.py) | Native QSA LightningIndexerV2 input preparation; [operator documentation](docs/prepare_qsa_lightning_v2_inputs.md) |
-| [qwen4_exp/qsa.py](qwen4_exp/qsa.py) | Model/attention primitive; [compressed-key preparation](docs/qsa_compress_groups_with_ratio.md) |
+| [qwen4_exp/hc.py](qwen4_exp/hc.py) | HyperConnection glue operators; row-block `gate_mix` is documented in [qwen4_exp_hc_gate_mix.md](docs/qwen4_exp_hc_gate_mix.md). |
+| [qwen4_exp/qsa.py](qwen4_exp/qsa.py) | Model/attention primitive or shared utility |
 | [rms_norm.py](rms_norm.py) | Model/attention primitive or shared utility |
 | [rope.py](rope.py) | Model/attention primitive or shared utility |
 | [sfa_indexer_store.py](sfa_indexer_store.py) | Indexer cache publication; see [operator documentation](docs/sfa_indexer_store.md). |
@@ -162,6 +163,8 @@ configuration rather than the runner input or sampling interface.
 | [spec_decode/dspark_swa_indices.py](spec_decode/dspark_swa_indices.py) | Model attention indices |
 | [step5/fused_add_rms_norm.py](step5/fused_add_rms_norm.py) | Fused optional FP32 residual add, RMSNorm, and BF16 output cast. [Operator documentation](docs/fused_add_rms_norm_cast.md) |
 | [step5/fused_qknorm_rope.py](step5/fused_qknorm_rope.py) | Step5 fused QK RMSNorm + NeoX RoPE with V passthrough. [Operator documentation](docs/step5_fused_qknorm_rope.md) |
+| [step5/gated_scale.py](step5/gated_scale.py) | Step5 head-wise attention gate: sigmoid + broadcast multiply fused on the caller's offset-0 gate base. [Operator documentation](docs/step5_gated_scale.md) |
+| [step5/indexer_qkz_norm_rope.py](step5/indexer_qkz_norm_rope.py) | Step5 sparse-indexer Q/K norm + NeoX RoPE with Z passthrough and e4m3-at-store quantization. [Operator documentation](docs/step5_indexer_qkz_norm_rope.md) |
 | [step5/summary_update.py](step5/summary_update.py) | Step5 CSA region summaries: [decode](docs/step5_update_decode.md), [verify](docs/step5_update_verify.md), [prefill](docs/step5_update_prefill.md), [prefill grouping](docs/step5_build_prefill_groups.md), [GBSA id pack](docs/step5_append_current_region.md) |
 | [triton_utils.py](triton_utils.py) | Model/attention primitive or shared utility |
 | [turboquant_finalize.py](turboquant_finalize.py) | Model/attention primitive or shared utility |

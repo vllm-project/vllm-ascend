@@ -1,7 +1,7 @@
 # Pipeline Parallelism
 
 Pipeline Parallelism (PP) partitions a model's Transformer hidden layers into
-consecutive pipeline stages. Each stage is executed by one Tensor Parallel (TP)
+consecutive pipeline stages. Each stage is executed by one Tensor Parallelism (TP)
 group, or by one worker when the TP size is `1`, and sends intermediate
 activations to the next stage. For example, `--pipeline-parallel-size 2`
 divides the hidden layers between two pipeline stages.

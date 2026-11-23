@@ -3,6 +3,10 @@
 
 """Test packaged operator dispatcher contracts without the DSL compiler."""
 
+import sys
+from types import ModuleType
+from unittest.mock import Mock, call
+
 import pytest
 import torch
 
@@ -108,3 +112,39 @@ def test_attention_meta_outputs(return_lse):
     assert lse.shape == ((1, 7, 64) if return_lse else (0,))
     assert lse.dtype == torch.float32
     assert output.device.type == lse.device.type == "meta"
+
+
+@pytest.mark.parametrize("capturing", [False, True])
+@pytest.mark.parametrize("return_lse", [False, True])
+def test_attention_retires_eager_dsl_stream_uses(monkeypatch, capturing, return_lse):
+    calls = Mock()
+    calls.is_capturing.return_value = capturing
+    stream = calls.current_stream.return_value
+    npu_utils = ModuleType("torch_npu.npu.utils")
+    monkeypatch.setattr(npu_utils, "_erase_stream", calls.erase_stream, raising=False)
+    monkeypatch.setitem(sys.modules, npu_utils.__name__, npu_utils)
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", calls.is_capturing)
+    monkeypatch.setattr(torch.npu, "current_stream", calls.current_stream)
+    monkeypatch.setattr(ops, "_get_dsl_ops", lambda _: (calls.attention, None))
+    q = torch.empty((7, 64, 512), dtype=torch.bfloat16)
+    kv = torch.empty((3, 128, 1, 584), dtype=torch.uint8)
+
+    out, lse = ops._mixed_quant_sparse_flash_mla_impl(q, ori_kv=kv, quant_mode=0, return_softmax_lse=return_lse)
+
+    assert calls.attention.call_args.args[0] is q
+    assert calls.attention.call_args.kwargs["out"] is out
+    assert calls.attention.call_args.kwargs["lse"] is lse
+    assert lse.shape == ((1, 7, 64) if return_lse else (0,))
+    submitted = calls.attention.call_args
+    expected = [call.attention(*submitted.args, **submitted.kwargs), call.is_capturing()]
+    if not capturing:
+        expected.extend(
+            [
+                call.current_stream(q.device),
+                call.current_stream().record_event(),
+                call.current_stream().wait_event(stream.record_event.return_value),
+                call.erase_stream(q, stream),
+                call.erase_stream(out, stream),
+            ]
+        )
+    assert calls.mock_calls == expected

@@ -6,7 +6,7 @@ SigLIP2 is a family of vision-language embedding models from Google. Each checkp
 
 Supported use cases include image-text similarity, zero-shot ImageNet classification, and multimodal retrieval. **Text and image must be embedded in separate requests**; do not pass both in one call.
 
-This guide describes how to deploy and evaluate SigLIP2 with vLLM Ascend on **Atlas 300I DUO**.
+This guide describes how to deploy and evaluate SigLIP2 with vLLM Ascend on **Atlas 300I Duo**.
 
 This document is validated and written based on the **vLLM-Ascend main branch** as of **2026-09-03**. The current model (`siglip2-base-patch16-224`) is fully supported for text and image embedding on this branch. As a pooling model, SigLIP2 is used for offline `llm.embed()` and online `/v1/embeddings` serving; features such as PD separation and MTP are not applicable. Use the **main branch** snapshot from that date or a later official release that includes SigLIP2 support.
 
@@ -20,9 +20,9 @@ Refer to [Supported Models](../../user_guide/support_matrix/supported_models.md)
 
 | Weight Version | Hardware Requirements | Download Links |
 |----------------|-----------------------|----------------|
-| `siglip2-base-patch16-224` (FP16) | 1 Atlas 300I DUO node | [Modelscope](https://modelscope.cn/models/google/siglip2-base-patch16-224) \| [HuggingFace](https://huggingface.co/google/siglip2-base-patch16-224) |
+| `siglip2-base-patch16-224` (FP16) | 1 Atlas 300I Duo node | [Modelscope](https://modelscope.cn/models/google/siglip2-base-patch16-224) \| [HuggingFace](https://huggingface.co/google/siglip2-base-patch16-224) |
 
->**Path description:** Please download the model weights to a directory of your choice and record this path. For example: `/root/.cache/modelscope/hub/models/google/siglip2-base-patch16-224`. In subsequent commands, replace `<YOUR_MODEL_PATH>` with the path you recorded here (a local directory or a Hugging Face / ModelScope model id such as `google/siglip2-base-patch16-224`).
+> **Path description:** Please download the model weights to a directory of your choice and record this path. For example: `/root/.cache/modelscope/hub/models/google/siglip2-base-patch16-224`. In subsequent commands, replace `<YOUR_MODEL_PATH>` with the path you recorded here (a local directory or a Hugging Face / ModelScope model id such as `google/siglip2-base-patch16-224`).
 
 ### 3.2 ImageNet Labels (Optional, for Accuracy Evaluation)
 
@@ -34,7 +34,7 @@ For ImageNet val zero-shot Top-1 evaluation, prepare:
 
 ## 4 Installation
 
-> **Hardware support:** SigLIP2 in this tutorial is supported and validated on **Atlas 300I DUO** only. Use the corresponding Docker image and the installation steps below.
+> **Hardware support:** SigLIP2 in this tutorial is supported and validated on **Atlas 300I Duo** only. Use the corresponding Docker image and the installation steps below.
 
 ### 4.1 Docker Image Installation
 
@@ -54,7 +54,7 @@ You can use the official all-in-one Docker image. For the available image tags a
   export NAME=siglip2-dev
 
   # Start the container with the variables defined above.
-  # Atlas 300I DUO uses a single NPU device (/dev/davinci0).
+  # Atlas 300I Duo uses a single NPU device (/dev/davinci0).
   docker run --rm \
   --name $NAME \
   --net=host \
@@ -102,7 +102,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment runs text and image embedding on one Atlas 300I DUO node, suitable for development, testing, and online `/v1/embeddings` serving.
+Single-node deployment runs text and image embedding on one Atlas 300I Duo node, suitable for development, testing, and online `/v1/embeddings` serving.
 
 Startup command:
 
@@ -135,11 +135,11 @@ INFO:     Application startup complete.
 
 Required Parameter Descriptions:
 
-- `--compilation-config` For Atlas 300I DUO, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
+- `--compilation-config` For Atlas 300I Duo, due to limited hardware streams, the size of cudagraph_capture_sizes is restricted.
 
 Key Parameter Descriptions:
 
-- **Tensor parallelism (TP) is not supported** for SigLIP2 online serving. Do not set `--tensor-parallel-size`; deploy on a single Atlas 300I DUO NPU as shown above.
+- **Tensor parallelism (TP) is not supported** for SigLIP2 online serving. Do not set `--tensor-parallel-size`; deploy on a single Atlas 300I Duo NPU as shown above.
 - `--served-model-name` must match the `"model"` field in `/v1/embeddings` requests; use the same value as `MODEL_PATH`.
 - `--runner pooling` is required. SigLIP2 is an embedding model, not a generative LLM.
 - `--max-model-len 64` matches SigLIP2 text tokenization (`padding=max_length`, `max_length=64`).
@@ -523,7 +523,7 @@ After about several minutes, you can get the performance evaluation result.
 
 ### 9.1 Recommended Configurations
 
-The following configurations are validated on Atlas 300I DUO and are categorized by use case. Start from the [§5.1 Single-Node Online Deployment](#51-single-node-online-deployment) command, then adjust the serve flags below.
+The following configurations are validated on Atlas 300I Duo and are categorized by use case. Start from the [§5.1 Single-Node Online Deployment](#51-single-node-online-deployment) command, then adjust the serve flags below.
 
 | Scenario | Workload | Deployment | NPUs | Max Num Seqs | Max Num Batched Tokens | Max Model Len | Client Concurrency (ref.) |
 |----------|----------|------------|------|--------------|------------------------|---------------|---------------------------|
@@ -553,9 +553,9 @@ The following optimizations are enabled in the recommended [§5.1 Single-Node On
 
 | Optimization Technique | Technical Principle | Performance Benefit |
 | ---------------------- | ------------------- | ------------------- |
-| ACL graph capture | Uses `--compilation-config '{"cudagraph_capture_sizes": [64,32]}'` to capture fixed small batch shapes on Atlas 300I DUO | Reduces per-request scheduling overhead for short text and image embed paths |
+| ACL graph capture | Uses `--compilation-config '{"cudagraph_capture_sizes": [64,32]}'` to capture fixed small batch shapes on Atlas 300I Duo | Reduces per-request scheduling overhead for short text and image embed paths |
 | Pooling runner | Uses `--runner pooling` for embedding-only forward passes | Required for SigLIP2; avoids generative decode paths |
-| FP16 inference | Uses `--dtype float16` on Atlas 300I DUO | Matches 300I DUO supported precision and model weights |
+| FP16 inference | Uses `--dtype float16` on Atlas 300I Duo | Matches 300I DUO supported precision and model weights |
 
 ##### Optimizations That Require Explicit Enabling
 
