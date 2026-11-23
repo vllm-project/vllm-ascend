@@ -1,0 +1,103 @@
+#include "register/op_def_registry.h"
+
+namespace ops {
+class SolAttnFwdM128Kernel : public OpDef {
+public:
+    explicit SolAttnFwdM128Kernel(const char* name) : OpDef(name)
+    {
+        this->Input("q")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_BF16})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("k_pad")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_BF16})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("v_pad")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_BF16})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("kc_padded")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_BF16})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("vc_padded")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_BF16})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("flat_exact_cnt")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_INT32})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("flat_exact_idx")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_UINT16})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("group_approx_mask")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_UINT64})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("last_group_lens")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("out")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_BF16})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("lse")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Attr("B")
+            .AttrType(REQUIRED)
+            .Int(0);
+        this->Attr("T")
+            .AttrType(REQUIRED)
+            .Int(0);
+        this->Attr("H")
+            .AttrType(REQUIRED)
+            .Int(0);
+        this->Attr("NT")
+            .AttrType(REQUIRED)
+            .Int(0);
+        this->Attr("NT_Q")
+            .AttrType(REQUIRED)
+            .Int(0);
+        this->Attr("NG")
+            .AttrType(REQUIRED)
+            .Int(0);
+        this->Attr("NPAD")
+            .AttrType(REQUIRED)
+            .Int(0);
+        this->Attr("T_PAD_KV")
+            .AttrType(REQUIRED)
+            .Int(0);
+        this->Attr("NT_Q_PAD8")
+            .AttrType(REQUIRED)
+            .Int(0);
+        this->Attr("T_LSE")
+            .AttrType(REQUIRED)
+            .Int(0);
+        this->Attr("scale_log2")
+            .AttrType(REQUIRED)
+            .Float(0);
+        OpAICoreConfig aicoreConfig;
+        aicoreConfig.DynamicCompileStaticFlag(true).DynamicShapeSupportFlag(true);
+        this->AICore().AddConfig("ascend910b", aicoreConfig);
+    }
+};
+
+OP_ADD(SolAttnFwdM128Kernel);
+}

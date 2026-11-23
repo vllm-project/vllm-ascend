@@ -52,6 +52,7 @@
 #include "attention/indexer_region_score/indexer_region_score_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/attn_res_fwd/attn_res_fwd_torch_adpt.h"
+#include "aclnn_torch_adapter/sol_attn_torch_adpt.h"
 #include "attention/kda_gate_cumsum_vllm/kda_gate_cumsum_vllm_torch_adpt.h"
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
@@ -2902,6 +2903,28 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor? output_norm_weight=None, float output_norm_eps=1e-5, int block_write_idx=-1, "
         "bool return_materialized=False, bool mix=True, bool optimize_prefill=False) -> (Tensor(c), Tensor(b), Tensor(c))");
     ops.impl("attn_res_fwd", torch::kPrivateUse1, &vllm_ascend::attn_res_fwd);
+
+    ops.def(
+        "sol_attn_prepare_qkv(Tensor q, Tensor k, Tensor v, Tensor(a!) k_pad, Tensor(b!) v_pad, "
+        "Tensor(c!) k_summary, Tensor(d!) v_summary, Tensor(e!) k_summary_fp32, Tensor(f!) q_summary, "
+        "Tensor(g!) tail_lengths) -> ()");
+    ops.impl("sol_attn_prepare_qkv", torch::kPrivateUse1, &vllm_ascend::sol_attn_prepare_qkv);
+
+    ops.def(
+        "sol_attn_prepare_diag_thresh(Tensor q_summary, Tensor k_summary_fp32, float scale_log2, float tau, "
+        "Tensor(a!) threshold) -> ()");
+    ops.impl("sol_attn_prepare_diag_thresh", torch::kPrivateUse1, &vllm_ascend::sol_attn_prepare_diag_thresh);
+
+    ops.def(
+        "sol_attn_prepare_route_pack(Tensor raw_scores, Tensor threshold, int sink_start_block, int sink_end_block, "
+        "float scale_log2, Tensor(a!) approx_mask, Tensor(b!) exact_count, Tensor(c!) exact_index) -> ()");
+    ops.impl("sol_attn_prepare_route_pack", torch::kPrivateUse1, &vllm_ascend::sol_attn_prepare_route_pack);
+
+    ops.def(
+        "sol_attn_fwd_m128(Tensor q, Tensor k_pad, Tensor v_pad, Tensor k_summary, Tensor v_summary, "
+        "Tensor exact_count, Tensor exact_index, Tensor approx_mask, Tensor tail_lengths, float scale_log2, "
+        "Tensor(a!) output, Tensor(b!) lse) -> ()");
+    ops.impl("sol_attn_fwd_m128", torch::kPrivateUse1, &vllm_ascend::sol_attn_fwd_m128);
 
     ops.def(
         "dequant_situ_quant(Tensor x, "

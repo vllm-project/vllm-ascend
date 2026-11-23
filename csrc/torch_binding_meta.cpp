@@ -117,6 +117,31 @@ int64_t get_physical_device_id_meta(int64_t user_device_id)
     return user_device_id;
 }
 
+// Sol-Attn writes into caller-owned outputs whose metadata is already set.
+void sol_attn_prepare_qkv_meta(
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, const at::Tensor&)
+{
+}
+
+void sol_attn_prepare_diag_thresh_meta(const at::Tensor&, const at::Tensor&, double, double, const at::Tensor&)
+{
+}
+
+void sol_attn_prepare_route_pack_meta(
+    const at::Tensor&, const at::Tensor&, int64_t, int64_t, double,
+    const at::Tensor&, const at::Tensor&, const at::Tensor&)
+{
+}
+
+void sol_attn_fwd_m128_meta(
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, double, const at::Tensor&, const at::Tensor&)
+{
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> attn_res_fwd_meta(
     const at::Tensor& prefix, const c10::optional<at::Tensor>& addend,
     at::Tensor blocks, const at::Tensor& proj, const at::Tensor& norm,
@@ -1874,6 +1899,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("grouped_matmul_swiglu_quant_v2", &vllm_ascend::meta::grouped_matmul_swiglu_quant_v2_meta);
     // Kimi K3 attention residual
     ops.impl("attn_res_fwd", &vllm_ascend::meta::attn_res_fwd_meta);
+    ops.impl("sol_attn_prepare_qkv", &vllm_ascend::meta::sol_attn_prepare_qkv_meta);
+    ops.impl("sol_attn_prepare_diag_thresh", &vllm_ascend::meta::sol_attn_prepare_diag_thresh_meta);
+    ops.impl("sol_attn_prepare_route_pack", &vllm_ascend::meta::sol_attn_prepare_route_pack_meta);
+    ops.impl("sol_attn_fwd_m128", &vllm_ascend::meta::sol_attn_fwd_m128_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
     ops.impl("npu_generic_block_sparse_attention_metadata",
