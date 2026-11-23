@@ -34,12 +34,28 @@ from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 import vllm_ascend.patch.platform.patch_eplb as patch_eplb
 from vllm_ascend.patch.platform.patch_eplb import _AscendAsyncLayerResult
 
+
+def _real_npu_available() -> bool:
+    """Probe the exact capability this module needs: allocating on 'npu'.
+
+    The CPU UT runner (tests/ut/conftest.py) replaces torch.npu with a mock
+    and has no PrivateUse1 allocator, and the vllm/vllm-ascend import chain
+    can override torch.npu.is_available(). A real device allocation is
+    therefore the only reliable availability probe here.
+    """
+    try:
+        torch.empty(1, device="npu")
+    except (NotImplementedError, RuntimeError, AssertionError, AttributeError):
+        return False
+    return True
+
+
 # Device-level stream-ordering regression: needs real NPU streams/events and
 # real device memory. The CPU UT environment mocks torch.npu (no privateuse1
 # allocator, no-op stream stubs), so the ordering contract cannot be expressed
 # there; skip on CPU runners, run on real NPU runners.
 pytestmark = pytest.mark.skipif(
-    not (hasattr(torch, "npu") and torch.npu.is_available()),
+    not _real_npu_available(),
     reason="requires a real Ascend NPU (stream-order regression; cpu-ut mocks torch.npu)",
 )
 
