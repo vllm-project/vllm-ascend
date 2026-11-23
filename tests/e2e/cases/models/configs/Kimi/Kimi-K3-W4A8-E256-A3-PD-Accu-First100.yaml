@@ -1,7 +1,7 @@
 # Draft: A3 hardware execution and baseline calibration are pending.
 # Adapted from Task4_2_tcase_0.30.0_Kimi-K3_E256_PD_Disag_A5_TCase / tests/e2e/cases/models/configs/Kimi/Kimi-K3-W4A8-E256-A5-PD-Accu.yaml
 # Two A3 nodes: node 0 = Prefill, node 1 = Decode; TP16/EP per role.
-test_name: Kimi-K3-W4A8-E256-A3-PD-0.30.0-Accu-First100
+test_name: Kimi-K3-W4A8-E256-A3-PD-Accu-First100
 model: /root/.cache/modelscope/hub/models/CuiZ2007/Kimi-K3-w4a8-experts256
 num_nodes: 2
 npu_per_node: 16
