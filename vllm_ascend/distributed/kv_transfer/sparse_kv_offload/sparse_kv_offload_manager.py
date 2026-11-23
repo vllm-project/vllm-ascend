@@ -245,21 +245,47 @@ def _fsa_plan_payload_words(topk: int) -> int:
     return cdiv((topk + 16) * 2, 32) * 8 + 8
 
 
+def _fsa_planner_tensor_sizes(rows: int, config: SparseKVOffloadConfig, layers: int, rank: int, tp_size: int):
+    """Byte sizes of live planner tensors, in allocation order."""
+    word = torch.int32.itemsize
+    if config.fsa_planner_mode == "hccl" or tp_size == 1:
+        yield rows * _fsa_plan_payload_words(config.topk) * word
+    if rank == 0:
+        yield rows * 4 * word  # mapping
+        yield rows * torch.int64.itemsize  # input request IDs
+        yield rows * config.topk * word
+        yield rows * word
+        yield rows * word
+    yield rows * FSA_SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT * torch.int16.itemsize
+    if rank == 0:
+        for _ in range(layers):
+            yield rows * torch.int64.itemsize  # last request IDs
+            yield rows * word  # active bank
+            yield rows * 2 * 2 * config.topk_buffer_size * word
+
+
 def fsa_device_planner_hbm_bytes(
     vllm_config: VllmConfig, config: SparseKVOffloadConfig, num_layers: int, tp_rank: int, tp_size: int
 ) -> int:
-    """Persistent planner tensors allocated after the KV block budget is fixed."""
+    """Measure the allocator segments needed at startup before sizing the KV cache."""
     rows = _fsa_plan_rows(vllm_config)
-    row_bytes = FSA_SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT * torch.int16.itemsize
-    if config.fsa_planner_mode == "hccl" or tp_size == 1:
-        row_bytes += _fsa_plan_payload_words(config.topk) * torch.int32.itemsize
-    if tp_rank == 0:
-        # Four mapping words, an int64 request ID, TopK and two sequence lengths.
-        row_bytes += torch.int64.itemsize + (4 + config.topk + 2) * torch.int32.itemsize
-        # A skipped layer can still become an owner when no plan can be reused.
-        # Budget last_req_id, bank and both token/slot banks for each offload layer.
-        row_bytes += num_layers * (torch.int64.itemsize + (1 + 4 * config.topk_buffer_size) * torch.int32.itemsize)
-    return rows * row_bytes
+    sizes = list(_fsa_planner_tensor_sizes(rows, config, num_layers, tp_rank, tp_size))
+    if tp_rank == 0 and num_layers:
+        # Filling the strided slot column uses arange and a packed copy. The
+        # scratch is reused across layers, so reserve one copy for initialization.
+        slot_bytes = config.topk_buffer_size * torch.int32.itemsize
+        sizes.extend((slot_bytes, rows * 2 * slot_bytes))
+    # The active allocator determines segment sizes (including device-specific
+    # padding). Probe an isolated pool without touching tensor contents or
+    # resetting the worker's memory statistics. All blocks expire on return.
+    pool = torch.npu.MemPool()
+    with torch.npu.use_mem_pool(pool):
+        blocks = [torch.empty(size, dtype=torch.uint8, device="npu") for size in sizes]
+        reserved = sum(s["total_size"] for s in torch.npu.memory_snapshot() if s["segment_pool_id"] == pool.id)
+        if reserved < sum(sizes):
+            raise RuntimeError("NPU allocator did not report all FSA planner segments")
+        del blocks
+    return reserved
 
 
 def _fsa_plan_ipc_bytes(vllm_config: VllmConfig, config: SparseKVOffloadConfig, tp_size: int) -> int:

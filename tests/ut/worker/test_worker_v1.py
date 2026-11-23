@@ -1108,7 +1108,7 @@ class TestNPUWorker(TestBase):
         from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
             SparseKVOffloadManager,
             _fsa_plan_ipc_bytes,
-            fsa_device_planner_hbm_bytes,
+            _fsa_planner_tensor_sizes,
         )
 
         for sequences, draft_steps, token_limit, rows, topk, capacity, layers in (
@@ -1143,8 +1143,36 @@ class TestNPUWorker(TestBase):
                         buffers = [t for t in tree_leaves(vars(manager)) if isinstance(t, torch.Tensor)]
                         allocated_bytes = sum(t.nbytes for t in buffers)
                         self.assertEqual(
-                            fsa_device_planner_hbm_bytes(vllm_config, config, layers, rank, size), allocated_bytes
+                            sum(_fsa_planner_tensor_sizes(rows, config, layers, rank, size)), allocated_bytes
                         )
+
+    def test_planner_budget_includes_one_initialization_workspace_and_pool_segments(self):
+        from vllm_ascend.distributed.kv_transfer.sparse_kv_offload import sparse_kv_offload_manager as mm
+
+        rows, capacity = 512, 8192
+        cfg = SimpleNamespace(topk=2048, topk_buffer_size=capacity, fsa_planner_mode="notify")
+        vc = SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_seqs=rows, max_num_batched_tokens=rows), speculative_config=None
+        )
+        pool = SimpleNamespace(id=(0, 7))
+        for rank in (0, 1):
+            sizes = list(mm._fsa_planner_tensor_sizes(rows, cfg, 2, rank, 2))
+            if rank == 0:
+                sizes.extend((capacity * 4, rows * 2 * capacity * 4))
+            physical = sum(sizes) + 4096
+            segments = [
+                {"segment_pool_id": (0, 1), "total_size": 1024},
+                {"segment_pool_id": pool.id, "total_size": physical},
+            ]
+            with (
+                patch.object(torch.npu, "MemPool", return_value=pool),
+                patch.object(torch.npu, "use_mem_pool") as use_pool,
+                patch.object(torch.npu, "memory_snapshot", return_value=segments),
+                patch.object(torch, "empty") as empty,
+            ):
+                self.assertEqual(mm.fsa_device_planner_hbm_bytes(vc, cfg, 2, rank, 2), physical)
+                use_pool.assert_called_once_with(pool)
+                self.assertEqual([call.args[0] for call in empty.call_args_list], sizes)
 
     @patch("vllm_ascend.worker.worker.fsa_device_planner_hbm_bytes", return_value=512)
     @patch("vllm_ascend.worker.worker.get_tp_group")
