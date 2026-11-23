@@ -224,6 +224,10 @@ class BaseKVPoolScheduler(ABC):
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:
         return token_len // self.cache_transfer_granularity * self.cache_transfer_granularity
 
+    def _ceil_to_cache_transfer_granularity(self, token_len: int) -> int:
+        granularity = self.cache_transfer_granularity
+        return (token_len + granularity - 1) // granularity * granularity
+
     def _infer_mamba_groups(self) -> dict[int, int]:
         """Validate Mamba cache modes and return hybrid group scratch counts."""
         if self.kv_cache_config is None:
@@ -437,6 +441,7 @@ class BaseKVPoolScheduler(ABC):
             kv_cache_group_families=self.kv_cache_group_families,
             save_partial_block=self.layerwise_offload,
             hash_block_size=self.hash_block_size,
+            save_unaligned_tail=self.use_hybrid and not self.use_layerwise,
         )
 
     def _process_new_request(
@@ -826,12 +831,15 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         if len(self.cacheable_group_ids) != len(self.original_block_size):
             # Private compressor state is rebuilt from a whole token page.
             token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
+        elif self._discard_partial_chunks:
+            token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
+            if self.use_hybrid and token_len < prompt_token_len:
+                # Hybrid align-state: probe the true prompt tail so the final
+                # mamba checkpoint block enters the lookup mask. Reported hits
+                # stay block-aligned.
+                token_len = self._ceil_to_cache_transfer_granularity(prompt_token_len)
         else:
-            token_len = (
-                self._floor_to_cache_transfer_granularity(prompt_token_len)
-                if self._discard_partial_chunks
-                else prompt_token_len
-            )
+            token_len = prompt_token_len
         if token_len < self.cache_transfer_granularity or num_computed_tokens >= token_len:
             return None
         if self.client is None or self.client.closed:
