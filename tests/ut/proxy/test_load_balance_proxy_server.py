@@ -25,27 +25,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PROXY_SCRIPT = REPO_ROOT / "examples" / "disaggregated_prefill_v1" / "load_balance_proxy_server_example.py"
 
-
-def _worker_port(port: int) -> int:
-    """Offset fixed ports per xdist worker so parallel workers never share ports.
-
-    pytest-xdist sets PYTEST_XDIST_WORKER (e.g. "gw3") in worker processes;
-    without it (serial runs) the base ports are used unchanged.
-    """
-    worker = os.environ.get("PYTEST_XDIST_WORKER", "")
-    if worker.startswith("gw"):
-        try:
-            return port + int(worker[2:]) * 100
-        except ValueError:
-            pass
-    return port
-
-
-# The 100-port step exceeds the largest gap between any two of the fixed
-# ports below, so no two logical ports of different workers can collide.
-MOCK_PREFILL_PORT = _worker_port(19001)
-MOCK_DECODE_PORT = _worker_port(19002)
-PROXY_PORT = _worker_port(19080)
+MOCK_PREFILL_PORT = 19001
+MOCK_DECODE_PORT = 19002
+PROXY_PORT = 19080
 MODEL = "test-model"
 
 
@@ -387,7 +369,7 @@ def test_decode_5xx(proxy_server):
 
 def test_decode_connection_failure(proxy_server):
     """Decode connection failure returns 502."""
-    dead_port = _worker_port(19081)
+    dead_port = 19081
     _kill_port(dead_port)
     time.sleep(0.5)
     dead_proc = subprocess.Popen(
@@ -405,7 +387,7 @@ def test_decode_connection_failure(proxy_server):
             "--decoder-hosts",
             "127.0.0.1",
             "--decoder-ports",
-            str(_worker_port(19999)),
+            "19999",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -519,7 +501,7 @@ def test_concurrent_requests(proxy_server):
 def test_instances_add_remove(proxy_server):
     """Add and remove a decode instance via /instances/add and /instances/remove."""
     test_file = str(Path(__file__).resolve())
-    temp_port = _worker_port(19003)
+    temp_port = 19003
     _kill_port(temp_port)
     temp_proc = subprocess.Popen(
         [sys.executable, test_file, "--mock-backend", str(temp_port)],
