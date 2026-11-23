@@ -64,6 +64,8 @@ class HardwareCapability(Enum):
     SCATTER_ND_STRIDED_CACHE_STORE = auto()
     # Extend SK cache writes to FP8 E4M3FN/E5M2 (A5 ABI).
     SCATTER_ND_FP8_CACHE_STORE = auto()
+    # Allow the CANN MegaMhc Post/Pre fusion when its model and tensor checks pass.
+    CANN_MEGAMHC = auto()
     # Allow the CANN MegaMoe fused-MC2 path when its model, EP, and config checks pass.
     CANN_MEGAMOE = auto()
     # Allow A5 MegaMoe's MXFP-only path and its A5-specific calling conventions.
@@ -500,6 +502,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
                     HardwareCapability.SCATTER_ND_CACHE_STORE,
                     HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,
+                    HardwareCapability.CANN_MEGAMHC,
                     HardwareCapability.CANN_MEGAMOE,
                     HardwareCapability.CANN_MEGAMOE_MXFP,
                     HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,

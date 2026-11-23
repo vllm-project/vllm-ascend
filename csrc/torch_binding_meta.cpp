@@ -1165,6 +1165,20 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_v3_meta(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>(y, post, comb_frag, pre);
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mega_mhc_meta(
+    const at::Tensor& x, const at::Tensor& residual, const at::Tensor& post, const at::Tensor& comb,
+    const at::Tensor& hc_fn, const at::Tensor& hc_scale, const at::Tensor& hc_base, const at::Tensor& norm_weight,
+    int64_t hc_mult, int64_t hc_sinkhorn_iters, double norm_eps, double hc_norm_eps, double hc_pre_eps,
+    double hc_post_scale)
+{
+    return {
+        at::empty_symint(residual.sym_sizes(), residual.options()),
+        at::empty_symint(post.sym_sizes(), post.options().dtype(at::kFloat)),
+        at::empty_symint(comb.sym_sizes(), comb.options().dtype(at::kFloat)),
+        at::empty_symint(x.sym_sizes(), x.options()),
+    };
+}
+
 void inplace_partial_rotary_mul_meta(
     at::Tensor &x,
     const at::Tensor &r1,
@@ -1916,6 +1930,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_hc_post", &vllm_ascend::meta::npu_hc_post_meta);
     ops.impl("npu_hc_pre_v2", &vllm_ascend::meta::npu_hc_pre_meta);
     ops.impl("npu_hc_pre_v3", &vllm_ascend::meta::npu_hc_pre_v3_meta);
+    ops.impl("npu_mega_mhc", &vllm_ascend::meta::npu_mega_mhc_meta);
     ops.impl("inplace_partial_rotary_mul", &vllm_ascend::meta::inplace_partial_rotary_mul_meta);
     ops.impl("npu_rms_norm_dynamic_quant", &vllm_ascend::meta::npu_rms_norm_dynamic_quant_meta);
     ops.impl("kv_compress_epilog_v2", &vllm_ascend::meta::kv_compress_epilog_v2_meta);

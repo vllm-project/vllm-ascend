@@ -80,7 +80,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.utils import pad_sequence_parallel_tokens
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.utils import pad_sequence_parallel_tokens, vllm_version_is
 
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention, get_kda_parallel_size
@@ -94,6 +95,12 @@ from .ops.mhc_ops import hc_contract, hc_expand
 # Trained GLM-5.3-Flash values formerly supplied by vLLM's vendored config.
 _MHC_TAU = 0.05
 _MHC_POST_MULT_VALUE = 2.0
+_MEGA_MHC_HC_MULT = 4
+_MEGA_MHC_MIN_HIDDEN_SIZE = 16
+_MEGA_MHC_MAX_HIDDEN_SIZE = 16384
+_MEGA_MHC_HIDDEN_ALIGNMENT = 16
+_MEGA_MHC_MIN_SINKHORN_ITERS = 1
+_MEGA_MHC_MAX_SINKHORN_ITERS = 100
 _LOGIT_SCALE = 1.0
 
 
@@ -399,6 +406,18 @@ class Glm5NextDecoderLayer(nn.Module):
             mix_hc = (2 + n) * n
 
             self.n = n
+            self._use_mega_mhc = (
+                n == _MEGA_MHC_HC_MULT
+                and _MEGA_MHC_MIN_HIDDEN_SIZE <= self.hidden_size <= _MEGA_MHC_MAX_HIDDEN_SIZE
+                and self.hidden_size % _MEGA_MHC_HIDDEN_ALIGNMENT == 0
+                and _MEGA_MHC_MIN_SINKHORN_ITERS <= self.mhc_sinkhorn_iterations <= _MEGA_MHC_MAX_SINKHORN_ITERS
+                and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMHC)
+                and hasattr(torch.ops._C_ascend, "npu_mega_mhc")
+                and hasattr(torch.ops._C_ascend, "is_mega_mhc_available")
+                and torch.ops._C_ascend.is_mega_mhc_available()
+            )
+            self.register_buffer("_input_layernorm_weight_fp32", None, persistent=False)
+            self.register_buffer("_post_attention_layernorm_weight_fp32", None, persistent=False)
 
             # attn hc
             self.hc_attn_fn = nn.Parameter(torch.empty(mix_hc, d_model, dtype=torch.float32))
@@ -409,6 +428,24 @@ class Glm5NextDecoderLayer(nn.Module):
             self.hc_ffn_fn = nn.Parameter(torch.empty(mix_hc, d_model, dtype=torch.float32))
             self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
             self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
+
+    @torch.inference_mode()
+    def process_weights_after_loading(self, act_dtype: torch.dtype | None = None) -> None:
+        """Cache FP32 norm weights and refill them in place after weight reloads."""
+        if not getattr(self, "_use_mega_mhc", False):
+            return
+        for norm, buffer_name in (
+            (self.input_layernorm, "_input_layernorm_weight_fp32"),
+            (self.post_attention_layernorm, "_post_attention_layernorm_weight_fp32"),
+        ):
+            weight_fp32 = norm.weight.detach().to(dtype=torch.float32, copy=True).contiguous()
+            cached_weight = getattr(self, buffer_name, None)
+            if cached_weight is not None:
+                cached_weight.copy_(weight_fp32)
+            elif buffer_name in self._buffers:
+                setattr(self, buffer_name, weight_fp32)
+            else:
+                self.register_buffer(buffer_name, weight_fp32, persistent=False)
 
     def forward(
         self,
@@ -488,6 +525,7 @@ class Glm5NextDecoderLayer(nn.Module):
                 self.hc_attn_base,
                 norm_weight=self.input_layernorm.weight.data,
                 norm_eps=self.input_layernorm.variance_epsilon,
+                norm_weight_fp32=self._input_layernorm_weight_fp32,
             )
 
         # Attention needs the full token sequence; mHC above ran on the SP
@@ -514,6 +552,7 @@ class Glm5NextDecoderLayer(nn.Module):
             self.hc_ffn_base,
             norm_weight=self.post_attention_layernorm.weight.data,
             norm_eps=self.post_attention_layernorm.variance_epsilon,
+            norm_weight_fp32=self._post_attention_layernorm_weight_fp32,
         )
 
         # Fully Connected
@@ -580,7 +619,32 @@ class Glm5NextDecoderLayer(nn.Module):
         hc_base: torch.Tensor,
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
+        norm_weight_fp32: torch.Tensor | None = None,
     ):
+        if (
+            getattr(self, "_use_mega_mhc", False)
+            and norm_weight is not None
+            and x.dtype == torch.bfloat16
+            and residual.dtype == x.dtype
+        ):
+            if norm_weight_fp32 is None:
+                norm_weight_fp32 = norm_weight if norm_weight.dtype == torch.float32 else norm_weight.float()
+            return torch.ops._C_ascend.npu_mega_mhc(
+                x,
+                residual,
+                post,
+                comb,
+                hc_fn,
+                hc_scale,
+                hc_base,
+                norm_weight_fp32,
+                self.n,
+                self.mhc_sinkhorn_iterations,
+                norm_eps,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.mhc_post_mult_value,
+            )
         residual = self.hc_post(x, residual, post, comb)
         post, comb, layer_input = self.hc_pre(
             residual,
@@ -699,6 +763,12 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             comb.unsqueeze(0),
         ).squeeze(0)
         return hc_contract(completed, self.config.hc_mult)
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype | None = None) -> None:
+        if not vllm_version_is("0.33.0"):
+            return
+        for layer in self._active_layers:
+            layer.process_weights_after_loading(act_dtype)
 
     def make_empty_intermediate_tensors(
         self,
@@ -1026,6 +1096,10 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, DeepseekV2Mixtur
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
+    def process_weights_after_loading(self, act_dtype: torch.dtype | None = None) -> None:
+        if vllm_version_is("0.33.0"):
+            self.model.process_weights_after_loading(act_dtype)
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
@@ -1133,6 +1207,13 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
         # wrapper so PP ranks > 0 can materialize placeholder intermediate
         # tensors (the vision tower only executes on the first rank).
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype | None = None) -> None:
+        parent_hook = getattr(super(), "process_weights_after_loading", None)
+        if parent_hook is not None:
+            parent_hook()
+        if vllm_version_is("0.33.0"):
+            self.language_model.process_weights_after_loading(act_dtype)
 
     def load_weights(self, weights: Iterable[tuple[Any, ...]]) -> set[str]:
         # The visual merger's down_proj already contains the exported rotation.
