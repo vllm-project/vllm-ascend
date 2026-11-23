@@ -716,7 +716,8 @@ def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests(recover, for_c
         is_target_attn_groups=MagicMock(return_value=True),
         build_attention_context=MagicMock(return_value=pcp_context),
     )
-    state = SimpleNamespace(
+    state = object.__new__(AscendMambaHybridModelState)
+    vars(state).update(
         pcp_manager=pcp_manager,
         vllm_config=SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=4))),
         recoverssm=SimpleNamespace(record_step=MagicMock()) if recover else None,
@@ -770,7 +771,8 @@ def test_glm_kpool_pcp_advances_mamba_align_state_once_per_global_request(mock_k
     pcp_context = SimpleNamespace(global_batch=global_batch, global_block_tables=global_tables)
     pcp_manager = SimpleNamespace(build_attention_context=MagicMock(return_value=pcp_context))
     spec = _mamba_spec()
-    state = SimpleNamespace(
+    state = object.__new__(AscendMambaHybridModelState)
+    vars(state).update(
         _align_mode=True,
         pcp_manager=pcp_manager,
         vllm_config=SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=4))),
