@@ -1,0 +1,8 @@
+pr: 22879
+entries:
+  - category: feature
+    text: >-
+      Enabled layerwise prefill KV offload for BF16 MLA and Indexer caches on GLM-5.3
+      with the V2 model runner and one KV cache group. Set `use_layerwise` and
+      `layerwise_num_shared_buffers` on the prefill worker's AscendStoreConnector.
+    model: glm-5.3
