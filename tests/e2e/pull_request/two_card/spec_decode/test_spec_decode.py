@@ -166,7 +166,6 @@ def test_dflash2_v2_acceptance(
     method: str,
     num_speculative_tokens: int,
 ):
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 

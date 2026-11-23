@@ -306,7 +306,6 @@ def test_sparse_kv_offload_runner_request_lifecycle(tmp_path):
     (model_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
     env = {
         **os.environ,
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION": "1",
         "OMP_NUM_THREADS": "8",
