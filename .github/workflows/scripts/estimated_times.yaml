@@ -218,6 +218,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/ops/triton/test_dflash_candidate_sampler.py: 60
   tests/e2e/pull_request/two_card/ops/triton/test_fused_gdn_gating.py: 30
   tests/e2e/pull_request/two_card/ops/triton/test_gdn_prepare.py: 40
+  tests/e2e/pull_request/two_card/ops/triton/test_glm5next_output_writeback.py: 40
   tests/e2e/pull_request/two_card/ops/triton/test_glm5next_state_gather_npu.py: 30
   tests/e2e/pull_request/two_card/ops/triton/test_kda_state_copy_triton.py: 40
   tests/e2e/pull_request/two_card/ops/triton/test_l2norm.py: 40
@@ -229,8 +230,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/ops/triton/test_muls_add.py: 30
   tests/e2e/pull_request/two_card/ops/triton/test_mxfp_k_scale_scatter.py: 40
   tests/e2e/pull_request/two_card/ops/triton/test_penality.py: 90
-  tests/e2e/pull_request/two_card/ops/triton/test_qsa_compress_groups_with_ratio.py: 60
-  tests/e2e/pull_request/two_card/ops/triton/test_qsa_rmsnorm_mrope.py: 60
+  tests/e2e/pull_request/two_card/ops/triton/test_qsa_rmsnorm_mrope.py: 50
   tests/e2e/pull_request/two_card/ops/triton/test_qwen4_exp_qsa.py: 40
   tests/e2e/pull_request/two_card/ops/triton/test_rejection_sample_v2.py: 230
   tests/e2e/pull_request/two_card/ops/triton/test_resample.py: 70
