@@ -717,6 +717,7 @@ class TestAscendSFAKPathFusion(TestBase):
         wk_weights_proj = MagicMock(return_value=(kw, None))
 
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+        indexer.topk_tokens = 4
         indexer.wk_weights_proj = wk_weights_proj
         indexer.k_norm = MagicMock(side_effect=lambda x: x)
         indexer.head_dim = head_dim
@@ -738,6 +739,8 @@ class TestAscendSFAKPathFusion(TestBase):
         cos = torch.randn(num_tokens, 1, 1, 64)
         sin = torch.randn(num_tokens, 1, 1, 64)
         indexer_metadata = SimpleNamespace(
+            num_actual_tokens=num_tokens,
+            kv_gather_block_ids=None,
             cos=cos,
             sin=sin,
             slot_mapping=torch.arange(num_tokens, dtype=torch.int64).view(-1, 1),

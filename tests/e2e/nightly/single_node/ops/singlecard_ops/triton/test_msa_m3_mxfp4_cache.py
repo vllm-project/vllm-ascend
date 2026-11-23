@@ -6,6 +6,8 @@ import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.device.device_config import check_ascend_device_type, is_950
+from vllm_ascend.models.minimax_m3.ops import msa_m3_npu as native
+from vllm_ascend.models.minimax_m3.ops.msa_m3_mxfp4 import pack_mxfp4
 from vllm_ascend.ops.triton.msa.msa_m3_mxfp4_cache import scatter_mxfp4_cache
 
 
@@ -71,3 +73,41 @@ def test_cache_graph_replay_reads_changed_inputs_and_slots(width):
         torch.npu.synchronize()
         assert torch.equal(keys.cpu(), expected_keys)
         assert torch.equal(scale_bytes.cpu(), expected_scales)
+
+
+@pytest.mark.parametrize("query_len", [1, 8])
+def test_mxfp4_fused_topk_matches_separate_selection(query_len):
+    if not native._can_use_index_score_topk_fusion(16):
+        pytest.skip("Requires CANN MsaIndexScore fused TopK support")
+    generator = torch.Generator().manual_seed(22235)
+    context = 8192
+    seq_len = context + query_len
+    blocks = (seq_len + 127) // 128
+    query = pack_mxfp4(torch.randn((query_len, 1, 128), dtype=torch.bfloat16, generator=generator).npu())
+    cache = pack_mxfp4(torch.randn((blocks, 128, 128), dtype=torch.bfloat16, generator=generator).npu())
+    table = torch.arange(blocks, dtype=torch.int32, device="npu").reshape(1, blocks)
+    cu = torch.tensor([0, query_len], dtype=torch.int32, device="npu")
+    lengths = torch.tensor([seq_len], dtype=torch.int32, device="npu")
+    contexts = torch.tensor([context], dtype=torch.int32, device="npu")
+    start = torch.tensor([context // 128], dtype=torch.int32, device="npu")
+    scores = native._minimax_m3_index_score(query, cache, table, cu, lengths, start, None)
+    # The separate selector returns score order; compare logical IDs in the
+    # ascending order required by GBSA. This case has at least topk valid blocks.
+    expected = native._minimax_m3_index_prefill_topk(scores, cu, contexts, query_len, 16, 2, 1).sort(dim=-1).values
+    actual = native._minimax_m3_index_score_topk(
+        query,
+        cache,
+        table,
+        cu,
+        lengths,
+        start,
+        None,
+        topk=16,
+        init_blocks=2,
+        local_blocks=1,
+    )
+    torch.npu.synchronize()
+    assert actual.dtype == torch.int32
+    assert actual.shape == (1, query_len, 16)
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
+    assert torch.all(actual[..., 1:] >= actual[..., :-1])

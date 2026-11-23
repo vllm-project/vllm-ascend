@@ -12,7 +12,7 @@ MiniMax-M3.1-Flash is a multimodal Mixture-of-Experts model with approximately 4
 
 This document covers supported features, environment and model preparation, single-node deployment, PD separation, functional verification, accuracy and performance evaluation, performance tuning, and troubleshooting.
 
-MiniMax-M3.1-Flash is supported on the vLLM Ascend `main` branch and in `v0.32.0rc`. This guide is written based on the `main` branch. Use the deployment image for your hardware from [Installation](#4-installation).
+MiniMax-M3.1-Flash is supported on the vLLM Ascend `main` branch and in `v0.32.0rc`. This guide is written based on the `main` branch. Use the deployment image for your hardware from [Section 4](#4-installation).
 
 The features described below are those enabled by the deployment commands in this guide. Refer to [Supported Features](#2-supported-features) for the model support matrix.
 
@@ -194,7 +194,7 @@ When the service spans multiple nodes, install the same vLLM and vLLM Ascend rev
 
 ## 5 Online Service Deployment
 
-Use the container and model weights for your hardware from [Installation](#4-installation).
+Use the container and model weights for your hardware from [Section 4](#4-installation).
 
 For descriptions of the standard `vllm serve` arguments used in the deployment examples, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments). For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
 
@@ -275,7 +275,7 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
 
     Wait for the following startup messages, then check the health endpoint from another terminal in the container:
 
-    ```text
+    ```output
     INFO:     Started server process
     INFO:     Waiting for application startup.
     INFO:     Application startup complete.
@@ -340,7 +340,7 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
 
     Wait for the following startup messages, then check the health endpoint from another terminal in the container:
 
-    ```text
+    ```output
     INFO:     Started server process
     INFO:     Waiting for application startup.
     INFO:     Application startup complete.
@@ -522,7 +522,7 @@ There are two A2 nodes, DP4 × TP4 / EP16 in total. The following values match t
 
     Node 1 is headless and does not open an HTTP server. After node 0 prints the following startup messages, check the health endpoint from another terminal in the node 0 container:
 
-    ```text
+    ```output
     INFO:     Started server process
     INFO:     Waiting for application startup.
     INFO:     Application startup complete.
@@ -567,7 +567,7 @@ The following values match the configurations in the Prefill and Decode scripts 
 
 Use one Prefill host and two hosts for the distributed Decode service (1P1D), each with all eight NPUs and the W8A8-MXFP8 weights. Prefill uses DP1 × TP4 × PP2. The two Decode hosts form one global DP4 × TP4 × PP1 / EP16 group with two local DP ranks per host: D1 runs ranks 0–1 and D2 runs ranks 2–3. Both Decode hosts serve the HTTP API and are registered separately as proxy endpoints, so do not add `--headless` to the D2 script. The verified configuration uses `--data-parallel-size-local 2` on both hosts and `--data-parallel-start-rank 2` on D2. Each host exposes one API endpoint serving its two local DP ranks; retaining the API on D2 does not change its local DP size. D1 is the Data Parallel master and the two Decode scripts must use the same `DECODE_HEAD_IP`, DP RPC port, and KV port.
 
-The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles. They use 128K input and 1K output; see the configuration table after the role summary for the 16K input variant.
+The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles. They use 128k input and 1K output; see the configuration table after the role summary for the 16K input variant.
 
 | Parameter | Prefill | Decode |
 | --- | --- | --- |
@@ -583,9 +583,9 @@ The following values match the configurations in the Prefill and Decode scripts 
 | Main-model execution | Eager | FULL_DECODE_ONLY with 1024-token graph capture |
 | KV cache dtype | fp8 | fp8 (DSpark draft uses bfloat16) |
 
-All three scripts use `MAX_MODEL_LEN=133000`, which covers a 128K prompt plus 1K generated tokens. For 16K input workloads, only the Decode side changes: lower the sequence limit and fall back to the default graph capture size, which is enough for 64 sequences × (1 + 7 draft tokens) = 512 tokens per step.
+All three scripts use `MAX_MODEL_LEN=133000`, which covers a 128k prompt plus 1K generated tokens. For 16K input workloads, only the Decode side changes: lower the sequence limit and fall back to the default graph capture size, which is enough for 64 sequences × (1 + 7 draft tokens) = 512 tokens per step.
 
-| Parameter | 128K input / 1K output | 16K input / 1K output |
+| Parameter | 128k input / 1K output | 16K input / 1K output |
 | --- | --- | --- |
 | Decode `MAX_NUM_SEQS` | 128 | 64 |
 | Decode `--compilation-config` | `{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}` | `{"cudagraph_mode":"FULL_DECODE_ONLY"}` |
@@ -2937,93 +2937,45 @@ The msmodeling tool (MindStudio-Modeling) optimizes serving and benchmark parame
 
 For the complete, step-by-step usage guide please refer to **[Optix-for-PD-disaggregation](https://gitcode.com/Ascend/msmodeling/blob/master/docs/en/quick_start/optix_agent_pd_disaggregation.md)**.
 
-#### 9.2.4 Experimental MXFP4 Index Scoring on 950DT
+#### 9.2.4 Opt-in MXFP4 Index Scoring on 950DT
 
-`--attention-config '{"indexer_kv_dtype":"mxfp4"}' enables MXFP4 query/key
-operands for MSA index scoring on Ascend 950. Omitting this option preserves
-the existing path. It changes index-key cache packing and index
-scoring; the model weights and main attention cache retain their configured
-formats. Logical index head dimensions 64 and 128 are supported.
+Add `--attention-config '{"indexer_kv_dtype":"mxfp4"}'` to enable MXFP4
+query/key operands for MSA index scoring on Ascend 950. Omitting this option
+preserves the existing indexer format. Model weights and the main attention
+cache retain their configured formats. Logical index head dimensions 64 and
+128 are supported.
 
-This path requires the experimental `MSAIndexScore` operator and an isolated
-`cann_ops_transformer_a4c4` Python extension. A stock vendor wheel still uses
-the default torch dispatcher and plugin entry-point group. Isolate both before
-starting either a baseline or an MXFP4 service; otherwise the experimental
-entry point can override the baseline implementation.
+Use a CANN 9.3 operator build whose standard
+`cann_ops_transformer.ops.msa_index_score` binding supports MXFP4 Q/K and
+separate E8M0 `query_scale`/`key_scale` operands. Fusion additionally requires
+`return_choice` and `topk` in that binding. The integration uses the paged
+`BBND` layout; no separately named experimental Python package or namespace
+rewriting is needed. Validate the selected CANN build on the serving runtime
+before deployment; the CANN version alone does not establish operator support.
 
-Build the operator from revision `a690c0b9bc735db673ca82e7c287b27aa509f73a`
-on branch `1117_msa_bnsd_host_split` of
-[the operator source](https://gitcode.com/yolic/transformer-readme).
-Use a separate CANN 9.3 build environment and an explicit vendor install prefix:
+For 128-wide BF16 heads and supported normalization weights, fused prepare
+retains QK normalization, RoPE, and main KV insertion. It computes the
+normalization scale `1 + weight` in FP32, as in the ordinary fused prepare
+path, and materializes BF16 index Q and new K into one contiguous buffer.
+One native MXFP4 quantization call processes both, inserts only new K bytes
+and E8M0 scales into the managed cache, and forwards packed Q without another
+quantization. Unsupported prepare configurations use the separate prepare
+path. Both paths preserve cached prefixes.
 
-```bash
-# Run from the operator source checkout with the CANN 9.3 build environment sourced.
-bash build.sh --pkg --soc=ascend950 --ops=msa_index_score --vendor_name=msa_a4c4 -j16
-bash build_out/cann-ops-transformer-msa_a4c4_linux-aarch64.run \
-    --quiet --install-path="${A4C4_PREFIX:?Set the experimental vendor install prefix}"
-cd torch_extension
-TORCH_EXTENSION_OPS=msa_index_score TORCH_EXTENSION_VENDOR=a4c4 \
-    python -m pip install . --no-deps --no-build-isolation
-```
+MXFP4 uses the same fused IndexScore/TopK selection as the other A5 indexer
+formats. When supported, `return_choice=1` returns ascending logical block
+IDs with `-1` padding, including the configured initial/local blocks. Decode
+also derives valid-block counts from those indices for GBSA. TopK must be a
+multiple of 8 in the range 1 through 128. Other TopK sizes, an older binding
+without the fusion interface, or a decode consumer that does not request
+sorted indices retain the separate score/TopK path.
 
-From the vLLM Ascend checkout, finish the Python namespace isolation:
-
-```bash
-python tools/isolate_msa_a4c4.py
-```
-
-The helper preserves backups, changes Python dispatcher/plugin names, and can
-be run again. It does not change operator kernels or scoring arithmetic.
-Before enabling the path, verify that the selected serving runtime can load
-the compiled vendor and passes the operator accuracy and graph replay tests.
-A successful source build alone does not establish runtime compatibility.
-
-Source the selected serving runtime first, then the experimental vendor, and
-pass the indexer cache option to the same model command:
-
-```bash
-source "${A4C4_PREFIX}/vendors/msa_a4c4_transformer/bin/set_env.bash"
-# Add --attention-config '{"indexer_kv_dtype":"mxfp4"}' to the model command.
-# Keep the same weights and parallelism used for the baseline.
-```
-
-Omit the MXFP4 option for the baseline and start a new worker process for
-each setting. Rebuild the index cache when switching formats.
-Measure accuracy, clean serving performance, and profiling in separate runs.
-The namespace tool isolates Python dispatch and plugin entry points. CANN
-vendor registration remains process-wide: sourcing the experimental prefix
-can also select its BF16 kernel. Verify the loaded operator provider and use
-the same vendor build for BF16/MXFP4 comparisons; record a production-vendor
-baseline separately when evaluating a deployment change.
-
-The serving integration uses the paged `BBND` layout. The experimental
-operator's packed `TND` wrapper reads sequence lengths on the host and is not
-supported by this integration for global graph capture.
-
-For supported 128-wide BF16 heads and normalization weights, MXFP4 scoring
-retains fused QK normalization, RoPE, and main KV insertion. The fused kernel
-writes index Q and new K into contiguous regions of one buffer. One native
-MXFP4 quantization call processes both, then paged cache insertion writes only
-the new K bytes and E8M0 scales. This
-keeps BF16 normalization-scale rounding consistent with the separate A5
-prepare path. Unsupported fusion configurations use the separate path.
-Compare the complete prepare-and-score chain as well as the score kernel;
-kernel speedup alone does not establish a serving throughput improvement.
-
-The model produces BF16 index Q/K before quantization. The fused path packs Q
-and new K together and passes the packed Q onward without a second quantization.
-The separate prepare fallback quantizes Q and new K separately. Both update only
-new K tokens in the paged cache. The operator receives packed Q, cached K, separate E8M0 scales,
-`block_table`, and sequence lengths. It reads the cache and returns FP32 block
-scores; it does not allocate or update the cache. TopK and GBSA retain their
-existing interfaces. The packing and cache insertion contract is documented in
-`vllm_ascend/ops/triton/docs/msa_m3_mxfp4_cache.md` in the source tree.
-
-This path is experimental. BF16-to-MXFP4 quantization can change block selection,
-generated tokens, and speculative acceptance. Exploratory serving runs showed
-mixed throughput results, and their profiling windows included residual prefill.
-Strict decode recapture and model-quality acceptance are required before claiming
-a stable end-to-end improvement.
+Start a new worker process and rebuild the index cache when switching
+formats. See `vllm_ascend/ops/triton/docs/msa_m3_mxfp4_cache.md` in the source
+tree for the packing and insertion contract. BF16-to-MXFP4 quantization can
+change block selection, generated tokens, and speculative acceptance. Run
+model-quality evaluation and clean serving benchmarks for the selected
+weights and runtime before claiming an accuracy or throughput improvement.
 
 ## 10 FAQ
 

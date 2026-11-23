@@ -264,6 +264,10 @@ def test_raw_sequence_lifecycle(
         block_size=block_size,
         hash_block_size=hash_size,
     )
+    # #65448 makes core lookahead hashing opt-out. AscendStore's masks still
+    # use the legacy EAGLE drop, so both hashing and local lookup must agree.
+    assert config.num_hash_lookahead_tokens == scheduler.num_hash_lookahead_tokens == 0
+    assert scheduler.use_eagle_block_drop == (speculative_method == "mtp")
     producer_tokens = list(range(512))
 
     def run_request(req_id, tokens, expected_hit, expected_local=0):

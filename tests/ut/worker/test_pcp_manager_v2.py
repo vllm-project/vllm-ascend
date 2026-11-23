@@ -260,6 +260,24 @@ def test_constructor_forwards_decode_sharding_with_release_compatible_arguments(
     assert manager.shard_decode_requests is True
 
 
+@pytest.mark.parametrize("pcp_size", [2, 4, 8])
+def test_hisparse_uses_standard_decode_sharding(pcp_size):
+    config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    config.attention_config = SimpleNamespace(hisparse_config={})
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    manager = AscendPCPManager(pcp_size, 0, torch.device("cpu"), shard_decode_requests=True)
+    manager.bind_config(config)
+    assert is_pcp_decode_sharding_enabled(config)
+    assert manager.shard_decode_requests
+    counts = np.array([1, 4], dtype=np.int32)
+    prefilling = np.array([False, False])
+    # Core classifies decode rows before assigning their single-rank owner.
+    assert list(manager._iter_rank_chunks(0, counts, prefilling)) == [(0, 0, 1)]
+    assert list(manager._iter_rank_chunks(1, counts, prefilling)) == [(1, 0, 4)]
+    for rank in range(2, pcp_size):
+        assert list(manager._iter_rank_chunks(rank, counts, prefilling)) == []
+
+
 def test_setup_preserves_upstream_decode_sharding_policy():
     parallel_config = ParallelConfig(prefill_context_parallel_size=2, decode_context_parallel_size=1)
     parallel_config.worker_cls = "test-worker"
@@ -268,6 +286,7 @@ def test_setup_preserves_upstream_decode_sharding_policy():
         speculative_config=SimpleNamespace(method="mtp"),
         compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
         cache_config=None,
+        scheduler_config=SimpleNamespace(max_async_kv_loads_per_step=None),
     )
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
@@ -727,6 +746,7 @@ def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefillin
         num_tokens=input_batch.num_tokens,
         num_tokens_after_padding=input_batch.num_tokens_after_padding,
         idx_mapping_np=np.array([3, 3, 7], dtype=np.int32),
+        idx_mapping=torch.tensor([3, 3, 7], dtype=torch.int32),
     )
     manager._local_gather_idx = torch.arange(input_batch.num_tokens + 3, dtype=torch.int64)
     manager._block_tables = SimpleNamespace(
@@ -1436,11 +1456,14 @@ def test_sample_tokens_leaves_pcp_batch_selection_to_upstream(
     grammar_output = object()
     expected_output = object()
 
-    with patch.object(
-        vllm_model_runner.GPUModelRunner,
-        "sample_tokens",
-        return_value=expected_output,
-    ) as parent_sample_tokens:
+    with (
+        patch.object(
+            vllm_model_runner.GPUModelRunner,
+            "sample_tokens",
+            return_value=expected_output,
+        ) as parent_sample_tokens,
+        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=False),
+    ):
         actual_output = runner.sample_tokens(grammar_output)
 
     # Upstream sample_tokens selects pcp_manager.global_batch on non-last PP
@@ -1551,6 +1574,26 @@ def test_dummy_attention_context_uses_current_batch(pcp_rank, has_stale_batch):
     assert manager._global_batch is saved_batch
     assert manager._hidden_restore_idx is saved_indices
     manager._block_tables.gather_block_tables.assert_not_called()
+
+
+@pytest.mark.parametrize("query_len", [1, 4])
+def test_hisparse_sharded_dummy_preserves_local_request_states(query_len):
+    config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    config.attention_config = SimpleNamespace(hisparse_config={})
+    manager = _make_factory_pcp_manager(config, 0)
+    manager.global_input_buffers = AscendInputBuffers(8, 64, torch.device("cpu"))
+    manager._block_tables = SimpleNamespace(get_dummy_block_tables=MagicMock(return_value=()))
+    manager._global_batch_slot_mappings = torch.empty(1, 64, dtype=torch.int64)
+    local_buffers = AscendInputBuffers(8, 64, torch.device("cpu"))
+    with (
+        patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
+        patch("vllm_ascend.worker.v2.pcp_manager.update_cos_sin"),
+    ):
+        dummy = AscendInputBatch.make_dummy(2, 2 * query_len, local_buffers, max_query_len=query_len)
+        context = manager.build_attention_context(dummy, (), manager._global_batch_slot_mappings)
+    assert context.local_request_state_indices is dummy.idx_mapping
+    assert context.global_batch.num_reqs == 4
+    assert context.local_num_tokens == 2 * query_len
 
 
 def test_capture_input_uses_upstream_staging_path():

@@ -14,7 +14,6 @@ import torch_npu
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
-from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context, is_forward_context_available
 from vllm.logger import logger
@@ -23,7 +22,7 @@ from vllm.platforms import current_platform
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
-from ..utils import super_kernel_scope, use_updatable_graph, weak_ref_tensors
+from ..utils import super_kernel_scope, use_updatable_graph, vllm_version_is, weak_ref_tensors
 from .updatable_graph import (
     ContextSource,
     SharedSource,
@@ -31,6 +30,12 @@ from .updatable_graph import (
 )
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
+
+if vllm_version_is("0.33.0"):
+    # Removed from upstream main by #63373; retained until v0.33.0 support ends.
+    from vllm.compilation.monitor import validate_cudagraph_capturing_enabled  # type: ignore[attr-defined]
+
+
 _STREAM_RESOURCE_ERROR_CODE = "207008"
 _STREAM_RESOURCE_ERROR_MARKERS = (
     "insufficient_stream_resources",
@@ -189,7 +194,8 @@ class ACLGraphWrapper:
                 # piecewise mode.
                 logger.debug("Capturing ACL graph (%s, %s)", self.runtime_mode.name, entry.batch_descriptor)
             # validate that aclgraph capturing is legal at this point.
-            validate_cudagraph_capturing_enabled()
+            if vllm_version_is("0.33.0"):
+                validate_cudagraph_capturing_enabled()
 
             input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             entry.input_addresses = input_addresses

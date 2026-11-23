@@ -112,11 +112,6 @@ def _minimax_qknorm_rope_cache_kernel(
     )
     qk_scale = 1.0 + qk_weight
     iqk_scale = 1.0 + iqk_weight
-    if MATERIALIZE_INDEX_KEY:
-        # The A5 separate prepare adds one in BF16 before native RMSNorm.
-        # Preserve that rounding while fusing its launch and memory traffic.
-        qk_scale = qk_scale.to(packed.dtype.element_ty).to(tl.float32)
-        iqk_scale = iqk_scale.to(packed.dtype.element_ty).to(tl.float32)
     for token in range(program, NUM_TOKENS, programs):
         position = tl.load(positions + token * POSITION_STRIDE).to(tl.int64)
         cs = cos_sin + position * COS_SIN_STRIDE

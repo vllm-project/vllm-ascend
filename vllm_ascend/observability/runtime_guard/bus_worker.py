@@ -15,7 +15,7 @@
 
 """Background worker for the last-PP TP merged config+dump due bus.
 
-C2 hot path (reload on, detectors off) pays ``sync_due_bits_from_src`` every
+C2 hot path (reload on, detectors off) pays ``broadcast_due_bits_from_src`` every
 step. Running that source broadcast (and rare due-lane broadcasts) on a
 dedicated daemon
 thread lets the inference thread overlap the collective with forward:
@@ -183,11 +183,11 @@ class DueBitsBusWorker:
     @staticmethod
     def _run_merged_bus(req: MergedBusRequest) -> MergedBusResult:
         from vllm_ascend.observability.runtime_config.dist import (
+            broadcast_due_bits_from_src,
             broadcast_when_due,
-            sync_due_bits_from_src,
         )
 
-        config_due, dump_due = sync_due_bits_from_src(
+        config_due, dump_due = broadcast_due_bits_from_src(
             req.sync_group,
             [req.config_due_local, req.dump_due_local],
             wave_idx=req.wave_idx,

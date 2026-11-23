@@ -150,7 +150,7 @@ templates:
       - "--seed"
       - "1024"
       - "--max-model-len"
-      - "37368"
+      - "1048576"
       - "--max-num-batched-tokens"
       - "120"
       - "--max-num-seqs"
@@ -193,7 +193,7 @@ benchmarks:
     temperature: 1.0
     top_p: 1.0
     thinking: "true"
-    max_out_len: 65536
+    max_out_len: 81920
     batch_size: 32
     baseline: 90
     threshold: 10

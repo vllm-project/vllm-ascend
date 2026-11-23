@@ -7,10 +7,10 @@
   The optional `index_key_out` mode writes normalized/rotated BF16 index keys
   to `[T,128]` instead of the index cache. Its caller quantizes those keys and
   inserts packed FP4 bytes and E8M0 scales. Main K/V still go directly to their
-  caches. This mode requires BF16 normalization weights and rounds `1+weight`
-  to BF16, matching the separate A5 prepare path. The ordinary cache-write
-  mode retains its existing normalization-scale rounding. This numerical
-  difference is part of model-quality validation for the MXFP4 path.
+  caches. This mode requires BF16 normalization weights. Both modes compute
+  `1+weight` in FP32, preserving the ordinary fused prepare's Q/K values before
+  the caller quantizes index Q/K. Materializing index keys does not introduce
+  additional rounding in main Q/K or index Q/K.
   `index_query_out` optionally supplies the contiguous query region next to
   `index_key_out`, allowing both to be quantized in one native call without
   concatenating or quantizing the query a second time.

@@ -1,0 +1,6 @@
+pr: 22216
+entries:
+  - category: bugfix
+    text: Fixed external prefix cache misses in layerwise KV pooling when pipeline parallelism and prefill context parallelism are used together. Start with an empty pool when upgrading an affected deployment.
+  - category: bugfix
+    text: Fixed layerwise MemCache prefix cache entries that stayed unreadable when using DFlash or DFlash2 speculative decoding.

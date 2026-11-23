@@ -99,9 +99,9 @@ def mxfp4_index_score(
     start_loc: torch.Tensor,
     **kwargs,
 ) -> torch.Tensor:
-    """Dispatch actual FP4 operands and E8M0 scales to the experimental operator."""
-    # Load the isolated extension only in a worker that has enabled A4C4.
-    from cann_ops_transformer_a4c4.ops import msa_index_score
+    """Dispatch packed operands and E8M0 scales through the standard CANN API."""
+    # Import the optional CANN binding only in a worker that uses MXFP4.
+    from cann_ops_transformer.ops import msa_index_score
 
     if isinstance(query, tuple):
         packed, query_scale = query

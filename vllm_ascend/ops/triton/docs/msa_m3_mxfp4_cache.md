@@ -40,6 +40,20 @@ orders writes before IndexScore on the execution stream. Cache allocation,
 prefix reuse, and lifetime belong to vLLM's cache manager; IndexScore only reads
 the packed cache and scales through its BBND input view.
 
+## CANN consumer contract
+
+The standard `cann_ops_transformer.ops.msa_index_score` binding receives Q/K
+as FP4 E2M1 and their separate scales as E8M0. Cached K is viewed as
+`[P,128,1,D/2]`, and its scales as `[P,128,1,D/32]`, without copying. Native
+packing uses `scale_alg=0` and groups each logical head independently.
+Prequantized Q from fused prepare bypasses a second quantization.
+
+With supported aligned TopK, the adapter forwards `return_choice=1`, `topk`,
+`init_blocks`, and `local_blocks` alongside the paged sequence metadata.
+The operator returns ascending logical block IDs and `-1` padding. Decode
+counts nonnegative entries for the GBSA consumer. Unsupported fusion cases
+retain the separate score/TopK path; they still use the same packed operands.
+
 ## Origin and Differences
 
 This is a model-specific copy kernel. It writes separate packed-key and scale

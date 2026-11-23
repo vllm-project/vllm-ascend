@@ -41,12 +41,12 @@ def scatter_mxfp4_cache(
         return
     packed = packed.view(torch.uint8).reshape(tokens, -1)
     scales = scales.view(torch.uint8).reshape(tokens, -1)
-    key_bytes = key_cache.view(torch.uint8)
-    scale_bytes = scale_cache.view(torch.uint8)
     if not (
-        packed.is_contiguous() and scales.is_contiguous() and key_bytes.is_contiguous() and scale_bytes.is_contiguous()
+        packed.is_contiguous() and scales.is_contiguous() and key_cache.is_contiguous() and scale_cache.is_contiguous()
     ):
         raise ValueError("MiniMax M3 MXFP4 cache insertion requires contiguous packed data and scales")
+    key_bytes = key_cache.view(torch.uint8)
+    scale_bytes = scale_cache.view(torch.uint8)
     if packed.shape[1] != key_bytes.shape[-1]:
         raise ValueError("Packed index-key width differs from the managed cache")
     if scales.shape[1] != key_bytes.shape[-1] // 16:

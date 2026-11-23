@@ -153,12 +153,17 @@ configuration rather than the runner input or sampling interface.
 | [query_gather_prep.py](query_gather_prep.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/fia.py](qwen4_exp/fia.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/gbsa.py](qwen4_exp/gbsa.py) | Model/attention primitive or shared utility |
-| [qwen4_exp/hc.py](qwen4_exp/hc.py) | Model/attention primitive or shared utility |
+| [qwen4_exp/hc.py](qwen4_exp/hc.py) | HyperConnection glue operators; row-block `gate_mix` is documented in [qwen4_exp_hc_gate_mix.md](docs/qwen4_exp_hc_gate_mix.md). |
 | [qwen4_exp/qsa.py](qwen4_exp/qsa.py) | Model/attention primitive or shared utility |
 | [rms_norm.py](rms_norm.py) | Model/attention primitive or shared utility |
 | [rope.py](rope.py) | Model/attention primitive or shared utility |
 | [sfa_indexer_store.py](sfa_indexer_store.py) | Indexer cache publication; see [operator documentation](docs/sfa_indexer_store.md). |
 | [sparse_index_remap.py](sparse_index_remap.py) | Model/attention primitive or shared utility |
 | [spec_decode/dspark_swa_indices.py](spec_decode/dspark_swa_indices.py) | Model attention indices |
+| [step5/fused_add_rms_norm.py](step5/fused_add_rms_norm.py) | Fused optional FP32 residual add, RMSNorm, and BF16 output cast. [Operator documentation](docs/fused_add_rms_norm_cast.md) |
+| [step5/fused_qknorm_rope.py](step5/fused_qknorm_rope.py) | Step5 fused QK RMSNorm + NeoX RoPE with V passthrough. [Operator documentation](docs/step5_fused_qknorm_rope.md) |
+| [step5/gated_scale.py](step5/gated_scale.py) | Step5 head-wise attention gate: sigmoid + broadcast multiply fused on the caller's offset-0 gate base. [Operator documentation](docs/step5_gated_scale.md) |
+| [step5/indexer_qkz_norm_rope.py](step5/indexer_qkz_norm_rope.py) | Step5 sparse-indexer Q/K norm + NeoX RoPE with Z passthrough and e4m3-at-store quantization. [Operator documentation](docs/step5_indexer_qkz_norm_rope.md) |
+| [step5/summary_update.py](step5/summary_update.py) | Step5 CSA region summaries: [decode](docs/step5_update_decode.md), [verify](docs/step5_update_verify.md), [prefill](docs/step5_update_prefill.md), [prefill grouping](docs/step5_build_prefill_groups.md), [GBSA id pack](docs/step5_append_current_region.md) |
 | [triton_utils.py](triton_utils.py) | Model/attention primitive or shared utility |
 | [turboquant_finalize.py](turboquant_finalize.py) | Model/attention primitive or shared utility |

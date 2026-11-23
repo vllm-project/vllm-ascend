@@ -346,7 +346,7 @@ def test_fused_cache_insert_precedes_indexer_and_attention(use_dspark, use_mxfp4
         patch.dict("sys.modules", {"vllm_ascend.ops.triton.msa.minimax_qknorm_rope_cache": module}),
         patch("vllm_ascend.models.minimax_m3.minimax_m3.get_forward_context", return_value=context),
         patch(
-            "vllm_ascend.models.minimax_m3.ops.msa_m3_mxfp4.pack_mxfp4_query_and_insert_cache",
+            "vllm_ascend.models.minimax_m3.minimax_m3.pack_mxfp4_query_and_insert_cache",
             side_effect=insert_mxfp4,
         ),
     ):

@@ -14,7 +14,7 @@ from vllm_ascend.ops.triton.msa.minimax_qknorm_rope_cache import minimax_qknorm_
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 
-def reference(packed, cos_sin, positions, weights, q_heads, kv_heads, index_heads, eps, bf16_norm_scale=False):
+def reference(packed, cos_sin, positions, weights, q_heads, kv_heads, index_heads, eps):
     head_dim = weights[0].numel()
     sizes = [q_heads * head_dim, kv_heads * head_dim, kv_heads * head_dim, index_heads * head_dim, head_dim]
     parts = list(packed.split(sizes, -1))
@@ -22,7 +22,7 @@ def reference(packed, cos_sin, positions, weights, q_heads, kv_heads, index_head
     cs = cos_sin[positions].float().unsqueeze(1)
     for part, weight in zip((0, 1, 3, 4), weights):
         x = parts[part].reshape(packed.shape[0], -1, head_dim).float()
-        scale = (1 + weight).float() if bf16_norm_scale else 1 + weight.float()
+        scale = 1 + weight.float()
         x = x * torch.rsqrt(x.square().mean(-1, keepdim=True) + eps) * scale
         x = x.to(packed.dtype).float()
         a, b = x[..., :half].clone(), x[..., half : 2 * half].clone()
@@ -108,7 +108,6 @@ def test_minimax_qknorm_rope_cache(tokens, heads, rotary_dim, materialize_index_
         kv_heads,
         index_heads,
         eps,
-        bf16_norm_scale=materialize_index_key,
     )
     torch.testing.assert_close(q.cpu().float(), expected[0].to(q.dtype).float(), atol=0.032, rtol=0.01)
     torch.testing.assert_close(iq.cpu().float(), expected[3].to(iq.dtype).float(), atol=0.032, rtol=0.01)
@@ -138,6 +137,52 @@ def test_minimax_qknorm_rope_cache(tokens, heads, rotary_dim, materialize_index_
 @pytest.mark.parametrize("heads", [(8, 1, 1), (16, 1, 1)])
 def test_materialized_index_key_preserves_fused_prepare(tokens, heads):
     test_minimax_qknorm_rope_cache(tokens, heads, 64, materialize_index_key=True)
+
+
+@pytest.mark.parametrize("tokens", [1, 17])
+@torch.inference_mode()
+def test_materialized_index_key_matches_bf16_prepare(tokens):
+    torch.manual_seed(19)
+    q_heads, kv_heads, index_heads, head_dim, block_size = 8, 1, 2, 128, 128
+    total_heads = q_heads + 2 * kv_heads + index_heads + 1
+    packed = torch.randn(tokens, total_heads * head_dim, dtype=torch.bfloat16).npu()
+    # Adding this representable weight to one is halfway between two BF16
+    # values. An extra BF16 scale cast must therefore fail the exact comparison.
+    weights = [torch.full((head_dim,), 2**-8, dtype=torch.bfloat16, device="npu") for _ in range(4)]
+    angles = torch.randn(32, 32)
+    cos_sin = torch.cat((angles.cos(), angles.sin()), -1).to(torch.bfloat16).npu()
+    positions = torch.arange(tokens, dtype=torch.int64, device="npu")
+    slots = torch.arange(tokens, dtype=torch.int64, device="npu")
+
+    def prepare(materialize):
+        key_cache = torch.zeros((1, block_size, kv_heads, head_dim), dtype=torch.bfloat16, device="npu")
+        value_cache = torch.zeros_like(key_cache)
+        index_cache = torch.zeros((1, block_size, head_dim), dtype=torch.bfloat16, device="npu")
+        index_key = torch.empty((tokens, head_dim), dtype=torch.bfloat16, device="npu") if materialize else None
+        query, index_query = minimax_qknorm_rope_cache(
+            packed,
+            cos_sin,
+            positions,
+            *weights,
+            key_cache,
+            value_cache,
+            None if materialize else index_cache,
+            slots,
+            slots,
+            tokens,
+            q_heads,
+            kv_heads,
+            index_heads,
+            1e-6,
+            index_key_out=index_key,
+        )
+        index_key = index_key if materialize else index_cache.view(-1, head_dim)[:tokens]
+        return query, index_query, key_cache, value_cache, index_key
+
+    baseline = prepare(False)
+    materialized = prepare(True)
+    for expected, actual in zip(baseline, materialized):
+        torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("tokens", [1024, 2048, 4096, 8192])
@@ -312,7 +357,6 @@ def test_cache_graph_replay_updates_slots_and_preserves_strides(
         kh,
         ih,
         1e-6,
-        bf16_norm_scale=materialize_index_key,
     )
     if materialize_index_key:
         torch.testing.assert_close(index_key.cpu().float(), expected[4].to(packed.dtype).float(), atol=0.032, rtol=0.01)

@@ -144,7 +144,7 @@ class PackingTests(unittest.TestCase):
             quant.assert_not_called()
 
     def test_prequantized_query_does_not_run_quantization_again(self):
-        ops = types.ModuleType("cann_ops_transformer_a4c4.ops")
+        ops = types.ModuleType("cann_ops_transformer.ops")
         ops.msa_index_score = mock.Mock(return_value=torch.empty((1, 3, 16)))
         packed = torch.zeros(3, 1, 64, dtype=torch.uint8)
         scales = torch.zeros(3, 1, 4, dtype=torch.uint8)
@@ -157,9 +157,9 @@ class PackingTests(unittest.TestCase):
         self.assertEqual(ops.msa_index_score.call_args.args[0].data_ptr(), packed.data_ptr())
 
     def test_actual_fp4_and_e8m0_operands_reach_score_api(self):
-        parent = types.ModuleType("cann_ops_transformer_a4c4")
+        parent = types.ModuleType("cann_ops_transformer")
         parent.__path__ = []
-        ops = types.ModuleType("cann_ops_transformer_a4c4.ops")
+        ops = types.ModuleType("cann_ops_transformer.ops")
         ops.msa_index_score = mock.Mock(return_value=torch.empty((1, 3, 16)))
         key = torch.zeros((2, 128, 64), dtype=torch.uint8)
         scales = torch.zeros((2, 128, 2, 2), dtype=torch.uint8).view(torch.float8_e8m0fnu)
@@ -172,8 +172,16 @@ class PackingTests(unittest.TestCase):
                 (key, scales),
                 torch.zeros(1, dtype=torch.int32),
                 layout_key="BBND",
+                return_choice=1,
+                topk=16,
+                init_blocks=2,
+                local_blocks=1,
             )
         args = ops.msa_index_score.call_args
+        self.assertEqual(args.kwargs["return_choice"], 1)
+        self.assertEqual(args.kwargs["topk"], 16)
+        self.assertEqual(args.kwargs["init_blocks"], 2)
+        self.assertEqual(args.kwargs["local_blocks"], 1)
         self.assertEqual(args.args[0].dtype, torch.float4_e2m1fn_x2)
         self.assertEqual(args.args[1].dtype, torch.float4_e2m1fn_x2)
         self.assertEqual(tuple(args.args[1].shape), (2, 128, 1, 64))
