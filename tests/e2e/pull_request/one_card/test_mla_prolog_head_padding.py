@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""A3 numerical regression for native MLA Q_B head padding before NZ conversion."""
+"""A3 numerical regressions for MLA prolog weight preparation."""
 
 from types import SimpleNamespace
 
@@ -8,9 +8,36 @@ import pytest
 import torch
 import torch_npu
 
-from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+from vllm_ascend.attention.mla_v1 import AscendMLAImpl, _mla_qkv_weight_for_slicing
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 pytestmark = pytest.mark.skipif(not torch.npu.is_available(), reason="requires Ascend NPU")
+
+
+@pytest.mark.parametrize("width", [2112, 2208])
+def test_int8_nz_projection_split_matches_nd(width):
+    prior_internal_format = torch_npu._C._npu_getOption("ALLOW_INTERNAL_FORMAT")
+    torch.npu.config.allow_internal_format = True
+    try:
+        generator = torch.Generator().manual_seed(197)
+        reference = torch.randint(-64, 64, (7168, width), dtype=torch.int8, generator=generator)
+        nd_weight = torch_npu.npu_format_cast(reference.npu(), ACL_FORMAT_FRACTAL_ND)
+        assert _mla_qkv_weight_for_slicing(nd_weight) is nd_weight
+        nz_weight = torch_npu.npu_format_cast(nd_weight, ACL_FORMAT_FRACTAL_NZ)
+        assert torch_npu.get_npu_format(nz_weight) == ACL_FORMAT_FRACTAL_NZ
+        prepared = _mla_qkv_weight_for_slicing(nz_weight)
+        for part in (slice(0, 1536), slice(1536, 2112)):
+            packed = torch_npu.npu_format_cast(prepared[..., part].contiguous(), ACL_FORMAT_FRACTAL_NZ)
+            assert torch_npu.get_npu_format(packed) == ACL_FORMAT_FRACTAL_NZ
+            torch.testing.assert_close(
+                torch_npu.npu_format_cast(packed, ACL_FORMAT_FRACTAL_ND).cpu(), reference[..., part], rtol=0, atol=0
+            )
+        assert torch_npu.get_npu_format(nz_weight) == ACL_FORMAT_FRACTAL_NZ
+        torch.testing.assert_close(
+            torch_npu.npu_format_cast(nz_weight, ACL_FORMAT_FRACTAL_ND).cpu(), reference, rtol=0, atol=0
+        )
+    finally:
+        torch.npu.config.allow_internal_format = prior_internal_format in (b"enable", "enable")
 
 
 @pytest.mark.parametrize("heads", [4, 6, 8, 12])
