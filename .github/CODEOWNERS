@@ -33,6 +33,18 @@
 /AGENTS.md @MrZ20
 /CLAUDE.md @MrZ20
 
+# AI review
+/.github/agent-review/ @wangxiyuan
+/.github/workflows/ai_review.yml @wangxiyuan
+/.github/workflows/_schedule_ai_review_image_build.yaml @wangxiyuan
+/.github/workflows/dockerfiles/Dockerfile.ai-review @wangxiyuan
+/.github/workflows/scripts/ai_review.py @wangxiyuan
+/.github/workflows/scripts/test_ai_review.py @wangxiyuan
+/.github/agent-review/L2/release-note/ @wangxiyuan
+# AI review knowledge base: fine-grained owners (later entries win)
+/.github/agent-review/L1/ @wangxiyuan
+/.github/agent-review/L2/ci/ @zhangxinyuehfad
+
 # Dockerfiles
 /Dockerfile* @zhangxinyuehfad @czydyy @winson-00178005
 
@@ -272,6 +284,7 @@
 # SKIP(owner): /tests/deepseek_v41_utils.py
 # SKIP(owner): /tests/ut/
 # SKIP(owner): /tests/e2e/pull_request/
+<<<<<<< HEAD
 # SKIP(owner): /vllm_ascend/attention/__init__.py
 # SKIP(owner): /vllm_ascend/model_executor/__init__.py
 # SKIP(owner): /vllm_ascend/models/layer/__init__.py
@@ -287,3 +300,7 @@
 /.github/workflows/scripts/ai_review.py @wangxiyuan
 /.github/workflows/scripts/test_ai_review.py @wangxiyuan
 /.github/agent-review/L2/release-note/ @wangxiyuan
+
+# AI review knowledge base: fine-grained owners (later entries win)
+/.github/agent-review/L1/ @wangxiyuan
+/.github/agent-review/L2/ci/ @zhangxinyuehfad
