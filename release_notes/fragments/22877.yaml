@@ -1,0 +1,4 @@
+pr: 22877
+entries:
+  - category: documentation
+    text: Added an expanded Ascend Disaggregated Encoder (EPD) guide covering the E/P/D role and topology matrix, Model Runner V2 as the default runner with VLLM_USE_V2_MODEL_RUNNER=0 as the V1 fallback, the encoder-cache connector matrix, and the reference proxy health, metrics, shutdown and retry semantics. A matching design document describes the encoder-cache data and control plane.
