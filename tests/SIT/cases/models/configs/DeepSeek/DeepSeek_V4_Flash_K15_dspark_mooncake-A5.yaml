@@ -28,8 +28,8 @@ _envs: &envs
   PYTHONHASHSEED: "0"   # 池化哈希一致性要求, 全实例统一
   # 950PR&950DT Products UBOE 传输协议（UB 硬件则删此行, 改用下方 ASCEND_LOCAL_COMM_RES）
   ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config.protocol_desc":["uboe:device"]}'
-  VLLM_ENGINE_READY_TIMEOUT_S: 3600
-  VLLM_RPC_TIMEOUT: 6000
+  VLLM_ENGINE_READY_TIMEOUT_S: "36000"
+  VLLM_RPC_TIMEOUT: "6000"
   # 950PR&950DT Products UB:
   # ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
 
