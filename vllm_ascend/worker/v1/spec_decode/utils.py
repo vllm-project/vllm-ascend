@@ -73,6 +73,11 @@ class SlidingWindowAdapter:
         and the K draft positions lie beyond it, so ``final = seq_lens + K``.
       * DFlash / DSpark pass ``0`` — ``set_inputs_first_pass`` already bakes the
         query stretch (bonus + mask) into ``seq_lens``, so ``final = seq_lens``.
+
+    ``align`` is the token multiple the window start rounds down to. It defaults
+    to ``block_size``. MRV2 sets it to the LCM of the KV groups' kernel block
+    sizes so every group shares one token crop while each table is indexed in
+    its own block size.
     """
 
     def __init__(
@@ -82,11 +87,28 @@ class SlidingWindowAdapter:
         max_num_reqs: int,
         future_offset: int,
         device: torch.device,
+        align: int | None = None,
     ) -> None:
         self.window_size: int = window_size
         self.block_size: int = block_size
-        self.window_blocks = (window_size + block_size - 1) // block_size
-        self.max_window_blocks = self.window_blocks + 1
+        if block_size <= 0:
+            raise ValueError(f"sliding window block_size must be positive, got {block_size}")
+        # Token start is rounded to ``align``; block-table columns stay in ``block_size``
+        # units. MRV2 passes the LCM of every group's kernel block size so groups share
+        # one token crop while each table drops a different number of columns.
+        self._align: int = block_size if align is None else align
+        if self._align <= 0 or self._align % block_size != 0:
+            raise ValueError(
+                f"sliding window align {self._align} must be a positive multiple of block_size {block_size}"
+            )
+        if self._align == block_size:
+            self.window_blocks = (window_size + block_size - 1) // block_size
+            self.max_window_blocks = self.window_blocks + 1
+        else:
+            # A coarser alignment keeps up to align-1 tokens past the tighter boundary.
+            max_windowed = window_size + self._align - 1
+            self.window_blocks = (max_windowed + block_size - 1) // block_size
+            self.max_window_blocks = self.window_blocks
         self._future_offset: int = future_offset
         self._block_table_clone = torch.zeros(
             (max_num_reqs, self.max_window_blocks),
@@ -102,11 +124,15 @@ class SlidingWindowAdapter:
         k_future = self._future_offset
         w = self.window_size
         b = self.block_size
+        align = self._align
         num_reqs = common_attn_metadata.seq_lens.shape[0]
         full_cols = self.full_block_table.shape[1]
 
         # Window math on the (NPU) seq_lens. Pure arithmetic -> stays on NPU.
-        self.start_tokens_in_window_rounding = ((common_attn_metadata.seq_lens + k_future - w).clamp(min=0) // b) * b
+        # ``align`` chooses the token boundary; ``b`` converts that offset into this
+        # table's columns. They are equal unless several kernel block sizes share a crop.
+        raw = (common_attn_metadata.seq_lens + k_future - w).clamp(min=0)
+        self.start_tokens_in_window_rounding = (raw // align) * align
         self._windowed_seq_lens = common_attn_metadata.seq_lens - self.start_tokens_in_window_rounding
         start_block_indices = self.start_tokens_in_window_rounding // b
 
@@ -131,7 +157,7 @@ class SlidingWindowAdapter:
         num_reqs = common_attn_metadata.seq_lens.shape[0]
         k_future = self._future_offset
         w = self.window_size
-        b = self.block_size
+        align = self._align
 
         self.compute_sliding_window_block_table(common_attn_metadata, self._block_table_clone)
         common_attn_metadata.block_table_tensor = self._block_table_clone[:num_reqs]
@@ -142,7 +168,7 @@ class SlidingWindowAdapter:
         for name in ("seq_lens_cpu", "_seq_lens_cpu", "seq_lens_cpu_upper_bound"):
             src = getattr(common_attn_metadata, name, None)
             if src is not None:
-                _windowed = src - ((src + k_future - w).clamp(min=0) // b) * b
+                _windowed = src - ((src + k_future - w).clamp(min=0) // align) * align
                 setattr(common_attn_metadata, name, _windowed)
 
 

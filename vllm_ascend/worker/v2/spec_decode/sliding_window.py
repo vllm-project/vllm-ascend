@@ -11,6 +11,7 @@ Model Runner V2 bakes ``seq_lens`` / block tables into per-layer metadata inside
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -53,14 +54,31 @@ def resolve_draft_window_size(method: str, vllm_config: VllmConfig) -> int | Non
     return draft_window_size
 
 
-def _kernel_block_size(block_tables: Any) -> int:
-    """Prefer Ascend kernel block size; fall back to physical block size."""
+def _checked_block_sizes(block_sizes: Sequence[int], num_groups: int) -> list[int]:
+    """Require one positive block size per KV table."""
+    resolved = [int(size) for size in block_sizes]
+    if len(resolved) != num_groups:
+        raise RuntimeError(
+            "draft sliding window block sizes do not match KV groups: "
+            f"{resolved} for {num_groups} tables"
+        )
+    if any(size <= 0 for size in resolved):
+        raise RuntimeError(f"draft sliding window block sizes must be positive, got {resolved}")
+    return resolved
+
+
+def _kernel_block_sizes(block_tables: Any, num_groups: int) -> list[int]:
+    """Prefer one Ascend kernel block size per KV table; fall back to the physical block size.
+
+    ``len`` covers both a list and a tensor. A truthiness check on a multi-value
+    tensor raises, which is the mixed-size case this crop has to accept.
+    """
     kernel_block_sizes = getattr(block_tables, "kernel_block_sizes", None)
-    if kernel_block_sizes:
-        return int(kernel_block_sizes[0])
+    if kernel_block_sizes is not None and len(kernel_block_sizes) > 0:
+        return _checked_block_sizes(kernel_block_sizes, num_groups)
     block_sizes = getattr(block_tables, "block_sizes", None)
-    if block_sizes:
-        return int(block_sizes[0])
+    if block_sizes is not None and len(block_sizes) > 0:
+        return _checked_block_sizes(block_sizes, num_groups)
     raise RuntimeError("draft sliding window requires block_tables with a block size")
 
 
@@ -70,34 +88,42 @@ class MRV2DraftSlidingWindow:
     def __init__(
         self,
         window_size: int,
-        block_size: int,
+        block_sizes: Sequence[int],
         max_num_reqs: int,
         future_offset: int,
         device: torch.device,
-        num_groups: int,
     ) -> None:
-        if num_groups < 1:
+        if not block_sizes:
             raise ValueError("draft sliding window requires at least one KV cache group")
-        self.adapter = SlidingWindowAdapter(
-            window_size,
-            block_size,
-            max_num_reqs,
-            future_offset,
-            device,
-        )
+        self.block_sizes = tuple(int(size) for size in block_sizes)
+        # One seq_lens tensor is shared by every group, so the token crop has to be a
+        # multiple of every kernel block size. Each table then drops start_tokens / block_size
+        # columns: a 128-token offset is 2 columns of 64 and 1 column of 128.
+        self.align = math.lcm(*self.block_sizes)
+        self.adapters = [
+            SlidingWindowAdapter(
+                window_size,
+                block_size,
+                max_num_reqs,
+                future_offset,
+                device,
+                align=self.align,
+            )
+            for block_size in self.block_sizes
+        ]
         self._clones = [
             torch.zeros(
-                (max_num_reqs, self.adapter.max_window_blocks),
+                (max_num_reqs, adapter.max_window_blocks),
                 dtype=torch.int32,
                 device=device,
             )
-            for _ in range(num_groups)
+            for adapter in self.adapters
         ]
         self._last_windowed_seq_lens: torch.Tensor | None = None
 
     @property
     def max_window_tokens(self) -> int:
-        return self.adapter.max_window_blocks * self.adapter.block_size
+        return min(adapter.max_window_blocks * adapter.block_size for adapter in self.adapters)
 
     @classmethod
     def maybe_create(
@@ -114,15 +140,14 @@ class MRV2DraftSlidingWindow:
         if window_size is None:
             return None
         input_block_tables = getattr(block_tables, "input_block_tables", None)
-        if not input_block_tables:
+        if input_block_tables is None or len(input_block_tables) == 0:
             return None
         return cls(
             window_size,
-            _kernel_block_size(block_tables),
+            _kernel_block_sizes(block_tables, len(input_block_tables)),
             max_num_reqs,
             future_offset,
             device,
-            num_groups=len(input_block_tables),
         )
 
     def _subtract_crop(self, tensor: torch.Tensor, crop: torch.Tensor, num_reqs: int) -> None:
@@ -158,20 +183,30 @@ class MRV2DraftSlidingWindow:
 
         extras = [extra for extra in extra_seq_lens if extra is not None]
 
+        # Crop into private clones first. Live tables stay intact until every group
+        # agrees on the same token offset.
+        seq_lens = original_seq_lens[:num_reqs]
         windowed_seq_lens: torch.Tensor | None = None
+        crops: list[torch.Tensor] = []
         for i, full_table in enumerate(original_tables):
-            meta = SimpleNamespace(
-                seq_lens=original_seq_lens[:num_reqs],
-                block_table_tensor=full_table,
-            )
-            self.adapter.full_block_table = full_table
-            self.adapter.compute_sliding_window_block_table(meta, self._clones[i])
+            meta = SimpleNamespace(seq_lens=seq_lens, block_table_tensor=full_table)
+            adapter = self.adapters[i]
+            adapter.full_block_table = full_table
+            adapter.compute_sliding_window_block_table(meta, self._clones[i])
+            crops.append(adapter.start_tokens_in_window_rounding)
             if windowed_seq_lens is None:
-                windowed_seq_lens = self.adapter._windowed_seq_lens
-            block_tables.input_block_tables[i] = self._clones[i][:num_reqs]
+                windowed_seq_lens = adapter._windowed_seq_lens
 
         assert windowed_seq_lens is not None
-        crop = self.adapter.start_tokens_in_window_rounding
+        crop = crops[0]
+        for other in crops[1:]:
+            if not torch.equal(crop, other):
+                raise RuntimeError(
+                    "draft sliding window token crops differ across KV groups "
+                    f"(kernel block sizes {list(self.block_sizes)}); block tables were left unchanged"
+                )
+        for i in range(len(original_tables)):
+            block_tables.input_block_tables[i] = self._clones[i][:num_reqs]
         self._last_windowed_seq_lens = windowed_seq_lens
 
         # Separate storage: metadata may alias ``input_buffers.seq_lens``.

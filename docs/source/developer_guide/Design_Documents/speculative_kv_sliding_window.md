@@ -97,11 +97,16 @@ applies the same window math to the **builder inputs** around that call:
 - windowed `input_buffers.seq_lens` on a **separate clone**, so GQA metadata
   that aliases the builder tensor keeps windowed lengths after the buffer is
   restored
-- cropped per-group `block_tables.input_block_tables` clones
-- the same crop offset applied to DSpark MLA `seq_lens_cpu` and to
+- cropped per-group `block_tables.input_block_tables` clones. The token
+  offset is rounded to the least common multiple of the groups' kernel block
+  sizes, so one `seq_lens` stays valid for every table; each table then drops
+  `offset / kernel_block_size` columns (a 128-token offset is 2 columns of 64
+  and 1 column of 128). Live tables are replaced only after that offset matches
+  on every group
+- that same token offset applied to DSpark MLA `seq_lens_cpu` and to
   `seq_lens_cpu_upper_bound` (so the bound stays `>=` the windowed actual
   length). After upstream adds the draft `step`, CPU bounds are clamped to
-  the cropped table
+  the narrowest cropped table
 
 Wired into Ascend DSpark, DFlash (and DFlash2), and autoregressive EAGLE
 speculators. Slot mappings remain absolute. `draft_window_size` no longer
