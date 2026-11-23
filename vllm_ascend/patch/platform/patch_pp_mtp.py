@@ -14,12 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Backport vLLM PP + MTP output support.
+"""Backport vLLM PP + MTP config validation.
 
-The local Eagle/MTP drafter returns the draft tokens that belong to the model
-output being processed. Supported vLLM revisions do not all carry
-``spec_token_ids`` on the output object, so add it here. The ModelConfig
-validation shim keeps local drafters on an effective PP=1.
+The local Eagle/MTP drafter is loaded on the last PP stage rather than
+partitioned across all PP ranks. Keep its parallel validation at PP=1.
 """
 
 from __future__ import annotations
@@ -30,30 +28,6 @@ from functools import wraps
 from vllm.logger import logger
 
 _PATCHED = False
-
-
-def _patch_model_runner_output() -> None:
-    from vllm.v1 import outputs as outputs_mod
-
-    model_runner_output_cls = outputs_mod.ModelRunnerOutput
-    fields = getattr(model_runner_output_cls, "__dataclass_fields__", {})
-    if "spec_token_ids" not in fields:
-        model_runner_output_cls.spec_token_ids = None
-        original_init = model_runner_output_cls.__init__
-        if getattr(original_init, "_vllm_ascend_pp_mtp_patched", False):
-            return
-
-        @wraps(original_init)
-        def _patched_init(self, *args, spec_token_ids=None, **kwargs):
-            original_init(self, *args, **kwargs)
-            self.spec_token_ids = spec_token_ids
-
-        _patched_init._vllm_ascend_pp_mtp_patched = True  # type: ignore[attr-defined]
-        model_runner_output_cls.__init__ = _patched_init
-
-    empty_output = outputs_mod.EMPTY_MODEL_RUNNER_OUTPUT
-    if not hasattr(empty_output, "spec_token_ids"):
-        empty_output.spec_token_ids = None
 
 
 def _patch_model_config_validation() -> None:
@@ -106,8 +80,6 @@ def _apply_patch() -> None:
     if _PATCHED:
         return
     _PATCHED = True
-    _patch_model_runner_output()
-    # The patch for engine core has been moved to patch_engine_core.py.
     _patch_model_config_validation()
 
 

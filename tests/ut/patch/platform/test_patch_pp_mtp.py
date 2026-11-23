@@ -8,7 +8,6 @@ from vllm.config.model import ModelConfig
 from vllm_ascend.patch.platform.patch_pp_mtp import (
     _apply_patch,
     _patch_model_config_validation,
-    _patch_model_runner_output,
 )
 
 
@@ -78,5 +77,4 @@ def test_model_config_keeps_target_model_pp_validation(monkeypatch):
 
 def test_pp_mtp_patch_reentry():
     _apply_patch()
-    _patch_model_runner_output()
     _patch_model_config_validation()
