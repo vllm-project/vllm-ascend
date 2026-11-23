@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-"""Triton-Ascend kernels for Qwen4Exp HyperConnection glue operations.
+"""Model-local Triton-Ascend kernels for Qwen4Exp HyperConnection glue.
 
 The math and public interfaces mirror
 ``vllm/models/qwen4_exp/nvidia/ops/hc.py``. CUDA PDL hooks are deliberately

@@ -4,12 +4,20 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.qwen4_exp.fia import QSAFIAMaskWorkspace, build_qsa_fia_mask
-from vllm_ascend.ops.triton.qwen4_exp.gbsa import prepare_qsa_gbsa_inputs
-from vllm_ascend.ops.triton.qwen4_exp.qsa import pack_qsa_group_indices_npu
+from vllm_ascend.models.qwen4_exp.ops.fia import QSAFIAMaskWorkspace, build_qsa_fia_mask
+from vllm_ascend.models.qwen4_exp.ops.qsa import pack_qsa_group_indices_npu
+from vllm_ascend.models.qwen4_exp.qsa_prepare import (
+    pack_qsa_gbsa_indices,
+    prepare_qsa_gbsa_inputs,
+    prepare_qsa_gbsa_shared,
+    prepare_qsa_lengths,
+)
 
 pytestmark = [
-    pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A3, reason="Requires Ascend A3"),
+    pytest.mark.skipif(
+        get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
+        reason="Requires Ascend A3/A5",
+    ),
     pytest.mark.skipif(not HAS_TRITON, reason="Triton is not available"),
 ]
 
@@ -83,3 +91,46 @@ def test_qsa_gbsa_preparation_ragged_noncontiguous_table() -> None:
     torch.testing.assert_close(visible.cpu(), torch.tensor([19, 32], dtype=torch.int32), rtol=0, atol=0)
     torch.testing.assert_close(cu_query.cpu(), torch.tensor([0, 1, 2], dtype=torch.int64), rtol=0, atol=0)
     torch.testing.assert_close(row_table.cpu(), block_table.cpu(), rtol=0, atol=0)
+
+
+@torch.inference_mode()
+def test_qsa_prepared_lengths_and_split_gbsa_match_monolithic() -> None:
+    lengths = torch.tensor([0, 1, 3, 4, 19, 32], dtype=torch.int32, device="npu")
+    compressed = torch.empty_like(lengths)
+    residual = torch.empty_like(lengths)
+    prepare_qsa_lengths(lengths, compressed, residual, lengths.numel())
+    torch.testing.assert_close(compressed.cpu(), lengths.cpu() // 4, rtol=0, atol=0)
+    torch.testing.assert_close(residual.cpu(), lengths.cpu() % 4, rtol=0, atol=0)
+
+    compact = torch.tensor(
+        [[0, 2, -1, 4, -1, -1, -1, -1, 99, 99, 99], [0, 1, 2, 3, 4, 5, 6, 7, 99, 99, 99]],
+        dtype=torch.int32,
+        device="npu",
+    )
+    positions = torch.tensor([18, 31], dtype=torch.int64, device="npu")
+    seq_lens = torch.tensor([19, 32], dtype=torch.int32, device="npu")
+    token_to_req = torch.tensor([0, 1], dtype=torch.int32, device="npu")
+    table_storage = torch.arange(24, dtype=torch.int32, device="npu").reshape(2, 12)
+    block_table = table_storage[:, ::2]
+    expected_sparse, expected_counts, expected_visible, expected_cu, expected_table = prepare_qsa_gbsa_inputs(
+        compact, positions, seq_lens, token_to_req, block_table, num_kv_heads=2
+    )
+
+    visible = torch.empty(2, dtype=torch.int32, device="npu")
+    row_table = torch.empty((2, 6), dtype=torch.int32, device="npu")
+    prepare_qsa_gbsa_shared(
+        positions,
+        seq_lens,
+        token_to_req,
+        block_table,
+        visible,
+        row_table,
+        rows=2,
+    )
+    actual_sparse, actual_counts = pack_qsa_gbsa_indices(compact, visible, num_kv_heads=2)
+    cu_query = torch.arange(3, dtype=torch.int64, device="npu")
+    torch.testing.assert_close(actual_sparse.cpu(), expected_sparse.cpu(), rtol=0, atol=0)
+    torch.testing.assert_close(actual_counts.cpu(), expected_counts.cpu(), rtol=0, atol=0)
+    torch.testing.assert_close(visible.cpu(), expected_visible.cpu(), rtol=0, atol=0)
+    torch.testing.assert_close(cu_query.cpu(), expected_cu.cpu(), rtol=0, atol=0)
+    torch.testing.assert_close(row_table.cpu(), expected_table.cpu(), rtol=0, atol=0)

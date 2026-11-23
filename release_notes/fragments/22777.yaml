@@ -1,0 +1,5 @@
+pr: 22777
+entries:
+  - category: performance
+    text: Reduced Qwen3.8-Flash-Next QSA preparation and copy kernels and enabled compatible Indexer work to overlap the main QKV path.
+    model: qwen3.8-flash-next

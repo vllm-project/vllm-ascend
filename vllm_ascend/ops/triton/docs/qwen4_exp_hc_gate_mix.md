@@ -1,6 +1,6 @@
 # qwen4_exp_hc_gate_mix
 
-Source: `vllm_ascend/ops/triton/qwen4_exp/hc.py` (public wrapper:
+Source: `vllm_ascend/models/qwen4_exp/ops/hc.py` (public wrapper:
 `hc_gate_mix`).
 
 ## Description
@@ -202,7 +202,7 @@ capability-absent dispatch, A2/A3/A5 capability assignment, and the
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.ops.triton.qwen4_exp.hc import hc_gate_mix
+from vllm_ascend.models.qwen4_exp.ops.hc import hc_gate_mix
 
 rows = 2048
 hc_count = 4

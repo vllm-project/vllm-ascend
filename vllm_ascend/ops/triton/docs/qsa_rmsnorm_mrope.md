@@ -2,7 +2,7 @@
 
 ## Description
 
-- **Location**: `vllm_ascend/ops/triton/linearnorm/qsa_rmsnorm_mrope.py`.
+- **Location**: `vllm_ascend/models/qwen4_exp/ops/qsa_rmsnorm_mrope.py`.
 - **Function**: Fuses weighted RMS normalization with Qwen3.8-Next QSA rotary position embedding for prefill and decode query projections.
 - **Formula** (per token `t`, head `h`, and channel `d`, with the RMS reduction in fp32):
 
