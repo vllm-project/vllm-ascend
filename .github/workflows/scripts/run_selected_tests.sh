@@ -81,6 +81,23 @@ setup_vllm_cache_root() {
   echo "Using Torch extensions directory: ${TORCH_EXTENSIONS_DIR}"
 }
 
+ensure_a5_cannbot_ops() {
+  if [ "${npu_type}" != "a5" ] || [ "${mode}" != "with-device" ]; then
+    return
+  fi
+  if python -c "import ops.mixed_quant_sparse_flash_mla_metadata" >/dev/null 2>&1; then
+    echo "CannBot DSL ops already available"
+    return
+  fi
+  echo "Installing CannBot DSL ops for A5"
+  PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly" \
+    python -m pip install "cannbotdsl===0.8.2" "cannbot-arena-net-ops===0.3.0"
+  if ! python -c "import ops.mixed_quant_sparse_flash_mla_metadata" >/dev/null 2>&1; then
+    echo "::error::CannBot DSL ops installation did not provide ops.mixed_quant_sparse_flash_mla_metadata"
+    exit 1
+  fi
+}
+
 terminate_process_group() {
   local process_group="$1"
   if ! kill -0 -- "-${process_group}" 2>/dev/null; then
@@ -293,6 +310,7 @@ print_timing_json() {
 
 print_test_info
 setup_vllm_cache_root
+ensure_a5_cannbot_ops
 
 if [ "${npu_type}" = "cpu" ]; then
   run_pytest_batch "cpu-ut (${#targets[@]} targets)" "${targets[@]}"
