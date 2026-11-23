@@ -1367,6 +1367,7 @@ def test_validate_config_allows_supported_speculators(
     ("method", "draft_sample_method", "error"),
     [
         ("draft_model", "greedy", "supports speculative decoding only with"),
+        ("ngram", "greedy", "supports speculative decoding only with"),
     ],
 )
 def test_validate_config_rejects_unsupported_speculator_options(

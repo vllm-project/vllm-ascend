@@ -61,19 +61,6 @@ def test_no_draft_preserves_target_decode_requests():
     assert get_pcp_profile_num_tokens(runner.vllm_config, runner.max_num_tokens, runner.max_num_reqs) == 7040
 
 
-def test_non_model_draft_keeps_global_budget():
-    runner = make_runner(method="ngram")
-    assert get_pcp_profile_num_tokens(runner.vllm_config, runner.max_num_tokens, runner.max_num_reqs) == 16384
-
-
-def test_standalone_draft_context_is_not_reduced():
-    runner = make_runner(method="draft_model")
-    assert (
-        get_pcp_profile_num_tokens(runner.vllm_config, runner.max_num_tokens, runner.max_num_reqs)
-        == runner.max_num_tokens
-    )
-
-
 @pytest.mark.parametrize("tokens,requests", [(16384, 64), (16384, 512), (17, 64)])
 def test_local_dummy_preserves_actual_upstream_request_count(tokens, requests):
     runner = make_runner(tokens=tokens, requests=requests)
