@@ -22,8 +22,9 @@ from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm_ascend.worker.sentinel.eplb_quant_schemes import (
     _MOE_WEIGHT_NAMES,
     _WANTED_SUFFIXES,
-    _find_reload_plans,
-    _QuantReloadPlans,
+    _cast_weights_to_nz,
+    _find_reload_definition,
+    _QuantReloadDefinition,
     _WeightBuilder,
 )
 
@@ -87,19 +88,21 @@ def _reload_local_expert_slots(
         routed_layer = routed_layers[layer_idx]
         if getattr(routed_layer, "w13_bias", None) is not None or getattr(routed_layer, "w2_bias", None) is not None:
             raise NotImplementedError("[FT] scale_down weight reload does not support MoE expert bias yet.")
-        reload_plans = _find_reload_plans(routed_layer)
+        reload_definition = _find_reload_definition(routed_layer)
         slot_shapes = []
-        for weight_name in reload_plans.pipelines:
+        for weight_name in reload_definition.pipelines:
             slot_list = getattr(routed_layer, f"{weight_name}_list", None)
             tensor = slot_list[slot] if slot_list is not None else getattr(routed_layer, weight_name).data[slot]
             slot_shapes.append((weight_name, tensor.shape, tensor.dtype))
-        pairs_by_slot_shape.setdefault((reload_plans, tuple(slot_shapes)), []).append((layer_idx, logical_id))
+        pairs_by_slot_shape.setdefault((reload_definition, tuple(slot_shapes)), []).append((layer_idx, logical_id))
 
     reloaded = 0
-    for (reload_plans, _slot_shapes), layer_experts in pairs_by_slot_shape.items():
+    for (reload_definition, _slot_shapes), layer_experts in pairs_by_slot_shape.items():
         for start in range(0, len(layer_experts), _EXPERTS_PER_STACK):
             expert_stack = layer_experts[start : start + _EXPERTS_PER_STACK]
-            reloaded += _reload_expert_stack(reload_plans, routed_layers, expert_stack, local_slots, expert_weights)
+            reloaded += _reload_expert_stack(
+                reload_definition, routed_layers, expert_stack, local_slots, expert_weights
+            )
     return reloaded
 
 
@@ -121,7 +124,7 @@ def _convert_expert_weights(
 
 
 def _reload_expert_stack(
-    reload_plans: _QuantReloadPlans,
+    reload_definition: _QuantReloadDefinition,
     routed_layers: list,
     layer_experts: list[tuple[int, int]],
     local_slots: dict[tuple[int, int], int],
@@ -137,7 +140,7 @@ def _reload_expert_stack(
         _convert_expert_weights,
         routed_layers=routed_layers,
         expert_weights=expert_weights,
-        pipelines=reload_plans.pipelines,
+        pipelines=reload_definition.pipelines,
     )
     with ThreadPoolExecutor(max_workers=min(len(layer_experts), _GATHER_MAX_WORKERS)) as pool:
         converted_experts = list(pool.map(convert_expert, layer_experts))
@@ -147,7 +150,7 @@ def _reload_expert_stack(
     first_layer = routed_layers[layer_experts[0][0]]
     first_slot = local_slots[layer_experts[0]]
     device_tensors: dict[str, torch.Tensor] = {}
-    for weight_name in reload_plans.pipelines:
+    for weight_name in reload_definition.pipelines:
         slot_list = getattr(first_layer, f"{weight_name}_list", None)
         if slot_list is not None:
             destination = slot_list[first_slot]
@@ -156,7 +159,7 @@ def _reload_expert_stack(
         stacked = torch.stack([expert[weight_name] for expert in converted_experts])
         device_tensors[weight_name] = stacked.to(device=destination.device, dtype=destination.dtype)
     for weight_name in _MOE_WEIGHT_NAMES:
-        device_tensors[weight_name] = reload_plans.cast_weights_to_nz(device_tensors[weight_name])
+        device_tensors[weight_name] = _cast_weights_to_nz(reload_definition, device_tensors[weight_name])
 
     # Scatter phase: non-blocking copies drained by one sync.
     for i, layer_expert in enumerate(layer_experts):

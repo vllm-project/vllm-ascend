@@ -121,18 +121,15 @@ def _to_fractal_nz(weight: torch.Tensor) -> torch.Tensor:
 
 
 @dataclass(eq=False)  # compared by identity: used as a dict key in the reload
-class _QuantReloadPlans:
-    """The reload plans for one quant method's expert tensors.
+class _QuantReloadDefinition:
+    """The reload definition for one quant method's expert tensors.
 
     ``pipelines`` maps each weight tensor name (``w13_weight``, ...) to the
-    reader/converter pair that rebuilds it; ``cast_weights_to_nz`` converts the expert
-    weight tensors to FRACTAL_NZ afterwards (a no-op when the policy does not
-    require it).
+    builder that rebuilds it.
     """
 
     quant_method: type
     pipelines: dict[str, _WeightBuilder]
-    cast_weights_to_nz: Callable[[torch.Tensor], torch.Tensor]
 
     def matches(self, method) -> bool:
         if type(method) is not self.quant_method:
@@ -143,12 +140,18 @@ class _QuantReloadPlans:
         return True
 
 
-_UNQUANTIZED_PLANS = _QuantReloadPlans(
+def _cast_weights_to_nz(definition: _QuantReloadDefinition, weight: torch.Tensor) -> torch.Tensor:
+    """Cast expert weights to the kernel format: NZ for quantized checkpoints, weight_nz_mode for unquantized ones."""
+    if definition.quant_method is AscendUnquantizedFusedMoEMethod:
+        return maybe_trans_nz(weight)
+    return _to_fractal_nz(weight)
+
+
+_UNQUANTIZED_DEFINITION = _QuantReloadDefinition(
     AscendUnquantizedFusedMoEMethod,
     _MOE_WEIGHT_PIPELINES,
-    maybe_trans_nz,
 )
-_W8A8_DYNAMIC_PLANS = _QuantReloadPlans(
+_W8A8_DYNAMIC_DEFINITION = _QuantReloadDefinition(
     AscendW8A8DynamicFusedMoEMethod,
     {
         **_MOE_WEIGHT_PIPELINES,
@@ -159,9 +162,8 @@ _W8A8_DYNAMIC_PLANS = _QuantReloadPlans(
             _down_proj("weight_scale"), _apply_stack_transform_to_one_expert(flatten_expert_dims)
         ),
     },
-    _to_fractal_nz,
 )
-_W4A8_ASCEND_PLANS = _QuantReloadPlans(
+_W4A8_ASCEND_DEFINITION = _QuantReloadDefinition(
     AscendW4A8DynamicFusedMoEMethod,
     {
         **_MOE_WEIGHT_PIPELINES,
@@ -177,19 +179,22 @@ _W4A8_ASCEND_PLANS = _QuantReloadPlans(
             _down_proj("scale_bias"), AscendW4A8DynamicFusedMoEMethod.reduce_scale_bias_modelslim
         ),
     },
-    _to_fractal_nz,
 )
 
-# Checked in this order by _find_reload_plans().
-_RELOAD_PLANS: tuple[_QuantReloadPlans, ...] = (_UNQUANTIZED_PLANS, _W8A8_DYNAMIC_PLANS, _W4A8_ASCEND_PLANS)
+# Checked in this order by _find_reload_definition().
+_RELOAD_DEFINITIONS: tuple[_QuantReloadDefinition, ...] = (
+    _UNQUANTIZED_DEFINITION,
+    _W8A8_DYNAMIC_DEFINITION,
+    _W4A8_ASCEND_DEFINITION,
+)
 
 
-def _find_reload_plans(routed_layer: torch.nn.Module) -> _QuantReloadPlans:
-    """Pick the reload plans matching a routed-experts layer's quant method."""
+def _find_reload_definition(routed_layer: torch.nn.Module) -> _QuantReloadDefinition:
+    """Pick the reload definition matching a routed-experts layer's quant method."""
     method = getattr(routed_layer.quant_method, "quant_method", routed_layer.quant_method)
-    for plans in _RELOAD_PLANS:
-        if plans.matches(method):
-            return plans
+    for definition in _RELOAD_DEFINITIONS:
+        if definition.matches(method):
+            return definition
     hint = f"checkpoint sub-format: {getattr(method, 'quant_method', None) or 'unknown'}"
     if isinstance(method, AscendW4A8DynamicFusedMoEMethod):
         hint += f'; only msModelSlim ("{ASCEND_QUANTIZATION_METHOD}") is supported'
