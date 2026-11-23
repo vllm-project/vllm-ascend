@@ -70,7 +70,7 @@ def render_template(template: str, values: dict[str, str]) -> str:
     """
     return re.sub(
         r"\{\{(\w+)\}\}",
-        lambda m: values.get(m.group(1), m.group(0)),
+        lambda m: str(values.get(m.group(1), m.group(0))),
         template,
     )
 
@@ -126,6 +126,9 @@ REQUIRED_FINDING_FIELDS = ("path", "line", "severity", "rule", "body")
 INLINE_MARKER = "ai-review finding"
 WAIVED_PREFIX = "**[WAIVED"
 WAIVE_RE = re.compile(r"/ai-review-waive(?![\w-])")
+
+# dsh provider patch written per round from the AI_REVIEW_* configuration
+PATCH_FILE = "/tmp/ai-review-patch.yml"
 
 
 def parse_findings(text: str) -> list[dict]:
@@ -232,7 +235,12 @@ class Orchestrator:
     # ---- thin gh wrappers -------------------------------------------------
 
     def _gh(self, *args: str) -> str:
-        return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout.strip()
+        result = subprocess.run(["gh", *args], capture_output=True, text=True)
+        if result.returncode != 0:
+            # bring-up aid: surface gh's own message instead of losing it
+            print(f"::error::gh {' '.join(args)} failed:\n{result.stderr.strip()}", flush=True)
+            raise SystemExit(1)
+        return result.stdout.strip()
 
     def _gh_json(self, *args: str):
         return json.loads(self._gh(*args))
@@ -258,6 +266,10 @@ class Orchestrator:
             ".comments",
         )
         for c in reversed(comments):
+            # only the orchestrator's own comments may carry state; a user
+            # pasting a signature block must not hijack the state machine
+            if BOT_MARKER not in c.get("body", ""):
+                continue
             m = SIGNATURE_RE.search(c.get("body", ""))
             if not m:
                 continue
@@ -276,12 +288,11 @@ class Orchestrator:
         perm = self._gh_json("api", f"repos/:owner/:repo/collaborators/{self.actor}/permission")
         return perm.get("permission") in ("admin", "maintain", "write")
 
-    def author_in_allowlist(self) -> bool:
-        author = self._gh("pr", "view", str(self.pr), "--json", "author", "-q", ".author.login")
+    def user_in_allowlist(self, user: str) -> bool:
         path = os.path.join(self.workspace, ".github", "agent-review", "allowlist.txt")
         with open(path) as f:
             entries = parse_allowlist(f.read())
-        return author in entries
+        return user in entries
 
     # ---- agent round ------------------------------------------------------
 
@@ -377,23 +388,57 @@ class Orchestrator:
             f.write(prompt)
 
         cmd = os.environ.get("AI_REVIEW_DSH_CMD", "dsh --profile headless").split()
-        # The agent process gets ONLY the model credentials and the model
-        # name — never GH_TOKEN. Every GitHub API call is made by this
+        cmd += ["--patch", PATCH_FILE]
+        # The agent process gets ONLY the model credential (via the patch's
+        # apiKeyEnv) — never GH_TOKEN. Every GitHub API call is made by this
         # orchestrator; the agent's output is parsed text we post ourselves.
         # This keeps a prompt-injected PR diff from reaching any repo token.
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": os.environ.get("HOME", "/tmp"),
             "AI_REVIEW_KEY": os.environ.get("AI_REVIEW_KEY", ""),
-            "AI_REVIEW_API": os.environ.get("AI_REVIEW_API", ""),
-            # Picked up by dsh's config surface once confirmed in the smoke
-            # test; harmless to expose until then.
-            "AI_REVIEW_MODEL": os.environ.get("AI_REVIEW_MODEL", "deepseek-v4.1-flash"),
+            # placeholder: the headless profile boot-gates on the presence of
+            # a deepseek-official credential; real requests go to the
+            # OpenAI-protocol gateway provider declared in the patch
+            "DEEPSEEK_API_KEY": "boot-gate-placeholder",
         }
+        base_url = os.environ.get("AI_REVIEW_API", "")
+        model = os.environ.get("AI_REVIEW_MODEL", "deepseek-v4.1-flash")
+        if not base_url:
+            print("::error::AI_REVIEW_API is not set; no endpoint to review against", flush=True)
+            raise SystemExit(1)
+        # dsh's built-in DeepSeek route speaks the Anthropic Messages
+        # protocol with x-api-key auth, which our gateway rejects. The
+        # verified recipe: a --patch overlay declaring an OpenAI-protocol
+        # provider (Bearer auth) plus the agent-default-model override.
+        with open(PATCH_FILE, "w") as f:
+            # quote the env-derived values: a URL containing "#" or ":"
+            # would otherwise be mangled by YAML comment/key parsing
+            f.write(
+                "- id: agent-default-model\n"
+                "  config:\n"
+                "    provider: ai-review-gateway\n"
+                f'    model: "{model}"\n'
+                "- id: llm-pi-ai\n"
+                "  config:\n"
+                "    providers:\n"
+                "      ai-review-gateway:\n"
+                "        apiKeyEnv: AI_REVIEW_KEY\n"
+                "        api: openai-completions\n"
+                f'        baseURL: "{base_url}"\n'
+                "        models:\n"
+                f'          - id: "{model}"\n'
+            )
         started = time.monotonic()
         print(
             f"::notice::ai-review prompt size: {len(prompt)} chars; "
             f"engine: {cmd[0]}; timeout: {ROUND_TIMEOUT_SECONDS}s",
+            flush=True,
+        )
+        # the base URL is not a secret; print it so endpoint/auth mismatches
+        # are diagnosable (the key itself is masked by GitHub)
+        print(
+            f"::notice::dsh endpoint: {base_url}; model: {model}",
             flush=True,
         )
         try:
@@ -475,14 +520,29 @@ class Orchestrator:
         # an anchor (line outside the diff), fall back to a summary-only
         # round so no finding is silently lost.
         findings = parse_findings(output)
-        output = FINDING_BLOCK_RE.sub("", output).strip()
-        summary = banner + output.rstrip() + "\n"
+        summary_body = FINDING_BLOCK_RE.sub("", output).strip()
+        summary = banner + summary_body + "\n"
+        # findings move to inline comments only after the review API
+        # accepted them; on failure they stay in the summary verbatim
         if findings and post_inline_review(self.pr, self.head_sha, findings):
+            findings_text = ""
             summary += (
                 f"\n---\n📋 {len(findings)} finding(s) posted as inline review "
                 "comments on the diff; this comment carries the verdict and "
                 "state only.\n"
             )
+        else:
+            findings_text = (
+                "\n## Findings\n\n"
+                + "\n\n".join(
+                    f"- **[{f['severity']}]** `{f['path']}:{f['line']}` rule: `{f['rule']}`\n  {f['body']}"
+                    for f in findings
+                )
+                + "\n"
+                if findings
+                else ""
+            )
+        summary += findings_text
         self.comment(summary)
 
         if verdict_pass:
@@ -588,9 +648,12 @@ class Orchestrator:
             if not self.actor_can_write():
                 print(f"actor {self.actor} lacks write access; ignoring", flush=True)
                 return 0
-            if not self.author_in_allowlist():
+            # The allowlist authorizes OPERATORS (who may apply the label to
+            # any PR), not the PR under review.
+            if not self.user_in_allowlist(self.actor):
                 self.post_notice(
-                    "AI review POC 未覆盖此 PR（作者不在灰度名单），已忽略并移除标签。如需参与请在 RFC #21451 留言。",
+                    f"@{self.actor} 不在 ai-review 灰度名单，无法启动评审（名单见 "
+                    "`.github/agent-review/allowlist.txt`，加入请在 RFC #21451 留言）。标签已移除。",
                 )
                 subprocess.run(
                     ["gh", "pr", "edit", str(self.pr), "--remove-label", AI_REVIEW_LABEL],
