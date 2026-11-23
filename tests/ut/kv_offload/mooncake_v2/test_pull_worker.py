@@ -1476,7 +1476,7 @@ def test_worker_run_marks_only_failed_requests_and_finishes_the_batch(
     def submit_group(_engine, _metadata, group, *_args):
         futures = {}
         for request_id in group:
-            future = Future()
+            future: Future[None] = Future()
             if request_id == "request-b":
                 future.set_exception(RuntimeError("READ failed"))
             else:
@@ -2551,7 +2551,7 @@ def test_pull_modes_preserve_addresses_and_select_read_granularity(mode, read_co
     thread.executor = MagicMock()
 
     def submit(fn, *args):
-        future = Future()
+        future: Future[None] = Future()
         try:
             future.set_result(fn(*args))
         except Exception as exc:
@@ -2585,7 +2585,7 @@ def test_request_completion_drains_reads(failure, monkeypatch):
     thread._get_remote_metadata = MagicMock(return_value=remote)
     thread.remote_tp_rank_groups = {"engine-p": {pp: {(0, 0): [[0]]} for pp in range(2)}}
     thread.remote_layer_index_pairs = {"engine-p": {pp: [(0, 0)] for pp in range(2)}}
-    futures = {}
+    futures: dict[tuple[str, int], Future[None]] = {}
 
     def submit(fn, pp, pcp, tp, *args):
         name = args[-1][0][(0, 0)][0][0]
@@ -2621,9 +2621,9 @@ def test_request_completion_drains_reads(failure, monkeypatch):
 
 
 @pytest.mark.parametrize("registration", ["before", "after", "completed"])
-def test_callback_registration_failure_drains_and_finishes_once(registration):
+def test_callback_registration_failure_drains_and_finishes_once(registration, monkeypatch):
     thread = make_thread()
-    futures = [Future() for _ in range(3)]
+    futures: list[Future[None]] = [Future() for _ in range(3)]
     futures[0].set_result(None)
     entered = threading.Event()
     original = futures[1].add_done_callback
@@ -2638,7 +2638,7 @@ def test_callback_registration_failure_drains_and_finishes_once(registration):
         entered.set()
         raise RuntimeError("callback registration failed")
 
-    futures[1].add_done_callback = register
+    monkeypatch.setattr(futures[1], "add_done_callback", register)
     tasks = {future: (0, 0, rank, {"a"}) for rank, future in enumerate(futures)}
     with ThreadPoolExecutor(max_workers=1) as executor:
         tracking = executor.submit(thread._track_request, "a", make_req_meta(local=([10],)), tasks, None)
@@ -2664,7 +2664,8 @@ def test_callback_registration_failure_drains_and_finishes_once(registration):
 @pytest.mark.parametrize("mode", ["request", "batch"])
 def test_pull_fallback_drains_before_finish_and_keeps_other_engines(mode, monkeypatch):
     thread = make_thread(pull_transfer_mode=mode, device=0, ready_event=threading.Event())
-    pending, healthy = Future(), Future()
+    pending: Future[None] = Future()
+    healthy: Future[None] = Future()
     healthy.set_result(None)
     thread._get_remote_metadata = MagicMock()
     thread._submit_transfer_group = MagicMock(

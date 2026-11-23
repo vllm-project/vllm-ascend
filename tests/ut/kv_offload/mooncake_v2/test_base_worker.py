@@ -23,7 +23,7 @@ from .helpers import make_full_spec, make_kv_cache_tensor, make_sfa_indexer_spec
 
 
 def test_transfer_max_workers() -> None:
-    options = {}
+    options: dict[str, int] = {}
     config = SimpleNamespace(kv_transfer_config=SimpleNamespace(get_from_extra_config=options.get))
     assert MooncakeBaseConnectorWorker._get_transfer_max_workers(config) == 32
     options["transfer_max_workers"] = 64
