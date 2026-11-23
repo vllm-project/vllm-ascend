@@ -41,6 +41,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.evidence import (
     AscendStoreAttemptEvidence,
     EvidenceBuffer,
+    contract_available,
     evidence_enabled,
     validate_evidence_certification,
 )
@@ -307,7 +308,7 @@ class BaseKVPoolWorker(ABC):
         # _init_key_head_config (see BaseKVPoolWorker.__init__).
         evidence_active = evidence_enabled(
             policy,
-            contract_importable=True,
+            contract_importable=contract_available(),
             num_prefix_cacheable_groups=len(self.cacheable_group_ids),
             num_kv_cache_groups=self.num_kv_cache_groups,
             use_hybrid=self.use_hybrid,

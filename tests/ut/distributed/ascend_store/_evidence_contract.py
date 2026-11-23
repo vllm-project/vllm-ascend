@@ -13,7 +13,6 @@ Under a real PR1-3 core (e.g. PYTHONPATH-shadowed CI runs) the classes
 are already importable and identical; install() then keeps them.
 """
 
-import sys
 from dataclasses import dataclass
 
 
@@ -71,14 +70,23 @@ class KVLoadAttestation:
 
 
 def install() -> None:
-    """Put the contract classes into vllm.v1.outputs if (and only if) the
-    module lacks the real ones. Idempotent."""
-    outputs = sys.modules.get("vllm.v1.outputs")
-    if outputs is None:
-        return
-    existing = getattr(outputs, "KVLoadAttestation", None)
-    if isinstance(existing, type) and hasattr(existing, "certifies_content"):
-        # Real (or already-installed) classes: keep them.
-        return
-    outputs.KVLoadAttestation = KVLoadAttestation  # type: ignore[attr-defined]
-    outputs.KVLoadFailureReport = KVLoadFailureReport  # type: ignore[attr-defined]
+    """Inject the contract classes into the evidence module directly.
+
+    The previous approach patched vllm.v1.outputs in sys.modules, but the
+    evidence module's import guard runs at module-load time: once evidence.py
+    has been imported (by conftest or a prior test), its local
+    KVLoadAttestation/KVLoadFailureReport bindings are already None and
+    patching sys.modules is too late.  Injecting into the evidence module
+    itself is order-independent: the classes are visible whether evidence.py
+    was imported before or after this call.
+
+    Under a real PR1-3 core the classes are already bound and non-None;
+    install() then keeps them (idempotent).
+    """
+    import vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.evidence as _ev
+
+    if _ev.KVLoadAttestation is not None:
+        return  # Real contract already available.
+    _ev.KVLoadAttestation = KVLoadAttestation
+    _ev.KVLoadFailureReport = KVLoadFailureReport
+    _ev._CONTRACT_AVAILABLE = True

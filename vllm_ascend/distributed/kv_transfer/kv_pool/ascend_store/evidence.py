@@ -261,8 +261,11 @@ class AscendStoreAttemptEvidence:
         return self.certified_cells > 0 and self.certified_cells == self.loaded_cells
 
     def to_attestation(self):
-        if KVLoadAttestation is None:  # pragma: no cover - gate prevents this
-            raise RuntimeError("the v1 evidence contract is not importable; the evidence path must not be active")
+        if KVLoadAttestation is None:
+            # Core without the PR1-3 contract: produce no attestation
+            # (the activation gate should have disabled the evidence path
+            # entirely; returning None here is the fail-closed behavior).
+            return None
         return KVLoadAttestation(
             request_id=self.req_id,
             expected_objects=self.expected_cells,
@@ -299,8 +302,10 @@ class AscendStoreAttemptEvidence:
         the attempt's delta start are the request's LOCAL prefix, not
         external content, so they need no transfer evidence.
         """
-        if KVLoadFailureReport is None:  # pragma: no cover - gate prevents this
-            raise RuntimeError("the v1 evidence contract is not importable; the evidence path must not be active")
+        if KVLoadFailureReport is None:
+            # Core without the PR1-3 contract: produce no report
+            # (fail-closed; the activation gate disables the path).
+            return None
         if len(self.failed_blocks) != 1:
             return None
         logical = next(iter(self.failed_blocks))

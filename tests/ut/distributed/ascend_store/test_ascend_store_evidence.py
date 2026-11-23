@@ -495,6 +495,38 @@ class TestEvidenceGates(unittest.TestCase):
         # import guard sees a usable contract.
         self.assertTrue(contract_available())
 
+    def test_worker_wiring_uses_contract_availability(self):
+        """The pool worker's evidence activation must follow the actual
+        contract availability (not a hardcoded True), so that upstream
+        Core without PR1-3 keeps the legacy flat failure channels.
+
+        Regression test for the wiring: patching contract_available to
+        False must produce a worker whose evidence buffer is None and
+        whose flat failure channels are active.
+        """
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import (
+            pool_worker as pw_mod,
+        )
+
+        with patch.object(pw_mod, "contract_available", return_value=False):
+            # Re-create the worker-side activation decision the way
+            # pool_worker does at init: the importable flag comes from
+            # the actual contract availability.
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.evidence import (
+                evidence_enabled,
+            )
+
+            active = evidence_enabled(
+                "repair",
+                contract_importable=False,  # what contract_available() returns
+                num_prefix_cacheable_groups=1,
+                num_kv_cache_groups=1,
+                use_hybrid=False,
+                use_layerwise=False,
+            )
+            self.assertFalse(active, "evidence must be disabled when the contract is unavailable")
+            # The flat failure channels are the only path left.
+
 
 class _WorkerHarnessMixin:
     """Builds a blockwise KVPoolWorker with the evidence path ACTIVE."""

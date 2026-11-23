@@ -25,7 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.evidence import evidence_enabled
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.evidence import contract_available, evidence_enabled
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse.layout import has_hisparse_cache_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient
@@ -174,7 +174,7 @@ class BaseKVPoolScheduler(ABC):
         # exactly as before.
         self._evidence_enabled = evidence_enabled(
             getattr(vllm_config.kv_transfer_config, "kv_load_failure_policy", None),
-            contract_importable=True,
+            contract_importable=contract_available(),
             num_prefix_cacheable_groups=len(self.cacheable_group_ids),
             num_kv_cache_groups=len(self.kv_cache_group_ids),
             use_hybrid=self.use_hybrid,
