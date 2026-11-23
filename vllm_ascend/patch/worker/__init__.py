@@ -19,8 +19,6 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
-# Generic causal_conv1d bindings are owned by patch_ascend_ops. GLM5Next
-# imports its model-specific fla_npu AscendC convolution entry points directly.
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_ascend_ops  # noqa
     import vllm_ascend.patch.worker.patch_triton  # noqa

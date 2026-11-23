@@ -1159,9 +1159,7 @@
 #    How：
 #       Rebind the two upstream symbols to the generic torch implementations in
 #       `vllm_ascend.ops.causal_conv1d`, dropping the CUDA-only block-table and
-#       spec-decode kwargs those kernels do not accept. This module owns the
-#       generic convolution bindings; GLM5Next uses its model-specific fla_npu
-#       AscendC entry points independently.
+#       spec-decode kwargs those kernels do not accept.
 #    Future Plan:
 #       Remove this patch once upstream exposes a backend-dispatch hook for the
 #       causal_conv1d kernels.
