@@ -1,0 +1,4 @@
+pr: 22913
+entries:
+  - category: performance
+    text: Kimi K3.1 Pro decode on Ascend 950DT reduces padding-related memory traffic with DCP and avoids a separate output copy for eligible BF16 projections.
