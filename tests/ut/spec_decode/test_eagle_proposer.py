@@ -2647,7 +2647,6 @@ class TestRunMergedDraft(TestBase):
         proposer.input_ids[:4] = torch.arange(4)
         proposer._context_slot_mapping_buffers = MagicMock()
         proposer.build_model_inputs_first_pass = MagicMock()
-        proposer.dynamic_spec = None
         proposer.use_fp64_gumbel = False
         greedy = SimpleNamespace(all_greedy=True)
         with patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False):
@@ -2676,6 +2675,18 @@ class TestRunMergedDraft(TestBase):
 
         proposer._sample_dflash_logits(logits, 2, greedy)
         self.assertIsNone(proposer.take_last_draft_probs())
+
+    def test_dflash_replay_preserves_strided_probs_and_updates_scheduler(self):
+        proposer = self.proposer
+        proposer.num_speculative_tokens = 2
+        proposer.dynamic_spec = MagicMock()
+        logits = torch.randn(6, 8)
+        probs = torch.randn(8, 4).softmax(dim=0).T
+        with patch.object(proposer, "_sample_draft_from_logits", return_value=(probs.argmax(-1), probs)):
+            proposer._sample_dflash_logits(logits, 4, SimpleNamespace(all_greedy=False))
+        torch.testing.assert_close(proposer.take_last_draft_probs(), torch.stack((probs[:2], probs[2:])))
+        proposer.dynamic_spec.update.assert_called_once()
+        torch.testing.assert_close(proposer.dynamic_spec.update.call_args.kwargs["logits"], logits[:4])
 
     def test_run_merged_draft_mtp_mrope_graph_and_lmhead_tp_preparation(self):
         self.proposer.method = "mtp"

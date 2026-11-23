@@ -1403,9 +1403,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # A replay can return a padded graph bucket. Only real requests have sampling metadata.
         logits = logits[:num_rows]
         token_ids, probs = self._sample_draft_from_logits(logits, sampling_metadata)
-        self._last_draft_probs = None if probs is None else probs.view(-1, self.num_speculative_tokens, probs.shape[-1])
-        if self.dynamic_spec is not None:
-            self.dynamic_spec.update(logits=logits)
+        self._last_draft_probs = (
+            None if probs is None else probs.reshape(-1, self.num_speculative_tokens, probs.shape[-1])
+        )
+        dynamic_spec = getattr(self, "dynamic_spec", None)
+        if dynamic_spec is not None:
+            dynamic_spec.update(logits=logits)
         return token_ids.reshape(-1, self.num_speculative_tokens)
 
     def _sample_draft_from_logits(
