@@ -10,8 +10,8 @@ the plugin even when the plugin's own code is self-consistent.
 
 - `L2-exec#override-contract`: When a PR changes the signature, return
   type or call order of a method that any Ascend override implements
-  (init_device, _make_model_runner, load_model, determine_available_memory,
-  execute_model, sample_tokens, _prepare_inputs, _build_attention_metadata,
+  (init_device,_make_model_runner, load_model, determine_available_memory,
+  execute_model, sample_tokens,_prepare_inputs,_build_attention_metadata,
   _dummy_run, _allocate_kv_cache_tensors, capture_model, ...), ALL Ascend
   overrides must be updated together: `worker/worker.py`,
   `worker/model_runner_v1.py`, `worker/v2/model_runner.py` and

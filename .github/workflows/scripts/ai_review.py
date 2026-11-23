@@ -470,7 +470,7 @@ class Orchestrator:
         kb_dir = os.path.join(self.workspace, ".github", "agent-review")
         for root, _dirs, files in os.walk(kb_dir):
             for name in sorted(files):
-                if not name.endswith(".md") or name == "instructions.md":
+                if not name.endswith(".md") or name in ("instructions.md", "README.md"):
                     continue
                 path = os.path.join(root, name)
                 rel = os.path.relpath(path, self.workspace)
