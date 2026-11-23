@@ -1598,11 +1598,25 @@ class DPVllmRunner(VllmRunner):
             with contextlib.suppress(Exception):
                 conn.send({"command": "shutdown"})
 
+        # EngineCore runs in child processes of each DP worker. A worker that
+        # never started cannot read the shutdown command, and killing it alone
+        # leaves those children retrying the pool service until the job-level
+        # timeout. Collect the tree before the parents are reparented or gone.
+        children: list[psutil.Process] = []
+        for proc in self._dp_processes:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                children.extend(psutil.Process(proc.pid).children(recursive=True))
+
         for proc in self._dp_processes:
             proc.join(timeout=_DP_RUNNER_SHUTDOWN_TIMEOUT_SECONDS)
             if proc.is_alive():
                 proc.kill()
                 proc.join(timeout=5)
+
+        _, still_alive = psutil.wait_procs(children, timeout=10)
+        for child in still_alive:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                child.kill()
 
         for conn in self._dp_parent_conns:
             with contextlib.suppress(Exception):
