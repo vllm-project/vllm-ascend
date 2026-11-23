@@ -873,6 +873,10 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             current_output.record_stream(main_stream)
             current_lse.record_stream(main_stream)
 
+        # FlashMLA history attention is complete on the main stream: fork the
+        # deferred output gate here so it overlaps pack/AllToAll/combine
+        # instead of competing with the prolog and attention for cube cores.
+        self._late_fork_gate()
         history_recv = self._merge_dcp_attention_output(
             history_output,
             history_lse,
@@ -1064,7 +1068,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             attn_output = attn_output.permute(0, 2, 1, 3).reshape(B_attn * S, N_attn, D)
             softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
 
-        # Update out&lse
+        # Update out&lse. Fork the deferred output gate at the same boundary:
+        # attention is done, so only the pack/AllToAll/combine chain overlaps.
+        self._late_fork_gate()
         attn_output = self._merge_dcp_attention_output(attn_output, softmax_lse)
         return self._v_up_proj_batch_major(attn_output)
 

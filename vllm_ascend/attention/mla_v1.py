@@ -77,10 +77,13 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.device.paged_mla_cache_read import load_mla_cache_rows_by_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.triton.dcp.dcp_a2a import exchange_and_combine_dcp_output, pack_dcp_output_lse
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
+    is_mx_quant_type,
 )
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
@@ -89,6 +92,8 @@ from vllm_ascend.utils import (
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
+    mla_gate_stream,
+    npu_stream_switch,
     weak_ref_tensors,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -107,6 +112,13 @@ TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
 PROLOG_V3_SUPPORTED_INPUT_SIZES = (1024, 2048, 3072, 4096, 5120, 6144, 7168, 7680, 8192)
 MLAPO_CACHE_BLOCK_ALIGNMENT = 16
 MLAPO_MAX_CACHE_BLOCK_SIZE = 1024
+
+# The MLA output gate is a MIX_AIC GEMM: its quant/epilogue phase occupies
+# vector cores. Use a fixed quota from launch through completion; an in-flight
+# GEMM cannot be throttled when AllToAll finishes. MXFP input quantization
+# needs more vector cores than the floating-point BF16 gate.
+MLA_GATE_CORE_LIMIT_BF16 = (32, 1)
+MLA_GATE_CORE_LIMIT_MXFP = (16, 8)
 
 
 class AscendMLABackend(AttentionBackend):
@@ -1093,6 +1105,18 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.o_proj = kwargs["o_proj"]
         self.g_proj = kwargs.get("g_proj")
         self.use_output_gate = self.g_proj is not None
+        self._gate_stream: torch.npu.Stream | None = None
+        self._gate_in_event: torch.npu.Event | None = None
+        self._gate_done_event: torch.npu.Event | None = None
+        self._gate_pending = False
+        # DCP defers the fork to the attention output boundary: the frozen
+        # hidden input waits here until ``_late_fork_gate`` launches it, and
+        # the launched tensor lands in ``_gate`` for the final multiply.
+        self._gate_hidden: torch.Tensor | None = None
+        self._gate: torch.Tensor | None = None
+        # Resolved on the first fork: quantized layers only grow ``weight_scale``
+        # during ``process_weights_after_loading``, after this constructor.
+        self._gate_core_limit: tuple[int, int] | None = None
         self.use_mla_rope = kwargs.get("use_mla_rope", True)
         self.vllm_config = get_current_vllm_config()
         self.pcp_enabled = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
@@ -1409,6 +1433,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         return None
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        # Create the gate stream/events once, before any ACL graph capture, and
+        # resolve the core limit from the loaded linear method. Re-entering for
+        # an RL weight reload must keep the captured event objects.
+        if getattr(self, "use_output_gate", False):
+            if getattr(self, "_gate_stream", None) is None and torch.npu.is_available():
+                self._gate_stream = mla_gate_stream()
+                self._gate_in_event = torch.npu.Event()
+                self._gate_done_event = torch.npu.Event()
+            self._gate_core_limit = self._resolve_gate_core_limit()
         # NOTE: We currently do not support quant kv_b_proj.
         assert isinstance(self.kv_b_proj.quant_method, UnquantizedLinearMethod)
         # NOTE: Weight will be reshaped next, we need to revert and transpose it.
@@ -1789,8 +1822,109 @@ class AscendMLAImpl(MLAAttentionImpl):
             attn_mask=None if self.dcp_enabled else decode.attn_mask,
         )
         if self.dcp_enabled:
-            out = self._merge_dcp_attention_output(out, lse.transpose(0, 1).unsqueeze(-1).contiguous())
+            merge_lse = lse.transpose(0, 1).unsqueeze(-1).contiguous()
+            if getattr(self, "use_output_gate", False):
+                out = self._merge_kimi_c8_dcp_output(out, merge_lse)
+            else:
+                out = self._merge_dcp_attention_output(out, merge_lse)
+        else:
+            self._late_fork_gate()
         return self._v_up_proj_batch_major(out), lse
+
+    def _merge_kimi_c8_dcp_output(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:
+        """Release the staged gate after Pack, without delaying DCP Combine."""
+        send = pack_dcp_output_lse(out, lse, self.dcp_size, scatter_dim=1)
+        # _fork_gate records its input event on the main stream here. The gate
+        # stream therefore waits for Pack to finish before starting MIX_AIC work.
+        self._late_fork_gate()
+        vector_core_budget = None
+        if getattr(self, "_gate_pending", False):
+            # Pack initialized the device properties. Bound both scalar and
+            # batched Combine grids while the fixed gate quota may be active.
+            # This is a launch budget, not a physical core affinity guarantee.
+            vector_core_budget = max(1, get_vectorcore_num() - self._gate_core_limit[1])
+        return exchange_and_combine_dcp_output(
+            send,
+            out.shape[-1],
+            scatter_dim=1,
+            scatter_group=self.dcp_device_group,
+            vector_core_budget=vector_core_budget,
+        )
+
+    def _stage_gate(self, hidden_states: torch.Tensor, *, defer: bool) -> None:
+        """Start the output gate now, or hold it for a DCP-boundary fork.
+
+        C8 DCP releases the gate after packing output/LSE. Other DCP paths
+        retain their existing output boundary. The final sigmoid multiply
+        joins the gate; communication and Combine never join it.
+        """
+        self._gate = None
+        self._gate_hidden = None
+        if not getattr(self, "use_output_gate", False):
+            return
+        if defer:
+            self._gate_hidden = hidden_states
+            return
+        self._gate = self._fork_gate(hidden_states)
+
+    def _late_fork_gate(self) -> None:
+        """Fork a staged gate at the DCP output boundary; no-op otherwise."""
+        hidden = getattr(self, "_gate_hidden", None)
+        if hidden is None:
+            return
+        self._gate_hidden = None
+        self._gate = self._fork_gate(hidden)
+
+    def _resolve_gate_core_limit(self) -> tuple[int, int]:
+        method = getattr(self.g_proj, "quant_method", None)
+        scheme = getattr(method, "quant_method", method)
+        return MLA_GATE_CORE_LIMIT_MXFP if is_mx_quant_type(scheme) else MLA_GATE_CORE_LIMIT_BF16
+
+    def _fork_gate(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        """Launch the output gate on its auxiliary stream, unjoined.
+
+        The MIX_AIC gate uses a fixed cube/vector quota while the main stream
+        proceeds through communication, Combine and V up-projection. HCCL
+        resource use depends on its algorithm. Only the final sigmoid multiply
+        joins the gate through ``_join_gate``.
+        """
+        self._gate_pending = False
+        if not getattr(self, "use_output_gate", False):
+            return None
+        if torch.compiler.is_compiling() and not get_ascend_config().ascend_compilation_config.enable_npugraph_ex:
+            return self.g_proj(hidden_states.contiguous())[0]
+        if getattr(self, "_gate_stream", None) is None:
+            if not torch.npu.is_available():
+                # CPU-only unit tests and tooling keep the serial main-stream path.
+                return self.g_proj(hidden_states.contiguous())[0]
+            self._gate_stream = mla_gate_stream()
+            self._gate_in_event = torch.npu.Event()
+            self._gate_done_event = torch.npu.Event()
+        assert self._gate_in_event is not None and self._gate_done_event is not None
+        if getattr(self, "_gate_core_limit", None) is None:
+            self._gate_core_limit = self._resolve_gate_core_limit()
+        main_stream = torch.npu.current_stream()
+        gate_stream = self._gate_stream
+        hidden_states.record_stream(gate_stream)
+        self._gate_in_event.record(main_stream)
+        with npu_stream_switch(gate_stream):
+            gate_stream.wait_event(self._gate_in_event)
+            with torch_npu.npu.npugraph_ex.scope.limit_core_num(*self._gate_core_limit):
+                # Bound any input copy as well as the projection's AIV work.
+                hidden = hidden_states.contiguous()
+                gate = self.g_proj(hidden)[0]
+            self._gate_done_event.record(gate_stream)
+        gate.record_stream(main_stream)
+        self._gate_pending = True
+        return gate
+
+    def _join_gate(self) -> None:
+        """Wait for the auxiliary-stream gate tail before applying it."""
+        if not getattr(self, "_gate_pending", False):
+            return
+        assert self._gate_done_event is not None
+        torch.npu.current_stream().wait_event(self._gate_done_event)
+        self._gate_pending = False
 
     def _forward_kimi_c8(self, layer_name, hidden_states, kv_cache, attn_metadata, output):
         from vllm_ascend.attention.kimi_c8_decode import project_and_write_kimi_c8
@@ -1805,6 +1939,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         actual, num_decode = attn_metadata.num_actual_tokens, attn_metadata.num_decode_tokens
         if actual == 0:
             return output.zero_()
+        self._stage_gate(hidden_states, defer=self.dcp_enabled and num_decode > 0)
         cos = sin = None
         if self.use_mla_rope:
             rows = []
@@ -1863,6 +1998,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 attn_metadata,
                 projection=projection,
             )
+        self._late_fork_gate()
         if (
             decode_output is not None
             and num_decode == hidden_states.shape[0]
@@ -1891,9 +2027,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                 kv_cache,
                 attn_metadata,
             )
-        if self.use_output_gate:
-            assert self.g_proj is not None
-            projected.mul_(torch.sigmoid(self.g_proj(hidden_states.contiguous())[0]))
+        if self._gate is not None:
+            self._join_gate()
+            projected.mul_(torch.sigmoid(self._gate))
+            # Drop the reference: a padded prefill gate can be large and the
+            # next step's fork replaces it anyway.
+            self._gate = None
         output[...] = self.o_proj(projected, is_prefill=has_prefill)[0]
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
         return output
@@ -3971,10 +4110,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         o_proj_input_shape = (_EXTRA_CTX.num_tokens, self.num_heads * self.v_head_dim)
         o_proj_input = torch.zeros(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
-        gate = None
-        if self.use_output_gate:
-            assert self.g_proj is not None
-            gate = self.g_proj(hidden_states.contiguous())[0]
+        # DCP decode defers the gate to the output boundary so the prolog and
+        # FlashMLA never share cube cores with it; everything else forks here.
+        self._stage_gate(hidden_states, defer=self.dcp_enabled and num_decode_tokens > 0)
 
         # MLA Preprocess
         decode_requires_current_kv = self._decode_requires_current_kv(attn_metadata)
@@ -4048,6 +4186,9 @@ class AscendMLAImpl(MLAAttentionImpl):
 
             o_proj_input[:num_decode_tokens] = output_decode
 
+        # Fallback for decode paths that never reached the DCP output boundary.
+        self._late_fork_gate()
+
         if prefill_preprocess_res is not None:
             # FIX: aicore move should be also placed on the comm stream in dbo,
             # otherwise it may affect the accuracy
@@ -4063,8 +4204,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
 
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
-        if gate is not None:
-            o_proj_input.mul_(torch.sigmoid(gate))
+        if self._gate is not None:
+            self._join_gate()
+            o_proj_input.mul_(torch.sigmoid(self._gate))
+            # Drop the reference: a padded prefill gate can be large and the
+            # next step's fork replaces it anyway.
+            self._gate = None
         # O proj
         output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
 

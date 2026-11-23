@@ -285,6 +285,45 @@ def test_a5_flashmla_combine_without_local_precision_and_timing(monkeypatch, rec
     print(f"FlashMLA combine T={num_tokens}, H=12, DCP=8: {timings}")
 
 
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("has_local", [False, True])
+@pytest.mark.parametrize("budget", [1, 3])
+@torch.inference_mode()
+def test_combine_reduced_vector_budget_preserves_all_rows(monkeypatch, batched, has_local, budget):
+    if batched and not dcp_a2a.is_950():
+        pytest.skip("The batched DCP kernel requires A5")
+    dcp_a2a.init_device_properties_triton()
+    # Use enough rows for batching even before reducing the grid. Three
+    # heads and an odd token count also exercise a partial eight-row tile.
+    num_tokens, num_heads, head_dim = 4 * dcp_a2a.get_vectorcore_num() + 1, 3, 257
+    torch.manual_seed(947)
+    values = torch.randn(8, num_tokens, num_heads, head_dim, device="npu", dtype=torch.bfloat16)
+    lse = torch.randn(8, num_tokens, num_heads, 1, device="npu") * 5
+    lse[:, 0, 0] = -torch.inf
+    values[:, 0, 0] = torch.nan
+    recv = torch.stack([pack_dcp_output_lse(values[rank], lse[rank], 1, 1)[0] for rank in range(8)])
+    local_output = local_lse = None
+    if has_local:
+        local_output = torch.randn(num_tokens, num_heads, head_dim * 2, device="npu", dtype=torch.bfloat16)[..., ::2]
+        local_lse = torch.randn(num_tokens, num_heads, 2, device="npu")[..., :1]
+        local_output[0, 0] = torch.nan
+        local_lse[0, 0] = torch.inf
+        values = torch.cat((values, local_output.unsqueeze(0)))
+        lse = torch.cat((lse, local_lse.unsqueeze(0)))
+    expected = _reference_merge(values, lse[..., 0])
+    monkeypatch.setattr(dcp_a2a, "is_950", lambda: batched)
+    actual = fused_dcp_lse_combine(
+        recv,
+        head_dim,
+        1,
+        local_output=local_output,
+        local_lse=local_lse,
+        vector_core_budget=budget,
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+    assert torch.count_nonzero(actual[0, 0]).item() == 0
+
+
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("scatter_dim", [0, 1])
 @pytest.mark.parametrize("head_dim", [96, 128, 160, 256])

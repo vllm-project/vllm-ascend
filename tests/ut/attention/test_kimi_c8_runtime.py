@@ -160,6 +160,94 @@ def test_decode_request_geometry_scale_and_local_v_projection(monkeypatch, metad
 
 
 @pytest.mark.parametrize("graph", [False, True])
+@pytest.mark.parametrize("decode_tokens,padding", [(3, 0), (3, 2), (2, 2)])
+def test_c8_dcp_gate_starts_after_pack_and_joins_only_before_multiply(
+    monkeypatch, metadata_op, graph, decode_tokens, padding
+):
+    impl, meta, raw = runtime(graph)
+    impl.use_output_gate, impl.v_head_dim = True, 3
+    impl.dcp_device_group = object()
+    impl._gate_core_limit = mla_v1.MLA_GATE_CORE_LIMIT_BF16
+    meta.num_decode_tokens = decode_tokens
+    meta.num_prefills = int(decode_tokens < 3)
+    if decode_tokens < 3:
+        meta.query_start_loc = meta.c8_query_start_loc_cpu = torch.arange(4, dtype=torch.int32)
+        meta.decode.actual_seq_lengths_q = [1, 2]
+    events = []
+    projection = projections.KimiC8Projection(
+        torch.zeros(decode_tokens, 2, 576, dtype=torch.float8_e4m3fn),
+        torch.ones(decode_tokens, 2),
+        torch.ones(3, 1),
+        torch.ones(3, 576),
+        (torch.ones(3, 1, 64), torch.ones(3, 1, 512)),
+    )
+    monkeypatch.setattr(projections, "project_and_write_kimi_c8_prolog", lambda *a, **kw: projection)
+    impl._dcp_all_gather_fragments = lambda value, dim: (torch.cat([value] * 8, dim),)
+
+    def attention(*args, **kwargs):
+        events.append("attention")
+        return torch.ones(decode_tokens, 16, 512), torch.zeros(16, decode_tokens)
+
+    monkeypatch.setattr(torch.ops.cann_ops_transformer, "quant_flash_mla", attention, raising=False)
+    send = torch.empty(8, 2, decode_tokens, 516)
+
+    def pack(out, lse, world, scatter_dim):
+        assert world == 8 and scatter_dim == 1
+        assert out.shape == (decode_tokens, 16, 512) and lse.shape == (decode_tokens, 16, 1)
+        events.append("pack")
+        return send
+
+    monkeypatch.setattr(mla_v1, "pack_dcp_output_lse", pack)
+    monkeypatch.setattr(mla_v1, "get_vectorcore_num", lambda: 56)
+
+    def fork(hidden):
+        assert events == ["attention", "pack"]
+        events.append("gate")
+        impl._gate_pending = True
+        return torch.zeros(hidden.shape[0], 6)
+
+    impl._fork_gate = fork
+
+    def exchange(payload, head_dim, **kwargs):
+        assert payload is send and head_dim == 512 and impl._gate_pending
+        assert kwargs == dict(scatter_dim=1, scatter_group=impl.dcp_device_group, vector_core_budget=55)
+        events.extend(("alltoall", "combine"))
+        return torch.ones(decode_tokens, 2, 512)
+
+    monkeypatch.setattr(mla_v1, "exchange_and_combine_dcp_output", exchange)
+    impl._merge_dcp_attention_output = MagicMock(side_effect=AssertionError("Gate must use the split merge"))
+    impl._v_up_proj_batch_major = lambda value: events.append("v_up") or torch.full((decode_tokens, 6), 3.0)
+    impl.mla_preprocess_prefill = lambda *a, **kw: Ns(
+        **dict.fromkeys(("q_nope", "q_pe", "k_nope", "k_pe", "value"), torch.ones(1))
+    )
+    impl._forward_prefill = lambda *a, **kw: events.append("prefill") or torch.full((3 - decode_tokens, 6), 5.0)
+
+    def join():
+        assert events[-1] == ("prefill" if decode_tokens < 3 else "v_up")
+        events.append("join")
+        impl._gate_pending = False
+
+    impl._join_gate = join
+
+    def output_projection(value, **kwargs):
+        assert events[-1] == "join"
+        torch.testing.assert_close(value[:decode_tokens], torch.full((decode_tokens, 6), 1.5))
+        torch.testing.assert_close(value[decode_tokens:3], torch.full((3 - decode_tokens, 6), 2.5))
+        events.append("out")
+        return value, None
+
+    impl.o_proj = output_projection
+    for name in ("wait_for_kv_layer_from_connector", "notify_kv_cache_written", "maybe_save_kv_layer_to_connector"):
+        monkeypatch.setattr(mla_v1, name, lambda *a: None)
+    output = torch.empty(3 + padding, 6)
+    impl._forward_kimi_c8("mla", torch.ones_like(output), (raw,), meta, output)
+    assert events == ["attention", "pack", "gate", "alltoall", "combine", "v_up"] + (
+        ["prefill"] if decode_tokens < 3 else []
+    ) + ["join", "out"]
+    assert impl._gate is None and impl._gate_hidden is None and not impl._gate_pending
+
+
+@pytest.mark.parametrize("graph", [False, True])
 def test_metadata_refreshes_values_shares_only_within_group_and_skips_empty(metadata_op, graph):
     impl, meta, raw = runtime(graph)
     other, separate, _ = runtime(graph)
@@ -344,6 +432,9 @@ def test_real_forward_preserves_write_wait_gate_and_save_order(monkeypatch, deco
     )
     impl._forward_prefill = lambda *a, **kw: events.append("prefill") or torch.full((3 - decode_tokens, 3), 5.0)
     impl.g_proj = lambda value: (events.append("gate") or torch.zeros_like(value), None)
+    # Keep the gate on the serial main-stream path: this CPU test has no NPU
+    # stream/event machinery and only checks call ordering.
+    monkeypatch.setattr(mla_v1.torch.npu, "is_available", lambda: False, raising=False)
 
     def output_projection(value, **kwargs):
         reuse = decode_tokens == 3 and padding == 0 and decode_dtype == torch.float32
@@ -363,11 +454,13 @@ def test_real_forward_preserves_write_wait_gate_and_save_order(monkeypatch, deco
     torch.testing.assert_close(output[:decode_tokens], torch.full_like(output[:decode_tokens], 2.5))
     torch.testing.assert_close(output[decode_tokens:3], torch.full_like(output[decode_tokens:3], 3.5))
     torch.testing.assert_close(output[3:], torch.ones_like(output[3:]))
+    # The gate now runs at the layer entry (serial on CPU-only test hosts), so
+    # it is recorded before the KV write/wait bookkeeping.
     assert events == (
-        ["wait", "layer_wait", "write", "written"]
+        ["gate", "wait", "layer_wait", "write", "written"]
         + (["decode"] if decode_tokens else [])
         + (["prepare", "prefill"] if decode_tokens < 3 else [])
-        + ["gate", "out", "save"]
+        + ["out", "save"]
     )
 
 

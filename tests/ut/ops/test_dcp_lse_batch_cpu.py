@@ -181,7 +181,8 @@ def pack_reference(values, lse):
 @pytest.mark.parametrize("world", [1, 2, 8])
 @pytest.mark.parametrize("dim", [96, 257, 512])
 @pytest.mark.parametrize("has_local", [False, True])
-def test_production_batched_kernel_arithmetic_and_masks(world, dim, has_local):
+@pytest.mark.parametrize("programs", [1, 3])
+def test_production_batched_kernel_arithmetic_and_masks(world, dim, has_local, programs):
     torch.manual_seed(52)
     tokens, heads = 13, 3  # 39 rows exercise a partial eight-row tile and loops.
     values = torch.randn(world, tokens, heads, dim).bfloat16()
@@ -203,7 +204,9 @@ def test_production_batched_kernel_arithmetic_and_masks(world, dim, has_local):
     local[0, 0] = torch.nan
     output_storage = torch.full((tokens * heads * dim + 16,), -91.0, dtype=torch.bfloat16)
     output = output_storage[: tokens * heads * dim].view(tokens, heads, dim)
-    language = TorchLanguage(programs=3)
+    # A single program must still visit every tile when the Gate reserves
+    # vector cores; both grids leave a masked tail in the final tile.
+    language = TorchLanguage(programs=programs)
     kernel = load_function("dcp_a2a_batched.py", "_fused_dcp_lse_combine_batched_kernel", {"tl": language})
     for program in range(language.programs):
         language.index = program

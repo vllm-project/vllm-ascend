@@ -370,12 +370,19 @@ def fused_dcp_lse_combine(
     return_lse: bool = False,
     local_output: torch.Tensor | None = None,
     local_lse: torch.Tensor | None = None,
+    vector_core_budget: int | None = None,
 ) -> torch.Tensor:
     """Merge rank outputs and an optional local FIA contribution in one pass.
 
     Local tensors use [tokens, heads, D/1] layout and may be strided. The local
     contribution is counted once, with FP32 weights shared by all ranks.
+    vector_core_budget bounds the number of launched vector programs when
+    overlapping other work; it does not select disjoint physical cores.
     """
+    if vector_core_budget is not None and (
+        not isinstance(vector_core_budget, int) or isinstance(vector_core_budget, bool) or vector_core_budget <= 0
+    ):
+        raise ValueError(f"DCP combine vector_core_budget must be a positive integer, got {vector_core_budget}.")
     # Appended LSE must retain FP32 precision.
     if return_lse and recv.dtype != torch.float32:
         raise TypeError("Returning merged LSE requires an FP32 receive buffer.")
@@ -417,7 +424,8 @@ def fused_dcp_lse_combine(
     total_rows = num_tokens * num_heads
     init_device_properties_triton()
     vector_cores = get_vectorcore_num()
-    grid_size = total_rows if total_rows < vector_cores else vector_cores
+    launch_cores = vector_cores if vector_core_budget is None else min(vector_cores, vector_core_budget)
+    grid_size = min(total_rows, launch_cores)
     # Wider tiles need a bounded DCP and more rows on small-DCP cases.
     # Strided local features regress for DCP 1-2 when D > 256. FlashMLA
     # supplies all contributions through recv, so it has no local stride
@@ -494,6 +502,49 @@ def dcp_a2a_fused_combine(
         scatter_size,
         scatter_dim=scatter_dim,
     )
+    return exchange_and_combine_dcp_output(
+        send,
+        partial_output.shape[-1],
+        scatter_dim,
+        scatter_group,
+        pcp_group=pcp_group,
+        return_lse=return_lse,
+        defer_combine=defer_combine,
+    )
+
+
+def exchange_and_combine_dcp_output(
+    send: torch.Tensor,
+    head_dim: int,
+    scatter_dim: int,
+    scatter_group: dist.ProcessGroup | None,
+    pcp_group: GroupCoordinator | None = None,
+    return_lse: bool = False,
+    defer_combine: bool = False,
+    vector_core_budget: int | None = None,
+) -> torch.Tensor:
+    """Exchange an already-packed payload, then combine without waiting on Gate.
+
+    ``send`` has the layout returned by :func:`pack_dcp_output_lse`. Keeping
+    packing separate lets the caller record its stream event after Pack and
+    launch independent work before the AllToAll. All operations here remain
+    ordered on the caller's current stream.
+    """
+    if defer_combine and return_lse:
+        raise ValueError("defer_combine and return_lse are mutually exclusive.")
+    if send.ndim != 4 or not send.is_contiguous():
+        raise RuntimeError("DCP packed exchange requires a contiguous 4D payload.")
+    if scatter_dim not in (0, 1):
+        raise ValueError(f"DCP packed exchange scatter_dim must be 0 or 1, got {scatter_dim}.")
+    if not isinstance(head_dim, int) or isinstance(head_dim, bool) or head_dim <= 0:
+        raise ValueError(f"DCP packed exchange requires a positive integer head_dim, got {head_dim}.")
+    if send.shape[-1] != head_dim + _lse_pack_dim(send.dtype):
+        raise RuntimeError("DCP packed exchange payload does not match head_dim and LSE packing.")
+    scatter_size = send.shape[0]
+    if scatter_size < 1:
+        raise ValueError("DCP packed exchange requires at least one source rank.")
+    if return_lse and send.dtype != torch.float32:
+        raise TypeError("Returning merged LSE requires an FP32 packed payload.")
     if scatter_size > 1:
         if scatter_group is None:
             raise ValueError("DCP output scatter requires an explicit All2All group.")
@@ -511,7 +562,13 @@ def dcp_a2a_fused_combine(
         recv = pcp_group.all_gather(recv, dim=0)
     if defer_combine:
         return recv
-    return fused_dcp_lse_combine(recv, partial_output.shape[-1], scatter_dim=scatter_dim, return_lse=return_lse)
+    return fused_dcp_lse_combine(
+        recv,
+        head_dim,
+        scatter_dim=scatter_dim,
+        return_lse=return_lse,
+        vector_core_budget=vector_core_budget,
+    )
 
 
 def dcp_a2a_fused(
