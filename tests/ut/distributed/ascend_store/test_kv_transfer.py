@@ -83,7 +83,7 @@ class MaskedFakeTokenDatabase(FakeTokenDatabase):
         super().__init__(block_size)
         self.masks = masks
 
-    def store_mask(self, token_len, num_prompt_tokens=None):
+    def store_mask(self, token_len, num_prompt_tokens=None, computed_token_len=None):
         return self.masks
 
     def load_mask(self, block_hashes, token_len):

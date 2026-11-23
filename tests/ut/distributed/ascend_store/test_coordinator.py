@@ -297,6 +297,27 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
                 self.assertEqual(coord.find_reachable_hit_tokens(hashes, 1024, query), 768)
 
+    def test_mamba_store_mask_uses_written_checkpoint_column(self):
+        block_size = 896
+        spec = MambaSpec(block_size=block_size, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+        coord = AscendStoreCoordinator(
+            [KVCacheGroupSpec(["attention"], _full_spec(block_size)), KVCacheGroupSpec(["state"], spec)],
+            scheduler_block_size=block_size,
+            hash_block_size=block_size,
+            group_block_sizes=[block_size, block_size],
+            group_cache_families=["default", "default"],
+            retention_interval=0,
+        )
+        for saved_tokens, prompt_tokens, computed_tokens, checkpoint_column in (
+            (16128, 16388, 16128, 16),
+            (31360, 31857, 31360, 33),
+            (31360, 31857, 31857, 34),
+            (122752, 122881, 122881, 136),
+        ):
+            with self.subTest(computed_tokens=computed_tokens):
+                mask = coord.store_mask(saved_tokens, prompt_tokens, computed_tokens)[1]
+                self.assertEqual([index for index, selected in enumerate(mask) if selected], [checkpoint_column])
+
     def test_legacy_reachable_mask_ignores_new_boundary_argument(self):
         class LegacyManager:
             @staticmethod

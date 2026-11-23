@@ -380,10 +380,11 @@ class ChunkedTokenDatabase:
         self,
         aligned_token_len: int,
         num_prompt_tokens: int | None = None,
+        computed_token_len: int | None = None,
     ) -> tuple[list[bool], ...] | None:
         if self.cache_coordinator is None:
             return None
-        return self.cache_coordinator.store_mask(aligned_token_len, num_prompt_tokens)
+        return self.cache_coordinator.store_mask(aligned_token_len, num_prompt_tokens, computed_token_len)
 
     def load_mask(
         self,
@@ -1125,6 +1126,7 @@ class ReqMeta:
         kv_cache_group_families: list[str] | None = None,
         save_partial_block: bool = False,
         hash_block_size: int | None = None,
+        save_mamba_tail: bool = False,
     ) -> ReqMeta | None:
         """Create the request metadata from a request tracker."""
         if block_hashes is None:
@@ -1173,8 +1175,20 @@ class ReqMeta:
         should_save_partial_block = save_partial_block and (
             target_token_len % cache_transfer_granularity != 0 or full_block_count > available_full_block_count
         )
+        # The final prefill step can create the checkpoint at the preceding
+        # full-block boundary without advancing the ordinary save extent.
+        # It must still reach the worker so that state can be published.
+        save_tail_checkpoint = (
+            save_mamba_tail
+            and num_tokens_to_save > 0
+            and num_tokens_to_save == previous_saved_tokens
+            and len(block_hashes) >= num_tokens_to_save // hash_block_size
+        )
         skip_save = skip_save or (
-            num_tokens_to_save < chunk_boundary and partial_block_index is None and not should_save_partial_block
+            num_tokens_to_save < chunk_boundary
+            and partial_block_index is None
+            and not should_save_partial_block
+            and not save_tail_checkpoint
         )
         # A ReqMeta must never carry both a save AND a load.
         # The save would also be wasted work — the bytes are being looked up

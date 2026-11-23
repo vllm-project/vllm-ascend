@@ -828,6 +828,34 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         return sched_output
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_mamba_prefill_tail_reaches_save_without_new_block_ids(self, mock_client_cls):
+        scheduler = KVPoolScheduler(self._make_config(), use_layerwise=False)
+        scheduler.num_speculative_blocks_by_group = {1: 0}
+        scheduler._request_trackers["r1"] = RequestTracker(
+            req_id="r1",
+            token_len=16,
+            allocated_block_ids=[1, 2],
+            num_saved_tokens=16,
+            num_prompt_tokens=21,
+            prefill_end_tokens=21,
+        )
+        output = self._make_running_chunk_output([], num_computed_tokens=16)
+        output.num_scheduled_tokens = {"r1": 5}
+        with (
+            patch.object(
+                scheduler, "_process_running_cached_request", return_value=ReqMeta("r1", can_save=True)
+            ) as save,
+            patch.object(scheduler, "retain_blocks_for_save"),
+        ):
+            scheduler.build_connector_meta(output)
+        save.assert_called_once()
+
+        output.scheduled_cached_reqs.num_computed_tokens = [0]
+        with patch.object(scheduler, "_process_running_cached_request") as save:
+            scheduler.build_connector_meta(output)
+        save.assert_not_called()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_running_chunk_passes_computed_tokens_to_tracker(self, mock_client_cls):
         scheduler = KVPoolScheduler(self._make_config(), use_layerwise=False)
         request = MagicMock()

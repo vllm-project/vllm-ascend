@@ -695,6 +695,27 @@ class TestReqMeta(unittest.TestCase):
         self.assertEqual(meta.save_end_token, 16)
         self.assertEqual(meta.target_token_len, 20)
 
+    def test_from_request_tracker_saves_mamba_checkpoint_after_partial_tail(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=31857,
+            allocated_block_ids=[1] * 36,
+            num_saved_tokens=31360,
+            num_prompt_tokens=31857,
+        )
+        hashes = [bytes([index]) for index in range(35)]
+        self.assertIsNone(ReqMeta.from_request_tracker(tracker, 896, block_hashes=hashes))
+
+        meta = ReqMeta.from_request_tracker(tracker, 896, block_hashes=hashes, save_mamba_tail=True)
+        self.assertIsNotNone(meta)
+        self.assertTrue(meta.can_save)
+        self.assertEqual(meta.save_start_token, 31360)
+        self.assertEqual(meta.save_end_token, 31360)
+        self.assertEqual(meta.target_token_len, 31857)
+
+        # The state cannot be published under an uncommitted boundary hash.
+        self.assertIsNone(ReqMeta.from_request_tracker(tracker, 896, block_hashes=hashes[:-1], save_mamba_tail=True))
+
     def test_from_request_tracker_keeps_partial_decode_step(self):
         tracker = RequestTracker(
             req_id="r1",

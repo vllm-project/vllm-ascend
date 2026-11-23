@@ -17,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheSpec,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -223,6 +224,7 @@ class AscendStoreCoordinator:
         aligned_token_len: int,
         retention_interval: int | None,
         num_prompt_tokens: int | None,
+        computed_token_len: int | None = None,
     ) -> list[tuple[int, list[bool] | None]]:
         assert aligned_token_len % self.lcm_block_size == 0, (
             f"aligned_token_len ({aligned_token_len}) must be a multiple of lcm_block_size ({self.lcm_block_size})"
@@ -245,6 +247,11 @@ class AscendStoreCoordinator:
                 masks.append((num_chunks, None))
                 continue
             manager_cls = _get_manager_class(_unwrap_spec(self.kv_cache_groups[group_id].kv_cache_spec))
+            is_mamba_store = (
+                computed_token_len is not None
+                and num_prompt_tokens is not None
+                and isinstance(_unwrap_spec(self.kv_cache_groups[group_id].kv_cache_spec), MambaSpec)
+            )
             mask = _reachable_block_mask(
                 manager_cls,
                 start_block=0,
@@ -254,8 +261,15 @@ class AscendStoreCoordinator:
                 use_eagle=group_id in self.eagle_reachable_group_ids,
                 retention_interval=retention_interval,
                 num_prompt_tokens=num_prompt_tokens,
-                reachable_boundaries=reachable_boundaries,
+                reachable_boundaries=() if is_mamba_store else reachable_boundaries,
             )
+            if is_mamba_store and mask is not None:
+                # The prefill kernel writes the checkpoint one physical column
+                # before the current state: cdiv(query_end, block_size) - 2.
+                # The transfer extent can end earlier than query_end.
+                checkpoint_block = cdiv(computed_token_len, self.group_effective_block_sizes[group_id]) - 2
+                if 0 <= checkpoint_block < num_chunks:
+                    mask[checkpoint_block] = True
             masks.append((num_chunks, mask))
         return masks
 
@@ -263,8 +277,11 @@ class AscendStoreCoordinator:
         self,
         aligned_token_len: int,
         num_prompt_tokens: int | None = None,
+        computed_token_len: int | None = None,
     ) -> tuple[list[bool], ...]:
-        masks = self._cached_reachable_masks(aligned_token_len, self.retention_interval, num_prompt_tokens)
+        masks = self._cached_reachable_masks(
+            aligned_token_len, self.retention_interval, num_prompt_tokens, computed_token_len
+        )
         return tuple([True] * num_chunks if mask is None else mask.copy() for num_chunks, mask in masks)
 
     def lookup_mask(

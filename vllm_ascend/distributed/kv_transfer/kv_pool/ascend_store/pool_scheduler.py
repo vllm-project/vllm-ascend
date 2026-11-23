@@ -423,6 +423,7 @@ class BaseKVPoolScheduler(ABC):
         load_spec: LoadSpec | None,
         prompt_token_ids: list[int],
         skip_save: bool | None,
+        save_mamba_tail: bool = False,
     ):
         last_chunk_tokens_num = self._get_last_chunk_tokens_num(prompt_token_ids)
         return ReqMeta.from_request_tracker(
@@ -437,6 +438,20 @@ class BaseKVPoolScheduler(ABC):
             kv_cache_group_families=self.kv_cache_group_families,
             save_partial_block=self.layerwise_offload,
             hash_block_size=self.hash_block_size,
+            save_mamba_tail=save_mamba_tail,
+        )
+
+    def _is_mamba_prefill_tail(self, req_id: str, num_computed_tokens: int, num_scheduled_tokens: int) -> bool:
+        if not self.num_speculative_blocks_by_group:
+            return False
+        tracker = self._request_trackers.get(req_id)
+        if tracker is None:
+            return False
+        prefill_end = tracker.prefill_end_tokens or tracker.num_prompt_tokens or 0
+        return (
+            prefill_end > 0
+            and prefill_end % self.cache_transfer_granularity != 0
+            and num_computed_tokens <= prefill_end <= num_computed_tokens + num_scheduled_tokens
         )
 
     def _process_new_request(
@@ -545,9 +560,10 @@ class BaseKVPoolScheduler(ABC):
             raise ValueError(f"Request {req_id} is not in _request_trackers, but it is scheduled to be cached")
         prefill_end_tokens = request_tracker.prefill_end_tokens or request_tracker.num_prompt_tokens or 0
         is_decoding = num_computed_tokens >= prefill_end_tokens
-        if is_decoding and not self.save_decode_cache and not self.layerwise_offload:
-            return None
         num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
+        save_mamba_tail = self._is_mamba_prefill_tail(req_id, num_computed_tokens, num_new_tokens)
+        if is_decoding and not self.save_decode_cache and not self.layerwise_offload and not save_mamba_tail:
+            return None
         if req_tuple:
             request = req_tuple[0]
             # The scheduler rolls this back when speculative tokens are rejected.
@@ -573,6 +589,7 @@ class BaseKVPoolScheduler(ABC):
             load_spec,
             request.prompt_token_ids,
             skip_save,
+            save_mamba_tail=save_mamba_tail,
         )
 
     def _sync_swa_block_ids(self, tracker: RequestTracker) -> None:
@@ -668,6 +685,11 @@ class BaseKVPoolScheduler(ABC):
                     and not self.tp_mismatch
                     and not self.layerwise_offload
                     and not self.save_decode_cache
+                    and not self._is_mamba_prefill_tail(
+                        req_id,
+                        cached_reqs.num_computed_tokens[i],
+                        scheduler_output.num_scheduled_tokens[req_id],
+                    )
                 ):
                     continue
                 if req_id in self._preempted_req_ids:
