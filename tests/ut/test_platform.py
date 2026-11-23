@@ -18,6 +18,7 @@ from tests.ut.base import TestBase
 from tests.ut.graph_dispatch_fixture import CudagraphDispatcher
 from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
+from vllm_ascend.attention.context_parallel.topology import CPTopology, validate_dcp_block_interleave
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import (
     NPUPlatform,
@@ -55,6 +56,42 @@ def test_kimi_hybrid_pd_keeps_kernel_interleave_after_manager_block_growth(block
     ):
         _validate_sfa_dcp_kv_sp(config)
     assert config.parallel_config.cp_kv_cache_interleave_size == interleave
+
+
+def test_sfa_local_dcp_normalises_interleave_before_the_divisibility_check():
+    """SFA DCP2 with block 128 / interleave 3 must still start.
+
+    The SFA validator warns and rewrites the interleave to the cache block size;
+    the divisibility check therefore runs on the backend-resolved value instead
+    of the raw configuration (which would raise 128 % 3 != 0).
+    """
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architecture="SomeSFAArch"),
+        cache_config=SimpleNamespace(block_size=128, cache_dtype="bf16"),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=2,
+            cp_kv_cache_interleave_size=3,
+            tensor_parallel_size=2,
+            prefill_context_parallel_size=1,
+        ),
+        kv_transfer_config=None,
+        use_v2_model_runner=True,
+    )
+    with (
+        patch("vllm_ascend.platform.model_uses_sfa_sparse", return_value=True),
+        patch("vllm_ascend.platform.enable_sp", return_value=False),
+    ):
+        _validate_sfa_dcp_kv_sp(config)
+    assert config.parallel_config.cp_kv_cache_interleave_size == 128
+    topology = CPTopology(tp_size=2, pcp_size=1, dcp_size=2, interleave_size=128)
+    validate_dcp_block_interleave(topology, config.cache_config)
+
+
+def test_dcp_divisibility_check_still_rejects_raw_mismatch():
+    """A backend that does not normalise the interleave still fails early."""
+    topology = CPTopology(tp_size=2, pcp_size=1, dcp_size=2, interleave_size=3)
+    with pytest.raises(ValueError, match="must divide the cache block_size"):
+        validate_dcp_block_interleave(topology, SimpleNamespace(block_size=128))
 
 
 @pytest.mark.parametrize("connector,interleave", [("MooncakeConnectorV2", 64), ("MooncakePullConnector", 192)])

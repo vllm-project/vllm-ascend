@@ -40,7 +40,7 @@ from vllm_ascend.utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+    from vllm_ascend.attention.context_parallel.context import AscendPCPAttentionContext
 
 # Native npu_attention_update accepts at most 16 output/LSE pairs.
 ATTENTION_UPDATE_MAX_INPUTS = 16
@@ -321,13 +321,13 @@ def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAt
 
 
 def is_dcp_enabled():
-    parallel_config = get_current_vllm_config().parallel_config
-    return parallel_config.decode_context_parallel_size > 1
+    # Read the single field directly: callers include partial config stubs and the
+    # draft path, which do not always carry the full TP x PCP x DCP grid.
+    return get_current_vllm_config().parallel_config.decode_context_parallel_size > 1
 
 
 def is_pcp_enabled():
-    parallel_config = get_current_vllm_config().parallel_config
-    return parallel_config.prefill_context_parallel_size > 1
+    return get_current_vllm_config().parallel_config.prefill_context_parallel_size > 1
 
 
 def uses_pcp_sharded_layout(common_attn_metadata: "AscendCommonAttentionMetadata", use_pcp: bool) -> bool:

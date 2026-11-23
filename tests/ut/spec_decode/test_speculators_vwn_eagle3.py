@@ -22,13 +22,22 @@ Eagle3VwnLlamaForCausalLM using CPU-only execution with mocked VllmConfig.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from vllm.config import CacheConfig, CompilationMode, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    CompilationMode,
+    VllmConfig,
+    set_current_vllm_config,
+)
+from vllm.config import (
+    get_current_vllm_config as _real_get_current_vllm_config,
+)
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.models.llama_eagle3_vwn import (
@@ -112,6 +121,29 @@ def _cpu_add_rms_norm_bias(x, residual, weight, bias, eps):
     return out, _, new_residual
 
 
+def _cp_config(pcp_size: int = 1, dcp_size: int = 1):
+    """Minimal current-config stub for the registry-based CP selection seam."""
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=pcp_size,
+            decode_context_parallel_size=dcp_size,
+        )
+    )
+
+
+def _current_or_cp_config():
+    """Real current config inside a context, CP stub for config-less probes.
+
+    The VWN tests never exercise context parallelism, so the backend routing
+    probes only need the parallel sizes. The attention impl, however, reads the
+    full VllmConfig, so return the real one whenever a context is active.
+    """
+    try:
+        return _real_get_current_vllm_config()
+    except Exception:
+        return _cp_config()
+
+
 @pytest.fixture(autouse=True)
 def _mock_npu_env():
     """Patch TP group, Ascend config, and NPU ops so all tests run on CPU.
@@ -160,6 +192,10 @@ def _mock_npu_env():
             return_value=False,
         ),
         patch("vllm_ascend.attention.mla_v1.is_dcp_enabled", return_value=False),
+        patch(
+            "vllm_ascend.attention.mla_v1.get_current_vllm_config",
+            new=_current_or_cp_config,
+        ),
     ):
         yield
 

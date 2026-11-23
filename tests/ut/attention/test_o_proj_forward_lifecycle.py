@@ -297,7 +297,7 @@ def test_native_sfa_dcp_forward_needs_no_projection_component(monkeypatch, fail)
 @pytest.mark.parametrize("pcp_enabled", [False, True])
 def test_sfa_dcp_state_and_postload_cooperate_with_projection(pcp_enabled, switch_enabled, monkeypatch):
     from vllm_ascend.attention import sfa_v1
-    from vllm_ascend.attention.context_parallel import common_cp, sfa_cp
+    from vllm_ascend.attention.context_parallel import metadata, sfa_cp
 
     group = SimpleNamespace(world_size=2, rank_in_group=0, device_group=object())
     owner = torch.nn.Module()
@@ -335,7 +335,7 @@ def test_sfa_dcp_state_and_postload_cooperate_with_projection(pcp_enabled, switc
     impl._initialize_pcp_o_proj()
     monkeypatch.setattr(AscendSFAImpl, "__init__", lambda self: None)
     for name in ("get_tp_group", "get_pcp_group", "get_dcp_group"):
-        monkeypatch.setattr(common_cp, name, lambda: group)
+        monkeypatch.setattr(metadata, name, lambda: group)
     monkeypatch.setattr(sfa_cp, "get_pcp_group", lambda: group)
     AscendSFADCPImpl.__init__(impl)
     assert not impl.enable_mlapo
