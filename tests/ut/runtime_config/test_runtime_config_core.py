@@ -217,6 +217,64 @@ def test_report_save_sensitive_wrong_type_rejected():
         validate_runtime_config(data)
 
 
+def test_metrics_level_normalizes_and_rejects_unknown():
+    from copy import deepcopy
+
+    from vllm_ascend.observability.runtime_config._defaults import _DEFAULTS
+    from vllm_ascend.observability.runtime_config.config import validate_runtime_config
+
+    data = deepcopy(_DEFAULTS)
+    data["metrics"]["level"] = 1
+    validate_runtime_config(data)
+    assert data["metrics"]["level"] == "detail"
+
+    data = deepcopy(_DEFAULTS)
+    data["metrics"]["level"] = "nope"
+    with pytest.raises(ValueError, match="invalid metric level"):
+        validate_runtime_config(data)
+
+    data = deepcopy(_DEFAULTS)
+    data["metrics"]["enabled"] = True
+    with pytest.raises(ValueError, match="unknown key"):
+        validate_runtime_config(data)
+
+
+def test_hot_reload_apply_metric_level(tmp_path: Path):
+    from vllm_ascend.observability.ms_metrics.level import (
+        METRIC_LEVEL_BASIC,
+        METRIC_LEVEL_DETAIL,
+        get_metric_level,
+        set_metric_level,
+    )
+
+    cfg_path = tmp_path / "runtime_config.json"
+    _write(cfg_path, {})
+    cfg = RuntimeConfig(
+        config_path=cfg_path,
+        report_dir=tmp_path / "report",
+        ensure_file=True,
+        hot_reload=True,
+    )
+    try:
+        cfg.apply_metric_level()
+        assert get_metric_level() == METRIC_LEVEL_BASIC
+
+        _write(cfg_path, {"metrics": {"level": "detail"}})
+        time.sleep(0.01)
+        assert cfg.reload(force=True) is True
+        cfg.apply_metric_level()
+        assert cfg.metrics_level() == "detail"
+        assert get_metric_level() == METRIC_LEVEL_DETAIL
+
+        _write(cfg_path, {"metrics": {"level": "basic"}})
+        time.sleep(0.01)
+        assert cfg.reload(force=True) is True
+        cfg.apply_metric_level()
+        assert get_metric_level() == METRIC_LEVEL_BASIC
+    finally:
+        set_metric_level("basic")
+
+
 def test_ascend_log_enabled_unknown_key_rejected():
     from copy import deepcopy
 
@@ -357,23 +415,23 @@ def test_manual_dump_watermark_never_rewrites_json(tmp_path: Path):
     assert cfg.reload(force=True) is True
     assert cfg.manual_dump_target() == 3
     assert cfg.manual_dumps_done() == 0
-    assert cfg.manual_trigger_count() == 3
+    assert cfg.manual_dump_remaining() == 3
 
-    assert cfg.consume_manual_trigger() is True
+    assert cfg.consume_manual_dump() is True
     assert cfg.manual_dumps_done() == 1
-    assert cfg.manual_trigger_count() == 2
+    assert cfg.manual_dump_remaining() == 2
     assert json.loads(cfg_path.read_text(encoding="utf-8"))["dump"]["manual_dump"] == 3
 
-    assert cfg.consume_manual_trigger() is True
+    assert cfg.consume_manual_dump() is True
     assert cfg.manual_dumps_done() == 2
-    assert cfg.manual_trigger_count() == 1
+    assert cfg.manual_dump_remaining() == 1
     assert json.loads(cfg_path.read_text(encoding="utf-8"))["dump"]["manual_dump"] == 3
 
-    assert cfg.consume_manual_trigger() is True
+    assert cfg.consume_manual_dump() is True
     assert cfg.manual_dumps_done() == 3
-    assert cfg.manual_trigger_count() == 0
+    assert cfg.manual_dump_remaining() == 0
     assert json.loads(cfg_path.read_text(encoding="utf-8"))["dump"]["manual_dump"] == 3
-    assert cfg.consume_manual_trigger() is False
+    assert cfg.consume_manual_dump() is False
 
 
 def test_manual_dump_skip_when_target_leq_done(tmp_path: Path):
@@ -388,25 +446,25 @@ def test_manual_dump_skip_when_target_leq_done(tmp_path: Path):
     )
     _write(cfg_path, {"dump": {"manual_dump": 1, "auto_max_times": 0}})
     assert cfg.reload(force=True) is True
-    assert cfg.consume_manual_trigger() is True
+    assert cfg.consume_manual_dump() is True
     assert cfg.manual_dumps_done() == 1
-    assert cfg.manual_trigger_count() == 0
+    assert cfg.manual_dump_remaining() == 0
 
     # Same or lower target: skip.
     _write(cfg_path, {"dump": {"manual_dump": 1, "auto_max_times": 0}})
     assert cfg.reload(force=True) is True
-    assert cfg.manual_trigger_count() == 0
-    assert cfg.consume_manual_trigger() is False
+    assert cfg.manual_dump_remaining() == 0
+    assert cfg.consume_manual_dump() is False
 
     _write(cfg_path, {"dump": {"manual_dump": 0, "auto_max_times": 0}})
     assert cfg.reload(force=True) is True
-    assert cfg.manual_trigger_count() == 0
+    assert cfg.manual_dump_remaining() == 0
 
     # Bump above done → one more dump.
     _write(cfg_path, {"dump": {"manual_dump": 2, "auto_max_times": 0}})
     assert cfg.reload(force=True) is True
-    assert cfg.manual_trigger_count() == 1
-    assert cfg.consume_manual_trigger() is True
+    assert cfg.manual_dump_remaining() == 1
+    assert cfg.consume_manual_dump() is True
     assert cfg.manual_dumps_done() == 2
     assert json.loads(cfg_path.read_text(encoding="utf-8"))["dump"]["manual_dump"] == 2
 
@@ -422,16 +480,16 @@ def test_manual_dump_hand_edit_raises_target_while_catching_up(tmp_path: Path):
     )
     _write(cfg_path, {"dump": {"manual_dump": 3, "auto_max_times": 0}})
     assert cfg.reload(force=True) is True
-    assert cfg.consume_manual_trigger() is True
+    assert cfg.consume_manual_dump() is True
     assert cfg.manual_dumps_done() == 1
-    assert cfg.manual_trigger_count() == 2
+    assert cfg.manual_dump_remaining() == 2
 
     # Hand-edit raises target; done stays — remaining grows.
     _write(cfg_path, {"dump": {"manual_dump": 5, "auto_max_times": 0}})
     assert cfg.reload(force=True) is True
     assert cfg.manual_dumps_done() == 1
     assert cfg.manual_dump_target() == 5
-    assert cfg.manual_trigger_count() == 4
+    assert cfg.manual_dump_remaining() == 4
 
 
 def test_bootstrap_overwrite_wipes_prestart_manual_dump_then_hot_reload_rearms(
@@ -444,13 +502,13 @@ def test_bootstrap_overwrite_wipes_prestart_manual_dump_then_hot_reload_rearms(
     cfg = RuntimeConfig(
         config_path=cfg_path,
         report_dir=tmp_path / "report",
-        ensure_file=False,  # production: persist deferred to ensure_persisted
+        ensure_file=False,  # production: persist deferred to persist_bootstrap_config
         hot_reload=True,
     )
     # Bootstrap ignores the pre-start file → default false.
     assert cfg.manual_dump_target() == 0
-    assert cfg.manual_trigger_count() == 0
-    assert cfg.ensure_persisted() is True
+    assert cfg.manual_dump_remaining() == 0
+    assert cfg.persist_bootstrap_config() is True
     on_disk = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert on_disk["dump"]["manual_dump"] is False
 
@@ -458,8 +516,8 @@ def test_bootstrap_overwrite_wipes_prestart_manual_dump_then_hot_reload_rearms(
     _write(cfg_path, {"dump": {"manual_dump": 1, "auto_max_times": 0}})
     assert cfg.reload(force=True) is True
     assert cfg.manual_dump_target() == 1
-    assert cfg.manual_trigger_count() == 1
-    assert cfg.consume_manual_trigger() is True
+    assert cfg.manual_dump_remaining() == 1
+    assert cfg.consume_manual_dump() is True
     assert cfg.manual_dumps_done() == 1
     assert json.loads(cfg_path.read_text(encoding="utf-8"))["dump"]["manual_dump"] == 1
 
@@ -467,6 +525,10 @@ def test_bootstrap_overwrite_wipes_prestart_manual_dump_then_hot_reload_rearms(
 def test_same_mtime_content_change_reloads_via_digest(tmp_path: Path):
     """Bug #11: same-second equal-size edits must reload via content digest."""
     import os
+
+    from vllm_ascend.observability.runtime_guard.detector.token_repeat import (
+        TokenRepeatDetector,
+    )
 
     cfg_path = tmp_path / "runtime_config.json"
     _write(cfg_path, {})
@@ -482,11 +544,22 @@ def test_same_mtime_content_change_reloads_via_digest(tmp_path: Path):
     assert cfg.detector_get("token_repeat", "window") == 10
     pinned = cfg._mtime
     assert pinned is not None
+    version_before = float(cfg.config_version)
+    det = TokenRepeatDetector(runtime_config=cfg, runner=None)
+    assert det.enabled is False
+    assert det._window == 10
+    applied = det._applied_config_version
 
     _write(cfg_path, {"detector": {"token_repeat": {"enabled": False, "window": 33}}})
     os.utime(cfg_path, (pinned, pinned))
     assert cfg.reload(force=False) is True
     assert cfg.detector_get("token_repeat", "window") == 33
+    # Revision must advance even when file mtime is unchanged.
+    assert float(cfg.config_version) > version_before
+    assert cfg._mtime == pinned
+    det.refresh_from_config()
+    assert det._window == 33
+    assert det._applied_config_version != applied
 
 
 def test_touch_same_content_skips_reload(tmp_path: Path):

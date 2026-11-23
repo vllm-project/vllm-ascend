@@ -12,7 +12,7 @@ GLM-5 model has been discontinued since vLLM Ascend v0.30.0 and will no longer r
 
 [GLM-5.1](https://huggingface.co/zai-org/GLM-5.1) uses a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
 
-To use the latest features (e.g., PD separation, MTP), use a vLLM-Ascend release that supports GLM-5.1. The version of transformers needs to be 5.2.0 or later.
+To use the latest features (e.g., PD separation, MTP), use a vLLM Ascend release that supports GLM-5.1. The version of transformers needs to be 5.2.0 or later.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
@@ -45,11 +45,11 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 
 ### 4.1 Docker Image Installation
 
-You can use our official docker image to run GLM-5.1 directly.
+You can use our official Docker image to run GLM-5.1 directly.
 
 === "950DT Products"
 
-    Start the docker image on each node.
+    Start the Docker image on each node.
 
     ```shell
 
@@ -97,7 +97,7 @@ You can use our official docker image to run GLM-5.1 directly.
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
-    # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+    # Note: If you are running bridge network with Docker, please expose available ports for multiple nodes communication in advance
     docker run --rm \
     --name $NAME \
     --net=host \
@@ -169,7 +169,7 @@ You can use our official docker image to run GLM-5.1 directly.
 
 ### 4.2 Source Code Installation
 
-In addition, if you don't want to use the docker image as above, you can also build all from source:
+In addition, if you don't want to use the Docker image as above, you can also build all from source:
 
 - Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
@@ -181,7 +181,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 === "950DT Products"
 
-    - Quantized model `GLM-5.1-w4a4c8-mxfp4` can be deployed on 1 950DT Product (96GB × 8) .
+    - Quantized model `GLM-5.1-w4a4c8-mxfp4` can be deployed on 1 950DT Product (96GB × 8).
 
     Run the following script to execute online inference.
 
@@ -238,7 +238,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 === "A3 series"
 
-    - Quantized model `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (128GB × 8) .
+    - Quantized model `GLM-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (128GB × 8).
 
     Run the following script to execute online inference.
 
@@ -277,7 +277,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 === "A2 series"
 
-    - Quantized model `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A2 (64GB × 8) .
+    - Quantized model `GLM-5.1-w4a8` can be deployed on 1 Atlas 800 A2 (64GB × 8).
 
     Run the following script to execute online inference.
 
@@ -340,7 +340,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 ### 5.2 Multi-node Deployment
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
@@ -573,9 +573,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
 
 #### 5.3.1 Prefill-Decode Disaggregation (950DT Products)
 
-Before you start, please
-
-prepare the script `launch_online_dp.py` on each node:
+Before you start, please prepare the script `launch_online_dp.py` on each node:
 
 ```python
 import argparse
@@ -980,9 +978,7 @@ Once the preparation is done, you can start the server with the following comman
 
 The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (128GB × 8): 2 prefill nodes (`PP2 TP1 PCP16`, 78 layers partitioned as `41/37`, one PP rank per node) and 2 decode nodes (`DP8 TP4`, 4 DP ranks per node). The same scripts serve both the high-throughput and low-latency cases.
 
-Before you start, please
-
-prepare the script `launch_online_dp.py` on each node:
+Before you start, please prepare the script `launch_online_dp.py` on each node:
 
 ```python
 import argparse
@@ -1334,7 +1330,7 @@ Once the preparation is done, you can start the server with the following comman
 
 #### 5.3.3 Request Forwarding and Key Parameter Descriptions
 
-To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
+To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
 
 **950DT Products:**
 
@@ -1416,7 +1412,7 @@ In addition to the single-node and multi-node parameters described above, the fo
 **Prefill node-specific configurations:**
 
 - `--additional-config '{"enable_fused_mc2": true}'`: Enables fused MC2 operators (`dispatch_ffn_combine`/`mega_moe`) to optimize MoE communication. Constraints: `dispatch_ffn_combine` only for w8a8 and EP≤32; `mega_moe` works for w8a8/w4a8/bf16 with EP≤64. Both are incompatible with MTP and dynamic EPLB.
-- `--prefill-context-parallel-size`: Enables PCP on prefill nodes to accelerate long-context prefill. Required for handling prompts up to 128K tokens.
+- `--prefill-context-parallel-size`: Enables PCP on prefill nodes to accelerate long-context prefill. Required for handling prompts up to 128k tokens.
 
 **Decode node-specific configurations:**
 
@@ -1473,7 +1469,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### 8.2 Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ## 9 Performance Tuning
 
@@ -1488,7 +1484,7 @@ The tables below provide recommended parameter configurations for the `GLM-5.1-w
 - **Prefill-Decode Disaggregation 198K (PP2)**: prefill `PP2 TP1 PCP16` + decode `DP8 TP4`, see [Prefill-Decode Disaggregation (A3 series)](#532-prefill-decode-disaggregation-a3-series).
 - **Prefill-Decode Disaggregation 198K (950DT Products)**: prefill `TP1 PCP8` + decode `DP16 TP1`, see [Prefill-Decode Disaggregation (950DT Products)](#531-prefill-decode-disaggregation-950dt-products).
 
-Test cases use the notation `input/output`, e.g., `128k/1k` means 128K input tokens and 1K output tokens; `@50%/90%` marks the prefix cache hit rate. When the prefix cache hit rate is > 0, add `--enable-prefix-caching`; when the hit rate is 0, add `--no-enable-prefix-caching` instead (for the PD scenario, this applies to the prefill nodes).
+Test cases use the notation `input/output`, e.g., `128k/1k` means 128k input tokens and 1k output tokens; `@50%/90%` marks the prefix cache hit rate. When the prefix cache hit rate is > 0, add `--enable-prefix-caching`; when the hit rate is 0, add `--no-enable-prefix-caching` instead (for the PD scenario, this applies to the prefill nodes).
 
 #### 9.1.1 Table 1: Detailed Node Configuration
 
@@ -1516,7 +1512,7 @@ The following optimizations must be explicitly enabled to take effect. They appl
 |FlashComm_v1|A3 prefill nodes / co-located nodes|`--additional-config '{"enable_flashcomm1": true}'`|Splits AllReduce into Reduce-Scatter and All-Gather, improving prefill throughput and reducing communication latency|Not available when `layer_sharding` includes `o_proj`|
 |Fused MC2|A3 prefill nodes|`--additional-config '{"enable_fused_mc2": true}'`|Replaces ALLTOALL+MC2 with the `dispatch_ffn_combine`/`dispatch_gmm_combine_decode` operators, reducing MoE communication overhead and improving MoE inference performance|`dispatch_ffn_combine` only for w8a8, EP≤32, non-MTP, non-dynamic-EPLB; conflicts with `multistream_overlap_shared_expert` (the latter is auto-disabled)|
 |MLAPO|A3 co-located high-throughput / PD decode nodes|`--additional-config '{"enable_mlapo": true}'`|Fuses the MLA preprocess operations, significantly improving decode performance|Consumes more NPU memory; in PD scenarios enable on decode nodes only|
-|PCP|A3 prefill nodes; long context (≥128K)|`--prefill-context-parallel-size`|PCP accelerates long-context prefill, reducing TTFT for long prompts|In the reference configs, enabled on co-located nodes and PD prefill nodes|
+|PCP|A3 prefill nodes; long context (≥128k)|`--prefill-context-parallel-size`|PCP accelerates long-context prefill, reducing TTFT for long prompts|In the reference configs, enabled on co-located nodes and PD prefill nodes|
 |Balance Scheduling|A3 single-node / co-located / non-PD scenarios|`--additional-config '{"enable_balance_scheduling": true}'`|Improves output throughput and reduces TPOT in the v1 scheduler|TTFT may degrade; not recommended when Prefill-Decode is separated|
 |Sparse SFA C8|A3 (w8a8c8); long-context prefill|`--additional-config '{"enable_sparse_sfa_c8": true}'`|Sparse Flash Attention skips unnecessary attention computation of the C8 quantized model, accelerating long-context prefill|Experimental in v0.23.0. In the reference configs, enabled in the high-throughput and PD scenarios; disabled in the low-latency scenario|
 |Sparse LI C8|A3 (w8a8c8)|`--attention_config.indexer_kv_dtype int8`|Sparse attention optimization reduces computation of the C8 quantized model, improving throughput|Independent of `enable_sparse_sfa_c8`; the reference low-latency config disables both|
@@ -1530,7 +1526,7 @@ The following optimizations must be explicitly enabled to take effect. They appl
 |Parameter|Low Latency|High Throughput|Long Context|Description|
 |---------|-----------|---------------|-------------|-----------|
 |`--max-num-seqs`|16 in the reference layout|6–64, depending on the layout|32–64, subject to KV cache capacity|Limits concurrent sequences. Tune within the selected parallel layout; sequence counts across different layouts are not directly comparable.|
-|`--max-model-len`|198K|Longer (128K–198K)|Maximum (198K)|Maximum context length. Must accommodate your longest input+output. Larger values consume more KV cache memory.|
+|`--max-model-len`|198K|Longer (128k–198k)|Maximum (198k)|Maximum context length. Must accommodate your longest input+output. Larger values consume more KV cache memory.|
 |`--max-num-batched-tokens`|Lower (4096)|Higher for prefill (4096–16384)|Higher for prefill (16384); account for MTP tokens on decode nodes|Controls batch size per step. Lower values reduce per-step latency; higher values improve prefill throughput.|
 |`--gpu-memory-utilization`|0.92|0.92|0.92|NPU memory fraction. The reference configs in this document use 0.92. Reduce if OOM.|
 |`--enable-chunked-prefill`|Enable (co-located)|Enable (co-located)|Enable (co-located)|Splits long prompts into chunks to prevent prefill from blocking decode. `--enforce-eager` controls graph execution and does not replace chunked prefill; configure the two independently.|
@@ -1551,11 +1547,11 @@ For environment variable descriptions and constraints, refer to [envs.py](https:
 
 - **Q: How to solve ValueError: Tokenizer class TokenizersBackend does not exist or is not currently imported?**
 
-  A: Please update the version of transformers to 5.2.0
+  A: Please update the version of transformers to 5.2.0.
 
 - **Q: How to enable function calling for GLM-5.1?**
 
-  A: Please add following configurations in vLLM startup command
+  A: Please add following configurations in vLLM startup command.
 
   ```shell
   --tool-call-parser glm47 \

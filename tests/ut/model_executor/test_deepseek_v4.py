@@ -19,7 +19,7 @@ def test_routed_moe_receives_configured_swiglu_limit(monkeypatch):
             fused_moe_kwargs.update(kwargs)
 
     monkeypatch.setattr(deepseek_v4, "FusedMoEFactory", StubFusedMoEFactory)
-    monkeypatch.setattr(deepseek_v4, "ReplicatedLinear", StubModule)
+    monkeypatch.setattr(deepseek_v4, "GateLinear", StubModule)
     monkeypatch.setattr(deepseek_v4, "DeepseekV2MLP", StubModule)
     monkeypatch.setattr(deepseek_v4, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(deepseek_v4, "get_tensor_model_parallel_rank", lambda: 0)

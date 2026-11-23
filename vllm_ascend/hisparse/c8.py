@@ -13,8 +13,8 @@ _INT32_MAX = 2**31 - 1
 
 def pack_c8_components(nope: torch.Tensor, rope: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
     """Pack existing SFA quantizer outputs using byte copies only."""
-    if nope.dtype != torch.float8_e4m3fn:
-        raise ValueError("HiSparse C8 requires FP8 E4M3 NoPE")
+    if nope.dtype not in (torch.int8, torch.float8_e4m3fn):
+        raise ValueError("HiSparse C8 requires INT8 or FP8 E4M3 NoPE")
     components = (nope, rope, scales)
     if any(t.device != nope.device or not t.is_contiguous() for t in components):
         raise ValueError("HiSparse C8 components must be contiguous on one device")
@@ -40,8 +40,8 @@ def c8_storage_view(cache: torch.Tensor) -> tuple[torch.Tensor, int, int, int]:
     The allocator must align the physical block stride to a whole packed row.
     The returned TND view shares storage; no payload is gathered or dequantized.
     """
-    if cache.ndim != 3 or cache.dtype != torch.float8_e4m3fn or cache.shape[-1] != C8_ROW_BYTES:
-        raise ValueError("HiSparse C8 cache must be FP8 [pages, block_size, 656]")
+    if cache.ndim != 3 or cache.dtype not in (torch.int8, torch.float8_e4m3fn) or cache.shape[-1] != C8_ROW_BYTES:
+        raise ValueError("HiSparse C8 cache must be INT8 or FP8 [pages, block_size, 656]")
     pages, block, width = cache.shape
     stride = cache.stride(0)
     if min(pages, block) <= 0 or cache.stride(1) != width or cache.stride(2) != 1:

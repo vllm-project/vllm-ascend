@@ -43,10 +43,10 @@ ASCENDC_TPL_ARGS_DECL(SparseFlashMla, // 算子OpType
 
 // Aurora always uses TND Q and PA_BBND KV: C0 -> SWA, C1/C2 -> CSA.
 // Keep the declaration above unchanged to preserve the host/kernel key ABI.
-// Only CSA on A2/A3 uses HEAD_RATIO_ONE. Split-G and vectorized sparse
-// addressing belong to A5. Both deterministic levels remain reachable.
+// Only CSA on A2/A3 uses HEAD_RATIO_ONE. Split-G belongs to A5.
+// CSA address caching retains both optimized and fallback kernels on A2/A3.
 #if !defined(__CCE_AICORE__)
-// Host validation accepts the union of the two device selections (14 keys).
+// Host validation accepts the union of the two device selections (16 keys).
 ASCENDC_TPL_SEL(
     ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_BOOL_SEL(FLASH_DECODE, 0),
                          ASCENDC_TPL_UINT_SEL(LAYOUT_T, ASCENDC_TPL_UI_LIST, SMLA_LAYOUT_TND),
@@ -59,7 +59,7 @@ ASCENDC_TPL_SEL(
                          ASCENDC_TPL_UINT_SEL(KV_LAYOUT_T, ASCENDC_TPL_UI_LIST, SMLA_LAYOUT_PA_BBND),
                          ASCENDC_TPL_UINT_SEL(TEMPLATE_MODE, ASCENDC_TPL_UI_LIST, CSA_TEMPLATE),
                          ASCENDC_TPL_BOOL_SEL(SPLIT_G, 0), ASCENDC_TPL_BOOL_SEL(HEAD_RATIO_ONE, 1),
-                         ASCENDC_TPL_BOOL_SEL(BATCH_CONSISTENCY, 0, 1), ASCENDC_TPL_BOOL_SEL(IS_VEC_S2PHYADDR, 0)),
+                         ASCENDC_TPL_BOOL_SEL(BATCH_CONSISTENCY, 0, 1), ASCENDC_TPL_BOOL_SEL(IS_VEC_S2PHYADDR, 0, 1)),
     ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_BOOL_SEL(FLASH_DECODE, 0),
                          ASCENDC_TPL_UINT_SEL(LAYOUT_T, ASCENDC_TPL_UI_LIST, SMLA_LAYOUT_TND),
                          ASCENDC_TPL_UINT_SEL(KV_LAYOUT_T, ASCENDC_TPL_UI_LIST, SMLA_LAYOUT_PA_BBND),
@@ -88,7 +88,7 @@ ASCENDC_TPL_SEL(
                          ASCENDC_TPL_BOOL_SEL(SPLIT_G, 0, 1), ASCENDC_TPL_BOOL_SEL(HEAD_RATIO_ONE, 0),
                          ASCENDC_TPL_BOOL_SEL(BATCH_CONSISTENCY, 0, 1), ASCENDC_TPL_BOOL_SEL(IS_VEC_S2PHYADDR, 0, 1)));
 #else
-// A2/A3: keep the CSA single-head kernel; never compile A5-only flags.
+// A2/A3: retain fallback kernels and compile CSA address caching without split-G.
 ASCENDC_TPL_SEL(
     ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_BOOL_SEL(FLASH_DECODE, 0),
                          ASCENDC_TPL_UINT_SEL(LAYOUT_T, ASCENDC_TPL_UI_LIST, SMLA_LAYOUT_TND),
@@ -101,7 +101,7 @@ ASCENDC_TPL_SEL(
                          ASCENDC_TPL_UINT_SEL(KV_LAYOUT_T, ASCENDC_TPL_UI_LIST, SMLA_LAYOUT_PA_BBND),
                          ASCENDC_TPL_UINT_SEL(TEMPLATE_MODE, ASCENDC_TPL_UI_LIST, CSA_TEMPLATE),
                          ASCENDC_TPL_BOOL_SEL(SPLIT_G, 0), ASCENDC_TPL_BOOL_SEL(HEAD_RATIO_ONE, 0, 1),
-                         ASCENDC_TPL_BOOL_SEL(BATCH_CONSISTENCY, 0, 1), ASCENDC_TPL_BOOL_SEL(IS_VEC_S2PHYADDR, 0)));
+                         ASCENDC_TPL_BOOL_SEL(BATCH_CONSISTENCY, 0, 1), ASCENDC_TPL_BOOL_SEL(IS_VEC_S2PHYADDR, 0, 1)));
 #endif
 
 #endif // TEMPLATE_TILING_KEY

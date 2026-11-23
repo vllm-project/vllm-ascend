@@ -27,7 +27,6 @@ from vllm.v1.attention.backends.gdn_attn import (
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     PAD_SLOT_ID,
-    mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
@@ -38,6 +37,9 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_offsets,
     prepare_final_chunk_indices,
     prepare_update_chunk_offsets,
+)
+from vllm_ascend.ops.triton.mamba.align_block_table import (
+    mamba_get_block_table_tensor,
 )
 from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
 
@@ -1115,6 +1117,10 @@ class AscendGDNAttentionBackend(GDNAttentionBackend):
     def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder]:
         return AscendGDNAttentionMetadataBuilder
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
 
 class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
     """Build only the descriptors consumed by AscendC host-metadata paths."""
@@ -1400,9 +1406,9 @@ class AscendGDNHostMetadataBackend(AscendGDNAttentionBackend):
             from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
 
             if use_glm_recoverssm(vllm_config):
-                from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
+                from vllm_ascend.models.glm5next.recoverssm_metadata import Glm5NextRecoverSSMMetadataBuilder
 
-                return AscendKDARecoverSSMMetadataBuilder
+                return Glm5NextRecoverSSMMetadataBuilder
         return AscendGDNHostMetadataBuilder
 
 
