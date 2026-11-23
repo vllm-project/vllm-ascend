@@ -1074,6 +1074,23 @@ class AscendConfig:
                 f"ft_communication_abort_timeout must be 0 (disabled) or an integer of at least "
                 f"2 seconds, got {self.ft_communication_abort_timeout}"
             )
+
+        # Fault tolerance needs the vLLM main (>= v0.34) lane. The v0.33.0
+        # release lane predates the scale-down helpers
+        # (WorkerSentinel.scale_down, _eplb_model_state,
+        # activate_cpu_group_timeouts, the /v1 fault_tolerance API), so
+        # enabling FT there only fails later with an AttributeError during
+        # model load or recovery. Fail fast with a clear message instead;
+        # the release lane supports normal startup with FT disabled.
+        if vc.parallel_config.enable_fault_tolerance:
+            # Imported here to avoid a utils <-> ascend_config import cycle.
+            from vllm_ascend.utils import vllm_version_is
+
+            if vllm_version_is("0.33.0"):
+                raise ValueError(
+                    "fault tolerance requires the vLLM main (>= v0.34) lane; "
+                    "the vLLM v0.33.0 release lane supports only FT disabled."
+                )
         return self
 
     @property
