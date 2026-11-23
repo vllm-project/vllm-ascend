@@ -18,8 +18,10 @@ GRAPH = "vllm_ascend/worker/v2/aclgraph_utils.py"
 def load_methods(file, class_name, names, namespace):
     # Execute the production methods without importing the platform and CANN.
     tree = ast.parse((ROOT / file).read_text(encoding="utf-8"))
-    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
-    methods = [node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name in names]
+    scope = tree if class_name is None else next(
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name
+    )
+    methods = [node for node in scope.body if isinstance(node, ast.FunctionDef) and node.name in names]
     assert len(methods) == len(names)
     code = compile(ast.Module(body=methods, type_ignores=[]), file, "exec", __future__.annotations.compiler_flag)
     exec(code, namespace)
@@ -335,6 +337,40 @@ class TestFsaPlannerMain(unittest.TestCase):
         old_draft.breakable_cg_runner.clear_graphs.assert_called_once()
         self.assertEqual(old_draft.graphs, {})
         self.assertFalse(old_draft._graphs_captured)
+
+    def test_shutdown_allows_a_new_engine_in_the_same_process(self):
+        ipc = Mock(owned={0: object()}, imported={}, owner_payload=None)
+        ipc.mark_failed.side_effect = lambda: setattr(ipc.ensure_usable, "side_effect", RuntimeError("closed IPC"))
+        old = SimpleNamespace(fsa_plan_ipc=ipc, _retire_fused_device_plan_graphs=Mock())
+        new = SimpleNamespace(fsa_plan_ipc=Mock())
+        ns = load_methods(
+            MANAGER,
+            None,
+            {"init_sparse_kv_offload_manager", "guard_fsa_plan_ipc"},
+            {
+                "contextlib": contextlib,
+                "_SPARSE_KV_OFFLOAD_MANAGER": old,
+                "get_ascend_device_type": lambda: "A3",
+                "AscendDeviceType": SimpleNamespace(A3="A3"),
+                "SparseKVOffloadManager": Mock(return_value=new),
+            },
+        )
+        close = load_methods(MANAGER, "SparseKVOffloadManager", {"close_fsa_plan_ipc"}, ns)["close_fsa_plan_ipc"]
+        # A failed release must be retryable and must keep replay disabled.
+        ipc.close.side_effect = [RuntimeError("release failed"), None]
+        with self.assertRaisesRegex(RuntimeError, "release failed"):
+            close(old, object())
+        self.assertIs(ns["_SPARSE_KV_OFFLOAD_MANAGER"], old)
+        with self.assertRaisesRegex(RuntimeError, "closed IPC"), ns["guard_fsa_plan_ipc"]():
+            pass
+        close(old, object())
+        with ns["guard_fsa_plan_ipc"]() as current:
+            self.assertIsNone(current)
+        self.assertIs(ns["init_sparse_kv_offload_manager"](None, None, None), new)
+        close(old, object())
+        with ns["guard_fsa_plan_ipc"]() as current:
+            self.assertIs(current, new.fsa_plan_ipc)
+        self.assertEqual(ipc.close.call_count, 2)
 
     def test_failed_drain_retains_notify_resources(self):
         namespace = load_methods(MANAGER, "SparseKVOffloadManager", {"close_fsa_plan_ipc"}, {})

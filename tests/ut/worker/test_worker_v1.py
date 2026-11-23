@@ -1111,9 +1111,13 @@ class TestNPUWorker(TestBase):
             fsa_device_planner_hbm_bytes,
         )
 
-        for draft_steps, token_limit, rows, topk, capacity, layers in ((0, 12, 3, 16, 128, 1), (3, 7, 7, 33, 256, 2)):
+        for sequences, draft_steps, token_limit, rows, topk, capacity, layers in (
+            (3, 0, 12, 3, 16, 128, 1),
+            (3, 3, 7, 7, 33, 256, 2),
+            (512, 0, 512, 512, 2048, 8192, 1),
+        ):
             vllm_config = SimpleNamespace(
-                scheduler_config=SimpleNamespace(max_num_seqs=3, max_num_batched_tokens=token_limit),
+                scheduler_config=SimpleNamespace(max_num_seqs=sequences, max_num_batched_tokens=token_limit),
                 speculative_config=SimpleNamespace(num_speculative_tokens=draft_steps) if draft_steps else None,
             )
             for mode in ("hccl", "notify"):

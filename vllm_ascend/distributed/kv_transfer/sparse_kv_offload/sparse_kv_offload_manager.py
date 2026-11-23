@@ -1867,14 +1867,18 @@ class SparseKVOffloadManager:
                     runner.clear_graphs()
 
     def close_fsa_plan_ipc(self, model_runner: typing.Any) -> None:
+        global _SPARSE_KV_OFFLOAD_MANAGER
         ipc = self.fsa_plan_ipc
-        if ipc is None or not (ipc.owned or ipc.imported or ipc.owner_payload is not None):
+        if ipc is None:
             return
         # Fail closed before draining. A failed drain must retain the resources
         # that an outstanding task may still access.
         ipc.mark_failed()
         self._retire_fused_device_plan_graphs(model_runner)
         ipc.close()
+        self.fsa_plan_ipc = None
+        if _SPARSE_KV_OFFLOAD_MANAGER is self:
+            _SPARSE_KV_OFFLOAD_MANAGER = None
 
     def wait_for_current_kv_writeback(self, capturing: bool = False) -> None:
         if self.use_fused_overlap and capturing and self.tp_rank == 0:
