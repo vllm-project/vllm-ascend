@@ -38,5 +38,3 @@ domains:
       - "vllm_ascend/_310p/**"
       - "vllm_ascend/attention/**"
       - "vllm_ascend/compilation/**"
-      - "vllm_ascend/sample/**"
-      - "vllm_ascend/spec_decode/**"
