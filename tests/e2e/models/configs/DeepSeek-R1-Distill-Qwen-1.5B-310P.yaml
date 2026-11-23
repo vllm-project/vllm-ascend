@@ -1,0 +1,36 @@
+# Measured on 310P3 Device 0 TP1, CANN 9.1.0, vLLM 0.23.0 / vLLM-Ascend 0.23.0.post1.
+# Bounded 32-sample regression baseline, not full-dataset model accuracy.
+# Checkpoint config SHA256: 37bd455e9679d2959536270fed49d25cc7c290a64f6e52abb97c71345a9cee41
+# For affected local Llama tokenizers, prepare and set serve.tokenizer as documented.
+model_name: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+model_type: vllm
+hardware: "Atlas 300I DUO (310P3), TP1"
+
+serve:
+  revision: "ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562"
+  tensor_parallel_size: 1
+  dtype: float16
+  max_model_len: 4096
+  max_num_seqs: 4
+  max_num_batched_tokens: 4096
+  gpu_memory_utilization: 0.8
+  enable_prefix_caching: false
+  enforce_eager: true
+  trust_remote_code: false
+
+tasks:
+- name: gsm8k
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.0
+  - name: "exact_match,flexible-extract"
+    value: 0.21875
+
+limit: 32
+num_fewshot: 5
+apply_chat_template: true
+fewshot_as_multiturn: true
+batch_size: "auto"
+generation_kwargs:
+  max_gen_toks: 512
+  temperature: 0

@@ -55,6 +55,11 @@ def build_model_args(eval_config, tp_size):
         "enforce_eager",
         "enable_thinking",
         "quantization",
+        "tokenizer",
+        "revision",
+        "max_num_seqs",
+        "max_num_batched_tokens",
+        "enable_prefix_caching",
     ]:
         val = serve_cfg.get(s, None)
         if val is not None:
@@ -124,6 +129,7 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
         "fewshot_as_multiturn": eval_config.get("fewshot_as_multiturn", True),
         "limit": eval_config.get("limit", None),
         "batch_size": eval_config.get("batch_size", "auto"),
+        "gen_kwargs": eval_config.get("generation_kwargs", None),
     }
     for s in ["num_fewshot", "fewshot_as_multiturn", "apply_chat_template"]:
         val = eval_config.get(s, None)
