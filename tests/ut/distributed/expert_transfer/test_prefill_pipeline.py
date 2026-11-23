@@ -61,10 +61,10 @@ def make_pool(monkeypatch, layers=4):
         for i in range(layers)
     ]
     pool.bindings = bindings
-    pool.buffers = [{"layer": None} for _ in range(min(layers, 2))]
+    pool.buffers = [{"layer": None} for _ in range(2)]
     pool.tensors = pool.buffers[0]
     pool.owners = [None] * len(pool.buffers)
-    pool.load_stream = load if layers > 1 else None
+    pool.load_stream = load
 
     def copy(adapter, store, destination, loads, device, *, stream=None, **kwargs):
         synchronize = stream is None
@@ -203,24 +203,28 @@ def test_failed_prefetch_invalidates_buffer_and_can_retry(monkeypatch):
     state.compute.synchronize()
 
 
-def test_single_layer_reuses_one_buffer_without_prefetch(monkeypatch):
+def test_single_layer_keeps_two_buffers_without_prefetch(monkeypatch):
     _, pool, bindings, state, _, calls = make_pool(monkeypatch, layers=1)
     for _ in range(2):
         submit_compute(pool, bindings[0], state)
     state.compute.synchronize()
     assert calls.count(("compute", "copy", 0)) == 1
     assert not pool.inflight
-    assert len(pool.buffers) == 1
+    assert len(pool.buffers) == 2
+    assert not any(call[:2] == ("load", "copy") for call in calls)
 
 
 @pytest.mark.parametrize("layers", [1, 2, 4])
-def test_native_allocation_uses_two_buffers_for_multiple_layers(monkeypatch, layers):
-    _, pool, bindings, _, load, _ = make_pool(monkeypatch, layers=layers)
+@pytest.mark.parametrize("device_type", ["cpu", "npu"])
+def test_native_allocation_always_uses_two_buffers(monkeypatch, layers, device_type):
+    _, _, bindings, _, load, _ = make_pool(monkeypatch, layers=layers)
+    pool = mod.FullExpertPool()
     for binding in bindings:
+        binding.device = SimpleNamespace(type=device_type)
         binding.adapter = SimpleNamespace(allocate_weights=lambda *args: {"layer": None})
     monkeypatch.setattr(pool, "_expert_layout", lambda _: None)
     monkeypatch.setattr(mod.torch.npu, "Stream", lambda **kwargs: load, raising=False)
     pool.allocate(bindings)
-    assert len(pool.buffers) == min(2, layers)
-    assert len({id(buffer) for buffer in pool.buffers}) == min(2, layers)
-    assert (pool.load_stream is not None) == (layers > 1)
+    assert len(pool.buffers) == 2
+    assert len({id(buffer) for buffer in pool.buffers}) == 2
+    assert (pool.load_stream is not None) == (device_type == "npu")

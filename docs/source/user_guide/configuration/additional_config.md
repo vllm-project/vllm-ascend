@@ -93,8 +93,8 @@ compilation mode `NONE` with `FULL_DECODE_ONLY` graphs.
 | `num_device_experts` | int or null | `None` | Resident expert slots per layer. Required when enabled; must satisfy `top_k <= num_device_experts < num_experts`. |
 
 When expert offload is enabled, prefill and mixed batches always use two reusable
-full-layer expert buffers on the NPU. A model with only one offloaded layer uses
-one buffer, since there is no next layer to prefetch. There are no additional
+full-layer expert buffers on the NPU, including models with one offloaded layer.
+There are no additional
 prefill switches, buffer-count settings, or legacy transfer modes.
 Experts already resident on the device are copied into these buffers locally;
 only missing experts are transferred from the host. Preparing a layer's buffer

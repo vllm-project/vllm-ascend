@@ -262,15 +262,14 @@ class FullExpertPool:
                     f"{binding.layer_name} differs from {first_binding.layer_name}"
                 )
         # Allocate in the scheme's native format, including scale strides.
-        count = 2 if first_binding.device.type == "npu" and remaining_bindings else 1
         self.buffers = [
             first_binding.adapter.allocate_weights(
                 first_binding.host_store, first_binding.num_experts, first_binding.device
             )
-            for _ in range(count)
+            for _ in range(2)
         ]
         self.tensors = self.buffers[0]
-        if count > 1:
+        if first_binding.device.type == "npu":
             self.load_stream = torch.npu.Stream(device=first_binding.device)
         self.owners = [None] * len(self.buffers)
 
