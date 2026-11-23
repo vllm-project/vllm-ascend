@@ -211,6 +211,27 @@ def _hc_gate_mix_needs_wide_offsets(
     )
 
 
+def _hc_combine_norm_needs_wide_offsets(
+    rows: int,
+    residual_dim: int,
+    group_dim: int,
+    hc_count: int,
+    stride_residual_row: int,
+    stride_block_row: int,
+    stride_injection_row: int,
+    stride_combined_row: int,
+    stride_normalized_row: int,
+    has_injection: bool,
+) -> bool:
+    return (
+        _row_major_offset_exceeds_int32(rows, residual_dim, stride_residual_row)
+        or _row_major_offset_exceeds_int32(rows, group_dim, stride_block_row)
+        or _row_major_offset_exceeds_int32(rows, residual_dim, stride_combined_row)
+        or _row_major_offset_exceeds_int32(rows, residual_dim, stride_normalized_row)
+        or (has_injection and _row_major_offset_exceeds_int32(rows, hc_count, stride_injection_row))
+    )
+
+
 @triton.jit(do_not_specialize=["rows"])
 def _hc_gate_mix_row_block_kernel(
     x_ptr,
@@ -611,6 +632,70 @@ def _hc_combine_norm_kernel(
     )
 
 
+@triton.jit
+def _hc_combine_norm_row_wise_kernel(
+    residual_ptr,
+    block_output_ptr,
+    injection_ptr,
+    weight_ptr,
+    combined_ptr,
+    normalized_ptr,
+    stride_residual_row,
+    stride_block_row,
+    stride_injection_row,
+    stride_combined_row,
+    stride_normalized_row,
+    GROUP_DIM: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    HAS_INJECTION: tl.constexpr,
+    WEIGHT_SHARED: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    EPS: tl.constexpr,
+    WIDE_OFFSETS: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    if WIDE_OFFSETS:
+        row = row.to(tl.int64)
+    inner_offsets = tl.arange(0, BLOCK_SIZE)
+    mask = inner_offsets < GROUP_DIM
+    block_output = tl.load(
+        block_output_ptr + row * stride_block_row + inner_offsets,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+
+    for stream in tl.static_range(HC_COUNT):
+        offsets = stream * GROUP_DIM + inner_offsets
+        weight_offsets = inner_offsets if WEIGHT_SHARED else offsets
+        residual = tl.load(
+            residual_ptr + row * stride_residual_row + offsets,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        stream_block_output = block_output
+        if HAS_INJECTION:
+            injection = tl.load(injection_ptr + row * stride_injection_row + stream).to(tl.float32)
+            stream_block_output *= 2.0 * tl.sigmoid(injection / HC_COUNT)
+
+        # Preserve the unfused combine -> BF16 materialization -> RMSNorm boundary.
+        combined = (residual + stream_block_output).to(combined_ptr.dtype.element_ty)
+        tl.store(
+            combined_ptr + row * stride_combined_row + offsets,
+            combined,
+            mask=mask,
+        )
+        combined_fp32 = combined.to(tl.float32)
+        reciprocal_rms = tl.rsqrt(tl.sum(combined_fp32 * combined_fp32) / GROUP_DIM + EPS)
+        weights = tl.load(weight_ptr + weight_offsets, mask=mask, other=0.0)
+        normalized = combined_fp32 * reciprocal_rms
+        normalized += normalized * weights.to(tl.float32)
+        tl.store(
+            normalized_ptr + row * stride_normalized_row + offsets,
+            normalized,
+            mask=mask,
+        )
+
+
 def _hc_combine_norm(
     residual: torch.Tensor,
     block_output: torch.Tensor,
@@ -634,7 +719,26 @@ def _hc_combine_norm(
     if rows:
         injection_ptr = residual if injection_logits is None else injection_logits
         injection_stride = 0 if injection_logits is None else injection_logits.stride(0)
-        _hc_combine_norm_kernel[(rows * hc_count,)](
+        kernel = _hc_combine_norm_kernel
+        grid = (rows * hc_count,)
+        kernel_kwargs: dict[str, bool] = {}
+        row_wise_min_rows = get_current_hardware_profile().qwen4exp_hc_combine_norm_row_wise_min_rows
+        if row_wise_min_rows is not None and norm_weight_numel != group_dim and rows >= row_wise_min_rows:
+            kernel = _hc_combine_norm_row_wise_kernel
+            grid = (rows,)
+            kernel_kwargs["WIDE_OFFSETS"] = _hc_combine_norm_needs_wide_offsets(
+                rows,
+                residual_dim,
+                group_dim,
+                hc_count,
+                residual.stride(0),
+                block_output.stride(0),
+                injection_stride,
+                combined.stride(0),
+                normalized.stride(0),
+                injection_logits is not None,
+            )
+        kernel[grid](
             residual,
             block_output,
             injection_ptr,
@@ -652,6 +756,7 @@ def _hc_combine_norm(
             WEIGHT_SHARED=norm_weight_numel == group_dim,
             BLOCK_SIZE=block_size,
             EPS=eps,
+            **kernel_kwargs,
         )
     return combined, normalized
 
