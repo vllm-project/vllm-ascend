@@ -52,6 +52,10 @@ curated_tests:
     - tests/e2e/pull_request/one_card/test_hisparse_attention.py
     - tests/e2e/pull_request/one_card/test_hisparse_integration.py
     - tests/e2e/pull_request/one_card/test_hisparse_prefill_staging.py
+    - tests/e2e/pull_request/four_card_a5/pool/test_deepseek_v4_1_pool.py
+    - tests/e2e/pull_request/four_card_a5/pool/test_deepseek_v4_1_pool_mooncake.py
+    - tests/e2e/pull_request/four_card_a5/pool/test_pool_ssd_hit.py
+    - tests/e2e/pull_request/four_card_a5/pool/test_pool_perf.py
 
 # === Skipped Tests ===
 # Removed from any selection after directory scanning, so they are never
@@ -133,6 +137,11 @@ runner_mapping:
     default: a5-4
   tests/e2e/pull_request/one_card/test_hisparse_(attention|integration|prefill_staging)\.py$:
     default: a5-4
+  tests/e2e/pull_request/four_card_a5:
+    default: a5-4
+  # Qwen3.8-27B hybrid Mamba runs on the 2-card A5 runner.
+  tests/e2e/pull_request/two_card/pool:
+    default: a5-2
   tests/e2e/pull_request/one_card:
     default: a2-1
     310p: 310p-1
@@ -149,6 +158,9 @@ runner_mapping:
 partition:
   a5-4:
     runner_label: linux-aarch64-a5-4
+    count: 1
+  a5-2:
+    runner_label: linux-aarch64-a5-2
     count: 1
   310p-1:
     runner_label: linux-aarch64-310p-1
