@@ -97,34 +97,6 @@ results or sampled-row correctness do not replace final-revision model tests.
 
 ## Performance comparison
 
-The reproducible single-rank benchmark compares quantized lookup against the
-existing BF16 host lookup using exactly the same dequantized values and IDs.
-It reports logical table bytes, graph replay latency and compiler-entry counts.
-Both buffers remain alive and share the same NUMA placement policy; it does not
-measure full-model throughput, multi-rank reduction or NUMA tuning.
-
-Use production-size tables as well as small smoke tests. For the target
-checkpoints, per-rank shards contain 40,000,192 rows at TP8 (INT8) or
-80,000,384 rows at TP4 (MXFP8), each of width 160. Report fully owned IDs and
-uniform cross-shard IDs separately, including the actual owned ID count.
-A single non-owned ID measures zero output rather than host lookup latency.
-The benchmark retains every event sample; small shapes can expose overhead
-and timing noise even when larger gathers benefit from reduced storage.
-
-```bash
-TRITON_CACHE_DIR=$(mktemp -d) python benchmarks/benchmark_ple_lookup.py --format int8
-# TP8-like ownership: approximately one eighth of IDs belong to this shard.
-TRITON_CACHE_DIR=$(mktemp -d) python benchmarks/benchmark_ple_lookup.py --format int8 --ownership-shards 8
-# Run on 950DT, in another fresh process/cache:
-TRITON_CACHE_DIR=$(mktemp -d) python benchmarks/benchmark_ple_lookup.py --format mxfp8
-```
-
-For production-size runs, use `--rows 40000192 --ownership-shards 8` for
-A3 INT8 or `--rows 80000384 --ownership-shards 4` for A5 MXFP8. Both use
-`--width 160`. Set `--ownership-shards 1` to measure fully owned IDs.
-Use `--tokens 1 32 128 256 4096 32768 65536` to cover small and large gathers;
-`--tokens 131072` adds a large operator shape, not a full model prefill.
-
 ### Measured operator results
 
 The following historical results used host-resident scales. They were measured using CANN 9.2.1 r89, torch 2.10.0, torch_npu
@@ -188,11 +160,6 @@ performance result.
   compiler entry points, then checks changing shapes, offsets and graph replay.
   This verifies reuse after priming, not compile-only registry warmup or absence
   of first-request compilation in a full service.
-- With a fresh `TRITON_CACHE_DIR`, the benchmark reports startup compiler entries
-  separately from additional synthetic runtime entries. These include persistent
-  cache resolution if the cache is reused. Full-model serving must separately
-  record observed shapes/types/compile-time values and startup versus serving
-  compilation counts; synthetic results do not establish GPQA compilation counts.
 - If real service workloads expose required variants not reached during startup,
   first reduce unnecessary specialization, then use the existing Ascend
   `AscendTritonJitKernel`/`JitWarmupRegistry` mechanism for required variants, with
