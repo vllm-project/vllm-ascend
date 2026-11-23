@@ -19,7 +19,7 @@ msgstr ""
 "Generated-By: detect_po_changes.py\n"
 
 msgid "# NPU Device Selection"
-msgstr ""
+msgstr "# NPU 设备选择"
 
 msgid ""
 "Use `ASCEND_RT_VISIBLE_DEVICES` to restrict the NPUs visible to a process, and\n"
