@@ -656,6 +656,11 @@ class NPUPlatform(Platform):
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
 
+        # The attention-backend memo is keyed by geometry alone, so an opted-in
+        # engine must not inherit B1 from a sibling engine with a different
+        # speculative mode. See _reset_b1_attn_backend_cache.
+        _reset_b1_attn_backend_cache()
+
         # vLLM #61392 folds `compress_ratios` into `layer_types`/`compress_rates`.
         # Restore the legacy field before any runner/model/cache component reads
         # it (e.g. NPUModelRunner.__init__ setting `use_compress`).
@@ -2004,6 +2009,35 @@ def _validate_fa3_backend(key, _attn_selector_config):
     return True
 
 
+def _uses_dynamic_speculative_decoding(speculative_config) -> bool:
+    """True when the scheduler may pick a verify width narrower than k+1."""
+    if speculative_config is None:
+        return False
+    return bool(getattr(speculative_config, "uses_dynamic_speculative_decoding", lambda: False)())
+
+
+def _reset_b1_attn_backend_cache() -> None:
+    """Drop vLLM's memoized attention-backend selection for an opted-in run.
+
+    ``vllm.v1.attention.selector`` caches the selected backend class by
+    attention geometry, and the speculative mode is not part of that key. A
+    process that configures a static-MTP engine first and a dynamic-MTP engine
+    with the same geometry second would therefore reuse the cached B1 class and
+    bypass the dynamic-SD exclusion in ``_want_b1_paged_verify``. The cache only
+    memoizes a config-derived decision, so dropping it when an engine is
+    configured costs one re-selection and keeps the two modes apart.
+    """
+    from vllm.v1.attention import selector as attn_selector
+
+    from vllm_ascend import envs as ascend_envs
+
+    if not ascend_envs.VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY:
+        return
+    cache_clear = getattr(getattr(attn_selector, "_cached_get_attn_backend", None), "cache_clear", None)
+    if cache_clear is not None:
+        cache_clear()
+
+
 def _want_b1_paged_verify(attn_selector_config) -> bool:
     """Select the B1 paged-verify backend for the exact geometry it serves.
 
@@ -2035,7 +2069,7 @@ def _want_b1_paged_verify(attn_selector_config) -> bool:
     # configured maximum (including one query when the schedule picks K=0).
     # The B1 capture contract only serves the full k+1 width, so keep dynamic
     # SD on the default backend until those narrower graphs are supported.
-    if getattr(spec_cfg, "uses_dynamic_speculative_decoding", lambda: False)():
+    if _uses_dynamic_speculative_decoding(spec_cfg):
         logger.warning_once(
             "VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY is ignored with dynamic speculative decoding "
             "(num_speculative_tokens_per_batch_size): B1 capture only supports the uniform "

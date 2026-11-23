@@ -346,3 +346,48 @@ def test_want_b1_paged_verify_rejects_missing_or_a5_context(b1_enabled):
         patch("vllm_ascend.utils.is_950", return_value=True),
     ):
         assert platform._want_b1_paged_verify(selector) is False
+
+
+def test_config_hook_drops_stale_backend_cache_for_dynamic_speculation(b1_enabled):
+    """A static B1 selection must not leak into a later dynamic-SD engine.
+
+    vLLM memoizes the selected backend by attention geometry only, so both
+    selections below share one cache key. ``_reset_b1_attn_backend_cache`` is
+    the config-hook behaviour under test; the test never clears the cache
+    itself.
+    """
+    from vllm.v1.attention import selector as attn_selector
+    from vllm_ascend import platform
+
+    selector = _gemma4_selector()
+    fake_platform = SimpleNamespace(
+        device_name="npu",
+        get_attn_backend_cls=platform.AscendPlatform.get_attn_backend_cls,
+    )
+    # num_heads is part of the core cache key; 7 keeps this entry private to
+    # the test without touching the cache.
+    cache_kwargs = {"backend": None, "attn_selector_config": selector, "num_heads": 7}
+
+    with (
+        patch("vllm.platforms.current_platform", fake_platform),
+        patch("vllm.config.get_current_vllm_config_or_none", return_value=_speculative_config()),
+        patch("vllm_ascend.utils.is_950", return_value=False),
+        patch.object(platform, "_validate_fa3_backend", return_value=False),
+        patch.object(platform, "_validate_flash_attn_backend", return_value=False),
+        patch.object(platform, "_validate_flash_attn_npu_3", return_value=False),
+        patch.object(
+            platform,
+            "get_current_hardware_profile",
+            return_value=SimpleNamespace(attention_backend_family=platform.AttentionBackendFamily.STANDARD),
+        ),
+    ):
+        static_backend = attn_selector._cached_get_attn_backend(**cache_kwargs)
+        assert issubclass(static_backend, attention_v2_b1.AscendB1AttentionBackend)
+
+        # A second engine is configured; its hook drops the geometry-keyed memo
+        # before the selector runs for the dynamic-SD config.
+        platform._reset_b1_attn_backend_cache()
+        with patch("vllm.config.get_current_vllm_config_or_none", return_value=_speculative_config(dynamic=True)):
+            dynamic_backend = attn_selector._cached_get_attn_backend(**cache_kwargs)
+
+        assert not issubclass(dynamic_backend, attention_v2_b1.AscendB1AttentionBackend)
