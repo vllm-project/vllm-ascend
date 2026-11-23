@@ -1665,7 +1665,11 @@ class MultiGroupKDACommit:
         if any(state_layout(group) != layout for group in groups[1:]):
             return None
         checkpoints = tuple(tensor for group in groups for tensor in group.checkpoints)
-        if len({tensor.data_ptr() for tensor in checkpoints}) != len(checkpoints):
+        # Cache groups may share a physical slot. The scheduler's block pool
+        # assigns their writable pages separately. Verify records, however,
+        # must stay live for every layer until its accepted state is restored.
+        records = [record for group in groups for record in group.correction_caches]
+        if len({record.data_ptr() for record in records}) != len(records):
             return None
 
         # Allocate group-major plans once. The existing plan/conv kernels use

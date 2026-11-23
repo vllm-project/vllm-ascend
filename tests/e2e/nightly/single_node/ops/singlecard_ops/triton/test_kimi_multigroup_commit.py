@@ -12,24 +12,30 @@ from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 import vllm_ascend.ops.triton.kda.recoverssm as ops
 
 
-def make_contexts(module, device, heads, width):
+def make_contexts(module, device, heads, width, shared_slot=False):
     rng = torch.Generator().manual_seed(141)
 
     def rand(*shape):
         return torch.randn(shape, generator=rng).to(device)
 
     groups = []
+    shared_kv = None
     for group, n_layers in enumerate((1, 2, 1)):
         layers = []
-        pages = 13 + group
+        pages = 25 if shared_slot and group == 0 else 13 + group
         for _ in range(n_layers):
-            # Pages can be strided and each group has its own physical page pool.
-            state = rand(pages * (group + 1), heads, width, width)[:: group + 1]
-            conv = rand(pages, 6, 9)
-            stored_conv = conv.transpose(-1, -2) if is_conv_state_dim_first() else conv
+            if shared_slot and group == 2:
+                assert shared_kv is not None
+                kv_cache = shared_kv
+            else:
+                state = rand(pages * (group + 1), heads, width, width)[:: group + 1]
+                conv = rand(pages, 6, 9)
+                kv_cache = (conv.transpose(-1, -2) if is_conv_state_dim_first() else conv, state)
+                if shared_slot and group == 0:
+                    shared_kv = kv_cache
             layers.append(
                 SimpleNamespace(
-                    kv_cache=(stored_conv, state),
+                    kv_cache=kv_cache,
                     recoverssm_records=SimpleNamespace(
                         correction=rand(7, heads, 4, width), key_gate=rand(7, heads, 4, width * 2).half()
                     ),
@@ -44,7 +50,7 @@ def make_contexts(module, device, heads, width):
     return tuple(groups)
 
 
-def make_metadata(device, step):
+def make_metadata(device, step, shared_slot=False):
     metadata = []
     # The second batch interleaves four speculative rows with two other rows.
     positions = torch.tensor([0, 2, 4, 5]) if step else torch.arange(4)
@@ -57,6 +63,9 @@ def make_metadata(device, step):
         if identity:
             order = torch.arange(4)
         table = (torch.arange(12).reshape(4, 3) + 3 * group + step) % 12 + 1
+        if shared_slot and group == 2:
+            # The groups sharing one slot own disjoint pages in the block pool.
+            table += 12
         table[2, 1] = 0
         indices = torch.zeros(4, 2, dtype=torch.int32)
         indices[:, 0] = table[order, 0]
@@ -100,15 +109,17 @@ class CountKernel:
         return invoke
 
 
-def check_multi_group(device, heads, width, reference=ops):
-    serial = make_contexts(reference, device, heads, width)
-    groups = make_contexts(ops, device, heads, width)
+def check_multi_group(device, heads, width, reference=ops, shared_slot=False):
+    serial = make_contexts(reference, device, heads, width, shared_slot)
+    groups = make_contexts(ops, device, heads, width, shared_slot)
+    if shared_slot:
+        assert groups[0].checkpoints[0].data_ptr() == groups[2].checkpoints[0].data_ptr()
     merged = ops.MultiGroupKDACommit.create(groups)
     assert merged is not None
     grouped_heads = ops.is_950() and heads in (32, 64) and width == 128
     kernel = "_commit_kda_state_grouped_kernel" if grouped_heads else "_commit_kda_state_kernel"
     for step in range(2):
-        metadata = make_metadata(device, step)
+        metadata = make_metadata(device, step, shared_slot)
         sampled = make_sampled(device, step)
         serial_calls, merged_calls = [], []
         with patch.object(reference, kernel, CountKernel(getattr(reference, kernel), serial_calls)):
@@ -142,9 +153,9 @@ def check_multi_group(device, heads, width, reference=ops):
                 torch.testing.assert_close(a, b, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("heads", [12, 32])
-def test_multigroup_commit_matches_serial_on_all_pages(heads):
-    check_multi_group(torch.device("npu"), heads, 128)
+@pytest.mark.parametrize(("heads", "shared_slot"), [(12, False), (12, True), (32, False)])
+def test_multigroup_commit_matches_serial_on_all_pages(heads, shared_slot):
+    check_multi_group(torch.device("npu"), heads, 128, shared_slot=shared_slot)
 
 
 def test_draft_scope_orders_next_state_read():
