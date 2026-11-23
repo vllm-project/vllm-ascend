@@ -48,7 +48,6 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     get_current_hardware_profile,
-    is_fla_gdn_chunk32_supported,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_checkpoint import ensure_gdn_checkpoint_workspace, run_gdn_checkpoint_prefill
@@ -991,7 +990,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 # beta = sigmoid(b); dt_bias belongs only to the decay gate
                 # g = -exp(A_log) * softplus(a + dt_bias), computed above.
                 beta_fla = beta_non_spec
-                if is_fla_gdn_chunk32_supported():
+                if get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32):
                     beta_fla = b.unsqueeze(0)
                     if spec_sequence_masks is not None:
                         beta_fla = beta_fla.index_select(1, non_spec_token_indx)

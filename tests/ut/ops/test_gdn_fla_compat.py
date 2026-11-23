@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import get_hardware_profile, is_fla_gdn_chunk32_supported
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, _get_fla_gdn_prefill_op
 
 
@@ -19,23 +19,17 @@ def clear_prefill_probe():
 
 
 @pytest.mark.parametrize("device", list(AscendDeviceType))
-def test_chunk32_requires_a5_but_not_fla_version(device):
+def test_fla_prefill_does_not_require_version(device):
     module = ModuleType("fla_npu.ops.ascendc")
     fla_op = Mock()
     module.__dict__["chunk_gated_delta_rule_fwd"] = fla_op
     with (
         patch.dict(sys.modules, {module.__name__: module}),
         patch("vllm_ascend.ops.gdn.get_current_hardware_profile", return_value=get_hardware_profile(device)),
-        patch(
-            "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
-            return_value=get_hardware_profile(device),
-        ),
         patch("importlib.metadata.version", side_effect=AssertionError("FLA version must not be queried")),
     ):
         op = _get_fla_gdn_prefill_op()
         assert _get_fla_gdn_prefill_op() is op
-        assert is_fla_gdn_chunk32_supported() is (device == AscendDeviceType.A5)
-        assert is_fla_gdn_chunk32_supported() is (device == AscendDeviceType.A5)
     assert op is fla_op
 
 

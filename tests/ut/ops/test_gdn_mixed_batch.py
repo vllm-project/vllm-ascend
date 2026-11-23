@@ -97,7 +97,7 @@ def test_chunk32_raw_beta_routing(batch_kind, backend):
     with ExitStack() as stack:
         stack.enter_context(
             patch(
-                "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+                "vllm_ascend.ops.gdn.get_current_hardware_profile",
                 return_value=get_hardware_profile(device_type),
             )
         )

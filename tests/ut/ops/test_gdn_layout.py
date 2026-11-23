@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -7,6 +8,8 @@ import torch
 
 from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 
 
 @pytest.mark.parametrize("kind", ["head_first", "sequence_first", "mixed_slice"])
@@ -45,7 +48,10 @@ def test_a5_prefill_layout_preserves_values_and_output(kind, chunk32_enabled):
         torch.testing.assert_close(beta, gate)
         return output, state
 
-    with patch("vllm_ascend.device.device_op.is_fla_gdn_chunk32_supported", return_value=chunk32_enabled):
+    profile = get_hardware_profile(AscendDeviceType.A5)
+    if not chunk32_enabled:
+        profile = replace(profile, capabilities=profile.capabilities - {HardwareCapability.FLA_GDN_PREFILL_CHUNK32})
+    with patch("vllm_ascend.device.device_op.get_current_hardware_profile", return_value=profile):
         result, final_state = A5DeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
     assert result is output
     assert final_state is state
