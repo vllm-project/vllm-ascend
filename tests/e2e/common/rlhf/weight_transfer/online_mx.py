@@ -12,6 +12,18 @@ from tests.e2e.common.rlhf.common import post_control, rlhf_server, wait_for_fre
 from tests.e2e.common.rlhf.weight_transfer.weight_source import fixed_startup_checkpoint
 
 
+def _snapshot_bytes(tensor: torch.Tensor) -> bytes:
+    value = tensor.detach()
+    # MXFP4 kernels consume a transposed NZ view. CANN cannot copy that
+    # non-contiguous internal format to CPU (or clone it on-device). Undo the
+    # view, copy the contiguous storage, then restore its logical CPU layout.
+    if value.ndim >= 2 and not value.is_contiguous() and value.transpose(-1, -2).is_contiguous():
+        value = value.transpose(-1, -2).cpu().transpose(-1, -2)
+    else:
+        value = value.cpu()
+    return value.contiguous().view(torch.uint8).numpy().tobytes()
+
+
 class OnlineMXAuditWorker:
     """Read-only test extension; no quantization or load behavior is patched."""
 
@@ -35,7 +47,7 @@ class OnlineMXAuditWorker:
                 for name, tensor in ((weight_name, weight), (weight_name + "_scale", scale)):
                     key = prefix + "." + name
                     # CPU transfer also synchronizes the preceding receive/quantization.
-                    raw = tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
+                    raw = _snapshot_bytes(tensor)
                     tensors[key] = [str(tensor.dtype), list(tensor.shape), hashlib.sha256(raw).hexdigest()]
                     pointers[key] = tensor.data_ptr()
         assert kinds == {"linear", "moe"}, f"Missing online MX layers: {kinds}"

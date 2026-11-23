@@ -28,10 +28,11 @@ from copy import deepcopy
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
 from tests.e2e.common.rlhf.weight_transfer import reference_check as utils
 from tests.e2e.common.rlhf.weight_transfer.case import MODEL_CASES
-from tests.e2e.common.rlhf.weight_transfer.online_mx import assert_online_updates
+from tests.e2e.common.rlhf.weight_transfer.online_mx import _snapshot_bytes, assert_online_updates
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     live_update_serve_args,
     reference_serve_args,
@@ -41,6 +42,39 @@ from tests.e2e.common.rlhf.weight_transfer.reference_check import (
 CASE = MODEL_CASES[0]
 PORT = 8123
 GPU_MEMORY_UTILIZATION = 0.75
+
+
+@pytest.mark.parametrize("shape", [(8, 64), (2, 8, 64)])
+def test_snapshot_transposed_internal_format_keeps_packed_bytes(shape):
+    class InternalFormatTensor:
+        """Emulate CANN's rejection of copies from non-contiguous NZ views."""
+
+        def __init__(self, data):
+            self.data = data
+            self.ndim = data.ndim
+
+        def detach(self):
+            return self
+
+        def is_contiguous(self):
+            return self.data.is_contiguous()
+
+        def transpose(self, first, second):
+            return InternalFormatTensor(self.data.transpose(first, second))
+
+        def cpu(self):
+            if not self.data.is_contiguous():
+                raise RuntimeError("Cannot copy a non-contiguous internal format")
+            return self.data.clone()
+
+    packed = torch.arange(torch.tensor(shape).prod().item()).to(torch.uint8).reshape(shape)
+    original = packed.clone()
+    view = packed.transpose(-1, -2)
+    pointer = view.data_ptr()
+    expected = view.contiguous().numpy().tobytes()
+    assert _snapshot_bytes(InternalFormatTensor(view)) == expected
+    assert view.data_ptr() == pointer
+    assert torch.equal(packed, original)
 
 
 @pytest.fixture
