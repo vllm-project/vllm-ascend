@@ -43,14 +43,16 @@ def test_conflict_protocol(production, scenario):
             production['_open_puts'](worker, [(request, key, 0, 128)])
         assert len(calls) == 1
         return
-    production['_open_puts'](worker, [(request, key, 0, 128)])
+    aliases = production['_open_puts'](worker, [(request, key, 0, 128)])
     if scenario == 'public_conflict':
         fallback = 'public@offload_v1:fallback:inc'
         assert request.save_block_keys == [fallback]
         worker.group_uses_align_state = [False]
         worker.grouped_block_size = [128]
         worker._reused_layers_by_group = {0: {0}}
-        worker._snapshot_keys = {}
+        assert aliases == {('r', 'inc', 'public'): fallback}
+        worker._snapshot_keys = {'r': {0: {0: fallback}}}
+        worker._offload_snapshot_endpoints = {('r', 0): ('inc', 128)}
         worker.use_eagle = False
         worker._layerwise_load_snapshot_start = lambda *args: None
         worker._make_layerwise_full_key = lambda group, key: key
