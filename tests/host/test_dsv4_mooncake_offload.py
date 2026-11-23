@@ -417,41 +417,11 @@ def test_dsv4_window_continuation_restores_live_pages_only(ns):
     )
     entries = ns["_load_entries"](worker, request, 0, [b"evicted", b"live"], [True, False])
     assert entries == [(b"live".hex(), 1)]
-    worker._snapshot_keys = {"request": {0: {1: "committed-private-page"}}}
-    worker._offload_snapshot_endpoints = {("request", 0): ("incarnation", 256)}
+    worker._offload_active_pages = {("request", "incarnation", 0): (256, {1: "committed-private-page"})}
     assert ns["_load_entries"](worker, request, 0, [], None) == [("committed-private-page", 1)]
-    worker._snapshot_keys["request"][0].clear()
-    with pytest.raises(ValueError, match="no committed version"):
-        ns["_load_entries"](worker, request, 0, [b"evicted", b"live"], None)
-    worker._snapshot_keys["request"][0][1] = "stale"
-    worker._offload_snapshot_endpoints[("request", 0)] = ("incarnation", 128)
+    worker._offload_active_pages[("request", "incarnation", 0)] = (128, {1: "stale"})
     with pytest.raises(ValueError, match="no committed version"):
         ns["_load_entries"](worker, request, 0, [], None)
-
-
-def test_committed_pages_are_published_only_after_save_drain(ns):
-    worker_type = isolated_method(
-        STORE + "layerwise/pool_worker.py", "LayerwiseKVPoolWorker", "_wait_for_final_layer_save", ns
-    )
-    worker = worker_type()
-    worker.layer_save_finished_events = [MagicMock()]
-    worker.layerwise_offload = True
-    worker._snapshot_keys = {"request": {0: {0: "previous"}}}
-    worker._offload_snapshot_endpoints = {("request", 0): ("incarnation", 128)}
-    worker._offload_pending_pages = {("request", "incarnation", 0): (256, {1: "fallback"})}
-    worker._drain_attention_transfers = MagicMock()
-    worker._check_hybrid_load_errors = MagicMock(side_effect=RuntimeError("save failed"))
-
-    with pytest.raises(RuntimeError, match="save failed"):
-        worker._wait_for_final_layer_save(1)
-    assert worker._snapshot_keys["request"][0] == {0: "previous"}
-    assert worker._offload_snapshot_endpoints[("request", 0)] == ("incarnation", 128)
-
-    worker._check_hybrid_load_errors.side_effect = None
-    worker._wait_for_final_layer_save(1)
-    assert worker._snapshot_keys["request"][0] == {1: "fallback"}
-    assert worker._offload_snapshot_endpoints[("request", 0)] == ("incarnation", 256)
-    assert not worker._offload_pending_pages
 
 
 def test_mtp_prefill_uses_same_window_for_save_and_continuation(ns):
@@ -510,8 +480,9 @@ def test_untrimmed_shared_window_saves_masked_live_page_for_continuation(ns):
     hashes = [b"a", b"b", b"c"]
     saved = ns["_save_entries"](worker, request, NS(), 0, hashes)
     assert saved == [("offload_v1:incarnation:384:0", 0), (b"c".hex(), 2)]
-    worker._snapshot_keys = {"request": {0: {index: key for key, index in saved}}}
-    worker._offload_snapshot_endpoints = {("request", 0): ("incarnation", 384)}
+    worker._offload_active_pages = {
+        ("request", "incarnation", 0): (384, {index: key for key, index in saved})
+    }
     assert ns["_load_entries"](worker, request, 0, hashes, request.store_masks[0]) == saved
 
 

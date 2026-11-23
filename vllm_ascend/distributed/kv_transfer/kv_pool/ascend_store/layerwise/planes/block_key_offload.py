@@ -68,16 +68,9 @@ def _load_entries(worker, request, group, hashes, mask):
     config = getattr(worker, "kv_cache_config", None)
     live_window = running and group in getattr(config, "dsv4_window_group_ids", ())
     first = _continuation_window_start(worker, group, tokens, size, request) if live_window else None
-    committed = getattr(worker, "_offload_snapshot_endpoints", {}).get((request.req_id, group)) if running else None
-    incarnation = request.layerwise_request_id if committed is not None else None
-    strict = (
-        committed is not None
-        and committed[0] == incarnation
-        and not worker.group_uses_align_state[group]
-        and getattr(config, "dsv4_component_identity", None) is not None
-    )
-    if committed is not None and committed[0] != incarnation:
-        snapshots = {}
+    checkpoint = getattr(worker, "_offload_active_pages", {}).get(
+        (request.req_id, request.layerwise_request_id, group)
+    ) if running and getattr(config, "dsv4_component_identity", None) is not None else None
     entries = []
     for index in range(first or 0, end):
         if not live_window and not selected(mask, index):
@@ -86,13 +79,21 @@ def _load_entries(worker, request, group, hashes, mask):
             if live_window:
                 continue
             raise ValueError("Mooncake offload restore selected a null block")
+        if checkpoint is not None:
+            endpoint, pages = checkpoint
+            if endpoint != tokens or index not in pages:
+                raise ValueError("Mooncake offload has no committed version for a live continuation page")
+            entries.append((pages[index], index))
+            continue
         key = snapshots.get(index)
-        if strict and (committed[1] != tokens or key is None):
-            raise ValueError("Mooncake offload has no committed version for a live continuation page")
         if key is None:
             if index >= min(tokens // size, len(hashes)):
                 raise ValueError("Mooncake offload restore has no exact snapshot identity")
             key = worker._make_layerwise_full_key(group, block_hash_to_str(hashes[index]))
+        if running:
+            key = getattr(worker, "_offload_private_aliases", {}).get(
+                (request.req_id, request.layerwise_request_id, key), key
+            )
         entries.append((key, index))
     return entries
 
@@ -285,6 +286,9 @@ def _open_puts(worker, slots):
             finally:
                 with worker._put_started_keys_lock:
                     started.update(worker._put_started_keys - before_fallback)
+            if not hasattr(worker, "_offload_private_aliases"):
+                worker._offload_private_aliases = {}
+            worker._offload_private_aliases.update(aliases)
     except Exception:
         worker._queue_layerwise_revoke_keys(list(started))
         raise
@@ -294,7 +298,6 @@ def _open_puts(worker, slots):
                 view.save_last_block_key = key
             else:
                 view.save_block_keys[slot] = key
-    return aliases
 
 
 def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
@@ -306,7 +309,6 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
     get_slots = []
     put_slots: list[tuple[ReqMeta, str, int | None, int]] = []
     pending = {}
-    ordinary_saves = []
     dsv4 = getattr(getattr(worker, "kv_cache_config", None), "dsv4_component_identity", None) is not None
     next_snapshots: dict[str, dict[int, dict[int, str]]] = {}
     for request in requests:
@@ -355,26 +357,13 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
                     )
             else:
                 saves = _save_entries(worker, request, view, group, hashes, group_snapshots)
-                ordinary_saves.append((request, group, view, saves, group_snapshots))
             put_slots.extend((view, key, slot, sum(worker.group_block_len[group])) for key, slot in saves)
             groups[group].append(view)
     try:
         worker._open_layerwise_get_sessions(get_slots)
         worker._check_hybrid_load_errors()
-        aliases = _open_puts(worker, put_slots)
-        for request, group, view, saves, snapshots in ordinary_saves:
-            identity = (request.req_id, request.layerwise_request_id, group)
-            for key, slot in saves:
-                fallback = aliases.get((*identity[:2], key))
-                if fallback is None:
-                    continue
-                index = view.partial_block_index if slot is None else view.save_key_block_offset + slot
-                # A private tail snapshot can supersede a public save for the same page.
-                if index not in snapshots:
-                    _, pages = pending.setdefault(identity, (request.target_token_len, {}))
-                    pages[index] = fallback
-            if identity in pending:
-                pending[identity][1].update(snapshots)
+        _open_puts(worker, put_slots)
+        aliases = getattr(worker, "_offload_private_aliases", {})
         worker._offload_pending_pages = {
             identity: (endpoint, {index: aliases.get((*identity[:2], key), key) for index, key in pages.items()})
             for identity, (endpoint, pages) in pending.items()

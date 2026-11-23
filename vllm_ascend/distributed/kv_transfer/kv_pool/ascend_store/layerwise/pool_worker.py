@@ -926,7 +926,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     def _release_layerwise_requests_terminal(self, req_ids: set[str]) -> None:
         with self._load_session_lock:
             self._end_layerwise_load_keys(self._layerwise_session_tracker.release_terminal(req_ids))
-        for name in ("_offload_snapshot_endpoints", "_offload_pending_pages"):
+        aliases = getattr(self, "_offload_private_aliases", None)
+        if aliases:
+            for identity in [identity for identity in aliases if identity[0] in req_ids]:
+                del aliases[identity]
+        for name in ("_offload_active_pages", "_offload_pending_pages"):
             checkpoints = getattr(self, name, {})
             for identity in [identity for identity in checkpoints if identity[0] in req_ids]:
                 del checkpoints[identity]
@@ -1796,9 +1800,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             event.clear()
         pending = getattr(self, "_offload_pending_pages", None)
         if pending:
-            if not hasattr(self, "_offload_snapshot_endpoints"):
-                self._offload_snapshot_endpoints = {}
-            for (req_id, incarnation, group), (endpoint, pages) in pending.items():
-                self._snapshot_keys.setdefault(req_id, {})[group] = pages
-                self._offload_snapshot_endpoints[(req_id, group)] = (incarnation, endpoint)
+            if not hasattr(self, "_offload_active_pages"):
+                self._offload_active_pages = {}
+            self._offload_active_pages.update(pending)
             pending.clear()
