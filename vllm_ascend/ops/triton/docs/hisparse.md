@@ -35,8 +35,9 @@ selection. It updates `representatives` in place and returns the same tensor,
 matching `scatter_reduce_(0, index, source, reduce="amin", include_self=True)`.
 Duplicate IDs take the exact signed minimum, including the existing output;
 unreferenced destinations retain their values. A 256-element tile performs
-relaxed atomic minimums on NPU, avoiding the int64 CPU fallback. The wrapper
-introduces no Host tensor reads, allocation or synchronization.
+atomic minimums on NPU with the default `acq_rel` memory semantics, avoiding
+the int64 CPU fallback. The wrapper introduces no Host tensor reads,
+allocation or synchronization.
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |

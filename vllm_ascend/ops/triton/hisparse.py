@@ -34,7 +34,7 @@ def _scatter_min_representatives_kernel(index_ptr, source_ptr, representatives_p
     valid = row < num_rows
     destination = tl.load(index_ptr + row, valid, other=0)
     position = tl.load(source_ptr + row, valid, other=0)
-    tl.atomic_min(representatives_ptr + destination, position, mask=valid, sem="relaxed")
+    tl.atomic_min(representatives_ptr + destination, position, mask=valid)
 
 
 class TritonScatterMinRepresentativesKernel(AscendTritonJitKernel["TritonScatterMinRepresentativesKernel.CompileKey"]):
