@@ -299,25 +299,3 @@ def test_ascend_expert_map_uses_upstream_map():
     object.__setattr__(routed_experts, "rocm_aiter_fmoe_enabled", False)
 
     assert routed_experts.ascend_expert_map is upstream_map
-
-
-def test_update_expert_map_preserves_upstream_and_legacy_contracts(monkeypatch):
-    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
-    parent_update_calls = []
-
-    def parent_update(instance):
-        parent_update_calls.append(instance)
-
-    monkeypatch.setattr(type(routed_experts).__mro__[1], "update_expert_map", parent_update)
-    expert_map_manager = SimpleNamespace(_expert_map=None)
-    object.__setattr__(routed_experts, "expert_map_manager", expert_map_manager)
-
-    routed_experts.update_expert_map()
-
-    assert parent_update_calls == [routed_experts]
-
-    legacy_map = torch.tensor([1, 0], dtype=torch.int32)
-    routed_experts.update_expert_map(legacy_map)
-
-    assert routed_experts.ascend_expert_map is legacy_map
-    assert expert_map_manager._expert_map is legacy_map

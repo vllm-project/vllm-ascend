@@ -311,19 +311,6 @@ def test_process_weights_after_loading_splits_lists_for_dynamic_eplb(monkeypatch
     assert len(layer.w2_weight_list) == num_experts
 
 
-def test_update_expert_map_updates_routed_experts_and_manager():
-    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
-    nn.Module.__init__(routed_experts)
-    manager = SimpleNamespace(_expert_map=torch.tensor([0, 1, 2, -1], dtype=torch.int32))
-    routed_experts.expert_map_manager = manager
-
-    new_map = torch.tensor([0, 1, -1], dtype=torch.int32)
-    routed_experts.update_expert_map(new_map)
-
-    assert routed_experts.ascend_expert_map is new_map
-    assert manager._expert_map is new_map
-
-
 @pytest.mark.parametrize("moe_comm_type", [MoECommType.ALLGATHER, MoECommType.FUSED_MC2])
 def test_unquantized_apply_builds_current_fused_experts_input(monkeypatch, moe_comm_type):
     method = _build_unquantized_method()

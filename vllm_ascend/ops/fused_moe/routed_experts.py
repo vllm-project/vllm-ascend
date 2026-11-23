@@ -512,19 +512,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         """
         return getattr(self, "_expert_map", None)
 
-    def update_expert_map(self, new_expert_map: torch.Tensor | None = None) -> None:
-        """Update the expert map used by Ascend MoE execution."""
-        if new_expert_map is None:
-            super().update_expert_map()
-            return
-
-        self.expert_map_manager._expert_map = new_expert_map
-        buffers = getattr(self, "_buffers", None)
-        if buffers is not None and "_expert_map" in buffers:
-            buffers["_expert_map"] = new_expert_map
-        else:
-            object.__setattr__(self, "_expert_map", new_expert_map)
-
     def get_log2phy_map(self) -> torch.Tensor | None:
         return self.log2phy
 
