@@ -333,7 +333,8 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
         draft = torch.nn.Linear(2, 2)
         worker.weight_transfer_engine = MagicMock(supports_draft_weight_update=True)
         worker._weight_update_active = False
-        worker._draft_weight_update_active = False
+        worker._weight_update_is_draft = False
+        worker._incomplete_weight_updates = set()
         worker.use_v2_model_runner = True
         worker.parallel_config = SimpleNamespace(pipeline_parallel_size=1)
         worker.vllm_config = SimpleNamespace(
@@ -358,13 +359,15 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
                 worker, draft = self._make_worker()
                 engine = worker.weight_transfer_engine
                 worker.start_draft_weight_update()
+                assert worker.has_incomplete_weight_update()
                 engine.set_weight_update_target.assert_called_once_with(
                     draft, worker.vllm_config.speculative_config.draft_model_config
                 )
                 worker.update_weights({})
                 worker.finish_weight_update()
                 self.assertFalse(worker._weight_update_active)
-                self.assertFalse(worker._draft_weight_update_active)
+                self.assertFalse(worker._weight_update_is_draft)
+                assert not worker.has_incomplete_weight_update()
                 worker.model_runner.reset_lora_state.assert_not_called()
                 worker.model_runner.on_target_weights_replaced.assert_not_called()
                 engine.reset_weight_update_target.assert_called_once_with()
@@ -389,16 +392,32 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
             with self.subTest(operation=operation):
                 worker, _ = self._make_worker()
                 engine = worker.weight_transfer_engine
-                getattr(engine, operation).side_effect = RuntimeError("reload failed")
+
+                def fail_reload(*args, worker=worker):
+                    assert worker.has_incomplete_weight_update()
+                    raise RuntimeError("reload failed")
+
+                getattr(engine, operation).side_effect = fail_reload
                 with self.assertRaisesRegex(RuntimeError, "reload failed"):
                     worker.start_draft_weight_update()
                     worker.update_weights({})
                     worker.finish_weight_update()
                 engine.reset_weight_update_target.assert_called_once_with()
                 self.assertFalse(worker._weight_update_active)
-                self.assertFalse(worker._draft_weight_update_active)
+                self.assertFalse(worker._weight_update_is_draft)
                 worker.model_runner.reset_lora_state.assert_not_called()
                 worker.model_runner.on_target_weights_replaced.assert_not_called()
+                if vllm_version_is("0.33.0"):
+                    # Release has no EngineCore readiness query.
+                    assert worker.has_incomplete_weight_update()
+                else:
+                    from vllm.v1.engine.core import EngineCore
+
+                    core = SimpleNamespace(
+                        is_sleeping=lambda: False,
+                        collective_rpc=lambda method, worker=worker: [getattr(worker, method)()],
+                    )
+                    assert not EngineCore.is_inference_ready(core)
 
     def test_draft_capability_follows_engine_support(self):
         for backend, use_v2, engine_support, supported in (

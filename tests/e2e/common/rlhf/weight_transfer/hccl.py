@@ -236,10 +236,9 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
                 sync_client.is_draft = role == "draft"
                 engine.source = source
                 post_control(server, "pause")
-                try:
-                    engine.send_weights()
-                finally:
-                    post_control(server, "resume")
+                # Failed transfers leave partially updated weights; keep generation paused.
+                engine.send_weights()
+                post_control(server, "resume")
                 after = snapshot_weight_update_models(server)
                 projections = post_control(
                     server, "collective_rpc", json={"method": "snapshot_draft_context_projections"}

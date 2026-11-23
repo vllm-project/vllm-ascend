@@ -249,14 +249,19 @@ class NPUWorker(GPUWorker):
         self.profiler: TorchNPUProfilerWrapper | None
         self.weight_transfer_engine: WeightTransferEngine | None
         self._weight_update_active: bool
+        self._weight_update_is_draft: bool
+        self._incomplete_weight_updates: set[bool]
         self._pp_send_work: list[Handle]
+
+        # v0.33.0 predates the upstream incomplete-update readiness contract.
+        if vllm_version_is("0.33.0"):
+            self._incomplete_weight_updates = set()
 
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
 
-        self._draft_weight_update_active = False
         self.npugraph_memory_bytes = 0
         # Buffers and parameters saved before sleep.
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
@@ -364,6 +369,11 @@ class NPUWorker(GPUWorker):
         assert self.weight_transfer_engine is not None
         self.weight_transfer_engine.set_weight_update_target(draft_model, speculative_config.draft_model_config)
 
+    def has_incomplete_weight_update(self) -> bool:
+        if vllm_version_is("0.33.0"):
+            return bool(self._incomplete_weight_updates)
+        return super().has_incomplete_weight_update()
+
     def start_draft_weight_update(self) -> None:
         self._check_weight_transfer_engine()
         if self._weight_update_active:
@@ -377,11 +387,12 @@ class NPUWorker(GPUWorker):
         engine = cast("WeightTransferEngine", self.weight_transfer_engine)
         try:
             self._set_draft_weight_update_target()
+            self._incomplete_weight_updates.add(True)
             engine.start_weight_update()
         except BaseException:
             engine.reset_weight_update_target()
             raise
-        self._draft_weight_update_active = True
+        self._weight_update_is_draft = True
         self._weight_update_active = True
 
     def _restore_draft_weight_update_target(self) -> None:
@@ -389,7 +400,7 @@ class NPUWorker(GPUWorker):
         try:
             self.weight_transfer_engine.reset_weight_update_target()
         finally:
-            self._draft_weight_update_active = False
+            self._weight_update_is_draft = False
 
     def _start_weight_update(self, is_draft: bool = False) -> None:
         raise NotImplementedError("GPUWorker._start_weight_update is not validated on Ascend.")
@@ -621,7 +632,7 @@ class NPUWorker(GPUWorker):
             self.weight_transfer_engine.update_weights(update_info)
         except BaseException:
             self._weight_update_active = False
-            if getattr(self, "_draft_weight_update_active", False):
+            if self._weight_update_is_draft:
                 self._restore_draft_weight_update_target()
             raise
 
@@ -633,9 +644,10 @@ class NPUWorker(GPUWorker):
             raise RuntimeError("start_weight_update must be called before finish_weight_update.")
 
         assert self.weight_transfer_engine is not None
-        if getattr(self, "_draft_weight_update_active", False):
+        if self._weight_update_is_draft:
             try:
                 self.weight_transfer_engine.finish_weight_update()
+                self._incomplete_weight_updates.discard(True)
             finally:
                 self._weight_update_active = False
                 self._restore_draft_weight_update_target()
