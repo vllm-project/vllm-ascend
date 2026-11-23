@@ -616,6 +616,20 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         # A deferred call must not reset state between target and MTP.
         return
 
+    def retire_aborted_attempts(self, req_ids: set[str]) -> None:
+        # The aborted attempt's per-block private keys belong to its block
+        # table; this step's save writes the new attempt's keys after this.
+        if self._snapshot_keys:
+            for req_id in req_ids:
+                self._snapshot_keys.pop(req_id, None)
+        if self.use_block_key_layerwise:
+            # Re-admitted requests are NOT terminal: release the aborted
+            # attempt's active sessions while retaining the request entries
+            # the new attempt's retry needs (same path as an aborted load), and
+            # do it before this step's tasks are prepared at bind.
+            self._release_layerwise_requests_for_retry(req_ids)
+        super().retire_aborted_attempts(req_ids)
+
     def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
         if self._snapshot_keys:
             for req_id in finished_req_ids | meta.preempted_req_ids:

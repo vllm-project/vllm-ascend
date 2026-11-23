@@ -419,6 +419,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         super().bind_connector_metadata(connector_metadata)
+        # Requests preempted out of band and re-admitted in this step start
+        # their new attempt now: the aborted attempts' worker-side state must
+        # be gone before this step's load or save consults it.
+        readmitted = getattr(connector_metadata, "readmitted_req_ids", None)
+        if readmitted:
+            assert self.connector_worker is not None
+            self.connector_worker.retire_aborted_attempts(readmitted)
         if self.use_layerwise:
             assert self.connector_worker is not None
             # Layerwise hooks need this step's tasks before target forward.

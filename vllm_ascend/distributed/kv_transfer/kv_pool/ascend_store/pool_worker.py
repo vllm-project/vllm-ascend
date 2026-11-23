@@ -944,6 +944,31 @@ class BaseKVPoolWorker(ABC):
         )
         self._previous_save_batch = None
 
+    def retire_aborted_attempts(self, req_ids: set[str]) -> None:
+        """Drop the per-request state of the attempts a same-step re-admission
+        aborted.
+
+        A request preempted out of band (reset_prefix_cache(reset_running_
+        requests=True)) and re-admitted in the step that reports the preemption
+        starts its NEW attempt in that very step. The aborted attempt's durable
+        saved-offset high-water mark and queued store jobs belong to the old
+        allocation: kv_transfer.py would otherwise skip saving blocks up to the
+        old offset for the new attempt. The connector calls this when the
+        step's metadata is bound, i.e. before this step's load or save can
+        consult the state; the end-of-step get_finished is too late for it
+        (this step's own save has recorded by then) and only retires requests
+        that stay abandoned.
+        """
+        send_thread = self.kv_send_thread
+        if send_thread is None:
+            return
+        for req_id in req_ids:
+            if isinstance(send_thread, (KVCacheStoreSendingThread, KVCacheStoreLayerSendingThread)):
+                send_thread.delete_finished_stored_request(req_id)
+            if isinstance(send_thread, KVCacheStoreSendingThread):
+                send_thread.reset_saved_request(req_id)
+            self._retired_store_req_ids.discard(req_id)
+
     def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
         if self.kv_send_thread is not None:
             send_thread = self.kv_send_thread
