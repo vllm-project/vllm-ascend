@@ -553,6 +553,7 @@ class AscendConfig:
             "multistream_dsv4_dsa_overlap": true,
             "multistream_engram_overlap": true,
             "enable_prefill_mc2": false,
+            "enable_union_sparse_prefill": false,
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
             "kv_trace": {"enabled": false, "action": "log"},
@@ -696,6 +697,7 @@ class AscendConfig:
         )
     )
     enable_prefill_mc2: bool = False
+    enable_union_sparse_prefill: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
     kv_trace: KVTraceConfig = dataclasses.field(default_factory=KVTraceConfig)

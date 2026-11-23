@@ -36,6 +36,9 @@ tiling -- and the per-layer forward passes it straight through.
 ``is_consistent_topk`` is fixed to ``False``: live counts vary per row in
 serving, and the operator's consistent-count fast path does not apply.
 
+Union-mode prefill shares one capacity-based AICPU schedule across layers.
+Each layer uses UnionSparseMeta to deduplicate its selected blocks and
+generate the per-token mask consumed by GenericBlockSparseAttention.
 """
 
 from __future__ import annotations
@@ -46,8 +49,13 @@ from vllm_ascend.ops.triton.step5.summary_update import append_current_region
 
 _SPARSE_PATTERN_PER_GROUP_PER_TOKEN = 4
 _MASK_CAUSAL = 1
+_MASK_UNION = 3
 _QUANT_NONE = 0
+_SOFTMAX_PRECISION_BF16 = 0
 _SOFTMAX_PRECISION_FP32 = 1
+_WINDOW_DISABLED = -1
+_RESIDUAL_BLOCK_MODE_DISABLED = 0
+_UNION_REGION_SIZE = 8
 
 
 def gbsa_expected_counts(
@@ -192,5 +200,157 @@ def gbsa_sparse_attention(
         softmax_scale=softmax_scale,
         return_softmax_lse=False,
         **common,
+    )
+    return out
+
+
+def _union_step_geometry(
+    seq_lens_host: list[int],
+    context_lens_host: list[int],
+    *,
+    region_size: int,
+    topk: int,
+) -> tuple[int, int, int, int]:
+    """Return max query length, union-group count, capacity, and max KV blocks."""
+    query_lens = [seq_len - context_len for seq_len, context_len in zip(seq_lens_host, context_lens_host)]
+    max_kv_blocks = max(1, (max(seq_lens_host) + region_size - 1) // region_size)
+    num_union_groups = sum((query_len + region_size - 1) // region_size for query_len in query_lens)
+    union_capacity = min(region_size * (topk + 1), max_kv_blocks)
+    return max(query_lens), num_union_groups, union_capacity, max_kv_blocks
+
+
+def gbsa_union_sparse_metadata(
+    *,
+    num_heads: int,
+    num_kv_groups: int,
+    head_dim: int,
+    region_size: int,
+    topk: int,
+    cu_seqlens_q: torch.Tensor,
+    seqused_kv: torch.Tensor,
+    seq_lens_host: list[int],
+    context_lens_host: list[int],
+    max_pages: int,
+    page_size: int,
+) -> torch.Tensor:
+    """Schedule from the capacity bound once per step, outside the model graph.
+
+    The attention kernel clamps the schedule to each layer's union counts,
+    so all layers in the step can reuse this schedule.
+    """
+    if num_kv_groups != 1 or region_size != _UNION_REGION_SIZE:
+        raise NotImplementedError(
+            f"Union sparse prefill requires one KV group and {_UNION_REGION_SIZE}-token regions, "
+            f"got {num_kv_groups} KV groups and {region_size}-token regions."
+        )
+
+    from cann_ops_transformer.ops.attention.generic_block_sparse_attention import (
+        generic_block_sparse_attention_metadata,
+    )
+
+    max_query_len, num_union_groups, union_capacity, _ = _union_step_geometry(
+        seq_lens_host, context_lens_host, region_size=region_size, topk=topk
+    )
+    idx_shape = torch.zeros(
+        (num_kv_groups, num_union_groups, union_capacity), dtype=torch.int32, device=seqused_kv.device
+    )
+    counts = torch.full((num_kv_groups, num_union_groups), union_capacity, dtype=torch.int32, device=seqused_kv.device)
+    return generic_block_sparse_attention_metadata(
+        idx_shape,
+        counts,
+        num_heads,
+        num_kv_groups,
+        head_dim,
+        [1, region_size],
+        cu_seqlens_q=cu_seqlens_q.to(torch.int64),
+        seqused_kv=seqused_kv.to(torch.int32),
+        max_seqlen_q=max_query_len,
+        max_seqlen_kv=max_pages * page_size,
+        layout_q="TND",
+        layout_kv="PA_BBND",
+        layout_sparse_pattern=_SPARSE_PATTERN_PER_GROUP_PER_TOKEN,
+        mask_mode=_MASK_UNION,
+        quant_mode=_QUANT_NONE,
+        softmax_precision=_SOFTMAX_PRECISION_BF16,
+        win_left=_WINDOW_DISABLED,
+        win_right=_WINDOW_DISABLED,
+        residual_block_mode=_RESIDUAL_BLOCK_MODE_DISABLED,
+        is_consistent_topk=False,
+    )
+
+
+def gbsa_union_sparse_attention(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    ids: torch.Tensor,
+    positions: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seqused_kv: torch.Tensor,
+    metadata: torch.Tensor,
+    *,
+    num_kv_groups: int,
+    region_size: int,
+    softmax_scale: float,
+    seq_lens_host: list[int],
+    context_lens_host: list[int],
+) -> torch.Tensor:
+    """Compute attention over the per-region union with an exact per-token mask."""
+    try:
+        import cann_ops_nn_custom_nn  # noqa: F401, registers UnionSparseMeta
+    except ImportError as exc:
+        raise RuntimeError(
+            "enable_union_sparse_prefill requires the CANN UnionSparseMeta vendor package "
+            "and the cann_ops_nn_custom_nn wheel."
+        ) from exc
+    from cann_ops_transformer.ops.attention.generic_block_sparse_attention import generic_block_sparse_attention
+
+    idx, counts = append_current_region(ids, positions, groups=num_kv_groups, region_size=region_size)
+    _, num_union_groups, union_capacity, max_kv_blocks = _union_step_geometry(
+        seq_lens_host, context_lens_host, region_size=region_size, topk=idx.shape[2] - 1
+    )
+
+    seqused_kv_i32 = seqused_kv.to(torch.int32)
+    cu_seqlens_kv = torch.cat((seqused_kv_i32.new_zeros(1), seqused_kv_i32.cumsum(0, dtype=torch.int32)))
+    union_idx, union_counts, exact_mask = torch.ops.cann_ops_nn.union_sparse_meta_launch(
+        idx,
+        counts,
+        cu_seqlens_q.to(torch.int32),
+        cu_seqlens_kv,
+        None,
+        seqused_kv_i32,
+        1,
+        region_size,
+        region_size,
+        True,
+        union_capacity,
+        num_union_groups,
+        max_kv_blocks,
+    )
+    out, _lse = generic_block_sparse_attention(
+        query,
+        key_cache,
+        value_cache,
+        union_idx,
+        union_counts,
+        [1, region_size],
+        metadata=metadata,
+        block_table=block_table,
+        attn_mask=exact_mask,
+        softmax_scale=softmax_scale,
+        return_softmax_lse=False,
+        cu_seqlens_q=cu_seqlens_q.to(torch.int64),
+        seqused_kv=seqused_kv_i32,
+        layout_q="TND",
+        layout_kv="PA_BBND",
+        layout_sparse_pattern=_SPARSE_PATTERN_PER_GROUP_PER_TOKEN,
+        mask_mode=_MASK_UNION,
+        quant_mode=_QUANT_NONE,
+        softmax_precision=_SOFTMAX_PRECISION_BF16,
+        win_left=_WINDOW_DISABLED,
+        win_right=_WINDOW_DISABLED,
+        residual_block_mode=_RESIDUAL_BLOCK_MODE_DISABLED,
+        is_consistent_topk=False,
     )
     return out

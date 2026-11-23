@@ -46,11 +46,14 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.models.step5.ops.generic_block_sparse_attention import (
     gbsa_expected_counts,
     gbsa_sparse_attention,
     gbsa_sparse_attention_metadata,
+    gbsa_union_sparse_attention,
+    gbsa_union_sparse_metadata,
 )
 from vllm_ascend.models.step5.ops.indexer_region_score import indexer_score_topk
 from vllm_ascend.ops.triton.step5.summary_update import (
@@ -228,6 +231,9 @@ class AscendStep5DSAPrefillMetadata:
     once in the builder from the query positions and shared across all
     layers (the scheduled counts are position-derived, layer-independent)."""
 
+    gbsa_union_metadata: torch.Tensor | None = None
+    """Capacity-based AICPU schedule shared across layers in union mode."""
+
     @property
     def query_lens(self) -> torch.Tensor:
         return self.query_start_loc[1:] - self.query_start_loc[:-1]
@@ -341,6 +347,7 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
         self.gbsa_region_size = impl.region_size
         self.gbsa_topk = impl.topk_regions
         self.gbsa_block_size = kv_cache_spec.block_size
+        self.enable_union_sparse_prefill = get_ascend_config().enable_union_sparse_prefill
         self.capture_sizes = set(vllm_config.compilation_config.cudagraph_capture_sizes or [])
         # Graph-replay metadata buffers: on capture-sized steps the AICPU
         # tensor must live at a stable address (baked into the captured
@@ -461,10 +468,9 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
                 context_lens_host=context_lens_host_t.tolist(),
             )
             # GBSA AICPU scheduling plus the summary-grouping inputs, once
-            # per step outside the model graph. Per-token positions:
-            # context + in-chunk offset, straight from the (rebased)
-            # start-loc; the scheduled counts depend on these positions
-            # only, so every layer reuses these tensors.
+            # per step outside the model graph. Each layer reuses these
+            # positions (context + in-chunk offset) and the schedule for
+            # the selected attention mode.
             qsl = prefill_metadata.query_start_loc.to(torch.int64)
             num_query_tokens = prefill_metadata.num_query_tokens
             token_idx = torch.arange(num_query_tokens, device=seq_lens.device, dtype=torch.int64)
@@ -472,15 +478,30 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
             prefill_positions = prefill_context_lens.to(torch.int64)[reqs] + token_idx - qsl[reqs]
             prefill_metadata.positions = prefill_positions
             prefill_metadata.owners = reqs.to(torch.int64)
-            prefill_metadata.gbsa_metadata = self._build_gbsa_metadata(
-                prefill_positions,
-                prefill_metadata.query_start_loc,
-                prefill_seq_lens,
-                block_table,
-                prefill_metadata.max_query_len,
-                path="prefill",
-                use_graph_shape=False,
-            )
+            if self.enable_union_sparse_prefill:
+                prefill_metadata.gbsa_union_metadata = gbsa_union_sparse_metadata(
+                    num_heads=self.gbsa_num_heads,
+                    num_kv_groups=self.gbsa_num_kv_groups,
+                    head_dim=self.gbsa_head_size,
+                    region_size=self.gbsa_region_size,
+                    topk=self.gbsa_topk,
+                    cu_seqlens_q=qsl,
+                    seqused_kv=prefill_seq_lens,
+                    seq_lens_host=prefill_metadata.seq_lens_host,
+                    context_lens_host=prefill_metadata.context_lens_host,
+                    max_pages=block_table.shape[1],
+                    page_size=self.gbsa_block_size,
+                )
+            else:
+                prefill_metadata.gbsa_metadata = self._build_gbsa_metadata(
+                    prefill_positions,
+                    prefill_metadata.query_start_loc,
+                    prefill_seq_lens,
+                    block_table,
+                    prefill_metadata.max_query_len,
+                    path="prefill",
+                    use_graph_shape=False,
+                )
 
         decode_metadata: AscendStep5DSADecodeMetadata | None = None
         active_decodes = 0
@@ -897,20 +918,38 @@ class AscendStep5DSAImpl(AttentionImplBase[AscendStep5DSAMetadata]):
             topk=self.topk_regions,
             region_size=self.region_size,
         )
-        out = gbsa_sparse_attention(
-            query,
-            key_cache,
-            value_cache,
-            ids,
-            q_positions,
-            p.block_table[:num_reqs],
-            cu_seq_lens.to(torch.int64),
-            p.seq_lens[:num_reqs].to(torch.int32),
-            p.gbsa_metadata,
-            num_kv_groups=self.num_kv_groups,
-            region_size=self.region_size,
-            softmax_scale=self.scale,
-        )
+        if p.gbsa_union_metadata is not None:
+            out = gbsa_union_sparse_attention(
+                query,
+                key_cache,
+                value_cache,
+                ids,
+                q_positions,
+                p.block_table[:num_reqs],
+                cu_seq_lens,
+                actual_kv_lengths,
+                p.gbsa_union_metadata,
+                num_kv_groups=self.num_kv_groups,
+                region_size=self.region_size,
+                softmax_scale=self.scale,
+                seq_lens_host=p.seq_lens_host,
+                context_lens_host=p.context_lens_host,
+            )
+        else:
+            out = gbsa_sparse_attention(
+                query,
+                key_cache,
+                value_cache,
+                ids,
+                q_positions,
+                p.block_table[:num_reqs],
+                cu_seq_lens.to(torch.int64),
+                actual_kv_lengths,
+                p.gbsa_metadata,
+                num_kv_groups=self.num_kv_groups,
+                region_size=self.region_size,
+                softmax_scale=self.scale,
+            )
         output[token_offset : token_offset + num_query_tokens] = out.to(output.dtype)
 
     def forward(
