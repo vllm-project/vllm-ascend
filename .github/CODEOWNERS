@@ -286,3 +286,4 @@
 /.github/workflows/dockerfiles/Dockerfile.ai-review @wangxiyuan
 /.github/workflows/scripts/ai_review.py @wangxiyuan
 /.github/workflows/scripts/test_ai_review.py @wangxiyuan
+/.github/agent-review/L2/release-note/ @wangxiyuan

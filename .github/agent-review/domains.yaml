@@ -20,3 +20,8 @@ domains:
       - ".github/**"
       - "tools/**"
       - "tests/**"
+  - name: release-note
+    description: release note fragments in release_notes/, and whether a PR
+      needs one at all
+    paths:
+      - "release_notes/**"
