@@ -330,11 +330,6 @@ jobs:
         # NPU test jobs use fail-on-cache-miss instead.
         build-args: |
           CANN_QUAY_URL=${{ inputs.cann_quay_url }}
-          APTMIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081
-          PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          PIP_TRUSTED_HOST=cache-service.nginx-pypi-cache.svc.cluster.local
-          PYTORCH_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu
-          ASCEND_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi
           GIT_PROXY=https://gh-proxy.test.osinfra.cn/
           COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
           VLLM_COMMIT=${{ inputs.vllm_commit }}
