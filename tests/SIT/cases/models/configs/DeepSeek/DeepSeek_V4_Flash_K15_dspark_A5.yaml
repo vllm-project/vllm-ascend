@@ -6,7 +6,6 @@ _envs: &envs
   SERVER_PORT: "DEFAULT_PORT"
   PYTHONHASHSEED: "0"   # 池化哈希一致性要求, 全实例统一
   VLLM_ENGINE_READY_TIMEOUT_S: "36000"
-  LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH"
 _kv_pool: &kv_pool
   type: "memcache"
   meta_service_port: 5000
