@@ -1716,3 +1716,17 @@
 #       Remove the verifier override once native Kimi defaults dispatch through
 #       the platform's attention/cache configuration interface.
 #
+
+# ** File: patch_layerwise_reload.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.model_loader.reload.layerwise`
+#    Why:
+#       Ascend950 cannot copy into the transposed NZ views produced by native
+#       MXFP4 schemes during online BF16 layerwise reload.
+#    How:
+#       Only online W4A8 MXFP4 uses transpose-aware device copies into the
+#       original captured storage. Other methods retain the upstream function.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; the failure was found in Ascend hardware validation.
+#    Future Plan:
+#       Propose a backend copy hook upstream and remove this patch once adopted.
