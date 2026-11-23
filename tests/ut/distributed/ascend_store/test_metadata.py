@@ -172,6 +172,7 @@ class TestPoolKey(unittest.TestCase):
             ("kv_cache_group_id", 1),
             ("cache_role", "state"),
             ("cache_family", "swa"),
+            ("mamba_shard_layout", "tp2-pcp2-dcp1"),
         ):
             with self.subTest(field=field):
                 other = PoolKey(replace(self.meta, **{field: value}), "hash1")
@@ -219,6 +220,17 @@ class TestChunkedTokenDatabase(unittest.TestCase):
     def test_process_tokens_empty(self):
         result = list(self.db.process_tokens(32, []))
         self.assertEqual(result, [])
+
+    def test_mamba_layout_matches_object_and_cached_string_keys(self):
+        self.meta.mamba_shard_layout = "tp2-pcp2-dcp1"
+        for cache_role in ("kv", "state"):
+            with self.subTest(cache_role=cache_role):
+                key = self.db._make_key_by_hash("abc", cache_role=cache_role)
+                expected = self.db._get_key_prefix(0, cache_role) + "abc"
+                self.assertEqual(key.to_string(), expected)
+                self.assertEqual(self.db._get_key_prefix(0, cache_role) + "abc", expected)
+                self.assertIn("@mamba_layout:tp2-pcp2-dcp1@", expected)
+                self.assertIn("@mamba_layout:tp2-pcp2-dcp1@", key.split_layers(1)[0].to_string())
 
     def test_process_tokens_with_str_hashes(self):
         hashes = ["aaa", "bbb"]

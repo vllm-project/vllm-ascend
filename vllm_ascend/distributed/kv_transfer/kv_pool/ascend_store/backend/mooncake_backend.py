@@ -387,12 +387,16 @@ class MooncakeBackend(Backend):
                     pp_rank=stage if pp_size > 1 else None,
                 )
 
-            return LayerwiseKeyBuilder(make_key, pp_size, pcp_size, pcp_sharded_group_ids, dcp_size)
+            return LayerwiseKeyBuilder(
+                make_key, pp_size, pcp_size, pcp_sharded_group_ids, dcp_size, parallel.tensor_parallel_size
+            )
 
         def make_single_group_key(group: int, block_hash: str, head: int, stage: int) -> str:
             return mooncake_layerwise.make_block_key(model_name, block_hash, head, namespace=namespace, pp_rank=stage)
 
-        return LayerwiseKeyBuilder(make_single_group_key, pp_size, pcp_size, pcp_sharded_group_ids, dcp_size)
+        return LayerwiseKeyBuilder(
+            make_single_group_key, pp_size, pcp_size, pcp_sharded_group_ids, dcp_size, parallel.tensor_parallel_size
+        )
 
     @classmethod
     def send_fence_backlog(cls) -> int:

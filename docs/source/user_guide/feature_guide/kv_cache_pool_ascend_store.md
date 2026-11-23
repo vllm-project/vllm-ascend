@@ -62,6 +62,20 @@ For non-layerwise complete-block transfers, adjacent MLA components sharing one 
 
 This bulk fast path uses physical-page-major object contents instead of the previous component-major segmented contents. A fresh namespace is required even when upgrading from the earlier segmented version of this fix. Writers and readers must agree on transfer mode and cache layout; do not share these objects with layerwise readers or workers using a different component layout.
 
+### Sharded Mamba State Layouts
+
+`AscendStoreConnector` accepts sharded Mamba state with tensor parallelism and
+prefill context parallelism both greater than one. For bulk and layerwise pooling,
+Mamba state keys include the TP, PCP and DCP sizes. Readers only reuse states from
+the same parallel layout; for example, a TP2/PCP1 reader misses state written by a
+TP2/PCP2 instance and recomputes the prefix. This does not reshard cached states
+between layouts or relax other backend restrictions.
+
+Upgrade writers and readers together. Sharded Mamba entries written before this
+change are not reused, so the first request for an existing prefix may be cold.
+Full-attention and TP-replicated Mamba keys retain their existing format.
+Decode consumers still require `consumer_is_to_load: true` to load from the pool.
+
 ### Prefix Cache Retention
 
 Configure retention with the upstream vLLM argument `--prefix-cache-retention-interval`.

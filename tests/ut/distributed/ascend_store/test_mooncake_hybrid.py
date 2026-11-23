@@ -233,18 +233,31 @@ class TestMooncakeHybrid(unittest.TestCase):
         self._roundtrip(private_tail=True)
 
     def test_mla_dedup_preserves_every_tp_rank_kda_snapshot(self):
+        self._roundtrip_mamba_shards(tp_size=8, pcp_size=1)
+
+    def test_joint_tp_pcp_restores_each_mamba_shard_after_local_eviction(self):
+        self._roundtrip_mamba_shards(tp_size=2, pcp_size=2)
+
+    def _roundtrip_mamba_shards(self, tp_size, pcp_size):
         store = MemoryRangeStore()
         workers = []
-        for rank in range(8):
-            worker, _, arrays, jobs, errors = self.make_hybrid(private_tail=True, tp_size=8, tp_rank=rank, use_mla=True)
+        for rank in range(tp_size * pcp_size):
+            worker, _, arrays, jobs, errors = self.make_hybrid(
+                private_tail=True,
+                tp_size=tp_size,
+                tp_rank=rank // pcp_size,
+                pcp_size=pcp_size,
+                pcp_rank=rank % pcp_size,
+                use_mla=True,
+            )
             worker.m_store = worker.kv_send_thread.m_store = worker.kv_recv_thread.m_store = store
             for name, array in arrays.items():
                 if "state" in name:
                     array.fill(80 + rank)
             request = self.save_prefix(worker)
             workers.append((worker, arrays, request, jobs, errors))
-        # MLA/indexer objects are replicated; recurrent state has eight shards.
-        self.assertEqual(len(store.complete), 4 + 2 + 8)
+        # MLA/indexer objects are replicated; every recurrent-state shard is distinct.
+        self.assertEqual(len(store.complete), 4 + 2 + tp_size * pcp_size)
         for rank, (worker, arrays, request, jobs, errors) in enumerate(workers):
             for array in arrays.values():
                 array.fill(0)

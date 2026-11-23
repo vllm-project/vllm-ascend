@@ -323,6 +323,53 @@ class TestPCPPoolWorker(unittest.TestCase):
                 self.assertEqual(worker.metadata[0].head_or_tp_rank, 0 if use_layerwise else 1)
                 self.assertEqual(worker.get_group_tp_size(0), 2)
 
+    def test_bulk_mamba_lookup_requires_matching_shard_layout_and_all_writers(self):
+        spec = MambaSpec(block_size=16, shapes=((8,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+        plan = SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(["model.layers.0.state"], spec)])
+        stored_keys = set()
+        for tp_rank, pcp_rank in product(range(2), range(2)):
+            writer = make_worker(
+                self, kv_cache_config=plan, num_layers=1, tp_size=2, tp_rank=tp_rank, pcp_size=2, pcp_rank=pcp_rank
+            )
+            stored_keys.add(writer.token_database._make_key_by_hash("prefix").to_string())
+            self.doCleanups()
+        self.assertEqual(len(stored_keys), 4)
+
+        for tp_size, pcp_size, expected in ((2, 2, 16), (2, 1, 0), (1, 2, 0), (4, 1, 0)):
+            with self.subTest(tp_size=tp_size, pcp_size=pcp_size):
+                reader = make_worker(
+                    self,
+                    kv_cache_config=plan,
+                    num_layers=1,
+                    tp_size=tp_size,
+                    pcp_size=pcp_size,
+                    kv_role="kv_consumer",
+                    extra_config={"consumer_is_to_load": True},
+                )
+                reader.m_store.exists.side_effect = lambda keys: [int(key in stored_keys) for key in keys]
+                self.assertEqual(reader.lookup_scheduler(16, ["prefix"]), expected)
+                if expected:
+                    self.assertEqual(set(reader.m_store.exists.call_args.args[0]), stored_keys)
+                    removed = stored_keys.pop()
+                    self.assertEqual(reader.lookup_scheduler(16, ["prefix"]), 0)
+                    stored_keys.add(removed)
+                self.doCleanups()
+
+    def test_bulk_attention_and_replicated_mamba_keep_legacy_keys(self):
+        specs = (
+            FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32),
+            MambaSpec(block_size=16, shapes=((8,),), dtypes=(torch.float32,), tp_replicated=True),
+        )
+        for spec in specs:
+            with self.subTest(spec=spec):
+                plan = SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(["model.layers.0.attn"], spec)])
+                worker = make_worker(self, kv_cache_config=plan, num_layers=1, tp_size=2, pcp_size=2)
+                self.assertEqual(
+                    worker.token_database._make_key_by_hash("prefix").to_string(),
+                    "llama-7b@dcp:0@head_or_tp_rank:0@pp_rank:0@group:0@cache_role:kv@cache_family:default@prefix",
+                )
+                self.doCleanups()
+
     def test_dspark_draft_pool_exclusion_requires_layerwise_reuse(self):
         target_names = [f"model.layers.{index}.attn" for index in range(4)]
         draft_names = [f"draft.layers.{index}.attn" for index in range(4, 6)]

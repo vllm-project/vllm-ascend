@@ -340,11 +340,15 @@ class BaseKVPoolWorker(ABC):
 
         self.metadata: list[KeyMetadata] = []
         for group_id in range(self.num_kv_cache_groups):
+            mamba_shard_layout = ""
             # the mamba kv_heads is not same with the full attention, can't share the cache data
             group_tp_rank = self.tp_rank if self.group_uses_align_state[group_id] else self.head_or_tp_rank
             if group_id in self.sharded_mamba_group_ids:
                 # Layerwise keys carry PCP coordinates in their own suffix.
                 group_tp_rank = self.tp_rank if self.use_layerwise else self.tp_rank * self.pcp_size + self.pcp_rank
+                if not self.use_layerwise:
+                    # A rank number alone can alias a wider shard from another topology.
+                    mamba_shard_layout = f"tp{self.tp_size}-pcp{self.pcp_size}-dcp{self.dcp_size}"
             self.metadata.append(
                 KeyMetadata(
                     model_config.model.rstrip("/").split("/")[-1],
@@ -352,6 +356,7 @@ class BaseKVPoolWorker(ABC):
                     self.dcp_rank,
                     self.pp_rank,
                     group_id,
+                    mamba_shard_layout=mamba_shard_layout,
                 )
             )
 
