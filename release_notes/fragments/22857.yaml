@@ -1,0 +1,4 @@
+pr: 22857
+entries:
+  - category: bugfix
+    text: Fixed missed external prefix-cache hits for hybrid Mamba models using AscendStore when a prompt ends in a partial cache block.
