@@ -1,5 +1,8 @@
 [run]
 branch = True
+# @triton.jit bodies execute on device, so the tracer never sees them.
+# Record those lines when the kernel is launched.
+plugins = tests.coverage_support.triton_coverage
 # The file path in the specified overwritten data is an absolute path, which facilitates path matching during subsequent analysis.
 relative_files = False
 # Specifies the base name of the generated coverage data file. The absolute path can be used.

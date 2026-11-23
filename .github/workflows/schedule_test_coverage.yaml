@@ -18,6 +18,16 @@
 name: Schedule Test Coverage
 
 on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
   workflow_dispatch:
     inputs:
       vllm_ascend_ref:
@@ -33,10 +43,11 @@ defaults:
   run:
     shell: bash -el {0}
 
-# Extra coverage branch collected with the main run.
-# latest = newest releases/v* branch. none = skip. Or a releases/v* branch name.
+# This run collects singlecard operator coverage for the checked-out ref only.
+# none skips the extra release-branch plan. That branch may not have
+# select_tests.py --singlecard-ops yet.
 env:
-  COVERAGE_BRANCH: latest
+  COVERAGE_BRANCH: none
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.vllm_ascend_ref || 'main' }}
@@ -44,7 +55,7 @@ concurrency:
 
 jobs:
   select-full-tests:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'pull_request'
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -55,8 +66,8 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.vllm_ascend_ref || 'main' }}
-          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_ref || 'main' }}
+          fetch-depth: 1
 
       - name: Checkout coverage helper from main
         uses: actions/checkout@v7
@@ -124,7 +135,7 @@ jobs:
               env = os.environ.copy()
               env["GITHUB_OUTPUT"] = output_path
               script = os.path.join(root, ".github/workflows/scripts/select_tests.py")
-              subprocess.run([sys.executable, script, "--all-tests"], cwd=root, env=env, check=True)
+              subprocess.run([sys.executable, script, "--singlecard-ops"], cwd=root, env=env, check=True)
               parsed = {}
               for line in open(output_path, encoding="utf-8"):
                   if "=" not in line:
@@ -224,8 +235,9 @@ jobs:
       base_sha: ${{ matrix.target.base_sha }}
       test_groups: ${{ matrix.target.test_groups }}
       enable-coverage: true
+      upload-coverage-to-obs: false
       coverage-file-suffix: ${{ matrix.target.coverage_file_suffix }}
-      timeout-minutes: 180
+      timeout-minutes: 360
     secrets:
       OBS_ACCESS_KEY_PRECISION: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
       OBS_SECRET_ACCESS_KEY_PRECISION: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
