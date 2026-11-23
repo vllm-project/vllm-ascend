@@ -984,6 +984,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     keys=len(keys),
                     bytes=put_bytes,
                     queue_wait_ms=round(queue_wait * 1e3, 3),
+                    sample_keys=keys[:1],
                 )
             if self.owner_stager is not None:
                 put_result = self.owner_stager.put(self.m_store, keys, addrs, sizes)

@@ -1187,12 +1187,36 @@ class BaseKVPoolWorker(ABC):
 
             if keys:
                 res = self.m_store.exists(keys)  # type: ignore[assignment]
+                if self._kvpd_timing:
+                    log_kvpd_timing(
+                        True,
+                        "d_lookup_keys",
+                        group=group_id,
+                        token_len=token_len,
+                        hbm_hit_tokens=hbm_hit_tokens,
+                        variants=len(keys) // max(len(chunk_hashes), 1),
+                        keys=len(keys),
+                        exists=sum(1 for value in res if value == 1),  # type: ignore[union-attr]
+                        sample_keys=keys[:1],
+                        sample_res=list(res[:1]),  # type: ignore[index]
+                    )
                 offset = 0
                 for chunk_hash, count in zip(chunk_hashes, variant_counts, strict=True):
                     values = res[offset : offset + count]  # type: ignore[index]
                     if values and all(value == 1 for value in values):
                         present.append(chunk_hash)
                     offset += count
+            elif self._kvpd_timing:
+                log_kvpd_timing(
+                    True,
+                    "d_lookup_keys",
+                    group=group_id,
+                    token_len=token_len,
+                    hbm_hit_tokens=hbm_hit_tokens,
+                    chunk_mask=None if lookup_mask is None else len(lookup_mask),
+                    keys=0,
+                    exists=0,
+                )
 
             logger.debug(
                 "KV pool coordinator lookup group=%d token_len=%d keys=%d exists_chunks=%d sample_keys=%s",
@@ -1242,15 +1266,50 @@ class BaseKVPoolWorker(ABC):
             )
             if coordinator_hit is not None:
                 return coordinator_hit
+            if self._kvpd_timing:
+                log_kvpd_timing(
+                    True,
+                    "d_lookup_path",
+                    token_len=token_len,
+                    hbm_hit_tokens=hbm_hit_tokens,
+                    groups=kv_cache_group_ids,
+                    use_layerwise=use_layerwise,
+                    coordinator=coordinator_hit,
+                    num_groups=self.num_kv_cache_groups,
+                )
             for group_id in kv_cache_group_ids:
                 keys, starts, ends = self._build_lookup_keys(token_len, block_hashes, group_id)
 
                 if not keys:
+                    if self._kvpd_timing:
+                        log_kvpd_timing(
+                            True,
+                            "d_lookup_keys",
+                            group=group_id,
+                            token_len=token_len,
+                            hbm_hit_tokens=hbm_hit_tokens,
+                            keys=0,
+                            path="contiguous",
+                        )
                     return 0
 
                 multi_tp_keys = self._expand_lookup_keys_by_rank(keys, group_id)
                 num_ranks = len(multi_tp_keys) // len(keys)
                 res = self.m_store.exists(multi_tp_keys)  # type: ignore[assignment]
+                if self._kvpd_timing:
+                    log_kvpd_timing(
+                        True,
+                        "d_lookup_keys",
+                        group=group_id,
+                        token_len=token_len,
+                        hbm_hit_tokens=hbm_hit_tokens,
+                        variants=num_ranks,
+                        keys=len(keys),
+                        exists=sum(1 for value in res if value == 1),  # type: ignore[union-attr]
+                        sample_keys=multi_tp_keys[:1],
+                        sample_res=list(res[:1]),  # type: ignore[index]
+                        path="contiguous",
+                    )
                 num_block = len(keys)
                 if use_layerwise:
                     res = self.check_all_layers_exists(
@@ -1602,6 +1661,13 @@ class KVPoolWorker(BaseKVPoolWorker):
                     bytes=load_bytes,
                 )
             load_get_start = time.perf_counter()
+            if self.backend_name == "mooncake":
+                # Mooncake restores KV outside the NPU compute stream, while
+                # MRV2 queues new-block zeroing on that stream. Drain the
+                # zeroing first so a later zero cannot wipe the restored pages.
+                # The producer path needs this for its own prefix hits too; the
+                # consumer path is the PD decode side.
+                torch.npu.current_stream().synchronize()
             if self.owner_transfer_stager is not None:
                 ret = self.owner_transfer_stager.get(self.m_store, key_list_c, addr_list_c, size_list_c)
             else:
@@ -1805,6 +1871,10 @@ class KVPoolWorker(BaseKVPoolWorker):
         )
         load_bytes = sum_transfer_bytes(sizes_c)
         load_get_start = time.perf_counter()
+        if self.backend_name == "mooncake":
+            # Drain MRV2 new-block zeroing before the pool restore writes
+            # these pages (same reason as the non-TP-mismatch load path).
+            torch.npu.current_stream().synchronize()
         if self.owner_transfer_stager is not None:
             ret = self.owner_transfer_stager.get(self.m_store, keys_c, addrs_c, sizes_c)
         else:

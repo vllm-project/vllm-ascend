@@ -853,12 +853,35 @@ class KVPoolScheduler(BaseKVPoolScheduler):
                 else prompt_token_len
             )
         if token_len < self.cache_transfer_granularity or num_computed_tokens >= token_len:
+            if self._kvpd_timing:
+                log_kvpd_timing(
+                    True,
+                    "d_lookup_skip",
+                    request.request_id,
+                    prompt_tokens=prompt_token_len,
+                    token_len=token_len,
+                    hbm_hit_tokens=num_computed_tokens,
+                    granularity=self.cache_transfer_granularity,
+                )
             return None
         if self.client is None or self.client.closed:
             self.client = LookupKeyClient(self.vllm_config)
-        return self.client.lookup(
+        hit = self.client.lookup(
             token_len,
             request.block_hashes,
             self.kv_cache_group_ids,
             hbm_hit_tokens=num_computed_tokens,
         )
+        if self._kvpd_timing:
+            log_kvpd_timing(
+                True,
+                "d_external_lookup",
+                request.request_id,
+                token_len=token_len,
+                hbm_hit_tokens=num_computed_tokens,
+                groups=self.kv_cache_group_ids,
+                hashes=len(request.block_hashes),
+                sample_hash=request.block_hashes[0].hex() if request.block_hashes else None,
+                hit=hit,
+            )
+        return hit
