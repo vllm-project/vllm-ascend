@@ -42,7 +42,7 @@ def test_metadata_capacity_bounds_do_not_change_empty_actual_lengths():
     used = torch.tensor([1, 2], dtype=torch.int32)
     operation = Mock(return_value=object())
     scope = dict(torch=torch, _check_lengths=Mock(), FLASHMLA_QK_DIM=576, FLASHMLA_V_DIM=512)
-    build = load_method("vllm_ascend/attention/quant_flashmla.py", "QuantFlashMLAImpl", "build_metadata", scope)
+    build = load_method("vllm_ascend/attention/flashmla.py", "QuantFlashMLAImpl", "build_metadata", scope)
     impl = SimpleNamespace(
         metadata_op=operation, config=SimpleNamespace(num_heads=96, quant_mode=1, mask_mode=0, NUM_KV_HEADS=1)
     )

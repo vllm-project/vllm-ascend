@@ -9,12 +9,8 @@ import torch
 
 import vllm_ascend.ops  # noqa: F401  # Register ops before importing attention/device modules.
 from vllm_ascend.attention import mla_v1
-from vllm_ascend.attention.flashmla import FlashMLAMetadataBuilder
+from vllm_ascend.attention.flashmla import FlashMLAMetadataBuilder, QuantFlashMLAConfig, QuantFlashMLAImpl
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
-from vllm_ascend.attention.quant_flashmla import (
-    QuantFlashMLAConfig,
-    QuantFlashMLAImpl,
-)
 
 
 def _inputs(tokens: int = 2, heads: int = 8):

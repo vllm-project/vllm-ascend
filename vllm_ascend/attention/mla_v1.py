@@ -41,12 +41,10 @@ from vllm_ascend.attention.flashmla import (
     FLASHMLA_V_DIM,
     FlashMLADecode,
     FlashMLAMetadataBuilder,
-    get_flashmla_ops,
-    split_flashmla_requests,
-)
-from vllm_ascend.attention.quant_flashmla import (
     QuantFlashMLAConfig,
     QuantFlashMLAImpl,
+    get_flashmla_ops,
+    split_flashmla_requests,
 )
 from vllm_ascend.attention.utils import (
     ATTENTION_UPDATE_MAX_INPUTS,

@@ -144,7 +144,7 @@ def runtime(monkeypatch):
         return install(name, **runpy.run_path(str(ROOT / relative)))
 
     install("vllm_ascend")
-    utils = install("vllm_ascend.attention.utils", get_flashmla_ops=lambda: None)
+    utils = install("vllm_ascend.attention.utils", get_flashmla_ops=lambda: None, get_quant_flashmla_ops=lambda: None)
     tree = ast.parse((ROOT / "vllm_ascend/attention/utils.py").read_text(encoding="utf-8"))
     constant = next(
         node
@@ -836,13 +836,8 @@ def test_quant_metadata_requires_positive_request_capacity(runtime, capacity):
 
 
 @pytest.mark.parametrize("heads", [12, 48, 96])
-def test_quant_adapter_class_constraints_and_native_abi(runtime, monkeypatch, heads):
-    monkeypatch.setattr(
-        sys.modules["vllm_ascend.attention.utils"], "get_quant_flashmla_ops", lambda: None, raising=False
-    )
-    path = ROOT / "vllm_ascend/attention/quant_flashmla.py"
-    module = runpy.run_path(str(path))
-    config_type, impl_type = module["QuantFlashMLAConfig"], module["QuantFlashMLAImpl"]
+def test_quant_adapter_class_constraints_and_native_abi(runtime, heads):
+    config_type, impl_type = runtime.api.QuantFlashMLAConfig, runtime.api.QuantFlashMLAImpl
     config = config_type(heads, 0.125, mask_mode=config_type.NON_CAUSAL_MASK_MODE, return_softmax_lse=True)
     assert config.quant_mode == 1
     assert config_type.NUM_KV_HEADS == 1 and config_type.METADATA_PLANES == 2
