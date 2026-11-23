@@ -9,7 +9,7 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.engram_gate import fused_engram_gate
 
-from .common import engram_gate
+from .common import engram_gate, restore_engram_hidden
 
 
 class AscendEngram(nn.Module):
@@ -39,12 +39,14 @@ class AscendEngram(nn.Module):
         rotation: torch.Tensor | None,
     ) -> torch.Tensor:
         kv = self.wkv(rows)
-        if (
-            rotation is None
-            and hidden_states.device.type == "npu"
-            and get_current_hardware_profile().supports(HardwareCapability.ENGRAM_UNROTATED_GATE)
-        ):
-            return fused_engram_gate(hidden_states, kv, self.q_weight, self.k_weight, token_mask, self.eps)
+        capability = (
+            HardwareCapability.ENGRAM_UNROTATED_GATE if rotation is None else HardwareCapability.ENGRAM_ROTATED_GATE
+        )
+        if hidden_states.device.type == "npu" and get_current_hardware_profile().supports(capability):
+            gate_hidden = None if rotation is None else restore_engram_hidden(hidden_states, rotation)
+            return fused_engram_gate(
+                hidden_states, kv, self.q_weight, self.k_weight, token_mask, self.eps, gate_hidden=gate_hidden
+            )
         key, value = kv.split([self.hc_mult * self.dim, self.dim], -1)
         return engram_gate(
             hidden_states,

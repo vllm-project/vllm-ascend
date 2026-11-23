@@ -241,6 +241,12 @@ fragment.
 - Breaking and config entries: old behavior → new behavior, the exact switch, the
   migration step, and what happens if the user does nothing.
 - Bug fixes: the user-visible symptom and when it occurs, not the internal root cause.
+- The unit of a release note is the net change relative to the previous release. A fix for
+  a bug **already shipped in a released version** needs a `bugfix` fragment; a fix for a
+  bug that never reached a released artifact needs no fragment of its own. A revert of a PR
+  merged after the last release needs no fragment either. In both unreleased cases, remove
+  the cancelled PR's not-yet-archived fragment in the fix/revert PR. See
+  [release_notes/README.md](release_notes/README.md#changes-that-cancel-out-before-a-release).
 
 Add `release_notes/fragments/<PR number>.yaml` following `release_notes/TEMPLATE.yaml` — open the PR first to get its number, then push the fragment to the same PR. When in
 doubt about whether users can observe the change, add a fragment — the release manager drops
@@ -262,6 +268,8 @@ git commit -s -m "<type>: <summary>" -m "<body - explaining what changed and why
 ```
 
 **Valid Types**: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `chore`
+
+Follow the [commit message content guidelines](docs/source/developer_guide/contribution/index.md#commit-message-content) for the problem, fix, and validation.
 
 ### Pull Request Title Format
 

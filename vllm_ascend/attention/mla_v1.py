@@ -35,7 +35,6 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
-    is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.flashmla import (
     FLASHMLA_QK_DIM,
@@ -67,6 +66,9 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, supports
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.paged_mla_cache_read import load_mla_cache_rows_by_slots
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
+    uses_sfa_dspark_kv_transfer,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
@@ -186,7 +188,12 @@ class AscendMLAAttention(MLAAttention):
             cache_sparse_sfa_turboquant=use_sfa_turboquant,
             cache_sparse_sfa_c8=use_sfa_c8,
             store_on_host=(
-                not (spec.is_draft or self.is_draft_layer) and getattr(self.impl, "store_kv_cache_on_host", False)
+                # Only draft layers owned by the DSpark resident protocol stay
+                # device-resident; an MTP head under another method has no
+                # DSPARK_DRAFT_KV path and must ride the host pipeline (the
+                # blanket is_draft exclusion broke non-dspark MTP PD).
+                not ((spec.is_draft or self.is_draft_layer) and uses_sfa_dspark_kv_transfer(vllm_config))
+                and getattr(self.impl, "store_kv_cache_on_host", False)
             ),
             head_size=head_size,
             dtype=dtype,
@@ -370,7 +377,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         )
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.use_pcp = self.pcp_size > 1
-        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
+        self.is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         self.use_dcp = is_dcp_enabled()
 
         scheduler_config = vllm_config.scheduler_config
@@ -1080,7 +1087,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.vllm_config = get_current_vllm_config()
         self.use_pcp = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
         self.use_dcp = self.vllm_config.parallel_config.decode_context_parallel_size > 1
-        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
+        self.is_pcp_decode_sharded = self.vllm_config.parallel_config.pcp_shard_decode_requests
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
         self.q_a_layernorm = kwargs.get("q_a_layernorm")
@@ -1139,8 +1146,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.fa_quant_layer or self.dtype not in (torch.bfloat16, torch.float16) or self.enable_kv_nz:
             return False
         dcp_size = config.parallel_config.decode_context_parallel_size
-        # History sees all Q heads in the DCP group; current uses local heads.
-        if self.use_pcp or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
+        # Replicated DSpark queries keep PCP=1 in their config, but reuse the
+        # physical PCP group. Its ranks carry the same Q heads, so history
+        # gathers only distinct TP heads, as _dcp_all_gather_fragments does.
+        pcp_size = get_pcp_group().world_size if dcp_size > 1 else 1
+        query_gather_size = max(1, dcp_size // pcp_size)
+        if self.use_pcp or self.num_heads * query_gather_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
         if not supports_component_major_mla_pd(config):
             return False

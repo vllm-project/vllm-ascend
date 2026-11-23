@@ -1,4 +1,4 @@
-The following Qwen3-0.6B example has been validated on Atlas 300I DUO and Atlas 200I Pro.
+The following Qwen3-0.6B example has been validated on Atlas 300I Duo and Atlas 200I Pro.
 
 ???+ important "Runtime requirements for this hardware path"
 
@@ -58,7 +58,7 @@ python3 example.py
 
 The following output shows that vLLM has successfully detected the Ascend platform:
 
-```text
+```output
 INFO 05-27 11:40:38 [__init__.py:44] Available plugins for group vllm.platform_plugins:
 INFO 05-27 11:40:38 [__init__.py:46] - ascend -> vllm_ascend:register
 INFO 05-27 11:40:38 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
@@ -67,14 +67,14 @@ INFO 05-27 11:40:38 [__init__.py:238] Platform plugin ascend is activated
 
 The following output shows the generated results:
 
-```text
+```output
 Prompt: 'Hello, my name is', Generated text: ' Lucy and I am an 8 year old who loves to draw and write stories'
 Prompt: 'The future of AI is', Generated text: ' a topic that is being discussed in various contexts. In the business world, AI'
 ```
 
 The following messages show the process exiting after offline inference and do not affect the inference results:
 
-```text
+```output
 (EngineCore pid=970) INFO 05-12 11:36:00 [core.py:1201] Shutdown initiated (timeout=0)
 (EngineCore pid=970) INFO 05-12 11:36:00 [core.py:1224] Shutdown complete
 ERROR 05-12 11:36:01 [core_client.py:704] Engine core proc EngineCore died unexpectedly, shutting down client.

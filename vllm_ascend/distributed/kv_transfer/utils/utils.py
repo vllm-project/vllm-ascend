@@ -4,7 +4,7 @@ import os
 from collections import OrderedDict, defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed as dist
@@ -12,12 +12,23 @@ from vllm.logger import logger
 
 from vllm_ascend.distributed.parallel_state import get_p_tp_group
 
+if TYPE_CHECKING:
+    from vllm.v1.request import Request
+
+
 MAX_HCCL_REGISTER_REGIONS = 256
 REGISTER_MERGE_GAP_BYTES = 4096
 
 QOS_KEY = "comm_resource_config.qos"
 PD_QOS_DEFAULT = 1
 QOS_MAX = 4
+
+
+def truncate_block_hashes_fallback(request: "Request", hash_block_size: int, num_hash_lookahead_tokens: int) -> None:
+    """Discard hashes invalidated by P-side truncation on vLLM versions earlier than 0.34."""
+    num_valid_hashes = max(0, request.num_tokens - num_hash_lookahead_tokens) // hash_block_size
+    del request.block_hashes[num_valid_hashes:]
+    request._prompt_embeds_per_block_hashes.clear()
 
 
 def inject_qos(qos: int) -> None:

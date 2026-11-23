@@ -47,7 +47,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_wor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyServer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
-    get_sharded_mamba_group_ids,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
@@ -136,17 +135,12 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        parallel_config = vllm_config.parallel_config
-        if (
-            get_sharded_mamba_group_ids(kv_cache_config)
-            and parallel_config.tensor_parallel_size > 1
-            and parallel_config.prefill_context_parallel_size > 1
-        ):
-            raise ValueError("AscendStore sharded Mamba state transfer currently requires PCP=1 or TP=1")
-
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        if "consumer_is_to_put" in extra_config:
+            raise ValueError("consumer_is_to_put has been replaced by save_decode_cache")
+        if "consumer_is_to_load" in extra_config:
+            raise ValueError("consumer_is_to_load has been replaced by enable_lookup")
         self.use_layerwise = extra_config.get("use_layerwise", False)
-        self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
         self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
@@ -158,19 +152,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
         )
-        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
-        if (
-            self.kv_role == "kv_consumer"
-            and self.save_decode_cache
-            and not self.consumer_is_to_put
-            and self.use_layerwise
-        ):
-            raise ValueError(
-                "save_decode_cache on a kv_consumer does not support use_layerwise "
-                "unless consumer_is_to_put is enabled. "
-                "Decode-only saving is not implemented in the layerwise transfer path. "
-                "Set use_layerwise=False for Decode KV offload."
-            )
+        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.save_decode_cache
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
         if connector_name == "MooncakeConnectorStoreV1":

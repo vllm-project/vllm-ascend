@@ -8,10 +8,12 @@ LLMs can be unpredictable when you need output in specific formats. Think of ask
 
 In simple terms, structured decoding gives LLMs a "template" to follow. Users provide a schema that "influences" the model output, ensuring compliance with the desired structure.
 
+Diagram of a schema constraining model output to the desired structure.
+
 ![structured decoding](./images/structured_output_1.png)
 
-## Usage in vllm-ascend
+## Usage in vLLM-Ascend
 
-Currently, the usage of structured output feature in vllm-ascend is totally the same as that in vLLM.
+Currently, the usage of structured output feature in vLLM-Ascend is totally the same as that in vLLM.
 
 Find more examples and explanations about these usages in [vLLM official document](https://docs.vllm.ai/en/stable/features/structured_outputs/).

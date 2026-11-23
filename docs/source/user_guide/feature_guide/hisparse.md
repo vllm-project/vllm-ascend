@@ -33,8 +33,8 @@ serving path or change the existing non-HiSparse BF16 path.
 | --- | --- |
 | Hardware and software | A2/A3 with the arch22 custom operators, or 950PR&950DT Products with a SIMT-capable CANN 9.2 toolchain. |
 | Cache formats | A2/A3: INT8 C8. 950PR&950DT Products: BF16 or native E4M3FN C8. C4 and TurboQuant are outside the current support scope. |
-| Parallelism and transport | Context parallelism and external P/D transport are outside the current support scope. |
-| Host storage | Requires AIV Host-memory mapping support from the device and runtime/driver stack. Use private Host pools per tensor-parallel rank and Core eager Host mirroring. |
+| Parallelism and transport | Supports PCP (prefill and decode request sharding). DCP and external P/D transport are outside the current support scope. |
+| Host storage | Use private Host pools per tensor-parallel rank and Core eager Host mirroring. |
 | TopK | The existing SFA requirement of divisibility by 128 applies. |
 | Feature mutual exclusion | HiSparse and `additional_config.sparse_kv_offload_config.enabled` cannot be enabled together. |
 
@@ -70,6 +70,19 @@ options with:
 
 These options select KV-cache quantization independently of model-weight
 quantization; keep the weight-quantization options required by the model.
+
+On A3 with HDK 25.5.1, select MemFabric in the HiSparse connector to provide
+AIV Host-memory mapping. The SDK must include the A3 AccOffload extension.
+If the extension is missing, source the CANN environment and build it with
+`mfcli kernel install --soc-version A3`.
+
+```bash
+--kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":4,"transfer_backend":"memfabric"}}'
+```
+
+For a `MultiConnector` configuration, put `transfer_backend` in the
+`HiSparseConnector` child's extra configuration. This setting selects
+the private Host allocator. Omitting it uses native ACL Host-memory registration.
 
 ### Verifying the Feature
 

@@ -15,7 +15,6 @@ from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.ascend_config import PcpConfig, pcp_config_from_vllm_config
 from vllm_ascend.attention import dsa_v41 as v41
-from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSAPCPMetadataBuilder,
 )
@@ -288,7 +287,9 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
                 )
             else:
                 log_owner_sharing_fallback(reason)
-        self._is_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
+        # Upstream moved decode-request sharding onto the parallel config;
+        # keep the owner selector above and use the current source of truth.
+        self._is_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         self._max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self._hidden_restore_idx_buffer = torch.empty(self._max_tokens, dtype=torch.int64, device=device)
 
