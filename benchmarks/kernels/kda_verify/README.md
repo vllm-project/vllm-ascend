@@ -1,5 +1,14 @@
 # GLM5Next KDA verify benchmark
 
+## Single-kernel QKV-to-O replay
+
+For six-token BF16 verification with 64 heads of width 128 and a hidden size of 4096, `WholeKDA` runs the input projection, both gate projections, four-tap convolution, ReplaySSM recurrence, gated RMSNorm and output projection in one TileLang mixed kernel. The entry point accepts hidden states and three rows of int32 metadata containing convolution page IDs, checkpoint page IDs and accepted token counts. It writes convolution history, correction records and packed KG records. The checkpoint is read-only. The measured path uses prepacked weights and device workspaces for the projected and normalized intermediates.
+
+With a captured replay fixture, run `python verify_whole_kda.py --trace trace.pt --out checked.json --batches 1,10,50 --stress 4`. For use from a caller, construct `fused = WholeKDA(layer)` after binding the paged cache, then call `out = fused(hidden_states, metadata)`. Each verification call dispatches one device kernel. The default serving path and the earlier middle-kernel benchmark are separately available.
+
+[Device timing and numerical checks for batches 1–50](mtp5-whole-kda-device-b1-50.csv) · [Per-invocation timing samples](whole-kda-device-evidence.json)
+
+
 Compare unfused and TileLang KDA verification on Ascend950DT_9581 (850E) and Ascend950PR_958b (850). The six-token fixture also reports the original fused schedule.
 Install torch-npu, fla-npu, vllm-ascend, CANN 9.2.1 and TileLang with the Ascend mixed Cube/Vector backend.
 Run from the repository root.
