@@ -68,8 +68,8 @@
     {
       "persist": 24,
       "title": "wrep_hi",
-      "reason": "wrep_W2048>=0.99 S24",
-      "all": [{"f": 4, "ge": 0.99}]
+      "reason": "wrep_W2048>=0.99 S24 N_n4_W512<=0.2",
+      "all": [{"f": 4, "ge": 0.99}, {"f": 2, "le": 0.2}]
     },
     {
       "persist": 8,
