@@ -255,9 +255,7 @@ def test_gbsa_uses_cann_transformer_op_api_without_bundled_sources():
 
     assert not bundled_source.exists()
     assert "EXEC_NPU_CMD(aclnnGenericBlockSparseAttentionMetadata," in binding
-    assert "EXEC_NPU_CMD(aclnnGenericBlockSparseAttention," in binding
     assert '"npu_generic_block_sparse_attention_metadata(' in binding
-    assert '"npu_generic_block_sparse_attention(' in binding
     assert 'return "libopapi_transformer.so";' in loader
 
 

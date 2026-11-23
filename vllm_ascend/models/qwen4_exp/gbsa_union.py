@@ -10,8 +10,6 @@ from typing import Any
 
 import torch
 
-from vllm_ascend.ops.gbsa import generic_block_sparse_attention_out
-
 UNION_SIZE = 8
 BLOCK_Y = 4
 INVALID_KEY = 1 << 30
@@ -150,14 +148,13 @@ def _run_union_gbsa(
         max_seqlen_kv=block_table.shape[1] * GBSA_PAGE_SIZE,
         **common,
     )
-    generic_block_sparse_attention_out(
+    result, _ = union_ops.generic_block_sparse_attention(
         query.contiguous(),
         key_cache,
         value_cache,
         union_idx,
         union_count,
         shape,
-        output,
         metadata=metadata,
         block_table=block_table.contiguous(),
         attn_mask=exact,
@@ -165,6 +162,7 @@ def _run_union_gbsa(
         return_softmax_lse=False,
         **common,
     )
+    output.copy_(result)
     return output
 
 
