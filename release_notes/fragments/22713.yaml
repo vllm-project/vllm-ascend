@@ -1,0 +1,7 @@
+pr: 22713
+entries:
+  - category: breaking
+    text: >-
+      AscendStore Decode nodes now use enable_lookup for pool queries (disabled by default)
+      and save_decode_cache for saving generated KV. Replace consumer_is_to_load and
+      consumer_is_to_put in existing configurations; the old options now raise an error.

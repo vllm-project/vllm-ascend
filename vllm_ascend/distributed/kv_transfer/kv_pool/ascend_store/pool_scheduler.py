@@ -79,12 +79,7 @@ class BaseKVPoolScheduler(ABC):
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.num_speculative_blocks_by_group = self._infer_mamba_groups()
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "consumer_is_to_load", False
-        )
-        self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "consumer_is_to_put", False
-        )
+        self.enable_lookup = extra_config.get("enable_lookup", self.kv_role != "kv_consumer")
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = bool(kv_event_config and kv_event_config.enable_kv_cache_events)
@@ -92,7 +87,7 @@ class BaseKVPoolScheduler(ABC):
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
         )
-        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
+        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.save_decode_cache
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
@@ -264,7 +259,7 @@ class BaseKVPoolScheduler(ABC):
         # A waiting request can be looked up again before it is admitted.
         # Never retain a load plan from an earlier hit across a miss/early return.
         self.load_specs.pop(request.request_id, None)
-        if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
+        if not self.enable_lookup:
             return 0, False
 
         num_external_hit_tokens = self._lookup_external_hit_tokens(request, num_computed_tokens)
@@ -563,9 +558,8 @@ class BaseKVPoolScheduler(ABC):
             request_tracker.update(new_block_ids, request.num_computed_tokens)
         self._sync_swa_block_ids(request_tracker)
         load_spec = self._running_load_spec(request_tracker, num_current_tokens)
-        # save_decode_cache is intentionally narrower than
-        # consumer_is_to_put: a consumer keeps skipping prefill writes and is
-        # allowed to publish only once it reaches decode.
+        # A consumer skips Prefill writes, including KV received over PD.
+        # Its first Decode save may restore missing Prefill ancestors in the pool.
         skip_save = force_skip_save and not (is_decoding and self.save_decode_cache)
         return self._build_req_meta(
             request_tracker,
@@ -632,7 +626,7 @@ class BaseKVPoolScheduler(ABC):
         except the `kv_connector_metadata` field.
         Also, calling this function will reset the state of the connector.
         """
-        force_skip_save = self.kv_role == "kv_consumer" and not self.consumer_is_to_put
+        force_skip_save = self.kv_role == "kv_consumer"
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)

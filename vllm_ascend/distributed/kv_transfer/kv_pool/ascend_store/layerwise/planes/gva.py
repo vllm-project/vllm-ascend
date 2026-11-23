@@ -76,7 +76,7 @@ class GvaDataPlane(LayerwiseDataPlane):
         worker = self._worker
         if not worker.use_layerwise_transfer:
             return
-        if worker.kv_role == "kv_consumer" and not worker.consumer_is_to_put:
+        if worker.kv_role == "kv_consumer" and not worker.save_decode_cache:
             return
         for request in requests:
             if worker._save_disabled.is_set():

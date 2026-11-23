@@ -112,6 +112,12 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
             previously_started = set(requested_keys) & worker._put_started_keys
             new_keys = [key for key in requested_keys if key not in worker._put_started_keys]
 
+        if worker.kv_role == "kv_consumer" and worker.save_decode_cache:
+            # Fill only Prefill ancestors missing from the pool when Decode
+            # first saves a completed block.
+            missing_keys = worker._pool_keys_missing(new_keys)
+            new_keys = [key for key in new_keys if key in missing_keys]
+
         started = set(previously_started)
         if new_keys:
             try:
