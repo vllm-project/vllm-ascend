@@ -70,6 +70,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_pool_bytes_per_block,
 )
 from vllm_ascend.models.step5.cache_config import (
+    declare_step5_default_backing,
     get_step5_kv_cache_config_from_groups,
     get_step5_kv_cache_groups,
     get_step5_pool_bytes_per_block,
@@ -143,7 +144,10 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         if bytes_per_block is None:
             return _attach_transfer_and_speculation_metadata(
                 vllm_config,
-                super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks),
+                declare_step5_default_backing(
+                    vllm_config,
+                    super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks),
+                ),
             )
         return get_ascend_kv_cache_config_from_groups(
             vllm_config,

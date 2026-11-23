@@ -92,6 +92,7 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm_ascend.models.step5.cache_views import Step5AttentionCacheView
 from vllm_ascend.models.step5.sparse_attention import (
     AscendStep5CSATailRing,
     AscendStep5DSABackend,
@@ -175,7 +176,7 @@ class AscendStep5RMSNorm(Step5RMSNorm):
         return out.to(out_dtype) if out.dtype != out_dtype else out
 
 
-class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
+class AscendStep5DSAAttention(Step5AttentionCacheView, nn.Module, AttentionLayerBase):
     """Step5 DSA layer on Ascend over the upstream ring/summary layout."""
 
     def __init__(
@@ -546,6 +547,10 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
         return output_tensor
 
 
+class AscendStep5DenseAttention(Step5AttentionCacheView, Attention):
+    """Platform-selected dense attention with Step5's page view contract."""
+
+
 class AscendStep5Attention(nn.Module):
     """Step5 sliding-window layer on Ascend.
 
@@ -713,7 +718,7 @@ class AscendStep5Attention(nn.Module):
 
         # The vLLM Attention layer resolves the backend through the platform
         # selector (AscendFlashAttentionBackend for GQA/SWA on NPU).
-        self.attn = Attention(
+        self.attn = AscendStep5DenseAttention(
             self.num_heads,
             self.head_dim,
             self.scaling,

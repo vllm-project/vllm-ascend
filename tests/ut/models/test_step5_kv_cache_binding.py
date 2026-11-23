@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 """Compare Step5 V2 cache allocation and view geometry on CPU."""
 
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
 import torch
 from vllm import envs
-from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -19,17 +19,21 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 
 import vllm_ascend.worker.v2.attn_utils as attn_utils_v2
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+from vllm_ascend.core.kv_cache_interface import KVCacheTensorWithBacking
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import KV_CACHE_BUFFER_ALIGNMENT
 from vllm_ascend.models.step5.cache_config import (
     get_step5_kv_cache_config_from_groups,
     get_step5_kv_cache_groups,
     get_step5_pool_bytes_per_block,
 )
+from vllm_ascend.models.step5.model import AscendStep5DenseAttention, AscendStep5DSAAttention
 from vllm_ascend.models.step5.sparse_attention import (
     AscendStep5CSATailRing,
     AscendStep5DSABackend,
-    AscendStep5SparseSummaryBackend,
+    AscendStep5SparseSummaryCacheLayer,
 )
+from vllm_ascend.patch.worker.patch_bind_kv_cache import bind_kv_cache_to_layers
 
 BLOCK = 128
 MAIN_PAGE = 98304
@@ -106,7 +110,7 @@ def _plan(num_blocks, layout, with_aux):
     if not with_aux:
         # This worker only owns sliding-window layers from the global plan.
         groups = [KVCacheGroupSpec([L0, L1], _specs()[L1])]
-        config = DefaultKVCacheConfigBuilder().get_kv_cache_config_from_groups(vllm_config, groups, num_blocks)
+        config = AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(vllm_config, groups, num_blocks)
         return vllm_config, groups, config
     groups = get_step5_kv_cache_groups(vllm_config, _specs(), _orig_groups)
     config = get_step5_kv_cache_config_from_groups(
@@ -149,21 +153,23 @@ def test_step5_shared_allocator_matches_legacy_views(monkeypatch, num_blocks, kv
     monkeypatch.setattr(envs, "VLLM_KV_CACHE_LAYOUT", layout.name)
     monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime)
     monkeypatch.setattr(attn_utils_v2, "get_shared_kv_cache_layers", lambda _: {})
-    ring = AscendStep5CSATailRing.__new__(AscendStep5CSATailRing)
-    backends = {
-        L0: AscendStep5DSABackend,
-        L2: AscendStep5DSABackend,
-        L1: AscendAttentionBackend,
-        RING: ring.get_attn_backend(),
-        SUMMARY0: AscendStep5SparseSummaryBackend,
-        SUMMARY2: AscendStep5SparseSummaryBackend,
-    }
-    if not with_aux:
-        backends = {name: AscendAttentionBackend for name in (L0, L1)}
-    layers = {
-        name: SimpleNamespace(get_attn_backend=lambda backend=backend: backend) for name, backend in backends.items()
-    }
+    dense = AscendStep5DenseAttention.__new__(AscendStep5DenseAttention)
+    dense.attn_backend = AscendAttentionBackend
+    layers = {L1: dense}
+    if with_aux:
+        dsa = AscendStep5DSAAttention.__new__(AscendStep5DSAAttention)
+        dsa.attn_backend = AscendStep5DSABackend
+        ring = AscendStep5CSATailRing.__new__(AscendStep5CSATailRing)
+        layers.update({L0: dsa, L2: dsa, RING: ring})
+        for name in (SUMMARY0, SUMMARY2):
+            summary = AscendStep5SparseSummaryCacheLayer.__new__(AscendStep5SparseSummaryCacheLayer)
+            summary._target_impl = SimpleNamespace()
+            layers[name] = summary
+    else:
+        layers[L0] = dense
     monkeypatch.setattr(attn_utils_v2, "get_layers_from_vllm_config", lambda *_: layers)
+    assert all(isinstance(tensor, KVCacheTensorWithBacking) for tensor in config.kv_cache_tensors)
+    assert {tensor.backing_id for tensor in config.kv_cache_tensors} == {0}
     allocations = []
     allocate = attn_utils_v2._allocate_int8_cache_tensor
 
@@ -186,12 +192,15 @@ def test_step5_shared_allocator_matches_legacy_views(monkeypatch, num_blocks, kv
     )
     (legacy_backing,) = allocations
     allocations.clear()
+    config = deepcopy(config)
 
     def reject_legacy(*args, **kwargs):
         pytest.fail("Step5 should use the shared V2 allocator")
 
     monkeypatch.setattr(attn_utils_v2, "_allocate_kv_cache", reject_legacy)
     monkeypatch.setattr(attn_utils_v2, "_reshape_kv_cache_v2", reject_legacy)
+    runtime.model_config.hf_text_config.model_type = "test_descriptor_driven"
+    runtime.model_config.hf_config.model_type = "test_descriptor_driven"
     actual = attn_utils_v2.allocate_kv_cache_main(config, device, layout, block_sizes)
     (backing,) = allocations
     assert backing.nbytes == legacy_backing.nbytes == config.kv_cache_tensors[0].size
@@ -200,7 +209,7 @@ def test_step5_shared_allocator_matches_legacy_views(monkeypatch, num_blocks, kv
         assert backing.data_ptr() % KV_CACHE_BUFFER_ALIGNMENT == 0
         assert legacy_backing.data_ptr() % KV_CACHE_BUFFER_ALIGNMENT == 0
 
-    assert actual.keys() == legacy.keys() == backends.keys()
+    assert actual.keys() == legacy.keys() == layers.keys()
     attention_names = (L0, L1, L2) if with_aux else (L0, L1)
     assert all(isinstance(actual[name], tuple) and len(actual[name]) == 2 for name in attention_names)
     if with_aux:
@@ -208,3 +217,8 @@ def test_step5_shared_allocator_matches_legacy_views(monkeypatch, num_blocks, kv
     views = _snapshot(actual, backing)
     assert views == _snapshot(legacy, legacy_backing)
     assert all(shares_backing for _, components in views.values() for shares_backing, *_ in components)
+    bind_kv_cache_to_layers(actual, layers, kv_cache_groups=groups)
+    if with_aux:
+        assert layers[RING].rows.data_ptr() == actual[RING].data_ptr()
+        for name in (SUMMARY0, SUMMARY2):
+            assert layers[name]._target_impl.summary_cache is not None

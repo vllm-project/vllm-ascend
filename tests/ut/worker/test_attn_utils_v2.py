@@ -52,6 +52,7 @@ from vllm_ascend.core.kv_cache_config_builder import (
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
+    KVCacheTensorWithBacking,
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -59,7 +60,8 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
-from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
+from vllm_ascend.models.step5.cache_views import Step5AuxiliaryCacheView
+from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes, reshape_combined_attention_kv_cache
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2 import model_runner as v2_model_runner
 from vllm_ascend.worker.v2 import utils as v2_utils
@@ -483,7 +485,7 @@ def test_mrv2_attention_views_interleave_kv_per_physical_page():
         dtype=torch.int8,
     )
 
-    key, value = attn_utils._reshape_combined_attention_kv_cache(
+    key, value = reshape_combined_attention_kv_cache(
         raw,
         (2, num_blocks, block_size, num_heads, head_size),
         torch.float16,
@@ -1657,7 +1659,7 @@ def test_combined_attention_kernel_blocks_match_physical_rows(splits):
     shape = (2, 3 * splits, 128, 2, 256)
     block_elements = 128 * 2 * 256
     raw = torch.zeros(2 * shape[1] * block_elements, dtype=torch.float16)
-    key, value = attn_utils._reshape_combined_attention_kv_cache(
+    key, value = reshape_combined_attention_kv_cache(
         raw.view(torch.int8), shape, raw.dtype, splits * 2 * block_elements * 2, splits
     )
     physical = raw.view(3, splits, 2, 128, 2, 256)
@@ -1670,9 +1672,7 @@ def test_combined_attention_kernel_blocks_match_physical_rows(splits):
     assert key.stride(0) == 2 * block_elements
     assert key.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr()
     with pytest.raises(ValueError, match="Padded combined"):
-        attn_utils._reshape_combined_attention_kv_cache(
-            raw.view(torch.int8), shape, raw.dtype, 9 * 2 * block_elements * 2 + 64, 9
-        )
+        reshape_combined_attention_kv_cache(raw.view(torch.int8), shape, raw.dtype, 9 * 2 * block_elements * 2 + 64, 9)
 
 
 @pytest.mark.parametrize("splits", [1, 2, 4, 8])
@@ -1685,9 +1685,7 @@ def test_padded_attention_kernel_writes_preserve_other_pages_and_padding(splits,
     kernel_stride_elements = page_bytes // splits // dtype_size
     raw = torch.full((num_blocks, splits, kernel_stride_elements), -7, dtype=dtype)
     shape = (2, num_blocks * splits, block_size, heads, dim)
-    key, value = attn_utils._reshape_combined_attention_kv_cache(
-        raw.view(torch.int8).flatten(), shape, dtype, page_bytes, splits
-    )
+    key, value = reshape_combined_attention_kv_cache(raw.view(torch.int8).flatten(), shape, dtype, page_bytes, splits)
     assert key.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr()
     assert value.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr()
     assert not key.is_contiguous()
@@ -1714,7 +1712,7 @@ def test_padded_attention_kernel_writes_preserve_other_pages_and_padding(splits,
 def test_combined_attention_rejects_invalid_kernel_page_geometry(splits, page_bytes, message):
     raw = torch.zeros(4096, dtype=torch.int8)
     with pytest.raises(ValueError, match=message):
-        attn_utils._reshape_combined_attention_kv_cache(raw, (2, 4, 128, 1, 1), torch.float16, page_bytes, splits)
+        reshape_combined_attention_kv_cache(raw, (2, 4, 128, 1, 1), torch.float16, page_bytes, splits)
 
 
 @pytest.mark.parametrize("for_capture", [False, True])
@@ -3237,12 +3235,7 @@ def test_step5_align_hybrid_attention_page_sizes_refuses_indivisible_dense_page(
 
 
 def _step5_tensors_and_groups():
-    """One backing per page-size class: main pages alias one backing, the
-    summary and ring pages get their own (the ``step_backings`` contract).
-
-    Each tensor's ``size`` is its backing class; multi-layer tensors hold
-    contiguous per-layer slices at ``layer_stride`` spacing.
-    """
+    """Synthetic geometry with a main, summary, and ring allocation."""
     groups = [
         KVCacheGroupSpec(
             [STEP5_L0, STEP5_L2, STEP5_SUMMARY],
@@ -3314,11 +3307,8 @@ def _step5_kv_cache_config(tensors, groups) -> KVCacheConfig:
     )
 
 
-@pytest.mark.parametrize(
-    "model_type",
-    ["step3p5", "step3p7", "step5", "step5_vl", "step5_mtp"],
-)
-def test_step5_allocate_kv_cache_shares_step_backing_by_tensor_size(monkeypatch, model_type) -> None:
+@pytest.mark.parametrize("model_type", ["step3p5", "step3p7"])
+def test_legacy_step3_allocate_kv_cache_shares_backing_by_tensor_size(monkeypatch, model_type) -> None:
     tensors, groups = _step5_tensors_and_groups()
     raw = _step5_allocate(_step5_kv_cache_config(tensors, groups), _step5_vllm_config(model_type), monkeypatch)
 
@@ -3336,35 +3326,48 @@ def test_step5_allocate_kv_cache_shares_step_backing_by_tensor_size(monkeypatch,
     assert raw[STEP5_L2].data_ptr() == raw[STEP5_L0].data_ptr() + STEP5_MAIN_PAGE * STEP5_NUM_BLOCKS
 
 
-def test_step5_allocate_kv_cache_rejects_non_contiguous_step_views(monkeypatch) -> None:
-    tensors, groups = _step5_tensors_and_groups()
-    tensors[0] = KVCacheTensor(
-        size=2 * STEP5_MAIN_PAGE * STEP5_NUM_BLOCKS,
-        layers=[STEP5_L0, STEP5_L2],
-        layer_stride=2 * STEP5_MAIN_PAGE * STEP5_NUM_BLOCKS,
-        block_stride=STEP5_MAIN_PAGE,
-        offset=0,
-    )
-    with pytest.raises(ValueError, match="contiguous per-layer views"):
-        _step5_allocate(_step5_kv_cache_config(tensors, groups), _step5_vllm_config("step5"), monkeypatch)
+def _descriptors_with_backing_ids(tensors):
+    return [KVCacheTensorWithBacking(**vars(tensor), backing_id=index) for index, tensor in enumerate(tensors)]
 
 
-def test_step5_allocate_kv_cache_rejects_step_view_beyond_backing(monkeypatch) -> None:
+def test_allocate_distinct_declared_backings_with_equal_sizes(monkeypatch) -> None:
     tensors, groups = _step5_tensors_and_groups()
-    tensors[0] = KVCacheTensor(
-        size=2 * STEP5_MAIN_PAGE * STEP5_NUM_BLOCKS,
-        layers=[STEP5_L0, STEP5_L2],
-        layer_stride=STEP5_MAIN_PAGE * STEP5_NUM_BLOCKS,
-        block_stride=STEP5_MAIN_PAGE,
-        offset=STEP5_SUMMARY_PAGE,
-    )
-    with pytest.raises(ValueError, match="exceeds the backing allocation"):
-        _step5_allocate(_step5_kv_cache_config(tensors, groups), _step5_vllm_config("step5"), monkeypatch)
+    descriptors = _descriptors_with_backing_ids(tensors)
+    descriptors[1] = replace(descriptors[1], size=descriptors[2].size)
+    config = _step5_kv_cache_config(descriptors, groups)
+    raw = _step5_allocate(config, _step5_vllm_config("test_descriptor_driven"), monkeypatch)
+
+    main, other_main, summary, ring = (raw[name] for name in (STEP5_L0, STEP5_L2, STEP5_SUMMARY, STEP5_RING))
+    assert main.untyped_storage().data_ptr() == other_main.untyped_storage().data_ptr()
+    assert other_main.data_ptr() - main.data_ptr() == STEP5_MAIN_PAGE * STEP5_NUM_BLOCKS
+    assert summary.untyped_storage().nbytes() == ring.untyped_storage().nbytes()
+    assert summary.untyped_storage().data_ptr() != ring.untyped_storage().data_ptr()
+
+
+def test_allocate_rejects_inconsistent_declared_backing_sizes(monkeypatch) -> None:
+    tensors, groups = _step5_tensors_and_groups()
+    descriptors = _descriptors_with_backing_ids(tensors)
+    descriptors[1] = replace(descriptors[1], backing_id=descriptors[0].backing_id)
+    with pytest.raises(ValueError, match="Inconsistent KV cache size"):
+        _step5_allocate(
+            _step5_kv_cache_config(descriptors, groups), _step5_vllm_config("test_descriptor_driven"), monkeypatch
+        )
+
+
+def test_allocate_rejects_declared_view_beyond_backing(monkeypatch) -> None:
+    tensors, groups = _step5_tensors_and_groups()
+    descriptors = _descriptors_with_backing_ids(tensors)
+    descriptors[0] = replace(descriptors[0], offset=STEP5_SUMMARY_PAGE)
+    with pytest.raises(ValueError, match="exceeds its backing allocation"):
+        _step5_allocate(
+            _step5_kv_cache_config(descriptors, groups), _step5_vllm_config("test_descriptor_driven"), monkeypatch
+        )
 
 
 def _step5_reshape(config, raw, monkeypatch):
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: SimpleNamespace())
-    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: {})
+    cache_owners = {name: Step5AuxiliaryCacheView() for name in (STEP5_RING, STEP5_SUMMARY)}
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: cache_owners)
     backend = SimpleNamespace(
         get_kv_cache_shape=lambda num_blocks, block_size, heads, head_size, *a, **k: (
             2,
@@ -3388,8 +3391,8 @@ def _step5_reshape(config, raw, monkeypatch):
 
 def test_step5_reshape_aux_views_match_compute_layer_shape(monkeypatch) -> None:
     tensors, groups = _step5_tensors_and_groups()
-    config = _step5_kv_cache_config(tensors, groups)
-    raw = _step5_allocate(config, _step5_vllm_config("step5"), monkeypatch)
+    config = _step5_kv_cache_config(_descriptors_with_backing_ids(tensors), groups)
+    raw = _step5_allocate(config, _step5_vllm_config("test_descriptor_driven"), monkeypatch)
     caches = _step5_reshape(config, raw, monkeypatch)
 
     # Auxiliary layers get the typed page view straight from
@@ -3414,8 +3417,8 @@ def test_step5_reshape_aux_views_match_compute_layer_shape(monkeypatch) -> None:
 
 def test_step5_reshape_rejects_non_tensor_step_aux_raw(monkeypatch) -> None:
     tensors, groups = _step5_tensors_and_groups()
-    config = _step5_kv_cache_config(tensors, groups)
-    raw = _step5_allocate(config, _step5_vllm_config("step5"), monkeypatch)
+    config = _step5_kv_cache_config(_descriptors_with_backing_ids(tensors), groups)
+    raw = _step5_allocate(config, _step5_vllm_config("test_descriptor_driven"), monkeypatch)
     raw[STEP5_RING] = (raw[STEP5_RING], raw[STEP5_RING])
 
     with pytest.raises(ValueError, match="must use one raw tensor"):

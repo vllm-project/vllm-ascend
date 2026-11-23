@@ -52,9 +52,35 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_interface import KVCacheTensorWithBacking
+
 _STEP5_RING_SUFFIX = ".csa_tail_ring"
 _STEP5_SUMMARY_SUFFIX = ".sparse_summary_cache"
 _STEP5_AUX_SUFFIXES = (_STEP5_RING_SUFFIX, _STEP5_SUMMARY_SUFFIX)
+_STEP5_MODEL_TYPES = ("step5", "step5_vl", "step5_mtp")
+
+
+def declare_step5_default_backing(vllm_config: VllmConfig, config: KVCacheConfig) -> KVCacheConfig:
+    """Declare the default builder's single device backing for attention-only ranks."""
+    text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+    if getattr(text_config, "model_type", None) not in _STEP5_MODEL_TYPES or any(
+        tensor.host_resident for tensor in config.kv_cache_tensors
+    ):
+        return config
+    # The default planner expresses every device descriptor in the same
+    # offset space. Record that identity for the worker's materializer.
+    config.kv_cache_tensors = [
+        KVCacheTensorWithBacking(
+            size=tensor.size,
+            layers=tensor.layers,
+            layer_stride=tensor.layer_stride,
+            block_stride=tensor.block_stride,
+            offset=tensor.offset,
+            backing_id=0,
+        )
+        for tensor in config.kv_cache_tensors
+    ]
+    return config
 
 
 def _layer_specs(group: KVCacheGroupSpec) -> list[tuple[str, KVCacheSpec]]:
@@ -258,12 +284,13 @@ def get_step5_kv_cache_config_from_groups(
                     f"Step5 group ({group.layer_names[0]} ..) does not fit the {envelope}-byte envelope backing."
                 )
             kv_cache_tensors.append(
-                KVCacheTensor(
+                KVCacheTensorWithBacking(
                     size=backing_size,
                     layers=[layer_name],
                     layer_stride=layer_stride,
                     block_stride=spec.page_size_bytes,
                     offset=byte_offset,
+                    backing_id=0,
                 )
             )
             byte_offset += layer_stride

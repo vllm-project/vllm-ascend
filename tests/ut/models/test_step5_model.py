@@ -404,7 +404,7 @@ def dense_attn_env(monkeypatch):
             cos_sin_cache=torch.zeros(8, 2 * head_size)
         ),
     )
-    monkeypatch.setattr(step5_model, "Attention", fake_attention)
+    monkeypatch.setattr(step5_model, "AscendStep5DenseAttention", fake_attention)
     monkeypatch.setattr(step5_model, "get_tensor_model_parallel_world_size", lambda: 1)
     return built
 

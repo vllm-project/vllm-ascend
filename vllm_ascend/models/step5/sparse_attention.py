@@ -47,6 +47,7 @@ from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
+from vllm_ascend.models.step5.cache_views import Step5AuxiliaryCacheView
 from vllm_ascend.models.step5.ops.generic_block_sparse_attention import (
     gbsa_expected_counts,
     gbsa_sparse_attention,
@@ -77,7 +78,7 @@ else:
     )
 
 
-class AscendStep5CSATailRing(Step5CSATailRing):
+class AscendStep5CSATailRing(Step5AuxiliaryCacheView, Step5CSATailRing):
     """Tail ring on the main KV page, sized exactly as upstream sizes it.
 
     The inherited spec keeps the ring's ``CircularBufferSpec`` on the main
@@ -92,7 +93,7 @@ class AscendStep5CSATailRing(Step5CSATailRing):
     """
 
 
-class AscendStep5SparseSummaryCacheLayer(Step5SparseSummaryCacheLayer):
+class AscendStep5SparseSummaryCacheLayer(Step5AuxiliaryCacheView, Step5SparseSummaryCacheLayer):
     def __init__(
         self,
         *,
