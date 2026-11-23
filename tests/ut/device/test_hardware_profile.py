@@ -292,6 +292,20 @@ def test_qwen4exp_hc_gate_mix_row_block_threshold(device_type, expected_min_rows
 
 
 @pytest.mark.parametrize(
+    "device_type,expected_min_tokens",
+    [
+        (AscendDeviceType.A2, None),
+        (AscendDeviceType.A3, 1024),
+        (AscendDeviceType.A5, None),
+        (AscendDeviceType._310P, None),
+    ],
+)
+def test_moe_all2allv_fused_init_routing_policy(device_type, expected_min_tokens):
+    profile = get_hardware_profile(device_type)
+    assert profile.moe_all2allv_fused_init_routing_min_tokens == expected_min_tokens
+
+
+@pytest.mark.parametrize(
     "device_type,expected_precision",
     [
         (AscendDeviceType.A2, 0),

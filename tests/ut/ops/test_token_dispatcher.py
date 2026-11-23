@@ -1064,6 +1064,16 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_npu_event = patcher13.start()
         self.addCleanup(patcher13.stop)
 
+        patcher14 = patch("vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing")
+        self.mock_npu_moe_init_routing = patcher14.start()
+        self.addCleanup(patcher14.stop)
+        self.mock_npu_moe_init_routing.return_value = (
+            torch.randn(16, 16),
+            torch.arange(16),
+            torch.ones(4, dtype=torch.int32),
+            torch.randn(16),
+        )
+
         self.dispatcher = TokenDispatcherWithAll2AllV(top_k=2, num_experts=4, num_local_experts=2, with_quant=False)
 
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
@@ -1149,6 +1159,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
                 global_input_tokens_local_experts_indices,
                 _,
                 _,
+                _,
             ) = self.dispatcher._dispatch_preprocess(hidden_states, topk_ids)
 
         mock_device_sync.assert_not_called()
@@ -1162,6 +1173,100 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_repeat_interleave.assert_called_once()
         self.assertEqual(self.mock_repeat_interleave.call_args.kwargs["output_size"], 8)
         self.assertTrue(torch.equal(global_input_tokens_local_experts_indices, torch.arange(16)))
+
+    def test_dispatch_int8_init_routing_respects_token_threshold(self):
+        for num_tokens, expect_fused in ((1023, False), (1024, True)):
+            with self.subTest(num_tokens=num_tokens):
+                self.mock_npu_moe_token_permute.reset_mock()
+                self.mock_npu_moe_init_routing.reset_mock()
+                self.mock_npu_dynamic_quant.reset_mock()
+                profile = SimpleNamespace(moe_all2allv_fused_init_routing_min_tokens=1024)
+                hidden_states = torch.randn(num_tokens, 16)
+                topk_ids = torch.randint(0, 4, (num_tokens, 2), dtype=torch.int32)
+                call_order = MagicMock()
+                call_order.attach_mock(self.mock_npu_event.return_value.record, "record")
+                call_order.attach_mock(self.mock_npu_moe_token_permute, "permute")
+                call_order.attach_mock(self.mock_npu_moe_init_routing, "fused_init_routing")
+                call_order.attach_mock(self.mock_npu_event.return_value.synchronize, "split_wait")
+                call_order.attach_mock(self.mock_npu_dynamic_quant, "quant")
+                token_input = build_token_dispatch_input_fixture(
+                    hidden_states=hidden_states,
+                    topk_weights=torch.ones(num_tokens, 2),
+                    topk_ids=topk_ids,
+                    quant_type=QuantType.W4A8,
+                )
+
+                with (
+                    patch(
+                        "vllm_ascend.ops.fused_moe.token_dispatcher.get_current_hardware_profile",
+                        return_value=profile,
+                    ),
+                    self._mock_split_copy_state(self.dispatcher),
+                    patch("torch.npu.synchronize") as mock_device_sync,
+                ):
+                    self.dispatcher.token_dispatch(token_input)
+
+                mock_device_sync.assert_not_called()
+                routing_call = "fused_init_routing" if expect_fused else "permute"
+                expected_order = ["record", routing_call, "split_wait"]
+                if not expect_fused:
+                    expected_order.append("quant")
+                self.assertEqual([call[0] for call in call_order.mock_calls], expected_order)
+                self.assertEqual(self.mock_npu_moe_init_routing.called, expect_fused)
+                self.assertEqual(self.mock_npu_dynamic_quant.called, not expect_fused)
+                self.assertEqual(self.mock_npu_moe_token_permute.called, not expect_fused)
+                if expect_fused:
+                    args, kwargs = self.mock_npu_moe_init_routing.call_args
+                    self.assertEqual(args[0].data_ptr(), hidden_states.data_ptr())
+                    self.assertIs(args[1], topk_ids)
+                    self.assertEqual(args[1].dtype, torch.int32)
+                    self.assertEqual(kwargs["active_num"], num_tokens * 2)
+                    self.assertEqual(kwargs["active_expert_range"], [0, 4])
+                    self.assertEqual(kwargs["quant_mode"], 1)
+                    self.assertEqual(kwargs["act_quant_type"], torch.int8)
+
+    def test_dispatch_quant_fallbacks_keep_legacy_order(self):
+        for quant_type, min_tokens in ((QuantType.W4A8, 2048), (QuantType.W8A8FP, 1)):
+            with self.subTest(quant_type=quant_type):
+                self.mock_npu_dynamic_quant.reset_mock()
+                self.mock_npu_moe_token_permute.reset_mock()
+                self.mock_npu_moe_init_routing.reset_mock()
+                self.mock_npu_event.return_value.reset_mock()
+                hidden_states = torch.randn(8, 16)
+                topk_ids = torch.randint(0, 4, (8, 2)).long()
+                permuted_tokens = torch.randn(16, 16)
+                self.mock_npu_moe_token_permute.return_value = (permuted_tokens, torch.arange(16))
+                self.mock_npu_dynamic_quant.return_value = (permuted_tokens, torch.randn(16))
+                profile = SimpleNamespace(moe_all2allv_fused_init_routing_min_tokens=min_tokens)
+                call_order = MagicMock()
+                call_order.attach_mock(self.mock_npu_event.return_value.record, "record")
+                call_order.attach_mock(self.mock_npu_moe_token_permute, "permute")
+                call_order.attach_mock(self.mock_npu_event.return_value.synchronize, "split_wait")
+                call_order.attach_mock(self.mock_npu_dynamic_quant, "quant")
+                token_input = build_token_dispatch_input_fixture(
+                    hidden_states=hidden_states,
+                    topk_weights=torch.ones(8, 2),
+                    topk_ids=topk_ids,
+                    quant_type=quant_type,
+                )
+
+                with (
+                    patch(
+                        "vllm_ascend.ops.fused_moe.token_dispatcher.get_current_hardware_profile",
+                        return_value=profile,
+                    ),
+                    self._mock_split_copy_state(self.dispatcher),
+                    patch("torch.npu.synchronize") as mock_device_sync,
+                ):
+                    self.dispatcher.token_dispatch(token_input)
+
+                mock_device_sync.assert_not_called()
+                self.assertEqual(
+                    [call[0] for call in call_order.mock_calls],
+                    ["record", "permute", "split_wait", "quant"],
+                )
+                self.assertIs(self.mock_npu_dynamic_quant.call_args.args[0], permuted_tokens)
+                self.mock_npu_moe_init_routing.assert_not_called()
 
     def test_dispatch_preprocess_single_local_expert_avoids_device_sync(self):
         dispatcher = TokenDispatcherWithAll2AllV(top_k=2, num_experts=2, num_local_experts=1)
@@ -1178,6 +1283,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
                 input_splits,
                 output_splits,
                 global_input_tokens_local_experts_indices,
+                _,
                 _,
                 _,
             ) = dispatcher._dispatch_preprocess(hidden_states, topk_ids)
@@ -1200,7 +1306,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
             "_get_split_copy_state",
             return_value=(input_splits_cpu, output_splits_cpu, self.mock_npu_event.return_value),
         ):
-            _, _, _, input_splits, output_splits, _, _, _ = self.dispatcher._dispatch_preprocess(
+            _, _, _, input_splits, output_splits, _, _, _, _ = self.dispatcher._dispatch_preprocess(
                 hidden_states, topk_ids
             )
 
@@ -1236,7 +1342,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_gather_from_sequence_parallel_region.return_value = torch.zeros((2, 4), dtype=torch.int64)
 
         with self._mock_split_copy_state(self.dispatcher):
-            _, _, _, input_splits, output_splits, _, _, _ = self.dispatcher._dispatch_preprocess(
+            _, _, _, input_splits, output_splits, _, _, _, _ = self.dispatcher._dispatch_preprocess(
                 hidden_states, topk_ids
             )
 
@@ -1266,7 +1372,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
                 return_value=(input_splits_cpu, output_splits_cpu, self.mock_npu_event.return_value),
             ),
         ):
-            _, _, _, input_splits, output_splits, _, _, _ = dispatcher._dispatch_preprocess(hidden_states, topk_ids)
+            _, _, _, input_splits, output_splits, _, _, _, _ = dispatcher._dispatch_preprocess(hidden_states, topk_ids)
 
         np.testing.assert_array_equal(input_splits, [4])
         np.testing.assert_array_equal(output_splits, [4])
