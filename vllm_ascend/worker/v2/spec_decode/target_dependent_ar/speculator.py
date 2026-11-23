@@ -301,7 +301,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         """
         self.input_batch = input_batch
         self._eplb_dummy_run = dummy_run
-        self._num_rejected = None if self.advance_draft_positions else num_rejected
+        self._num_rejected = None if getattr(self, "advance_draft_positions", False) else num_rejected
         self._num_rejected_cpu = None
         # PCP can change the draft prefill token layout and uniform decode
         # shape. Negotiate its DP agreement instead of reusing the target's.

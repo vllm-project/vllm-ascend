@@ -78,7 +78,11 @@ def _mock_vllm_config(
             hf_config=SimpleNamespace(model_type="gemma4", architectures=["Gemma4ForConditionalGeneration"]),
             hf_text_config=SimpleNamespace(model_type="gemma4_text"),
         ),
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            pcp_shard_decode_requests=False,
+        ),
         cache_config=SimpleNamespace(block_size=8, cache_dtype="auto"),
         scheduler_config=SimpleNamespace(enable_chunked_prefill=True, max_num_seqs=8, max_num_batched_tokens=64),
         compilation_config=SimpleNamespace(
@@ -361,7 +365,11 @@ def test_bnsd_verify_capture_param_provider_and_eager_routing(monkeypatch):
     monkeypatch.setattr("vllm.config.get_current_vllm_config", lambda: cfg)
     monkeypatch.setattr("vllm_ascend.attention.attention_v1.get_current_vllm_config", lambda: cfg)
     monkeypatch.setattr("vllm_ascend.attention.utils.get_current_vllm_config", lambda: cfg)
-    monkeypatch.setattr("vllm_ascend.attention.attention_v1.is_pcp_decode_sharding_enabled", lambda *_: False)
+    monkeypatch.setattr(
+        "vllm_ascend.attention.attention_v1.is_pcp_decode_sharding_enabled",
+        lambda *_: False,
+        raising=False,
+    )
     monkeypatch.setattr("vllm_ascend.attention.attention_v1.needs_layer_aware_fia_graph_replay", lambda: True)
     monkeypatch.setattr(
         "vllm_ascend.attention.large_head_paged_verify.get_current_hardware_profile",
@@ -573,7 +581,11 @@ def _patch_large_head_env(monkeypatch, cfg, *, kv_layout: str | None = None):
     monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: cfg)
     monkeypatch.setattr("vllm_ascend.attention.attention_v1.get_current_vllm_config", lambda: cfg)
     monkeypatch.setattr("vllm_ascend.attention.utils.get_current_vllm_config", lambda: cfg)
-    monkeypatch.setattr("vllm_ascend.attention.attention_v1.is_pcp_decode_sharding_enabled", lambda *_: False)
+    monkeypatch.setattr(
+        "vllm_ascend.attention.attention_v1.is_pcp_decode_sharding_enabled",
+        lambda *_: False,
+        raising=False,
+    )
     monkeypatch.setattr("vllm_ascend.attention.attention_v1.needs_layer_aware_fia_graph_replay", lambda: True)
     monkeypatch.setattr(
         "vllm_ascend.attention.large_head_paged_verify.get_current_hardware_profile",
