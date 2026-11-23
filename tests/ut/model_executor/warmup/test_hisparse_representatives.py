@@ -26,7 +26,7 @@ def test_single_warmup_key_and_registration_window():
 
 def test_compile_binds_runtime_signature_without_executing():
     launcher = hisparse.TritonScatterMinRepresentativesKernel()
-    kernel = MagicMock(arg_names=hisparse._scatter_min_representatives_kernel.arg_names)
+    kernel = MagicMock(arg_names=["index_ptr", "source_ptr", "representatives_ptr", "num_rows", "BLOCK_SIZE"])
     with patch.object(launcher, "kernel", kernel):
         launcher.compile(launcher.CompileKey(block_size=256))
     kernel.__getitem__.assert_not_called()
@@ -54,12 +54,3 @@ def test_reject_noncontiguous_inputs_before_launch():
     x = torch.zeros(4, dtype=torch.int64)
     with pytest.raises(ValueError, match="contiguous int64"):
         hisparse.scatter_min_representatives(x, x[::2], x[::2])
-
-
-def test_runtime_length_and_pointer_alignment_do_not_specialize():
-    params = {p.name: p for p in hisparse._scatter_min_representatives_kernel.params}
-    assert not params["num_rows"].is_constexpr
-    assert params["num_rows"].do_not_specialize
-    assert params["BLOCK_SIZE"].is_constexpr
-    for name in ("index_ptr", "source_ptr", "representatives_ptr"):
-        assert params[name].do_not_specialize_on_alignment

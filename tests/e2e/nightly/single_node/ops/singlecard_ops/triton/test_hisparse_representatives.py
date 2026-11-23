@@ -7,7 +7,10 @@ import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.device.device_config import is_950
-from vllm_ascend.ops.triton.hisparse import scatter_min_representatives
+from vllm_ascend.ops.triton.hisparse import (
+    _scatter_min_representatives_kernel,
+    scatter_min_representatives,
+)
 
 pytestmark = pytest.mark.skipif(not is_950(), reason="HiSparse requires Ascend 950")
 
@@ -77,3 +80,12 @@ def test_representatives_graph_replay_reads_current_inputs():
         expected.scatter_reduce_(0, index.cpu(), source.cpu(), reduce="amin", include_self=True)
         torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
     graph.reset()
+
+
+def test_runtime_length_and_pointer_alignment_do_not_specialize():
+    params = {p.name: p for p in _scatter_min_representatives_kernel.params}
+    assert not params["num_rows"].is_constexpr
+    assert params["num_rows"].do_not_specialize
+    assert params["BLOCK_SIZE"].is_constexpr
+    for name in ("index_ptr", "source_ptr", "representatives_ptr"):
+        assert params[name].do_not_specialize_on_alignment
