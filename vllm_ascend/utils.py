@@ -159,7 +159,9 @@ def get_dsv4_spec_layer_idx_from_weight_name(config: Any, weight_name: str) -> i
     if not weight_name.startswith("mtp."):
         return None
     parts = weight_name.split(".")
-    if len(parts) < 2 or not parts[1].isdigit():
+    # isdecimal() (not isdigit()): only decimal characters are guaranteed to
+    # be parseable by int(); isdigit() also accepts e.g. superscripts.
+    if len(parts) < 2 or not parts[1].isdecimal():
         raise ValueError(f"Malformed MTP weight name {weight_name!r}: expected 'mtp.<layer_idx>...'.")
     return int(parts[1])
 
