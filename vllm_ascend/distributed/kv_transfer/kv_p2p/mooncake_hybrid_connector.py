@@ -1469,6 +1469,14 @@ class MooncakeConnectorScheduler:
                 truncate_hashes(hash_block_size, lookahead)
             else:
                 truncate_block_hashes_fallback(request, hash_block_size, lookahead)
+            # The P-side sample exists only to complete the KV handoff. If it
+            # lands on EOS or a stop token, the request finishes STOPPED, the
+            # conductor short-circuits on "stop", and no KV transfer runs.
+            # Clearing EOS and stop tokens forces the length-based stop so
+            # the handoff always completes.
+            request.sampling_params.ignore_eos = True
+            request.sampling_params._eos_token_id = None
+            request.sampling_params.stop_token_ids = []
             params["_p_side_truncated"] = True
 
     def _compute_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:

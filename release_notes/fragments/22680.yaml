@@ -1,4 +1,4 @@
 pr: 22680
 entries:
   - category: bugfix
-    text: Fixed MooncakeConnectorV1 prefill requests returning an empty response when the placeholder prefill sample stopped on EOS before the KV handoff.
+    text: Fixed truncated prefill requests returning an empty response when the placeholder sample stopped on EOS or a stop token before the KV handoff, across the Mooncake V1, Hybrid, layerwise and V2 connectors.

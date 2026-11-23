@@ -953,6 +953,14 @@ class MooncakeLayerwiseConnectorScheduler:
         request._all_token_ids.pop()
         request.num_prompt_tokens -= 1
         request.max_tokens = 1
+        # The P-side sample exists only to complete the KV handoff. If it
+        # lands on EOS or a stop token, the request finishes STOPPED, the
+        # conductor short-circuits on "stop", and no KV transfer runs.
+        # Clearing EOS and stop tokens forces the length-based stop so
+        # the handoff always completes.
+        request.sampling_params.ignore_eos = True
+        request.sampling_params._eos_token_id = None
+        request.sampling_params.stop_token_ids = []
         params["_p_side_truncated"] = True
 
     def _trim_hybrid_remote_block_ids(self, block_ids: tuple[list[int], ...], prompt_len: int) -> tuple[list[int], ...]:

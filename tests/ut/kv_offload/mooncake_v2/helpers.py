@@ -240,6 +240,7 @@ def make_request(**overrides: Any) -> SimpleNamespace:
         "max_tokens": 16,
         "block_hashes": [],
         "truncate_block_hashes": MagicMock(),
+        "sampling_params": SimpleNamespace(ignore_eos=False, _eos_token_id=42, stop_token_ids=[99]),
     }
     values.update(overrides)
     return SimpleNamespace(**values)
