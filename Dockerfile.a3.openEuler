@@ -75,7 +75,7 @@ RUN set -e; \
         curl -fsSL "${KYLIN_REPO_URL}" -o /etc/yum.repos.d/kylin.repo; \
     fi; \
     $PM makecache || { echo "ERROR: dnf 无可用软件源，请配置 .repo 或传 KYLIN_REPO_URL"; exit 1; }; \
-    $PM install -y git vim wget curl make patch gcc gcc-c++ \
+    $PM install -y git vim wget curl make patch tar gzip gcc gcc-c++ \
         openssl-devel bzip2-devel libffi-devel zlib-devel xz-devel \
         sqlite-devel readline-devel ncurses-devel \
         numactl numactl-devel libibverbs-devel hiredis-devel libcurl-devel \
