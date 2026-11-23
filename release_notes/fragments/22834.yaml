@@ -1,7 +1,0 @@
-pr: 22834
-entries:
-  - category: bugfix
-    text: >-
-      AscendStore now accepts sharded Mamba configurations when both
-      --tensor-parallel-size and --prefill-context-parallel-size are greater
-      than 1, removing the requirement to keep either TP or PCP at 1.
