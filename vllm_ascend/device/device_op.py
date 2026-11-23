@@ -1023,6 +1023,7 @@ class BaseDeviceAdaptor:
         scale: float,
         prebuilt_meta,
         fused_fwd,
+        chunk_size: int = 64,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A2/A3 Phase6 FLA NPU GDN prefill kernel."""
         # l2norm is done inside the kernel (use_qk_l2norm_in_kernel=True),
@@ -1056,7 +1057,7 @@ class BaseDeviceAdaptor:
             beta,
             initial_state=initial_state_kern,
             output_final_state=True,
-            chunk_size=64,
+            chunk_size=chunk_size,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             scale=scale,
@@ -2096,6 +2097,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         scale: float,
         prebuilt_meta,
         fused_fwd,
+        chunk_size: int = 64,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A5 arch35 FLA NPU GDN prefill kernel."""
         # Conv1d head-first output is exposed as BSND views by GDN. Recover
@@ -2114,7 +2116,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         initial_state = initial_state.contiguous()
 
         cu_seqlens = prebuilt_meta.cu_seqlens_host
-        chunk_indices = prebuilt_meta.chunk_indices_chunk64_host
+        use_chunk32 = chunk_size == 32
+        chunk_indices = (
+            prebuilt_meta.chunk_indices_chunk32_host if use_chunk32 else prebuilt_meta.chunk_indices_chunk64_host
+        )
         keep_meta = prebuilt_meta.keep_meta
         initial_state_kern = initial_state
         if keep_meta is not None:
@@ -2129,15 +2134,16 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             beta,
             initial_state=initial_state_kern,
             output_final_state=True,
-            chunk_size=64,
+            chunk_size=chunk_size,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             scale=scale,
             layout=layout,
-            use_exp2=True,
+            use_exp2=not use_chunk32,
             use_qk_l2norm_in_kernel=True,
+            use_beta_sigmoid_in_kernel=use_chunk32,
             allow_neg_eigval=False,
-            disable_recompute=True,
+            disable_recompute=not use_chunk32,
             state_v_first=True,
         )
         if keep_meta is not None:
