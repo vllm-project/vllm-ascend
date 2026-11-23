@@ -263,7 +263,11 @@ def test_remote_model_state_prepares_rows_before_graph(monkeypatch):
 
     monkeypatch.setattr(ple, "shared_ple_config", lambda _: SimpleNamespace(backend="a2"))
     monkeypatch.setattr(model_state, "Qwen4ExpPreparedInputAdapter", Mock())
-    monkeypatch.setattr(model_state.Qwen4ExpModelState, "__init__", lambda *args, **kwargs: None)
+
+    def fake_upstream_init(self, *args, **kwargs):
+        self.uses_ngram_embedding = False
+
+    monkeypatch.setattr(model_state.Qwen4ExpModelState, "__init__", fake_upstream_init)
     inputs = {"query_start_loc": "starts", "ngram_context": "context"}
     monkeypatch.setattr(model_state.Qwen4ExpModelState, "prepare_inputs", lambda *args: inputs)
     monkeypatch.setattr(model_state.Qwen4ExpModelState, "prepare_dummy_inputs", lambda *args: {})
