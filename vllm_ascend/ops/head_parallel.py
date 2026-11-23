@@ -6,6 +6,7 @@ from copy import copy
 
 from vllm.distributed import divide, get_pcp_group, get_tp_group
 from vllm.model_executor.layers.linear import ColumnParallelLinear, MergedColumnParallelLinear, RowParallelLinear
+from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.utils import vllm_version_is
 
@@ -55,7 +56,11 @@ class HeadParallelColumnLinear(ColumnParallelLinear):
 
 
 class HeadParallelMergedColumnLinear(MergedColumnParallelLinear, HeadParallelColumnLinear):
-    def __init__(self, input_size: int, output_sizes: list[int], **kwargs) -> None:
+    def __init__(self, input_size: int, output_sizes: list[int], *, padding_size: int = 0, **kwargs) -> None:
+        # #66784 moves padding ownership from the Kimi wrapper to the merged
+        # layer. Consume it here rather than forwarding it to ColumnParallelLinear.
+        if not vllm_version_is("0.33.0"):
+            self.padding_size = padding_size
         self.output_sizes = output_sizes.copy()
         self.shard_ids = tuple(range(len(output_sizes)))
         if padding_size and not vllm_version_is("0.33.0"):

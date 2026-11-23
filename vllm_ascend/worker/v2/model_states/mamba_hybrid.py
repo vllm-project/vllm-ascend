@@ -343,6 +343,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             if pcp_context is not None and (
                 not getattr(input_batch, "is_dummy", False)
                 or getattr(input_batch, "is_cpp_profile", False)
+                or pcp_context.global_batch is not input_batch
                 or (
                     pcp_manager is not None
                     and model_uses_kpool_indexer(self.vllm_config.model_config)

@@ -35,6 +35,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import QUANT_DTYPES, get_dynamic_mx_quant_scale_alg
 
 if TYPE_CHECKING:
+    from vllm_ascend.attention.indexer import QLIMetadataConfig
     from vllm_ascend.models.deepseek_v41.mixed_quant_attention import MixedQuantPackedCacheOps
 
 ACL_HOST_REG_MAPPED = 0x2
@@ -52,6 +53,14 @@ else:
 
 class BaseDeviceAdaptor:
     native_dcp_indexer = False
+
+    @staticmethod
+    def get_indexer_metadata_config(cache_spec, hf_config) -> "QLIMetadataConfig | None":
+        return None
+
+    @staticmethod
+    def get_indexer_metadata_op():
+        raise NotImplementedError("This device does not use CANN V2 indexer metadata")
 
     @staticmethod
     def build_indexer_local_metadata(
@@ -1149,6 +1158,24 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     native_dcp_indexer = True
 
     @staticmethod
+    def get_indexer_metadata_config(cache_spec, hf_config) -> "QLIMetadataConfig | None":
+        # indexer imports DeviceOperator; defer the reverse import until runtime.
+        from vllm_ascend.attention.indexer import QLIMetadataConfig
+
+        if getattr(cache_spec, "cache_sparse_li_c4", False) or not getattr(cache_spec, "cache_sparse_li_c8", False):
+            return None
+        if cache_spec.dtype != torch.float8_e4m3fn:
+            return None
+        return QLIMetadataConfig(
+            hf_config.index_n_heads, hf_config.index_head_dim, 1, topk=getattr(hf_config, "index_topk", 2048)
+        )
+
+    @staticmethod
+    def get_indexer_metadata_op():
+        metadata_op, _ = A5DeviceAdaptor._load_cann_quant_lightning_indexer_ops()
+        return metadata_op
+
+    @staticmethod
     def _scatter_cache(var, indices, updates) -> bool:
         operation = getattr(torch_npu, "npu_scatter_pa_cache", None)
         if operation is None or not var.is_contiguous():
@@ -1937,25 +1964,37 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
             if q_li_scale is not None:
                 q_li_scale = q_li_scale.view(q_li_shape_ori[:-1])
-                key_dequant_scale = kv_cache[indexer_scale_cache_idx].squeeze(2)
+                key_dequant_scale = kv_cache[indexer_scale_cache_idx].squeeze(-1)
+                if q_li.dtype != torch.float8_e4m3fn or kv_cache[indexer_cache_idx].dtype != torch.float8_e4m3fn:
+                    raise ValueError("A5 C8 V2 indexer requires FP8 E4M3 query and key cache")
+                metadata_op, quant_li_op = A5DeviceAdaptor._load_cann_quant_lightning_indexer_ops()
+                from vllm_ascend.attention.indexer import QLIMetadataConfig, get_qli_metadata
 
-                topk_indices = torch_npu.npu_quant_lightning_indexer(
+                inputs = get_qli_metadata(
+                    getattr(attn_metadata, "qli_inputs", None),
+                    QLIMetadataConfig(q_li_shape_ori[1], q_li_shape_ori[-1], 1, topk=topk),
+                    actual_seq_lengths_query,
+                    actual_seq_lengths_key,
+                    metadata_op,
+                )
+                topk_indices, _ = quant_li_op(
                     query=q_li.view(q_li_shape_ori),
                     key=kv_cache[indexer_cache_idx],
-                    weights=weights,
+                    weights=weights.to(torch.float32),
                     query_dequant_scale=q_li_scale,
                     key_dequant_scale=key_dequant_scale,
-                    actual_seq_lengths_query=actual_seq_lengths_query,
-                    actual_seq_lengths_key=actual_seq_lengths_key,
+                    topk=inputs.config.topk,
+                    quant_mode=inputs.config.quant_mode,
+                    cu_seqlens_q=inputs.query_start_loc,
+                    seqused_k=inputs.seq_lens,
                     block_table=attn_metadata.block_table,
-                    query_quant_mode=0,
-                    key_quant_mode=0,
-                    layout_query="TND",
-                    layout_key="PA_BSND",
-                    sparse_count=topk,
-                    sparse_mode=3,
-                    pre_tokens=INT64_MAX,
-                    next_tokens=INT64_MAX,
+                    metadata=inputs.metadata,
+                    max_seqlen_q=-1,
+                    layout_q="TND",
+                    layout_k="PA_BBND",
+                    mask_mode=3,
+                    cmp_ratio=1,
+                    return_value=0,
                 )
             else:
                 topk_indices, _ = torch_npu.npu_lightning_indexer(

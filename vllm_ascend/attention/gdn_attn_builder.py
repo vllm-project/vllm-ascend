@@ -29,17 +29,20 @@ from vllm.v1.attention.backends.gdn_attn import (
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     PAD_SLOT_ID,
-    mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
     prepare_final_chunk_indices,
     prepare_update_chunk_offsets,
+)
+from vllm_ascend.ops.triton.mamba.align_block_table import (
+    mamba_get_block_table_tensor,
 )
 from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
 
@@ -1149,6 +1152,20 @@ class AscendGDNAttentionBackend(GDNAttentionBackend):
         return True
 
 
+class AscendGDNPCPMetadataBuilder(PCPRecurrentMetadataBuilderMixin, AscendGDNAttentionMetadataBuilder):
+    pass
+
+
+class AscendGDNPCPBackend(AscendGDNAttentionBackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
+    @staticmethod
+    def get_builder_cls() -> type[AscendGDNPCPMetadataBuilder]:
+        return AscendGDNPCPMetadataBuilder
+
+
 class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
     """Build only the descriptors consumed by AscendC host-metadata paths."""
 
@@ -1451,36 +1468,3 @@ class AscendGDNFusedAttentionBackend(AscendGDNAttentionBackend):
         if get_pcp_group().world_size == 1 and AscendGatedDeltaNetAttention._supports_host_metadata_prefill():
             return AscendGDNHostMetadataBuilder
         return AscendGDNAttentionMetadataBuilder
-
-
-class AscendGDNPCPMetadataBuilder(AscendGDNAttentionMetadataBuilder):
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        num_accepted_tokens: torch.Tensor | None = None,
-        num_decode_draft_tokens_cpu: torch.Tensor | None = None,
-        fast_build: bool = False,
-        num_actual_reqs: int | None = None,
-    ) -> GDNAttentionMetadata:
-        metadata = super().build(
-            common_prefix_len,
-            common_attn_metadata,
-            num_accepted_tokens=num_accepted_tokens,
-            num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
-            fast_build=fast_build,
-            num_actual_reqs=num_actual_reqs,
-        )
-        context = common_attn_metadata.pcp_context
-        metadata.pcp_context = context if context is not None and context.local_token_indices is not None else None
-        return metadata
-
-
-class AscendGDNPCPBackend(AscendGDNAttentionBackend):
-    @classmethod
-    def supports_pcp(cls) -> bool:
-        return True
-
-    @staticmethod
-    def get_builder_cls() -> type[AscendGDNPCPMetadataBuilder]:
-        return AscendGDNPCPMetadataBuilder

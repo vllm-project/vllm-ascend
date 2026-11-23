@@ -1,4 +1,4 @@
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
 
     #### Pull the image
 

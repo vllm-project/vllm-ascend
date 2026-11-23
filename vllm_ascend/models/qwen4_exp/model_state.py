@@ -45,6 +45,8 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
     """
 
     _skip_spec_cpu_length_sync: bool
+    ngram_context: torch.Tensor
+    ple_query_start_loc: torch.Tensor
 
     def _uses_global_mamba_pcp(self) -> bool:
         return True
@@ -147,6 +149,24 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
             full_graph=cudagraph_mode == CUDAGraphMode.FULL,
         )
         return metadata
+
+    def _uses_global_mamba_pcp(self) -> bool:
+        return True
+
+    def _prepare_ngram_context(self, input_batch, req_states):
+        if input_batch.pcp is None or getattr(input_batch, "is_dummy", False):
+            return super()._prepare_ngram_context(input_batch, req_states)
+        num_reqs = input_batch.num_reqs
+        context = self.ngram_context[: input_batch.num_reqs_after_padding]
+        context.fill_(self.ngram_eos_token_id)
+        if num_reqs:
+            # Each local segment starts at its own position in the request.
+            starts = input_batch.seq_lens[:num_reqs] - input_batch.query_start_loc[: num_reqs + 1].diff()
+            indices = starts.long().unsqueeze(1) + self.ngram_context_offsets
+            requests = input_batch.idx_mapping[:num_reqs].long().unsqueeze(1)
+            history = req_states.all_token_ids.gpu[requests, indices.clamp_min(0)]
+            context[:num_reqs].copy_(torch.where(indices >= 0, history, self.ngram_eos_token_id))
+        return context
 
     def initialize_spec_cpu_length_sync(self, runner: Any) -> None:
         """Bind length consumers once, after target and draft KV initialization."""

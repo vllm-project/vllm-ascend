@@ -90,16 +90,14 @@ _IS_ROT_WEIGHT_USED = None
 def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max_num_reqs: int) -> int:
     """Keep replicated draft requests when profiling PCP-local prefill.
 
-    Initial memory profiling precedes KV/PCP-manager initialization.
-    Block drafters retain the global budget: their context-KV precompute
-    processes all target hidden states, independently of short queries.
+    Initial profiling runs before KV cache initialization. DFlash and DSpark
+    gather global context from the local target outputs for their replicated drafts.
+    The runner validates PCP support before using this budget.
     """
     pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
     if pcp_size <= 1:
         return max_num_tokens
     spec = vllm_config.speculative_config
-    if spec is not None and spec.method not in ("mtp", "eagle", "eagle3"):
-        return max_num_tokens
 
     # PCP: bound replicated decodes, including uneven whole-request sharding.
     # Shared config keeps this bound identical across pipeline stages.

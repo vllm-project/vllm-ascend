@@ -36,6 +36,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
 )
+from vllm_ascend.attention.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendGDNHostMetadataBuilder
 from vllm_ascend.ops.head_parallel import (
     HeadParallelColumnLinear,
     HeadParallelMergedColumnLinear,
@@ -44,7 +45,7 @@ from vllm_ascend.ops.head_parallel import (
     get_head_parallel_size,
 )
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
-from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend, KimiKDARecoverSSMMetadataBackend
+from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
@@ -212,6 +213,28 @@ def _prepare_beta(
     return beta if is_preprocessed else beta.float().sigmoid()
 
 
+class KimiKDAHostMetadataBuilder(PCPRecurrentMetadataBuilderMixin, AscendGDNHostMetadataBuilder):
+    pass
+
+
+class KimiKDAHostMetadataBackend(AscendGDNHostMetadataBackend):
+    @staticmethod
+    def get_builder_cls():
+        return KimiKDAHostMetadataBuilder
+
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
+
+class KimiKDARecoverSSMMetadataBackend(KimiKDAHostMetadataBackend):
+    @staticmethod
+    def get_builder_cls():
+        from vllm_ascend.models.kimi_k3.recoverssm_metadata import AscendKimiKDARecoverSSMMetadataBuilder
+
+        return AscendKimiKDARecoverSSMMetadataBuilder
+
+
 class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     """Kimi K3 KDA using AscendC prefill and recurrent kernels."""
 
@@ -373,10 +396,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         positions: torch.Tensor,
     ) -> torch.Tensor:
         if self.pcp_size > 1:
-            hidden_states = torch.ops.vllm.kda_pcp_gather(hidden_states, self.pcp_size, self.prefix)
+            hidden_states = torch.ops.vllm.pcp_gather_tokens(hidden_states, self.pcp_size, self.prefix)
         output = self._forward_projections(hidden_states, positions)
         if self.pcp_size > 1:
-            output = torch.ops.vllm.kda_pcp_scatter(output, self.pcp_size, self.prefix)
+            output = torch.ops.vllm.pcp_scatter_tokens(output, self.pcp_size, self.prefix)
         return output
 
     def _forward_projections(self, hidden_states: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:

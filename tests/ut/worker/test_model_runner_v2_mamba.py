@@ -490,6 +490,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(
 def test_kimi_pcp_metadata_respects_target_and_draft_groups(is_target):
     context = SimpleNamespace(global_batch=object(), global_block_tables=object(), global_slot_mappings=object())
     state = SimpleNamespace(
+        _uses_global_mamba_pcp=lambda: True,
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(model_type="kimi_linear", linear_attn_config={"num_heads": 96})
@@ -551,7 +552,8 @@ def test_kimi_pcp_metadata_respects_target_and_draft_groups(is_target):
     ],
 )
 @pytest.mark.parametrize("is_dummy", [False, True])
-def test_kimi_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_capture, is_dummy):
+@pytest.mark.parametrize("is_decode_sharded", [False, True])
+def test_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_capture, is_dummy, is_decode_sharded):
     owner = TargetDeviceMetadata()
     produce = MagicMock()
     task = DeviceMetadataTask(DeviceMetadataStage.ATTENTION, produce, 0)
@@ -563,8 +565,15 @@ def test_kimi_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_captur
         [SimpleNamespace(kv_cache_spec=object(), get_metadata_builder=lambda _: provider)],
         [SimpleNamespace(kv_cache_spec=_mamba_spec(), get_metadata_builder=lambda _: provider)],
     ]
-    context = SimpleNamespace(global_batch=object(), global_block_tables=object(), global_slot_mappings=object())
+    local_batch = SimpleNamespace(is_dummy=is_dummy)
+    use_global_mamba = not is_dummy or is_decode_sharded
+    context = SimpleNamespace(
+        global_batch=object() if use_global_mamba else local_batch,
+        global_block_tables=object(),
+        global_slot_mappings=object(),
+    )
     state = SimpleNamespace(
+        _uses_global_mamba_pcp=lambda: True,
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(model_type="kimi_linear", linear_attn_config={"num_heads": 96})
@@ -582,11 +591,11 @@ def test_kimi_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_captur
     with patch.object(
         AscendMambaHybridModelState,
         "_build_attn_metadata_for_batch",
-        side_effect=[{"sfa": sfa, "kda": kda}] if is_dummy else [{"sfa": sfa}, {"kda": kda}],
+        side_effect=[{"sfa": sfa}, {"kda": kda}] if use_global_mamba else [{"sfa": sfa, "kda": kda}],
     ) as build:
         result = AscendMambaHybridModelState.prepare_attn(
             state,
-            SimpleNamespace(is_dummy=is_dummy),
+            local_batch,
             graph_mode,
             (),
             object(),
@@ -595,7 +604,9 @@ def test_kimi_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_captur
             for_capture=for_capture,
         )
     assert result == {"sfa": sfa, "kda": kda}
-    assert build.call_count == (1 if is_dummy else 2)
+    assert build.call_count == (2 if use_global_mamba else 1)
+    if use_global_mamba:
+        assert build.call_args.args[1] is context.global_batch
     assert sfa.device_metadata_executor is owner.executor
     assert kda.device_metadata_executor is owner.executor
     provider.take_device_metadata_tasks.assert_called_once_with()
@@ -678,7 +689,8 @@ def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests(recover, for_c
         is_target_attn_groups=MagicMock(return_value=True),
         build_attention_context=MagicMock(return_value=pcp_context),
     )
-    state = SimpleNamespace(
+    state = object.__new__(AscendMambaHybridModelState)
+    vars(state).update(
         pcp_manager=pcp_manager,
         vllm_config=SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=4))),
         recoverssm=SimpleNamespace(record_step=MagicMock()) if recover else None,
@@ -733,7 +745,8 @@ def test_glm_kpool_pcp_advances_mamba_align_state_once_per_global_request(mock_k
     pcp_context = SimpleNamespace(global_batch=global_batch, global_block_tables=global_tables)
     pcp_manager = SimpleNamespace(build_attention_context=MagicMock(return_value=pcp_context))
     spec = _mamba_spec()
-    state = SimpleNamespace(
+    state = object.__new__(AscendMambaHybridModelState)
+    vars(state).update(
         _align_mode=True,
         pcp_manager=pcp_manager,
         vllm_config=SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=4))),
