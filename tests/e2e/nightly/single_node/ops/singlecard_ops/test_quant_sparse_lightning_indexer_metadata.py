@@ -125,7 +125,7 @@ def _check_native_dispatch(fake):
 
 
 @pytest.mark.parametrize("mode", ["meta", "fake"])
-def test_qli_native_registration_and_dispatch(mode):
+def test_quant_sparse_lightning_indexer_metadata(mode):
     pytest.importorskip("torch_npu")
     result = subprocess.run(
         [
