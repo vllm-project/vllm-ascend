@@ -900,11 +900,14 @@ def test_partition_batch_keeps_piecewise_request_extent():
 
 @pytest.mark.parametrize("dcp_world_size", [1, 2])
 @pytest.mark.parametrize("is_prefilling", [False, True])
-def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefilling):
+@pytest.mark.parametrize("sfa_model", [False, True])
+def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefilling, sfa_model):
     manager = AscendPCPManager.__new__(AscendPCPManager)
     manager._kernel_block_table_groups = {}
     manager.device = torch.device("cpu")
     manager.dcp_world_size = dcp_world_size
+    hf_text_config = SimpleNamespace(index_topk=2048) if sfa_model else SimpleNamespace()
+    manager.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=hf_text_config))
     input_batch = _make_local_pcp_batch()
     input_batch.idx_mapping_np = np.array([7, 3, -1, -1], dtype=np.int32)
     input_batch.idx_mapping = torch.from_numpy(input_batch.idx_mapping_np)
@@ -949,10 +952,10 @@ def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefillin
         )
         num_blocks.fill(0)
         assert actual.global_block_table_num_blocks[0, 0] == 7
-        assert actual.local_to_global_req_indices == (1, 1, 0)
     else:
         assert actual.global_block_table_num_blocks is None
-        assert actual.local_to_global_req_indices is None
+    expected_rows = (1, 1, 0) if is_prefilling and (dcp_world_size > 1 or sfa_model) else None
+    assert actual.local_to_global_req_indices == expected_rows
     assert actual.global_batch is input_batch
     assert actual.global_block_tables is block_tables
     assert torch.equal(

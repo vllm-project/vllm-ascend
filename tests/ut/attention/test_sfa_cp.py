@@ -7,6 +7,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
+import numpy as np
 import pytest
 import torch
 import vllm.distributed as vllm_distributed
@@ -1704,6 +1705,38 @@ def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, 
     assert common.block_table_tensor is blocks
 
 
+def test_sfa_pcp_dcp_view_preserves_global_prefill_gather_boundary():
+    builder = _make_builder()
+    builder.use_dcp = True
+    builder.decode_threshold = 6
+    builder.dcp_local_seq_lens_buf = torch.empty(1, dtype=torch.int32)
+    common = _make_sfa_split_common([1], [False], 1, 6)
+    common.dcp_local_seq_lens = torch.tensor([100], dtype=torch.int32)
+    common.pcp_context = SimpleNamespace(
+        global_batch=SimpleNamespace(is_prefilling_np=np.array([True])),
+        local_to_global_req_indices=(0,),
+    )
+    metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
+    metadata.pcp_has_global_prefill = True
+    with (
+        patch("vllm_ascend.attention.utils.is_pd_decode_recompute_scheduler_enabled", return_value=False),
+        patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp.is_pd_decode_recompute_scheduler_enabled", return_value=False
+        ),
+        patch.object(builder, "_get_dcp_local_block_table", return_value=common.block_table_tensor),
+        patch.object(builder, "_build_block_table_replicated_view", return_value=common.block_table_tensor),
+        patch.object(builder, "_build_slot_mapping_replicated_view", return_value=common.slot_mapping),
+        patch.object(
+            builder, "_build_compact_kv_gather_metadata", return_value=(torch.arange(1), common.block_table_tensor)
+        ),
+    ):
+        result = builder._build_with_metadata_view(common, lambda: metadata)
+
+    assert result.num_decode_tokens == 0
+    assert result.num_prefills == 1
+    assert common.is_prefilling.tolist() == [False]
+
+
 def test_sfa_dcp_prefill_passes_contiguous_gathered_cache() -> None:
     impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
     impl._sharded_indexer = False
@@ -2001,6 +2034,38 @@ def test_sfa_pcp_metadata_keeps_global_prefill_when_local_rank_is_empty(global_h
     else:
         assert metadata.pcp_prolog_local_slots is None
         assert metadata.pcp_prolog_global_slots is None
+
+
+@pytest.mark.parametrize("rank", range(8))
+def test_sfa_pcp_lookahead_uses_global_prefill_gather_boundary(rank):
+    builder = _make_sfa_split_builder(use_pcp=True, threshold=6)
+    actual = int(rank < 6)
+    original_flag = rank == 0 or rank >= 6
+    common = _make_sfa_split_common([actual], [original_flag], actual, 6, padded_tokens=1)
+    common.slot_mapping = torch.tensor([0, 1, 2, 3, 4, 5, -1, -1])
+    common.pcp_context = SimpleNamespace(
+        global_batch=SimpleNamespace(is_prefilling_np=np.array([True])),
+        local_to_global_req_indices=(0,),
+    )
+    group = SimpleNamespace(
+        world_size=8,
+        rank_in_group=rank,
+        all_gather=Mock(side_effect=lambda value, dim: value.repeat(8, 1)),
+    )
+    rope = torch.zeros(1, 64)
+    with (
+        patch("vllm_ascend.attention.utils.is_pd_decode_recompute_scheduler_enabled", return_value=False),
+        patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla", return_value=(rope, rope)),
+        patch("vllm_ascend.attention.sfa_v1.get_pcp_group", return_value=group),
+        patch("vllm.v1.attention.ops.pcp.get_pcp_group", return_value=group),
+    ):
+        metadata = builder.build(0, common)
+        _, slots = _gather_prefill_cache_inputs((torch.zeros(1, 4),), common.slot_mapping, metadata.num_decode_tokens)
+
+    assert metadata.num_decode_tokens == 0
+    group.all_gather.assert_called_once()
+    torch.testing.assert_close(metadata.pcp_prolog_global_slots, slots)
+    assert common.is_prefilling.tolist() == [original_flag]
 
 
 def test_sfa_pcp_builder_prepares_local_prolog_slots():

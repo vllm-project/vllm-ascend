@@ -4,6 +4,7 @@ These helpers encode SFA cache transport and the replicated indexer-cache
 layout without depending on the attention implementation or metadata builders.
 """
 
+from copy import copy
 from typing import Any
 
 import torch
@@ -72,6 +73,23 @@ def build_sfa_dcp_compact_kv_metadata(
     # without mapping a stale ID into another rank's segment or gathering it.
     block_table.masked_fill_(~allocated[:, local_columns], 0)
     return valid_block_ids, block_table.to(torch.int32)
+
+
+def get_sfa_pcp_prefill_metadata(common_attn_metadata: Any, pcp_context: Any) -> Any:
+    """Use global request phases with local query offsets for SFA cache gathering."""
+    local_rows = getattr(pcp_context, "local_to_global_req_indices", None)
+    if local_rows is None:
+        return common_attn_metadata
+    global_flags = pcp_context.global_batch.is_prefilling_np
+    if not global_flags.any():
+        return common_attn_metadata
+
+    # One request can occupy multiple local rows. Padding stays non-prefill.
+    is_prefilling = torch.zeros(common_attn_metadata.num_reqs, dtype=torch.bool, device="cpu")
+    is_prefilling[: len(local_rows)] = torch.from_numpy(global_flags[list(local_rows)])
+    metadata = copy(common_attn_metadata)
+    metadata.is_prefilling = is_prefilling
+    return metadata
 
 
 def get_sfa_pcp_global_metadata(

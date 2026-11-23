@@ -37,6 +37,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.utils import apply_prefill_as_decode_mask, has_requests_to_run_as_prefill
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
+from vllm_ascend.utils import enable_sfa
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
@@ -800,10 +801,12 @@ class AscendPCPManager(PCPManager):
         assert hidden_restore_idx is not None
         global_block_table_num_blocks = None
         local_to_global_req_indices = None
-        if self.dcp_world_size > 1 and has_requests_to_run_as_prefill(global_batch):
+        has_prefill = has_requests_to_run_as_prefill(global_batch)
+        if has_prefill and self.dcp_world_size > 1:
             global_block_table_num_blocks = torch.from_numpy(
                 self._block_tables.num_blocks.np[:, global_batch.idx_mapping_np[: global_batch.num_reqs]]
             ).to(device=self.device, non_blocking=True)
+        if has_prefill and (self.dcp_world_size > 1 or enable_sfa(self.vllm_config)):
             global_rows = {
                 int(state): row for row, state in enumerate(global_batch.idx_mapping_np[: global_batch.num_reqs])
             }

@@ -6,6 +6,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
+import numpy as np
 import pytest
 import torch
 import torch_npu
@@ -270,6 +271,34 @@ def test_sfa_indexer_metadata_builder_preserves_pcp_decode_boundary(
 
     # Preserve the boundary for PCP gathering and native DCP fused stores.
     assert metadata.num_decode_tokens == expected_decode_tokens
+
+
+@patch("vllm_ascend.attention.indexer.get_ascend_config")
+@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
+def test_sfa_indexer_pcp_maps_global_prefill_to_repeated_local_rows(mock_cos_sin, mock_get_ascend_config):
+    mock_cos_sin.return_value = (torch.zeros(4, 1, 1, 8), torch.zeros(4, 1, 1, 8))
+    builder = _make_builder(pcp_size=2, num_speculative_tokens=5)
+    common = _make_common_metadata()
+    common.num_reqs = 4
+    common.num_actual_tokens = 3
+    common.slot_mapping = torch.tensor([0, 1, 2, -1, -1, 3, 4, -1])
+    common.query_start_loc = torch.tensor([0, 1, 2, 3, 3], dtype=torch.int32)
+    common.query_start_loc_cpu = common.query_start_loc.clone()
+    common.max_query_len = 1
+    common.is_prefilling = torch.zeros(4, dtype=torch.bool)
+    common.seq_lens = torch.tensor([5, 6, 7, 0])
+    common.block_table_tensor = torch.zeros((4, 2), dtype=torch.int32)
+    common.pcp_context = SimpleNamespace(
+        global_batch=SimpleNamespace(is_prefilling_np=np.array([True, False])),
+        local_to_global_req_indices=(1, 0, 0),
+    )
+
+    with patch("vllm_ascend.attention.utils.is_pd_decode_recompute_scheduler_enabled", return_value=False):
+        metadata = builder.build(0, common)
+
+    assert metadata.num_decode_tokens == 1
+    assert not common.is_prefilling.any()
+    assert metadata.slot_mapping is common.slot_mapping
 
 
 @pytest.mark.parametrize("pcp_size,dcp_size", [(2, 2), (1, 8)])
