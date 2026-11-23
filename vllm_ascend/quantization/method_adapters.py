@@ -401,13 +401,16 @@ class AscendOnlineLinearMethod(OnlineLinearBase):
 
     activation_quant_key = None
     scheme_cls: type[AscendLinearScheme]
+    quant_method: AscendLinearScheme
 
     def __init__(self) -> None:
         super().__init__()
-        self.scheme = self.scheme_cls()
+        # Ascend's linear wrappers all expose their scheme as `quant_method`;
+        # vllm_ascend duck-types it as `layer.quant_method.quant_method`.
+        self.quant_method = self.scheme_cls()
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        self.scheme.process_weights_after_loading(layer)
+        self.quant_method.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -415,7 +418,7 @@ class AscendOnlineLinearMethod(OnlineLinearBase):
         x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.scheme.apply(layer, x, bias, _linear_tp_rank(layer))
+        return self.quant_method.apply(layer, x, bias, _linear_tp_rank(layer))
 
 
 class AscendOnlineFusedMoEMethod(_AscendMoEMethodMixin, OnlineMoEMethodBase):

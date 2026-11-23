@@ -265,7 +265,7 @@ class AscendInt8PerChannelOnlineLinearMethod(AscendOnlineLinearMethod):
 
         # Allocate the scale/offset tensors through the offline scheme so their
         # shape, dtype and device are exactly what the runtime kernel expects.
-        buffers = _params_on(weight.device, self.scheme.get_perchannel_param(weight.shape[0], params_dtype))
+        buffers = _params_on(weight.device, self.quant_method.get_perchannel_param(weight.shape[0], params_dtype))
         scale_buffer = buffers["weight_scale"]
         offset_buffer = buffers["weight_offset"]
         scale_buffer.copy_(scale.reshape(scale_buffer.shape))
