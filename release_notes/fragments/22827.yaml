@@ -1,0 +1,4 @@
+pr: 22827
+entries:
+  - category: bugfix
+    text: Route the implemented Qwen4Exp configuration types, including the Qwen3.8-Flash-Next text config, through unified KV allocation. Prevent QSA cache groups with unequal block strides from overlapping by reserving separate banks in one allocation.
