@@ -11,6 +11,11 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Protocol
 
+from vllm_ascend.distributed.ec_transfer.cache_statistics import (
+    CacheStatistics,
+    CacheStatisticsAccumulator,
+    CacheStatisticsSnapshot,
+)
 from vllm_ascend.distributed.ec_transfer.phash_index import PHASH_BITS, bands, hamming
 from vllm_ascend.distributed.ec_transfer.similarity_cache_config import SimilarityCacheConfig
 
@@ -48,6 +53,8 @@ class SimilarityIndex(Protocol):
 
     def record_similarity_scores(self, mm_hash: str, scores: list[tuple[float, str]]) -> None: ...
 
+    def report_cache_statistics(self, scheduler_id: str, counts: CacheStatistics) -> CacheStatisticsSnapshot: ...
+
     def close(self) -> None: ...
 
 
@@ -64,6 +71,7 @@ class LocalSimilarityIndex:
         self.phash_to_resized_mm_hashes: dict[int, list[str]] = {}
         self._phash_band_index: dict[tuple[int, int], set[int]] = {}
         self._lock = Lock()
+        self._statistics = CacheStatisticsAccumulator()
 
     def batch_get_entries(self, mm_hashes: list[str]) -> list[SimilarityCacheItem | None]:
         with self._lock:
@@ -155,6 +163,9 @@ class LocalSimilarityIndex:
                         del self._phash_band_index[band]
         # Scores may still reference evicted images. Their embeddings are
         # checked against Memcache before use; metadata eviction deletes no data.
+
+    def report_cache_statistics(self, scheduler_id: str, counts: CacheStatistics) -> CacheStatisticsSnapshot:
+        return self._statistics.report(scheduler_id, counts)
 
     def close(self) -> None:
         """No external resources are owned by the local implementation."""

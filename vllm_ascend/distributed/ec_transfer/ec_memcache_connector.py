@@ -37,6 +37,7 @@ entries, randomly selected entries are evicted down to
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import torch
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -50,12 +51,14 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import logger
 
+from vllm_ascend.distributed.ec_transfer.cache_statistics import CacheStatistics
 from vllm_ascend.distributed.ec_transfer.perceptual_ssim_cache_matcher import (
     PhashSSIMCacheMatcher,
 )
 from vllm_ascend.distributed.ec_transfer.similarity_cache_config import (
     SimilarityCacheConfig,
 )
+from vllm_ascend.distributed.ec_transfer.similarity_index import SimilarityIndex
 from vllm_ascend.distributed.ec_transfer.similarity_index_service import (
     SimilarityIndexConfigurationError,
     SimilarityIndexUnavailable,
@@ -125,6 +128,9 @@ class ECMemcacheConnector(ECConnectorBase):
         self._cache_matcher: PhashSSIMCacheMatcher | None = None
 
         if role == ECConnectorRole.SCHEDULER:
+            # A new connector instance gets a new ID; RPC retries keep this ID.
+            self._statistics_id = uuid4().hex
+            self._statistics_index: SimilarityIndex | None = None
             # Similarity matching persists and reloads resized tensors. Select
             # the scheduler's final backend capability before the process's
             # first Memcache initialization; a metadata-only native client
@@ -139,6 +145,9 @@ class ECMemcacheConnector(ECConnectorBase):
                     model_id=self._model_id,
                     merge_size=merge_size,
                 )
+                if self._similarity_config.shared_index_endpoint is not None:
+                    # Non-owning reference: matcher shutdown owns index cleanup.
+                    self._statistics_index = index
                 if self._similarity_config.shared_index_endpoint is None:
                     dp_size = vllm_config.parallel_config.data_parallel_size
                     if isinstance(dp_size, int) and dp_size > 1:
@@ -445,11 +454,40 @@ class ECMemcacheConnector(ECConnectorBase):
     @property
     def hit_rate(self) -> float:
         """Return the cumulative exact and similarity cache hit rate."""
-        hits = self._mm_hash_hit_count + self._similarity_hit_count
-        total = hits + self._miss_count
-        if total == 0:
-            return 0.0
-        return hits / total
+        return self.cache_statistics.hit_rate
+
+    @property
+    def cache_statistics(self) -> CacheStatistics:
+        """Cumulative local scheduler decisions, not successful worker loads."""
+        return CacheStatistics(self._mm_hash_hit_count, self._similarity_hit_count, self._miss_count)
+
+    def _report_cache_statistics(self, *, final: bool = False) -> None:
+        index = self._statistics_index
+        if index is None:
+            return
+        try:
+            snapshot = index.report_cache_statistics(self._statistics_id, self.cache_statistics)
+        except Exception:
+            # Telemetry is best effort: a later batch or shutdown sends the
+            # full counters again, even if this write applied but its reply was lost.
+            logger.debug("EC shared statistics report failed; local counters retained", exc_info=True)
+            return
+        counts = snapshot.counts
+        log = logger.info if final else logger.debug
+        log(
+            "EC cache stats: scope=global epoch=%s reporting_instances=%d "
+            "exact_hits=%d similarity_hits=%d misses=%d total=%d "
+            "hit_rate=%.2f%% similarity_hit_rate=%.2f%% similarity_lookup_hit_rate=%.2f%%",
+            snapshot.epoch,
+            snapshot.reporting_schedulers,
+            counts.exact_hits,
+            counts.similarity_hits,
+            counts.misses,
+            counts.total,
+            counts.hit_rate * 100,
+            counts.similarity_hit_rate * 100,
+            counts.similarity_lookup_hit_rate * 100,
+        )
 
     def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> ECMemcacheConnectorMetadata:
         meta = ECMemcacheConnectorMetadata(
@@ -461,7 +499,8 @@ class ECMemcacheConnector(ECConnectorBase):
             logger.debug(
                 "EC meta: %d loads, %d saves this step | "
                 "EC meta loads: %r, EC meta saves: %r this step | "
-                "exact_hits=%d similarity_hits=%d misses=%d hit_rate=%.2f%%",
+                "scope=local exact_hits=%d similarity_hits=%d misses=%d hit_rate=%.2f%% "
+                "similarity_hit_rate=%.2f%% similarity_lookup_hit_rate=%.2f%%",
                 len(meta.mm_hashes_need_loads),
                 len(meta.mm_hashes_need_saves),
                 meta.mm_hashes_need_loads,
@@ -470,7 +509,12 @@ class ECMemcacheConnector(ECConnectorBase):
                 self._similarity_hit_count,
                 self._miss_count,
                 self.hit_rate * 100,
+                self.cache_statistics.similarity_hit_rate * 100,
+                self.cache_statistics.similarity_lookup_hit_rate * 100,
             )
+            # Publish once per active batch, not once per image. No RPC is
+            # introduced on empty/decode-only steps, and actions stay local.
+            self._report_cache_statistics()
         # ECMemcacheConnectorMetadata will be passed to worker, so states must be cleared before next batch coming
         # and the statistics fields keep remaining
         self._mm_hashes_need_loads = set()
@@ -877,6 +921,10 @@ class ECMemcacheConnector(ECConnectorBase):
             logger.exception("EC PUT failed: mm_hash=%s", mm_hash)
 
     def shutdown(self) -> None:
+        # Flush before DP0 closes the server owned by its matcher. This is a
+        # snapshot, not a barrier waiting for every scheduler to shut down.
+        if getattr(self, "_statistics_index", None) is not None:
+            self._report_cache_statistics(final=True)
         matcher = getattr(self, "_cache_matcher", None)
         if matcher is not None:
             matcher.shutdown()

@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vllm_ascend.distributed.ec_transfer import ec_memcache_connector as connector_module
+from vllm_ascend.distributed.ec_transfer.cache_statistics import CacheStatistics
 from vllm_ascend.distributed.ec_transfer.ec_memcache_connector import (
     DEFAULT_RECV_BUFFER_TOKENS,
     MIN_RECV_BUFFER_TOKENS,
@@ -19,6 +20,7 @@ from vllm_ascend.distributed.ec_transfer.similarity_cache_config import (
     MIN_RESIZED_IMAGE_RECV_BUFFER_SIZE,
     SimilarityCacheConfig,
 )
+from vllm_ascend.distributed.ec_transfer.similarity_index import LocalSimilarityIndex
 
 
 def _make_connector(capacity_tokens: int = 8, hidden_dim: int = 4) -> ECMemcacheConnector:
@@ -210,6 +212,8 @@ def _make_scheduler_connector() -> ECMemcacheConnector:
     connector._mm_hash_hit_count = 0
     connector._similarity_hit_count = 0
     connector._miss_count = 0
+    connector._statistics_index = None
+    connector._statistics_id = "test-scheduler"
     connector._mm_hashes_need_loads = set()
     connector._mm_hash_to_store_key = {}
     connector._mm_hashes_need_saves = set()
@@ -707,3 +711,54 @@ def test_similarity_cache_defaults_to_three_bit_hamming_distance():
 def test_similarity_cache_constructor_rejects_invalid_hamming_distance(max_hamming):
     with pytest.raises(ValueError, match="max_hamming"):
         SimilarityCacheConfig(max_hamming=max_hamming)
+
+
+def test_batch_reports_global_counts_without_changing_local_counts():
+    connector = _make_scheduler_connector()
+    index = LocalSimilarityIndex(SimilarityCacheConfig())
+    index.report_cache_statistics("other", CacheStatistics(8, 1, 1))
+    connector._statistics_index = index
+    connector._mm_hash_hit_count = 0
+    connector._similarity_hit_count = 2
+    connector._miss_count = 18
+    connector._mm_hashes_need_loads = {"similar"}
+    connector._mm_hash_to_store_key = {"similar": "candidate"}
+    meta = connector.build_connector_meta(MagicMock())
+    snapshot = index.report_cache_statistics("other", CacheStatistics(8, 1, 1))
+    assert snapshot.counts == CacheStatistics(8, 3, 19)
+    assert connector.hit_rate == pytest.approx(2 / 20)
+    assert meta.mm_hashes_need_loads == ["similar"]
+    assert meta.mm_hash_to_store_key == {"similar": "candidate"}
+    assert not connector._mm_hashes_need_loads
+
+
+def test_statistics_outage_preserves_actions_and_next_batch_recovers():
+    connector = _make_scheduler_connector()
+    index = LocalSimilarityIndex(SimilarityCacheConfig())
+    connector._statistics_index = index
+    connector._miss_count = 1
+    connector._mm_hashes_need_saves = {"first"}
+    with patch.object(index, "report_cache_statistics", side_effect=connector_module.SimilarityIndexUnavailable()):
+        meta = connector.build_connector_meta(MagicMock())
+    assert meta.mm_hashes_need_saves == {"first"}
+    assert connector._miss_count == 1
+    connector._miss_count += 1
+    connector._mm_hashes_need_saves = {"second"}
+    connector.build_connector_meta(MagicMock())
+    snapshot = index.report_cache_statistics("test-scheduler", CacheStatistics())
+    assert snapshot.counts == CacheStatistics(0, 0, 2)
+
+
+def test_shutdown_reports_before_closing_matcher():
+    connector = _make_scheduler_connector()
+    connector._statistics_index = MagicMock()
+    connector._statistics_index.report_cache_statistics.return_value = LocalSimilarityIndex(
+        SimilarityCacheConfig()
+    ).report_cache_statistics("other", CacheStatistics())
+    connector._wait_recv_buffer_reusable = MagicMock()
+    order = MagicMock()
+    order.attach_mock(connector._statistics_index.report_cache_statistics, "report")
+    order.attach_mock(connector._cache_matcher.shutdown, "close")
+    connector.shutdown()
+    assert order.mock_calls[0] == call.report("test-scheduler", CacheStatistics())
+    assert order.mock_calls[1] == call.close()

@@ -130,6 +130,78 @@ remains. There is no persistent index recovery or scan of existing Memcache keys
 candidates are learned again from images that enter similarity processing.
 Clients do not retain negative lookup results or old remote index snapshots.
 
+## Shared hit statistics
+
+With a shared index configured, schedulers also share cumulative cache-decision
+statistics through that same endpoint. No additional service or configuration is
+needed. Each scheduler retains its local counters and publishes one cumulative
+snapshot after each batch containing cache loads or saves, and once at shutdown.
+Empty/decode-only batches do not add statistics RPCs. Reporting failure does not
+change cache actions or fail inference; the next active batch or shutdown retries
+the full local counters. There is no periodic retry thread.
+
+Counters are incremented in `update_state_after_alloc` for each multimodal
+feature whose final cache action is resolved:
+
+- `exact_hits`: reuse the embedding under the original image hash.
+- `similarity_hits`: reuse another image's embedding after a cached or newly
+  computed SSIM match and an embedding-availability check.
+- `misses`: schedule encoder computation and a save, including unavailable-index
+  and missing-candidate fallbacks.
+
+These are scheduler decisions, not request counts, globally unique image hashes,
+or successful worker loads. Batch load/save sets deduplicate keys, but decision
+counters do not. Features served without entering the connector's allocation
+callback are outside this denominator. If an embedding disappears before the
+worker loads it, the scheduler's hit count is not decremented.
+
+Let E, S and M be the sums of all reported exact hits, similarity hits and misses,
+and T = E + S + M. DP=1 and multi-DP use the same formulas:
+
+| Log field | Formula | Meaning |
+| --- | --- | --- |
+| `hit_rate` | (E + S) / T | Overall connector cache hit rate. |
+| `similarity_hit_rate` | S / T | Fraction of all decisions satisfied by similarity. |
+| `similarity_lookup_hit_rate` | S / (S + M) | Similarity hit rate after exact-cache misses. |
+
+An empty denominator gives zero. Sum counters before calculating rates; do not
+average the DP percentages. For example, DP0 reporting (8, 1, 1) and DP1 reporting
+(0, 2, 18) produce (8, 3, 19), with overall hit rate 36.67%, similarity hit rate
+10.00%, and similarity lookup hit rate 13.64%.
+
+Existing batch DEBUG logs are labeled `scope=local`. Additional DEBUG lines
+labeled `EC cache stats: scope=global` contain shared counts, all three rates,
+`epoch`, and `reporting_instances`. Shutdown attempts a final report and logs its
+global snapshot at INFO. The connector's Python `hit_rate` property remains
+local; `cache_statistics` exposes the local immutable counts and rates.
+
+A global line is already aggregated: **do not sum global lines across DPs or
+across time**. It contains the latest received report per scheduler instance,
+not a synchronized barrier. After a completed benchmark, use the latest global
+snapshot after every DP has finished reporting. A shutdown line alone does not
+prove other DPs have finished. Missing reports or a reporting outage can make a
+snapshot incomplete; local counters remain available for reconciliation.
+
+Each scheduler instance gets a new ID at construction. Repeated or older
+snapshots cannot inflate or reduce its counters. The index retains counts from
+exited instances; `reporting_instances` is the number of instances seen in this
+statistics epoch, including exited ones, **not the current DP size**. Metadata
+eviction does not reset counters. An index restart starts a new `epoch`: live
+schedulers restore their full local cumulative counts on their next report, but
+counts from already stopped schedulers are lost. Consequently, an epoch's totals
+are not necessarily counts collected only since that epoch began. The statistics
+are in memory, not durable accounting.
+
+For DP comparisons, use a fresh deployment per run or subtract before/after
+snapshots within one uninterrupted epoch. Keep the dataset, similarity settings,
+Memcache/index warmup, and measurement window consistent. Multi-DP concurrency
+can still lower hits when similar images arrive before an earlier embedding is
+saved; shared counters do not remove that execution-order effect. For a pure
+similarity comparison, inspect both S/T and S/(S+M), together with raw counters.
+
+The statistics RPC uses protocol version 2. Restart all schedulers together when
+upgrading; older clients/servers are rejected by protocol compatibility checks.
+
 ## Focused validation
 
 Run the lightweight CPU index tests without the repository's NPU test bootstrap:

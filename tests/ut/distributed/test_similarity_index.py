@@ -22,6 +22,7 @@ if importlib.util.find_spec("vllm") is None and "vllm_ascend" not in sys.modules
     _test_package.__spec__ = importlib.util.spec_from_loader("vllm_ascend", loader=None, is_package=True)
     sys.modules["vllm_ascend"] = _test_package
 
+from vllm_ascend.distributed.ec_transfer.cache_statistics import CacheStatistics  # noqa: E402
 from vllm_ascend.distributed.ec_transfer.similarity_cache_config import SimilarityCacheConfig  # noqa: E402
 from vllm_ascend.distributed.ec_transfer.similarity_index import LocalSimilarityIndex  # noqa: E402
 from vllm_ascend.distributed.ec_transfer.similarity_index_service import (  # noqa: E402
@@ -161,6 +162,7 @@ def test_timeout_resets_socket_and_reconnects_after_restart(server):
     endpoint, process, stop = server
     client = _client(endpoint)
     client.batch_register_phashes([("a", 0, "key-a")])
+    original_stats = client.report_cache_statistics("surviving-scheduler", CacheStatistics(2, 3, 4))
     stop.set()
     process.join(5)
     assert not process.is_alive()
@@ -182,6 +184,9 @@ def test_timeout_resets_socket_and_reconnects_after_restart(server):
         time.sleep(client.config.shared_index_timeout_ms / 1000)
         # Restarted metadata is cold; clients must not keep stale responses.
         assert client.batch_recall([0]) == [[]]
+        recovered_stats = client.report_cache_statistics("surviving-scheduler", CacheStatistics(3, 4, 5))
+        assert recovered_stats.counts == CacheStatistics(3, 4, 5)
+        assert recovered_stats.epoch != original_stats.epoch
         client.batch_register_phashes([("b", 0, "key-b")])
         assert client.batch_recall([0]) == [["key-b"]]
     finally:
@@ -286,3 +291,94 @@ def test_external_mode_does_not_start_a_second_server(server):
         assert client.batch_recall([0]) == [["key-a"]]
     finally:
         client.close()
+
+
+def test_statistics_merge_snapshots_without_double_counting():
+    index = LocalSimilarityIndex(SimilarityCacheConfig())
+    first = CacheStatistics(exact_hits=8, similarity_hits=1, misses=1)
+    second = CacheStatistics(exact_hits=0, similarity_hits=2, misses=18)
+    index.report_cache_statistics("dp0-instance", first)
+    result = index.report_cache_statistics("dp1-instance", second)
+    assert result.counts == CacheStatistics(8, 3, 19)
+    assert result.reporting_schedulers == 2
+    assert result.counts.hit_rate == pytest.approx(11 / 30)
+    assert result.counts.similarity_hit_rate == pytest.approx(3 / 30)
+    assert result.counts.similarity_lookup_hit_rate == pytest.approx(3 / 22)
+    # Replayed and delayed older reports must not add to or reduce totals.
+    assert index.report_cache_statistics("dp1-instance", second) == result
+    assert index.report_cache_statistics("dp0-instance", CacheStatistics(1, 0, 0)) == result
+    assert index.report_cache_statistics("dp0-restarted", CacheStatistics(0, 1, 0)).counts == CacheStatistics(8, 4, 19)
+    assert CacheStatistics().hit_rate == 0
+    assert CacheStatistics().similarity_hit_rate == 0
+    assert CacheStatistics().similarity_lookup_hit_rate == 0
+
+
+def test_statistics_updates_are_atomic_and_independent_of_eviction():
+    index = LocalSimilarityIndex(SimilarityCacheConfig(max_capacity=2))
+    with ThreadPoolExecutor(max_workers=4) as workers:
+        list(workers.map(lambda i: index.report_cache_statistics(str(i % 4), CacheStatistics(i, i, i)), range(40)))
+    result = index.report_cache_statistics("0", CacheStatistics())
+    assert result.counts == CacheStatistics(150, 150, 150)
+    assert result.reporting_schedulers == 4
+    index.batch_register_phashes([(str(i), i, str(i)) for i in range(10)])
+    assert index.report_cache_statistics("0", CacheStatistics()) == result
+
+
+def _report_statistics(endpoint, reporter, counts, connection):
+    client = _client(endpoint)
+    try:
+        snapshot = client.report_cache_statistics(reporter, CacheStatistics(*counts))
+        connection.send(snapshot)
+    finally:
+        client.close()
+        connection.close()
+
+
+def test_distinct_scheduler_processes_share_statistics(server):
+    endpoint, _, _ = server
+    ctx = multiprocessing.get_context("spawn")
+    results = []
+    # The first scheduler exits before the next reports; its counts must remain.
+    for reporter, counts in [("dp0", (8, 1, 1)), ("dp1", (0, 2, 18)), ("dp1", (0, 2, 18))]:
+        parent, child = ctx.Pipe()
+        process = ctx.Process(target=_report_statistics, args=(endpoint, reporter, counts, child))
+        process.start()
+        child.close()
+        try:
+            assert parent.poll(10), "statistics reporter did not return"
+            results.append(parent.recv())
+        finally:
+            process.join(5)
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+            parent.close()
+        assert process.exitcode == 0
+    assert results[1].counts == CacheStatistics(8, 3, 19)
+    assert results[1].reporting_schedulers == 2
+    assert results[2] == results[1]
+    assert results[0].epoch == results[1].epoch
+
+
+def test_statistics_retry_after_lost_response_is_idempotent(server):
+    endpoint, _, _ = server
+    client = _client(endpoint)
+    try:
+        counts = CacheStatistics(5, 3, 2)
+        client.report_cache_statistics("scheduler", counts)
+        # Discard the connection as on a timeout after the server applied a write.
+        client._reset_socket()
+        replay = client.report_cache_statistics("scheduler", counts)
+        assert replay.counts == counts
+        assert replay.reporting_schedulers == 1
+        newer = client.report_cache_statistics("scheduler", CacheStatistics(6, 4, 3))
+        assert newer.counts == CacheStatistics(6, 4, 3)
+        assert newer.epoch == replay.epoch
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("invalid", [-1, True, 1.5])
+def test_statistics_reject_invalid_counters(invalid):
+    with pytest.raises(ValueError, match="nonnegative integers"):
+        CacheStatistics(similarity_hits=invalid)

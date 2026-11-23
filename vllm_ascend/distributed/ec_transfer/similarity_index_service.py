@@ -20,6 +20,7 @@ from typing import Any
 import msgpack
 import zmq
 
+from vllm_ascend.distributed.ec_transfer.cache_statistics import CacheStatistics, CacheStatisticsSnapshot
 from vllm_ascend.distributed.ec_transfer.phash_index import PHASH_NUM_BANDS
 from vllm_ascend.distributed.ec_transfer.similarity_cache_config import SimilarityCacheConfig
 from vllm_ascend.distributed.ec_transfer.similarity_index import (
@@ -28,7 +29,7 @@ from vllm_ascend.distributed.ec_transfer.similarity_index import (
     SimilarityIndex,
 )
 
-_PROTOCOL_VERSION = 1
+_PROTOCOL_VERSION = 2
 # Bump when pHash preprocessing, resized-key semantics, or SSIM scoring changes.
 _ALGORITHM_VERSION = "phash64-ssim-v1"
 _SERVER_POLL_MS = 100
@@ -153,6 +154,10 @@ class SimilarityIndexClient:
         if scores:
             self._request("scores", [mm_hash, scores])
 
+    def report_cache_statistics(self, scheduler_id: str, counts: CacheStatistics) -> CacheStatisticsSnapshot:
+        values, reporting_schedulers, epoch = self._request("statistics", [scheduler_id, counts.as_tuple()])
+        return CacheStatisticsSnapshot(CacheStatistics(*values), reporting_schedulers, epoch)
+
     def _reset_socket(self) -> None:
         if self._socket is not None:
             self._socket.close(linger=0)
@@ -227,6 +232,10 @@ class SimilarityIndexServer:
             return self._index.batch_register_phashes(*args)
         if operation == "recall":
             return self._index.batch_recall(*args)
+        if operation == "statistics":
+            scheduler_id, counts = args
+            snapshot = self._index.report_cache_statistics(scheduler_id, CacheStatistics(*counts))
+            return [snapshot.counts.as_tuple(), snapshot.reporting_schedulers, snapshot.epoch]
         if operation == "scores":
             return self._index.record_similarity_scores(*args)
         raise SimilarityIndexConfigurationError(f"Unsupported shared index operation: {operation}")
