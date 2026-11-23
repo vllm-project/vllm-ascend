@@ -46,6 +46,7 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
     worker.model_runner = runner
     worker._sleep_saved_buffers = {}
     worker.sleep_wakeup_manager = MagicMock()
+    worker._sleep_mode_backend = MagicMock()
 
     with (
         # wake_up ends with a device barrier; this UT runs on a CPU runner, so the
@@ -77,6 +78,7 @@ def _make_sleep_worker(model: torch.nn.Module) -> NPUWorker:
     worker.model_runner = SimpleNamespace(model=model)
     worker._sleep_saved_buffers = {}
     worker.sleep_wakeup_manager = MagicMock()
+    worker._sleep_mode_backend = MagicMock()
     return worker
 
 
