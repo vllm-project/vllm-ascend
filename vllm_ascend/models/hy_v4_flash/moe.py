@@ -91,10 +91,6 @@ class AscendFlashMoE(HYV4FlashMoE):
             prefix,
             is_sequence_parallel=parallel_config.use_sequence_parallel_moe,
         )
-        if (
-            uses_prefill_ops(vllm_config)
-            and vllm_config.model_config.enforce_eager
-            and is_950()
-            and not envs.VLLM_BATCH_INVARIANT
-        ):
+        if (uses_prefill_ops(vllm_config) and vllm_config.model_config.enforce_eager
+                and is_950() and not envs.VLLM_BATCH_INVARIANT):
             self.gate.enable_prefill_router()

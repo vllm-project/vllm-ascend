@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from weakref import ref
 
 import torch
+from vllm_ascend.device.device_config import is_950
 from torch import nn
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -17,7 +18,6 @@ from vllm.models.hy_v4.nvidia.model import HYV4DecoderLayer
 from vllm.models.hy_v4.nvidia.moe import HYV4FeedForward
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-from vllm_ascend.device.device_config import is_950
 from vllm_ascend.hisparse.c8 import C8_ROW_BYTES, dequantize_c8_rows
 
 from .attention import AscendHYV4FlashAttention
@@ -87,12 +87,7 @@ class DFlyAttention(AscendHYV4FlashAttention):
             if share_history:
                 logger.info_once("HYV4 DFly reuses each request's packed C8 history across draft positions.")
                 decoded = self._shared_draft_rows(
-                    cache,
-                    block_table[first:last],
-                    block_size,
-                    selected,
-                    query_positions[first:last],
-                    query_kv[first:last],
+                    cache, block_table[first:last], block_size, selected, query_positions[first:last], query_kv[first:last]
                 )
                 self._attend_decoded(query[tokens], selected.flatten(0, 1), decoded.flatten(0, 1), wv, out[tokens])
                 continue
@@ -185,7 +180,8 @@ class FlashDFlyDraft(nn.Module):
         self.logits_processor.use_all_gather = True
         transfer = vllm_config.kv_transfer_config
         self.logits_processor.use_npu_fp32_head = (
-            transfer is not None and transfer.kv_role == "kv_consumer" and is_950()
+            transfer is not None and transfer.kv_role == "kv_consumer"
+            and is_950()
         )
         self.ffn_width = None
 

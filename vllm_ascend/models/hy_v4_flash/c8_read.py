@@ -72,12 +72,7 @@ def gather_c8_rows(cache, block_table, block_size, positions, *, output=None):
     shape = (*positions.shape, _LATENT + _ROPE)
     if output is None:
         output = torch.empty(shape, dtype=torch.float32, device=cache.device)
-    elif (
-        output.shape != shape
-        or output.dtype != torch.float32
-        or output.device != cache.device
-        or not output.is_contiguous()
-    ):
+    elif output.shape != shape or output.dtype != torch.float32 or output.device != cache.device or not output.is_contiguous():
         raise ValueError("C8 output must be contiguous FP32 with the requested shape and device")
     count = positions.numel()
     if count:

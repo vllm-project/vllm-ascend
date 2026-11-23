@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Original HY4-Flash operator implementations."""
+'''Original HY4-Flash operator implementations.'''
 
 from .attention_logits import build_mla_logits
 from .c8_read import gather_c8_qk, gather_c8_rows

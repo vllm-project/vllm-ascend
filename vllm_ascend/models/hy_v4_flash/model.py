@@ -186,7 +186,8 @@ class AscendHYV4FlashForCausalLM(HYV4FlashForCausalLM):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         transfer = vllm_config.kv_transfer_config
         self.logits_processor.use_npu_fp32_head = (
-            transfer is not None and transfer.kv_role == "kv_consumer" and is_950()
+            transfer is not None and transfer.kv_role == "kv_consumer"
+            and is_950()
         )
 
     @staticmethod
