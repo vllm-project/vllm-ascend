@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import PropertyMock, patch
 
+from pydantic import ValidationError
 from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -1339,7 +1340,7 @@ class TestSparseKVOffloadConfig(TestBase):
     def test_use_fused_overlap_validation_precedes_lru_max_threads(self):
         for enabled in (False, True):
             with self.subTest(enabled=enabled):
-                with self.assertRaises(ValueError) as caught:
+                with self.assertRaises(ValidationError) as caught:
                     SparseKVOffloadConfig.from_additional_config(
                         SimpleNamespace(),
                         {"enabled": enabled, "use_fused_overlap": "invalid", "lru_max_threads": 0},
