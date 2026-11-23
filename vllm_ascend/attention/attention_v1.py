@@ -195,6 +195,15 @@ class AscendMetadata:
     seq_lens_list: list[int] = None  # type: ignore
     actual_seq_lengths_q: list[int] = None  # type: ignore
 
+    # The runner-persistent block-table view BEFORE the builder padded it
+    # with synthetic zero rows for the FIA batch-size parity (see build()).
+    # torch.cat COPIES, so the padded metadata.block_tables is a snapshot
+    # whose storage is never refreshed; ACL-graph replay re-executes only
+    # device work, so a captured HND gather that consumed the padded copy
+    # would keep reading capture-time physical ids forever. Captured HND
+    # gathers must source the table from this in-place-refreshed view.
+    block_tables_pre_padding: torch.Tensor | None = None
+
     query_start_loc: torch.Tensor = None
     # Maximum query length in the batch (None for decoding).
     max_query_len: int | None = None
@@ -432,6 +441,13 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
         )
+        # Retain the pre-padding view (the runner-persistent buffer slice)
+        # for captured HND gathers: the padded metadata.block_tables is a
+        # torch.cat COPY whose storage is never refreshed, and ACL-graph
+        # replay re-executes only captured device work, so a captured
+        # gather that consumed the copy would read capture-time physical
+        # ids forever. See AscendMetadata.block_tables_pre_padding.
+        attn_metadata.block_tables_pre_padding = block_table if block_table is not None else None
         if pcp_shard_slot_mapping is not None:
             self._finalize_pcp_metadata(attn_metadata, pcp_shard_slot_mapping)
         return attn_metadata
@@ -1067,7 +1083,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # callers bound the gather by the batch-maximum live KV length
             # from the host-side seq_lens_list, so unused table columns
             # (repeated block-0 padding included) are not copied; graph
-            # capture keeps the full static width (max_kv_len=None).
+            # capture keeps the full static width (max_kv_len=None). Under
+            # capture the gather must read the runner-persistent table
+            # (refreshed in place every step): when the builder padded
+            # block_tables with a synthetic zero row the padded tensor is a
+            # cat COPY -- a snapshot whose storage replay never refreshes --
+            # so the captured gather sources the pre-padding view instead
+            # (the padding request is already mirrored in the gathered
+            # world's extra block-0 slot; see _materialize_bnsd_pa_read).
+            if _EXTRA_CTX.capturing:
+                pre_padding = getattr(attn_metadata, "block_tables_pre_padding", None)
+                if pre_padding is not None:
+                    block_table = pre_padding
             max_kv_len = None
             if not _EXTRA_CTX.capturing:
                 # Host-side per-request KV lengths: a scalar batch-maximum

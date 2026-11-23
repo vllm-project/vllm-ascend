@@ -388,6 +388,90 @@ class TestMaterializePaddingRow:
         assert remapped.flatten().tolist() == list(range(NUM_GATHERED))
 
 
+class TestCapturedGatherUsesPersistentTable:
+    """The builder's synthetic padding cat must not feed the captured gather.
+
+    build() pads metadata.block_tables with torch.cat when the FIA batch
+    outgrows the table rows; torch.cat COPIES, and ACL-graph replay
+    re-executes only captured device work, so a captured gather that
+    consumed the padded copy would read capture-time physical ids forever
+    (the runner refreshes the persistent buffer in place, not the copy).
+    The captured HND gather must source the runner-persistent
+    pre-padding view instead; the synthetic request is already mirrored by
+    the gathered world's extra block-0 slot.
+    """
+
+    def _capture_with_builder_padding(self, backend, persistent):
+        """Emulate a capture whose metadata went through build()'s cat."""
+        num_reqs, width = persistent.shape
+        padded = torch.cat([persistent, persistent.new_zeros((1, width))])
+        metadata = _make_metadata(padded)
+        metadata.actual_seq_lengths_q = [1] * (num_reqs + 1)
+        metadata.seq_lens_list = [3] * num_reqs + [1]
+        # The patched build() retains the pre-cat view on the metadata.
+        metadata.block_tables_pre_padding = persistent
+        seen = {}
+
+        orig = backend._materialize_bnsd_pa_read
+
+        def spy(block_table, max_kv_len=None):
+            seen["table"] = block_table
+            return orig(block_table, max_kv_len=max_kv_len)
+
+        backend._materialize_bnsd_pa_read = spy
+        try:
+            import sys as _sys
+
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(_sys.modules[__name__], "_make_metadata", lambda bt: metadata)
+                recorder = _run_full_graph_fia(backend, padded, capturing=True)
+        finally:
+            backend._materialize_bnsd_pa_read = orig
+        return recorder, seen
+
+    def test_captured_gather_consumes_persistent_storage_not_cat_copy(self):
+        backend = _make_backend()
+        persistent = PHYSICAL_TABLE.clone()
+        recorder, seen = self._capture_with_builder_padding(backend, persistent)
+        # The captured gather's input must share storage with the runner's
+        # persistent block table (refreshed in place each step), not the
+        # builder's torch.cat snapshot.
+        assert seen["table"].data_ptr() == persistent.data_ptr(), (
+            "captured HND gather consumed the builder's padded cat copy "
+            "(a stale snapshot) instead of the runner-persistent table"
+        )
+
+    def test_captured_gather_follows_inplace_refresh_across_replay(self):
+        backend = _make_backend()
+        persistent = PHYSICAL_TABLE.clone()
+        recorder, seen = self._capture_with_builder_padding(backend, persistent)
+        remapped = recorder["kwargs"]["block_table"]
+        # The synthetic request grew the FIA batch by one; the remapped
+        # table must cover it exactly (rows == batch), not double-pad.
+        assert remapped.shape[0] == NUM_ROWS + 1
+        # Replay: the runner rewrites the persistent buffer in place.
+        persistent.copy_(torch.tensor([[6, 3], [2, 0]], dtype=torch.int32))
+        # The captured gather re-executes reading the SAME storage (the
+        # persistent view), so re-running it yields the refreshed ids.
+        flat = seen["table"].reshape(-1).to(torch.int64).clamp(min=0)
+        extended = torch.cat([flat, flat.new_zeros(1)])
+        gathered_now = _expected_token_major(backend.key_cache, extended)
+        # The decisive contract: every remapped slot observes the NEW
+        # physical block now stored at that table position, and the
+        # synthetic padding row still resolves to physical block 0.
+        for r in range(NUM_ROWS):
+            for c in range(TABLE_WIDTH):
+                slot = int(remapped[r, c])
+                physical = int(persistent[r, c])
+                assert torch.equal(
+                    _expected_token_major(backend.key_cache, torch.tensor([physical], dtype=torch.int64))[0],
+                    gathered_now[slot],
+                )
+        padding_slot = int(remapped[NUM_ROWS, 0])
+        block_zero = _expected_token_major(backend.key_cache, torch.tensor([0], dtype=torch.int64))[0]
+        assert torch.equal(gathered_now[padding_slot], block_zero)
+
+
 class TestGatheredLayoutHelper:
     @pytest.mark.parametrize(
         ("layout", "expected"),
