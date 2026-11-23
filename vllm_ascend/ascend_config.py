@@ -426,8 +426,10 @@ class QuantizedAllReduceConfig:
     at TP=4 and 31,457,280 (60 MiB) at TP=8. The first two are 1.5x above their
     measured break-even; the TP=8 gate is 1.6-1.9x above its 31-38 MiB
     collective crossing and is the lowest payload that is strictly profitable
-    end to end. MXFP8 has no per-TP calibration yet and keeps 16,777,216
-    (32 MiB); benchmark it on the intended A5 workload before lowering it.
+    end to end. These gates are A2-only: A5 has no int8 payload calibration,
+    so forcing the int8 backend there requires an explicit ``min_numel``.
+    MXFP8 has no per-TP calibration yet and keeps 16,777,216 (32 MiB);
+    benchmark it on the intended A5 workload before lowering it.
 
     The wrapper is built for every parallel group; unsupported group sizes
     keep bf16. MXFP8 supports groups of 2/4/8 ranks, while INT8 supports up to
@@ -435,8 +437,9 @@ class QuantizedAllReduceConfig:
     """
 
     enable: bool = False
-    # None selects the per-TP int8 default measured on A2; MXFP8 falls back to
-    # its own 32 MiB default. See vllm_ascend.distributed.device_communicators.
+    # None selects the per-TP int8 default measured on A2. A5 int8 has no
+    # calibration, so it requires an explicit value; MXFP8 falls back to its
+    # own 32 MiB default. See vllm_ascend.distributed.device_communicators.
     min_numel: int | None = None
     quant_dtype: Literal["int8", "mxfp8"] = dataclasses.field(default_factory=lambda: "mxfp8" if is_950() else "int8")
 
@@ -457,6 +460,13 @@ class QuantizedAllReduceConfig:
         )
 
         tp_size = vllm_config.parallel_config.tensor_parallel_size
+        if self.quant_dtype == "int8" and self.min_numel is None and is_950():
+            raise ValueError(
+                "the per-TP min_numel defaults are measured on Atlas A2 only, and "
+                "A5 has no int8 payload calibration. Set "
+                "additional_config.quantized_all_reduce_config.min_numel explicitly, "
+                "or leave quant_dtype as mxfp8."
+            )
         if self.quant_dtype == "int8" and tp_size > _MAX_VALID_WORLD_SIZE:
             raise ValueError(
                 "additional_config.quantized_all_reduce_config supports "

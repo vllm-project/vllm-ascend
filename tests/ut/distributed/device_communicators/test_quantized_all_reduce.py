@@ -96,9 +96,17 @@ class TestQuantizedAllReduce(unittest.TestCase):
     def test_explicit_min_numel_wins_over_default(self):
         self.assertEqual(_make(world_size=8, min_numel=1024).min_numel, 1024)
 
+    def test_default_is_a2_only(self):
+        # A5 int8 has no calibration, so reusing the A2 gate there could land
+        # below the A5 break-even; an explicit value is required instead.
+        with self.assertRaisesRegex(ValueError, "measured on Atlas A2 only"):
+            _make(world_size=8, device_type=AscendDeviceType.A5)
+        wrapper = _make(world_size=8, device_type=AscendDeviceType.A5, min_numel=16_777_216)
+        self.assertEqual(wrapper.min_numel, 16_777_216)
+
     def test_accepted_on_validated_device_families(self):
         for dt in (AscendDeviceType.A2, AscendDeviceType.A5):
-            wrapper = _make(world_size=4, device_type=dt)
+            wrapper = _make(world_size=4, device_type=dt, min_numel=16_777_216)
             self.assertTrue(wrapper.supported)
             self.assertEqual(wrapper.max_q, 31)
 
@@ -123,7 +131,12 @@ class TestQuantizedAllReduce(unittest.TestCase):
             for group_name in ("tp:0", "dp:0", "ep:0", ""):
                 for ws in (2, 4, 8, 16):
                     with self.subTest(device=dt, group=group_name, world_size=ws):
-                        wrapper = _make(world_size=ws, device_type=dt, group_name=group_name)
+                        wrapper = _make(
+                            world_size=ws,
+                            device_type=dt,
+                            group_name=group_name,
+                            min_numel=16_777_216,
+                        )
                         self.assertEqual(wrapper.supported, ws <= 8)
                         self.assertEqual(wrapper.max_q, 127 // ws if ws <= 8 else 0)
 

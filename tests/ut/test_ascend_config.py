@@ -505,6 +505,34 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    @patch("vllm_ascend.ascend_config.is_950", return_value=True)
+    def test_quantized_all_reduce_requires_explicit_min_numel_on_a5(self, mock_is_950, mock_fix_incompatible_config):
+        # The per-TP gates are A2 measurements; A5 int8 has no calibration, so
+        # None must fail at config time instead of silently reusing an A2 gate.
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 4
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"enable": True, "quant_dtype": "int8"}}
+        with self.assertRaisesRegex(ValueError, "measured on Atlas A2 only"):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    @patch("vllm_ascend.ascend_config.is_950", return_value=True)
+    def test_quantized_all_reduce_accepts_explicit_min_numel_on_a5(self, mock_is_950, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 4
+        test_vllm_config.additional_config = {
+            "quantized_all_reduce_config": {
+                "enable": True,
+                "quant_dtype": "int8",
+                "min_numel": 16777216,
+            }
+        }
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertEqual(ascend_config.quantized_all_reduce_config.min_numel, 16777216)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_quantized_all_reduce_rejects_unsupported_tp_at_config_time(self, mock_fix_incompatible_config):
         # The TP degree is validated here, not when a parallel group is built:
         # an EP/MC2 group of DP x PCP x TP ranks must never gate the feature.

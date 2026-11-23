@@ -40,8 +40,10 @@ Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
   min_numel  Payload threshold in elements: a collective is quantized only when
              its payload reaches min_numel elements, i.e. min_numel * 2 bytes of
              bf16 data. Left at ``None`` (the default) the int8 gate is chosen
-             per tensor-parallel degree from the A2 measurements below, and
-             MXFP8 keeps its own 32 MiB default. Concurrency matters only
+             per tensor-parallel degree from the A2 measurements below, but only
+             on A2: A5 has no int8 payload calibration, so forcing the int8
+             backend there requires an explicit ``min_numel``. MXFP8 keeps its
+             own 32 MiB default. Concurrency matters only
              through the collective payload. Mixed batches and decode take the
              int8 path if they meet the same size/shape gates.
 
@@ -102,7 +104,9 @@ from vllm_ascend.logger import init_logger_ascend
 logger = init_logger_ascend(__name__)
 
 # A2 is validated end to end; A5 TP=2/4 has standalone numerical and
-# performance evidence. A3 remains disabled due to its measured regression.
+# performance evidence, but its int8 payload gate is uncalibrated, so the
+# per-TP defaults below are A2-only (see default_min_numel). A3 remains
+# disabled due to its measured regression.
 _VALID_DEVICE_TYPES = (AscendDeviceType.A2, AscendDeviceType.A5)
 # Groups larger than 8 ranks leave too few int8 levels (ws=16 -> max_q=7), so
 # they keep bf16 instead of failing. The TP degree is rejected at config time.
@@ -124,13 +128,25 @@ _DEFAULT_MIN_NUMEL_A2: dict[int, int] = {
 }
 
 
-def default_min_numel(world_size: int) -> int:
-    """Return the measured per-TP payload gate for a ``world_size``-rank group.
+def default_min_numel(world_size: int, device_type: AscendDeviceType) -> int:
+    """Return the measured A2 payload gate for a ``world_size``-rank group.
 
-    Unmeasured degrees take the next larger measured one, so the gate never
-    undercuts a measured break-even; degrees above the supported maximum are
-    not reachable here (those groups stay bf16).
+    The per-TP gates were measured on A2 (910B) only. A5 has a different bf16
+    HCCS bandwidth, so its int8 break-even is not covered by this table and
+    reusing an A2 number there could gate the quantized path in below its own
+    crossing. An A5 deployment must pass an explicit ``min_numel`` instead.
+
+    On A2, unmeasured degrees take the next larger measured one, so the gate
+    never undercuts a measured break-even; degrees above the supported maximum
+    are not reachable here (those groups stay bf16).
     """
+    if device_type != AscendDeviceType.A2:
+        raise ValueError(
+            "the per-TP min_numel defaults are measured on Atlas A2 only, but "
+            f"the current device family is {device_type.name}. Set "
+            "additional_config.quantized_all_reduce_config.min_numel explicitly "
+            "or use the MXFP8 backend."
+        )
     for degree in sorted(_DEFAULT_MIN_NUMEL_A2):
         if world_size <= degree:
             return _DEFAULT_MIN_NUMEL_A2[degree]
@@ -163,8 +179,11 @@ class QuantizedAllReduce:
         # ws=2 -> 63 (sum 126), ws=4 -> 31 (sum 124), ws=8 -> 15 (sum 120).
         self.max_q = 127 // self.world_size if self.supported else 0
         # Payload gate in elements (bf16 payload = 2 bytes per element). None
-        # means "use the measured per-TP default"; see default_min_numel().
-        self.min_numel = default_min_numel(self.world_size) if min_numel is None else min_numel
+        # means "use the measured A2 per-TP default"; see default_min_numel().
+        if min_numel is None:
+            self.min_numel = default_min_numel(self.world_size, device_type)
+        else:
+            self.min_numel = min_numel
 
     def _skip_reason(self, input_: torch.Tensor) -> str | None:
         if not self.supported:
