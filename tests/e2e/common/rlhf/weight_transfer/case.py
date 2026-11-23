@@ -46,6 +46,8 @@ class WeightUpdateModelCase:
     expert_intermediate_size: int | None = None
     trust_remote_code: bool = True
     extra_server_args: tuple[str, ...] = ()
+    # None preserves the existing single-file startup checkpoint.
+    checkpoint_shard_size_bytes: int | None = None
     prompts: tuple[str | tuple[int, ...], ...] = (
         "The capital of France is",
         "Explain why the sky is blue in one sentence:",

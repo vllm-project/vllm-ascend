@@ -53,6 +53,10 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
         device: torch.device,
     ) -> None:
         super().__init__(vllm_config, model, encoder_cache, device)
+        if self.uses_ngram_embedding:
+            # MRV2 constructs model state inside the discardable weights pool.
+            # Expose immutable PLE offsets to the worker's level-2 buffer backup.
+            model.register_buffer("_qwen4_exp_ngram_context_offsets", self.ngram_context_offsets, persistent=False)
         self.qsa_prepared_input_adapter = Qwen4ExpPreparedInputAdapter(model)
 
     def prepare_inputs(self, input_batch: Any, req_states: Any) -> dict[str, Any]:
