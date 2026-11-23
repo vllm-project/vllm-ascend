@@ -394,9 +394,10 @@ class Orchestrator:
             "HOME": os.environ.get("HOME", "/tmp"),
             "AI_REVIEW_KEY": os.environ.get("AI_REVIEW_KEY", ""),
             "AI_REVIEW_API": os.environ.get("AI_REVIEW_API", ""),
-            # upstream-expected alias; dsh config surface is confirmed in
-            # the smoke test, expose both spellings meanwhile
+            # dsh's DeepSeek provider is redirected by these two names
+            # (docs/user/guide/providers.md): the key + the custom base URL
             "DEEPSEEK_API_KEY": os.environ.get("AI_REVIEW_KEY", ""),
+            "DEEPSEEK_BASE_URL": os.environ.get("AI_REVIEW_API", ""),
             # Picked up by dsh's config surface once confirmed in the smoke
             # test; harmless to expose until then.
             "AI_REVIEW_MODEL": os.environ.get("AI_REVIEW_MODEL", "deepseek-v4.1-flash"),
