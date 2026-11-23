@@ -53,7 +53,20 @@ model:
     ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3
   install:
     pip: false
-    docker: false
+    docker:
+      command: |-
+        # A3 release container
+        # quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler
+        IMAGE=quay.io/ascend/vllm-ascend@sha256:0b8bf5b484d49c667ceab717347eb3a8695388429aebd9084b79fa0f57a545c0
+        docker run --rm -it --name internvl38-release --net=host --ipc=host \
+          --device /dev/davinci0 --device /dev/davinci1 --device /dev/davinci2 --device /dev/davinci3 \
+          --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
+          -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+          -v /usr/local/dcmi:/usr/local/dcmi \
+          -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+          -v /etc/ascend_install.info:/etc/ascend_install.info \
+          -v /models:/models -w /models "$IMAGE" bash
+      note: The Guide uses this installation command. Run its Serve and image request in the documented workflow.
 variants:
   default:
     model_id: Eco-Tech/InternVL3_5-38B-w8a8
@@ -66,6 +79,8 @@ variants:
     hardware_overrides:
       ascend_910c:
         docker_image: quay.io/ascend/vllm-ascend@sha256:0b8bf5b484d49c667ceab717347eb3a8695388429aebd9084b79fa0f57a545c0
+        docker_ipc: host
+        docker_serve_command: env --chdir=/models vllm serve
 compatible_strategies:
   - single_node_tp
 strategy_min_gpus: 4
