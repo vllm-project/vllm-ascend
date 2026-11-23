@@ -283,56 +283,56 @@ def fast_split_qkv_rope_kernel(
     qw_ptr,
     kw_ptr,
     batch_size,
-    eps: tl.constexpr,
-    q_hidden: tl.constexpr,
-    kv_hidden: tl.constexpr,
-    total_hidden: tl.constexpr,
-    q_heads: tl.constexpr,
-    kv_heads: tl.constexpr,
-    head_dim: tl.constexpr,
-    rope_dim: tl.constexpr,
-    half_rope: tl.constexpr,
-    num_vec: tl.constexpr,
+    EPS: tl.constexpr,
+    Q_HIDDEN: tl.constexpr,
+    KV_HIDDEN: tl.constexpr,
+    TOTAL_HIDDEN: tl.constexpr,
+    Q_HEADS: tl.constexpr,
+    KV_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    ROPE_DIM: tl.constexpr,
+    HALF_ROPE: tl.constexpr,
+    NUM_VEC: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    per = tl.cdiv(batch_size, num_vec)
+    per = tl.cdiv(batch_size, NUM_VEC)
     b0 = pid * per
     b1 = tl.minimum(b0 + per, batch_size)
-    qn = tl.arange(0, q_hidden)
-    kn = tl.arange(q_hidden, q_hidden + kv_hidden)
-    vn = tl.arange(q_hidden + kv_hidden, total_hidden)
-    wd = tl.arange(0, head_dim)
+    qn = tl.arange(0, Q_HIDDEN)
+    kn = tl.arange(Q_HIDDEN, Q_HIDDEN + KV_HIDDEN)
+    vn = tl.arange(Q_HIDDEN + KV_HIDDEN, TOTAL_HIDDEN)
+    wd = tl.arange(0, HEAD_DIM)
     qw = tl.load(qw_ptr + wd).to(tl.float32)
     kw = tl.load(kw_ptr + wd).to(tl.float32)
-    out_qn = tl.arange(0, q_hidden)
-    kvn = tl.arange(0, kv_hidden)
-    half_off = tl.arange(0, half_rope)
+    out_qn = tl.arange(0, Q_HIDDEN)
+    kvn = tl.arange(0, KV_HIDDEN)
+    half_off = tl.arange(0, HALF_ROPE)
     for m in tl.range(b0, b1):
-        qv = tl.load(input_ptr + m * total_hidden + qn).to(tl.float32).reshape(q_heads, head_dim)
-        qvar = tl.sum(qv * qv, axis=1, keep_dims=True) / head_dim
-        qnorm = (qv * tl.math.rsqrt(qvar + eps) * qw[None, :]).to(tl.bfloat16)
-        kv = tl.load(input_ptr + m * total_hidden + kn).to(tl.float32).reshape(kv_heads, head_dim)
-        kvar = tl.sum(kv * kv, axis=1, keep_dims=True) / head_dim
-        knorm = (kv * tl.math.rsqrt(kvar + eps) * kw[None, :]).to(tl.bfloat16)
+        qv = tl.load(input_ptr + m * TOTAL_HIDDEN + qn).to(tl.float32).reshape(Q_HEADS, HEAD_DIM)
+        qvar = tl.sum(qv * qv, axis=1, keep_dims=True) / HEAD_DIM
+        qnorm = (qv * tl.math.rsqrt(qvar + EPS) * qw[None, :]).to(tl.bfloat16)
+        kv = tl.load(input_ptr + m * TOTAL_HIDDEN + kn).to(tl.float32).reshape(KV_HEADS, HEAD_DIM)
+        kvar = tl.sum(kv * kv, axis=1, keep_dims=True) / HEAD_DIM
+        knorm = (kv * tl.math.rsqrt(kvar + EPS) * kw[None, :]).to(tl.bfloat16)
         pos = tl.load(pos_ptr + m).to(tl.int64)
-        csoff = pos * rope_dim + half_off
+        csoff = pos * ROPE_DIM + half_off
         cos = tl.load(cos_sin_ptr + csoff)[None, :]
-        sin = tl.load(cos_sin_ptr + csoff + half_rope)[None, :]
-        qx1 = extract_slice(qnorm, (0, 0), (q_heads, half_rope), (1, 1))
-        qx2 = extract_slice(qnorm, (0, half_rope), (q_heads, half_rope), (1, 1))
-        qo = tl.zeros((q_heads, rope_dim), dtype=tl.bfloat16)
-        qo = insert_slice(qo, (qx1 * cos - qx2 * sin), (0, 0), (q_heads, half_rope), (1, 1))
-        qo = insert_slice(qo, (qx2 * cos + qx1 * sin), (0, half_rope), (q_heads, half_rope), (1, 1))
-        tl.store(q_ptr + m * q_hidden + out_qn, qo.reshape(q_hidden))
+        sin = tl.load(cos_sin_ptr + csoff + HALF_ROPE)[None, :]
+        qx1 = extract_slice(qnorm, (0, 0), (Q_HEADS, HALF_ROPE), (1, 1))
+        qx2 = extract_slice(qnorm, (0, HALF_ROPE), (Q_HEADS, HALF_ROPE), (1, 1))
+        qo = tl.zeros((Q_HEADS, ROPE_DIM), dtype=tl.bfloat16)
+        qo = insert_slice(qo, (qx1 * cos - qx2 * sin), (0, 0), (Q_HEADS, HALF_ROPE), (1, 1))
+        qo = insert_slice(qo, (qx2 * cos + qx1 * sin), (0, HALF_ROPE), (Q_HEADS, HALF_ROPE), (1, 1))
+        tl.store(q_ptr + m * Q_HIDDEN + out_qn, qo.reshape(Q_HIDDEN))
 
-        kx1 = extract_slice(knorm, (0, 0), (kv_heads, half_rope), (1, 1))
-        kx2 = extract_slice(knorm, (0, half_rope), (kv_heads, half_rope), (1, 1))
-        ko = tl.zeros((kv_heads, rope_dim), dtype=tl.bfloat16)
-        ko = insert_slice(ko, (kx1 * cos - kx2 * sin), (0, 0), (kv_heads, half_rope), (1, 1))
-        ko = insert_slice(ko, (kx2 * cos + kx1 * sin), (0, half_rope), (kv_heads, half_rope), (1, 1))
-        tl.store(k_ptr + m * kv_hidden + kvn, ko.reshape(kv_hidden))
-        vv = tl.load(input_ptr + m * total_hidden + vn)
-        tl.store(v_ptr + m * kv_hidden + kvn, vv)
+        kx1 = extract_slice(knorm, (0, 0), (KV_HEADS, HALF_ROPE), (1, 1))
+        kx2 = extract_slice(knorm, (0, HALF_ROPE), (KV_HEADS, HALF_ROPE), (1, 1))
+        ko = tl.zeros((KV_HEADS, ROPE_DIM), dtype=tl.bfloat16)
+        ko = insert_slice(ko, (kx1 * cos - kx2 * sin), (0, 0), (KV_HEADS, HALF_ROPE), (1, 1))
+        ko = insert_slice(ko, (kx2 * cos + kx1 * sin), (0, HALF_ROPE), (KV_HEADS, HALF_ROPE), (1, 1))
+        tl.store(k_ptr + m * KV_HIDDEN + kvn, ko.reshape(KV_HIDDEN))
+        vv = tl.load(input_ptr + m * TOTAL_HIDDEN + vn)
+        tl.store(v_ptr + m * KV_HIDDEN + kvn, vv)
 
 
 @triton.jit(
@@ -361,67 +361,67 @@ def fused_qkv_cache_bs1_kernel(
     total_slots,
     kc_block_stride,
     vc_block_stride,
-    eps: tl.constexpr,
-    q_hidden: tl.constexpr,
-    kv_hidden: tl.constexpr,
-    total_hidden: tl.constexpr,
-    q_heads: tl.constexpr,
-    kv_heads: tl.constexpr,
-    head_dim: tl.constexpr,
-    rope_dim: tl.constexpr,
-    half_rope: tl.constexpr,
-    block_size: tl.constexpr,
-    num_vec: tl.constexpr,
+    EPS: tl.constexpr,
+    Q_HIDDEN: tl.constexpr,
+    KV_HIDDEN: tl.constexpr,
+    TOTAL_HIDDEN: tl.constexpr,
+    Q_HEADS: tl.constexpr,
+    KV_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    ROPE_DIM: tl.constexpr,
+    HALF_ROPE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_VEC: tl.constexpr,
     WRITE_KV_TENSORS: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    per = tl.cdiv(batch_size, num_vec)
+    per = tl.cdiv(batch_size, NUM_VEC)
     b0 = pid * per
     b1 = tl.minimum(b0 + per, batch_size)
-    qn = tl.arange(0, q_hidden)
-    kn = tl.arange(q_hidden, q_hidden + kv_hidden)
-    vn = tl.arange(q_hidden + kv_hidden, total_hidden)
-    wd = tl.arange(0, head_dim)
+    qn = tl.arange(0, Q_HIDDEN)
+    kn = tl.arange(Q_HIDDEN, Q_HIDDEN + KV_HIDDEN)
+    vn = tl.arange(Q_HIDDEN + KV_HIDDEN, TOTAL_HIDDEN)
+    wd = tl.arange(0, HEAD_DIM)
     qw = tl.load(qw_ptr + wd).to(tl.float32)
     kw = tl.load(kw_ptr + wd).to(tl.float32)
-    out_qn = tl.arange(0, q_hidden)
-    kvn = tl.arange(0, kv_hidden)
-    half_off = tl.arange(0, half_rope)
+    out_qn = tl.arange(0, Q_HIDDEN)
+    kvn = tl.arange(0, KV_HIDDEN)
+    half_off = tl.arange(0, HALF_ROPE)
     for m in tl.range(b0, b1):
-        qv = tl.load(input_ptr + m * total_hidden + qn).to(tl.float32).reshape(q_heads, head_dim)
-        qvar = tl.sum(qv * qv, axis=1, keep_dims=True) / head_dim
-        qnorm = (qv * tl.math.rsqrt(qvar + eps) * qw[None, :]).to(tl.bfloat16)
-        kv = tl.load(input_ptr + m * total_hidden + kn).to(tl.float32).reshape(kv_heads, head_dim)
-        kvar = tl.sum(kv * kv, axis=1, keep_dims=True) / head_dim
-        knorm = (kv * tl.math.rsqrt(kvar + eps) * kw[None, :]).to(tl.bfloat16)
+        qv = tl.load(input_ptr + m * TOTAL_HIDDEN + qn).to(tl.float32).reshape(Q_HEADS, HEAD_DIM)
+        qvar = tl.sum(qv * qv, axis=1, keep_dims=True) / HEAD_DIM
+        qnorm = (qv * tl.math.rsqrt(qvar + EPS) * qw[None, :]).to(tl.bfloat16)
+        kv = tl.load(input_ptr + m * TOTAL_HIDDEN + kn).to(tl.float32).reshape(KV_HEADS, HEAD_DIM)
+        kvar = tl.sum(kv * kv, axis=1, keep_dims=True) / HEAD_DIM
+        knorm = (kv * tl.math.rsqrt(kvar + EPS) * kw[None, :]).to(tl.bfloat16)
         pos = tl.load(pos_ptr + m).to(tl.int64)
-        csoff = pos * rope_dim + half_off
+        csoff = pos * ROPE_DIM + half_off
         cos = tl.load(cos_sin_ptr + csoff)[None, :]
-        sin = tl.load(cos_sin_ptr + csoff + half_rope)[None, :]
-        qx1 = extract_slice(qnorm, (0, 0), (q_heads, half_rope), (1, 1))
-        qx2 = extract_slice(qnorm, (0, half_rope), (q_heads, half_rope), (1, 1))
-        qo = tl.zeros((q_heads, rope_dim), dtype=tl.bfloat16)
-        qo = insert_slice(qo, (qx1 * cos - qx2 * sin), (0, 0), (q_heads, half_rope), (1, 1))
-        qo = insert_slice(qo, (qx2 * cos + qx1 * sin), (0, half_rope), (q_heads, half_rope), (1, 1))
-        tl.store(q_ptr + m * q_hidden + out_qn, qo.reshape(q_hidden))
+        sin = tl.load(cos_sin_ptr + csoff + HALF_ROPE)[None, :]
+        qx1 = extract_slice(qnorm, (0, 0), (Q_HEADS, HALF_ROPE), (1, 1))
+        qx2 = extract_slice(qnorm, (0, HALF_ROPE), (Q_HEADS, HALF_ROPE), (1, 1))
+        qo = tl.zeros((Q_HEADS, ROPE_DIM), dtype=tl.bfloat16)
+        qo = insert_slice(qo, (qx1 * cos - qx2 * sin), (0, 0), (Q_HEADS, HALF_ROPE), (1, 1))
+        qo = insert_slice(qo, (qx2 * cos + qx1 * sin), (0, HALF_ROPE), (Q_HEADS, HALF_ROPE), (1, 1))
+        tl.store(q_ptr + m * Q_HIDDEN + out_qn, qo.reshape(Q_HIDDEN))
 
-        kx1 = extract_slice(knorm, (0, 0), (kv_heads, half_rope), (1, 1))
-        kx2 = extract_slice(knorm, (0, half_rope), (kv_heads, half_rope), (1, 1))
-        ko = tl.zeros((kv_heads, rope_dim), dtype=tl.bfloat16)
-        ko = insert_slice(ko, (kx1 * cos - kx2 * sin), (0, 0), (kv_heads, half_rope), (1, 1))
-        ko = insert_slice(ko, (kx2 * cos + kx1 * sin), (0, half_rope), (kv_heads, half_rope), (1, 1))
-        kflat = ko.reshape(kv_hidden)
-        vv = tl.load(input_ptr + m * total_hidden + vn)
+        kx1 = extract_slice(knorm, (0, 0), (KV_HEADS, HALF_ROPE), (1, 1))
+        kx2 = extract_slice(knorm, (0, HALF_ROPE), (KV_HEADS, HALF_ROPE), (1, 1))
+        ko = tl.zeros((KV_HEADS, ROPE_DIM), dtype=tl.bfloat16)
+        ko = insert_slice(ko, (kx1 * cos - kx2 * sin), (0, 0), (KV_HEADS, HALF_ROPE), (1, 1))
+        ko = insert_slice(ko, (kx2 * cos + kx1 * sin), (0, HALF_ROPE), (KV_HEADS, HALF_ROPE), (1, 1))
+        kflat = ko.reshape(KV_HIDDEN)
+        vv = tl.load(input_ptr + m * TOTAL_HIDDEN + vn)
         if WRITE_KV_TENSORS:
-            tl.store(k_ptr + m * kv_hidden + kvn, kflat)
-            tl.store(v_ptr + m * kv_hidden + kvn, vv)
+            tl.store(k_ptr + m * KV_HIDDEN + kvn, kflat)
+            tl.store(v_ptr + m * KV_HIDDEN + kvn, vv)
         if m < n_slots:
             slot = tl.load(slots_ptr + m).to(tl.int64)
             if (slot >= 0) & (slot < total_slots):
-                blk = slot // block_size
-                off = slot % block_size
-                tl.store(kc_ptr + blk * kc_block_stride + off * kv_hidden + kvn, kflat)
-                tl.store(vc_ptr + blk * vc_block_stride + off * kv_hidden + kvn, vv)
+                blk = slot // BLOCK_SIZE
+                off = slot % BLOCK_SIZE
+                tl.store(kc_ptr + blk * kc_block_stride + off * KV_HIDDEN + kvn, kflat)
+                tl.store(vc_ptr + blk * vc_block_stride + off * KV_HIDDEN + kvn, vv)
 
 
 _VEC_CORES: int | None = None
@@ -588,16 +588,16 @@ def split_qkv_rmsnorm_rope_impl(
                 q_weight,
                 k_weight,
                 batch_size,
-                feps,
-                q_hidden_size,
-                kv_hidden_size,
-                total_hidden,
-                q_heads,
-                kv_heads,
-                head_dim,
-                rope_dim,
-                half_rope,
-                num_vectorcore,
+                EPS=feps,
+                Q_HIDDEN=q_hidden_size,
+                KV_HIDDEN=kv_hidden_size,
+                TOTAL_HIDDEN=total_hidden,
+                Q_HEADS=q_heads,
+                KV_HEADS=kv_heads,
+                HEAD_DIM=head_dim,
+                ROPE_DIM=rope_dim,
+                HALF_ROPE=half_rope,
+                NUM_VEC=num_vectorcore,
             )
         else:
             dev_idx = input.device.index if input.device.index is not None else 0
@@ -615,16 +615,16 @@ def split_qkv_rmsnorm_rope_impl(
                     q_weight,
                     k_weight,
                     batch_size,
-                    feps,
-                    q_hidden_size,
-                    kv_hidden_size,
-                    total_hidden,
-                    q_heads,
-                    kv_heads,
-                    head_dim,
-                    rope_dim,
-                    half_rope,
-                    num_vectorcore,
+                    EPS=feps,
+                    Q_HIDDEN=q_hidden_size,
+                    KV_HIDDEN=kv_hidden_size,
+                    TOTAL_HIDDEN=total_hidden,
+                    Q_HEADS=q_heads,
+                    KV_HEADS=kv_heads,
+                    HEAD_DIM=head_dim,
+                    ROPE_DIM=rope_dim,
+                    HALF_ROPE=half_rope,
+                    NUM_VEC=num_vectorcore,
                 )
                 _FAST_SPLIT_KERNELS[key] = k
             else:
@@ -887,18 +887,18 @@ def qkv_rmsnorm_rope_cache_impl(
                         total_slots,
                         kc_bs,
                         vc_bs,
-                        feps,
-                        q_hidden_size,
-                        kv_hidden_size,
-                        total_hidden,
-                        q_heads,
-                        kv_heads,
-                        head_dim,
-                        rope_dim,
-                        half_rope,
-                        block_size,
-                        num_vectorcore,
-                        write_kv_tensors,
+                        EPS=feps,
+                        Q_HIDDEN=q_hidden_size,
+                        KV_HIDDEN=kv_hidden_size,
+                        TOTAL_HIDDEN=total_hidden,
+                        Q_HEADS=q_heads,
+                        KV_HEADS=kv_heads,
+                        HEAD_DIM=head_dim,
+                        ROPE_DIM=rope_dim,
+                        HALF_ROPE=half_rope,
+                        BLOCK_SIZE=block_size,
+                        NUM_VEC=num_vectorcore,
+                        WRITE_KV_TENSORS=write_kv_tensors,
                     )
                 else:
                     dev_idx = input.device.index if input.device.index is not None else 0
@@ -933,18 +933,18 @@ def qkv_rmsnorm_rope_cache_impl(
                             total_slots,
                             kc_bs,
                             vc_bs,
-                            feps,
-                            q_hidden_size,
-                            kv_hidden_size,
-                            total_hidden,
-                            q_heads,
-                            kv_heads,
-                            head_dim,
-                            rope_dim,
-                            half_rope,
-                            block_size,
-                            num_vectorcore,
-                            write_kv_tensors,
+                            EPS=feps,
+                            Q_HIDDEN=q_hidden_size,
+                            KV_HIDDEN=kv_hidden_size,
+                            TOTAL_HIDDEN=total_hidden,
+                            Q_HEADS=q_heads,
+                            KV_HEADS=kv_heads,
+                            HEAD_DIM=head_dim,
+                            ROPE_DIM=rope_dim,
+                            HALF_ROPE=half_rope,
+                            BLOCK_SIZE=block_size,
+                            NUM_VEC=num_vectorcore,
+                            WRITE_KV_TENSORS=write_kv_tensors,
                         )
                         _FUSED_QKV_CACHE_KERNELS[key] = k
                     else:

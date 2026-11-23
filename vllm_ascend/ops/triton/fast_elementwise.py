@@ -31,7 +31,7 @@ def fast_add_rmsnorm_kernel(
     out_res_ptr,
     M,
     H: tl.constexpr,
-    eps: tl.constexpr,
+    EPS: tl.constexpr,
     NUM_CORES: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -47,7 +47,7 @@ def fast_add_rmsnorm_kernel(
         nr = xv + rv
         tl.store(out_res_ptr + off, nr.to(tl.bfloat16))
         var = tl.sum(nr * nr, axis=0) / H
-        yn = nr * tl.math.rsqrt(var + eps) * w
+        yn = nr * tl.math.rsqrt(var + EPS) * w
         tl.store(out_ptr + off, yn.to(tl.bfloat16))
 
 
@@ -114,9 +114,9 @@ def npu_fast_add_rms_norm_impl(
             out,
             out_res,
             m,
-            h,
-            feps,
-            ncores,
+            H=h,
+            EPS=feps,
+            NUM_CORES=ncores,
         )
     else:
         dev_idx = x.device.index if x.device.index is not None else 0
@@ -137,9 +137,9 @@ def npu_fast_add_rms_norm_impl(
                 out,
                 out_res,
                 m,
-                h,
-                feps,
-                ncores,
+                H=h,
+                EPS=feps,
+                NUM_CORES=ncores,
             )
             _ADD_RMSNORM_KERNELS[key] = k
         else:
@@ -190,14 +190,14 @@ def npu_fast_swiglu_impl(x: torch.Tensor) -> torch.Tensor:
         bh = 6144 if h == 12288 else min(4096, triton.next_power_of_2(h))
         out = torch.empty((m, h), device=x.device, dtype=x.dtype)
         if _get_raw_stream is None or torch.npu.is_current_stream_capturing():
-            fast_swiglu_kernel[(ncores,)](x, out, m, h, ncores, bh)
+            fast_swiglu_kernel[(ncores,)](x, out, m, H=h, NUM_CORES=ncores, BH=bh)
         else:
             dev_idx = x.device.index if x.device.index is not None else 0
             align = (((x.data_ptr() & 15) == 0) << 0) | (((out.data_ptr() & 15) == 0) << 1)
             key = (dev_idx, h, bh, ncores, align)
             k = _SWIGLU_KERNELS.get(key)
             if k is None:
-                k = fast_swiglu_kernel[(ncores,)](x, out, m, h, ncores, bh)
+                k = fast_swiglu_kernel[(ncores,)](x, out, m, H=h, NUM_CORES=ncores, BH=bh)
                 _SWIGLU_KERNELS[key] = k
             else:
                 st = _get_raw_stream(dev_idx)

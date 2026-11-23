@@ -18,43 +18,43 @@ def _scatter_layout_kernel(
     key_cache,
     value_cache,
     slots,
-    key_token_stride: tl.constexpr,
-    key_head_stride: tl.constexpr,
-    key_dim_stride: tl.constexpr,
-    value_token_stride: tl.constexpr,
-    value_head_stride: tl.constexpr,
-    value_dim_stride: tl.constexpr,
-    key_block_stride: tl.constexpr,
-    key_cache_head_stride: tl.constexpr,
-    key_cache_token_stride: tl.constexpr,
-    key_cache_dim_stride: tl.constexpr,
-    value_block_stride: tl.constexpr,
-    value_cache_head_stride: tl.constexpr,
-    value_cache_token_stride: tl.constexpr,
-    value_cache_dim_stride: tl.constexpr,
+    KEY_TOKEN_STRIDE: tl.constexpr,
+    KEY_HEAD_STRIDE: tl.constexpr,
+    KEY_DIM_STRIDE: tl.constexpr,
+    VALUE_TOKEN_STRIDE: tl.constexpr,
+    VALUE_HEAD_STRIDE: tl.constexpr,
+    VALUE_DIM_STRIDE: tl.constexpr,
+    KEY_BLOCK_STRIDE: tl.constexpr,
+    KEY_CACHE_HEAD_STRIDE: tl.constexpr,
+    KEY_CACHE_TOKEN_STRIDE: tl.constexpr,
+    KEY_CACHE_DIM_STRIDE: tl.constexpr,
+    VALUE_BLOCK_STRIDE: tl.constexpr,
+    VALUE_CACHE_HEAD_STRIDE: tl.constexpr,
+    VALUE_CACHE_TOKEN_STRIDE: tl.constexpr,
+    VALUE_CACHE_DIM_STRIDE: tl.constexpr,
     num_blocks,
-    block_size: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
     HEADS: tl.constexpr,
     DIM: tl.constexpr,
 ):
     token = tl.program_id(0).to(tl.int64)
     slot = tl.load(slots + token).to(tl.int64)
-    valid_slot = (slot >= 0) & (slot < num_blocks * block_size)
-    safe_slot = tl.minimum(tl.maximum(slot, 0), num_blocks * block_size - 1)
-    block = safe_slot // block_size
-    position = safe_slot % block_size
+    valid_slot = (slot >= 0) & (slot < num_blocks * BLOCK_SIZE)
+    safe_slot = tl.minimum(tl.maximum(slot, 0), num_blocks * BLOCK_SIZE - 1)
+    block = safe_slot // BLOCK_SIZE
+    position = safe_slot % BLOCK_SIZE
     head = tl.arange(0, HEADS)[:, None]
     dim = tl.arange(0, DIM)[None, :]
     # Keep wide slot arithmetic scalar; local head/dimension offsets stay
     # small affine int32 tensors rather than flattened int64 gather offsets.
-    key_row = key + token * key_token_stride
-    value_row = value + token * value_token_stride
-    keys = tl.load(key_row + head * key_head_stride + dim * key_dim_stride, mask=valid_slot, other=0)
-    values = tl.load(value_row + head * value_head_stride + dim * value_dim_stride, mask=valid_slot, other=0)
-    key_slot = key_cache + block * key_block_stride + position * key_cache_token_stride
-    value_slot = value_cache + block * value_block_stride + position * value_cache_token_stride
-    tl.store(key_slot + head * key_cache_head_stride + dim * key_cache_dim_stride, keys, mask=valid_slot)
-    tl.store(value_slot + head * value_cache_head_stride + dim * value_cache_dim_stride, values, mask=valid_slot)
+    key_row = key + token * KEY_TOKEN_STRIDE
+    value_row = value + token * VALUE_TOKEN_STRIDE
+    keys = tl.load(key_row + head * KEY_HEAD_STRIDE + dim * KEY_DIM_STRIDE, mask=valid_slot, other=0)
+    values = tl.load(value_row + head * VALUE_HEAD_STRIDE + dim * VALUE_DIM_STRIDE, mask=valid_slot, other=0)
+    key_slot = key_cache + block * KEY_BLOCK_STRIDE + position * KEY_CACHE_TOKEN_STRIDE
+    value_slot = value_cache + block * VALUE_BLOCK_STRIDE + position * VALUE_CACHE_TOKEN_STRIDE
+    tl.store(key_slot + head * KEY_CACHE_HEAD_STRIDE + dim * KEY_CACHE_DIM_STRIDE, keys, mask=valid_slot)
+    tl.store(value_slot + head * VALUE_CACHE_HEAD_STRIDE + dim * VALUE_CACHE_DIM_STRIDE, values, mask=valid_slot)
 
 
 def scatter(key, value, key_cache, value_cache, slots, *, head_major):
@@ -89,18 +89,22 @@ def scatter(key, value, key_cache, value_cache, slots, *, head_major):
         key_cache,
         value_cache,
         slots,
-        *key.stride(),
-        *value.stride(),
-        key_cache.stride(0),
-        key_cache.stride(head_axis),
-        key_cache.stride(token_axis),
-        key_cache.stride(3),
-        value_cache.stride(0),
-        value_cache.stride(head_axis),
-        value_cache.stride(token_axis),
-        value_cache.stride(3),
-        key_cache.shape[0],
-        key_cache.shape[token_axis],
+        KEY_TOKEN_STRIDE=key.stride(0),
+        KEY_HEAD_STRIDE=key.stride(1),
+        KEY_DIM_STRIDE=key.stride(2),
+        VALUE_TOKEN_STRIDE=value.stride(0),
+        VALUE_HEAD_STRIDE=value.stride(1),
+        VALUE_DIM_STRIDE=value.stride(2),
+        KEY_BLOCK_STRIDE=key_cache.stride(0),
+        KEY_CACHE_HEAD_STRIDE=key_cache.stride(head_axis),
+        KEY_CACHE_TOKEN_STRIDE=key_cache.stride(token_axis),
+        KEY_CACHE_DIM_STRIDE=key_cache.stride(3),
+        VALUE_BLOCK_STRIDE=value_cache.stride(0),
+        VALUE_CACHE_HEAD_STRIDE=value_cache.stride(head_axis),
+        VALUE_CACHE_TOKEN_STRIDE=value_cache.stride(token_axis),
+        VALUE_CACHE_DIM_STRIDE=value_cache.stride(3),
+        num_blocks=key_cache.shape[0],
+        BLOCK_SIZE=key_cache.shape[token_axis],
         HEADS=heads,
         DIM=dim,
         num_warps=4,
