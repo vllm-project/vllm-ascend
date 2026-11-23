@@ -1584,8 +1584,6 @@ def _setup_worker_and_scheduler(
     ascend_config,
 ) -> None:
     # Select worker class and refresh block size.
-    # ParallelConfig derives pcp_shard_decode_requests from the PCP/DCP sizes.
-    # Keep draft replace() compatible by avoiding undeclared config fields.
     parallel_config = vllm_config.parallel_config
     if parallel_config and parallel_config.worker_cls == "auto":
         hardware_profile = get_current_hardware_profile()
