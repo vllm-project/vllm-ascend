@@ -8,6 +8,7 @@ import time
 from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -51,7 +52,7 @@ def collision(host, port):
 
 @pytest.mark.parametrize("offset", [1, BLOCK_SIZE - 1])
 def test_busy_worker_port_skips_whole_block_and_releases_probes(blocks, offset):
-    rejected = []
+    rejected: list[dict[str, Any]] = []
     with socket.socket() as busy:
         busy.bind(("127.0.0.1", blocks[0] + offset))
         assert ports.select_port_base("127.0.0.1", blocks, BLOCK_SIZE, rejected) == blocks[1]
@@ -66,7 +67,7 @@ def test_busy_worker_port_skips_whole_block_and_releases_probes(blocks, offset):
 def test_dynamic_range_is_avoided_unless_entire_overlap_is_reserved(blocks, monkeypatch):
     low, high = blocks[0], blocks[0] + BLOCK_SIZE - 1
     monkeypatch.setattr(ports, "_kernel_port_ranges", lambda: ((low, high), {low}))
-    rejected = []
+    rejected: list[dict[str, Any]] = []
     assert ports.select_port_base("127.0.0.1", blocks, BLOCK_SIZE, rejected) == blocks[1]
     assert "automatic TCP" in rejected[0]["reason"]
     monkeypatch.setattr(ports, "_kernel_port_ranges", lambda: ((low, high), set(range(low, high + 1))))
@@ -183,7 +184,7 @@ def manager(config, blocks, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("failure_count", [0, 1, 3])
 def test_manager_recovers_live_parent_bind_failure_with_bounded_owned_cleanup(manager, monkeypatch, failure_count):
-    started = []
+    started: list[tuple[Mock, list[str], Path]] = []
     stop = Mock()
 
     def launch(cmd, env, path):
@@ -235,8 +236,8 @@ def test_busy_candidates_fail_without_loading_model(manager, monkeypatch, blocks
 
 
 def test_port_stolen_after_probe_retries_real_child_and_preserves_owner(blocks, tmp_path, monkeypatch):
-    processes = {}
-    selected = []
+    processes: dict[int, subprocess.Popen] = {}
+    selected: list[int] = []
     select = ports.select_port_base
     child = """
 import json
@@ -302,7 +303,13 @@ time.sleep(30)
             for proc in processes.values():
                 if proc.poll() is None:
                     proc.terminate()
-                proc.wait(timeout=5)
+            for proc in processes.values():
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+        assert all(proc.poll() is not None for proc in processes.values())
 
 
 @pytest.mark.parametrize("failure", ["RuntimeError: EngineCore failed to start: out of memory\n", "timeout"])

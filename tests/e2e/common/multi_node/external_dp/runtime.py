@@ -500,6 +500,20 @@ class ExternalDPServerManager:
                 if template.mooncake_port_retry is None:
                     process = start_logged_process(server_cmd.cmd, server_cmd.env, log_file)
                 else:
+
+                    def wait_ready(
+                        process: subprocess.Popen,
+                        path: Path,
+                        check: Callable[[], None],
+                        rank: RankInfo = rank,
+                    ) -> None:
+                        wait_ranks_ready(
+                            [rank],
+                            timeout=SERVER_READY_TIMEOUT_SECONDS,
+                            rank_processes=[(process, rank, path)],
+                            startup_check=check,
+                        )
+
                     process, effective_cmd, log_file = start_with_port_retry(
                         cmd=server_cmd.cmd,
                         env=server_cmd.env,
@@ -508,12 +522,7 @@ class ExternalDPServerManager:
                         policy=template.mooncake_port_retry,
                         log_file=log_file,
                         start_process=start_logged_process,
-                        wait_ready=lambda process, path, check, rank=rank: wait_ranks_ready(
-                            [rank],
-                            timeout=SERVER_READY_TIMEOUT_SECONDS,
-                            rank_processes=[(process, rank, path)],
-                            startup_check=check,
-                        ),
+                        wait_ready=wait_ready,
                         stop_process=terminate_process_tree,
                     )
                     self.effective_commands[rank] = ServerCommand(

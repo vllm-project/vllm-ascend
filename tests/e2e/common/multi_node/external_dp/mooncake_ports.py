@@ -61,7 +61,7 @@ def _kernel_port_ranges() -> tuple[tuple[int, int] | None, set[int]]:
     if not root.exists():
         return None, set()
     low, high = map(int, (root / "ip_local_port_range").read_text().split())
-    reserved = set()
+    reserved: set[int] = set()
     for item in (root / "ip_local_reserved_ports").read_text().strip().split(","):
         if item:
             bounds = list(map(int, item.split("-")))
