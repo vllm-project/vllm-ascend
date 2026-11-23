@@ -53,3 +53,19 @@ the rotated path with updated inputs and masks. Kernel compilation, graph replay
 and latency still require NPU evidence before merging. No hardware speedup is
 claimed from reducing the number of launches alone. The rotation also retains
 its FP32 input conversion; this is not a claim of exactly three launches.
+
+## Gate channel tiling
+
+The gate reduces scoring inputs in tiles of at most 1024 channels and writes
+the residual in tiles of the same size. This bounds live FP32 vectors instead
+of padding a 5120-channel row to 8192 channels, which exceeded A5 UB capacity
+for FP32 inputs. Tile reductions accumulate in FP32; their reduction order
+differs from a single full-row reduction. The public interface, output dtype,
+input strides and hardware routing are unchanged. No additional kernel launch
+or host synchronization is introduced. The tile size is derived in the public
+wrapper from the channel dimension and adds no workload-dependent tuning key.
+
+The gate test above runs on A3 and A5 and covers a full tile (1024 channels),
+a partial second tile (1056), and the failing 5120-channel FP32 cases for all
+rotation modes. Accuracy and latency comparisons on both devices remain
+required before merge.

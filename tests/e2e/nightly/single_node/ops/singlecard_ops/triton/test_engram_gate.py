@@ -40,7 +40,7 @@ def reference(hidden, kv, qw, kw, mask, rotation):
     get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Engram gate routes on A3 (rotated) and A5 (unrotated)",
 )
-@pytest.mark.parametrize("tokens,dim", [(0, 5120), (1, 96), (7, 5120), (132, 5120)])
+@pytest.mark.parametrize("tokens,dim", [(0, 5120), (1, 96), (7, 1024), (7, 1056), (7, 5120), (132, 5120)])
 @pytest.mark.parametrize("rotation_kind", ["none", "shared", "per_block"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_engram_gate(tokens, dim, rotation_kind, dtype):

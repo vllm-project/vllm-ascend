@@ -5,6 +5,9 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+# Bound per-program UB usage independently of the hidden dimension.
+_GATE_CHANNEL_TILE = 1024
+
 
 @triton.jit
 def _engram_gate_kernel(
@@ -33,28 +36,43 @@ def _engram_gate_kernel(
 ):
     token = tl.program_id(0)
     branch = tl.program_id(1)
-    col = tl.arange(0, BLOCK)
-    valid = col < DIM
-    if HAS_GATE_HIDDEN:
-        score_h = tl.load(gate_hidden + token * gate_stride_t + branch * gate_stride_h + col, valid, 0).to(tl.float32)
-    else:
-        score_h = tl.load(hidden + token * hidden_stride_t + branch * hidden_stride_h + col, valid, 0).to(tl.float32)
-    key = tl.load(kv + token * kv_stride_t + branch * DIM + col, valid, 0).to(tl.float32)
-    qw = tl.load(q + branch * q_stride_h + col * q_stride_d, valid, 0).to(tl.float32)
-    kw = tl.load(k + branch * k_stride_h + col * k_stride_d, valid, 0).to(tl.float32)
-    # Match the unfused FP32 operation order; do not contract the residual FMA.
-    rstd = tl.rsqrt(tl.sum(score_h * score_h, 0) / DIM + EPS)
-    rstd *= tl.rsqrt(tl.sum(key * key, 0) / DIM + EPS)
-    dot = tl.sum((score_h * (qw * kw)) * key, 0) * rstd * (DIM**-0.5)
+    offsets = tl.arange(0, BLOCK)
+    hidden_sq = tl.full((), 0, tl.float32)
+    key_sq = tl.full((), 0, tl.float32)
+    weighted_dot = tl.full((), 0, tl.float32)
+    # Bound live FP32 vectors: a padded 8192-channel row overflows A5 UB.
+    for start in range(tl.cdiv(DIM, BLOCK)):
+        col = start * BLOCK + offsets
+        valid = col < DIM
+        if HAS_GATE_HIDDEN:
+            score_h = tl.load(gate_hidden + token * gate_stride_t + branch * gate_stride_h + col, valid, 0).to(
+                tl.float32
+            )
+        else:
+            score_h = tl.load(hidden + token * hidden_stride_t + branch * hidden_stride_h + col, valid, 0).to(
+                tl.float32
+            )
+        key = tl.load(kv + token * kv_stride_t + branch * DIM + col, valid, 0).to(tl.float32)
+        qw = tl.load(q + branch * q_stride_h + col * q_stride_d, valid, 0).to(tl.float32)
+        kw = tl.load(k + branch * k_stride_h + col * k_stride_d, valid, 0).to(tl.float32)
+        hidden_sq += tl.sum(score_h * score_h, 0)
+        key_sq += tl.sum(key * key, 0)
+        weighted_dot += tl.sum((score_h * (qw * kw)) * key, 0)
+    rstd = tl.rsqrt(hidden_sq / DIM + EPS)
+    rstd *= tl.rsqrt(key_sq / DIM + EPS)
+    dot = weighted_dot * rstd * (DIM**-0.5)
     magnitude = tl.sqrt(tl.maximum(tl.abs(dot), 1e-6))
     negative = (dot.to(tl.int32, bitcast=True) & -2147483648) != 0
     gate = tl.sigmoid(tl.where(negative, -magnitude, magnitude))
     active = tl.load(mask + token * mask_stride) != 0
     gate = tl.where(active, gate, 0.0)
-    value = tl.load(kv + token * kv_stride_t + HC * DIM + col, valid, 0).to(tl.float32)
-    # Keep the residual out of UB until scoring reductions have finished.
-    h = tl.load(hidden + token * hidden_stride_t + branch * hidden_stride_h + col, valid, 0).to(tl.float32)
-    tl.store(output + (token * HC + branch) * DIM + col, h + gate * value, valid)
+    # Reuse the bounded tile for the residual; do not contract its FMA.
+    for start in range(tl.cdiv(DIM, BLOCK)):
+        col = start * BLOCK + offsets
+        valid = col < DIM
+        value = tl.load(kv + token * kv_stride_t + HC * DIM + col, valid, 0).to(tl.float32)
+        h = tl.load(hidden + token * hidden_stride_t + branch * hidden_stride_h + col, valid, 0).to(tl.float32)
+        tl.store(output + (token * HC + branch) * DIM + col, h + gate * value, valid)
 
 
 def fused_engram_gate(hidden, kv, q_weight, k_weight, token_mask, eps, *, gate_hidden=None):
@@ -94,7 +112,7 @@ def fused_engram_gate(hidden, kv, q_weight, k_weight, token_mask, eps, *, gate_h
             EPS=eps,
             DIM=dim,
             HC=branches,
-            BLOCK=triton.next_power_of_2(dim),
+            BLOCK=min(triton.next_power_of_2(dim), _GATE_CHANNEL_TILE),
             num_warps=4,
             enable_fp_fusion=False,
         )
