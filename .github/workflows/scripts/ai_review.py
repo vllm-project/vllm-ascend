@@ -127,6 +127,9 @@ INLINE_MARKER = "ai-review finding"
 WAIVED_PREFIX = "**[WAIVED"
 WAIVE_RE = re.compile(r"/ai-review-waive(?![\w-])")
 
+# dsh provider patch written per round from the AI_REVIEW_* configuration
+PATCH_FILE = "/tmp/ai-review-patch.yml"
+
 
 def parse_findings(text: str) -> list[dict]:
     """Parse ```finding blocks into dicts; malformed blocks are dropped.
@@ -385,29 +388,55 @@ class Orchestrator:
             f.write(prompt)
 
         cmd = os.environ.get("AI_REVIEW_DSH_CMD", "dsh --profile headless").split()
-        # The agent process gets ONLY the model credentials and the model
-        # name — never GH_TOKEN. Every GitHub API call is made by this
+        cmd += ["--patch", PATCH_FILE]
+        # The agent process gets ONLY the model credential (via the patch's
+        # apiKeyEnv) — never GH_TOKEN. Every GitHub API call is made by this
         # orchestrator; the agent's output is parsed text we post ourselves.
         # This keeps a prompt-injected PR diff from reaching any repo token.
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": os.environ.get("HOME", "/tmp"),
             "AI_REVIEW_KEY": os.environ.get("AI_REVIEW_KEY", ""),
-            "AI_REVIEW_API": os.environ.get("AI_REVIEW_API", ""),
-            # dsh's DeepSeek provider is redirected by these names
-            # (docs/user/guide/providers.md + env-vars reference): key,
-            # custom base URL, and the default model override
-            "DEEPSEEK_API_KEY": os.environ.get("AI_REVIEW_KEY", ""),
-            "DEEPSEEK_BASE_URL": os.environ.get("AI_REVIEW_API", ""),
-            "DEEPSEEK_DEFAULT_MODEL": os.environ.get("AI_REVIEW_MODEL", ""),
-            # Picked up by dsh's config surface once confirmed in the smoke
-            # test; harmless to expose until then.
-            "AI_REVIEW_MODEL": os.environ.get("AI_REVIEW_MODEL", "deepseek-v4.1-flash"),
+            # placeholder: the headless profile boot-gates on the presence of
+            # a deepseek-official credential; real requests go to the
+            # OpenAI-protocol gateway provider declared in the patch
+            "DEEPSEEK_API_KEY": "boot-gate-placeholder",
         }
+        base_url = os.environ.get("AI_REVIEW_API", "")
+        model = os.environ.get("AI_REVIEW_MODEL", "deepseek-v4.1-flash")
+        if not base_url:
+            print("::error::AI_REVIEW_API is not set; no endpoint to review against", flush=True)
+            raise SystemExit(1)
+        # dsh's built-in DeepSeek route speaks the Anthropic Messages
+        # protocol with x-api-key auth, which our gateway rejects. The
+        # verified recipe: a --patch overlay declaring an OpenAI-protocol
+        # provider (Bearer auth) plus the agent-default-model override.
+        with open(PATCH_FILE, "w") as f:
+            f.write(
+                "- id: agent-default-model\n"
+                "  config:\n"
+                "    provider: ai-review-gateway\n"
+                f"    model: {model}\n"
+                "- id: llm-pi-ai\n"
+                "  config:\n"
+                "    providers:\n"
+                "      ai-review-gateway:\n"
+                "        apiKeyEnv: AI_REVIEW_KEY\n"
+                "        api: openai-completions\n"
+                f"        baseURL: {base_url}\n"
+                "        models:\n"
+                f"          - id: {model}\n"
+            )
         started = time.monotonic()
         print(
             f"::notice::ai-review prompt size: {len(prompt)} chars; "
             f"engine: {cmd[0]}; timeout: {ROUND_TIMEOUT_SECONDS}s",
+            flush=True,
+        )
+        # the base URL is not a secret; print it so endpoint/auth mismatches
+        # are diagnosable (the key itself is masked by GitHub)
+        print(
+            f"::notice::dsh endpoint: {base_url}; model: {model}",
             flush=True,
         )
         try:
