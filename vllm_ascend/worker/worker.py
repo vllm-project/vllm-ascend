@@ -619,7 +619,7 @@ class NPUWorker(GPUWorker):
         self.weight_transfer_engine.start_weight_update()
         self._weight_update_active = True
 
-    def update_weights(self, update_info: dict) -> None:
+    def update_weights(self, update_info: dict | list[dict]) -> None:
         """Receive a chunk of weights from the trainer and load them in place."""
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -629,7 +629,14 @@ class NPUWorker(GPUWorker):
             raise RuntimeError("start_weight_update must be called before update_weights.")
 
         try:
-            self.weight_transfer_engine.update_weights(update_info)
+            if isinstance(update_info, list):
+                parallel_config = self.vllm_config.parallel_config
+                local_update_info = update_info[
+                    parallel_config.data_parallel_index * parallel_config.world_size + self.rank
+                ]
+            else:
+                local_update_info = update_info
+            self.weight_transfer_engine.update_weights(local_update_info)
         except BaseException:
             self._weight_update_active = False
             if self._weight_update_is_draft:
