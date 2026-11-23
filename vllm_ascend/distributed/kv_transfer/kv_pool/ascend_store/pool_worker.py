@@ -166,7 +166,7 @@ class BaseKVPoolWorker(ABC):
             # layer-range regression tests pass with the v0.34.0 baseline.
             self.total_layers = model_config.get_total_num_hidden_layers()
             start, end = get_pp_indices(self.total_layers, self.pp_rank, self.pp_size)
-            self.pp_layer_offset = start
+            self.pp_layer_offset, self.pp_layer_end = start, end
             self.num_layers = end - start
             return
 

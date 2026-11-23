@@ -3,6 +3,7 @@
 """Exercise shared-source scheduling through the real layerwise GVA data plane."""
 
 import ctypes
+import os
 import threading
 import unittest
 from collections import Counter
@@ -118,7 +119,17 @@ class MemoryGVAStore:
 
 
 def make_shared_worker(
-    test, *, bounded=False, draft=False, num_layers=12, sources=(2, 8), partition=None, pp_rank=0, mirrors=()
+    test,
+    *,
+    bounded=False,
+    draft=False,
+    num_layers=12,
+    sources=(2, 8),
+    partition=None,
+    pp_rank=0,
+    pcp_size=1,
+    pcp_rank=0,
+    mirrors=(),
 ):
     """Register real CPU cache views with the production GVA worker and queue threads."""
     start = sum(partition[:pp_rank]) if partition else 0
@@ -176,6 +187,8 @@ def make_shared_worker(
             pp_partition=partition,
             pp_size=len(partition) if partition else 1,
             pp_rank=pp_rank,
+            pcp_size=pcp_size,
+            pcp_rank=pcp_rank,
             num_hidden_layers=num_layers,
             extra_config={"backend": "memcache"},
             kv_cache_config=cache_config,
@@ -250,8 +263,17 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         self.assertEqual({size for _, size in store.objects.values()}, {32})
 
     def test_pp_mirror_transfers_follow_local_execution_hooks(self):
-        for partition, mirrors in [((20, 20), ()), ((24, 16), (20,)), ((14, 26), (8,))]:
-            with self.subTest(partition=partition):
+        for partition, mirrors, pcp_size, pcp_rank in [
+            ((20, 20), (), 1, 0),
+            ((24, 16), (20,), 1, 0),
+            ((14, 26), (8,), 1, 0),
+            ((24, 16), (20,), 2, 0),
+            ((24, 16), (20,), 2, 1),
+        ]:
+            with (
+                self.subTest(partition=partition, pcp_size=pcp_size, pcp_rank=pcp_rank),
+                patch.dict(os.environ, {"VLLM_PP_LAYER_PARTITION": ",".join(map(str, partition))}),
+            ):
                 worker, store, caches = make_shared_worker(
                     self,
                     bounded=False,
@@ -259,6 +281,8 @@ class TestSharedSourceLayerwise(unittest.TestCase):
                     sources=(2, 8, 14, 20),
                     partition=partition,
                     pp_rank=1,
+                    pcp_size=pcp_size,
+                    pcp_rank=pcp_rank,
                     mirrors=mirrors,
                 )
                 first, count = partition
@@ -282,6 +306,11 @@ class TestSharedSourceLayerwise(unittest.TestCase):
                     forward_layer(worker, meta)
                     fence.assert_called_once()
                 worker.get_finished(set(), meta)
+                if pcp_rank != 0:
+                    # For DCP1, only PCP rank 0 publishes the replicated KV.
+                    self.assertFalse(store.published)
+                    self.assertFalse(store.copied_addresses(0))
+                    continue
                 self.assertTrue(store.published)
                 self.assertEqual(store.copied_addresses(0), set(addresses.values()))
                 meta = metadata(worker, load=True, save=False)
