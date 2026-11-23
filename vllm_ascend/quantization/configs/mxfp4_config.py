@@ -24,6 +24,11 @@ from .compressed_tensors_config import AscendCompressedTensorsConfig
 class AscendMxfp4Config(AscendCompressedTensorsConfig):
     """Load native packed MXFP4 checkpoints through the Ascend W4A8 backend."""
 
+    # TODO: Only compressed-tensors MXFP4 checkpoints, such as Kimi-K3.1,
+    # have been verified and adapted. To support other MXFP4 weight formats,
+    # refactor this class so it no longer directly inherits from
+    # AscendCompressedTensorsConfig.
+
     def get_name(self) -> str:
         return "mxfp4"
 
