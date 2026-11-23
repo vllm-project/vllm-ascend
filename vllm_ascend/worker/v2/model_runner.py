@@ -35,7 +35,6 @@ from vllm.distributed.utils import get_distributed_timeout_or_none
 from vllm.logger import logger
 from vllm.model_executor.offloader.base import set_offloader
 from vllm.sequence import IntermediateTensors
-from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -1626,38 +1625,13 @@ class NPUModelRunner(GPUModelRunner):
         data: np.ndarray,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.device.type != "npu" or data.ndim != 1:
-            return async_copy_to_gpu(data, device=self.device, out=out)
-        scratch: dict[tuple[str, torch.dtype], list[Any]] | None = getattr(self, "_h2d_scratch", None)
-        if scratch is None:
-            scratch = {}
-            self._h2d_scratch = scratch
-        t_cpu = torch.from_numpy(data)
-        dtype = out.dtype if out is not None else t_cpu.dtype
-        if t_cpu.dtype != dtype:
-            return async_copy_to_gpu(data, device=self.device, out=out)
-        n = data.shape[0]
-        min_cap = max(n, self.max_num_reqs + 2)
-        state = scratch.get((key, dtype))
-        if state is None or state[0] < n:
-            state = [min_cap, 0, [None, None, None, None]]
-            scratch[(key, dtype)] = state
-        cap, idx, slots = state
-        state[1] = (idx + 1) & 3
-        entry = slots[idx]
-        if entry is None:
-            cpu_pin = torch.empty(cap, dtype=dtype, device="cpu", pin_memory=PIN_MEMORY)
-            npu_buf = None if out is not None else torch.empty(cap, dtype=dtype, device=self.device)
-            entry = (cpu_pin, cpu_pin.numpy(), npu_buf)
-            slots[idx] = entry
-        cpu_pin, cpu_np, npu_buf = entry
-        cpu_np[:n] = data
-        if out is not None:
+        del key
+        if out is not None and data.ndim == 1:
+            n = data.shape[0]
             target = out if n == out.shape[0] else out[:n]
-            target.copy_(cpu_pin[:n], non_blocking=True)
+            async_copy_to_gpu(data, device=self.device, out=target)
             return out
-        assert npu_buf is not None
-        return npu_buf[:n].copy_(cpu_pin[:n], non_blocking=True)
+        return async_copy_to_gpu(data, device=self.device, out=out)
 
     def _update_seq_lens_cpu(
         self,

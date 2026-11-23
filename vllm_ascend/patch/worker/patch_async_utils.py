@@ -16,14 +16,9 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-import sys
-import threading
-
-import numpy as np
 import torch
 import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
-from vllm.utils import torch_utils as _vllm_torch_utils
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu import async_utils as _vllm_async_utils
@@ -32,84 +27,7 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.utils import raise_if_nan_logits
 
 # ---------------------------------------------------------------------------
-# 1. TLS pinned buffer ring for small 1D async_tensor_h2d copies
-# ---------------------------------------------------------------------------
-
-_H2D_RING_SLOTS = 16
-_H2D_RING_MAX_ELEMS = 4096
-_H2D_RING_DTYPES = (torch.int32, torch.int64, torch.float32, torch.bool)
-_H2D_RING_TLS = threading.local()
-
-_orig_async_tensor_h2d = _vllm_torch_utils.async_tensor_h2d
-
-
-def _stage_pinned_1d(t: torch.Tensor, dt: torch.dtype) -> torch.Tensor:
-    n = t.numel()
-    pool = getattr(_H2D_RING_TLS, "pool", None)
-    if pool is None:
-        pool = {}
-        _H2D_RING_TLS.pool = pool
-    entry = pool.get(dt)
-    if entry is None:
-        slots = [
-            torch.empty(_H2D_RING_MAX_ELEMS, dtype=dt, device="cpu", pin_memory=True) for _ in range(_H2D_RING_SLOTS)
-        ]
-        entry = [slots, 0]
-        pool[dt] = entry
-    idx = entry[1]
-    entry[1] = (idx + 1) & (_H2D_RING_SLOTS - 1)
-    buf = entry[0][idx][:n]
-    buf.copy_(t)
-    return buf
-
-
-def _patched_async_tensor_h2d(
-    data: list | np.ndarray | torch.Tensor,
-    device: str | torch.device | None = None,
-    dtype: torch.dtype | None = None,
-    out: torch.Tensor | None = None,
-) -> torch.Tensor:
-    if out is not None or not PIN_MEMORY:
-        return _orig_async_tensor_h2d(data, device=device, dtype=dtype, out=out)
-    if isinstance(data, torch.Tensor):
-        t = data
-        if not t.is_pinned():
-            dt = dtype or t.dtype
-            n = t.numel()
-            if t.ndim == 1 and 0 < n <= _H2D_RING_MAX_ELEMS and dt in _H2D_RING_DTYPES:
-                t = _stage_pinned_1d(t, dt)
-            else:
-                t = torch.empty(t.shape, dtype=dt, device="cpu", pin_memory=True).copy_(t)
-        return t.to(device=device, non_blocking=True)
-    if (
-        isinstance(data, list)
-        and 0 < len(data) <= _H2D_RING_MAX_ELEMS
-        and dtype in _H2D_RING_DTYPES
-        and not isinstance(data[0], (list, tuple))
-    ):
-        t = _stage_pinned_1d(torch.tensor(data, dtype=dtype, device="cpu"), dtype)
-        return t.to(device=device, non_blocking=True)
-    return _orig_async_tensor_h2d(data, device=device, dtype=dtype, out=out)
-
-
-if not hasattr(_vllm_torch_utils, "_H2D_RING_TLS") and not getattr(
-    _orig_async_tensor_h2d, "_ascend_h2d_ring_patched", False
-):
-    _patched_async_tensor_h2d._ascend_h2d_ring_patched = True  # type: ignore[attr-defined]
-    _vllm_torch_utils.async_tensor_h2d = _patched_async_tensor_h2d
-    for _mod_name, _attr in (
-        ("vllm.v1.worker.gpu.model_runner", "async_tensor_h2d"),
-        ("vllm_ascend.worker.v2.model_runner", "async_copy_to_gpu"),
-        ("vllm_ascend.worker.v2.pcp_manager", "async_copy_to_gpu"),
-        ("vllm_ascend.worker.v2.spec_decode.suffix.speculator", "async_tensor_h2d"),
-    ):
-        _mod = sys.modules.get(_mod_name)
-        if _mod is not None and hasattr(_mod, _attr):
-            setattr(_mod, _attr, _patched_async_tensor_h2d)
-
-
-# ---------------------------------------------------------------------------
-# 2. Pinned copy cache for AsyncOutput D2H staging
+# Pinned copy cache for AsyncOutput D2H staging
 # ---------------------------------------------------------------------------
 
 

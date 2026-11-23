@@ -26,7 +26,6 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendC8AttentionBackendImpl,
 )
-from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.worker.v2 import attn_utils
@@ -234,7 +233,11 @@ def test_suffix_policy_missing_prerequisite_is_not_eligible(suffix_domain, path)
     assert not attention_utils.is_suffix_fia_cache_enabled(suffix_domain.config, suffix_domain.impl)
 
 
-@pytest.mark.parametrize("impl_type", [AscendC8AttentionBackendImpl, AscendAttentionDCPImpl])
+class _DerivedAttentionImpl(AscendAttentionBackendImpl):
+    pass
+
+
+@pytest.mark.parametrize("impl_type", [AscendC8AttentionBackendImpl, _DerivedAttentionImpl])
 def test_suffix_policy_does_not_select_specialized_implementations(suffix_domain, impl_type):
     impl = impl_type.__new__(impl_type)
     impl.__dict__.update(vars(suffix_domain.impl))
