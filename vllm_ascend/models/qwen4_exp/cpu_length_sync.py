@@ -41,7 +41,11 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
 
         from vllm_ascend.models.qwen4_exp import qsa as ascend_qsa
         from vllm_ascend.models.qwen4_exp.model_state import AscendQwen4ExpModelState
-        from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend, AscendQSAImpl
+        from vllm_ascend.models.qwen4_exp.qsa import (
+            AscendQSABackend,
+            AscendQSAImpl,
+            AscendQSAMetadataBuilder,
+        )
         from vllm_ascend.ops.gdn_attn_builder import (
             AscendGDNAttentionBackend,
             AscendGDNAttentionMetadataBuilder,
@@ -82,7 +86,10 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
         if isinstance(ascend_state_builder, type) and issubclass(ascend_state_builder, QSAIndexerMetadataBuilder):
             qsa_state_builders += (ascend_state_builder,)
         allowed_builders = {
-            AscendQSABackend: (Qwen4ExpQSAMetadataBuilder,),
+            AscendQSABackend: (
+                Qwen4ExpQSAMetadataBuilder,
+                AscendQSAMetadataBuilder,
+            ),
             QSAIndexerBackend: qsa_state_builders,
             AscendGDNAttentionBackend: (AscendGDNAttentionMetadataBuilder,),
             AscendGDNHostMetadataBackend: (AscendGDNHostMetadataBuilder,),

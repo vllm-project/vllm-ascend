@@ -34,7 +34,7 @@ def _draft_groups_disjoint(handles, draft_layers):
 
 def _source_layout_valid(worker):
     """Check per-page layer ranges; HMA owns live physical block IDs across groups."""
-    backing = worker.hot_backing
+    backing = worker.cache_handles[0].runtime.hot_backing
     if backing.ndim != 1 or not backing.is_contiguous() or backing.storage_offset() != 0:
         return False
     base = backing.data_ptr()
@@ -93,14 +93,18 @@ class _DirectMirrorSources:
 
     @classmethod
     def bind(cls, worker, speculator):
-        names = worker.cache_layer_names
+        handles = worker.cache_handles
+        layers = worker.vllm_config.compilation_config.static_forward_context
         draft = set(worker._draft_layers)
-        expected = set(getattr(speculator, "draft_attn_layer_names", ())) & set(names)
-        targets = tuple(index for index in range(len(names)) if index not in draft)
+        expected = {
+            id(getattr(layers.get(name), "hisparse_cache", None))
+            for name in getattr(speculator, "draft_attn_layer_names", ())
+        } & {id(handle) for handle in handles}
+        targets = tuple(index for index in range(len(handles)) if index not in draft)
         if (
             not draft
             or not targets
-            or {names[index] for index in draft} != expected
+            or {id(handles[index]) for index in draft} != expected
             or not _draft_groups_disjoint(worker.cache_handles, draft)
             or not _host_disjoint(worker.host_caches, draft)
             or not _source_layout_valid(worker)
@@ -168,11 +172,15 @@ class HostMirrorConnector:
         return self._connector.pre_forward(scheduler_output, input_batch, attn_metadata=attn_metadata)
 
     def finish_forward(self) -> None:
+        from vllm_ascend.hisparse.pcp import PCPHiSparseConnector
+
         eligible = self._eligible_forward
         self._eligible_forward = False
         worker = self._worker
         if not eligible or self._connector._disabled or not self._sources.can_defer(worker):
             return self._connector.finish_forward()
+        if isinstance(self._connector, PCPHiSparseConnector):
+            self._connector.prepare_host_mirror()
 
         compute_stream = torch.accelerator.current_stream()
         worker._forward_ready_event.record(compute_stream)
@@ -242,9 +250,13 @@ def overlap_target_host_mirror(runner):
     from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
     from vllm_ascend.hisparse.backend import AscendHiSparseBackend
+    from vllm_ascend.hisparse.pcp import PCPHiSparseConnector
 
     connector = runner.kv_connector
-    if type(connector) is not ActiveKVConnector or type(connector.kv_connector) is not HiSparseConnector:
+    if (
+        type(connector) not in (ActiveKVConnector, PCPHiSparseConnector)
+        or type(connector.kv_connector) is not HiSparseConnector
+    ):
         return connector
     worker = connector.kv_connector.connector_worker
     if (
@@ -253,7 +265,7 @@ def overlap_target_host_mirror(runner):
         or not isinstance(worker.backend, AscendHiSparseBackend)
         or worker.shared_host_region is not None
         or not worker.is_host_writer
-        or worker.hot_backing.device.type != "npu"
+        or worker.cache_handles[0].runtime.device.type != "npu"
     ):
         return connector
     sources = _DirectMirrorSources.bind(worker, runner.speculator)
@@ -266,7 +278,7 @@ def overlap_target_host_mirror(runner):
     compute_stream = torch.accelerator.current_stream()
     if (
         output_stream.device != compute_stream.device
-        or compute_stream.device != worker.hot_backing.device
+        or compute_stream.device != worker.cache_handles[0].runtime.device
         or output_stream == compute_stream
     ):
         return connector

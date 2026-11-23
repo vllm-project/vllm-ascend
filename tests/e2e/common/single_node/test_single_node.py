@@ -6,6 +6,7 @@ import shlex
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 import openai
@@ -17,6 +18,7 @@ import vllm
 from tests.e2e.common.single_node.kv_pool_runtime import (
     create_single_node_kv_pool_manager,
 )
+from tests.e2e.common.single_node.nightly_rounds import expand_test_rounds, preserve_round, round_id
 from tests.e2e.common.single_node.single_node_config import (
     SingleNodeConfig,
     SingleNodeConfigLoader,
@@ -41,6 +43,7 @@ from tools.profiling.capture import (
 logger = logging.getLogger(__name__)
 
 configs = SingleNodeConfigLoader.from_yaml_cases()
+TEST_ROUNDS = tuple(expand_test_rounds(configs))
 
 
 async def run_completion_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
@@ -637,8 +640,13 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("config", configs, ids=[config.name for config in configs])
-async def test_single_node(config: SingleNodeConfig) -> None:
+@pytest.mark.parametrize("config,round_number,round_count", TEST_ROUNDS, ids=[round_id(item) for item in TEST_ROUNDS])
+async def test_single_node(config: SingleNodeConfig, round_number: int, round_count: int) -> None:
+    with preserve_round(config, round_number, round_count, Path.cwd()):
+        await _run_single_node(config)
+
+
+async def _run_single_node(config: SingleNodeConfig) -> None:
     # TODO: remove this part after the transformers version upgraded
     if config.special_dependencies:
         for k, v in config.special_dependencies.items():

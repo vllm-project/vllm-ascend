@@ -1,5 +1,5 @@
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
@@ -27,7 +27,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -62,13 +62,7 @@ from vllm_ascend.attention.utils import (
     uses_pcp_sharded_layout,
     wait_for_kv_layer_from_connector,
 )
-from vllm_ascend.compilation.acl_graph import (
-    get_draft_graph_params,
-    get_draft_graph_prefill_params,
-    get_graph_params,
-    update_draft_graph_params_workspaces,
-    update_graph_params_workspaces,
-)
+from vllm_ascend.compilation.updatable_graph import get_capture_resource, register_task
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, supports_component_major_mla_pd
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -88,11 +82,19 @@ from vllm_ascend.utils import (
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
-    weak_ref_tensors,
+    vllm_version_is,
 )
 
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
+
+
+def _uses_unpadded_drafter_batch(speculative_config) -> bool:
+    if vllm_version_is("0.33.0"):
+        return speculative_config.disable_padded_drafter_batch
+    # MRv1's optional unpadded drafter was removed in native #63373.
+    return False
+
 
 # Exclusive batch * K limit of the fused op with perm_x1=(1, 0, 2).
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
@@ -159,6 +161,64 @@ class AscendMLAAttention(MLAAttention):
     """
 
     supports_pcp_dcp: ClassVar[bool] = True
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> AscendMLAAttentionSpec:
+        """Publish the complete cache demand using the selected execution format."""
+        spec = super().get_kv_cache_spec(vllm_config)
+        if getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None:
+            return spec
+        values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+        model_type = getattr(vllm_config.model_config.hf_text_config, "model_type", None)
+        storage_heads = self.num_heads
+        if model_type == "kimi_linear":
+            # Preserve the existing Kimi Linear cache head-count contract.
+            storage_heads = spec.num_heads
+        head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8 = self._get_kv_cache_format(spec)
+
+        # Preserve upstream metadata and apply all owner fields together.
+        # Reuse the physical packing selected by the execution implementation.
+        values.update(
+            num_heads=storage_heads,
+            model_version=spec.model_version or getattr(self, "model_version", None),
+            indexes_kv_by_block_stride=bool(
+                getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)
+            ),
+            cache_sparse_sfa_turboquant=use_sfa_turboquant,
+            cache_sparse_sfa_c8=use_sfa_c8,
+            store_on_host=(
+                not (spec.is_draft or self.is_draft_layer) and getattr(self.impl, "store_kv_cache_on_host", False)
+            ),
+            head_size=head_size,
+            dtype=dtype,
+            cache_dtype_str=cache_dtype_str,
+        )
+        return AscendMLAAttentionSpec(**values)
+
+    def _get_kv_cache_format(self, spec: MLAAttentionSpec) -> tuple[int, torch.dtype, str | None, bool, bool]:
+        """Resolve cache dimensions, dtype and SFA flags from the execution format."""
+        # Keep TurboQuant's existing precedence when both SFA switches are set.
+        use_sfa_turboquant = getattr(self.impl, "enable_sparse_sfa_turboquant", False)
+        use_sfa_c8 = not use_sfa_turboquant and getattr(self.impl, "enable_sparse_sfa_c8", False)
+        use_packed_sfa = use_sfa_turboquant or use_sfa_c8
+        use_fa_quant = getattr(self.impl, "fa_quant_layer", False)
+        head_size = spec.head_size
+        dtype = spec.dtype
+        cache_dtype_str = spec.cache_dtype_str
+        if use_packed_sfa:
+            head_size = self.impl.sfa_qsfa_packed_kv_head_dim
+            cache_dtype_str = self.impl.kv_cache_dtype
+            if use_sfa_turboquant:
+                dtype = torch.int8
+            else:
+                dtype = self.impl.c8_cache_dtype
+        elif use_fa_quant:
+            # FA quantization is selected per layer. The backend class hook
+            # must not reselect it from global configuration.
+            head_size = self.impl.head_size + self.qk_rope_head_dim
+            dtype = self.impl.dtype
+            cache_dtype_str = None
+
+        return head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8
 
 
 @dataclass
@@ -716,9 +776,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         if build_metadata_step == BUILD_METADATA_STEP_PREFILL:
             # If graph_pad_size > -1, mean is running in fullgraph mode.
             # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
-            if (
-                self.graph_pad_size > common_attn_metadata.num_reqs
-                and self.speculative_config.disable_padded_drafter_batch
+            if self.graph_pad_size > common_attn_metadata.num_reqs and _uses_unpadded_drafter_batch(
+                self.speculative_config
             ):
                 return self.graph_pad_size
             return common_attn_metadata.num_reqs
@@ -787,12 +846,12 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         # NOTE: MTP full graph is incompatible with context parallelism.
         # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
-        if self.graph_pad_size > self.num_decodes and self.speculative_config.disable_padded_drafter_batch:
+        if self.graph_pad_size > self.num_decodes and _uses_unpadded_drafter_batch(self.speculative_config):
             self.block_table = self.block_table[: self.graph_pad_size, ...]
         seq_lens_list = self.seq_lens.tolist()
 
         if self.graph_pad_size > num_reqs:
-            if self.speculative_config.disable_padded_drafter_batch:
+            if _uses_unpadded_drafter_batch(self.speculative_config):
                 num_reqs_pad_size = self.graph_pad_size - num_reqs
                 actual_seq_lengths_q = self.pad_actual_seq_len_q_mtp_disable_pad(
                     num_reqs_pad_size, num_reqs, actual_seq_lengths_q
@@ -910,6 +969,42 @@ class PrefillMLAPreprocessResult(NamedTuple):
     k_nope: torch.Tensor | None = None
     k_pe: torch.Tensor | None = None
     value: torch.Tensor | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MLAParamProvider:
+    layer_name: str
+    is_draft_model: bool = False
+    num_tokens: int | None = None
+    eagle_spec_multiple: int | None = None
+    disable_padded_batch: bool = False
+
+    def resolve(self, attn_metadata) -> dict[str, Any]:
+        decode = attn_metadata[self.layer_name].decode
+        assert decode is not None
+        if self.is_draft_model:
+            actual_seq_qlen = decode.actual_seq_lengths_q
+            block_table = decode.block_table
+            if self.disable_padded_batch:
+                block_table = block_table[: len(actual_seq_qlen)]
+            return {
+                "actual_seq_qlen": actual_seq_qlen,
+                "actual_seq_kvlen": decode.seq_lens_list + [0] * (len(actual_seq_qlen) - len(decode.seq_lens_list)),
+                "block_table": block_table,
+            }
+
+        assert self.num_tokens is not None
+        num_sequences = self.num_tokens
+        if self.eagle_spec_multiple is not None:
+            num_sequences //= self.eagle_spec_multiple
+        params: dict[str, Any] = {
+            "actual_seq_kvlen": decode.seq_lens_list + [0] * (num_sequences - len(decode.seq_lens_list)),
+        }
+        if self.eagle_spec_multiple is not None:
+            params["actual_seq_qlen"] = [
+                self.eagle_spec_multiple * (i + 1) for i in range(self.num_tokens // self.eagle_spec_multiple)
+            ]
+        return params
 
 
 class AscendMLAImpl(MLAAttentionImpl):
@@ -1044,141 +1139,16 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.fa_quant_layer or self.dtype not in (torch.bfloat16, torch.float16) or self.enable_kv_nz:
             return False
         dcp_size = config.parallel_config.decode_context_parallel_size
-        # History sees all Q heads in the DCP group; current uses local heads.
-        if self.use_pcp or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
+        # Replicated DSpark queries keep PCP=1 in their config, but reuse the
+        # physical PCP group. Its ranks carry the same Q heads, so history
+        # gathers only distinct TP heads, as _dcp_all_gather_fragments does.
+        pcp_size = get_pcp_group().world_size if dcp_size > 1 else 1
+        query_gather_size = max(1, dcp_size // pcp_size)
+        if self.use_pcp or self.num_heads * query_gather_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
         if not supports_component_major_mla_pd(config):
             return False
         return get_flashmla_ops() is not None
-
-    @staticmethod
-    def update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config=None,
-        speculative_config=None,
-        draft_attn_metadatas=None,
-    ):
-        if _EXTRA_CTX.is_draft_model:
-            if _EXTRA_CTX.is_draft_model_prefill:
-                graph_params = get_draft_graph_prefill_params()
-            else:
-                graph_params = get_draft_graph_params()
-            attn_metadata = draft_attn_metadatas
-            # mla_graph_keys_filter: hybrid models such as GLM-5.3-Flash put KDA
-            # layers in the same metadata dict, but only MLA layers contribute a
-            # captured FIA op, so zipping unfiltered keys against attn_params
-            # pairs MLA params with KDA layer names.
-            attn_keys = [
-                k
-                for k in attn_metadata[0]
-                if getattr(attn_metadata[0][k], "decode", None) is not None
-                and getattr(attn_metadata[0][k], "external_flashmla", None) is None
-            ]
-        else:
-            graph_params = get_graph_params()
-            attn_metadata = forward_context.attn_metadata
-            attn_keys = [
-                k
-                for k in attn_metadata
-                if getattr(attn_metadata[k], "decode", None) is not None
-                and getattr(attn_metadata[k], "external_flashmla", None) is None
-            ]
-        # FIXME: Behold! We are using a temporary hack here to update the args
-        # for each layer's attention op in the graph.
-        num_layers = len(attn_keys)
-        if num_layers == 0:
-            return
-        if _EXTRA_CTX.is_draft_model:
-            attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
-        attn_count = 0
-        with torch.npu.stream(update_stream):
-            for key, param, handle, event in zip(
-                attn_keys,
-                graph_params.attn_params[num_tokens],
-                graph_params.handles[num_tokens],
-                graph_params.events[num_tokens],
-            ):
-                (
-                    q_nope,
-                    k_nope,
-                    q_pe,
-                    k_pe,
-                    num_heads,
-                    num_kv_heads,
-                    input_layout,
-                    attn_mask,
-                    sparse_mode,
-                    scale,
-                    block_table,
-                    block_size,
-                    seq_lens_list,
-                    actual_seq_lengths,
-                    attn_output,
-                    softmax_lse,
-                    dequant_scale_q_nope,
-                    fak_descale_float,
-                ) = param
-                if _EXTRA_CTX.is_draft_model:
-                    draft_step = attn_count // num_layers
-                    attn_metadata_current = attn_metadata[draft_step]
-                    attn_count = attn_count + 1
-                else:
-                    attn_metadata_current = attn_metadata
-
-                layer_metadata = attn_metadata_current[key]
-                seq_lens_list = layer_metadata.decode.seq_lens_list
-                if speculative_config and speculative_config.use_eagle() and not _EXTRA_CTX.is_draft_model:
-                    actual_seq_lengths = layer_metadata.decode.actual_seq_lengths_q
-                    spec_multiple = speculative_config.num_speculative_tokens + 1
-                    seq_lens_list = seq_lens_list + [0] * (num_tokens // spec_multiple - len(seq_lens_list))
-                    actual_seq_lengths = [spec_multiple * (i + 1) for i in range(num_tokens // spec_multiple)]
-                elif _EXTRA_CTX.is_draft_model:
-                    actual_seq_lengths = layer_metadata.decode.actual_seq_lengths_q
-                    block_table = layer_metadata.decode.block_table
-                    # TODO: This is a hack and should be fixed in the future.
-                    if speculative_config.disable_padded_drafter_batch:
-                        block_table = block_table[: len(actual_seq_lengths)]
-                    seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) - len(seq_lens_list))
-                else:
-                    seq_lens_list = seq_lens_list + [0] * (num_tokens - len(seq_lens_list))
-
-                extra_args = {}
-                if dequant_scale_q_nope is not None:
-                    extra_args = {
-                        "query_quant_mode": 3,
-                        "key_quant_mode": 0,
-                        "value_quant_mode": 0,
-                        "dequant_scale_query": dequant_scale_q_nope,
-                        "dequant_scale_key": fak_descale_float,
-                        "dequant_scale_value": fak_descale_float,
-                    }
-
-                torch.npu.graph_task_update_begin(update_stream, handle)
-                torch_npu.npu_fused_infer_attention_score_v2.out(
-                    q_nope,
-                    k_nope,
-                    k_nope,
-                    query_rope=q_pe,
-                    key_rope=k_pe,
-                    num_query_heads=num_heads,
-                    num_key_value_heads=num_kv_heads,
-                    input_layout=input_layout,
-                    atten_mask=attn_mask,
-                    sparse_mode=sparse_mode,
-                    softmax_scale=scale,
-                    block_table=block_table,
-                    block_size=block_size,
-                    actual_seq_kvlen=seq_lens_list,
-                    actual_seq_qlen=actual_seq_lengths,
-                    workspace=graph_params.workspaces.get(num_tokens),
-                    out=[attn_output, softmax_lse],
-                    **extra_args,
-                )
-                torch.npu.graph_task_update_end(update_stream)
-
-                event.record(update_stream)
 
     def _v_up_proj(self, x):
         # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
@@ -2881,70 +2851,40 @@ class AscendMLAImpl(MLAAttentionImpl):
                 "dequant_scale_value": self.fak_descale_float,
             }
             common_kwargs.update(extra_fa_args)
-        if _EXTRA_CTX.is_draft_model:
-            if _EXTRA_CTX.is_draft_model_prefill:
-                graph_params = get_draft_graph_prefill_params()
-            else:
-                graph_params = get_draft_graph_params()
-        else:
-            graph_params = get_graph_params()
         # Release subsequent layer prefetches at the decode attention boundary,
         # just as prefill and external FlashMLA do.
         record_attention_compute_start()
         if _EXTRA_CTX.capturing:
-            stream = torch_npu.npu.current_stream()
-
-            event = torch.npu.ExternalEvent()
-            event.wait(stream)
-            event.reset(stream)
-            graph_params.events[num_tokens].append(event)
-
-            workspace = graph_params.workspaces.get(num_tokens)
+            workspace = get_capture_resource(
+                ("mla_fia_v2_workspace", num_tokens),
+                lambda: torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
+                    q_nope, k_nope, k_nope, **common_kwargs
+                ),
+                use_max_workspace=True,
+            )
             attn_output = torch.empty(attn_output_shape, dtype=q_pe.dtype, device=q_pe.device)
             softmax_lse = torch.empty(num_tokens, dtype=q_pe.dtype, device=q_pe.device)
-            attn_params = (
-                weak_ref_tensors(q_nope),
-                weak_ref_tensors(k_nope),
-                weak_ref_tensors(q_pe),
-                weak_ref_tensors(k_pe),
-                self.num_heads_padded,
-                self.num_kv_heads,
-                input_layout,
-                weak_ref_tensors(attn_mask) if attn_mask is not None else None,
-                sparse_mode,
-                self.scale,
-                decode_meta.block_table,
-                block_size,
-                decode_meta.seq_lens_list,
-                actual_seq_lengths,
-                weak_ref_tensors(attn_output),
-                weak_ref_tensors(softmax_lse),
+            operation_kwargs = {
+                "query": q_nope,
+                "key": k_nope,
+                "value": k_nope,
+                **common_kwargs,
+                "workspace": workspace,
+                "out": [attn_output, softmax_lse],
+            }
+            assert isinstance(self.layer_name, str)
+            is_draft_model = _EXTRA_CTX.is_draft_model
+            eagle_spec_multiple = None
+            if not is_draft_model and self.speculative_config is not None and self.speculative_config.use_eagle():
+                eagle_spec_multiple = self.speculative_config.num_speculative_tokens + 1
+            provider = MLAParamProvider(
+                layer_name=self.layer_name,
+                num_tokens=num_tokens,
+                is_draft_model=is_draft_model,
+                eagle_spec_multiple=eagle_spec_multiple,
+                disable_padded_batch=(is_draft_model and _uses_unpadded_drafter_batch(self.speculative_config)),
             )
-            if self.fa_quant_layer:
-                attn_params = attn_params + (
-                    weak_ref_tensors(dequant_scale_q_nope),
-                    weak_ref_tensors(self.fak_descale_float),
-                )  # type: ignore
-            else:
-                attn_params = attn_params + (None, None)  # type: ignore
-
-            if workspace is None:
-                workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
-                    q_nope, k_nope, k_nope, **common_kwargs
-                )
-                if _EXTRA_CTX.is_draft_model:
-                    update_draft_graph_params_workspaces(num_tokens, workspace)
-                else:
-                    update_graph_params_workspaces(num_tokens, workspace)
-
-            graph_params.attn_params[num_tokens].append(attn_params)
-
-            torch.npu.graph_task_group_begin(stream)
-            torch_npu.npu_fused_infer_attention_score_v2.out(
-                q_nope, k_nope, k_nope, **common_kwargs, workspace=workspace, out=[attn_output, softmax_lse]
-            )
-            handle = torch.npu.graph_task_group_end(stream)
-            graph_params.handles[num_tokens].append(handle)
+            register_task(torch_npu.npu_fused_infer_attention_score_v2.out, operation_kwargs, provider)
         else:
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(q_nope, k_nope, k_nope, **common_kwargs)
 

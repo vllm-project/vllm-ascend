@@ -1,0 +1,8 @@
+pr: 22482
+entries:
+  - category: bugfix
+    text: >-
+      Fixed an issue where the API server wrote its file logs to the default
+      directory even when `ascend_log_path` was set in `--additional-config`.
+      The configured directory is now honored from startup, so all processes
+      log to the same place.

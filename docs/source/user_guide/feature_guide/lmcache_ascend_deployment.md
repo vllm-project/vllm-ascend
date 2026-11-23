@@ -4,7 +4,7 @@
 
 LMCache-Ascend is a community maintained plugin for running LMCache on the Ascend NPU.
 
-We provide a simple deployment guide here. For further info about deployment notes, please refer to [LMCache-Ascend doc](https://github.com/LMCache/LMCache-Ascend/blob/main/README.md)
+We provide a simple deployment guide here. For further info about deployment notes, please refer to [LMCache-Ascend documentation](https://github.com/LMCache/LMCache-Ascend/blob/main/README.md)
 
 ## Getting Started
 
@@ -35,7 +35,6 @@ docker run -it \
     -p 8000:8000 \
     -p 8001:8001 \
     --name lmcache-ascend-dev \
-    -e ASCEND_VISIBLE_DEVICES=${DEVICE_LIST} \
     -e ASCEND_RT_VISIBLE_DEVICES=${DEVICE_LIST} \
     -e ASCEND_TOTAL_MEMORY_GB=32 \
     -e VLLM_TARGET_DEVICE=npu \
@@ -52,7 +51,7 @@ docker run -it \
 
 ### Manual Installation
 
-Assuming your working directory is `/workspace` and vllm/vllm-ascend have already been installed.
+Assuming your working directory is `/workspace` and vLLM/vllm-ascend have already been installed.
 
 1. Install LMCache Repo
 
