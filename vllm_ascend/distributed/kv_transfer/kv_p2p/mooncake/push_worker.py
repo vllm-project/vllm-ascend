@@ -847,11 +847,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     )
 
     def _submit_shared_layer_writes(self, shared_names: list[str]) -> None:
-        # A busy engine or pending metadata must not defer a shared cache read
-        # beyond the point where AscendStore can hand the slot to another layer.
+        # Wait for D metadata and submit WRITEs while this layer still owns the slot.
         self._process_sending_requests(layer_hook=True, force=True, wait_for_metadata=True)
-        # Only resident caches can be picked up by later hooks. Subsequent
-        # chunks restore the unsent part of a shared cache before writing it.
+        # Remove shared entries so later hooks cannot send from a reused slot.
         for request_id in self._prefilling_request_ids:
             available_layers = self._reqs_send_state[request_id].available_layers
             for name in shared_names:
