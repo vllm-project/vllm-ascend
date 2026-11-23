@@ -2,4 +2,4 @@ pr: 22516
 entries:
   - category: performance
     hardware: [A5]
-    text: Reduced combined KDA verification and ordinary state commit latency by 8% on A5 for 30 requests across 23 layers with four accepted speculative tokens per request.
+    text: Reduced combined KDA verification and ordinary state commit latency by 7.1% on A5 for 30 requests across 23 layers with four accepted speculative tokens per request.

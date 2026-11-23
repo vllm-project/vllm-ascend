@@ -1059,8 +1059,8 @@ def test_align_context(mode, graph_mode, state_dtype, heads, key_dim, value_dim,
 
             return invoke
 
-    for name in ["_commit_kda_state_kernel", "_commit_kda_state_grouped_kernel"]:
-        monkeypatch.setattr(recoverssm_module, name, RecordingKernel(name))
+    name = "_commit_kda_state_kernel"
+    monkeypatch.setattr(recoverssm_module, name, RecordingKernel(name))
 
     def launch():
         context.commit(counts, indices, offsets, mapping, table, computed, block_size)
@@ -1078,9 +1078,7 @@ def test_align_context(mode, graph_mode, state_dtype, heads, key_dim, value_dim,
         captured.replay()
     else:
         launch()
-    grouped = is_950() and state_dtype == torch.float32 and heads in (32, 64) and key_dim == value_dim == 128
-    fast_path = ("_commit_kda_state_grouped_kernel", False) if grouped else ("_commit_kda_state_kernel", False)
-    assert launches == {fast_path, (fast_path[0], True)}
+    assert launches == {(name, False), (name, True)}
     torch.testing.assert_close(
         context.state_commit_lens[:3] + context.boundary_commit_lens[:3], context.commit_lens[:3], atol=0, rtol=0
     )
@@ -1276,8 +1274,7 @@ def test_commit_window_uses_device_path(
         expected.append((golden_state, golden_conv))
         originals.append((initial, conv.clone()))
     context = KDARecoverSSMCommitContext.create(layers, spec_query_len=span, max_num_reqs=batch)
-    grouped_commit = is_950() and heads in (32, 64)
-    kernel_name = "_commit_kda_state_grouped_kernel" if grouped_commit else "_commit_kda_state_kernel"
+    kernel_name = "_commit_kda_state_kernel"
     original_kernel, launches = getattr(recoverssm_module, kernel_name), []
 
     class RecordingKernel:
@@ -1286,15 +1283,17 @@ def test_commit_window_uses_device_path(
 
             def invoke(*args, **kwargs):
                 launches.append(kernel_name)
-                if not grouped_commit:
-                    matrix_buffers = 2
-                    assert (
-                        kwargs["BV"] * kwargs["BK"] * context.correction_caches[0].element_size() * matrix_buffers
-                        <= recoverssm_module.get_ub_size_bytes()
-                    )
-                    if is_950():
-                        assert grid == (recoverssm_module.get_vectorcore_num(),)
-                        assert kwargs["batch"] == batch
+                matrix_buffers = 2
+                assert (
+                    kwargs["BV"] * kwargs["BK"] * context.correction_caches[0].element_size() * matrix_buffers
+                    <= recoverssm_module.get_ub_size_bytes()
+                )
+                if is_950():
+                    assert grid == (recoverssm_module.get_vectorcore_num(),)
+                    assert kwargs["batch"] == batch
+                else:
+                    assert "batch" not in kwargs
+                    assert grid == (((dim + kwargs["BV"] - 1) // kwargs["BV"]) * len(layers) * heads * batch,)
                 return launch(*args, **kwargs)
 
             return invoke
