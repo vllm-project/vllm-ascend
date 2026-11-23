@@ -72,7 +72,7 @@ def _build_memcache_pool_config() -> MemcacheKVPoolConfig:
                 "local": {
                     "ock.mmc.log_level": "error",
                     "ock.mmc.local_service.world_size": 256,
-                    "ock.mmc.local_service.protocol": "device_sdma",
+                    "ock.mmc.local_service.protocol": "device_urma",
                     # Per engine; 16K/36K prompts need well under 1GB of KV, and
                     # 8 DP engines each reserve this much host memory.
                     "ock.mmc.local_service.dram.size": "4GB",
@@ -92,13 +92,13 @@ def _build_memcache_pool_config() -> MemcacheKVPoolConfig:
             "local": {
                 "ock.mmc.log_level": "error",
                 "ock.mmc.local_service.world_size": 256,
-                "ock.mmc.local_service.protocol": "device_sdma",
+                "ock.mmc.local_service.protocol": "device_urma",
                 "ock.mmc.local_service.dram.size": "0GB",
             },
             "standalone": {
                 "ock.mmc.log_level": "error",
                 "ock.mmc.local_service.world_size": 256,
-                "ock.mmc.local_service.protocol": "device_sdma",
+                "ock.mmc.local_service.protocol": "device_urma",
                 "ock.mmc.local_service.dram.size": "10GB",
                 "ock.mmc.local_service.storage.enabled": "true",
                 "ubsio.disk.path": SSD_DEV,
@@ -208,6 +208,9 @@ def _assert_ssd_evidence(before: dict[str, float], after: dict[str, float]) -> N
         "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "PYTHONHASHSEED": "0",
+        # A5 (950PR/950DT) needs UBOE/UB comm resources for the pool runtime.
+        "ASCEND_GLOBAL_RESOURCE_CONFIG": '{"comm_resource_config.protocol_desc":["uboe:device"]}',
+        "ASCEND_LOCAL_COMM_RES": '{"version":"1.3"}',
         # DP8 settings mirrored from PR #22258's known-good A5 config.
         "HCCL_OP_EXPANSION_MODE": "CCU_SCHED",
         "HCCL_BUFFSIZE": "1600",
