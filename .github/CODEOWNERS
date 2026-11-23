@@ -40,10 +40,9 @@
 /.github/workflows/dockerfiles/Dockerfile.ai-review @wangxiyuan
 /.github/workflows/scripts/ai_review.py @wangxiyuan
 /.github/workflows/scripts/test_ai_review.py @wangxiyuan
-/.github/agent-review/L2/release-note/ @wangxiyuan
-# AI review knowledge base: fine-grained owners (later entries win)
 /.github/agent-review/L1/ @wangxiyuan
 /.github/agent-review/L2/ci/ @zhangxinyuehfad
+/.github/agent-review/L2/release-note/ @wangxiyuan
 
 # Dockerfiles
 /Dockerfile* @zhangxinyuehfad @czydyy @winson-00178005
@@ -284,23 +283,3 @@
 # SKIP(owner): /tests/deepseek_v41_utils.py
 # SKIP(owner): /tests/ut/
 # SKIP(owner): /tests/e2e/pull_request/
-<<<<<<< HEAD
-# SKIP(owner): /vllm_ascend/attention/__init__.py
-# SKIP(owner): /vllm_ascend/model_executor/__init__.py
-# SKIP(owner): /vllm_ascend/models/layer/__init__.py
-# SKIP(owner): /vllm_ascend/models/layer/attention/__init__.py
-# SKIP(owner): /vllm_ascend/worker/__init__.py
-# SKIP(owner): /vllm_ascend/worker/v2/__init__.py
-
-# AI review POC (RFC #21451): later entries win over /.github above
-/.github/agent-review/ @wangxiyuan
-/.github/workflows/ai_review.yml @wangxiyuan
-/.github/workflows/_schedule_ai_review_image_build.yaml @wangxiyuan
-/.github/workflows/dockerfiles/Dockerfile.ai-review @wangxiyuan
-/.github/workflows/scripts/ai_review.py @wangxiyuan
-/.github/workflows/scripts/test_ai_review.py @wangxiyuan
-/.github/agent-review/L2/release-note/ @wangxiyuan
-
-# AI review knowledge base: fine-grained owners (later entries win)
-/.github/agent-review/L1/ @wangxiyuan
-/.github/agent-review/L2/ci/ @zhangxinyuehfad
