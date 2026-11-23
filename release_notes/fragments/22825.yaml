@@ -1,0 +1,7 @@
+pr: 22825
+entries:
+  - category: performance
+    text: >-
+      Reduce compiled-model dispatch overhead for graphless Model Runner V2
+      steps with the optional `bypass_compiled_eager_steps` setting. It runs
+      steps in graph mode `NONE` directly through the uncompiled model.
