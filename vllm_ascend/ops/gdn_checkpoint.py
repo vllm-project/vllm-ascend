@@ -3,14 +3,17 @@
 """GDN checkpoint export from FP32 chunk-start recurrent states."""
 
 import torch
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position, is_mamba_prefill_checkpoint_valid
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.core.gdn_checkpoint_policy import GDNCheckpointPolicy
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule_checkpoint
+
+logger = init_logger(__name__)
 
 GDN_CHECKPOINT_ALIGNMENT = 64
 
@@ -60,7 +63,9 @@ def initialize_gdn_checkpoints(layer) -> None:
     layer._checkpoint_exporter = MambaPrefillCheckpointExporter(state_len=layer.conv_kernel_size - 1)
 
 
-def build_gdn_checkpoint_metadata(builder, metadata, rows, policy: GDNCheckpointPolicy):
+def build_gdn_checkpoint_metadata(
+    builder, metadata, rows, policy: GDNCheckpointPolicy, *, host_blocks: tuple[list[int], ...] | None = None
+):
     from vllm.model_executor.layers.mamba.checkpoint import (
         MambaPrefillCheckpointMetadata,
     )
@@ -77,7 +82,7 @@ def build_gdn_checkpoint_metadata(builder, metadata, rows, policy: GDNCheckpoint
     all_query_lens = metadata.query_start_loc_cpu.diff().tolist()
     query_lens = [all_query_lens[row] for row in rows]
     offsets, columns = [], []
-    for row, query_len in zip(rows, query_lens):
+    for row, query_len in zip(rows, query_lens, strict=True):
         end = seq_lens[row]
         start = end - query_len
         position = get_mamba_prefill_checkpoint_position(
@@ -87,10 +92,16 @@ def build_gdn_checkpoint_metadata(builder, metadata, rows, policy: GDNCheckpoint
         valid = is_mamba_prefill_checkpoint_valid(
             start, end, position, hash_size, spec.block_size, spec.prefill_checkpoint_alignment
         )
+        column = cdiv(end, spec.block_size) - 2
+        if valid and host_blocks is not None:
+            blocks = host_blocks[row] if row < len(host_blocks) else ()
+            valid = 0 <= column < len(blocks) and blocks[column] != NULL_BLOCK_ID
         offsets.append(position - start if valid else 0)
-        columns.append(cdiv(end, spec.block_size) - 2 if valid else -1)
+        columns.append(column if valid else -1)
     if not any(offsets):
         return None
+    if host_blocks is not None:
+        logger.info_once("Native GDN checkpoints use host block metadata")
     device = metadata.query_start_loc.device
     checkpoint = MambaPrefillCheckpointMetadata(
         checkpoint_offsets=async_tensor_h2d(offsets, dtype=torch.int32, device=device),

@@ -539,6 +539,11 @@ class NPUModelRunner(GPUModelRunner):
                 max_metadata_reqs,
                 [table.gpu.shape[1] for table in self.block_tables.block_tables],
             )
+            # Ascend's patched GPU runner does not call the upstream model-state
+            # KV initializer. Attach the GDN mirror to its actual block table.
+            initialize_gdn_mirror = getattr(self.model_state, "initialize_gdn_checkpoint_block_mirror", None)
+            if initialize_gdn_mirror is not None:
+                initialize_gdn_mirror(self.kv_cache_config, self.block_tables)
             self._target_uses_flashmla = self._has_target_flashmla_attention()
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
