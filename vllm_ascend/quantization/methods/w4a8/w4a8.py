@@ -27,7 +27,11 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import (
+    MoEWeights,
+    build_fused_experts_input,
+    megamoe_shared_weight_fields,
+)
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.utils import (
@@ -428,6 +432,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                     w2_scale=[t.reshape(-1) for t in layer.w2_weight_scale_list],
                     w1_scale_bias=[t.reshape(-1) for t in layer.w13_scale_bias_list],
                     w2_scale_bias=[t.reshape(-1) for t in layer.w2_scale_bias_list],
+                    **megamoe_shared_weight_fields(layer),
                 )
             else:
                 return MoEWeights(
@@ -446,6 +451,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=layer.cann_mega_moe_w2_weight_scale_list,
                 w1_scale_bias=layer.cann_mega_moe_w13_scale_bias_list,
                 w2_scale_bias=layer.cann_mega_moe_w2_scale_bias_list,
+                **megamoe_shared_weight_fields(layer),
             )
         return MoEWeights(
             w1=[layer.w13_weight],

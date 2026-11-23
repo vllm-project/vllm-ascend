@@ -551,7 +551,7 @@ class FusedMC2CommImpl(MoECommMethod):
         if activation_kwargs is None:
             activation_kwargs = getattr(self, "mega_moe_activation_kwargs", {}) or {}
 
-        # Shared experts fused into the MegaMoe operator (A5 only): their
+        # Shared experts fused into the MegaMoe operator: their
         # GMM1 + activation + GMM2 runs inside the kernel on the local tokens,
         # so no Dispatch/Combine traffic is involved. The caller skips the
         # separate shared-expert forward when this payload is present.
@@ -567,10 +567,14 @@ class FusedMC2CommImpl(MoECommMethod):
             shared_kwargs = dict(
                 shared_l1_weights=weights.shared_w1,
                 shared_l2_weights=weights.shared_w2,
-                shared_l1_weights_sf=weights.shared_w1_scale,
-                shared_l2_weights_sf=weights.shared_w2_scale,
                 shared_expert_quant_out_dtype=getattr(shared_fusion, "quant_out_dtype", None),
             )
+            # The A16W16 (bf16) shared expert has no scales; only pass the
+            # scale knobs when the payload provides them.
+            if weights.shared_w1_scale is not None:
+                shared_kwargs["shared_l1_weights_sf"] = weights.shared_w1_scale
+            if weights.shared_w2_scale is not None:
+                shared_kwargs["shared_l2_weights_sf"] = weights.shared_w2_scale
             # Mixed quantization: declare the shared weight dtype explicitly,
             # otherwise the operator inherits the routed weight type for the
             # shared descriptors and resolves the wrong shared GMM mode.
