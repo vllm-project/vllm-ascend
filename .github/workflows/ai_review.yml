@@ -56,6 +56,8 @@ jobs:
           AI_REVIEW_EVENT_ACTION: ${{ github.event.action }}
           AI_REVIEW_ACTOR: ${{ github.actor }}
           AI_REVIEW_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          # Set on comment events only; empty otherwise (label/push rounds).
+          AI_REVIEW_COMMENT_ID: ${{ github.event.comment.id }}
           # The agent command is kept configurable so the engine stays
           # pluggable (RFC: engine swap without workflow surgery). Override
           # the repo variable to switch engines.
@@ -69,4 +71,5 @@ jobs:
             --workspace . \
             --pr "${AI_REVIEW_PR_NUMBER}" \
             --event "${AI_REVIEW_EVENT_NAME}/${AI_REVIEW_EVENT_ACTION}" \
-            --actor "${AI_REVIEW_ACTOR}"
+            --actor "${AI_REVIEW_ACTOR}" \
+            --comment-id "${AI_REVIEW_COMMENT_ID}"

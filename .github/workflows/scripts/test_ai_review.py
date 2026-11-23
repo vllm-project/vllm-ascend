@@ -175,6 +175,19 @@ def test_mention_gate(body, expected):
 @pytest.mark.parametrize(
     "body,expected",
     [
+        ("/ai-review-waive", True),
+        ("please /ai-review-waive this one", True),
+        ("/ai-review-waiver", False),  # boundary: longer token
+        ("/ai-review", False),  # different command
+    ],
+)
+def test_waive_gate(body, expected):
+    assert bool(ai.WAIVE_RE.search(body)) == expected
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
         ("/ai-review-stop", True),
         ("text /ai-review-stop trailing", True),
         ("/ai-review-stopwatch", False),  # boundary: longer token

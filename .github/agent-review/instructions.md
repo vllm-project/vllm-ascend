@@ -31,13 +31,16 @@ Every reply MUST be a single PR comment consisting of:
      have not read.
    - `body` — what is wrong and how to fix it, 1–4 sentences. No headers,
      no markdown headings inside.
-2. **Checklist walk**: for rounds after the first, briefly state per open
+2. **Waived findings**: the prompt may list findings a human reviewer has
+   waived. A waiver is a final human decision — never re-raise a waived
+   finding, never count it toward MUST-FIX, and do not argue with it.
+3. **Checklist walk**: for rounds after the first, briefly state per open
    finding whether it is resolved (link the fixing commit/lines) or still
    open. Do not re-argue resolved findings.
-3. **Verdict line**: if and only if every MUST-FIX is resolved, include the
+4. **Verdict line**: if and only if every MUST-FIX is resolved, include the
    exact line `AI-REVIEW-VERDICT: PASS` and set `state=passed` in the
    signature block. Otherwise do not emit the PASS marker.
-4. **Signature block** as the last line of the comment:
+5. **Signature block** as the last line of the comment:
 
    ```text
    <!-- ai-review: state=reviewing | round=2/5 | total=6 | head=abc1234def0 -->

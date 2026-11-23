@@ -82,6 +82,12 @@ FINDING_BLOCK_RE = re.compile(r"```finding\n(.*?)```", re.S)
 FIELD_LINE_RE = re.compile(r"^(\w+):\s*(.+)$", re.M)
 REQUIRED_FINDING_FIELDS = ("path", "line", "severity", "rule", "body")
 
+# Marker embedded in every inline finding comment so thread replies can be
+# attributed to the agent, and so waived findings stay visibly marked.
+INLINE_MARKER = "ai-review finding"
+WAIVED_PREFIX = "**[WAIVED"
+WAIVE_RE = re.compile(r"/ai-review-waive(?![\w-])")
+
 
 def parse_findings(text: str) -> list[dict]:
     """Parse ```finding blocks into dicts; malformed blocks are dropped.
@@ -255,6 +261,7 @@ class Orchestrator:
         prev_agent_comment = self._last_agent_comment_text()
         user_reply = self.comment_body or "(n/a — new push or first round)"
         domains = self._touched_domains()
+        waived = self._waived_findings()
 
         closing_note = ""
         if closing:
@@ -289,6 +296,12 @@ class Orchestrator:
             + "\n## Knowledge base map\n\n"
             + kb_map
             + "\n"
+            + (
+                "\n\n## Waived findings (human decision — FINAL, do not re-raise, "
+                "do not count toward MUST-FIX)\n\n" + "\n".join(f"- {w}" for w in waived)
+                if waived
+                else ""
+            )
             + "\n\n## Domains this PR touches\n\n"
             + (
                 "\n".join(f"- {d['name']}: {d.get('description', '')} — read `L2/{d['name']}/` first" for d in domains)
@@ -407,6 +420,18 @@ class Orchestrator:
                 lines.append(f"- `{rel}` — rules with IDs: {ids}")
         return "\n".join(lines)
 
+    def _waived_findings(self) -> list[str]:
+        """path:line of inline findings a reviewer has waived."""
+        waived = []
+        for c in self._review_comments():
+            body = c.get("body", "")
+            if c.get("in_reply_to_id") or INLINE_MARKER not in body:
+                continue
+            if not body.startswith(WAIVED_PREFIX):
+                continue
+            waived.append(f"`{c.get('path')}:{c.get('line')}`")
+        return waived
+
     def _touched_domains(self) -> list[dict]:
         registry_path = os.path.join(self.workspace, ".github", "agent-review", "domains.yaml")
         files = self._gh_json("pr", "view", str(self.pr), "--json", "files", "-q", "[.files[].path]")
@@ -436,6 +461,8 @@ class Orchestrator:
             return self._handle_pr_event(action)
         if name == "issue_comment":
             return self._handle_comment()
+        if name == "pull_request_review_comment":
+            return self._handle_review_comment()
         return 0
 
     def _handle_pr_event(self, action: str) -> int:
@@ -524,6 +551,15 @@ class Orchestrator:
             )
             return 0
 
+        # Reviewer waiver: top-level /ai-review-waive waives ALL open
+        # findings, then triggers one re-evaluation round (it costs agent
+        # compute, so it counts against the budget).
+        if WAIVE_RE.search(body):
+            if not self.actor_can_write():
+                print(f"actor {self.actor} lacks write access; ignoring waive", flush=True)
+                return 0
+            return self._waive_all()
+
         # Only an explicit slash command counts as addressing the agent.
         if not MENTION_RE.search(body):
             return 0
@@ -543,10 +579,108 @@ class Orchestrator:
         self.run_agent_round(round_no=next_round, closing=closing)
         return 0
 
+    # ---- waivers and inline threads ---------------------------------------
+
+    def _review_comments(self) -> list[dict]:
+        return self._gh_json("api", f"repos/:owner/:repo/pulls/{self.pr}/comments?per_page=100")
+
+    def _edit_review_comment(self, comment_id: int, body: str):
+        self._gh_json(
+            "api",
+            f"repos/:owner/:repo/pulls/{self.pr}/comments/{comment_id}",
+            "-X",
+            "PATCH",
+            "-f",
+            f"body={body}",
+        )
+
+    def _thread_root(self, comment: dict) -> dict | None:
+        """Follow in_reply_to_id to the root comment of a thread (bounded)."""
+        root = comment
+        for _ in range(10):
+            if root.get("in_reply_to_id") is None:
+                return root
+            root = self._gh_json("api", f"repos/:owner/:repo/pulls/{self.pr}/comments/{root['in_reply_to_id']}")
+        return None
+
+    def _waive_comment(self, comment: dict) -> bool:
+        """Prefix one inline finding comment with the waived banner."""
+        body = comment.get("body", "")
+        if INLINE_MARKER not in body or body.startswith(WAIVED_PREFIX):
+            return False
+        self._edit_review_comment(comment["id"], f"{WAIVED_PREFIX} by @{self.actor}]**\n\n{body}")
+        return True
+
+    def _waive_all(self) -> int:
+        roots = [
+            c
+            for c in self._review_comments()
+            if INLINE_MARKER in c.get("body", "")
+            and not c.get("in_reply_to_id")
+            and not c.get("body", "").startswith(WAIVED_PREFIX)
+        ]
+        for c in roots:
+            self._waive_comment(c)
+        self.post_notice(
+            f"⚖️ @{self.actor} waived all {len(roots)} open finding(s). "
+            "Re-evaluating: waived findings will not count toward MUST-FIX."
+        )
+        if self.state.state in ("reviewing", "waiting-human"):
+            if self.state.total >= MAX_TOTAL_ROUNDS:
+                return 0
+            next_round = self.state.round + 1
+            closing = next_round > MAX_ROUNDS_PER_PUSH
+            self.run_agent_round(round_no=next_round, closing=closing)
+        return 0
+
+    def _handle_review_comment(self) -> int:
+        """Replies inside an inline finding thread: `/ai-review-waive` waives
+        that single finding; `/ai-review` triggers the next round. Replies to
+        threads the agent did not start are ignored."""
+        body = self.comment_body or ""
+        if not body:
+            return 0
+        comments = {c["id"]: c for c in self._review_comments()}
+        ours = [c for c in comments.values() if INLINE_MARKER in c.get("body", "")]
+        if not ours:
+            return 0
+        # the event's comment itself
+        event_comment = comments.get(self._event_comment_id)
+        if not event_comment:
+            return 0
+        root = self._thread_root(event_comment)
+        if not root or INLINE_MARKER not in root.get("body", ""):
+            return 0
+
+        if WAIVE_RE.search(body):
+            if not self.actor_can_write():
+                print(f"actor {self.actor} lacks write access; ignoring waive", flush=True)
+                return 0
+            if self._waive_comment(root):
+                self.post_notice(
+                    f"⚖️ @{self.actor} waived the finding at `{root.get('path')}:"
+                    f"{root.get('line')}`. It will not count toward MUST-FIX."
+                )
+            return 0
+
+        if MENTION_RE.search(body):
+            if self.state.state in ("passed", "none", "stopped"):
+                return 0
+            if self.state.total >= MAX_TOTAL_ROUNDS:
+                self.post_notice(
+                    f"AI review 已达到整个 PR 的轮次预算上限（{MAX_TOTAL_ROUNDS} 轮），暂停响应。",
+                )
+                return 0
+            next_round = self.state.round + 1
+            closing = next_round > MAX_ROUNDS_PER_PUSH
+            self.run_agent_round(round_no=next_round, closing=closing)
+        return 0
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--comment-body-file", default="")
+    parser.add_argument("--comment-id", type=int, default=0)
     parser.add_argument("--workspace", default=".")
     parser.add_argument("--pr", type=int, required=True)
     parser.add_argument("--event", required=True)
@@ -559,6 +693,7 @@ def main() -> int:
             comment_body = f.read()
 
     orch = Orchestrator(args.workspace, args.pr, args.event, args.actor, comment_body)
+    orch._event_comment_id = args.comment_id
     return orch.handle()
 
 

@@ -57,6 +57,8 @@ State is carried in a machine-readable signature block at the end of every agent
 |---|---|
 | Author replies with the `/ai-review` command | next round (plain comments, CI bots and human conversations are ignored) |
 | Author pushes a commit | `ai-review-passed` revoked, round budget reset, incremental re-review of the new diff |
+| Reviewer comments `/ai-review-waive` on a PR comment | ALL open findings waived (marked on the inline comments), one re-evaluation round runs |
+| Reviewer replies `/ai-review-waive` inside one finding's thread | that single finding is waived |
 | Reviewer removes the label or comments `/ai-review-stop` | agent stops; an in-flight round is discarded before posting |
 | All MUST-FIX resolved | agent emits `AI-REVIEW-VERDICT: PASS`; the orchestrator applies `ai-review-passed` |
 | Round cap reached (5 per push) | closing summary, state `waiting-human`, a human decides |
@@ -68,7 +70,7 @@ State is carried in a machine-readable signature block at the end of every agent
 
 1. Ask a maintainer to add you to the allowlist (or self-request in RFC #21451).
 2. When you want a deep review, ask a reviewer to apply the `ai-review` label to your PR.
-3. The agent posts findings as inline comments on your diff plus one summary comment. Reply to findings with a comment containing the `/ai-review` command (this is what triggers the next round).
+3. The agent posts findings as inline comments on your diff plus one summary comment. To trigger the next round, add a **top-level PR comment** containing `/ai-review` — replies inside an inline finding thread also reach the agent, but a plain comment without the command never does.
 4. Fix what is marked `MUST-FIX` and push. The agent re-reviews the new diff automatically; when nothing blocking remains it applies the `ai-review-passed` label and a human reviewer takes over.
 5. Everything is optional: without the label your PR flow is unchanged.
 
