@@ -1,4 +1,0 @@
-pr: 22198
-entries:
-  - category: dependency
-    text: Updated the supported vLLM release to v0.34.0; v0.33.0 is no longer supported.
