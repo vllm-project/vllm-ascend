@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""End-to-end CPU tests for the Step5 KV cache materialization path:
-
-plan (step5 cache_config) -> allocate (attn_utils._allocate_kv_cache) ->
-reshape (attn_utils._reshape_kv_cache_v2) -> bind (patch_bind_kv_cache).
-"""
+"""Compare Step5 V2 cache allocation and view geometry on CPU."""
 
 from types import SimpleNamespace
 
+import pytest
 import torch
+from vllm import envs
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -16,12 +14,20 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 import vllm_ascend.worker.v2.attn_utils as attn_utils_v2
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import KV_CACHE_BUFFER_ALIGNMENT
 from vllm_ascend.models.step5.cache_config import (
     get_step5_kv_cache_config_from_groups,
     get_step5_kv_cache_groups,
     get_step5_pool_bytes_per_block,
+)
+from vllm_ascend.models.step5.sparse_attention import (
+    AscendStep5CSATailRing,
+    AscendStep5DSABackend,
+    AscendStep5SparseSummaryBackend,
 )
 
 BLOCK = 128
@@ -48,7 +54,9 @@ def _specs():
         dtype=torch.bfloat16,
         sliding_window=4096,
     )
-    summary = FullAttentionSpec(block_size=BLOCK, num_kv_heads=1, head_size=16, dtype=torch.float8_e4m3fn)
+    summary = FullAttentionSpec(
+        block_size=BLOCK, num_kv_heads=1, head_size=256, head_size_v=0, dtype=torch.uint8, tokens_per_state=8
+    )
     ring = CircularBufferSpec(
         block_size=BLOCK,
         num_kv_heads=1,
@@ -94,96 +102,92 @@ def _plan(num_blocks: int = 3):
     )
     groups = get_step5_kv_cache_groups(vllm_config, _specs(), _orig_groups)
     config = get_step5_kv_cache_config_from_groups(
-        SimpleNamespace(
-            cache_config=SimpleNamespace(
-                num_gpu_blocks_override=num_blocks,
-                prefix_cache_retention_interval=None,
-            )
-        ),
-        groups,
-        10**9,
+        vllm_config, groups, num_blocks * get_step5_pool_bytes_per_block(groups)
     )
     return vllm_config, groups, config
 
 
-def _allocate(config, vllm_config, monkeypatch):
-    monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: vllm_config)
-    backend = SimpleNamespace(full_cls_name=lambda: "step5-cache-test")
+def _snapshot(caches, backing):
+    return {
+        name: (
+            isinstance(cache, tuple),
+            [
+                (
+                    tensor.untyped_storage().data_ptr() == backing.untyped_storage().data_ptr(),
+                    tensor.data_ptr() - backing.data_ptr(),
+                    tuple(tensor.shape),
+                    tensor.dtype,
+                    tensor.stride(),
+                )
+                for tensor in (cache if isinstance(cache, tuple) else (cache,))
+            ],
+        )
+        for name, cache in caches.items()
+    }
+
+
+@pytest.mark.parametrize(
+    ("num_blocks", "kv_transfer", "layout"),
+    [(1, False, KVCacheLayout.LBNHC), (3, False, KVCacheLayout.LBNHC), (3, True, KVCacheLayout.LBHNC)],
+)
+def test_step5_shared_allocator_matches_legacy_views(monkeypatch, num_blocks, kv_transfer, layout):
+    runtime, groups, config = _plan(num_blocks)
+    runtime.kv_transfer_config = object() if kv_transfer else None
+    monkeypatch.setattr(envs, "VLLM_KV_CACHE_LAYOUT", layout.name)
+    monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime)
+    monkeypatch.setattr(attn_utils_v2, "get_shared_kv_cache_layers", lambda _: {})
+    ring = AscendStep5CSATailRing.__new__(AscendStep5CSATailRing)
+    backends = {
+        L0: AscendStep5DSABackend,
+        L2: AscendStep5DSABackend,
+        L1: AscendAttentionBackend,
+        RING: ring.get_attn_backend(),
+        SUMMARY0: AscendStep5SparseSummaryBackend,
+        SUMMARY2: AscendStep5SparseSummaryBackend,
+    }
     layers = {
-        name: SimpleNamespace(get_attn_backend=lambda: backend, num_heads=1)
-        for group in config.kv_cache_groups
-        for name in group.layer_names
+        name: SimpleNamespace(get_attn_backend=lambda backend=backend: backend) for name, backend in backends.items()
     }
     monkeypatch.setattr(attn_utils_v2, "get_layers_from_vllm_config", lambda *_: layers)
-    return attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
+    allocations = []
+    allocate = attn_utils_v2._allocate_int8_cache_tensor
 
+    def record_allocation(size, alignment, device):
+        backing = allocate(size, alignment, device)
+        allocations.append(backing)
+        return backing
 
-def _reshape(config, raw, monkeypatch):
-    monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: SimpleNamespace())
-    monkeypatch.setattr(attn_utils_v2, "get_layers_from_vllm_config", lambda *_: {})
-    backend = SimpleNamespace(
-        get_kv_cache_shape=lambda num_blocks, block_size, heads, head_size, *a, **k: (
-            2,
-            num_blocks,
-            block_size,
-            heads,
-            head_size,
-        )
-    )
-    groups = [
-        SimpleNamespace(
-            kv_cache_group_id=index,
-            kv_cache_spec=group.kv_cache_spec,
-            layer_names=group.layer_names,
-            backend=backend,
-        )
-        for index, group in enumerate(config.kv_cache_groups)
-    ]
-    return attn_utils_v2._reshape_kv_cache_v2(
-        groups,
+    monkeypatch.setattr(attn_utils_v2, "_allocate_int8_cache_tensor", record_allocation)
+    device = torch.device("cpu")
+    block_sizes = [BLOCK] * len(groups)
+    raw = attn_utils_v2._allocate_kv_cache(config, {}, device)
+    legacy = attn_utils_v2._reshape_kv_cache_v2(
+        attn_utils_v2._get_cache_attention_groups(config, layers, {}),
         raw,
-        "auto",
-        [BLOCK] * len(groups),
+        runtime.cache_config.cache_dtype,
+        block_sizes,
         {},
         config,
     )
+    (legacy_backing,) = allocations
+    allocations.clear()
 
+    def reject_legacy(*args, **kwargs):
+        pytest.fail("Step5 should use the shared V2 allocator")
 
-def test_step5_allocation_uses_one_envelope_sized_backing(monkeypatch) -> None:
-    vllm_config, groups, config = _plan(num_blocks=3)
-    raw = _allocate(config, vllm_config, monkeypatch)
+    monkeypatch.setattr(attn_utils_v2, "_allocate_kv_cache", reject_legacy)
+    monkeypatch.setattr(attn_utils_v2, "_reshape_kv_cache_v2", reject_legacy)
+    actual = attn_utils_v2.allocate_kv_cache_main(config, device, layout, block_sizes)
+    (backing,) = allocations
+    assert backing.nbytes == legacy_backing.nbytes == num_blocks * get_step5_pool_bytes_per_block(groups)
+    assert backing.untyped_storage().nbytes() == legacy_backing.untyped_storage().nbytes()
+    if kv_transfer:
+        assert backing.data_ptr() % KV_CACHE_BUFFER_ALIGNMENT == 0
+        assert legacy_backing.data_ptr() % KV_CACHE_BUFFER_ALIGNMENT == 0
 
-    # Every planned layer draws its view from the single envelope backing:
-    # one distinct storage of num_blocks x envelope bytes.
-    storages = {tensor.untyped_storage().data_ptr(): tensor.untyped_storage().nbytes() for tensor in raw.values()}
-    assert set(storages.values()) == {config.num_blocks * get_step5_pool_bytes_per_block(groups)}
-
-
-def test_step5_reshape_builds_typed_aux_views(monkeypatch) -> None:
-    vllm_config, groups, config = _plan(num_blocks=3)
-    raw = _allocate(config, vllm_config, monkeypatch)
-    caches = _reshape(config, raw, monkeypatch)
-
-    # Auxiliary layers get the typed page view: one page per block id.
-    for aux, page_bytes, dtype in (
-        (RING, RING_PAGE, torch.bfloat16),
-        (SUMMARY0, SUMMARY_PAGE, torch.float8_e4m3fn),
-        (SUMMARY2, SUMMARY_PAGE, torch.float8_e4m3fn),
-    ):
-        view = caches[aux]
-        assert isinstance(view, torch.Tensor), aux
-        assert view.dtype is dtype, aux
-        assert view.element_size() * view.numel() == config.num_blocks * page_bytes, aux
-        assert view.stride(0) * view.element_size() == page_bytes, aux
-        assert view.shape[0] == config.num_blocks, aux
-
-    # Main attention layers keep the Ascend per-layer (k, v) tuple layout
-    # over one 96 KiB page per block id.
-    for main in (L0, L2, L1):
-        entry = caches[main]
-        tensors = entry if isinstance(entry, tuple) else (entry,)
-        assert all(isinstance(tensor, torch.Tensor) for tensor in tensors), main
-        assert all(tensor.dtype is torch.bfloat16 for tensor in tensors), main
-        assert sum(tensor.element_size() * tensor.numel() for tensor in tensors) == (config.num_blocks * MAIN_PAGE), (
-            main
-        )
+    assert actual.keys() == legacy.keys() == backends.keys()
+    assert all(isinstance(actual[name], tuple) and len(actual[name]) == 2 for name in (L0, L1, L2))
+    assert all(isinstance(actual[name], torch.Tensor) for name in (RING, SUMMARY0, SUMMARY2))
+    views = _snapshot(actual, backing)
+    assert views == _snapshot(legacy, legacy_backing)
+    assert all(shares_backing for _, components in views.values() for shares_backing, *_ in components)
