@@ -407,7 +407,6 @@ jobs:
     with:
       image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2"
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/multi-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
-      ref: ${{ github.sha }}
       should_run: >-
         ${{ needs.parse-trigger.outputs.filter == 'all' ||
             contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name)) }}
@@ -432,7 +431,6 @@ jobs:
     with:
       image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2"
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/single-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
-      ref: ${{ github.sha }}
       should_run: >-
         ${{ matrix.test_config.config_file_path != '' &&
             (needs.parse-trigger.outputs.filter == 'all' ||
@@ -476,6 +474,11 @@ jobs:
         env:
           MATRIX_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != '' && './pr/.github/workflows/configs/nightly_config.yaml' || '.github/workflows/configs/nightly_config.yaml' }}
           MATRIX_OUTPUTS: '{"nightly_matrix":"a2.accuracy.nightly","pr_only_matrix":"a2.accuracy.pr_only"}'
+          # The PR-derived config is validated against the base-branch config
+          # (see resolve_nightly_tests.py): unknown runner labels are dropped
+          # and shell metacharacters are rejected, so a crafted PR config
+          # cannot retarget nightly jobs or inject commands downstream.
+          MATRIX_ALLOWLIST_FILE: '.github/workflows/configs/nightly_config.yaml'
         run: |
           python3 -m pip install pyyaml -q
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix

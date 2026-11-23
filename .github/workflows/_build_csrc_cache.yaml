@@ -88,6 +88,9 @@ env:
   AWS_REGION: ap-southeast-1
   RUNS_ON_RUNNER_NAME: ""
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: build-${{ fromJSON(inputs.target).id }}-cache

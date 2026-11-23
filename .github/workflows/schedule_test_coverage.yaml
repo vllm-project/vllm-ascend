@@ -42,6 +42,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.vllm_ascend_ref || 'main' }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   select-full-tests:
     if: github.event_name == 'workflow_dispatch'

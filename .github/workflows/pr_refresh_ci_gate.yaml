@@ -71,6 +71,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   refresh-ci-gate:
     # Bot reviews cannot change the gate verdict (the owner gate ignores

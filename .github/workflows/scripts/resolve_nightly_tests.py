@@ -2,6 +2,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import subprocess
 
 try:
@@ -48,6 +49,61 @@ def _walk(matrix, path):
         else:
             return {}
     return node
+
+
+# Values coming from a PR-derived config are interpolated into downstream
+# matrices (runner labels, test paths); restrict them to shell-safe
+# characters and require runner labels to exist in the base-branch config.
+_SAFE_VALUE = re.compile(r"^[A-Za-z0-9_./:@+, -]+$")
+
+
+def _collect_runner_labels(node, labels):
+    """Recursively collect runner labels (`os` / `runner` fields)."""
+    if isinstance(node, dict):
+        for key in ("os", "runner"):
+            value = node.get(key)
+            if isinstance(value, str):
+                labels.add(value)
+        for value in node.values():
+            _collect_runner_labels(value, labels)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_runner_labels(item, labels)
+
+
+def _values_are_safe(node):
+    """True when every string leaf matches the shell-safe charset."""
+    if isinstance(node, str):
+        return _SAFE_VALUE.match(node) is not None
+    if isinstance(node, dict):
+        return all(_values_are_safe(value) for value in node.values())
+    if isinstance(node, list):
+        return all(_values_are_safe(item) for item in node)
+    return True
+
+
+def _validate_entries(entries, allowed_runners):
+    """Filter PR-derived matrix entries against the base-branch allowlist.
+
+    Drops entries whose runner label does not exist in the base config or
+    whose values carry shell metacharacters, so a crafted PR config cannot
+    retarget jobs to arbitrary runners or smuggle commands into downstream
+    run: blocks. Legit PRs only add or pick test groups, which still pass.
+    """
+    validated = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        labels = set()
+        _collect_runner_labels(entry, labels)
+        if labels and not labels <= allowed_runners:
+            print(f"::notice::Dropped matrix entry with unknown runner label(s): {sorted(labels)}")
+            continue
+        if not _values_are_safe(entry):
+            print("::notice::Dropped matrix entry with unsafe characters in values")
+            continue
+        validated.append(entry)
+    return validated
 
 
 def cmd_dispatch(_args):
@@ -126,10 +182,18 @@ def cmd_matrix(_args):
     with open(matrix_file) as f:
         matrix = yaml.safe_load(f) or {}
 
+    allowlist_file = os.environ.get("MATRIX_ALLOWLIST_FILE", "")
+    allowed_runners = set()
+    if allowlist_file:
+        with open(allowlist_file) as f:
+            _collect_runner_labels(yaml.safe_load(f) or {}, allowed_runners)
+
     with open(os.environ["GITHUB_OUTPUT"], "a") as f:
         for name, path in spec.items():
             node = _walk(matrix, path)
             cfg = node if isinstance(node, list) else []
+            if allowlist_file:
+                cfg = _validate_entries(cfg, allowed_runners)
             f.write(f"{name}={json.dumps(cfg)}\n")
 
 

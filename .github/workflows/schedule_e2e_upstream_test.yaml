@@ -48,6 +48,9 @@ env:
   AWS_REGION: ap-southeast-1
   RUNS_ON_RUNNER_NAME: ""
 
+permissions:
+  contents: read
+
 jobs:
     resolve-tag:
         runs-on: linux-amd64-cpu-1-hk

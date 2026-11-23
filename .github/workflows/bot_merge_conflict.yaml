@@ -13,8 +13,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   main:
+    # Labels PRs and posts the conflict comment via the GITHUB_TOKEN.
+    permissions:
+      pull-requests: write
     runs-on: linux-amd64-cpu-1-hk
     steps:
       - name: check if prs are dirty

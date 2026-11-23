@@ -57,8 +57,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   pre-commit:
+    # Fetches the PR title via the GitHub API, which needs pull-requests: read.
+    permissions:
+      pull-requests: read
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint

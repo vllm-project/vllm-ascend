@@ -9,9 +9,6 @@ on:
       prefix:
         required: true
         type: string
-      ref:
-        required: true
-        type: string
       should_run:
         required: true
         type: boolean
@@ -29,6 +26,9 @@ env:
   PIP_INDEX_URL: https://repo.huaweicloud.com/repository/pypi/simple/
   PROFILE_KEY_PREFIX: ${{ inputs.prefix }}
 
+permissions:
+  contents: read
+
 jobs:
   prepare:
     name: Plan
@@ -42,9 +42,12 @@ jobs:
       has_work: ${{ steps.plan.outputs.has_work }}
     steps:
       - name: Checkout profiling tools
+        # The profiling tools always come from the commit this run was
+        # triggered on; no caller-controlled ref is accepted, so PR code
+        # can never run here.
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ github.sha }}
           path: profile-source
 
       - name: Identify profiling artifacts
@@ -83,7 +86,7 @@ jobs:
       - name: Checkout profiling tools
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ github.sha }}
           path: profile-source
 
       - name: Identify profiling artifacts
@@ -133,7 +136,7 @@ jobs:
       - name: Checkout profiling tools
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ github.sha }}
           path: profile-source
 
       - name: Identify profiling artifacts
