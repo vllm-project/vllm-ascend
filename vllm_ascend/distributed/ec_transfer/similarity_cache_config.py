@@ -7,8 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from vllm_ascend.distributed.ec_transfer.phash import PHASH_NUM_BANDS
-from vllm_ascend.distributed.ec_transfer.ssim import DEFAULT_DATA_RANGE
+from vllm_ascend.distributed.ec_transfer.phash_index import PHASH_NUM_BANDS
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -28,6 +27,9 @@ MAX_RESIZED_IMAGE_TRANSFER_SIZE = 1024 * 1024 * 1024
 DEFAULT_SIMILARITY_CACHE_MAX_CAPACITY = 1_000_000
 DEFAULT_SIMILARITY_EVICTION_THRESHOLD = 0.95
 DEFAULT_SIMILARITY_LOWER_WATERMARK = 0.90
+# Normalized CLIP pixel range (1/std); shared with the SSIM implementation.
+DEFAULT_DATA_RANGE = 3.7
+DEFAULT_SHARED_INDEX_TIMEOUT_MS = 1000
 
 
 @dataclass(frozen=True)
@@ -43,39 +45,52 @@ class SimilarityCacheConfig:
     max_capacity: int = DEFAULT_SIMILARITY_CACHE_MAX_CAPACITY
     eviction_threshold: float = DEFAULT_SIMILARITY_EVICTION_THRESHOLD
     lower_watermark: float = DEFAULT_SIMILARITY_LOWER_WATERMARK
+    # None keeps the index local. All DPs sharing metadata use one endpoint
+    # and deployment namespace; neither contains a DP rank.
+    shared_index_endpoint: str | None = None
+    shared_index_namespace: str = "default"
+    shared_index_timeout_ms: int = DEFAULT_SHARED_INDEX_TIMEOUT_MS
+    # Embedded mode starts the metadata server in serving DP index zero.
+    # External mode connects to a separately managed service instead.
+    shared_index_mode: str = "embedded"
 
     def __post_init__(self) -> None:
+        if self.shared_index_mode not in ("embedded", "external"):
+            raise ValueError("similarity_cache.shared_index_mode must be embedded or external")
+        endpoint = self.shared_index_endpoint
+        if endpoint is not None and (
+            not isinstance(endpoint, str)
+            or not endpoint.startswith(("tcp://", "ipc://"))
+            or not endpoint.split("://", 1)[1]
+        ):
+            raise ValueError("similarity_cache.shared_index_endpoint must be a tcp:// or ipc:// address")
+        if not isinstance(self.shared_index_namespace, str) or not self.shared_index_namespace.strip():
+            raise ValueError("similarity_cache.shared_index_namespace must be a nonempty string")
+        if (
+            isinstance(self.shared_index_timeout_ms, bool)
+            or not isinstance(self.shared_index_timeout_ms, int)
+            or not 0 < self.shared_index_timeout_ms <= 2**31 - 1
+        ):
+            raise ValueError("similarity_cache.shared_index_timeout_ms must be a positive 32-bit integer")
         if isinstance(self.max_hamming, bool) or not isinstance(self.max_hamming, int):
             raise ValueError("similarity_cache.max_hamming must be an integer")
         if not 0 <= self.max_hamming < PHASH_NUM_BANDS:
-            raise ValueError(
-                f"similarity_cache.max_hamming must be between 0 and {PHASH_NUM_BANDS - 1}"
-            )
+            raise ValueError(f"similarity_cache.max_hamming must be between 0 and {PHASH_NUM_BANDS - 1}")
         if isinstance(self.max_capacity, bool) or not isinstance(self.max_capacity, int):
             raise ValueError("similarity_cache.max_capacity must be an integer")
         if self.max_capacity <= 0:
             raise ValueError("similarity_cache.max_capacity must be a positive integer")
-        if isinstance(self.eviction_threshold, bool) or not isinstance(
-            self.eviction_threshold, (int, float)
-        ):
+        if isinstance(self.eviction_threshold, bool) or not isinstance(self.eviction_threshold, (int, float)):
             raise ValueError("similarity_cache.eviction_threshold must be a number")
         if not 0.0 < self.eviction_threshold <= 1.0:
-            raise ValueError(
-                "similarity_cache.eviction_threshold must be greater than 0 "
-                "and at most 1"
-            )
-        if isinstance(self.lower_watermark, bool) or not isinstance(
-            self.lower_watermark, (int, float)
-        ):
+            raise ValueError("similarity_cache.eviction_threshold must be greater than 0 and at most 1")
+        if isinstance(self.lower_watermark, bool) or not isinstance(self.lower_watermark, (int, float)):
             raise ValueError("similarity_cache.lower_watermark must be a number")
         if not 0.0 < self.lower_watermark < self.eviction_threshold:
-            raise ValueError(
-                "similarity_cache.lower_watermark must be greater than 0 and "
-                "less than eviction_threshold"
-            )
+            raise ValueError("similarity_cache.lower_watermark must be greater than 0 and less than eviction_threshold")
 
     @classmethod
-    def from_vllm_config(cls, vllm_config: "VllmConfig") -> "SimilarityCacheConfig":
+    def from_vllm_config(cls, vllm_config: VllmConfig) -> SimilarityCacheConfig:
         ec_config = vllm_config.ec_transfer_config
         if ec_config is None:
             raise ValueError("ECMemcacheConnector requires ec_transfer_config")
@@ -91,10 +106,7 @@ class SimilarityCacheConfig:
 
         matcher = raw.get("matcher", "phash_ssim")
         if not isinstance(matcher, str) or matcher not in _SUPPORTED_MATCHERS:
-            raise ValueError(
-                "similarity_cache.matcher must be one of "
-                f"{sorted(_SUPPORTED_MATCHERS)}, got {matcher!r}"
-            )
+            raise ValueError(f"similarity_cache.matcher must be one of {sorted(_SUPPORTED_MATCHERS)}, got {matcher!r}")
 
         max_hamming = raw.get("max_hamming", PHASH_NUM_BANDS - 1)
 
@@ -116,16 +128,10 @@ class SimilarityCacheConfig:
             "resized_image_recv_buffer_size",
             DEFAULT_RESIZED_IMAGE_RECV_BUFFER_SIZE,
         )
-        if isinstance(resized_image_recv_buffer_size, bool) or not isinstance(
-            resized_image_recv_buffer_size, int
-        ):
-            raise ValueError(
-                "similarity_cache.resized_image_recv_buffer_size must be an integer"
-            )
+        if isinstance(resized_image_recv_buffer_size, bool) or not isinstance(resized_image_recv_buffer_size, int):
+            raise ValueError("similarity_cache.resized_image_recv_buffer_size must be an integer")
         if not (
-            MIN_RESIZED_IMAGE_RECV_BUFFER_SIZE
-            <= resized_image_recv_buffer_size
-            <= MAX_RESIZED_IMAGE_RECV_BUFFER_SIZE
+            MIN_RESIZED_IMAGE_RECV_BUFFER_SIZE <= resized_image_recv_buffer_size <= MAX_RESIZED_IMAGE_RECV_BUFFER_SIZE
         ):
             raise ValueError(
                 "similarity_cache.resized_image_recv_buffer_size must be between "
@@ -148,20 +154,14 @@ class SimilarityCacheConfig:
             raise ValueError("similarity_cache.eviction_threshold must be a number")
         eviction_threshold = float(eviction_threshold)
         if not 0.0 < eviction_threshold <= 1.0:
-            raise ValueError(
-                "similarity_cache.eviction_threshold must be greater than 0 "
-                "and at most 1"
-            )
+            raise ValueError("similarity_cache.eviction_threshold must be greater than 0 and at most 1")
 
         lower_watermark = raw.get("lower_watermark", DEFAULT_SIMILARITY_LOWER_WATERMARK)
         if isinstance(lower_watermark, bool) or not isinstance(lower_watermark, (int, float)):
             raise ValueError("similarity_cache.lower_watermark must be a number")
         lower_watermark = float(lower_watermark)
         if not 0.0 < lower_watermark < eviction_threshold:
-            raise ValueError(
-                "similarity_cache.lower_watermark must be greater than 0 and "
-                "less than eviction_threshold"
-            )
+            raise ValueError("similarity_cache.lower_watermark must be greater than 0 and less than eviction_threshold")
 
         return cls(
             enabled=enabled,
@@ -173,5 +173,8 @@ class SimilarityCacheConfig:
             max_capacity=max_capacity,
             eviction_threshold=eviction_threshold,
             lower_watermark=lower_watermark,
+            shared_index_endpoint=raw.get("shared_index_endpoint"),
+            shared_index_namespace=raw.get("shared_index_namespace", "default"),
+            shared_index_timeout_ms=raw.get("shared_index_timeout_ms", DEFAULT_SHARED_INDEX_TIMEOUT_MS),
+            shared_index_mode=raw.get("shared_index_mode", "embedded"),
         )
-

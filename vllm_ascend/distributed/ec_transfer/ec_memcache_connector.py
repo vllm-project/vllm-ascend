@@ -28,7 +28,7 @@ Cache hit rules, adapted from MultiLevelEncoderCacheManager:
   - only a miss runs ViT, then stores the result in memcache under the image's
     mm_hash.
 
-Memcache manages data eviction. The matcher's in-process similarity metadata
+Memcache manages data eviction. Similarity metadata (local or shared)
 is bounded separately: once it reaches ``max_capacity * eviction_threshold``
 entries, randomly selected entries are evicted down to
 ``max_capacity * lower_watermark``.
@@ -55,6 +55,11 @@ from vllm_ascend.distributed.ec_transfer.perceptual_ssim_cache_matcher import (
 )
 from vllm_ascend.distributed.ec_transfer.similarity_cache_config import (
     SimilarityCacheConfig,
+)
+from vllm_ascend.distributed.ec_transfer.similarity_index_service import (
+    SimilarityIndexConfigurationError,
+    SimilarityIndexUnavailable,
+    create_similarity_index,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
@@ -125,16 +130,34 @@ class ECMemcacheConnector(ECConnectorBase):
             # first Memcache initialization; a metadata-only native client
             # cannot be upgraded by constructing a second backend object.
             if self._similarity_config.enabled:
-                self._backend = MemcacheBackend.create_scheduler_data_client(vllm_config.parallel_config)
                 hf_config = getattr(model_config, "hf_config", None)
                 vision_config = getattr(hf_config, "vision_config", None)
                 merge_size = int(getattr(vision_config, "spatial_merge_size", 2) or 2)
-                self._cache_matcher = PhashSSIMCacheMatcher(
-                    self._backend,
+                index = create_similarity_index(
                     self._similarity_config,
-                    merge_size=merge_size,
+                    vllm_config.parallel_config,
                     model_id=self._model_id,
+                    merge_size=merge_size,
                 )
+                if self._similarity_config.shared_index_endpoint is None:
+                    dp_size = vllm_config.parallel_config.data_parallel_size
+                    if isinstance(dp_size, int) and dp_size > 1:
+                        logger.warning(
+                            "EC similarity metadata is local to each DP; configure "
+                            "similarity_cache.shared_index_endpoint to share the index"
+                        )
+                try:
+                    self._backend = MemcacheBackend.create_scheduler_data_client(vllm_config.parallel_config)
+                    self._cache_matcher = PhashSSIMCacheMatcher(
+                        self._backend,
+                        self._similarity_config,
+                        merge_size=merge_size,
+                        model_id=self._model_id,
+                        index=index,
+                    )
+                except Exception:
+                    index.close()
+                    raise
             else:
                 self._backend = MemcacheBackend.create_scheduler_client(vllm_config.parallel_config)
             # Exact hits contain only the current request's original mm_hash.
@@ -206,7 +229,6 @@ class ECMemcacheConnector(ECConnectorBase):
     # Scheduler-side methods
     # ==============================
 
-
     # Scheduler-side phase 1: prewarm cache availability for all multimodal
     # features in the request. This method deliberately does not make the final
     # load-or-save decision for an individual feature. It first probes the exact
@@ -226,8 +248,7 @@ class ECMemcacheConnector(ECConnectorBase):
     def ensure_cache_available(self, request: "Request", num_computed_tokens: int) -> bool:
         if num_computed_tokens >= request.num_prompt_tokens:
             logger.debug(
-                "Skip EC cache check: request=%s is in decode stage "
-                "(computed_prompt_tokens=%d, prompt_tokens=%d)",
+                "Skip EC cache check: request=%s is in decode stage (computed_prompt_tokens=%d, prompt_tokens=%d)",
                 request.request_id,
                 num_computed_tokens,
                 request.num_prompt_tokens,
@@ -293,9 +314,24 @@ class ECMemcacheConnector(ECConnectorBase):
         if cache_matcher is None:
             return
 
-        similar_mm_hash = cache_matcher.get_cached_similarity_match(
-            current_image_mm_hash
-        )
+        try:
+            self._match_similarity(current_image_mm_hash, feature.data)
+        except SimilarityIndexConfigurationError:
+            # Configuration disagreement must not silently look like a miss.
+            raise
+        except SimilarityIndexUnavailable:
+            logger.debug("EC shared similarity index unavailable; computing image=%s", current_image_mm_hash)
+            self._record_similarity_miss(current_image_mm_hash, reason="similarity_index_unavailable")
+        except Exception:
+            logger.exception("EC similarity lookup failed: mm_hash=%s", current_image_mm_hash)
+            self._record_similarity_miss(
+                current_image_mm_hash, reason="similarity_match_exception", feature=feature.data
+            )
+
+    def _match_similarity(self, current_image_mm_hash: str, feature: Any) -> None:
+        cache_matcher = self._cache_matcher
+        assert cache_matcher is not None
+        similar_mm_hash = cache_matcher.get_cached_similarity_match(current_image_mm_hash)
         if similar_mm_hash is not None:
             self._record_similarity_hit(current_image_mm_hash, similar_mm_hash)
             return
@@ -305,7 +341,7 @@ class ECMemcacheConnector(ECConnectorBase):
             self._record_similarity_miss(
                 current_image_mm_hash,
                 reason="phash_unavailable",
-                feature=feature.data,
+                feature=feature,
             )
             return
         candidate_mm_hashes_by_hamming = cache_matcher.find_resized_mm_hashes_by_hamming(
@@ -315,18 +351,18 @@ class ECMemcacheConnector(ECConnectorBase):
             self._record_similarity_miss(
                 current_image_mm_hash,
                 reason="no_hamming_candidate",
-                feature=feature.data,
+                feature=feature,
             )
             return
 
         try:
-            ssim_matched_mm_hash = (
-                cache_matcher.find_and_cache_matched_ssim(
-                    current_image_mm_hash,
-                    feature.data,
-                    candidate_mm_hashes_by_hamming,
-                )
+            ssim_matched_mm_hash = cache_matcher.find_and_cache_matched_ssim(
+                current_image_mm_hash,
+                feature,
+                candidate_mm_hashes_by_hamming,
             )
+        except SimilarityIndexConfigurationError:
+            raise
         except Exception:
             logger.exception(
                 "EC similarity match failed: mm_hash=%s",
@@ -335,14 +371,14 @@ class ECMemcacheConnector(ECConnectorBase):
             self._record_similarity_miss(
                 current_image_mm_hash,
                 reason="similarity_match_exception",
-                feature=feature.data,
+                feature=feature,
             )
             return
         if ssim_matched_mm_hash is None:
             self._record_similarity_miss(
                 current_image_mm_hash,
                 reason="ssim_threshold_not_met",
-                feature=feature.data,
+                feature=feature,
             )
             return
         try:
@@ -359,7 +395,7 @@ class ECMemcacheConnector(ECConnectorBase):
             self._record_similarity_miss(
                 current_image_mm_hash,
                 reason="similar_embedding_unavailable",
-                feature=feature.data,
+                feature=feature,
             )
             return
         self._record_similarity_hit(current_image_mm_hash, ssim_matched_mm_hash)
@@ -392,6 +428,11 @@ class ECMemcacheConnector(ECConnectorBase):
         if feature is not None and cache_matcher is not None:
             try:
                 cache_matcher.persist_missed_resized_tensor(mm_hash, feature)
+            except SimilarityIndexConfigurationError:
+                raise
+            except SimilarityIndexUnavailable:
+                # Embedding computation/save still proceeds without metadata.
+                pass
             except Exception:
                 logger.exception(
                     "EC missed resized tensor persistence failed: mm_hash=%s",
@@ -400,7 +441,6 @@ class ECMemcacheConnector(ECConnectorBase):
         self._miss_count += 1
         self._mm_hashes_need_saves.add(mm_hash)
         logger.debug("EC similarity match miss: mm_hash=%s reason=%s", mm_hash, reason)
-
 
     @property
     def hit_rate(self) -> float:
@@ -498,21 +538,22 @@ class ECMemcacheConnector(ECConnectorBase):
         matcher = self._cache_matcher
         if matcher is None or not exact_match_missing_features:
             return
-        exact_match_missing_mm_hashes = [
-            feature.identifier for feature in exact_match_missing_features
-        ]
+        exact_match_missing_mm_hashes = [feature.identifier for feature in exact_match_missing_features]
         try:
             matcher.batch_ensure_similarity_cache_available(
                 exact_match_missing_mm_hashes,
                 exact_match_missing_features,
             )
+        except SimilarityIndexConfigurationError:
+            raise
+        except SimilarityIndexUnavailable:
+            logger.debug("EC shared similarity prewarm unavailable; falling back to cache misses")
         except Exception:
             logger.exception(
                 "EC similarity batch prewarm failed: exact_match_missing_mm_hashes=%r",
                 exact_match_missing_mm_hashes,
             )
             return
-
 
     # ==============================
     # Worker-side methods
@@ -527,9 +568,7 @@ class ECMemcacheConnector(ECConnectorBase):
         if not loading_hashes_in_current_step:
             return
 
-        store_keys = [
-            metadata.mm_hash_to_store_key.get(mm_hash, mm_hash) for mm_hash in loading_hashes_in_current_step
-        ]
+        store_keys = [metadata.mm_hash_to_store_key.get(mm_hash, mm_hash) for mm_hash in loading_hashes_in_current_step]
         embeddings = self._ec_get_batch(store_keys)
         if not embeddings:
             return

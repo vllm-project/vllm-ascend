@@ -5,12 +5,11 @@
 
 import importlib
 
-from vllm.distributed.ec_transfer.ec_connector.factory import (
-    ECConnectorFactory,
-)
-
 
 def _replace_cpu_connector() -> bool:
+    # Keep the standalone similarity-index service independent of vLLM.
+    from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
+
     upstream_module = "vllm.distributed.ec_transfer.ec_connector.cpu.connector"
     try:
         importlib.import_module(upstream_module)
@@ -29,6 +28,8 @@ def _replace_cpu_connector() -> bool:
 
 
 def _replace_mooncake_connector() -> None:
+    from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
+
     if "ECMooncakeConnector" not in ECConnectorFactory._registry:
         return
 

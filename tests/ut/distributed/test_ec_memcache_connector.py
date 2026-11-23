@@ -1,6 +1,6 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 import torch
@@ -230,6 +230,27 @@ def test_update_state_after_alloc_uses_cached_ssim_match() -> None:
     connector._cache_matcher.persist_missed_resized_tensor.assert_not_called()
 
 
+def test_shared_index_outage_falls_back_to_embedding_save() -> None:
+    connector = _make_scheduler_connector()
+    connector._cache_matcher.get_cached_similarity_match.side_effect = connector_module.SimilarityIndexUnavailable()
+    request = MagicMock(mm_features=[MagicMock(identifier="query", data="query-data")])
+    connector.update_state_after_alloc(request, 0)
+    assert connector._mm_hashes_need_saves == {"query"}
+    assert connector._mm_hashes_need_loads == set()
+    assert connector._miss_count == 1
+
+
+def test_shared_index_configuration_error_is_not_hidden() -> None:
+    connector = _make_scheduler_connector()
+    connector._cache_matcher.get_cached_similarity_match.side_effect = (
+        connector_module.SimilarityIndexConfigurationError("mismatch")
+    )
+    request = MagicMock(mm_features=[MagicMock(identifier="query", data="query-data")])
+    with pytest.raises(connector_module.SimilarityIndexConfigurationError, match="mismatch"):
+        connector.update_state_after_alloc(request, 0)
+    assert not connector._mm_hashes_need_saves
+
+
 @pytest.mark.parametrize(
     ("image_phash", "resized_mm_hashes", "match_result", "expected_reason"),
     [
@@ -258,10 +279,11 @@ def test_update_state_after_alloc_records_similarity_miss(
 
     operation_order: list[str] = []
     matcher.persist_missed_resized_tensor.side_effect = lambda *_: operation_order.append("persist")
+    original_record_miss = connector._record_similarity_miss
 
     def record_miss(mm_hash: str, **kwargs):
         operation_order.append("record")
-        connector._record_similarity_miss(mm_hash, **kwargs)
+        original_record_miss(mm_hash, **kwargs)
 
     with patch.object(connector, "_record_similarity_miss", side_effect=record_miss) as record:
         connector.update_state_after_alloc(request, 0)
@@ -384,6 +406,7 @@ def test_scheduler_selects_data_client_before_constructing_similarity_matcher() 
         connector._similarity_config,
         merge_size=2,
         model_id="model",
+        index=ANY,
     )
 
 
@@ -671,7 +694,6 @@ def test_shutdown_waits_unregisters_and_releases_receive_buffer() -> None:
 
     connector.shutdown()
     connector._backend.unregister_buffer.assert_called_once_with([recv_buffer_ptr], [recv_buffer_nbytes])
-
 
 
 def test_similarity_cache_defaults_to_three_bit_hamming_distance():
