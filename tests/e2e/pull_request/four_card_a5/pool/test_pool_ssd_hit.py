@@ -166,13 +166,13 @@ def _assert_ssd_evidence(before: dict[str, float], after: dict[str, float]) -> N
     assert delta("memcache_evict_operations_total", "memcache_evict_operations") > 0, (
         "SSD: no eviction; the working set may be smaller than DRAM"
     )
-    assert delta("memcache_rewarm_total", "memcache_rewarm") > 0 or delta(
-        "memcache_rewarm_bytes_total"
-    ) > 0, "SSD: no rewarm"
+    assert delta("memcache_rewarm_total", "memcache_rewarm") > 0 or delta("memcache_rewarm_bytes_total") > 0, (
+        "SSD: no rewarm"
+    )
     assert delta("memcache_ubs_io_disk_used_bytes") > 0, "SSD: disk usage did not grow"
-    assert (
-        delta("memcache_ubs_io_disk_write_bandwidth") > 0 or delta("memcache_ubs_io_disk_read_bandwidth") > 0
-    ), "SSD: no disk bandwidth"
+    assert delta("memcache_ubs_io_disk_write_bandwidth") > 0 or delta("memcache_ubs_io_disk_read_bandwidth") > 0, (
+        "SSD: no disk bandwidth"
+    )
     print(
         f"[kv_pool_ssd] evict+{delta('memcache_evict_operations_total', 'memcache_evict_operations'):.0f} "
         f"rewarm+{delta('memcache_rewarm_total', 'memcache_rewarm'):.0f} "
