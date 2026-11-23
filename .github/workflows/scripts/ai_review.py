@@ -232,7 +232,12 @@ class Orchestrator:
     # ---- thin gh wrappers -------------------------------------------------
 
     def _gh(self, *args: str) -> str:
-        return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout.strip()
+        result = subprocess.run(["gh", *args], capture_output=True, text=True)
+        if result.returncode != 0:
+            # bring-up aid: surface gh's own message instead of losing it
+            print(f"::error::gh {' '.join(args)} failed:\n{result.stderr.strip()}", flush=True)
+            raise SystemExit(1)
+        return result.stdout.strip()
 
     def _gh_json(self, *args: str):
         return json.loads(self._gh(*args))
@@ -258,6 +263,10 @@ class Orchestrator:
             ".comments",
         )
         for c in reversed(comments):
+            # only the orchestrator's own comments may carry state; a user
+            # pasting a signature block must not hijack the state machine
+            if BOT_MARKER not in c.get("body", ""):
+                continue
             m = SIGNATURE_RE.search(c.get("body", ""))
             if not m:
                 continue
@@ -385,6 +394,9 @@ class Orchestrator:
             "HOME": os.environ.get("HOME", "/tmp"),
             "AI_REVIEW_KEY": os.environ.get("AI_REVIEW_KEY", ""),
             "AI_REVIEW_API": os.environ.get("AI_REVIEW_API", ""),
+            # upstream-expected alias; dsh config surface is confirmed in
+            # the smoke test, expose both spellings meanwhile
+            "DEEPSEEK_API_KEY": os.environ.get("AI_REVIEW_KEY", ""),
             # Picked up by dsh's config surface once confirmed in the smoke
             # test; harmless to expose until then.
             "AI_REVIEW_MODEL": os.environ.get("AI_REVIEW_MODEL", "deepseek-v4.1-flash"),
@@ -474,14 +486,29 @@ class Orchestrator:
         # an anchor (line outside the diff), fall back to a summary-only
         # round so no finding is silently lost.
         findings = parse_findings(output)
-        output = FINDING_BLOCK_RE.sub("", output).strip()
-        summary = banner + output.rstrip() + "\n"
+        summary_body = FINDING_BLOCK_RE.sub("", output).strip()
+        summary = banner + summary_body + "\n"
+        # findings move to inline comments only after the review API
+        # accepted them; on failure they stay in the summary verbatim
         if findings and post_inline_review(self.pr, self.head_sha, findings):
+            findings_text = ""
             summary += (
                 f"\n---\n📋 {len(findings)} finding(s) posted as inline review "
                 "comments on the diff; this comment carries the verdict and "
                 "state only.\n"
             )
+        else:
+            findings_text = (
+                "\n## Findings\n\n"
+                + "\n\n".join(
+                    f"- **[{f['severity']}]** `{f['path']}:{f['line']}` rule: `{f['rule']}`\n  {f['body']}"
+                    for f in findings
+                )
+                + "\n"
+                if findings
+                else ""
+            )
+        summary += findings_text
         self.comment(summary)
 
         if verdict_pass:
