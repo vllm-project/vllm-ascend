@@ -39,6 +39,28 @@ def test_required_layout_is_hnd_for_regular_attention_and_none_for_mla() -> None
     assert MooncakeBaseConnector.get_required_kvcache_layout(config) is None  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
+@pytest.mark.parametrize(
+    ("model_type", "method", "architecture", "layout"),
+    [
+        ("kimi_k31", "dspark", "Qwen3DSparkModel", "HND"),
+        ("kimi_k31", "dspark", "K3DSparkModel", None),
+        ("kimi_k31", "mtp", "Qwen3DSparkModel", None),
+        ("kimi_k3", "dspark", "Qwen3DSparkModel", None),
+    ],
+)
+def test_k31_gqa_draft_requests_hnd_from_both_roles(role, model_type, method, architecture, layout) -> None:
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(use_mla=True, hf_config=SimpleNamespace(model_type=model_type)),
+        speculative_config=SimpleNamespace(
+            method=method, draft_model_config=SimpleNamespace(architectures=[architecture])
+        ),
+        kv_transfer_config=SimpleNamespace(kv_role=role),
+    )
+
+    assert MooncakeConnector.get_required_kvcache_layout(config) == layout  # type: ignore[arg-type]
+
+
 def test_facade_delegates_scheduler_methods() -> None:
     connector = make_facade()
     request = MagicMock()

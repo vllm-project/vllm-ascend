@@ -23,7 +23,11 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
-from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.core.kv_cache_interface import (
+    AscendGQADraftFullAttentionSpec,
+    AscendGQADraftSlidingWindowSpec,
+    is_prefix_cacheable,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -61,7 +65,7 @@ _orig_validate_kv_cache_layout = vllm.v1.core.kv_cache_utils.validate_kv_cache_l
 
 
 def _validate_kv_cache_layout(layout, kv_cache_groups) -> None:
-    """Allow mixed page sizes only for the current Kimi C8 groups."""
+    """Allow native page sizes for Kimi layouts with explicit byte ranges."""
     has_c8 = any(
         getattr(spec, "static_fp8_pa_nz", False)
         for group in kv_cache_groups
@@ -71,7 +75,11 @@ def _validate_kv_cache_layout(layout, kv_cache_groups) -> None:
             else (group.kv_cache_spec,)
         )
     )
-    if has_c8 and layout.is_layer_compact and layout.is_block_compact:
+    has_paired_gqa = _uses_paired_sfa_groups(kv_cache_groups) and any(
+        isinstance(group.kv_cache_spec, (AscendGQADraftFullAttentionSpec, AscendGQADraftSlidingWindowSpec))
+        for group in kv_cache_groups
+    )
+    if (has_c8 or has_paired_gqa) and layout.is_layer_compact and layout.is_block_compact:
         return
     _orig_validate_kv_cache_layout(layout, kv_cache_groups)
 
@@ -707,7 +715,7 @@ def _ascend_get_kv_cache_config_from_groups(
             )
             # Keep mixed target/draft groups in the ordinary target lookup.
             # Empty PP-local layer names still carry the global group spec.
-            if specs and all(isinstance(spec, MLAAttentionSpec) and getattr(spec, "is_draft", False) for spec in specs):
+            if specs and all(getattr(spec, "is_draft", False) for spec in specs):
                 draft_only_group_ids.append(group_id)
         kv_cache_config.dspark_draft_only_group_ids = tuple(draft_only_group_ids)
     return kv_cache_config

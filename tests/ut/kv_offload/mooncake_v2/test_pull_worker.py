@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransfe
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
+from vllm_ascend.core.kv_cache_interface import AscendGQADraftFullAttentionSpec, AscendGQADraftSlidingWindowSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, pull_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
@@ -744,6 +745,83 @@ def test_compute_sliding_window_blocks_uses_unhashed_suffix() -> None:
     )
 
     assert result == [(0, [10, 11], [20, 21])]
+
+
+@pytest.mark.parametrize("sliding", [False, True])
+def test_gqa_draft_pull_selects_pages_and_copies_both_hnd_planes(sliding: bool) -> None:
+    name = "model.layers.93.self_attn.attn"
+    kwargs = {"block_size": 256, "num_kv_heads": 2, "head_size": 8, "dtype": torch.bfloat16}
+    spec = (
+        AscendGQADraftSlidingWindowSpec(**kwargs, sliding_window=512)
+        if sliding
+        else AscendGQADraftFullAttentionSpec(**kwargs)
+    )
+    block_bytes = 4096
+    local_bases = [100_000, 300_000]
+    remote_bases = [500_000, 700_000]
+    metadata_kwargs = dict(
+        layer_names=[name],
+        layer_block_sizes=[256],
+        block_lens=[[block_bytes, block_bytes]],
+        block_strides=[[block_bytes, block_bytes]],
+        block_shapes=[[(2, 128, 8), (2, 128, 8)]],
+        block_size_scales=[[2, 2]],
+    )
+    remote = make_pp_metadata(**metadata_kwargs, tp_base_addrs={3: [remote_bases]})
+    thread = make_thread(
+        tp_rank=3, tp_size=8, kv_cache_specs=[spec], kv_caches_base_addr=[local_bases], **metadata_kwargs
+    )
+    rank_groups = thread._get_layer_remote_tp_rank_groups(0, 0, spec, remote, 1, 8, 1)
+    assert rank_groups == [[3]]
+
+    local_table = [0, 0, 11, 12] if sliding else [9, 10, 11, 12]
+    local_blocks = local_table[2:] if sliding else local_table[1:]
+    remote_table = [0, 0, 22, 23] if sliding else [20, 21, 22, 23]
+    transfers = thread._compute_group_block_ids(
+        "request",
+        rank_groups,
+        1,
+        0,
+        256,
+        256,
+        local_blocks,
+        local_table,
+        remote_table,
+        1024,
+        1023,
+        512 if sliding else 256,
+        2,
+        2,
+        spec,
+        0,
+        remote_interleave_size=128,
+    )
+    expected = (22, 44, 4) if sliding else (20, 42, 6)
+    local_start, remote_start, count = expected
+    ((rank, local_ids, remote_ids),) = transfers
+    assert rank == 3
+    assert local_ids == list(range(local_start, local_start + count))
+    assert remote_ids == list(range(remote_start, remote_start + count))
+
+    local_addresses: list[int] = []
+    remote_addresses: list[int] = []
+    lengths: list[int] = []
+    thread._append_spec_transfer_addresses(
+        0,
+        0,
+        rank,
+        1,
+        8,
+        1,
+        {(0, 0): [("request", local_ids, remote_ids)]},
+        remote,
+        local_addresses,
+        remote_addresses,
+        lengths,
+    )
+    assert local_addresses == [base + local_start * block_bytes for base in local_bases]
+    assert remote_addresses == [base + remote_start * block_bytes for base in remote_bases]
+    assert lengths == [count * block_bytes] * 2
 
 
 @pytest.mark.parametrize("spec", [make_circular_spec(), make_kpool_tail_spec()])

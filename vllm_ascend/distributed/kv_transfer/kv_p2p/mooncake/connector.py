@@ -92,16 +92,24 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
         """Use HND to avoid reformatting KV cache before D2D transfer."""
-        if vllm_config.model_config is None:
+        model_config = vllm_config.model_config
+        if model_config is None:
             logger.warning_once(
                 "Unable to detect the current vLLM model config; falling back to the default KV cache layout."
             )
             return None
 
-        if vllm_config.model_config.use_mla:
-            # MLA has no separate head dimension, so HND versus NHD does not
-            # affect its transfer layout.
-            return None
+        if model_config.use_mla:
+            # A pure MLA cache has no separate head dimension. Kimi K3.1 can
+            # also have a GQA DSpark draft whose KV transfer is head-strided.
+            speculative = getattr(vllm_config, "speculative_config", None)
+            draft = getattr(speculative, "draft_model_config", None)
+            if not (
+                getattr(getattr(model_config, "hf_config", None), "model_type", None) == "kimi_k31"
+                and getattr(speculative, "method", None) == "dspark"
+                and "Qwen3DSparkModel" in getattr(draft, "architectures", ())
+            ):
+                return None
 
         logger.info_once("MooncakeConnector is setting the KV cache layout to HND for direct D2D transfer.")
         return "HND"

@@ -16,9 +16,12 @@ import inspect
 from types import SimpleNamespace
 
 import pytest
+import torch
 import vllm.v1.core.sched.scheduler as scheduler_module
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
 
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split as mod
+from vllm_ascend.core.kv_cache_interface import AscendGQADraftSlidingWindowSpec
 from vllm_ascend.patch.platform.patch_mamba_block_aligned_split import (
     _mamba_block_aligned_split,
     _original_mamba_block_aligned_split,
@@ -82,6 +85,23 @@ def test_pd_consumer_preserves_complete_speculative_window():
     )
 
     assert result == 8
+
+
+def test_k31_gqa_smallest_global_block_does_not_split_inside_kda_checkpoint():
+    scheduler = _scheduler(is_kv_consumer=None)
+    scheduler.cache_config.block_size = 128
+    scheduler.block_size = 1664
+    scheduler.hash_block_size = 128
+    mamba = MambaSpec(block_size=1664, shapes=((1, 1),), dtypes=(torch.bfloat16,), mamba_cache_mode="align")
+    draft = AscendGQADraftSlidingWindowSpec(
+        block_size=128, num_kv_heads=2, head_size=64, dtype=torch.bfloat16, sliding_window=2048
+    )
+    scheduler.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[KVCacheGroupSpec(["target"], mamba), KVCacheGroupSpec(["draft"], draft)]
+    )
+    request = _request(num_computed_tokens=1024, num_prompt_tokens=4096, num_tokens=4096)
+    assert _mamba_block_aligned_split(scheduler, request, 2048) == 1664 - 1024
+    assert scheduler.cache_config.block_size == 128
 
 
 def test_producer_retains_upstream_mamba_boundary_split():

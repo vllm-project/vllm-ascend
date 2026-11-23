@@ -12,6 +12,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_interface import AscendGQADraftFullAttentionSpec, AscendGQADraftSlidingWindowSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
@@ -133,6 +134,52 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
     assert metadata.block_size_scales == [[2, 2]]
     assert metadata.block_strides == [[k_cache.stride(0) * 2, v_cache.stride(0) * 2]]
     transfer_engine.register_buffer.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("spec_cls", "extra"),
+    [(AscendGQADraftFullAttentionSpec, {}), (AscendGQADraftSlidingWindowSpec, {"sliding_window": 256})],
+)
+def test_gqa_draft_registers_separate_hnd_descriptors_in_one_region(monkeypatch, spec_cls, extra) -> None:
+    name = "model.layers.93.self_attn.attn"
+    spec = spec_cls(block_size=256, num_kv_heads=2, head_size=8, dtype=torch.bfloat16, **extra)
+    # Two physical kernel blocks per manager page. K/V are separate planes
+    # carved from the same owned region in the paired backing allocation.
+    raw = torch.empty((2, 4, 2, 128, 8), dtype=torch.bfloat16)
+    k_cache, v_cache = raw.unbind(0)
+    config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            make_kv_cache_tensor(
+                size=raw.nbytes, layers=[name], layer_stride=raw.nbytes, block_stride=spec.page_size_bytes
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec)],
+    )
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=128))
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
+    worker.kv_cache_config = config
+    worker.engine_id, worker.te_rpc_port = "engine-d", 9000
+    worker.block_size, worker.side_channel_host, worker.handshake_port = 128, "10.0.0.1", 5000
+    transfer_engine = MagicMock()
+    monkeypatch.setattr(base_worker, "global_te", transfer_engine)
+    monkeypatch.setattr(base_worker, "validate_register_region_count", MagicMock())
+
+    worker.register_kv_caches({name: (k_cache, v_cache)})
+    metadata = worker.xfer_handshake_metadata
+    assert metadata.layer_block_sizes == [256]
+    assert metadata.kv_caches_base_addr == [[k_cache.data_ptr(), v_cache.data_ptr()]]
+    assert metadata.block_shapes == [[(2, 128, 8), (2, 128, 8)]]
+    assert metadata.block_size_scales == [[2, 2]]
+    assert metadata.block_lens == metadata.block_strides == [[4096, 4096]]
+    transfer_engine.register_buffer.assert_called_once_with([raw.data_ptr()], [raw.nbytes])
+
+    transfer_engine.reset_mock()
+    with pytest.raises(ValueError, match="requires HND K/V views"):
+        worker.register_kv_caches({name: tuple(cache.transpose(1, 2).contiguous() for cache in (k_cache, v_cache))})
+    transfer_engine.register_buffer.assert_not_called()
 
 
 @pytest.mark.parametrize("spare", [0, 64, 256])

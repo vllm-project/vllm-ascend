@@ -31,6 +31,40 @@ from torch import nn
 import vllm_ascend.models.qwen3_dspark as qwen3_dspark
 from vllm_ascend.models import qwen3_dflash2
 from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3ForCausalLM
+from vllm_ascend.patch.worker.patch_qwen3_dflash import precompute_and_store_context_kv
+
+
+def test_context_cache_uses_out_of_place_rope_result():
+    """Write rotated K and original V when RoPE leaves its inputs untouched."""
+    writes = []
+
+    def cache_update(_layer, key, value, _cache, slots):
+        writes.append((key.clone(), value.clone(), slots))
+
+    def rotary_emb(positions, query, key):
+        return query + positions[:, None], key
+
+    attn = SimpleNamespace(impl=SimpleNamespace(do_kv_cache_update=cache_update), kv_cache=object())
+    model = SimpleNamespace(
+        _num_attn_layers=1,
+        _kv_size=2,
+        _head_dim=2,
+        _num_kv_heads=1,
+        hidden_norm=nn.Identity(),
+        _fused_kv_weight=torch.tensor([[1.0, 0.0], [0.0, 1.0], [2.0, 0.0], [0.0, 2.0]]),
+        _fused_kv_bias=None,
+        layers=[SimpleNamespace(self_attn=SimpleNamespace(k_norm=nn.Identity(), rotary_emb=rotary_emb))],
+        _attn_layers=[attn],
+    )
+    states = torch.tensor([[2.0, 3.0], [5.0, 7.0]])
+    positions = torch.tensor([9, 11])
+    slots = torch.tensor([64, 65])
+    precompute_and_store_context_kv(model, states, positions, slots)
+
+    [(key, value, written_slots)] = writes
+    torch.testing.assert_close(key, torch.tensor([[[11.0, 12.0]], [[16.0, 18.0]]]))
+    torch.testing.assert_close(value, torch.tensor([[[4.0, 6.0]], [[10.0, 14.0]]]))
+    assert written_slots is slots
 
 
 class TestQwen3DSparkWeightLoading:
@@ -51,7 +85,11 @@ class TestQwen3DSparkWeightLoading:
         model.model.fc.weight.data.copy_(fc_weight)
         embed_before = model.model.embed_tokens.weight.detach().clone()
         head_before = model.lm_head.weight.detach().clone()
-        config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace()))
+        config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(model_type="qwen3"), hf_text_config=SimpleNamespace()
+            )
+        )
         with (
             patch.object(qwen3_dspark, "get_rotation_path", return_value="quarot.safetensors"),
             patch.object(qwen3_dspark, "get_rotation_matrix", return_value=rotation_matrix) as rotation_loader,
@@ -99,7 +137,11 @@ def test_quarot_loads_missing_target_vocab_shards(tmp_path, model_cls) -> None:
         return layer
 
     config = SimpleNamespace(
-        model_config=SimpleNamespace(model=str(tmp_path), hf_text_config=SimpleNamespace(vocab_size=4, hidden_size=2))
+        model_config=SimpleNamespace(
+            model=str(tmp_path),
+            hf_config=SimpleNamespace(model_type="qwen3"),
+            hf_text_config=SimpleNamespace(vocab_size=4, hidden_size=2),
+        )
     )
     with (
         patch.object(qwen3_dspark, "get_rotation_path", return_value=rotation_path),

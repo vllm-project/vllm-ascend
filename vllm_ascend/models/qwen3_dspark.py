@@ -3,6 +3,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
+from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
 
 from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
 from vllm_ascend.utils import (
@@ -98,4 +99,25 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
             set_capture_mode(True)
 
     def post_process(self, vllm_config: VllmConfig) -> None:
+        if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+            if not all(self.get_draft_attn_causal()):
+                raise ValueError("Kimi K3.1 DSpark on Ascend requires causal attention in every GQA draft layer.")
+            target_width = vllm_config.model_config.hf_text_config.hidden_size
+            layers = get_eagle3_aux_layers_from_config(vllm_config.speculative_config)
+            projection = getattr(self.model, "fc", None)
+            if not layers or projection is None:
+                raise ValueError("Kimi K3.1 GQA DSpark requires explicit target auxiliary layers and a projection.")
+            expected = len(layers) * target_width
+            if projection.input_size != expected:
+                raise ValueError(
+                    f"Kimi K3.1 GQA DSpark projection expects {projection.input_size} input features, but "
+                    f"the {len(layers)} target layers at width {target_width} supply {expected}. "
+                    "Use a draft trained for this target."
+                )
+            if self.config.hidden_size != target_width and not (
+                getattr(self, "has_own_embed_tokens", False) and getattr(self, "has_own_lm_head", False)
+            ):
+                raise ValueError(
+                    "Kimi K3.1 GQA DSpark with a different hidden size requires its own embedding and LM head."
+                )
         align_draft_weights(self, self.model.fc, vllm_config)

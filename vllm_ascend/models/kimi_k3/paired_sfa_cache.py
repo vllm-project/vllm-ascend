@@ -5,12 +5,14 @@
 Each full-history block owns both components. Recurrent groups use disjoint
 IDs from the same pool and may alias main-page physical slots. Token ownership
 never depends on the relative byte sizes of the two attention components.
-DSpark shares full-history block IDs, with a separate region in the backing.
+MLA DSpark shares full-history block IDs. GQA DSpark has its own groups.
+Both use separate regions in the backing.
 """
 
 from dataclasses import replace
 
 from vllm.config import VllmConfig
+from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -20,7 +22,12 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendGQADraftFullAttentionSpec,
+    AscendGQADraftSlidingWindowSpec,
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+)
 from vllm_ascend.models.kimi_k3.cache_config import make_kimi_cache_groups
 from vllm_ascend.utils import vllm_version_is
 
@@ -68,8 +75,33 @@ def paired_sfa_cache_groups(config, specs):
         return _paired_sfa_target_cache_groups(config, specs)
     target = {name: spec for name, spec in specs.items() if not getattr(spec, "is_draft", False)}
     groups = _paired_sfa_target_cache_groups(config, target)
-    specs.update(target)
-    if any(spec.uses_packed_sfa_main_cache for spec in draft.values()):
+    gqa = {
+        name: spec
+        for name, spec in draft.items()
+        if isinstance(spec, (AscendGQADraftFullAttentionSpec, AscendGQADraftSlidingWindowSpec))
+    }
+    if gqa:
+        if len(gqa) != len(draft):
+            raise ValueError("Paired SFA does not support a mixture of MLA and GQA draft layers.")
+        # Specs with identical geometry share a block table. Keep the target
+        # group IDs stable and preserve the draft's native window semantics.
+        by_spec = {}
+        for name, spec in sorted(gqa.items(), key=lambda item: (extract_layer_index(item[0]), item[0])):
+            by_spec.setdefault(spec, []).append(name)
+        for spec, names in by_spec.items():
+            logger.info_once(
+                "K3.1 DSpark GQA KV group %d: %d %s layers, block=%d, window=%s, dtype=%s, bytes/page/layer=%d",
+                len(groups),
+                len(names),
+                type(spec).__name__,
+                spec.block_size,
+                getattr(spec, "sliding_window", None),
+                spec.dtype,
+                spec.page_size_bytes,
+            )
+            groups.append(KVCacheGroupSpec(names, spec))
+        return groups
+    if any(not isinstance(spec, AscendMLAAttentionSpec) or spec.uses_packed_sfa_main_cache for spec in draft.values()):
         raise ValueError("Kimi DSpark draft groups require ordinary MLA cache specs.")
     ordered = dict(sorted(draft.items(), key=lambda item: extract_layer_index(item[0])))
 

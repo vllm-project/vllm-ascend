@@ -90,7 +90,11 @@ def test_post_process_aligns_weights_without_modifying_target(
     original_parameter = projection.weight
     original_projection = projection.weight.detach().clone()
     config = SimpleNamespace(
-        model_config=SimpleNamespace(model="/target", hf_text_config=SimpleNamespace(vocab_size=4, hidden_size=2))
+        model_config=SimpleNamespace(
+            model="/target",
+            hf_config=SimpleNamespace(model_type="qwen3"),
+            hf_text_config=SimpleNamespace(vocab_size=4, hidden_size=2),
+        )
     )
     rotation = torch.tensor([[0.0, -1.0], [1.0, 0.0]], dtype=torch.float64)
     monkeypatch.setattr(qwen3_dspark, "get_rotation_path", lambda received: "/rotation" if rotated else None)
@@ -142,6 +146,44 @@ def test_post_process_aligns_weights_without_modifying_target(
         else:
             assert actual is original
             torch.testing.assert_close(actual.weight, before)
+
+
+@pytest.mark.parametrize(
+    ("target_type", "causal_by_layer", "projection_width", "error"),
+    [
+        ("kimi_k31", [True, True], 8192, None),
+        ("kimi_k31", [True, False], 8192, "requires causal attention"),
+        ("kimi_k31", [True, True], 14336, "expects 14336 input features"),
+        ("qwen3", [True, False], 14336, None),
+    ],
+)
+def test_kimi_k31_validates_gqa_draft_inputs(monkeypatch, target_type, causal_by_layer, projection_width, error):
+    draft = AscendQwen3DSparkForCausalLM.__new__(AscendQwen3DSparkForCausalLM)
+    torch.nn.Module.__init__(draft)
+    projection = SimpleNamespace(input_size=projection_width)
+    draft.config = SimpleNamespace(hidden_size=4096)
+    draft.model = SimpleNamespace(
+        layers=[SimpleNamespace(self_attn=SimpleNamespace(causal=causal)) for causal in causal_by_layer],
+        fc=projection,
+    )
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type=target_type), hf_text_config=SimpleNamespace(hidden_size=4096)
+        ),
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(target_layer_ids=[23, 47]))
+        ),
+    )
+    align = MagicMock()
+    monkeypatch.setattr(qwen3_dspark, "align_draft_weights", align)
+
+    with pytest.raises(ValueError, match=error) if error else nullcontext():
+        draft.post_process(config)
+
+    if error:
+        align.assert_not_called()
+    else:
+        align.assert_called_once_with(draft, projection, config)
 
 
 @pytest.mark.parametrize("rotated", [False, True])

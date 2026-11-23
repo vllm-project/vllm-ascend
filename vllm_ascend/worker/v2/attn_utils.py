@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy
-from dataclasses import replace
+from dataclasses import fields, replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -77,6 +77,8 @@ from vllm_ascend.attention.utils import (
     supports_strided_mla_cache,
 )
 from vllm_ascend.core.kv_cache_interface import (
+    AscendGQADraftFullAttentionSpec,
+    AscendGQADraftSlidingWindowSpec,
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
@@ -425,6 +427,48 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         kv_cache_spec.update(mamba_specs)
 
     return kv_cache_spec
+
+
+def mark_kimi_k31_gqa_draft_specs(
+    vllm_config: VllmConfig,
+    kv_cache_specs: dict[str, KVCacheSpec],
+    draft_layer_names: Sequence[str],
+) -> dict[str, KVCacheSpec]:
+    """Preserve GQA cache roles when the MRv2 worker sends specs to the engine."""
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.prefill_context_parallel_size != 1 or parallel_config.decode_context_parallel_size != 1:
+        raise ValueError("Kimi K3.1 GQA DSpark requires PCP=1 and DCP=1.")
+    if not draft_layer_names or set(draft_layer_names) - kv_cache_specs.keys():
+        raise ValueError("Kimi K3.1 GQA DSpark must publish a cache spec for every draft attention layer.")
+
+    marked = dict(kv_cache_specs)
+    for name in draft_layer_names:
+        spec = kv_cache_specs[name]
+        if type(spec) is FullAttentionSpec:
+            draft_spec_type = AscendGQADraftFullAttentionSpec
+        elif type(spec) is SlidingWindowSpec:
+            draft_spec_type = AscendGQADraftSlidingWindowSpec
+        else:
+            raise ValueError(f"Unsupported Kimi K3.1 GQA DSpark cache spec for {name}: {type(spec).__name__}.")
+        if (
+            spec.dtype != torch.bfloat16
+            or spec.kv_quant_mode != KVQuantMode.NONE
+            or spec.page_size_bytes != spec.real_page_size_bytes
+            or spec.head_size != spec.head_size_v
+            or spec.tokens_per_state != 1
+        ):
+            raise ValueError(f"Kimi K3.1 GQA DSpark requires unpadded BF16 K/V pages for {name}.")
+        marked[name] = draft_spec_type(
+            **{field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+        )
+    logger.info_once(
+        "Kimi K3.1 GQA DSpark KV cache specs (layer, type, block size, page bytes): %s",
+        tuple(
+            (name, type(marked[name]).__name__, marked[name].block_size, marked[name].page_size_bytes)
+            for name in draft_layer_names
+        ),
+    )
+    return marked
 
 
 def _get_parallel_config_for_attn_metadata(attn_groups: list[list[AttentionGroup]]) -> ParallelConfig | None:
@@ -1629,6 +1673,26 @@ def _reshape_kv_cache_v2(
                 continue
 
             kv_cache_spec = layer_kv_cache_spec[layer_name]
+
+            if isinstance(kv_cache_spec, (AscendGQADraftFullAttentionSpec, AscendGQADraftSlidingWindowSpec)):
+                # The paired plan reserves a private range for each draft layer.
+                # Keep K and V contiguous within that range for GQA cache writes,
+                # FIA reads and Mooncake's separate K/V transfer descriptors.
+                raw_cache = kv_cache_raw_tensors[layer_name]
+                num_kernel_blocks, remainder = divmod(kv_cache_spec.block_size, kernel_block_size)
+                if remainder or not isinstance(raw_cache, torch.Tensor):
+                    raise ValueError(f"Invalid Kimi K3.1 GQA DSpark cache allocation for {layer_name}.")
+                shape = group.backend.get_kv_cache_shape(
+                    kv_cache_config.num_blocks * num_kernel_blocks,
+                    kernel_block_size,
+                    kv_cache_spec.num_kv_heads,
+                    kv_cache_spec.head_size,
+                    "bfloat16",
+                )
+                if shape[0] != 2 or math.prod(shape) * get_dtype_size(kv_cache_spec.dtype) != raw_cache.numel():
+                    raise ValueError(f"Kimi K3.1 GQA DSpark K/V views do not fit the allocation for {layer_name}.")
+                kv_caches[layer_name] = raw_cache.view(kv_cache_spec.dtype).view(shape).unbind(0)
+                continue
 
             if type(kv_cache_spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
                 raw_cache = kv_cache_raw_tensors[layer_name]

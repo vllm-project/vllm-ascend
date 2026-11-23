@@ -226,7 +226,7 @@ ACCURACY_CASES = [
         "parallel_drafting_token_id": 789,
     },
     {
-        "name": "query_position_clamp",
+        "name": "query_position_clamp_without_cache_write",
         "req_lens": [2],
         "position_starts": [60],
         "idx_mapping": [1],
@@ -453,8 +453,12 @@ def _build_reference(data, case):
             query_pos = last_valid_pos + 1 + query_off
             ref.input_ids[query_idx] = bonus_token if query_off == 0 else case["parallel_drafting_token_id"]
             ref.query_positions[query_idx] = min(query_pos, max_model_len - 1)
-            ref.query_slot_mapping[query_idx] = _local_slot(
-                query_pos, block_table[req_idx], kv_cache_block_size, block_size, cp_rank, cp_size, cp_interleave
+            ref.query_slot_mapping[query_idx] = (
+                _local_slot(
+                    query_pos, block_table[req_idx], kv_cache_block_size, block_size, cp_rank, cp_size, cp_interleave
+                )
+                if query_pos < max_model_len
+                else PAD_SLOT_ID
             )
 
         for sample_local in range(num_speculative_steps):

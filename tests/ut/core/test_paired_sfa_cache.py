@@ -7,32 +7,46 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
+from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config, get_kv_cache_configs
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+    register_all_kvcache_specs,
+)
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheLayout, MambaSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendGQADraftFullAttentionSpec,
+    AscendGQADraftSlidingWindowSpec,
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+    register_ascend_kv_cache_specs,
+)
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
     paired_sfa_cache_config,
     paired_sfa_cache_groups,
+    paired_sfa_max_memory,
     paired_sfa_pool_bytes,
 )
 from vllm_ascend.patch.platform import patch_kv_cache_utils
 
 
-def make_specs():
+def make_specs(block_size=1536):
     specs = {}
     sparse = [*range(3, 92, 4), 92]
     for layer in range(93):
         name = f"model.layers.{layer}"
         if layer in sparse:
             specs[name + ".attn"] = AscendMLAAttentionSpec(
-                block_size=1536,
+                block_size=block_size,
                 num_kv_heads=1,
                 head_size=656,
                 dtype=torch.int8,
                 cache_sparse_sfa_c8=True,
             )
             specs[name + ".indexer.k_cache"] = AscendSFAIndexerCacheSpec(
-                block_size=1536,
+                block_size=block_size,
                 num_kv_heads=1,
                 head_size=128,
                 dtype=torch.int8,
@@ -42,11 +56,11 @@ def make_specs():
             )
         else:
             specs[name + ".linear_attn"] = MambaSpec(
-                block_size=1536,
+                block_size=block_size,
                 shapes=((3, 4608), (12, 128, 128)),
                 dtypes=(torch.bfloat16, torch.float32),
                 mamba_cache_mode="align",
-                page_size_padded=1536 * 656,
+                page_size_padded=block_size * 656,
             )
     return specs
 
@@ -56,10 +70,91 @@ def make_config():
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(model_type="kimi_k31"),
             hf_text_config=SimpleNamespace(model_type="kimi_linear"),
+            max_model_len=131072,
         ),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
-        cache_config=SimpleNamespace(num_gpu_blocks_override=None, prefix_cache_retention_interval=None),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=None, prefix_cache_retention_interval=None, mamba_cache_mode="align"
+        ),
     )
+
+
+def test_gqa_dspark_groups_keep_target_ownership_and_native_swa():
+    register_ascend_kv_cache_specs()
+    config, target = make_config(), make_specs()
+    config.parallel_config = SimpleNamespace(decode_context_parallel_size=1)
+    config.max_in_flight_tokens = 16384
+    config.speculative_config = SimpleNamespace(method="dspark")
+    native = dict(block_size=128, num_kv_heads=2, head_size=64, dtype=torch.bfloat16)
+    full = AscendGQADraftFullAttentionSpec(**native)
+    swa = AscendGQADraftSlidingWindowSpec(**native, sliding_window=2048)
+    full_name = "model.layers.93.self_attn.attn"
+    swa_names = [f"model.layers.{index}.self_attn.attn" for index in (94, 95)]
+    specs = {**target, swa_names[1]: swa, full_name: full, swa_names[0]: swa}
+
+    old = paired_sfa_cache_groups(config, target)
+    groups = paired_sfa_cache_groups(config, specs)
+    assert groups[: len(old)] == old
+    assert groups[len(old) :] == [KVCacheGroupSpec([full_name], full), KVCacheGroupSpec(swa_names, swa)]
+    patch_kv_cache_utils._validate_kv_cache_layout(KVCacheLayout.LBHNC, groups)
+    extra_bytes = full.page_size_bytes + 2 * swa.page_size_bytes
+    pool_bytes = paired_sfa_pool_bytes(groups)
+    assert pool_bytes == paired_sfa_pool_bytes(old) + extra_bytes
+    target_blocks = paired_sfa_max_memory(config, old) // paired_sfa_pool_bytes(old)
+    draft_blocks = (
+        full.max_memory_usage_bytes(config) // full.page_size_bytes
+        + swa.max_memory_usage_bytes(config) // swa.page_size_bytes
+    )
+    assert paired_sfa_max_memory(config, groups) == (target_blocks + draft_blocks) * pool_bytes
+
+    plan = patch_kv_cache_utils._ascend_get_kv_cache_config_from_groups(config, groups, 7 * pool_bytes)
+    assert plan.num_blocks == 7
+    assert plan.kv_cache_tensors[-3].offset == 7 * paired_sfa_pool_bytes(old)
+    assert plan.kv_cache_tensors[-1].offset + 7 * swa.page_size_bytes == 7 * pool_bytes
+    scheduler = generate_scheduler_kv_cache_config([plan])
+    assert scheduler.dspark_draft_only_group_ids == (len(old), len(old) + 1)
+    assert KVCacheSpecRegistry.get_manager_class(scheduler.kv_cache_groups[-2].kv_cache_spec) is FullAttentionManager
+    assert KVCacheSpecRegistry.get_manager_class(scheduler.kv_cache_groups[-1].kv_cache_spec) is SlidingWindowManager
+
+
+def test_paired_sfa_rejects_unknown_untagged_gqa_layer():
+    spec = SlidingWindowSpec(block_size=128, num_kv_heads=2, head_size=64, dtype=torch.bfloat16, sliding_window=2048)
+    with pytest.raises(ValueError, match="Unexpected cache role"):
+        paired_sfa_cache_groups(make_config(), {**make_specs(), "model.layers.93.attn": spec})
+
+
+def test_gqa_dspark_engine_cache_admission_and_scheduler_alignment():
+    register_all_kvcache_specs(None)
+    register_ascend_kv_cache_specs()
+    config = make_config()
+    config.model_config.original_max_model_len = config.model_config.max_model_len
+    config.parallel_config = SimpleNamespace(decode_context_parallel_size=1)
+    config.attention_config = SimpleNamespace(hisparse_config=None)
+    config.speculative_config = SimpleNamespace(method="dspark", use_multi_module_mtp=lambda: False)
+    config.kv_transfer_config = None
+    config.cache_config.enable_prefix_caching = True
+    config.cache_config.prefix_match_unit = None
+    config.cache_config.block_size = 1664
+    config.max_in_flight_tokens = 16384
+    native = dict(num_kv_heads=2, head_size=64, dtype=torch.bfloat16)
+    specs = {
+        **make_specs(block_size=1664),
+        "model.layers.93.self_attn.attn": AscendGQADraftFullAttentionSpec(block_size=1664, **native),
+        "model.layers.94.self_attn.attn": AscendGQADraftSlidingWindowSpec(
+            block_size=128, sliding_window=2048, **native
+        ),
+    }
+    groups = paired_sfa_cache_groups(config, specs)
+    usable_memory = paired_sfa_max_memory(config, groups)
+    pool_bytes = paired_sfa_pool_bytes(groups)
+    plans = get_kv_cache_configs(config, [specs] * 8, [usable_memory + pool_bytes] * 8)
+    assert len(plans) == 8
+    assert plans[0].num_blocks == usable_memory // pool_bytes + 1
+    scheduler = generate_scheduler_kv_cache_config(plans)
+    config.cache_config.block_size = min(group.kv_cache_spec.block_size for group in scheduler.kv_cache_groups)
+    assert config.cache_config.block_size == 128
+    assert patch_kv_cache_utils._ascend_resolve_kv_cache_block_sizes(scheduler, config) == (1664, 128)
+    assert scheduler.dspark_draft_only_group_ids == (len(groups) - 2, len(groups) - 1)
 
 
 def test_token_blocks_unchanged_and_components_share_ids():

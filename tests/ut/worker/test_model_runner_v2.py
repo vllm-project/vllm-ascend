@@ -12,7 +12,7 @@ from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.offloader.base import NoopOffloader
 from vllm.sequence import IntermediateTensors
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, SlidingWindowSpec
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
@@ -24,6 +24,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_v_scale_cache_shape,
 )
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+from vllm_ascend.core.kv_cache_interface import AscendGQADraftSlidingWindowSpec
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -1328,6 +1329,42 @@ def test_profile_run_reserves_sparse_offload_topk_buffers():
         runner.profile_run()
 
     reserve.assert_called_once_with({"layer.0": "host-spec"}, runner.vllm_config, sparse_cfg)
+
+
+@pytest.mark.parametrize(
+    ("model_type", "method", "architecture", "marks_draft"),
+    [
+        ("kimi_k31", "dspark", "Qwen3DSparkModel", True),
+        ("kimi_k31", "dspark", "KimiK3DSparkModel", False),
+        ("kimi_k31", None, None, False),
+        ("kimi_k3", "dspark", "Qwen3DSparkModel", False),
+    ],
+)
+def test_get_kv_cache_spec_marks_only_loaded_kimi_k31_qwen3_dspark_layers(
+    model_type, method, architecture, marks_draft
+):
+    runner = _make_runner()
+    runner.model_config.hf_config.model_type = model_type
+    runner.vllm_config.model_config = runner.model_config
+    runner.vllm_config.parallel_config = SimpleNamespace(
+        prefill_context_parallel_size=1, decode_context_parallel_size=1
+    )
+    runner.vllm_config.speculative_config = (
+        SimpleNamespace(method=method, draft_model_config=SimpleNamespace(architectures=[architecture]))
+        if method is not None
+        else None
+    )
+    runner.speculator = SimpleNamespace(draft_attn_layer_names={"drafter"}) if method is not None else None
+    spec = SlidingWindowSpec(block_size=128, dtype=torch.bfloat16, head_size=64, num_kv_heads=2, sliding_window=2048)
+    with patch.object(GPUModelRunner, "get_kv_cache_spec", return_value={"target": spec, "drafter": spec}):
+        published = runner.get_kv_cache_spec()
+
+    assert published["target"] is spec
+    if marks_draft:
+        assert isinstance(published["drafter"], AscendGQADraftSlidingWindowSpec)
+        assert published["drafter"].sliding_window == spec.sliding_window
+    else:
+        assert published["drafter"] is spec
 
 
 def test_register_sparse_kv_caches_binds_fused_target_and_draft_layers():

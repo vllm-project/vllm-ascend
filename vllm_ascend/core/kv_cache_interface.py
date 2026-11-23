@@ -23,6 +23,20 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 
+@dataclass(frozen=True, kw_only=True)
+class AscendGQADraftFullAttentionSpec(FullAttentionSpec):
+    """Full-history GQA cache owned by the Kimi K3.1 DSpark draft."""
+
+    is_draft: bool = field(default=True, init=False)
+
+
+@dataclass(frozen=True, kw_only=True)
+class AscendGQADraftSlidingWindowSpec(SlidingWindowSpec):
+    """Sliding-window GQA cache owned by the Kimi K3.1 DSpark draft."""
+
+    is_draft: bool = field(default=True, init=False)
+
+
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
     return kv_cache_spec.tokens_per_state
@@ -497,6 +511,9 @@ class AscendCircularBufferSpec(CircularBufferSpec):
 def register_ascend_kv_cache_specs() -> None:
     from vllm_ascend.core.single_type_kv_cache_manager import AscendCircularBufferManager
     from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
+
+    KVCacheSpecRegistry.register(AscendGQADraftFullAttentionSpec, FullAttentionManager, FullAttentionSpec)
+    KVCacheSpecRegistry.register(AscendGQADraftSlidingWindowSpec, SlidingWindowManager, SlidingWindowSpec)
 
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendCircularBufferSpec,

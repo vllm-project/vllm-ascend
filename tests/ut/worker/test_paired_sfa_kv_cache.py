@@ -10,17 +10,25 @@ import torch
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheTensor,
     MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     compute_layout_strides,
 )
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.core.kv_cache_interface import (
+    AscendGQADraftFullAttentionSpec,
+    AscendGQADraftSlidingWindowSpec,
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+)
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import paired_sfa_cache_config, paired_sfa_cache_groups
 from vllm_ascend.worker.v2 import attn_utils
 
@@ -194,6 +202,75 @@ def test_draft_fia_reshape_uses_draft_cache_dtype_in_packed_target_group(monkeyp
     assert k_cache.shape == (NUM_BLOCKS, BLOCK_SIZE, 1, 512)
     assert v_cache.shape == (NUM_BLOCKS, BLOCK_SIZE, 1, 64)
     assert k_cache.dtype == v_cache.dtype == spec.dtype
+
+
+@pytest.mark.parametrize("layout", ["NHD", "HND"])
+@pytest.mark.parametrize(
+    ("spec", "draft_spec_type"),
+    [
+        (
+            SlidingWindowSpec(
+                block_size=BLOCK_SIZE, num_kv_heads=2, head_size=64, dtype=torch.bfloat16, sliding_window=2048
+            ),
+            AscendGQADraftSlidingWindowSpec,
+        ),
+        (
+            FullAttentionSpec(block_size=1664, num_kv_heads=2, head_size=64, dtype=torch.bfloat16),
+            AscendGQADraftFullAttentionSpec,
+        ),
+    ],
+    ids=["native-swa", "split-full"],
+)
+def test_gqa_dspark_uses_private_contiguous_kv_planes(vllm_config, monkeypatch, layout, spec, draft_spec_type):
+    vllm_config.parallel_config.prefill_context_parallel_size = 1
+    vllm_config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2")
+    monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", layout)
+    _, specs = make_paired_cache(vllm_config, torch.float16, with_draft=False)
+    target_specs = dict(specs)
+    # Native GQA specs arrive untagged in the v0.30 runner.
+    draft_name = "draft.model.layers.93.self_attn.attn"
+    specs[draft_name] = spec
+    marked = attn_utils.mark_kimi_k31_gqa_draft_specs(vllm_config, specs, [draft_name])
+    assert specs == {**target_specs, draft_name: spec}
+    assert isinstance(marked[draft_name], draft_spec_type)
+    assert marked[draft_name].sliding_window == spec.sliding_window
+
+    groups = paired_sfa_cache_groups(vllm_config, marked)
+    assert groups[-1].layer_names == [draft_name]
+    plan = paired_sfa_cache_config(vllm_config, groups, 0)
+    raw_caches = attn_utils._allocate_kv_cache(plan, shared_layers={}, device=torch.device("cpu"))
+    reshaped = attn_utils._reshape_kv_cache_v2(
+        attn_groups=[AttentionGroup(AscendAttentionBackend, [draft_name], marked[draft_name], len(groups) - 1)],
+        kv_cache_raw_tensors=raw_caches,
+        cache_dtype="int8",
+        kernel_block_sizes=[BLOCK_SIZE] * len(groups),
+        shared_kv_cache_layers={},
+        kv_cache_config=plan,
+    )
+
+    key, value = reshaped[draft_name]
+    assert key.is_contiguous() and value.is_contiguous()
+    num_kernel_blocks = NUM_BLOCKS * (spec.block_size // BLOCK_SIZE)
+    shape = (num_kernel_blocks, 2, BLOCK_SIZE, 64) if layout == "HND" else (num_kernel_blocks, BLOCK_SIZE, 2, 64)
+    assert key.shape == value.shape == shape
+    assert key.dtype == value.dtype == torch.bfloat16
+    assert key.data_ptr() == raw_caches[draft_name].data_ptr()
+    assert value.data_ptr() - key.data_ptr() == key.nbytes
+    key[1].fill_(1)
+    value[2].fill_(2)
+    assert torch.count_nonzero(key) == key[1].numel()
+    assert torch.count_nonzero(value) == value[2].numel()
+    assert all(torch.count_nonzero(raw_caches[name]) == 0 for name in target_specs)
+
+
+def test_kimi_k31_gqa_draft_spec_rejects_context_parallelism(vllm_config):
+    vllm_config.parallel_config.prefill_context_parallel_size = 1
+    vllm_config.parallel_config.decode_context_parallel_size = 2
+    spec = SlidingWindowSpec(
+        block_size=BLOCK_SIZE, num_kv_heads=2, head_size=64, dtype=torch.bfloat16, sliding_window=2048
+    )
+    with pytest.raises(ValueError, match="requires PCP=1 and DCP=1"):
+        attn_utils.mark_kimi_k31_gqa_draft_specs(vllm_config, {"draft": spec}, ["draft"])
 
 
 @pytest.mark.parametrize("scale_dtype", [torch.float16, torch.float32])

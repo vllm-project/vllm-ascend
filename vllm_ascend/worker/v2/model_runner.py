@@ -111,6 +111,7 @@ from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
+    mark_kimi_k31_gqa_draft_specs,
     skip_ring_state_update,
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
@@ -399,6 +400,18 @@ class NPUModelRunner(GPUModelRunner):
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         kv_cache_spec = super().get_kv_cache_spec()
+
+        spec_config = self.vllm_config.speculative_config
+        if (
+            self.speculator is not None
+            and getattr(self.vllm_config.model_config.hf_config, "model_type", None) == "kimi_k31"
+            and spec_config is not None
+            and spec_config.method == "dspark"
+            and "Qwen3DSparkModel" in spec_config.draft_model_config.architectures
+        ):
+            kv_cache_spec = mark_kimi_k31_gqa_draft_specs(
+                self.vllm_config, kv_cache_spec, sorted(self.speculator.draft_attn_layer_names)
+            )
 
         return apply_dspark_resident_kv_specs(
             kv_cache_spec,

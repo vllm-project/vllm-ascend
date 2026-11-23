@@ -39,11 +39,10 @@ def precompute_and_store_context_kv(
 
     # --- Fused RoPE across all layers ---
     # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
-    # In-place RoPE: pass K as the "query" arg with key=None.
     all_k_flat = all_k_normed.view(L * num_ctx, kv)
     positions_repeated = context_positions.repeat(L)
-    tmpv = all_k_flat.clone()
-    self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, tmpv)
+    # Some RoPE backends return newly allocated tensors.
+    all_k_flat, _ = self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, all_k_flat.clone())
 
     if context_slot_mapping is None:
         return

@@ -31,7 +31,11 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.attention.kimi_c8_static import pa_nz_prolog_view
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendGQADraftFullAttentionSpec,
+    AscendGQADraftSlidingWindowSpec,
+    AscendSFAIndexerCacheSpec,
+)
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
@@ -310,6 +314,8 @@ class MooncakeBaseConnectorWorker:
                 spec_index = self.layer_name_to_spec_index[layer_name]
                 spec = self.kv_cache_specs[spec_index]
                 caches = as_kv_cache_tensors(cache_or_caches)
+                if isinstance(spec, (AscendGQADraftFullAttentionSpec, AscendGQADraftSlidingWindowSpec)):
+                    self._validate_gqa_draft_cache(layer_name, spec, caches)
                 contract = None
                 draft_prefixes = getattr(getattr(self, "vllm_config", None), "_kimi_c8_draft_layer_prefixes", ())
                 is_draft_layer = any(
@@ -437,6 +443,31 @@ class MooncakeBaseConnectorWorker:
             register_regions.ptrs,
             register_regions.lengths,
         )
+
+    def _validate_gqa_draft_cache(
+        self,
+        layer_name: str,
+        spec: AscendGQADraftFullAttentionSpec | AscendGQADraftSlidingWindowSpec,
+        caches: tuple[torch.Tensor, ...],
+    ) -> None:
+        """Require a contiguous head per physical block for byte-range pulls."""
+        if len(caches) != 2:
+            raise ValueError(f"Mooncake GQA draft cache {layer_name!r} requires separate K and V views.")
+        for cache, head_dim in zip(caches, (spec.head_size, spec.head_size_v)):
+            if cache.ndim == 4 and cache.shape[0] > 0 and cache.shape[0] % self.num_blocks == 0:
+                blocks_per_page = cache.shape[0] // self.num_blocks
+                tokens_per_block, remainder = divmod(spec.block_size, blocks_per_page)
+                if (
+                    not remainder
+                    and tuple(cache.shape[1:]) == (spec.num_kv_heads, tokens_per_block, head_dim)
+                    and cache.dtype == spec.dtype
+                    and cache[0].is_contiguous()
+                ):
+                    continue
+            raise ValueError(
+                f"Mooncake GQA draft cache {layer_name!r} requires HND K/V views with contiguous heads per block. "
+                "Use VLLM_KV_CACHE_LAYOUT=HND on both producer and consumer."
+            )
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """Compatibility wrapper for the legacy completion API."""

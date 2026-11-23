@@ -71,6 +71,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.core.kv_cache_interface import AscendGQADraftFullAttentionSpec, AscendGQADraftSlidingWindowSpec
 from vllm_ascend.core.kv_cache_placement import (
     KVPPPhysicalCachePlan,
     create_kvpp_cache_allocation_plan,
@@ -696,6 +697,12 @@ class NPUWorker(WorkerBase):
             return available_memory
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         if not kv_cache_groups:
+            return available_memory
+        if any(
+            isinstance(spec, (AscendGQADraftFullAttentionSpec, AscendGQADraftSlidingWindowSpec))
+            for spec in kv_cache_spec.values()
+        ):
+            # The paired SFA pool divisor already charges for the independent GQA K/V planes.
             return available_memory
         # vLLM #51718 removed the DSV4-specific packed planner. Ascend restores
         # that shared-tuple layout in patch_kv_cache_utils, so DSV4 already fits

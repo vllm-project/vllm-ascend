@@ -35,10 +35,13 @@ hits one full page (or entirely) short.
 
 import functools
 import inspect
+from copy import copy
 
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.request import Request
 
+from vllm_ascend.core.kv_cache_interface import AscendGQADraftFullAttentionSpec, AscendGQADraftSlidingWindowSpec
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     _skips_eagle_block_drop,
 )
@@ -132,23 +135,31 @@ def _mamba_block_aligned_split(
                 num_new_tokens = last_cache_position - num_computed_tokens
         return num_new_tokens
 
-    if not _skips_eagle_block_drop(kv_transfer_config):
-        return _original_mamba_block_aligned_split(
-            self,
-            request,
-            num_new_tokens,
-            num_new_local_computed_tokens,
-            num_external_computed_tokens,
-        )
+    skip_eagle_drop = _skips_eagle_block_drop(kv_transfer_config)
     # vLLM 0.28.x and newer revisions use different names.  Some
     # transitional scheduler implementations expose both and different
     # wrapper layers consult different attributes, so clear every
     # attribute that exists and restore all of them after the call.
-    drop_attrs = tuple(name for name in ("use_eagle", "use_eagle_block_drop") if hasattr(self, name))
+    drop_attrs = (
+        tuple(name for name in ("use_eagle", "use_eagle_block_drop") if hasattr(self, name)) if skip_eagle_drop else ()
+    )
     original_drop_values = {name: getattr(self, name) for name in drop_attrs}
-    for name in drop_attrs:
-        setattr(self, name, False)
+    original_cache_config = self.cache_config
+    groups = getattr(getattr(self, "kv_cache_config", None), "kv_cache_groups", ())
+    if any(
+        isinstance(g.kv_cache_spec, (AscendGQADraftFullAttentionSpec, AscendGQADraftSlidingWindowSpec)) for g in groups
+    ):
+        # EngineCore reports the smallest cacheable block (typically 128),
+        # but this split materializes KDA checkpoints at the Mamba block size.
+        mamba_block_size = next(g.kv_cache_spec.block_size for g in groups if isinstance(g.kv_cache_spec, MambaSpec))
+    else:
+        mamba_block_size = original_cache_config.block_size
     try:
+        for name in drop_attrs:
+            setattr(self, name, False)
+        if mamba_block_size != original_cache_config.block_size:
+            self.cache_config = copy(original_cache_config)
+            self.cache_config.block_size = mamba_block_size
         result = _original_mamba_block_aligned_split(
             self,
             request,
@@ -164,7 +175,8 @@ def _mamba_block_aligned_split(
         # so this also covers API prompts of k * block_size + 1 tokens.
         block_size = self.cache_config.block_size
         if (
-            getattr(self.cache_config, "enable_prefix_caching", True)
+            skip_eagle_drop
+            and getattr(self.cache_config, "enable_prefix_caching", True)
             and self.hash_block_size == block_size
             and not getattr(self, "mamba_has_prefill_checkpoint_blocks", False)
             and request.num_prompt_tokens % block_size == 0
@@ -175,6 +187,7 @@ def _mamba_block_aligned_split(
                 result = replay_boundary - start
         return result
     finally:
+        self.cache_config = original_cache_config
         for name, value in original_drop_values.items():
             setattr(self, name, value)
 
