@@ -165,12 +165,6 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
     def chunk_gated_delta_rule(**kwargs):
         return kwargs["v"].clone(), kwargs["initial_state"].clone()
 
-    # Shape [1, num_tokens, num_heads].
-    gating = (
-        torch.zeros(1, 3, 1),
-        torch.ones(1, 3, 1),
-    )
-
     with (
         override_forward_context(forward_context),
         patch(
@@ -183,7 +177,7 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
         ),
         patch(
             "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
-            return_value=gating,
+            side_effect=lambda A, a, b, bias: (torch.zeros_like(a).unsqueeze(0), torch.ones_like(b).unsqueeze(0)),
         ),
         patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
         patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=True),
@@ -346,7 +340,7 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
         patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
         patch(
             "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
-            return_value=(torch.zeros(1, 4, 1), torch.ones(1, 4, 1)),
+            side_effect=lambda A, a, b, bias: (torch.zeros_like(a).unsqueeze(0), torch.ones_like(b).unsqueeze(0)),
         ),
         patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
         patch("vllm_ascend.ops.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: x.clone()) as conv,
@@ -416,7 +410,7 @@ def test_prefill_conv_layout_for_pure_and_mixed_batches(mixed, head_dim):
         patch("vllm_ascend.ops.gdn._get_fla_gdn_prefill_op", return_value=None),
         patch(
             "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
-            return_value=(torch.zeros(1, 3, 1), torch.ones(1, 3, 1)),
+            side_effect=lambda A, a, b, bias: (torch.zeros_like(a).unsqueeze(0), torch.ones_like(b).unsqueeze(0)),
         ),
         patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=conv) as conv_mock,
         patch(
@@ -495,7 +489,7 @@ def test_prefill_gathers_only_selected_rows_from_padded_state(padded_state) -> N
         patch("vllm_ascend.ops.gdn._get_fla_gdn_prefill_op", return_value=None),
         patch(
             "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
-            return_value=(torch.zeros(1, 3, 1), torch.ones(1, 3, 1)),
+            side_effect=lambda A, a, b, bias: (torch.zeros_like(a).unsqueeze(0), torch.ones_like(b).unsqueeze(0)),
         ),
         patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=conv),
         patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
