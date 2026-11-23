@@ -27,7 +27,7 @@ def _impl(manager_block_size, capacity, quant=True):
         dtype=torch.float8_e4m3fn if quant else torch.bfloat16,
         W_UV=torch.empty(1),
         kv_a_layernorm=SimpleNamespace(weight=torch.ones(mla_v1.FLASHMLA_V_DIM), variance_epsilon=1e-5),
-        _validate_prolog_v3_cache=MagicMock(),
+        _validate_mla_cache_layout=MagicMock(),
         vllm_config=SimpleNamespace(
             scheduler_config=SimpleNamespace(max_num_batched_tokens=capacity),
             cache_config=SimpleNamespace(block_size=manager_block_size),

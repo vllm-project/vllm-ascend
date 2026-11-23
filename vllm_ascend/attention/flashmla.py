@@ -28,6 +28,9 @@ FLASHMLA_V_DIM = 512
 FLASHMLA_BLOCK_SIZE = 128
 FLASHMLA_NUM_KV_HEADS = 1
 FLASHMLA_MASK_SIZE = 2048
+FLASHMLA_NON_CAUSAL_MASK_MODE = 0
+FLASHMLA_CAUSAL_MASK_MODE = 3
+FLASHMLA_KV_LAYOUT = "PA_BBND"
 FLASHMLA_MAX_BATCH_SIZE = 65535
 
 
@@ -98,29 +101,33 @@ def split_flashmla_requests(common) -> tuple[int, int, int, int]:
     return first_prefill, request_count - first_prefill, decode_tokens, common.num_actual_tokens - decode_tokens
 
 
+def _check_mask_and_kv_layout(mask_mode: int, layout_kv: str) -> None:
+    if mask_mode not in (FLASHMLA_NON_CAUSAL_MASK_MODE, FLASHMLA_CAUSAL_MASK_MODE):
+        raise ValueError("FlashMLA mask_mode must be 0 or 3")
+    if layout_kv != FLASHMLA_KV_LAYOUT:
+        raise ValueError(f"FlashMLA layout_kv must be {FLASHMLA_KV_LAYOUT}")
+
+
 @dataclass(frozen=True)
 class FlashMLAConfig:
     num_heads: int
     softmax_scale: float
-    mask_mode: int = 3
-    layout_kv: str = "PA_BBND"
+    mask_mode: int = FLASHMLA_CAUSAL_MASK_MODE
+    layout_kv: str = FLASHMLA_KV_LAYOUT
     return_softmax_lse: bool = False
 
     def __post_init__(self) -> None:
         if self.num_heads not in MLA_FLASH_SUPPORTED_Q_HEADS:
             raise ValueError(f"FlashMLA requires local Q heads in {MLA_FLASH_SUPPORTED_Q_HEADS}, got {self.num_heads}")
-        if self.mask_mode not in (0, 3):
-            raise ValueError("FlashMLA mask_mode must be 0 or 3")
-        if self.layout_kv != "PA_BBND":
-            raise ValueError("FlashMLA layout_kv must be PA_BBND")
+        _check_mask_and_kv_layout(self.mask_mode, self.layout_kv)
 
 
 @dataclass(frozen=True)
 class QuantFlashMLAConfig:
     # Immutable CANN ABI constraints, not module-level runtime state.
     FP8_QUANT_MODE: ClassVar[int] = 1
-    NON_CAUSAL_MASK_MODE: ClassVar[int] = 0
-    CAUSAL_MASK_MODE: ClassVar[int] = 3
+    NON_CAUSAL_MASK_MODE: ClassVar[int] = FLASHMLA_NON_CAUSAL_MASK_MODE
+    CAUSAL_MASK_MODE: ClassVar[int] = FLASHMLA_CAUSAL_MASK_MODE
     NUM_KV_HEADS: ClassVar[int] = FLASHMLA_NUM_KV_HEADS
     METADATA_PLANES: ClassVar[int] = 2
     SUPPORTED_Q_HEADS: ClassVar[frozenset[int]] = frozenset((1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128))
@@ -128,7 +135,7 @@ class QuantFlashMLAConfig:
     num_heads: int
     softmax_scale: float
     mask_mode: int = CAUSAL_MASK_MODE
-    layout_kv: str = "PA_BBND"
+    layout_kv: str = FLASHMLA_KV_LAYOUT
     return_softmax_lse: bool = False
     quant_mode: int = FP8_QUANT_MODE
 
@@ -137,10 +144,7 @@ class QuantFlashMLAConfig:
             raise ValueError(f"QuantFlashMLA requires local Q heads in {self.SUPPORTED_Q_HEADS}, got {self.num_heads}")
         if self.quant_mode != self.FP8_QUANT_MODE:
             raise ValueError("The vLLM Ascend QuantFlashMLA adapter currently supports FP8 E4M3 quant_mode=1 only")
-        if self.mask_mode not in (self.NON_CAUSAL_MASK_MODE, self.CAUSAL_MASK_MODE):
-            raise ValueError("QuantFlashMLA mask_mode must be 0 or 3")
-        if self.layout_kv != "PA_BBND":
-            raise ValueError("QuantFlashMLA layout_kv must be PA_BBND")
+        _check_mask_and_kv_layout(self.mask_mode, self.layout_kv)
 
 
 def _check_tensor(name: str, tensor: torch.Tensor, shape: tuple[int, ...], dtype: torch.dtype) -> None:
@@ -192,9 +196,9 @@ def _check_attention_inputs(
         raise ValueError("FlashMLA block_table must be int32")
     if metadata.dtype != torch.int32 or metadata.numel() == 0:
         raise ValueError("FlashMLA metadata must be a nonempty int32 tensor from the metadata operator")
-    if config.mask_mode == 0 and attn_mask is not None:
+    if config.mask_mode == FLASHMLA_NON_CAUSAL_MASK_MODE and attn_mask is not None:
         raise ValueError("FlashMLA mask_mode=0 requires attn_mask=None")
-    if config.mask_mode == 3:
+    if config.mask_mode == FLASHMLA_CAUSAL_MASK_MODE:
         if attn_mask is None:
             raise ValueError("FlashMLA mask_mode=3 requires the upper-triangular int8 mask")
         _check_tensor("attn_mask", attn_mask, (FLASHMLA_MASK_SIZE, FLASHMLA_MASK_SIZE), torch.int8)
@@ -480,9 +484,7 @@ class FlashMLAMetadataBuilder:
         self.rope_dtype = getattr(getattr(impl.vllm_config, "model_config", None), "dtype", impl.dtype)
         self.use_rope = impl.use_mla_rope
         self.max_num_reqs = max_num_reqs
-        self.quant_max_cache_len = (
-            impl.vllm_config.model_config.max_model_len if getattr(impl, "use_quant_flashmla", False) else None
-        )
+        self.quant_max_cache_len = impl.vllm_config.model_config.max_model_len if impl.use_quant_flashmla else None
         # Use the parent's stable decode/speculative capacity for every graph
         # shape and replay. Batch/padding storage capacity is not a query length.
         self.quant_max_query_len = max_query_len if self.quant_max_cache_len is not None else None
@@ -493,7 +495,7 @@ class FlashMLAMetadataBuilder:
         self.buffers: dict[tuple, FlashMLADecode] = {}
         self.attn_mask = attn_mask
 
-    def _metadata_bounds(self, tokens: int, *, current: bool = False) -> dict[str, int]:
+    def _metadata_bounds(self, *, current: bool = False) -> dict[str, int]:
         max_cache_len = self.quant_max_cache_len
         if max_cache_len is None:
             return {}
@@ -517,7 +519,7 @@ class FlashMLAMetadataBuilder:
             torch.empty_like(lengths, device="meta"),
             torch.empty_like(cu, device="meta"),
             torch.empty_like(used, device="meta"),
-            **self._metadata_bounds(tokens),
+            **self._metadata_bounds(),
         )
         rope_shape = (tokens, 1, 1, FLASHMLA_QK_DIM - FLASHMLA_V_DIM)
         flash = FlashMLADecode(
@@ -546,7 +548,7 @@ class FlashMLAMetadataBuilder:
                 torch.empty_like(used, device="meta"),
                 torch.empty_like(cu, device="meta"),
                 torch.empty_like(used, device="meta"),
-                **self._metadata_bounds(tokens, current=True),
+                **self._metadata_bounds(current=True),
             )
             flash.current = FlashMLACurrent(
                 adapter=self.current_adapter,
@@ -645,7 +647,7 @@ class FlashMLAMetadataBuilder:
                 flash.cos.copy_(cos)
                 flash.sin.copy_(sin)
             flash.schedule.copy_(
-                flash.adapter.build_metadata(flash.cache_lens, flash.cu, flash.used_q, **self._metadata_bounds(tokens))
+                flash.adapter.build_metadata(flash.cache_lens, flash.cu, flash.used_q, **self._metadata_bounds())
             )
             if flash.current is not None:
                 current = flash.current
@@ -660,7 +662,7 @@ class FlashMLAMetadataBuilder:
                 current.slots.masked_fill_(~flash.token_live, -1)
                 current.schedule.copy_(
                     current.adapter.build_metadata(
-                        flash.used_q, flash.cu, flash.used_q, **self._metadata_bounds(tokens, current=True)
+                        flash.used_q, flash.cu, flash.used_q, **self._metadata_bounds(current=True)
                     )
                 )
 

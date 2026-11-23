@@ -37,6 +37,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
 )
 from vllm_ascend.attention.flashmla import (
+    FLASHMLA_NUM_KV_HEADS,
     FLASHMLA_QK_DIM,
     FLASHMLA_V_DIM,
     FlashMLADecode,
@@ -449,7 +450,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             raise ValueError("MLA layers in one attention group must use the same decode backend")
         if layer_names:
             first_impl = static_forward_context[layer_names[0]].impl
-            backend_name = "QuantFlashMLA" if getattr(first_impl, "use_quant_flashmla", False) else "FlashMLA"
+            backend_name = "QuantFlashMLA" if first_impl.use_quant_flashmla else "FlashMLA"
             logger.info(
                 "MLA decode backend for group starting at %s: %s",
                 layer_names[0],
@@ -458,7 +459,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         if True in flashmla_choices:
             impl = static_forward_context[layer_names[0]].impl
             adapter = None
-            if getattr(impl, "use_quant_flashmla", False):
+            if impl.use_quant_flashmla:
                 adapter = QuantFlashMLAImpl.load(
                     QuantFlashMLAConfig(
                         impl.num_heads,
@@ -1177,48 +1178,40 @@ class AscendMLAImpl(MLAAttentionImpl):
         self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
         self._quant_flashmla_writer_scales: tuple[torch.Tensor, torch.Tensor] | None = None
 
+    def _supports_flashmla(self, supported_q_heads: frozenset[int]) -> bool:
+        return (
+            bool(getattr(self.vllm_config, "use_v2_model_runner", False))
+            and get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
+            and self.num_heads in supported_q_heads
+            and self.num_kv_heads == FLASHMLA_NUM_KV_HEADS
+            and self.kv_lora_rank == FLASHMLA_V_DIM
+            and self.qk_rope_head_dim == FLASHMLA_QK_DIM - FLASHMLA_V_DIM
+            and not self.enable_kv_nz
+            and not self.use_pcp
+            and supports_component_major_mla_pd(self.vllm_config)
+        )
+
     def _can_use_quant_flashmla(self) -> bool:
         config = self.vllm_config
-        if not self._is_k3_dspark_draft:
+        supported_heads = QuantFlashMLAConfig.SUPPORTED_Q_HEADS
+        if not self._is_k3_dspark_draft or not self.support_fp8_attention:
             return False
-        if not getattr(config, "use_v2_model_runner", False):
+        if not self._supports_flashmla(supported_heads):
             return False
-        hardware = get_current_hardware_profile()
-        if not hardware.supports(HardwareCapability.MLA_FLASH) or not self.support_fp8_attention:
-            return False
-        if self.num_heads not in QuantFlashMLAConfig.SUPPORTED_Q_HEADS or self.num_kv_heads != 1:
-            return False
-        if self.kv_lora_rank != FLASHMLA_V_DIM or self.qk_rope_head_dim != FLASHMLA_QK_DIM - FLASHMLA_V_DIM:
-            return False
-        if (
-            not self.fa_quant_layer
-            or self.dtype != torch.float8_e4m3fn
-            or config.model_config.dtype != torch.bfloat16
-            or self.enable_kv_nz
-        ):
+        if not self.fa_quant_layer or self.dtype != torch.float8_e4m3fn or config.model_config.dtype != torch.bfloat16:
             return False
         # DCP history consumes all group heads; the current chunk keeps the
         # local heads. Both adapters must accept their actual head counts.
         dcp_size = config.parallel_config.decode_context_parallel_size
-        if self.use_pcp or self.num_heads * dcp_size not in QuantFlashMLAConfig.SUPPORTED_Q_HEADS:
-            return False
-        if not supports_component_major_mla_pd(config):
-            return False
-        return get_quant_flashmla_ops() is not None
+        return self.num_heads * dcp_size in supported_heads and get_quant_flashmla_ops() is not None
 
     def _can_use_flashmla(self) -> bool:
         config = self.vllm_config
-        if not getattr(config, "use_v2_model_runner", False):
-            return False
         if config.speculative_config is not None and config.speculative_config.method != "dspark":
             return False
-        if not get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH):
+        if not self._supports_flashmla(MLA_FLASH_SUPPORTED_Q_HEADS):
             return False
-        if self.num_heads not in MLA_FLASH_SUPPORTED_Q_HEADS or self.num_kv_heads != 1:
-            return False
-        if self.kv_lora_rank != FLASHMLA_V_DIM or self.qk_rope_head_dim != FLASHMLA_QK_DIM - FLASHMLA_V_DIM:
-            return False
-        if self.fa_quant_layer or self.dtype not in (torch.bfloat16, torch.float16) or self.enable_kv_nz:
+        if self.fa_quant_layer or self.dtype not in (torch.bfloat16, torch.float16):
             return False
         dcp_size = config.parallel_config.decode_context_parallel_size
         # Replicated DSpark queries keep PCP=1 in their config, but reuse the
@@ -1226,11 +1219,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # gathers only distinct TP heads, as _dcp_all_gather_fragments does.
         pcp_size = get_pcp_group().world_size if dcp_size > 1 else 1
         query_gather_size = max(1, dcp_size // pcp_size)
-        if self.use_pcp or self.num_heads * query_gather_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
-            return False
-        if not supports_component_major_mla_pd(config):
-            return False
-        return get_flashmla_ops() is not None
+        return self.num_heads * query_gather_size in MLA_FLASH_SUPPORTED_Q_HEADS and get_flashmla_ops() is not None
 
     def _v_up_proj(self, x):
         # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
@@ -1368,14 +1357,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         elif not getattr(self, "use_dcp", False):
             self._prepare_prolog_v3_weights_after_loading()
         self._prepare_strided_kv_workspace()
-        if self.use_flashmla and (
-            self.supports_prolog_v3_writer() or (getattr(self, "use_quant_flashmla", False) and self.use_mla_rope)
-        ):
+        if self.use_flashmla and (self.supports_prolog_v3_writer() or (self.use_quant_flashmla and self.use_mla_rope)):
             self._prepare_flashmla_writer_buffers()
 
     def _prepare_flashmla_writer_buffers(self) -> None:
         """Keep a bounded dense PROLOG workspace alive across graph replay."""
-        if getattr(self, "use_quant_flashmla", False):
+        if self.use_quant_flashmla:
             if self.fak_descale_reciprocal.numel() != 1:
                 raise ValueError("QuantFlashMLA requires a single per-tensor latent KV scale")
             if self._quant_flashmla_writer_scales is None:
@@ -1458,7 +1445,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert self.fused_qkv_a_proj is not None
 
         is_native = self._mlapo_uses_native_weights
-        if self.fa_quant_layer and getattr(self, "_is_k3_dspark_draft", False):
+        if self.fa_quant_layer and self._is_k3_dspark_draft:
             # The K3 DSpark draft can combine quantized KV with BF16 weights
             # while MLAPO is disabled. Classify its two projections together.
             fused_method = self.fused_qkv_a_proj.quant_method
@@ -1643,7 +1630,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths": actual_seq_lengths_q,
         }
 
-        use_quant_flashmla = getattr(self, "use_quant_flashmla", False)
+        use_quant_flashmla = self.use_quant_flashmla
         if use_quant_flashmla and not (cache_kv_c.dtype == cache_k_pe.dtype == torch.float8_e4m3fn):
             raise ValueError("QuantFlashMLA prefill history requires FP8 latent and positional cache.")
 
@@ -1853,7 +1840,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         k_pe = k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim)
         cache_k_nope = kv_c_normed
         cache_k_pe = k_pe
-        if getattr(self, "use_quant_flashmla", False):
+        if self.use_quant_flashmla:
             # QuantFlashMLA applies k_descale to the complete 576-wide dot.
             # Quantize the latent slice with the checkpoint's static scale,
             # while keeping the positional slice as a raw FP8 cast; decode Q
@@ -1931,7 +1918,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             if return_current_kv:
                 return kv_cache[1], kv_cache[0], current_k_pe, current_k_nope
             return kv_cache[1], kv_cache[0]
-        if getattr(self, "use_quant_flashmla", False) and any(not cache.is_contiguous() for cache in kv_cache):
+        if self.use_quant_flashmla and any(not cache.is_contiguous() for cache in kv_cache):
             current_k_pe, current_k_nope = self._exec_quant_flashmla_kv_writer(
                 kv_no_split, cos, sin, kv_cache, slots, return_quantized_current=return_current_kv
             )
@@ -2087,7 +2074,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             raise RuntimeError("Strided MLA KV input exceeds the profiled workspace capacity.")
         if num_tokens == 0:
             return rope.flatten(0, 1)[:0], nope.flatten(0, 1)[:0]
-        self._validate_prolog_v3_cache(kv_cache)
+        self._validate_mla_cache_layout(kv_cache)
         assert self.kv_a_layernorm is not None
         blocks = cdiv(num_tokens, nope.shape[1])
         torch_npu.npu_kv_rmsnorm_rope_cache(
@@ -2135,7 +2122,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             if return_bf16_kv:
                 return current_rope.to(kv_no_split.dtype), current_nope.to(kv_no_split.dtype)
             return current_rope, current_nope
-        self._validate_prolog_v3_cache(kv_cache)
+        self._validate_mla_cache_layout(kv_cache)
         scales = self._quant_flashmla_writer_scales
         if scales is None:
             raise RuntimeError("QuantFlashMLA writer scales were not prepared during weight loading")
@@ -2358,69 +2345,24 @@ class AscendMLAImpl(MLAAttentionImpl):
             if old_value.data_ptr() != new_value.data_ptr():
                 old_value.copy_(new_value)
 
-    def _validate_context_prolog_v3_cache(self, kv_cache: tuple[torch.Tensor, torch.Tensor]) -> None:
+    def _validate_mla_cache_layout(self, kv_cache: tuple[torch.Tensor, torch.Tensor]) -> None:
+        """Validate component-major MLA views or slices of a token-interleaved MLA page."""
         nope_cache, rope_cache = kv_cache
         if nope_cache.dim() != 4 or rope_cache.dim() != 4:
             raise RuntimeError(
-                "PROLOG_V3 DSpark caches must be 4-D, got "
-                f"nope={tuple(nope_cache.shape)} and rope={tuple(rope_cache.shape)}."
+                f"MLA KV caches must be 4-D, got nope={tuple(nope_cache.shape)} and rope={tuple(rope_cache.shape)}."
             )
         if self.num_kv_heads != 1 or nope_cache.shape[2] != 1 or rope_cache.shape[2] != 1:
-            raise RuntimeError("PROLOG_V3 DSpark context writes require one KV head.")
+            raise RuntimeError("MLA KV cache layout requires one KV head.")
         if nope_cache.shape[-1] != self.kv_lora_rank or rope_cache.shape[-1] != self.qk_rope_head_dim:
             raise RuntimeError(
-                "PROLOG_V3 DSpark cache dimensions do not match MLA geometry: "
-                f"nope={tuple(nope_cache.shape)}, rope={tuple(rope_cache.shape)}, "
-                f"kv_lora_rank={self.kv_lora_rank}, rope_dim={self.qk_rope_head_dim}."
-            )
-
-        fused_dim = self.kv_lora_rank + self.qk_rope_head_dim
-        same_storage = nope_cache.untyped_storage().data_ptr() == rope_cache.untyped_storage().data_ptr()
-        token_interleaved = (
-            same_storage
-            and rope_cache.storage_offset() - nope_cache.storage_offset() == self.kv_lora_rank
-            and nope_cache.stride(3) == rope_cache.stride(3) == 1
-            and nope_cache.stride(2) == rope_cache.stride(2) == fused_dim
-            and nope_cache.stride(1) == rope_cache.stride(1) == fused_dim
-        )
-        if token_interleaved:
-            return
-
-        # Component-major PROLOG_V3 caches accept a non-contiguous first axis,
-        # but all trailing axes must remain dense.
-        for name, cache in (("kv_cache", nope_cache), ("kr_cache", rope_cache)):
-            if cache.stride(3) != 1:
-                raise RuntimeError(f"PROLOG_V3 {name} must have a contiguous last axis.")
-            if cache.stride(2) != cache.shape[3]:
-                raise RuntimeError(f"PROLOG_V3 {name} must have a contiguous head axis.")
-            if cache.stride(1) != cache.shape[2] * cache.stride(2):
-                raise RuntimeError(f"PROLOG_V3 {name} must have a contiguous token axis.")
-
-    def _validate_prolog_v3_cache(self, kv_cache: tuple[torch.Tensor, torch.Tensor]) -> bool:
-        """Validate the two cache forms accepted by the PROLOG_V3 writer.
-
-        A2/A3 use component-major views whose trailing axes are dense.  A5 may
-        instead expose NoPE and RoPE as trailing slices of one token-fused
-        FlashMLA page; the external reader's writer stages those interleaved
-        slices through its dense workspace before scattering into history.
-        """
-        nope_cache, rope_cache = kv_cache
-        if nope_cache.dim() != 4 or rope_cache.dim() != 4:
-            raise RuntimeError(
-                "PROLOG_V3 MLA caches must be 4-D, got "
-                f"nope={tuple(nope_cache.shape)} and rope={tuple(rope_cache.shape)}."
-            )
-        if self.num_kv_heads != 1 or nope_cache.shape[2] != 1 or rope_cache.shape[2] != 1:
-            raise RuntimeError("PROLOG_V3 MLA preprocessing requires one KV head.")
-        if nope_cache.shape[-1] != self.kv_lora_rank or rope_cache.shape[-1] != self.qk_rope_head_dim:
-            raise RuntimeError(
-                "PROLOG_V3 MLA cache dimensions do not match MLA geometry: "
+                "MLA KV cache dimensions do not match MLA geometry: "
                 f"nope={tuple(nope_cache.shape)}, rope={tuple(rope_cache.shape)}, "
                 f"kv_lora_rank={self.kv_lora_rank}, rope_dim={self.qk_rope_head_dim}."
             )
         if nope_cache.shape[:2] != rope_cache.shape[:2] or nope_cache.stride(0) != rope_cache.stride(0):
             raise RuntimeError(
-                "PROLOG_V3 MLA caches must share block geometry: "
+                "MLA KV caches must share block geometry: "
                 f"nope shape={tuple(nope_cache.shape)} stride={tuple(nope_cache.stride())}, "
                 f"rope shape={tuple(rope_cache.shape)} stride={tuple(rope_cache.stride())}."
             )
@@ -2436,10 +2378,16 @@ class AscendMLAImpl(MLAAttentionImpl):
             and nope_cache.stride(1) == rope_cache.stride(1) == fused_dim
         )
         if token_interleaved:
-            return True
+            return
 
-        self._validate_context_prolog_v3_cache(kv_cache)
-        return True
+        # Component-major pages can have a padded block stride.
+        for name, cache in (("NoPE", nope_cache), ("RoPE", rope_cache)):
+            if cache.stride(3) != 1:
+                raise RuntimeError(f"Component-major MLA {name} cache must have a contiguous last axis.")
+            if cache.stride(2) != cache.shape[3]:
+                raise RuntimeError(f"Component-major MLA {name} cache must have a contiguous head axis.")
+            if cache.stride(1) != cache.shape[2] * cache.stride(2):
+                raise RuntimeError(f"Component-major MLA {name} cache must have a contiguous token axis.")
 
     def _cache_requires_prolog_v3_writer(self, kv_cache: tuple[torch.Tensor, ...] | torch.Tensor) -> bool:
         """Whether the legacy RMSNorm/RoPE cache writer is unsafe for this cache.
@@ -2458,8 +2406,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         if nope_cache.is_contiguous() and rope_cache.is_contiguous():
             return False
         try:
-            if not self._validate_prolog_v3_cache(kv_cache):
-                return False
+            self._validate_mla_cache_layout(kv_cache)
         except RuntimeError:
             return False
         return True
@@ -2793,7 +2740,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         if cos is None or sin is None:
             raise RuntimeError("PROLOG_V3 DSpark context writes require cos/sin.")
 
-        self._validate_prolog_v3_cache(kv_cache)
+        self._validate_mla_cache_layout(kv_cache)
         # Query outputs are intentionally ignored: DSpark only needs the
         # context KV side effect from the stride-aware writer.
         self._run_prolog_v3(
@@ -2854,7 +2801,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         if not self.use_mla_rope:
             k_pe, k_nope = self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
-        elif getattr(self, "use_quant_flashmla", False) and any(not cache.is_contiguous() for cache in kv_cache):
+        elif self.use_quant_flashmla and any(not cache.is_contiguous() for cache in kv_cache):
             k_pe, k_nope = self._exec_quant_flashmla_kv_writer(
                 kv_no_split, cos, sin, kv_cache, slots, return_bf16_kv=return_bf16_kv
             )
@@ -3160,7 +3107,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         flash.query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
         record_attention_compute_start()
         quant_kwargs = {}
-        if getattr(self, "use_quant_flashmla", False):
+        if self.use_quant_flashmla:
             q_descale = preprocessed.dequant_scale_q_nope
             if q_descale is None:
                 raise RuntimeError("QuantFlashMLA requires the per-token-head query descale from MLA preprocessing")

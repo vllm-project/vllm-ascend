@@ -116,6 +116,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
         use_mla_rope=True,
         enable_kv_nz=False,
         fa_quant_layer=False,
+        use_quant_flashmla=False,
         fused_qkv_a_proj=SimpleNamespace(input_size=7168),
         q_proj=SimpleNamespace(_chunk_size=0),
         q_lora_rank=4,
@@ -135,7 +136,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
         "supports_prolog_v3_dtype",
         "_supports_strided_mla_projection",
         "supports_prolog_v3_writer",
-        "_validate_prolog_v3_cache",
+        "_validate_mla_cache_layout",
         "_cache_requires_prolog_v3_writer",
         "mla_preprocess_prolog_v3",
         "_get_dcp_current_kv_workspace",
@@ -280,8 +281,7 @@ def test_prolog_writer_stages_interleaved_cache_and_preserves_guards(interleaved
     for name in (
         "_prolog_v3_writer_workspace",
         "_run_prolog_v3",
-        "_validate_context_prolog_v3_cache",
-        "_validate_prolog_v3_cache",
+        "_validate_mla_cache_layout",
         "exec_context_kv_prolog_v3",
     ):
         setattr(impl, name, MethodType(load(MLA, name, scope, "AscendMLAImpl"), impl))

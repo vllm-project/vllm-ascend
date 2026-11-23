@@ -17,6 +17,12 @@ from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.device.hardware_profile import HardwareCapability
 
 
+def _selector_impl(**attrs):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    vars(impl).update(attrs)
+    return impl
+
+
 def test_flashmla_api_detection_distinguishes_absence_from_broken_import(monkeypatch):
     monkeypatch.setattr(flashmla, "_has_flashmla_module", lambda: True)
 
@@ -70,7 +76,7 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v3")),
     )
-    impl = SimpleNamespace(
+    impl = _selector_impl(
         vllm_config=config,
         num_heads=8,
         num_kv_heads=1,
@@ -122,7 +128,7 @@ def test_quant_flashmla_selection_is_k3_dspark_c8_mrv2_only(monkeypatch):
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=SimpleNamespace(model_type="kimi_linear")),
     )
-    impl = SimpleNamespace(
+    impl = _selector_impl(
         vllm_config=config,
         _is_k3_dspark_draft=False,
         support_fp8_attention=True,
@@ -169,7 +175,7 @@ def test_quant_flashmla_selection_supports_k31_dspark_draft_c8(monkeypatch):
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=SimpleNamespace(model_type="kimi_k31")),
     )
-    impl = SimpleNamespace(
+    impl = _selector_impl(
         vllm_config=config,
         _is_k3_dspark_draft=True,
         support_fp8_attention=True,
@@ -216,7 +222,7 @@ def test_flashmla_dspark_target_model_gate(monkeypatch, dcp_size, pcp_size, mode
             hf_text_config=SimpleNamespace(model_type="kimi_linear", index_topk=2048),
         ),
     )
-    impl = SimpleNamespace(
+    impl = _selector_impl(
         vllm_config=config,
         num_heads=8,
         num_kv_heads=1,

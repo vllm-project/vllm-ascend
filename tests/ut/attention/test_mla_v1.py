@@ -533,6 +533,7 @@ def test_mla_sharded_decode_empty_rank_writes_pcp_kv() -> None:
 def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.is_pcp_decode_sharded = False
+    impl.use_quant_flashmla = False
     captured: dict[str, torch.Tensor] = {}
 
     def fake_gather(tensors, slot_mapping, num_decode_tokens):
@@ -611,6 +612,7 @@ def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
 def test_mla_pcp_nope_prefill_trims_gathered_outputs() -> None:
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.is_pcp_decode_sharded = False
+    impl.use_quant_flashmla = False
 
     def fake_gather(tensors, slot_mapping, num_decode_tokens):
         assert num_decode_tokens == 0
@@ -1024,7 +1026,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
                 )
                 mock_vllm_config.compilation_config.static_forward_context = {
                     "self_attn": SimpleNamespace(
-                        impl=SimpleNamespace(use_mla_rope=layer_uses_rope, use_flashmla=False)
+                        impl=SimpleNamespace(use_mla_rope=layer_uses_rope, use_flashmla=False, use_quant_flashmla=False)
                     ),
                 }
                 with patch("vllm_ascend.attention.mla_v1.get_ascend_config", return_value=MagicMock()):
@@ -3539,6 +3541,7 @@ def test_mla_nope_decode_preserves_current_kv_contract():
     """DCP needs current KV tensors in addition to the paged NoPE cache."""
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.use_mla_rope = True
+    impl.use_quant_flashmla = False
     impl.num_kv_heads = 1
     impl.kv_lora_rank = 4
     impl.qk_rope_head_dim = 0
