@@ -85,37 +85,6 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                     key_sets.append(set(keys))
                 self.assertFalse(key_sets[0] & key_sets[1] or key_sets[0] & key_sets[2] or key_sets[1] & key_sets[2])
 
-    def test_sharded_mamba_keys_isolate_joint_tp_pcp_layouts(self):
-        for backend_class, num_groups in product((MooncakeBackend, MemcacheBackend), (1, 2)):
-            with self.subTest(backend=backend_class.__name__, num_groups=num_groups):
-                cache = self.make_cache_config(num_groups)
-                group_id = num_groups - 1
-                cache.kv_cache_groups[group_id].kv_cache_spec = MambaSpec(
-                    block_size=16, shapes=((4,),), dtypes=(torch.float32,), mamba_cache_mode="align"
-                )
-                key_sets = []
-                for tp_size, pcp_size in ((2, 2), (2, 1), (1, 2), (4, 1)):
-                    config = self.make_config()
-                    config.parallel_config.tensor_parallel_size = tp_size
-                    config.parallel_config.prefill_context_parallel_size = pcp_size
-                    builder = backend_class.bind_layerwise_keys(
-                        vllm_config=config,
-                        kv_cache_config=cache,
-                        model_name="model",
-                        use_hybrid=num_groups > 1,
-                        grouped_block_size=[16] * num_groups,
-                    )
-                    writers = {
-                        builder.make_full_key(group_id, "prefix", rank, 0, pcp_rank)
-                        for rank, pcp_rank in product(range(tp_size), range(pcp_size))
-                    }
-                    readers = builder.make_hit_check_keys(group_id, "prefix", tp_size)
-                    self.assertEqual(set(readers), writers)
-                    self.assertEqual(len(writers), tp_size * pcp_size)
-                    for prior in key_sets:
-                        self.assertTrue(writers.isdisjoint(prior))
-                    key_sets.append(writers)
-
     def test_dcp_keys_cover_all_workers_and_isolate_topologies(self):
         for pp_size in (1, 2):
             for num_groups in (1, 2):

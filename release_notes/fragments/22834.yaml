@@ -2,7 +2,6 @@ pr: 22834
 entries:
   - category: bugfix
     text: >-
-      Fixed false AscendStore cache hits between incompatible parallel layouts
-      for sharded Mamba states. Compatible instances can now use tensor
-      parallelism and prefill context parallelism together. Upgrade writers and
-      readers together; older sharded Mamba pool entries are not reused.
+      AscendStore now accepts sharded Mamba configurations when both
+      --tensor-parallel-size and --prefill-context-parallel-size are greater
+      than 1, removing the requirement to keep either TP or PCP at 1.

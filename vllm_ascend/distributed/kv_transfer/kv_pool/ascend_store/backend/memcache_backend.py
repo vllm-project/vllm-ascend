@@ -144,9 +144,7 @@ class MemcacheBackend(Backend):
         def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
             return make_full_key(model_name, group, block_hash, head, num_groups, stage, pp_size)
 
-        return LayerwiseKeyBuilder(
-            make_key, pp_size, pcp_size, pcp_sharded_group_ids, tp_size=parallel.tensor_parallel_size
-        )
+        return LayerwiseKeyBuilder(make_key, pp_size, pcp_size, pcp_sharded_group_ids)
 
     def __init__(
         self,

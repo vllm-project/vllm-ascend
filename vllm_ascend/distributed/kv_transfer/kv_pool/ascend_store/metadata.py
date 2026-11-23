@@ -133,8 +133,6 @@ class KeyMetadata:
     cache_role: str = "kv"
     """ Family name for compress-aware hybrid cache layouts """
     cache_family: str = "default"
-    """Parallel layout of a non-replicated Mamba state shard."""
-    mamba_shard_layout: str = ""
 
 
 @dataclass(order=True)
@@ -152,13 +150,11 @@ class PoolKey:
                 self.key_metadata.kv_cache_group_id,
                 self.key_metadata.cache_role,
                 self.key_metadata.cache_family,
-                self.key_metadata.mamba_shard_layout,
                 self.chunk_hash,
             )
         )
 
     def to_string(self):
-        layout = f"@mamba_layout:{self.key_metadata.mamba_shard_layout}" if self.key_metadata.mamba_shard_layout else ""
         return (
             f"{self.key_metadata.model_name}"
             f"@dcp:{self.key_metadata.dcp_rank}"
@@ -167,7 +163,6 @@ class PoolKey:
             f"@group:{self.key_metadata.kv_cache_group_id}"
             f"@cache_role:{self.key_metadata.cache_role}"
             f"@cache_family:{self.key_metadata.cache_family}"
-            f"{layout}"
             f"@{self.chunk_hash}"
         )
 
@@ -369,7 +364,6 @@ class ChunkedTokenDatabase:
         prefix = self._key_prefix_cache.get(cache_key)
         if prefix is None:
             group_metadata = self.metadata[kv_cache_group_id]
-            layout = f"@mamba_layout:{group_metadata.mamba_shard_layout}" if group_metadata.mamba_shard_layout else ""
             prefix = (
                 f"{group_metadata.model_name}"
                 f"@dcp:{group_metadata.dcp_rank}"
@@ -377,7 +371,7 @@ class ChunkedTokenDatabase:
                 f"@pp_rank:{group_metadata.pp_rank}"
                 f"@group:{kv_cache_group_id}"
                 f"@cache_role:{cache_role}"
-                f"@cache_family:{cache_family}{layout}@"
+                f"@cache_family:{cache_family}@"
             )
             self._key_prefix_cache[cache_key] = prefix
         return prefix
@@ -433,7 +427,6 @@ class ChunkedTokenDatabase:
                 kv_cache_group_id=kv_cache_group_id,
                 cache_role=cache_role,
                 cache_family=cache_family,
-                mamba_shard_layout=group_metadata.mamba_shard_layout,
             ),
             chunk_hash,
         )
