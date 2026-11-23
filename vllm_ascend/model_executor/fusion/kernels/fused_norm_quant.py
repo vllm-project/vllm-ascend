@@ -59,23 +59,15 @@ if ascend_compilation_config.fuse_norm_quant and profile.supports(
         _FUSED_NORM_QUANT[(AscendRMSNorm, kInt8StaticTensorSym)] = _add_rms_norm_quant
 
 
-def maybe_fused_norm_quant(
+def fused_norm_quant(
+    key: QuantKey,
     norm: AscendRMSNorm,
     hidden_states: torch.Tensor,
     residual: torch.Tensor,
     linear: AscendQKVParallelLinear,
 ) -> tuple[QuantizedActivation, torch.Tensor] | tuple[torch.Tensor, torch.Tensor]:
-
-    if hidden_states.dtype not in (torch.bfloat16, torch.float16):
-        return norm(hidden_states, residual)
-
-    key = get_input_quant_key(linear)
-    if key is not None:
-        registry_key = (type(norm), key)
-        producer = _FUSED_NORM_QUANT.get(registry_key)
-        if producer is not None:
-            return producer(norm, hidden_states, residual, linear)
+    registry_key = (type(norm), key)
+    producer = _FUSED_NORM_QUANT.get(registry_key)
+    if producer is not None:
+        return producer(norm, hidden_states, residual, linear)
     return norm(hidden_states, residual)
-    
-
-

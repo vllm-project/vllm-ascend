@@ -18,7 +18,7 @@ def _patched_qwen3_moe_decoder_layer_forward(
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
     else:
-        hidden_states, residual = maybe_fused_norm_quant(
+        hidden_states, residual = self.input_layernorm.forward_fused(
             self.input_layernorm, hidden_states, residual, self.self_attn.qkv_proj
         )
 

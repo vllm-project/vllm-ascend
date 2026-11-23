@@ -19,9 +19,16 @@ import torch
 from torch import nn
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.model_executor.fusion.kernels.fused_norm_quant import fused_norm_quant
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
+from vllm_ascend.ops.layernorm import AscendRMSNorm
+from vllm_ascend.ops.linear import AscendQKVParallelLinear
 from vllm_ascend.utils import enable_custom_op
 
 # Scanning quant_description is O(number of quantized tensors) and every
@@ -103,6 +110,21 @@ class AscendRMSNorm(RMSNorm):
             x.add_(self.bias)
 
         return x
+
+    def forward_fused(
+        norm: AscendRMSNorm,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        linear: AscendQKVParallelLinear,
+    ) -> tuple[QuantizedActivation, torch.Tensor] | tuple[torch.Tensor, torch.Tensor]:
+        
+        if hidden_states.dtype not in (torch.bfloat16, torch.float16):
+            return norm(hidden_states, residual)
+
+        key = get_input_quant_key(linear)
+        if key is not None:
+            return fused_norm_quant(key, norm, hidden_states, residual, linear)
+        return norm(hidden_states, residual)
 
 
 class AscendGemmaRMSNorm(GemmaRMSNorm):
