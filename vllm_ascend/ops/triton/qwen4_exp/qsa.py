@@ -814,6 +814,8 @@ def qsa_compress_norm_mrope_store(
         mrope_section_w=_FUSED_MROPE_SECTIONS[2],
         num_warps=4,
     )
+
+
 __all__ = [
     "pack_qsa_group_indices_npu",
     "qsa_compress_groups_with_ratio",
