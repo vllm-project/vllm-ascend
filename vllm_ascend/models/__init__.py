@@ -3,6 +3,14 @@ from vllm import ModelRegistry
 
 def register_model():
     ModelRegistry.register_model(
+        "HYV4FlashForCausalLM",
+        "vllm_ascend.models.hy4_flash.model:AscendHYV4FlashForCausalLM",
+    )
+    ModelRegistry.register_model(
+        "HYV4FlashVLForConditionalGeneration",
+        "vllm_ascend.models.hy4_flash.model:AscendHYV4FlashVLForConditionalGeneration",
+    )
+    ModelRegistry.register_model(
         "Qwen4ExpForCausalLM",
         "vllm_ascend.models.qwen4_exp:AscendQwen4ExpForCausalLM",
     )
