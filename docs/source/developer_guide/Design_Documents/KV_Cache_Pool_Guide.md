@@ -51,7 +51,7 @@ Currently, we only perform put and get operations of KV Pool for **Prefill Nodes
 
 The key benefit of doing this is that we can keep the gain in performance by computing less with Prefix Caching from on-chip memory and KV Pool for Prefill Nodes, while not sacrificing the data transfer efficiency between Prefill and Decode nodes with P2P KV Connector that transfers KV Caches between NPU devices directly.
 
-To enable this feature, To enable this feature, we need to set up both MooncakeConnector and MooncakeStoreConnector with a MultiConnector, which is a KV Connector class provided by vLLM that can call multiple KV Connectors in a specific order., which is a KV Connector class provided by vLLM that can call multiple KV Connectors in a specific order.
+To enable this feature, we need to set up both MooncakeConnector and MooncakeStoreConnector with a MultiConnector, which is a KV Connector class provided by vLLM that can call multiple KV Connectors in a specific order.
 
 For details, please also refer to the [Mooncake connector deployment guide](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/mooncake_connector_deployment_guide.md).
 

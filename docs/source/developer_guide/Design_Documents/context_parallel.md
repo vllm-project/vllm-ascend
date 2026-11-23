@@ -12,7 +12,7 @@ This document describes PCP execution and DCP cache sharding. See the [PCP/DCP R
 
 !!! warning "Sunset Notice for GQA DCP"
 
-    Decode Context Parallel (DCP) for GQA models is **deprecated** as of v0.32.0 and will be removed in a future release. GQA draft models maintain native TP sharding under target DCP. DCP for MLA and SFA models remains fully supported. See [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305).
+    Decode Context Parallel (DCP) for GQA models has been removed. GQA draft models maintain native TP sharding under target DCP. DCP for MLA and SFA models remains fully supported. See [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305).
 
 ## KV-cache layout
 
