@@ -1,0 +1,4 @@
+pr: 22167
+entries:
+  - category: performance
+    text: Reduced scheduler CPU work for long-context Mooncake V2 P/D requests on Ascend when the installed vLLM supports incremental prompt-hash truncation. No configuration changes are required.

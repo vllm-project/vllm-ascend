@@ -101,6 +101,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_vlm.py: 480
   tests/e2e/pull_request/one_card/test_xlite.py: 215
   tests/e2e/pull_request/one_card/test_batch_job_aware_scheduler_e2e.py: 820
+  tests/e2e/pull_request/one_card/test_all2allv_dispatch_host_sync.py: 60
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 180
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 430
@@ -140,6 +141,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_shared_expert_dp_graph.py: 540
   tests/e2e/pull_request/two_card/rlhf/weight_transfer/ipc/test_qwen_ipc.py: 450
   tests/e2e/pull_request/two_card/rlhf/weight_transfer/ipc/test_glm_ipc.py: 450
+  tests/e2e/pull_request/two_card/rlhf/weight_transfer/ipc/test_minimax_ipc.py: 950
   tests/e2e/pull_request/two_card/rlhf/weight_transfer/ipc/test_deepseek_ipc.py: 300
   tests/e2e/pull_request/two_card/rlhf/weight_transfer/hccl/test_qwen_hccl.py: 400
   tests/e2e/pull_request/two_card/test_xlite.py: 840

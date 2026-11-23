@@ -1,4 +1,5 @@
 import importlib
+import logging
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -27,8 +28,8 @@ from vllm_ascend.platform import (
     _validate_eplb_config,
     _validate_glm5next_dflash2_pp_config,
     _validate_parallel_config,
-    _validate_pcp_dcp_config,
     _validate_sfa_dcp_kv_sp,
+    _validate_target_dcp_config,
 )
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
@@ -230,16 +231,11 @@ def test_validate_v41_adaptive_preserves_other_configs(mode):
     "use_mla,pcp_size,dcp_size",
     [
         pytest.param(True, 2, 2, id="mla-equal"),
-        pytest.param(True, 2, 16, id="mla-full-tp-pcp"),
-        pytest.param(False, 2, 2, id="gqa-equal-2"),
-        pytest.param(False, 4, 4, id="gqa-equal-4"),
-        pytest.param(False, 1, 2, id="dcp-only"),
         pytest.param(False, 2, 1, id="pcp-only"),
         pytest.param(False, 1, 1, id="tp-only"),
     ],
 )
-def test_validate_pcp_dcp_config_accepts_supported_sizes(use_mla, pcp_size, dcp_size):
-    # This guard owns PCP/DCP equality; Q/KV head geometry is validated elsewhere.
+def test_validate_target_dcp_config_accepts_supported_configs(use_mla, pcp_size, dcp_size):
     config = SimpleNamespace(
         model_config=SimpleNamespace(use_mla=use_mla),
         parallel_config=SimpleNamespace(
@@ -247,27 +243,20 @@ def test_validate_pcp_dcp_config_accepts_supported_sizes(use_mla, pcp_size, dcp_
             decode_context_parallel_size=dcp_size,
         ),
     )
-    _validate_pcp_dcp_config(config)
+    _validate_target_dcp_config(config)
 
 
-@pytest.mark.parametrize(
-    "pcp_size,dcp_size",
-    [
-        pytest.param(2, 4, id="dcp-larger"),
-        pytest.param(4, 2, id="pcp-larger"),
-        pytest.param(2, 16, id="full-tp-pcp-rejected-for-gqa"),
-    ],
-)
-def test_validate_pcp_dcp_config_rejects_unsupported_sizes(pcp_size, dcp_size):
+@pytest.mark.parametrize("pcp_size", [1, 2])
+def test_validate_target_dcp_config_rejects_gqa_dcp(pcp_size):
     config = SimpleNamespace(
         model_config=SimpleNamespace(use_mla=False),
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=pcp_size,
-            decode_context_parallel_size=dcp_size,
+            decode_context_parallel_size=2,
         ),
     )
-    with pytest.raises(ValueError, match=rf"PCP\+DCP.*PCP={pcp_size}, DCP={dcp_size}"):
-        _validate_pcp_dcp_config(config)
+    with pytest.raises(ValueError, match="DCP.*not supported for GQA/MQA"):
+        _validate_target_dcp_config(config)
 
 
 @pytest.mark.parametrize("dcp_size", [2, 16])
@@ -294,61 +283,6 @@ def test_parallel_config_rejects_partial_tp_pcp_groups(dcp_size):
             prefill_context_parallel_size=2,
             decode_context_parallel_size=dcp_size,
         )
-
-
-def test_pcp_dcp_rejects_unequal_sizes_for_gqa_draft():
-    config = SimpleNamespace(
-        use_v2_model_runner=False,
-        parallel_config=SimpleNamespace(
-            tensor_parallel_size=8,
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=16,
-        ),
-        model_config=SimpleNamespace(
-            use_mla=True,
-            model_arch_config=SimpleNamespace(total_num_attention_heads=32),
-            get_total_num_kv_heads=lambda: 4,
-        ),
-        speculative_config=SimpleNamespace(
-            num_speculative_tokens_per_batch_size=None,
-            draft_model_config=SimpleNamespace(
-                use_mla=False,
-                model_arch_config=SimpleNamespace(total_num_attention_heads=32),
-                get_total_num_kv_heads=lambda: 8,
-            ),
-            draft_parallel_config=None,
-            draft_tensor_parallel_size=None,
-        ),
-    )
-    # MLA target validation is unchanged; its GQA draft must obey equal sizes.
-    _validate_pcp_dcp_config(config)
-    with pytest.raises(ValueError, match="to equal decode_context_parallel_size"):
-        _validate_draft_decode_context_parallel_config(config)
-
-
-def test_eagle3_gqa_pcp_dcp_skips_tp_only_head_limit():
-    draft_model_config = SimpleNamespace(
-        use_mla=False,
-        model_arch_config=SimpleNamespace(total_num_attention_heads=32),
-        get_total_num_kv_heads=lambda: 4,
-    )
-    speculative_config = SimpleNamespace(
-        num_speculative_tokens_per_batch_size=None,
-        draft_model_config=draft_model_config,
-        draft_parallel_config=None,
-        draft_tensor_parallel_size=None,
-    )
-    vllm_config = SimpleNamespace(
-        use_v2_model_runner=False,
-        speculative_config=speculative_config,
-        parallel_config=SimpleNamespace(
-            tensor_parallel_size=4,
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=2,
-        ),
-    )
-
-    _validate_draft_decode_context_parallel_config(vllm_config)
 
 
 @pytest.mark.parametrize("model_role", ["target", "draft", "alias", "non_speculative"])
@@ -451,6 +385,114 @@ def test_setup_compile_backend_scopes_kda_splitting_to_piecewise(mode):
     assert compilation_config.splitting_ops.count("vllm::glm5next_kda_forward_with_output") == expected_count
     if mode in (CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY):
         assert compilation_config.splitting_ops == []
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        CUDAGraphMode.PIECEWISE,
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+    ],
+)
+def test_setup_compile_backend_keeps_static_kernel_flags_under_piecewise(mode):
+    """Under PIECEWISE, npugraph_ex compiles each piece (force_eager) and can
+    carry the static/super kernel passes, so the user's flags must survive."""
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=mode,
+        splitting_ops=["vllm::mla_forward"],
+        cudagraph_capture_sizes=[8, 16],
+    )
+    config = SimpleNamespace(
+        compilation_config=compilation_config,
+        additional_config={
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": True,
+                "enable_static_kernel": True,
+                "enable_super_kernel": True,
+            }
+        },
+        model_config=SimpleNamespace(enforce_eager=False),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+            all2all_backend="allgather_reducescatter",
+            use_sequence_parallel_moe=False,
+        ),
+        _set_cudagraph_sizes=lambda: None,
+    )
+
+    _setup_compile_backend(config, compile_backend="test_backend")
+
+    ascend_cfg = config.additional_config["ascend_compilation_config"]
+    assert ascend_cfg["enable_npugraph_ex"] is True
+    assert ascend_cfg["enable_static_kernel"] is True
+    assert ascend_cfg["enable_super_kernel"] is True
+
+
+def test_setup_compile_backend_disables_static_kernel_flags_without_cudagraph():
+    """Without cudagraphs there is no capture context, so the static/super
+    kernel flags must be force-disabled."""
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=CUDAGraphMode.NONE,
+        splitting_ops=["vllm::mla_forward"],
+        cudagraph_capture_sizes=[8, 16],
+    )
+    config = SimpleNamespace(
+        compilation_config=compilation_config,
+        additional_config={
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": True,
+                "enable_static_kernel": True,
+                "enable_super_kernel": True,
+            }
+        },
+        model_config=SimpleNamespace(enforce_eager=False),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+            all2all_backend="allgather_reducescatter",
+            use_sequence_parallel_moe=False,
+        ),
+        _set_cudagraph_sizes=lambda: None,
+    )
+
+    _setup_compile_backend(config, compile_backend="test_backend")
+
+    ascend_cfg = config.additional_config["ascend_compilation_config"]
+    assert ascend_cfg["enable_npugraph_ex"] is False
+    assert ascend_cfg["enable_static_kernel"] is False
+    assert ascend_cfg["enable_super_kernel"] is False
+
+
+@pytest.mark.parametrize("use_custom_path", [True, False])
+def test_platform_startup_log_directory(tmp_path, monkeypatch, use_custom_path):
+    import vllm_ascend.ascend_config as ascend_config
+    import vllm_ascend.logger as ascend_logger
+
+    default_dir = tmp_path / "default"
+    custom_dir = tmp_path / "custom"
+    config = TestNPUPlatform.mock_vllm_config()
+    config.additional_config = {"ascend_log_path": str(custom_dir)} if use_custom_path else {}
+    config.model_config = None  # The platform logs a startup warning before full config initialization.
+
+    monkeypatch.setattr(ascend_config, "_ASCEND_CONFIG", None)
+    monkeypatch.setattr(ascend_logger, "_LOG_DIR", str(default_dir))
+    monkeypatch.setattr(ascend_logger, "_file_logging_configured", False)
+    monkeypatch.setattr(ascend_logger, "_file_handler", None)
+    for name in ("vllm", "vllm_ascend"):
+        monkeypatch.setattr(logging.getLogger(name), "handlers", [])
+    try:
+        NPUPlatform.check_and_update_config(config)
+        expected_dir = custom_dir if use_custom_path else default_dir
+        (log_file,) = expected_dir.glob("vllm_ascend_*.log")
+        assert "Model config is missing" in log_file.read_text(encoding="utf-8")
+        if use_custom_path:
+            assert not default_dir.exists()
+    finally:
+        if ascend_logger._file_handler is not None:
+            ascend_logger._file_handler.close()
 
 
 class TestNPUPlatform(TestBase):

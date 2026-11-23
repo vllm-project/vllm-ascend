@@ -313,6 +313,7 @@ def test_pending_removal_keeps_metadata_available_for_existing_receivers(runtime
 def _configure_real_session(runtime, monkeypatch, model, processed_layout):
     prefix = "vllm_ascend.model_loader.rfork"
     layout = sys.modules[f"{prefix}.tensor_layout"]
+    walker = sys.modules["vllm_ascend.model_loader.weight_state"]
     transfer = _load_module(monkeypatch, f"{prefix}.transfer_backend", "transfer_backend.py")
     monkeypatch.setattr(runtime.session, "RForkTransferBackend", transfer.RForkTransferBackend)
     monkeypatch.setattr(
@@ -320,7 +321,7 @@ def _configure_real_session(runtime, monkeypatch, model, processed_layout):
         "build_seed_key",
         lambda **kwargs: f"model-key:{kwargs['structural_digest']}",
     )
-    monkeypatch.setattr(layout, "is_tensor_on_transfer_device", lambda tensor: True)
+    monkeypatch.setattr(walker, "is_tensor_on_transfer_device", lambda tensor: True)
     monkeypatch.setattr(layout, "read_npu_format", lambda tensor: 0)
     monkeypatch.setattr(transfer, "read_npu_format", lambda tensor: 0)
     monkeypatch.setattr(sys.modules[f"{prefix}.manifest"], "read_npu_format", lambda tensor: 0)

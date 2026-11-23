@@ -3,6 +3,7 @@
 meta:
   hardware:
     ascend_910b: verified
+    ascend_950dt: supported
 hardware_notes:
   ascend_910b:
     title: W4A8 prefill/decode disaggregation on Atlas 800I A2 (910B4)
@@ -17,6 +18,19 @@ hardware_notes:
     link:
       label: vLLM Ascend DeepSeek-V4.1-Flash tutorial
       href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4.1-Flash.html
+  ascend_950dt:
+    title: Docker setup for Ascend 950DT
+    body: >-
+      Use the vLLM Ascend `v0.32.0rc1-a5` image shown in the Docker tab.
+      The Install header displays the model's general minimum vLLM version.
+
+      Before running the Prefill and Decode commands, add the UMMU and UBURMA
+      devices, the urma_admin bind mount, and the model directory mount as
+      shown in the tutorial. Use the same mounted checkpoint path in both
+      serving commands.
+    link:
+      label: vLLM Ascend v0.32 RC tutorial for 950DT Docker setup
+      href: https://github.com/vllm-project/vllm-ascend/blob/49007fd8cbcf597d9a1a4e2ebc968c69257045ed/docs/source/tutorials/models/DeepSeek-V4.1-Flash.md#L183-L222
 strategy_hardware:
   single_node_tp:
     npu: unsupported
@@ -33,10 +47,15 @@ strategy_hardware:
   pd_cluster:
     npu: unsupported
     ascend_910b: supported
+    ascend_950dt: supported
 features:
   spec_decoding:
     hardware_overrides:
       ascend_910b:
+        args:
+          - '--speculative-config'
+          - '{"num_speculative_tokens":5,"method":"dspark"}'
+      ascend_950dt:
         args:
           - '--speculative-config'
           - '{"num_speculative_tokens":5,"method":"dspark"}'
@@ -98,6 +117,42 @@ variants:
         docker_serve_command: "vllm serve"
         install:
           pip: false
+  default:
+    tp:
+      ascend_950dt: 1
+    hardware_overrides:
+      ascend_950dt:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1-a5
+        docker_shm_size: 512g
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+        extra_args:
+          - '--served-model-name'
+          - dsv41
+          - '--max-model-len'
+          - '1048576'
+          - '--max-num-seqs'
+          - '64'
+          - '--gpu-memory-utilization'
+          - '0.90'
+          - '--block-size'
+          - '128'
+          - '--quantization'
+          - deepseek_v4_fp8
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":true}'
+          - '--trust-remote-code'
+        extra_env:
+          VLLM_USE_V2_MODEL_RUNNER: '1'
+          HCCL_OP_EXPANSION_MODE: CCU_SCHED
+          HCCL_BUFFSIZE: '1600'
+          HCCL_CONNECT_TIMEOUT: '1200'
+          HCCL_EXEC_TIMEOUT: '2040'
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '10'
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
 presets:
   ascend_a2_w4a8_pd:
     label: Ascend A2 W4A8 PD (1P + 1D)
@@ -214,3 +269,118 @@ presets:
             kv_connector_extra_config:
               prefill: { dp_size: 2, tp_size: 1, pcp_size: 4 }
               decode: { dp_size: 8, tp_size: 1 }
+  ascend_a5_pd:
+    label: 950DT MXFP 1P1D (DP8/TP1 per role)
+    hardware: ascend_950dt
+    strategy: pd_cluster
+    variants: [default]
+    default: true
+    description: Direct KV transfer between two eight-NPU nodes, with eager Prefill and graph-mode Decode.
+    image:
+      model_revision: 08c8657f02291e11b6f6b63e0e16014f8e748518
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+      features:
+        spec_decoding: true
+        encoder_parallel: false
+      kv_offload: 'off'
+    args:
+      - '--port'
+      - '7100'
+      - '--data-parallel-rpc-port'
+      - '12321'
+      - '--enable-prefix-caching'
+    env:
+      GLOO_SOCKET_IFNAME: $IFACE_NAME
+      TP_SOCKET_IFNAME: $IFACE_NAME
+      HCCL_SOCKET_IFNAME: $IFACE_NAME
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: dep
+        data_parallel_lb: external
+        tp: 1
+        pp: 1
+        args:
+          - '--host'
+          - $PREFILL_NODE_1
+          - '--max-num-batched-tokens'
+          - '5120'
+          - '--max-num-seqs'
+          - '16'
+          - '--swa-bounded-replay'
+          - '--enforce-eager'
+        env:
+          VLLM_HOST_IP: $PREFILL_NODE_1
+          HCCL_IF_IP: $PREFILL_NODE_1
+          HCCL_BUFFSIZE: '1024'
+        json_args:
+          '--speculative-config':
+            enforce_eager: true
+          '--additional-config':
+            multistream_engram_overlap: false
+            multistream_overlap_shared_expert: true
+          '--kv-transfer-config':
+            MooncakeConnectorV2:
+              kv_connector: MooncakeHybridConnector
+              kv_port: 26010
+      decode:
+        nodes: 1
+        parallelism: dep
+        data_parallel_lb: external
+        tp: 1
+        pp: 1
+        args:
+          - '--host'
+          - $DECODE_NODE_1
+          - '--max-num-batched-tokens'
+          - '1024'
+          - '--max-num-seqs'
+          - '64'
+          - '--gpu-memory-utilization'
+          - '0.92'
+          - '--no-swa-bounded-replay'
+        env:
+          VLLM_HOST_IP: $DECODE_NODE_1
+          HCCL_IF_IP: $DECODE_NODE_1
+        json_args:
+          '--compilation-config':
+            cudagraph_mode: FULL_DECODE_ONLY
+          '--additional-config':
+            multistream_overlap_shared_expert: true
+            combine_quant_mode: 4
+            scheduler_config:
+              recompute_scheduler_enable: true
+          '--kv-transfer-config':
+            MooncakeConnectorV2:
+              kv_connector: MooncakeHybridConnector
+              kv_port: 27010
+    source:
+      label: v0.32.0rc 950DT PD tutorial
+      href: https://github.com/vllm-project/vllm-ascend/blob/49007fd8cbcf597d9a1a4e2ebc968c69257045ed/docs/source/tutorials/models/DeepSeek-V4.1-Flash.md#950dt-dp8-prefill-and-dp8-decode
+      revision: 49007fd8cbcf597d9a1a4e2ebc968c69257045ed
+    runbook: >-
+      Set PREFILL_NODE_1, DECODE_NODE_1 and IFACE_NAME for your hosts.
+      The native vLLM supervisor starts eight HTTP endpoints per role on
+      ports 7100–7107. The separate DP groups each use RPC port 12321.
+      Prefill and Decode start KV transfer at ports 26010 and 27010,
+      respectively. Check every worker's /health endpoint before starting the
+      Ascend proxy with ROUTER_PORT=30000. Verify /v1/models and send a request
+      for dsv41 through the proxy, then confirm KV transfer in the worker logs.
+guide_sections:
+  ascend: |
+    ## Ascend 950DT PD deployment
+
+    Use the [official MXFP checkpoint](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)
+    on two dedicated eight-NPU nodes for 1P1D. Before serving, follow the
+    [release tutorial's 950DT container setup](https://github.com/vllm-project/vllm-ascend/blob/49007fd8cbcf597d9a1a4e2ebc968c69257045ed/docs/source/tutorials/models/DeepSeek-V4.1-Flash.md#41-docker-image-installation)
+    for the host driver, URMA devices and mount, and local checkpoint storage.
+    Keep 512 GiB of container shared memory for Engram. Replace the model ID
+    in the serving command with the absolute path of the mounted checkpoint
+    on your data volume. Use the same path on both nodes.
+
+    The 1P1D preset uses MooncakeHybridConnector for direct KV transfer and
+    launches both DP groups with `--data-parallel-multi-port-external-lb`.
+    This native launcher has been checked by rendering the commands.

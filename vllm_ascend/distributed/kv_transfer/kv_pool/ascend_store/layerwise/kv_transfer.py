@@ -968,17 +968,23 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                     self.set_finished_request(req_id)
             self._active_load_indices = None
 
+    def _wait_for_reuse_saves(self, data: LayerLoadTask) -> bool:
+        for source in data.wait_for_save_layers:
+            if not self._wait_for_event(self.layer_save_finished_events[source], self.save_failure_checker):
+                return False
+            if self.save_failure_checker is not None:
+                self.save_failure_checker()
+            # CPU completion on a non-writing rank only records the NPU event.
+            self.sync_save_events[source].synchronize()
+            if self.external_slot_release_waiter is not None:
+                self.external_slot_release_waiter(source)
+        return True
+
     def _handle_range_layer_task(self, data: LayerLoadTask) -> None:
         layer_id = data.layer_id
         try:
-            wait_for_save = data.wait_for_save_layer
-            if wait_for_save is not None:
-                if not self._wait_for_event(self.layer_save_finished_events[wait_for_save], self.save_failure_checker):
-                    return
-                if self.save_failure_checker is not None:
-                    self.save_failure_checker()
-                self.sync_save_events[wait_for_save].synchronize()
-                self.layer_save_finished_events[wait_for_save].clear()
+            if not self._wait_for_reuse_saves(data):
+                return
 
             if data.attention_start_gate is not None:
                 if not self._wait_for_event(data.attention_start_gate):
@@ -1043,22 +1049,11 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
     def _copy_gva_layers(self, data: LayerLoadTask) -> bool:
         # Layerwise threads only run when the worker-side
         # protocol gate is on; every store call below sits on the Backend ABC.
-        wait_for_save = data.wait_for_save_layer
         transfer_tasks = data.transfer_tasks
         layer_id = data.layer_id
         attention_start_gate = data.attention_start_gate
-
-        if wait_for_save is not None:
-            if not self._wait_for_event(self.layer_save_finished_events[wait_for_save], self.save_failure_checker):
-                return False
-            if self.save_failure_checker is not None:
-                self.save_failure_checker()
-            # Non-saving TP ranks have no D2H task to synchronize the event.
-            # Their CPU save-finished signal only means the event was recorded;
-            # wait for the NPU work before reusing the local HBM buffer.
-            self.sync_save_events[wait_for_save].synchronize()
-            logger.debug("Layer save event cleared: layer %d", wait_for_save)
-            self.layer_save_finished_events[wait_for_save].clear()
+        if not self._wait_for_reuse_saves(data):
+            return False
 
         if self.load_disabled.is_set():
             if self.external_slot_release_waiter is not None:

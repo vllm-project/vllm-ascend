@@ -20,6 +20,7 @@ pytest.importorskip(
     reason="DeepSeek V4.1 is unavailable on this vLLM release",
 )
 
+from vllm.model_executor.model_loader import weight_utils
 from vllm.models.deepseek_v41.common import engram as upstream_engram
 
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
@@ -27,6 +28,21 @@ from vllm_ascend.models.deepseek_v41.engram import npu
 from vllm_ascend.models.deepseek_v41.engram.common import engram_gate, load_engram_rotation_block
 from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgramHashState
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
+
+
+@pytest.mark.skipif(
+    not hasattr(weight_utils, "finalize_model_weights"),
+    reason="This vLLM revision does not dispatch module post-load hooks",
+)
+def test_finalize_ascend_engram_without_gpu_peer_storage():
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    weight = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
+    table.weight = weight
+
+    weight_utils.finalize_model_weights(torch.nn.Sequential(table))
+
+    assert table.weight is weight
 
 
 def test_vmm_allocation_failure_disables_vmm_for_later_layers(monkeypatch):

@@ -224,31 +224,33 @@ class AuroraTilingKeysTest(unittest.TestCase):
     def test_sparse_mla_covers_model_dispatch_on_each_architecture(self):
         # DoOpTiling derives flags from hardware, template mode and local head
         # count. A5 CSA can enable address vectorization depending on the KV
-        # block shape and UB capacity; both paths must stay compiled.
+        # block shape and UB capacity; A2/A3 CSA also has a bounded UB cache.
+        # Both optimized and fallback paths must stay compiled.
         for arch in (220, 310):
             expected = set()
             for ratio, heads, batch_consistency in itertools.product((0, 1, 2), (1, 2, 4, 8, 16, 32, 64, 128), (0, 1)):
                 mode = 0 if ratio == 0 else 2
                 split_g = int(arch == 310 and heads > 64)
                 head_ratio_one = int(arch == 220 and mode == 2 and heads == 1)
-                vectorize_flags = (0, 1) if arch == 310 and mode == 2 else (0,)
+                vectorize_flags = (0, 1) if mode == 2 and (arch == 310 or heads <= 64) else (0,)
                 for vectorize in vectorize_flags:
                     expected.add((0, 1, 2, mode, split_g, head_ratio_one, batch_consistency, vectorize))
             with self.subTest(arch=arch):
                 selected = self.matrices["sparse_flash_mla", arch]
                 self.assertEqual(set(selected), expected)
-                self.assertEqual(len(selected), 6 if arch == 220 else 12)
+                self.assertEqual(len(selected), 10 if arch == 220 else 12)
                 self.assertEqual(len(selected), len(set(selected)))
 
     def test_sparse_mla_architectures_exclude_each_others_specializations(self):
         a2a3 = set(self.matrices["sparse_flash_mla", 220])
         a5 = set(self.matrices["sparse_flash_mla", 310])
-        self.assertTrue(all(key[4] == 0 and key[7] == 0 for key in a2a3))
+        self.assertTrue(all(key[4] == 0 for key in a2a3))
+        self.assertTrue(all(key[3] == 2 for key in a2a3 if key[7] == 1))
         self.assertTrue(all(key[5] == 0 for key in a5))
-        self.assertEqual(len(a2a3 & a5), 4)
+        self.assertEqual(len(a2a3 & a5), 6)
         host = self.matrices["sparse_flash_mla", None]
         self.assertEqual(set(host), a2a3 | a5)
-        self.assertEqual(len(host), 14)
+        self.assertEqual(len(host), 16)
 
     def test_sparse_mla_scope_and_a2a3_qli_quantization(self):
         for arch in (None, 220, 310):

@@ -89,13 +89,14 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_kv import (
     get_resident_dspark_layer_names,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    apply_layerwise_kv_cache_plan,
+    get_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_offload_topk_profile_buffers,
     init_sparse_kv_offload_manager,
 )
 from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
+from vllm_ascend.hisparse.pcp import adapt_pcp_hisparse_connector
 from vllm_ascend.kv_trace.kv_trace_runner import install_trace
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
@@ -495,11 +496,14 @@ class NPUModelRunner(GPUModelRunner):
             is_last_pp_rank=self.is_last_pp_rank,
             shared_kv_cache_layers=getattr(self, "shared_kv_cache_layers", None),
         )
-        # P also needs persistent prompt draft KV until D acknowledges its
-        # transfer. It must never alias target layerwise scratch buffers.
-        persistent_draft_names = resident_draft_names | set(getattr(kv_cache_config, "dspark_draft_layer_names", ()))
-        persistent_draft_names.update(getattr(kv_cache_config, "dflash_draft_layer_names", ()))
-        apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config, excluded_layer_names=persistent_draft_names)
+        reuse_layout = get_layerwise_reuse_layout(kv_cache_config)
+        if reuse_layout is not None:
+            persistent_draft_names = resident_draft_names.union(
+                getattr(kv_cache_config, "dspark_draft_layer_names", ()),
+                getattr(kv_cache_config, "dflash_draft_layer_names", ()),
+            )
+            if not reuse_layout.reused_cache_names.isdisjoint(persistent_draft_names):
+                raise ValueError("Persistent draft caches cannot rotate through target layerwise slots.")
         if sparse_cfg.enabled:
             self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
                 self.vllm_config, kv_cache_config, sparse_cfg
@@ -572,9 +576,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             self.kv_connector = MambaCopyKVConnector(self.kv_connector, copy_mamba_state)
 
-        initialize_cpu_lengths = getattr(self.model_state, "initialize_spec_cpu_length_sync", None)
-        if callable(initialize_cpu_lengths):
-            initialize_cpu_lengths(self)
+        self.initialize_spec_cpu_length_sync()
 
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
@@ -595,6 +597,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self._fill_c8_mxfp_v_scale_caches()
         if self.vllm_config.attention_config.hisparse_config is not None:
+            self.kv_connector = adapt_pcp_hisparse_connector(self)
             self.kv_connector = overlap_target_host_mirror(self)
         guard = getattr(self, "_kv_trace", None)
         if guard is not None:
@@ -1354,6 +1357,20 @@ class NPUModelRunner(GPUModelRunner):
         self._finalize_dump_data(dump=False)
         return output
 
+    def initialize_spec_cpu_length_sync(self) -> None:
+        """Initialize model-specific and draft length policies after attention setup."""
+        initialize_cpu_lengths = getattr(self.model_state, "initialize_spec_cpu_length_sync", None)
+        if callable(initialize_cpu_lengths):
+            initialize_cpu_lengths(self)
+
+        draft_backends = [group.backend for groups in getattr(self.speculator, "attn_groups", []) for group in groups]
+        # FA3 consumes corrected device lengths. The full class name distinguishes
+        # it from fa_v1 without importing the optional FA3 package.
+        self._skip_fa3_cpu_length_sync = bool(draft_backends) and all(
+            backend.full_cls_name() == ("vllm_ascend.attention.flash_attention_v3", "AscendFlashAttentionBackend")
+            for backend in draft_backends
+        )
+
     def _can_skip_spec_cpu_length_sync(self) -> bool:
         """Allow device lengths for supported speculative-decoding paths."""
         if self.sync_spec_pp_cpu_counts:
@@ -1395,6 +1412,9 @@ class NPUModelRunner(GPUModelRunner):
                 or backend.get_name() in ("ASCEND_MINIMAX_M3_SPARSE", "ASCEND_MINIMAX_M3_SPARSE_INDEXER")
                 for backend in backends
             )
+
+        if getattr(self, "_skip_fa3_cpu_length_sync", False):
+            return True
 
         if spec is None or self.speculator is None or spec.method != "dspark" or spec.draft_model_config is None:
             return False
