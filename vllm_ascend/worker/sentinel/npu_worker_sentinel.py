@@ -47,7 +47,7 @@ def _num_local_experts(model_state: EplbModelState) -> int:
     return model_state.physical_to_logical_map.shape[1] // get_ep_group().world_size
 
 
-def fault_barrier_wrapper(func: Callable):
+def fault_barrier_wrapper(method: Callable):
     """Wrap a worker method so a device fault is handled where it happens.
 
     If the wrapped method raises (for example, an EP all-reduce times out
@@ -60,11 +60,11 @@ def fault_barrier_wrapper(func: Callable):
     def wrapped(self, *args, **kwargs):
         sentinel = _sentinel
         if sentinel is None:
-            return func(self, *args, **kwargs)
+            return method(self, *args, **kwargs)
         if sentinel.worker_faulted:
             raise RuntimeError(f"[FT] worker is faulted and will not use the device until retry: {sentinel.fault_info}")
         try:
-            return func(self, *args, **kwargs)
+            return method(self, *args, **kwargs)
         except Exception as exc:
             rank = getattr(self, "rank", None)
             rank_desc = f"rank {rank}" if isinstance(rank, int) else "worker"
@@ -168,7 +168,7 @@ class WorkerSentinel(GPUWorkerSentinel):
             raise ValueError(
                 "[FT] scale_down requires EPLB with num_redundant_experts > 0 to re-host the dead rank's experts."
             )
-        self._resolve_drafter()
+        self._find_eplb_drafter()
         ascend_config = get_ascend_config()
         if ascend_config.enable_fused_mc2:
             raise ValueError(
@@ -233,7 +233,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         models: list[tuple[torch.nn.Module, EplbModelState, ModelConfig, LoadConfig]] = [
             (model_runner.model, self._eplb_model_state(), vllm_config.model_config, vllm_config.load_config)
         ]
-        drafter = self._resolve_drafter()
+        drafter = self._find_eplb_drafter()
         if drafter is not None:
             draft_layer = drafter[1].model.moe_layers[0]
             draft_ep_size = getattr(draft_layer, "routed_experts", draft_layer).moe_config.ep_size
@@ -266,23 +266,23 @@ class WorkerSentinel(GPUWorkerSentinel):
             redistribute_expert_placement,
         )
 
-        p2l = model_state.physical_to_logical_map
+        physical_to_logical = model_state.physical_to_logical_map
         num_logical = model_state.logical_replica_count.shape[1]
         num_local_experts = _num_local_experts(model_state)
 
-        mark_dead_expert_slots_inplace(p2l, dead_ep_ranks, num_local_experts)
-        moved_experts = redistribute_expert_placement(p2l, num_logical, num_local_experts)
+        mark_dead_expert_slots_inplace(physical_to_logical, dead_ep_ranks, num_local_experts)
+        moved_experts = redistribute_expert_placement(physical_to_logical, num_logical, num_local_experts)
         logger.info(
             "[FT] %s expert redistribution: moe_layers=%d, num_logical=%d, moved_experts=%d",
             type(model).__name__,
-            p2l.shape[0],
+            physical_to_logical.shape[0],
             num_logical,
             len(moved_experts),
         )
-        _commit_eplb_maps(model_state, p2l.cpu())
-        # The model's expert map maps physical expert ids to local slots, and
-        # those ids do not change here, so leave it as is (p2l holds logical
-        # ids and must not be written into it).
+        _commit_eplb_maps(model_state, physical_to_logical.cpu())
+        # The model's expert map maps physical expert ids to local slots and no
+        # physical id changes here, so leave it as is; the logical-id map must
+        # not be written into it.
         if moved_experts:
             reload_experts_from_disk(model, model_config, load_config, moved_experts)
         refresh_model_routing_tables(model_state)
@@ -292,8 +292,8 @@ class WorkerSentinel(GPUWorkerSentinel):
             num_local_experts,
         )
 
-    def _resolve_drafter(self) -> tuple[torch.nn.Module, EplbModelState, ModelConfig, LoadConfig] | None:
-        """Resolve the drafter's EPLB state and checkpoint, rejecting unregistered MoE."""
+    def _find_eplb_drafter(self) -> tuple[torch.nn.Module, EplbModelState, ModelConfig, LoadConfig] | None:
+        """Find the MoE drafter's EPLB state and checkpoint, rejecting an unregistered drafter."""
         model_runner = self.worker.model_runner
         drafter = getattr(getattr(model_runner, "speculator", None), "model", None)
         draft_moe = get_mixture_of_experts_model(drafter)

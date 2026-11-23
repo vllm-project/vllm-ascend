@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Weight reload rules for the EPLB scale-down.
+"""Weight reload builders for the EPLB scale-down.
 
 Each quant method declares how to read one expert's tensors from the
 checkpoint and how to convert them into the same form the normal load path's
@@ -47,12 +47,12 @@ _WANTED_SUFFIXES = frozenset(
 )
 
 
-class _WeightPipeline(NamedTuple):
+class _WeightBuilder(NamedTuple):
     """How to build one weight tensor for a single expert.
 
-    ``source`` reads the tensor from the checkpoint, already split for this TP
-    rank; ``processor`` converts it with the same function the normal load
-    path's ``process_weights_after_loading`` calls.
+    ``source`` fetches the tensor from the checkpoint, already split for this TP
+    rank; ``processor`` applies the same function the normal load path's
+    ``process_weights_after_loading`` calls.
     """
 
     source: Callable[[dict[str, torch.Tensor], int, int], torch.Tensor]
@@ -100,18 +100,18 @@ def _apply_stack_transform_to_one_expert(
 ) -> Callable[[torch.Tensor], torch.Tensor]:
     """Apply a transform that expects the full expert stack to one expert's tensor."""
 
-    def processor(expert: torch.Tensor) -> torch.Tensor:
+    def convert(expert: torch.Tensor) -> torch.Tensor:
         return transform(expert.unsqueeze(0)).squeeze(0)
 
-    return processor
+    return convert
 
 
 # The two MoE expert weight tensors every quant method reloads. Only these
 # are cast to FRACTAL_NZ; quant scales and scale biases are converted
 # separately and never NZ-cast.
-_MOE_WEIGHT_PIPELINES: dict[str, _WeightPipeline] = {
-    "w13_weight": _WeightPipeline(_gate_up("weight"), transpose_expert_weight_last_two_dims),
-    "w2_weight": _WeightPipeline(_down_proj("weight", shard=True), transpose_expert_weight_last_two_dims),
+_MOE_WEIGHT_PIPELINES: dict[str, _WeightBuilder] = {
+    "w13_weight": _WeightBuilder(_gate_up("weight"), transpose_expert_weight_last_two_dims),
+    "w2_weight": _WeightBuilder(_down_proj("weight", shard=True), transpose_expert_weight_last_two_dims),
 }
 _MOE_WEIGHT_NAMES = tuple(_MOE_WEIGHT_PIPELINES)
 
@@ -122,18 +122,18 @@ def _to_fractal_nz(weight: torch.Tensor) -> torch.Tensor:
 
 
 @dataclass(eq=False)  # compared by identity: used as a dict key in the reload
-class _ReloadScheme:
-    """How to reload one quant method's expert tensors.
+class _QuantReloadPlans:
+    """The reload plans for one quant method's expert tensors.
 
     ``pipelines`` maps each weight tensor name (``w13_weight``, ...) to the
-    reader/converter pair that rebuilds it; ``cast_layout`` converts the expert
+    reader/converter pair that rebuilds it; ``cast_weights_to_nz`` converts the expert
     weight tensors to FRACTAL_NZ afterwards (a no-op when the policy does not
     require it).
     """
 
     quant_method: type
-    pipelines: dict[str, _WeightPipeline]
-    cast_layout: Callable[[torch.Tensor], torch.Tensor]
+    pipelines: dict[str, _WeightBuilder]
+    cast_weights_to_nz: Callable[[torch.Tensor], torch.Tensor]
 
     def matches(self, method) -> bool:
         if type(method) is not self.quant_method:
@@ -144,53 +144,53 @@ class _ReloadScheme:
         return True
 
 
-_UNQUANTIZED_SCHEME = _ReloadScheme(
+_UNQUANTIZED_PLANS = _QuantReloadPlans(
     AscendUnquantizedFusedMoEMethod,
     _MOE_WEIGHT_PIPELINES,
     maybe_trans_nz,
 )
-_W8A8_DYNAMIC_SCHEME = _ReloadScheme(
+_W8A8_DYNAMIC_PLANS = _QuantReloadPlans(
     AscendW8A8DynamicFusedMoEMethod,
     {
         **_MOE_WEIGHT_PIPELINES,
-        "w13_weight_scale_fp32": _WeightPipeline(
+        "w13_weight_scale_fp32": _WeightBuilder(
             _gate_up("weight_scale"), _apply_stack_transform_to_one_expert(flatten_expert_dims)
         ),
-        "w2_weight_scale": _WeightPipeline(
+        "w2_weight_scale": _WeightBuilder(
             _down_proj("weight_scale"), _apply_stack_transform_to_one_expert(flatten_expert_dims)
         ),
     },
     _to_fractal_nz,
 )
-_W4A8_ASCEND_SCHEME = _ReloadScheme(
+_W4A8_ASCEND_PLANS = _QuantReloadPlans(
     AscendW4A8DynamicFusedMoEMethod,
     {
         **_MOE_WEIGHT_PIPELINES,
-        "w13_weight_scale": _WeightPipeline(
+        "w13_weight_scale": _WeightBuilder(
             _gate_up("weight_scale"),
             _apply_stack_transform_to_one_expert(AscendW4A8DynamicFusedMoEMethod.w13_scale_to_runtime),
         ),
-        "w2_weight_scale": _WeightPipeline(_down_proj("weight_scale"), AscendW4A8DynamicFusedMoEMethod._process_scale),
-        "w13_scale_bias": _WeightPipeline(
+        "w2_weight_scale": _WeightBuilder(_down_proj("weight_scale"), AscendW4A8DynamicFusedMoEMethod._process_scale),
+        "w13_scale_bias": _WeightBuilder(
             _gate_up("scale_bias"), AscendW4A8DynamicFusedMoEMethod.reduce_scale_bias_modelslim
         ),
-        "w2_scale_bias": _WeightPipeline(
+        "w2_scale_bias": _WeightBuilder(
             _down_proj("scale_bias"), AscendW4A8DynamicFusedMoEMethod.reduce_scale_bias_modelslim
         ),
     },
     _to_fractal_nz,
 )
 
-# Checked in this order by _resolve_scheme().
-_SCHEMES: tuple[_ReloadScheme, ...] = (_UNQUANTIZED_SCHEME, _W8A8_DYNAMIC_SCHEME, _W4A8_ASCEND_SCHEME)
+# Checked in this order by _find_reload_plans().
+_RELOAD_PLANS: tuple[_QuantReloadPlans, ...] = (_UNQUANTIZED_PLANS, _W8A8_DYNAMIC_PLANS, _W4A8_ASCEND_PLANS)
 
 
-def _resolve_scheme(routed: torch.nn.Module) -> _ReloadScheme:
-    """Pick the reload rules matching a routed-experts layer's quant method."""
-    method = getattr(routed.quant_method, "quant_method", routed.quant_method)
-    for scheme in _SCHEMES:
-        if scheme.matches(method):
-            return scheme
+def _find_reload_plans(routed_layer: torch.nn.Module) -> _QuantReloadPlans:
+    """Pick the reload plans matching a routed-experts layer's quant method."""
+    method = getattr(routed_layer.quant_method, "quant_method", routed_layer.quant_method)
+    for plans in _RELOAD_PLANS:
+        if plans.matches(method):
+            return plans
     hint = f"checkpoint sub-format: {getattr(method, 'quant_method', None) or 'unknown'}"
     if isinstance(method, AscendW4A8DynamicFusedMoEMethod):
         hint += f'; only msModelSlim ("{ASCEND_QUANTIZATION_METHOD}") is supported'
