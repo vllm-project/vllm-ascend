@@ -23,7 +23,8 @@ selected by `ENGRAM_UNROTATED_GATE`, also currently an A5 capability. Moving
 these kernels into `ops/triton` does not change their hardware routing. These
 call-path descriptions do not establish A3 runtime validation or CI coverage.
 
-The A2 eager prefill worker can opt into a capped Host-UVA lookup grid via
+On A2, colocated serving without KV transfer and dedicated P/D prefill workers
+can cap the Host-UVA lookup grid for eager prefill-only batches via
 `engram_prefill_uva_core_percentage` and `multistream_engram_overlap`.
 Following [#21827](https://github.com/vllm-project/vllm-ascend/pull/21827),
 each program advances by the grid size to cover its remaining rows. The

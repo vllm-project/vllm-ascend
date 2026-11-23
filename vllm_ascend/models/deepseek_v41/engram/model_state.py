@@ -111,9 +111,7 @@ class EngramModelState(AscendModelState):
         if (
             percentage is not None
             and get_ascend_device_type() == AscendDeviceType.A2
-            and transfer is not None
-            and transfer.is_kv_producer
-            and not transfer.is_kv_consumer
+            and (transfer is None or (transfer.is_kv_producer and not transfer.is_kv_consumer))
         ):
             self._host_uva_core_percentage = percentage
         if depth > 0:

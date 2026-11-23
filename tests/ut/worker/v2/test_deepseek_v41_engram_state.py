@@ -49,14 +49,20 @@ def state(monkeypatch, request):
     monkeypatch.setattr(DefaultModelState, "prepare_inputs", lambda *args: {})
     monkeypatch.setattr(DefaultModelState, "prepare_dummy_inputs", lambda *args: {})
     monkeypatch.setattr(deepseek_v41, "ring_state_update_skipped", lambda: False)
-    pcp_size, percentage, device_type, is_consumer = getattr(request, "param", (1, None, AscendDeviceType.A2, False))
+    pcp_size, percentage, device_type, kv_role = getattr(request, "param", (1, None, AscendDeviceType.A2, None))
     monkeypatch.setattr(
         deepseek_v41, "get_ascend_config", lambda: SimpleNamespace(engram_prefill_uva_core_percentage=percentage)
     )
     monkeypatch.setattr(deepseek_v41, "get_ascend_device_type", lambda: device_type)
+    transfer = None
+    if kv_role is not None:
+        transfer = SimpleNamespace(
+            is_kv_producer=kv_role in ("kv_producer", "kv_both"),
+            is_kv_consumer=kv_role in ("kv_consumer", "kv_both"),
+        )
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size),
-        kv_transfer_config=SimpleNamespace(is_kv_producer=True, is_kv_consumer=is_consumer),
+        kv_transfer_config=transfer,
     )
     return deepseek_v41.EngramModelState(config, EngramModel(), None, torch.device("cpu"))
 
@@ -129,15 +135,17 @@ def test_idle_rank_defers_collective_without_reading_request_history(state, monk
 @pytest.mark.parametrize(
     ("state", "mode", "prefills", "expected"),
     [
-        ((1, 75, AscendDeviceType.A2, False), CUDAGraphMode.NONE, [True, True], 75),
-        ((1, 75, AscendDeviceType.A2, False), CUDAGraphMode.NONE, [True, False], None),
-        ((1, 75, AscendDeviceType.A2, False), CUDAGraphMode.NONE, [False, False], None),
-        ((1, 75, AscendDeviceType.A2, False), CUDAGraphMode.FULL, [True, True], None),
-        ((1, 75, AscendDeviceType.A2, True), CUDAGraphMode.NONE, [True, True], None),
-        ((1, 75, AscendDeviceType.A3, False), CUDAGraphMode.NONE, [True, True], None),
+        ((1, 75, AscendDeviceType.A2, None), CUDAGraphMode.NONE, [True, True], 75),
+        ((1, 75, AscendDeviceType.A2, None), CUDAGraphMode.NONE, [True, False], None),
+        ((1, 75, AscendDeviceType.A2, None), CUDAGraphMode.NONE, [False, False], None),
+        ((1, 75, AscendDeviceType.A2, None), CUDAGraphMode.FULL, [True, True], None),
+        ((1, 75, AscendDeviceType.A2, "kv_producer"), CUDAGraphMode.NONE, [True, True], 75),
+        ((1, 75, AscendDeviceType.A2, "kv_consumer"), CUDAGraphMode.NONE, [True, True], None),
+        ((1, 75, AscendDeviceType.A2, "kv_both"), CUDAGraphMode.NONE, [True, True], None),
+        ((1, 75, AscendDeviceType.A3, None), CUDAGraphMode.NONE, [True, True], None),
     ],
     indirect=["state"],
-    ids=["prefill", "mixed", "decode", "full", "dual-role", "a3"],
+    ids=["prefill", "mixed", "decode", "full", "pd-prefill", "pd-decode", "dual-role", "a3"],
 )
 def test_grid_cap_only_reaches_a2_eager_prefill(state, mode, prefills, expected, monkeypatch):
     monkeypatch.setattr(deepseek_v41, "triton", SimpleNamespace(next_power_of_2=lambda _: 4))
@@ -183,7 +191,7 @@ def test_eager_hook_forwards_lookup_events(state):
     state.model.prepare_engram_inputs.assert_called_once()
 
 
-@pytest.mark.parametrize("state", [(pcp, None, AscendDeviceType.A2, False) for pcp in (1, 2, 4)], indirect=True)
+@pytest.mark.parametrize("state", [(pcp, None, AscendDeviceType.A2, None) for pcp in (1, 2, 4)], indirect=True)
 @pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
 def test_replay_metadata_follows_local_segments_and_preserves_global_history(state, mode, monkeypatch):
     state._replay_start_np[:] = [11, 22, 33, 44]
