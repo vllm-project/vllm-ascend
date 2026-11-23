@@ -276,7 +276,7 @@ The control flow is:
 
 The repository contains runnable tests for draft weight transfer:
 
-- [`test_draft_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/two_card/rlhf/weight_transfer/hccl/test_draft_hccl.py)
+- [`test_draft_hccl.py`](../../../../tests/e2e/pull_request/two_card/rlhf/weight_transfer/hccl/test_draft_hccl.py)
 
 ### Pause and resume generation
 
