@@ -25,7 +25,13 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.triton_utils import HAS_TRITON
 
+from vllm_ascend import envs
 from vllm_ascend.device import utils as device_utils
+from vllm_ascend.device.fia_short_query import (
+    FIA_PADDED_QUERY_LENGTH,
+    pad_short_fia_queries,
+    unpad_short_fia_output,
+)
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.paged_mla_cache_read import try_load_strided_mla_cache
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
@@ -346,7 +352,30 @@ class BaseDeviceAdaptor:
             key = key.contiguous()
             value = value.contiguous()
 
-        return torch_npu.npu_fused_infer_attention_score(
+        padded = None
+        kv_lengths = kwargs.get("actual_seq_lengths_kv")
+        if (
+            envs.VLLM_ASCEND_FIA_SHORT_QUERY_WORKAROUND
+            and query.dtype == torch.bfloat16
+            and key.dtype == query.dtype
+            and value.dtype == query.dtype
+            and head_size == 256
+            and num_heads == 8 * num_key_value_heads
+            and kwargs.get("input_layout") == "TND"
+            and kwargs.get("block_table") is not None
+            and kwargs.get("sparse_mode") == 3
+            and not kwargs.get("softmax_lse_flag", False)
+            and kwargs.get("query_rope") is None
+            and kwargs.get("pse_shift") is None
+            and isinstance(kv_lengths, (list, tuple))
+            and kv_lengths
+            and all(isinstance(length, int) and length >= FIA_PADDED_QUERY_LENGTH for length in kv_lengths)
+        ):
+            padded = pad_short_fia_queries(query, kwargs.get("actual_seq_lengths"))
+        if padded is not None:
+            query, actual_seq_lengths, output_slices = padded
+            kwargs = dict(kwargs, actual_seq_lengths=actual_seq_lengths)
+        result = torch_npu.npu_fused_infer_attention_score(
             query=query,
             key=key,
             value=value,
@@ -355,6 +384,10 @@ class BaseDeviceAdaptor:
             scale=scale,
             **kwargs,
         )
+        if padded is not None:
+            output, lse = result
+            return unpad_short_fia_output(output, output_slices), lse
+        return result
 
     @staticmethod
     def npu_moe_init_routing(

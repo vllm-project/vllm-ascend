@@ -69,6 +69,42 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.assertEqual(param_dict["w2_weight"].dtype, torch.int8)
         self.assertEqual(param_dict["w2_weight"].shape, (self.experts, self.output_size // 2, self.input_size))
 
+    def test_effective_tp_scale_bias_is_fully_loaded(self):
+        from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
+        checkpoint = torch.arange(4 * 16, dtype=torch.float32).reshape(4, 16)
+        for effective_tp in (1, 2, 4, 8, 16):
+            for rank in range(effective_tp):
+                with self.subTest(tp=effective_tp, rank=rank):
+                    layer = SimpleNamespace(
+                        moe_config=SimpleNamespace(moe_parallel_config=SimpleNamespace(tp_size=effective_tp)),
+                        _get_hidden_dim=RoutedExperts._get_hidden_dim,
+                        _narrow_expert_data_for_padding=RoutedExperts._narrow_expert_data_for_padding,
+                    )
+                    self.quant_method.tp_size = 1  # Physical TP1, routed expert TP may include DP.
+                    self.quant_method.validate_weight_shapes(layer, 512 // effective_tp)
+                    target = self.quant_method.get_dynamic_quant_param_modelslim(1, 512 // effective_tp, 4)[
+                        "w2_scale_bias"
+                    ][0]
+                    target.fill_(float("nan"))
+                    RoutedExperts._load_w2(layer, target, 1, checkpoint, rank)
+                    width = 16 // effective_tp
+                    expected = checkpoint[:, rank * width : (rank + 1) * width]
+                    torch.testing.assert_close(target, expected)
+                    torch.testing.assert_close(target.sum(-1), expected.sum(-1))
+
+    def test_effective_tp_rejects_invalid_modelslim_partitions(self):
+        for tp in (0, 3, 32):
+            layer = SimpleNamespace(moe_config=SimpleNamespace(moe_parallel_config=SimpleNamespace(tp_size=tp)))
+            with self.subTest(tp=tp), self.assertRaisesRegex(ValueError, "routed-expert TP size"):
+                self.quant_method.validate_weight_shapes(layer, 256)
+
+    def test_effective_tp_does_not_restrict_compressed_tensors_to_sixteen(self):
+        self.quant_method.quant_method = COMPRESSED_TENSORS_METHOD
+        layer = SimpleNamespace(moe_config=SimpleNamespace(moe_parallel_config=SimpleNamespace(tp_size=32)))
+        self.quant_method.validate_weight_shapes(layer, 256)
+        self.assertEqual(self.quant_method.tp_size, 32)
+
     def test_get_weight_compressed_tensors(self):
         self.quant_method.quant_method = COMPRESSED_TENSORS_METHOD
         result = self.quant_method.get_weight(self.experts, self.input_size, self.output_size, torch.bfloat16)
