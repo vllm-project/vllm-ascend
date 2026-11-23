@@ -50,7 +50,7 @@ from vllm_ascend.attention.utils import (
     uses_pcp_sharded_layout,
     wait_for_kv_layer_from_connector,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
@@ -412,11 +412,11 @@ class AscendSFABackend(AttentionBackend):
         kernel_block_size: int | None = None,
     ) -> KVCacheRuntimeShapesAndDtypes:
         """Describe the packed or split SFA main cache in storage elements."""
-        storage_block_size = get_storage_block_size(spec)
-        block_size = storage_block_size if kernel_block_size is None else kernel_block_size
-        if block_size <= 0 or storage_block_size % block_size:
-            raise ValueError("SFA kernel block size must divide the storage block size.")
-        runtime_blocks = num_blocks * (storage_block_size // block_size)
+        # SFA main cache stores one row per token. Packing changes the row width.
+        block_size = spec.block_size if kernel_block_size is None else kernel_block_size
+        if block_size <= 0 or spec.block_size % block_size:
+            raise ValueError("SFA kernel block size must divide the manager block size.")
+        runtime_blocks = num_blocks * (spec.block_size // block_size)
         if spec.uses_packed_sfa_main_cache:
             widths = (spec.head_size,)
         else:
@@ -427,9 +427,7 @@ class AscendSFABackend(AttentionBackend):
         return shapes, (spec.dtype,) * len(widths)
 
     @staticmethod
-    def format_runtime_views(
-        _spec: AscendMLAAttentionSpec, components: list[torch.Tensor]
-    ) -> tuple[torch.Tensor, ...]:
+    def format_runtime_views(_spec: AscendMLAAttentionSpec, components: list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
         return tuple(components)
 
     @staticmethod

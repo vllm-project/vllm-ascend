@@ -1480,6 +1480,9 @@ def create_kv_cache_runtime_views(
                 raise ValueError(f"KV cache placement for {name} exceeds its backing allocation.")
             raw_cache = backing[start : start + span]
             block_stride = descriptor.block_stride
+            # The backend returns the final cache component shapes in kernel axis order.
+            # For compressed caches, the row count reflects the compressed storage.
+            # The last dimension counts elements of each component's storage dtype.
             cache_shapes, dtypes = group.backend.get_runtime_shapes_and_dtypes(
                 spec,
                 num_blocks,
