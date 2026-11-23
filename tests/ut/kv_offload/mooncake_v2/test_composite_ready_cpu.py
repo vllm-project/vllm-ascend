@@ -33,7 +33,6 @@ def worker(cache_names=("model.layers.2.long", "model.layers.2.swa")):
         kv_transfer_config=SimpleNamespace(is_kv_producer=True),
         _prefilling_request_ids=("r",),
         _shared_layer_indices={},
-        _shared_layer_writes={},
         _last_layer_index=None,
         _process_sending_requests=Mock(),
         _send_completions=Mock(),
@@ -149,6 +148,8 @@ def test_push_advertises_the_worker_layout(configuration):
 def test_shared_hook_leaves_resident_writes_deferred():
     obj = worker()
     shared, resident = "model.layers.2.long", "model.layers.2.swa"
+    other_shared = "model.layers.3.long"
+    obj._shared_layer_indices = {shared: 0, other_shared: 1}
     target = (0, 0, 0)
     resident_target = (0, 0, 1)
     event = object()
@@ -188,16 +189,17 @@ def test_shared_hook_leaves_resident_writes_deferred():
     obj._process_sending_requests = MethodType(process, obj)
     submit = load(PUSH, "_submit_shared_layer_writes", {}, OWNER)
 
-    submit(obj, 0, [shared])
+    submit(obj, [shared])
 
     metadata_future.result.assert_called_once()
     resident_future.result.assert_not_called()
     obj._build_layer_transfer_request.assert_called_once_with("r", state, destination, shared)
     batch = obj._sender_executor.submit.call_args.args[1]
     assert batch is obj._pending_sends[0][0]
-    assert obj._shared_layer_writes[0] == (write,)
     assert state.available_layers == {resident: (32, event)}
-    wait_futures = Mock()
+    obj._pending_sends.extend((SimpleNamespace(layer_name=name), Future()) for name in (resident, other_shared))
+    waited = []
+    wait_futures = Mock(side_effect=waited.extend)
     wait = load(PUSH, "wait_for_layer_reuse", {"wait_futures": wait_futures}, OWNER)
     wait(obj, 0)
-    wait_futures.assert_called_once_with((write,))
+    assert waited == [write]

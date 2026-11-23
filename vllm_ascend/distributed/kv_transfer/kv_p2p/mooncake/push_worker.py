@@ -216,8 +216,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._sending_futures: dict[str, list[Future]] = {}
         # Rotating cache entry name -> stage-local layer index.
         self._shared_layer_indices: dict[str, int] = {}
-        # Stage-local source layer index -> Push WRITE futures to wait for before reuse.
-        self._shared_layer_writes: dict[int, tuple[Future, ...]] = {}
         layout = get_layerwise_reuse_layout(kv_cache_config) if self.kv_transfer_config.is_kv_producer else None
         if layout is not None:
             stage_indices = {layer: index for index, layer in enumerate(layout.layers)}
@@ -282,8 +280,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
         if self.kv_transfer_config.is_kv_producer:
-            # The previous step's wait_for_save has joined its WRITE tasks.
-            self._shared_layer_writes.clear()
             for local_request_id, request in metadata.push_send_requests.items():
                 state = self._reqs_send_state.setdefault(request.request_id, SendReqInfo(local_request_id))
                 state.metadata = request
@@ -863,13 +859,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         self._send_done_after_transfers, destination.transfer_params, state.error, transfers
                     )
 
-    def _submit_shared_layer_writes(self, layer_idx: int, shared_names: list[str]) -> None:
+    def _submit_shared_layer_writes(self, shared_names: list[str]) -> None:
         # A busy engine or pending metadata must not defer a shared cache read
         # beyond the point where AscendStore can hand the slot to another layer.
         self._process_sending_requests(layer_hook=True, force=True, shared_names=shared_names)
-        self._shared_layer_writes[layer_idx] = tuple(
-            future for batch, future in self._pending_sends if batch.layer_name in shared_names
-        )
         # Only resident caches can be picked up by later hooks. Subsequent
         # chunks restore the unsent part of a shared cache before writing it.
         for request_id in self._prefilling_request_ids:
@@ -878,9 +871,13 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 available_layers.pop(name, None)
 
     def wait_for_layer_reuse(self, layer_idx: int) -> None:
-        # May run on the store receive thread. It only observes futures published
-        # before the store's save completion and leaves bookkeeping to Push.
-        wait_futures(self._shared_layer_writes.get(layer_idx, ()))
+        # The source layer submits its WRITEs before the store's save completion.
+        # Push removes them from the pending list only after they finish.
+        wait_futures(
+            future
+            for batch, future in self._pending_sends
+            if self._shared_layer_indices.get(batch.layer_name) == layer_idx
+        )
 
     def save_kv_layer(self, layer_name: str) -> None:
         if not self.kv_transfer_config.is_kv_producer or not self._prefilling_request_ids:
@@ -889,12 +886,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         if layer_index is None:
             return
         # Share one fence across the physical layer's caches and requests.
-        # Duplicate hooks with no new tokens do not record another device event.
         layer_names = self._layer_names_by_index[layer_index]
         shared_names = [name for name in layer_names if name in self._shared_layer_indices]
-        shared_layer = self._shared_layer_indices[shared_names[0]] if shared_names else None
-        if shared_layer is not None and shared_layer in self._shared_layer_writes:
-            return
         event = None
         for request_id in self._prefilling_request_ids:
             state = self._reqs_send_state[request_id]
@@ -909,9 +902,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         event.record()
                     state.available_layers[cache_name] = end, event
         last_layer = layer_index == self._last_layer_index
-        if shared_layer is not None:
-            self._submit_shared_layer_writes(shared_layer, shared_names)
-        if last_layer or (shared_layer is None and event is not None):
+        if shared_names:
+            self._submit_shared_layer_writes(shared_names)
+        if last_layer or (not shared_names and event is not None):
             self._process_sending_requests(layer_hook=True, force=last_layer)
         if last_layer:
             self._send_completions()
