@@ -17,6 +17,7 @@ from tests.e2e.common.multi_node.utils import (
 from tests.e2e.common.multi_node.utils import (
     resolve_current_node_index as resolve_node_index,
 )
+from tools.benchmark_repeats import expand_benchmark_repeats
 
 logger = logging.getLogger(__name__)
 
@@ -363,8 +364,9 @@ class ExternalDPConfigLoader:
         for name, case in (raw_config.get("benchmarks") or {}).items():
             case_with_name = dict(case)
             case_with_name["case_name"] = name
+            case_with_name["benchmark_artifact_name"] = f"{raw_config.get('test_name', 'external_dp_test')}__{name}"
             benchmark_cases.append(case_with_name)
-        return benchmark_cases
+        return expand_benchmark_repeats(benchmark_cases)
 
     @staticmethod
     def _parse_kv_pool(raw_config: dict[str, Any]) -> KVPoolConfig | None:

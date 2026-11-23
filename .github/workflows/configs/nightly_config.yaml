@@ -118,6 +118,10 @@ a3:
 
   double_node:
     test_config:
+      - name: Kimi-K3-W4A8-E256-A3-PD-Accu-First100
+        config_file_path: Kimi-K3-W4A8-E256-A3-PD-Accu-First100.yaml
+        config_base_path: tests/e2e/cases/models/configs/Kimi
+        size: 2
       - name: multi-node-GLM-5.1-W8A8C8-MTP-A3_198k_function
         config_file_path: GLM-5.1-W8A8C8-A3_198k_function.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
@@ -154,6 +158,10 @@ a3:
 a3-560t:
   single_node:
     test_config:
+      - name: Kimi-K3-W4A8-E256-A3-GSM8K-First100
+        os: linux-aarch64-a3-800i-16
+        config_file_path: Kimi-K3-w4a8-experts256-A3-First100.yaml
+        config_base_path: tests/e2e/cases/models/configs/Kimi
       - name: Qwen3.8-27B-w8a8-A3
         os: linux-aarch64-a3-800i-2
         config_file_path: Qwen3.8-27B-w8a8-A3.yaml
