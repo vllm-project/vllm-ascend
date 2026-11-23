@@ -711,7 +711,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace_key: str | tuple = _FIA_WORKSPACE_KEY
-        if attn_metadata.diffusion_causal is not None:
+        is_diffusion = isinstance(getattr(attn_metadata, "diffusion_causal", None), torch.Tensor)
+        if is_diffusion:
             # The graph contains both mask modes and Gemma layers with
             # different head shapes. FIA's workspace tiling depends on both.
             workspace_key = (
@@ -771,7 +772,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.sliding_window,
                 _EXTRA_CTX.is_draft_model,
                 is_non_pa=block_table is None,
-                diffusion_causal=attn_metadata.causal if attn_metadata.diffusion_causal is not None else None,
+                diffusion_causal=attn_metadata.causal if is_diffusion else None,
             ),
         )
         return output, num_tokens
@@ -1351,7 +1352,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         with attention_transfer_window():
-            if attn_metadata.diffusion_causal is not None:
+            if isinstance(getattr(attn_metadata, "diffusion_causal", None), torch.Tensor):
                 # KV has already been written once by forward(). Both calls
                 # read the same cache; each has a fixed FIA mask mode even
                 # when request phases change between graph replays.

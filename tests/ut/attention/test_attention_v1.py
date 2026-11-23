@@ -23,7 +23,7 @@ from vllm_ascend.attention.utils import (
     requires_contiguous_pa_kv_cache,
     using_paged_attention,
 )
-from vllm_ascend.device.device_op import A5DeviceAdaptor
+from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import AscendDeviceType
@@ -678,7 +678,10 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.attn_mask = None
         mock_get_forward_context.return_value = MagicMock(capturing=False)
 
-        with patch(LARGE_HEAD_PREFILL_PATH, return_value=(torch.ones_like(query), None)) as mock_forward:
+        with (
+            patch.object(attn_module, "DeviceOperator", BaseDeviceAdaptor),
+            patch(LARGE_HEAD_PREFILL_PATH, return_value=(torch.ones_like(query), None)) as mock_forward,
+        ):
             result = self.impl_large_head.forward_impl(query, key, value, (), metadata, output)
 
         mock_forward.assert_called_once()
