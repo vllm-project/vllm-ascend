@@ -96,6 +96,19 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
             AscendGDNFusedAttentionBackend: (AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder),
             PleShortConvAttentionBackend: (PleShortConvAttentionMetadataBuilder,),
         }
+        # RecoverSSM also consumes rejection-corrected device lengths. Its
+        # framework integration may be absent; preserve existing fast paths
+        # rather than disabling them because an optional backend is missing.
+        try:
+            from vllm_ascend.attention.gdn_recoverssm_metadata import (
+                AscendGDNRecoverSSMAttentionBackend,
+                AscendGDNRecoverSSMMetadataBuilder,
+            )
+        except ModuleNotFoundError as exc:
+            if exc.name != "vllm_ascend.attention.gdn_recoverssm_metadata":
+                raise
+        else:
+            allowed_builders[AscendGDNRecoverSSMAttentionBackend] = (AscendGDNRecoverSSMMetadataBuilder,)
         target_pairs = tuple(
             (group.backend, type(group.get_metadata_builder(0)))
             for cache_groups in runner.attn_groups
