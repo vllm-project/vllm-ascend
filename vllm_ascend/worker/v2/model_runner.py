@@ -89,13 +89,17 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_kv import (
     get_resident_dspark_layer_names,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    apply_layerwise_kv_cache_plan,
+    get_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_offload_topk_profile_buffers,
+    d2h_record_source_ready,
+    d2h_retire,
     init_sparse_kv_offload_manager,
+    make_d2h_plan_launch_hook,
 )
 from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
+from vllm_ascend.hisparse.pcp import adapt_pcp_hisparse_connector
 from vllm_ascend.kv_trace.kv_trace_runner import install_trace
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
@@ -393,6 +397,7 @@ class NPUModelRunner(GPUModelRunner):
         state = self.execute_model_state
         self._lmhead_pad_size = self._get_lmhead_pad_size(state) if state is not None and lmhead_tp_enable() else None
         output = super().sample_tokens(grammar_output)
+        d2h_record_source_ready(self)
         self._lmhead_pad_size = None
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
@@ -495,15 +500,19 @@ class NPUModelRunner(GPUModelRunner):
             is_last_pp_rank=self.is_last_pp_rank,
             shared_kv_cache_layers=getattr(self, "shared_kv_cache_layers", None),
         )
-        # P also needs persistent prompt draft KV until D acknowledges its
-        # transfer. It must never alias target layerwise scratch buffers.
-        persistent_draft_names = resident_draft_names | set(getattr(kv_cache_config, "dspark_draft_layer_names", ()))
-        persistent_draft_names.update(getattr(kv_cache_config, "dflash_draft_layer_names", ()))
-        apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config, excluded_layer_names=persistent_draft_names)
+        reuse_layout = get_layerwise_reuse_layout(kv_cache_config)
+        if reuse_layout is not None:
+            persistent_draft_names = resident_draft_names.union(
+                getattr(kv_cache_config, "dspark_draft_layer_names", ()),
+                getattr(kv_cache_config, "dflash_draft_layer_names", ()),
+            )
+            if not reuse_layout.reused_cache_names.isdisjoint(persistent_draft_names):
+                raise ValueError("Persistent draft caches cannot rotate through target layerwise slots.")
         if sparse_cfg.enabled:
             self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
                 self.vllm_config, kv_cache_config, sparse_cfg
             )
+            self.model_state.runner_plan_launch_d2h = make_d2h_plan_launch_hook(self)
             self.model_state._offload_live_req_ids = self.req_states.req_id_to_index
             self.model_state._offload_draft_layer_names = (
                 getattr(self.speculator, "draft_attn_layer_names", set[str]()) - resident_draft_names
@@ -593,6 +602,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self._fill_c8_mxfp_v_scale_caches()
         if self.vllm_config.attention_config.hisparse_config is not None:
+            self.kv_connector = adapt_pcp_hisparse_connector(self)
             self.kv_connector = overlap_target_host_mirror(self)
         guard = getattr(self, "_kv_trace", None)
         if guard is not None:
@@ -761,6 +771,7 @@ class NPUModelRunner(GPUModelRunner):
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
         with dp_coordination_context:
+            d2h_retire(self, getattr(scheduler_output, "preempted_req_ids", None))
             try:
                 output = super().execute_model(
                     scheduler_output,
@@ -974,7 +985,7 @@ class NPUModelRunner(GPUModelRunner):
             adaptive_verification_manager is not None and num_draft_tokens_per_req is not None
         )
         num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
-        admitted_draft_kwargs = {}
+        num_admitted_draft_tokens = None
         if adaptive_verification_active:
             num_scheduled_tokens_np, cu_num_logits_np = adaptive_verification_manager.compact_batch(
                 num_draft_tokens_per_req, num_scheduled_tokens_np, cu_num_logits_np
@@ -1009,10 +1020,12 @@ class NPUModelRunner(GPUModelRunner):
         if adaptive_verification_active:
             num_scheduled_draft_tokens = total_num_draft_tokens
             self._log_adaptive_verification_costs(adaptive_verification_manager)
-            allocation = adaptive_verification_manager.reallocate_drafts(req_ids, idx_mapping)
-            cu_num_logits, query_start_loc, total_num_draft_tokens = allocation[:3]
-            if len(allocation) == 4:
-                admitted_draft_kwargs["num_admitted_draft_tokens"] = allocation[3]
+            (
+                cu_num_logits,
+                query_start_loc,
+                total_num_draft_tokens,
+                num_admitted_draft_tokens,
+            ) = adaptive_verification_manager.reallocate_drafts(req_ids, idx_mapping)
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
             logger.debug(
                 "Adaptive verification budget: requests=%d, scheduled_drafts=%d, admitted_drafts=%d, "
@@ -1120,8 +1133,6 @@ class NPUModelRunner(GPUModelRunner):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
-        pp_kwargs = {"max_seq_len_np": batch_req_state.max_seq_len_np}
-        pp_kwargs.update(admitted_draft_kwargs)
         input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -1135,6 +1146,7 @@ class NPUModelRunner(GPUModelRunner):
             num_tokens_after_padding=num_tokens_after_padding,
             num_draft_tokens=total_num_draft_tokens,
             num_draft_tokens_per_req=num_draft_tokens_per_req,
+            num_admitted_draft_tokens=num_admitted_draft_tokens,
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
@@ -1147,7 +1159,7 @@ class NPUModelRunner(GPUModelRunner):
             has_prefill=batch_req_state.has_prefill,
             decode_graph_eligible=batch_req_state.decode_graph_eligible,
             prefill_runs_as_decode_np=batch_req_state.prefill_runs_as_decode_np,
-            **pp_kwargs,
+            max_seq_len_np=batch_req_state.max_seq_len_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.prepare_padding_mask(num_tokens, num_tokens_after_padding),

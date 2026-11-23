@@ -15,7 +15,7 @@ This guide uses [Qwen3-0.6B](../tutorials/models/Qwen3-Dense.md) as an example t
 
     The prebuilt image includes a validated Python and Ascend user-space software stack, including CANN, NNAL, PyTorch, TorchNPU, vLLM, and vLLM Ascend.
 
-    Atlas A2 Products (A2), Atlas A3 Products (A3), and 950DT Products images also include the matching Triton Ascend runtime. Atlas 300I DUO and Atlas 200I Pro do not use Triton Ascend.
+    Atlas A2 Products (A2), Atlas A3 Products (A3), and 950DT Products images also include the matching Triton Ascend runtime. Atlas 300I Duo and Atlas 200I Pro do not use Triton Ascend.
 
     For component roles and the exact validated versions, see [Installation Guide > Hardware and software stack](installation.md#installation-hardware-software-stack).
 
@@ -70,7 +70,7 @@ The following sections provide offline inference and online serving examples. Ch
 
 {% filter indent(4, true) %}{% include "getting_started/quick_start/offline/qwen3-0.6b.inc.md" %}{% endfilter %}
 
-=== "Atlas 300I DUO / Atlas 200I Pro"
+=== "Atlas 300I Duo / Atlas 200I Pro"
 
     <span id="quick-start-atlas-300i-duo-offline"></span>
     <span id="quick-start-atlas-200i-pro-offline"></span>
@@ -87,7 +87,7 @@ The following sections provide offline inference and online serving examples. Ch
 
 {% filter indent(4, true) %}{% include "getting_started/quick_start/online/qwen3-0.6b.inc.md" %}{% endfilter %}
 
-=== "Atlas 300I DUO / Atlas 200I Pro"
+=== "Atlas 300I Duo / Atlas 200I Pro"
 
     <span id="quick-start-atlas-300i-duo-online"></span>
     <span id="quick-start-atlas-200i-pro-online"></span>

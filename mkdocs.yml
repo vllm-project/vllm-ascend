@@ -260,6 +260,7 @@ nav:
         - tutorials/models/Hunyuan-A13B-Instruct.md
         - tutorials/models/Hy3-preview.md
         - tutorials/models/Hy4-preview.md
+        - tutorials/models/Hy4.md
         - tutorials/models/HY4-Flash.md
         - tutorials/models/Minitron-8B-Base.md
         - tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md
@@ -381,6 +382,7 @@ nav:
     - community/contributors.md
     - community/issue-workflow-guidelines.md
     - community/slash-commands.md
+    - community/ai-review.md
     - community/versioning_policy.md
     - User Stories:
         - community/user_stories/index.md

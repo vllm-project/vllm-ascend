@@ -34,6 +34,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  ASCEND_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly"
+  PYTORCH_INDEX_URL: "https://download.pytorch.org/whl/cpu/"
   UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu/"
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_HTTP_TIMEOUT: 120
@@ -48,7 +50,7 @@ env:
 
 jobs:
     resolve-tag:
-        runs-on: linux-amd64-cpu-4-hk
+        runs-on: linux-amd64-cpu-1-hk
         outputs:
             release_tag: ${{ steps.vllm.outputs.release_tag }}
         steps:
@@ -81,6 +83,8 @@ jobs:
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 1
+            VLLM_MEDIA_CACHE: /root/.cache/vllm/media
+            VLLM_MEDIA_CACHE_TTL_HOURS: 876000
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v7
@@ -171,16 +175,20 @@ jobs:
               CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
             run: |
               export MAX_JOBS=$(( ${{ matrix.num_npus }} * 23 ))
-              uv pip install -r requirements-dev.txt
-              # Preserve CI availability during the transition by compiling on
-              # the NPU only when the CPU-produced cache is unavailable.
+              source /usr/local/Ascend/ascend-toolkit/set_env.sh
+              source /usr/local/Ascend/nnal/atb/set_env.sh
+              export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}"
+              # Same order as the Dockerfile: pip installs triton==3.6.0, then
+              # triton-ascend overwrites site-packages/triton. Keep this ahead
+              # of uv so those two wheels are not unpacked in one transaction.
               if [ "$CSRC_CACHE_HIT" = "true" ]; then
                 echo "csrc cache hit: skip kernel compilation"
-                COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
+                COMPILE_CUSTOM_KERNELS=0 python3 -m pip install -e . --extra-index-url "${PYTORCH_INDEX_URL}"
               else
                 echo "csrc cache miss: compile kernels on the NPU runner"
-                uv pip install -e . --no-build-isolation
+                python3 -m pip install -e . --no-build-isolation --extra-index-url "${PYTORCH_INDEX_URL}"
               fi
+              uv pip install -r requirements-dev.txt
               uv pip install tblib
               uv pip install cohere_melody peft "vllm[helion]"  "vllm[grpc]" "vllm[audio]"
               uv pip install pqdm timm imagehash num2words schemathesis==3.39.15
@@ -229,6 +237,8 @@ jobs:
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 1
+            VLLM_MEDIA_CACHE: /root/.cache/vllm/media
+            VLLM_MEDIA_CACHE_TTL_HOURS: 876000
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v7
@@ -316,16 +326,20 @@ jobs:
               CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
             run: |
               export MAX_JOBS=$(( ${{ matrix.num_npus }} * 23 ))
-              uv pip install -r requirements-dev.txt
-              # Preserve CI availability during the transition by compiling on
-              # the NPU only when the CPU-produced cache is unavailable.
+              source /usr/local/Ascend/ascend-toolkit/set_env.sh
+              source /usr/local/Ascend/nnal/atb/set_env.sh
+              export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}"
+              # Same order as the Dockerfile: pip installs triton==3.6.0, then
+              # triton-ascend overwrites site-packages/triton. Keep this ahead
+              # of uv so those two wheels are not unpacked in one transaction.
               if [ "$CSRC_CACHE_HIT" = "true" ]; then
                 echo "csrc cache hit: skip kernel compilation"
-                COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
+                COMPILE_CUSTOM_KERNELS=0 python3 -m pip install -e . --extra-index-url "${PYTORCH_INDEX_URL}"
               else
                 echo "csrc cache miss: compile kernels on the NPU runner"
-                uv pip install -e . --no-build-isolation
+                python3 -m pip install -e . --no-build-isolation --extra-index-url "${PYTORCH_INDEX_URL}"
               fi
+              uv pip install -r requirements-dev.txt
               uv pip install tblib
               uv pip install "mteb[bm25s]"
 
@@ -450,16 +464,20 @@ jobs:
               CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
             run: |
               export MAX_JOBS=$(( ${{ matrix.num_npus }} * 23 ))
-              uv pip install -r requirements-dev.txt
-              # Preserve CI availability during the transition by compiling on
-              # the NPU only when the CPU-produced cache is unavailable.
+              source /usr/local/Ascend/ascend-toolkit/set_env.sh
+              source /usr/local/Ascend/nnal/atb/set_env.sh
+              export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}"
+              # Same order as the Dockerfile: pip installs triton==3.6.0, then
+              # triton-ascend overwrites site-packages/triton. Keep this ahead
+              # of uv so those two wheels are not unpacked in one transaction.
               if [ "$CSRC_CACHE_HIT" = "true" ]; then
                 echo "csrc cache hit: skip kernel compilation"
-                COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
+                COMPILE_CUSTOM_KERNELS=0 python3 -m pip install -e . --extra-index-url "${PYTORCH_INDEX_URL}"
               else
                 echo "csrc cache miss: compile kernels on the NPU runner"
-                uv pip install -e . --no-build-isolation
+                python3 -m pip install -e . --no-build-isolation --extra-index-url "${PYTORCH_INDEX_URL}"
               fi
+              uv pip install -r requirements-dev.txt
               uv pip install tblib 
               uv pip install "runai-model-streamer[s3,gcs]"
 

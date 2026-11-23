@@ -170,10 +170,10 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
     @property
     def attn_vllm_config(self) -> VllmConfig:
-        config = super().attn_vllm_config
-        # Builders and graph replay must use the same topology as model loading.
-        config.parallel_config = self.draft_vllm_config.parallel_config
-        return config
+        # Preserve upstream attention settings without mutating shared config.
+        attn_config = copy(super().attn_vllm_config)
+        attn_config.parallel_config = self.draft_vllm_config.parallel_config
+        return attn_config
 
     # TODO: Remove this method once vllm-project/vllm#53458 or an
     # equivalent upstream fix is merged.
@@ -245,6 +245,9 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
     def on_prefill_begin(self, num_reqs: int) -> None:
         super().on_prefill_begin(num_reqs)
+        hisparse_pcp = getattr(self, "hisparse_pcp_connector", None)
+        if hisparse_pcp is not None:
+            hisparse_pcp.prepare_draft_prefill()
         source_mask = getattr(self, "_eplb_source_is_padding", None)
         if source_mask is not None:
             source_mask.fill_(True)
@@ -254,6 +257,9 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
     def on_multi_step_decode_begin(self, num_reqs: int) -> None:
         super().on_multi_step_decode_begin(num_reqs)
+        hisparse_pcp = getattr(self, "hisparse_pcp_connector", None)
+        if hisparse_pcp is not None:
+            hisparse_pcp.prepare_draft_decode()
         source_mask = getattr(self, "_eplb_source_is_padding", None)
         if source_mask is not None:
             source_mask.fill_(True)

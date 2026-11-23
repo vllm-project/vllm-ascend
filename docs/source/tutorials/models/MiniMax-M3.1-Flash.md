@@ -8,7 +8,7 @@
 
     **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
 
-MiniMax-M3.1-Flash is a multimodal Mixture-of-Experts model with approximately 428B total parameters and 23B activated parameters per token. It uses sparse attention throughout the model.
+MiniMax-M3.1-Flash is a multimodal Mixture-of-Experts model with approximately 428 billion total parameters and 23 billion activated parameters per token. It uses sparse attention throughout the model.
 
 This document covers supported features, environment and model preparation, single-node deployment, PD separation, functional verification, accuracy and performance evaluation, performance tuning, and troubleshooting.
 
@@ -1276,7 +1276,7 @@ For backend selection, `mooncake.json`, Mooncake Master, eviction, tenant option
 | `lookup_rpc_port` | Not used | **Must be unique per DP rank** (`37000/37100 + DP_RANK`); on 950DT products use one distinct base port per host (D1 `37100`, D2 `37102`) to avoid IPC endpoint collisions |
 | Extra env | Section 5.3 `HCCL_*` only | Keep 5.3 env, then add A3 fabric-memory or 950DT Device UB exports from [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) |
 | Container mounts | `/etc/hccn.conf`; 950DT products also keep `/etc/hixlep/` | Also mount the local SSD offload directory |
-| Startup order | Decode → Prefill → Proxy | **Mooncake Master → Decode → Prefill → Proxy** |
+| Startup order | Start Prefill and Decode simultaneously, then start the Proxy | **Mooncake Master → Start Decode and Prefill simultaneously → Proxy** |
 | Verification | P→D KV transfer only | Also check Prefill pool lookup/get/put hits after a repeated-prefix warmup |
 
 #### 5.4.1 Prerequisites
@@ -1417,7 +1417,7 @@ The SSD I/O buffer is allocated separately from `global_segment_size`. The `1GB`
 
 For this three-tier (NPU, host memory, and SSD) example, the recommended starting SSD budget is **10 GiB per NPU worker rank** on every Prefill and Decode node. The two capacity limits describe the same SSD budget; they do not add up to 20 GiB:
 
-- `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` sets the per-worker SSD capacity reported to Mooncake Master. Its default is `2199023255552` bytes (2 TiB) per worker; this is advertised capacity, not an immediate disk allocation.
+- `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` sets the per-worker SSD capacity reported to Mooncake Master. Its default is `2TiB` per worker; this is advertised capacity, not an immediate disk allocation.
 - `MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE` sets the local bucket size limit. Its default is `0`, meaning 90% of the physical disk capacity. Set it explicitly alongside the reported capacity.
 - `MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru` enables least-recently-used eviction, removing old SSD cache entries to make room for new writes within the configured bucket limit.
 
@@ -2305,7 +2305,7 @@ This text-only W8A8 profile uses a 1P1D topology: one Prefill service on one hos
 
 This is a functional long-context configuration with one sequence per Decode replica. Both roles use eager execution, Model Runner V2, BF16 KV caches, and chunked prefill. Speculative decoding, prefix caching, asynchronous scheduling, and static kernels are disabled. The batched-token budget limits each iteration; it does not limit the total input length.
 
-Decode reserves `48421142528` bytes (about 45.1 GiB) of KV cache per worker. To retain workspace for the attention operators, it prefetches router and attention-projection weights from CPU using `gate.weight`, `qkv_proj.weight`, and `o_proj.weight`. Other weights remain on NPU. Decode uses `weight_nz_mode=0` so the selected projection weights use ordinary layouts for prefetching. Allow for these CPU-to-NPU transfers when evaluating latency; tune performance separately.
+Decode reserves about 45.1 GiB of KV cache per worker. To retain workspace for the attention operators, it prefetches router and attention-projection weights from CPU using `gate.weight`, `qkv_proj.weight`, and `o_proj.weight`. Other weights remain on NPU. Decode uses `weight_nz_mode=0` so the selected projection weights use ordinary layouts for prefetching. Allow for these CPU-to-NPU transfers when evaluating latency; tune performance separately.
 
 #### 5.5.1 Preparation
 
@@ -2917,7 +2917,7 @@ Use the commands in [Section 5](#5-online-service-deployment) as starting config
 
 | Scenario | Starting Configuration | Parameters to Evaluate | Validation |
 | --- | --- | --- | --- |
-| Long context | All examples set `MAX_MODEL_LEN` to `133000`. | Set `MAX_MODEL_LEN` for the combined input/output budget and reduce `--max-num-seqs` if KV cache capacity is insufficient. | Confirm the requested context fits at the target concurrency before increasing load. |
+| Long context | All examples except the 1M PD disaggregation profile in Section 5.5 set `MAX_MODEL_LEN` to `133000`; that profile uses `1050624`. | Set `MAX_MODEL_LEN` for the combined input/output budget and reduce `--max-num-seqs` if KV cache capacity is insufficient. | Confirm the requested context fits at the target concurrency before increasing load. |
 | Low latency | Single-node examples in Section 5.1. | Reduce request concurrency and compare `--max-num-seqs` and `--max-num-batched-tokens` settings. | Compare TTFT and TPOT alongside output-token throughput. |
 | High throughput | PD examples in Section 5.3. | Adjust `MAX_NUM_SEQS` and `MAX_BATCHED_TOKENS` on Prefill and Decode separately while keeping both connector topology declarations consistent. | Increase offered load gradually and check throughput, latency, and failed requests. |
 

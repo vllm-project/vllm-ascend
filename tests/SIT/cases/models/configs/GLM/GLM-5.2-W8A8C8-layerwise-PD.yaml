@@ -56,7 +56,6 @@ env_common: &env_common
   HCCL_OP_EXPANSION_MODE: AIV
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   TASK_QUEUE_ENABLE: '1'
-  VLLM_USE_V2_MODEL_RUNNER: '0'
   ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
   ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config.protocol_desc":["hccs:device"]}'
   ASCEND_LOCAL_COMM_RES: '{"version":"1.2"}'
@@ -220,7 +219,7 @@ templates:
       - --attention_config.indexer_kv_dtype
       - int8
       - --additional-config
-      - '{"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":true},"multistream_overlap_shared_expert":true}'
+      - '{"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"enable_npugraph_ex":true},"multistream_overlap_shared_expert":true}'
       - --speculative-config
       - '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}'
       - --compilation-config
@@ -271,7 +270,7 @@ templates:
       - --attention_config.indexer_kv_dtype
       - int8
       - --additional-config
-      - '{"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":true},"multistream_overlap_shared_expert":true}'
+      - '{"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"enable_npugraph_ex":true},"multistream_overlap_shared_expert":true}'
       - --speculative-config
       - '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}'
       - --compilation-config
