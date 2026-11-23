@@ -61,6 +61,20 @@ MAX_DIFF_CHARS = 80_000
 ROUND_TIMEOUT_SECONDS = 600
 
 
+def render_template(template: str, values: dict[str, str]) -> str:
+    """Single-pass {{PLACEHOLDER}} substitution.
+
+    Values are never re-scanned, so a diff containing something that looks
+    like a placeholder cannot inject other values; unknown placeholders are
+    left verbatim so a template typo is visible in the output.
+    """
+    return re.sub(
+        r"\{\{(\w+)\}\}",
+        lambda m: values.get(m.group(1), m.group(0)),
+        template,
+    )
+
+
 def truncate_diff(diff: str, limit: int = MAX_DIFF_CHARS) -> str:
     """Cap the diff so one huge PR cannot dominate the token bill; the
     agent is told to read the remainder from the head/ checkout."""
@@ -297,50 +311,65 @@ class Orchestrator:
                 "then set state=waiting-human.\n"
             )
 
-        environment = (
-            "## Working environment\n\n"
-            "- Your working directory is a full checkout of the vllm-ascend"
-            " repository (BASE branch).\n"
-            "- The PR's own code is checked out read-only under `head/`."
-            " Finding line numbers refer to files under `head/` — when you"
-            " need context around a changed line, read the file at"
-            " `head/<path>` from there, never from the base checkout.\n"
-            "- Project documentation lives under `head/docs/source/`; the"
-            " contributor guidelines are `head/AGENTS.md` (background only —"
-            " the review rules are the checklists below).\n"
-            "- The knowledge base map paths are relative to the working"
-            " directory (the trusted BASE checkout).\n"
-            "- You have read access to all of it. Do not modify, build or"
-            " execute anything; this is a review-only environment.\n"
+        # The prompt skeleton lives in
+        # .github/agent-review/prompt_template.md (owner-gated with the rest
+        # of the knowledge base); this code only fills in the values.
+        template_path = os.path.join(self.workspace, ".github", "agent-review", "prompt_template.md")
+        with open(template_path) as f:
+            template = f.read()
+        waived_section = (
+            "\n\n## Waived findings (human decision — FINAL, do not re-raise, "
+            "do not count toward MUST-FIX)\n\n" + "\n".join(f"- {w}" for w in waived)
+            if waived
+            else ""
         )
-
-        prompt = (
-            instructions
-            + "\n\n"
-            + environment
-            + "\n## Knowledge base map\n\n"
-            + kb_map
-            + "\n"
-            + (
-                "\n\n## Waived findings (human decision — FINAL, do not re-raise, "
-                "do not count toward MUST-FIX)\n\n" + "\n".join(f"- {w}" for w in waived)
-                if waived
-                else ""
-            )
-            + "\n\n## Domains this PR touches\n\n"
-            + (
-                "\n".join(f"- {d['name']}: {d.get('description', '')} — read `L2/{d['name']}/` first" for d in domains)
-                or "(none matched — L1 global rules only)"
-            )
-            + f"\n\n## PR diff (head {self.head_sha[:12]})\n```diff\n{diff}\n```\n"
-            + "\n## Your previous comment\n"
-            + (prev_agent_comment or "(first round)")
-            + "\n\n## Developer / reviewer reply to address\n"
-            + user_reply
-            + closing_note
-            + f"\nRound for this push: {round_no}/{MAX_ROUNDS_PER_PUSH}. "
-            + f"Whole-PR rounds so far: {self.state.total + 1}/{MAX_TOTAL_ROUNDS}."
+        domains_section = (
+            "\n".join(f"- {d['name']}: {d.get('description', '')} — read `L2/{d['name']}/` first" for d in domains)
+            or "(none matched — L1 global rules only)"
         )
+        prompt = render_template(
+            template,
+            {
+                "INSTRUCTIONS": instructions.strip(),
+                "ENVIRONMENT": (
+                    "## Working environment\n\n"
+                    "- Your working directory is a full checkout of the"
+                    " vllm-ascend repository (BASE branch).\n"
+                    "- The PR's own code is checked out read-only under"
+                    " `head/`. Finding line numbers refer to files under"
+                    " `head/` — when you need context around a changed line,"
+                    " read the file at `head/<path>`, never from the base"
+                    " checkout.\n"
+                    "- Project documentation lives under `head/docs/source/`;"
+                    " the contributor guidelines are `head/AGENTS.md`"
+                    " (background only — the review rules are the checklists"
+                    " in the knowledge base map).\n"
+                    "- Knowledge base map paths are relative to the working"
+                    " directory (the trusted BASE checkout).\n"
+                    "- You have read access to all of it. Do not modify,"
+                    " build or execute anything; this is a review-only"
+                    " environment.\n"
+                ),
+                "KB_MAP": kb_map.strip(),
+                "WAIVED_SECTION": waived_section,
+                "DOMAINS": domains_section,
+                "HEAD_SHA": self.head_sha[:12],
+                "DIFF": diff.strip(),
+                "PREV_COMMENT": prev_agent_comment or "(first round)",
+                "REPLY": user_reply,
+                "CLOSING_NOTE": closing_note,
+                "ROUND": round_no,
+                "MAX_ROUNDS": MAX_ROUNDS_PER_PUSH,
+                "TOTAL": self.state.total + 1,
+                "MAX_TOTAL": MAX_TOTAL_ROUNDS,
+            },
+        )
+        leftover = re.findall(r"\{\{\w+\}\}", prompt)
+        if leftover:
+            print(
+                f"::warning::unfilled prompt placeholders: {sorted(set(leftover))}",
+                flush=True,
+            )
 
         prompt_file = "/tmp/ai-review-prompt.md"
         out_file = "/tmp/ai-review-output.md"
@@ -470,7 +499,11 @@ class Orchestrator:
         kb_dir = os.path.join(self.workspace, ".github", "agent-review")
         for root, _dirs, files in os.walk(kb_dir):
             for name in sorted(files):
-                if not name.endswith(".md") or name in ("instructions.md", "README.md"):
+                if not name.endswith(".md") or name in (
+                    "instructions.md",
+                    "README.md",
+                    "prompt_template.md",
+                ):
                     continue
                 path = os.path.join(root, name)
                 rel = os.path.relpath(path, self.workspace)

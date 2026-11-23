@@ -8,6 +8,7 @@ import os
 import sys
 
 import pytest
+import regex as re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -63,6 +64,51 @@ class TestTruncateDiff:
         for line in out.splitlines():
             if line.startswith("line"):
                 assert line.startswith("line")
+
+
+class TestRenderTemplate:
+    def test_substitutes_all_values(self):
+        out = ai.render_template("Hello {{NAME}}, {{N}} times", {"NAME": "x", "N": "3"})
+        assert out == "Hello x, 3 times"
+
+    def test_values_are_not_rescanned(self):
+        # a value that looks like a placeholder must not be expanded
+        out = ai.render_template("{{A}}", {"A": "{{B}}", "B": "boom"})
+        assert out == "{{B}}"
+
+    def test_unknown_placeholder_left_visible(self):
+        out = ai.render_template("keep {{TYPO}} here", {})
+        assert out == "keep {{TYPO}} here"
+
+    def test_real_template_matches_known_placeholders(self):
+        repo_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
+        template_path = os.path.join(repo_root, ".github", "agent-review", "prompt_template.md")
+        with open(template_path) as f:
+            template = f.read()
+        placeholders = set(re.findall(r"\{\{(\w+)\}\}", template))
+        known = {
+            "INSTRUCTIONS",
+            "ENVIRONMENT",
+            "KB_MAP",
+            "WAIVED_SECTION",
+            "DOMAINS",
+            "HEAD_SHA",
+            "DIFF",
+            "PREV_COMMENT",
+            "REPLY",
+            "CLOSING_NOTE",
+            "ROUND",
+            "MAX_ROUNDS",
+            "TOTAL",
+            "MAX_TOTAL",
+        }
+        assert placeholders <= known, f"template uses unknown placeholders: {placeholders - known}"
+        # every placeholder is also referenced by the orchestrator
+        source_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_review.py")
+        with open(source_path) as f:
+            source = f.read()
+        for name in known:
+            assert f'"{name}":' in source, f"orchestrator no longer fills {name}"
 
 
 class TestParseFindings:
