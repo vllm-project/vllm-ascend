@@ -144,9 +144,8 @@ class WorkerSentinel(GPUWorkerSentinel):
         self._validate_scale_down_preconditions()
         super().scale_down(ft_request)
 
-        # Not exported by vLLM v0.33.0, so import it here: this method only
-        # runs on the FT-capable vLLM line, and the release lane must be able
-        # to import this module (normal worker startup does) without it.
+        # Imported lazily: vLLM v0.33.0 does not export it, and normal worker
+        # startup imports this module without running scale_down.
         from vllm.distributed.utils import set_gloo_backend_timeout
 
         # Verify the redistributed model is runnable before reporting healthy.
@@ -258,9 +257,8 @@ class WorkerSentinel(GPUWorkerSentinel):
         dead_ep_ranks: set[int],
     ) -> None:
         """Redistribute one model and reload through its own checkpoint config."""
-        # Added after vLLM v0.33.0, so import it here: only the FT path reaches
-        # this method, and the release lane must be able to import this module
-        # (normal worker startup does) without the upstream helper.
+        # Imported lazily: the helper was added after vLLM v0.33.0, and normal
+        # worker startup imports this module without running this path.
         from vllm.v1.worker.sentinel.eplb_redistribute import (
             mark_dead_expert_slots_inplace,
             redistribute_expert_placement,
@@ -280,9 +278,8 @@ class WorkerSentinel(GPUWorkerSentinel):
             len(moved_experts),
         )
         _commit_eplb_maps(model_state, physical_to_logical.cpu())
-        # The model's expert map maps physical expert ids to local slots and no
-        # physical id changes here, so leave it as is; the logical-id map must
-        # not be written into it.
+        # The model's expert map is indexed by physical expert id and no id
+        # changes here; the logical-id map must not overwrite it.
         if moved_experts:
             reload_experts_from_disk(model, model_config, load_config, moved_experts)
         refresh_model_routing_tables(model_state)

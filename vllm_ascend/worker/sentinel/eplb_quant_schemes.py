@@ -106,9 +106,8 @@ def _apply_stack_transform_to_one_expert(
     return convert
 
 
-# The two MoE expert weight tensors every quant method reloads. Only these
-# are cast to FRACTAL_NZ; quant scales and scale biases are converted
-# separately and never NZ-cast.
+# The two MoE expert weight tensors every quant method reloads; only these are
+# cast to FRACTAL_NZ (scales and scale biases are not).
 _MOE_WEIGHT_PIPELINES: dict[str, _WeightBuilder] = {
     "w13_weight": _WeightBuilder(_gate_up("weight"), transpose_expert_weight_last_two_dims),
     "w2_weight": _WeightBuilder(_down_proj("weight", shard=True), transpose_expert_weight_last_two_dims),

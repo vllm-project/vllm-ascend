@@ -19,7 +19,7 @@ from vllm.distributed import get_ep_group
 from vllm.logger import logger
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 
-from vllm_ascend.worker.sentinel.eplb_quant_weight_builders import (
+from vllm_ascend.worker.sentinel.eplb_quant_schemes import (
     _MOE_WEIGHT_NAMES,
     _WANTED_SUFFIXES,
     _find_reload_plans,
@@ -132,7 +132,7 @@ def _reload_expert_stack(
     Their tensors are prepared on the CPU pool, then stacked, NZ-cast and
     written into the per-expert tensors.
     """
-    # CPU phase: convert pairs in parallel (read-only shared state).
+    # Convert the pairs in parallel on the CPU (read-only shared state).
     convert_expert = partial(
         _convert_expert_weights,
         routed_layers=routed_layers,
@@ -142,9 +142,8 @@ def _reload_expert_stack(
     with ThreadPoolExecutor(max_workers=min(len(layer_experts), _GATHER_MAX_WORKERS)) as pool:
         converted_experts = list(pool.map(convert_expert, layer_experts))
 
-    # Device phase: one H2D copy and one NZ cast per weight tensor;
-    # each tensor is converted to the dtype its destination holds (int8
-    # weights, int64 bit scales, fp32).
+    # Device phase: one H2D copy and one NZ cast per weight tensor, converted
+    # to the destination dtype (int8 weights, int64 bit scales, fp32).
     first_layer = routed_layers[layer_experts[0][0]]
     first_slot = local_slots[layer_experts[0]]
     device_tensors: dict[str, torch.Tensor] = {}

@@ -517,8 +517,7 @@ class NPUWorker(GPUWorker):
     def _apply_ft_comm_settings(self, parallel_config) -> None:
         """Apply the HCCL environment overrides fault tolerance requires."""
         if self.use_v2_model_runner:
-            # Model Runner V2 + fault tolerance task queue
-            # (TASK_QUEUE_ENABLE) hangs abnormally; force it off.
+            # Model Runner V2 hangs with the task queue under FT; force it off.
             os.environ["TASK_QUEUE_ENABLE"] = "0"
             logger.warning(
                 "Fault tolerance with Model Runner V2 does not support the "
@@ -526,18 +525,16 @@ class NPUWorker(GPUWorker):
             )
 
         if parallel_config.tensor_parallel_size > 1:
-            # TP>1 relies on collective HCCL comms; disable HCCL's async
-            # error handling so it cannot abort the process out-of-band
-            # during fault-tolerance recovery.
+            # TP>1 uses collective HCCL; disable async error handling so HCCL
+            # cannot abort the process during fault-tolerance recovery.
             os.environ["TORCH_HCCL_ASYNC_ERROR_HANDLING"] = "0"
 
         abort_timeout = get_ascend_config().ft_communication_abort_timeout
         if abort_timeout <= 0:
             return
-        # User-provided HCCL timeouts win; otherwise derive them
-        # from the config value. HCCL_EVENT_TIMEOUT must be
-        # greater than HCCL_EXEC_TIMEOUT, hence EXEC defaults to
-        # abort_timeout - 1.
+        # User HCCL timeouts win; otherwise derive them from
+        # ft_communication_abort_timeout. HCCL requires EXEC < EVENT,
+        # so EXEC defaults to abort_timeout - 1.
         os.environ.setdefault("HCCL_EVENT_TIMEOUT", str(abort_timeout))
         os.environ.setdefault("HCCL_EXEC_TIMEOUT", str(abort_timeout - 1))
         if int(os.environ["HCCL_EVENT_TIMEOUT"]) <= int(os.environ["HCCL_EXEC_TIMEOUT"]):

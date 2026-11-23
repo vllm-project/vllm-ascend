@@ -436,11 +436,9 @@ def _wait_for_ft_apply_outcome(server: RemoteOpenAIServer, request_id: str, dead
 def has_npu_ft_capability() -> bool:
     """Require the FT-capable vLLM lane and at least 4 visible NPUs for DP=4.
 
-    The vLLM v0.33.0 release lane predates the /v1 fault_tolerance API and
-    the scale-down helpers (``WorkerSentinel.scale_down``,
-    ``_eplb_model_state``, ``activate_cpu_group_timeouts``), and only
-    accepts ``retry`` on its unprefixed routes; FT is supported on the
-    vLLM main (>= v0.34) lane only.
+    The v0.33.0 release lane has no /v1 fault_tolerance API or scale-down
+    helpers and only accepts retry, so FT runs on the vLLM main (>= v0.34)
+    lane only.
     """
     if vllm_version_is("0.33.0"):
         return False
