@@ -16,13 +16,20 @@
 #
 # 基于空白麒麟 V10 SP3（glibc 2.28）自建 vLLM v0.23.0 + vllm-ascend 0.23.0 环境。
 #
-# 构建上下文要求：无（CANN 安装包在镜像内下载，无需额外目录）
+# 交付形态：完全离线镜像。构建期允许联网（麒麟 dnf 源 / PyPI / CANN 下载），
+# 运行期所需依赖全部固化进镜像，不依赖外网。
+#
+# 构建上下文要求：
+#   ./offline/motor/*.whl   MindIE-Motor 官方 wheel（PD 分离服务，必需）
 #
 # mooncake 与客户环境一致：不做 pip 安装，从源码编译 0.3.12.post1
+# memfabric / memcache 由 requirements.txt 固定版本（1.3.0）随 vllm-ascend 安装。
+# etcd 由官方 release 下载后内置，供 MindIE-Motor 做服务发现。
 #
 # 可选参数：
-#   --build-arg KYLIN_REPO_URL=<麒麟 dnf 源 .repo 地址>   基础镜像无源时必填
+#   --build-arg KYLIN_REPO_URL=<麒麟 dnf 源 .repo 地址>   基础镜像已内置源，缺省即用镜像内配置
 #   --build-arg CANN_BASE_URL=<内网 CANN 包地址>          外网不可达时改为内网镜像
+#   --build-arg ETCD_VERSION=v3.5.21                     内置 etcd 版本
 #   --build-arg MAX_JOBS=32
 #
 # 本仓库源码必须是 releases/v0.23.0 分支（main 为 vLLM 0.33 世代，无法在此环境运行）。
@@ -53,17 +60,19 @@ ARG CANN_OPS_PKG=Ascend-cann-A3-ops_9.1.0_linux-aarch64.run
 WORKDIR /workspace
 SHELL ["/bin/bash", "-c"]
 
-# 1) 系统依赖：麒麟 init 镜像无 repo 配置、无 gcc，必须先注入 dnf 源
+# 1) 系统依赖：基础镜像已内置 kylin_aarch64.repo（V10SP3-2403 base/updates），
+#    这里只校验 dnf 可用；KYLIN_REPO_URL 非空时用外部 .repo 覆盖。
 RUN set -e; \
-    if [ -n "${KYLIN_REPO_URL}" ]; then \
-        curl -fsSL "${KYLIN_REPO_URL}" -o /etc/yum.repos.d/kylin.repo; \
-    fi; \
     PM="$(command -v dnf || command -v yum || true)"; \
     if [ -z "$PM" ]; then \
         echo "ERROR: 基础镜像无 dnf/yum，需换带包管理器的麒麟基础镜像"; \
         exit 1; \
     fi; \
-    $PM install -y git vim wget curl make cmake patch gcc gcc-c++ \
+    if [ -n "${KYLIN_REPO_URL}" ]; then \
+        curl -fsSL "${KYLIN_REPO_URL}" -o /etc/yum.repos.d/kylin.repo; \
+    fi; \
+    $PM makecache || { echo "ERROR: dnf 无可用软件源，请配置 .repo 或传 KYLIN_REPO_URL"; exit 1; }; \
+    $PM install -y git vim wget curl make patch gcc gcc-c++ \
         openssl-devel bzip2-devel libffi-devel zlib-devel xz-devel \
         sqlite-devel readline-devel ncurses-devel \
         numactl numactl-devel libibverbs-devel hiredis-devel libcurl-devel \
@@ -97,8 +106,10 @@ RUN set -e; cd /tmp; \
     if [ -f "/tmp/${CANN_OPS_PKG}" ]; then /tmp/${CANN_OPS_PKG} --install; fi; \
     rm -f /tmp/*.run
 
-# 4) modelscope / ray（多机） / protobuf
-RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
+# 4) modelscope / ray（多机） / protobuf；cmake>=3.26 与 ninja 由 pip 提供
+#    （麒麟源里的 cmake 版本低于 vllm-ascend 要求，且镜像初始无 cmake）
+RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' \
+        'cmake>=3.26' ninja && \
     python3 -m pip cache purge
 
 # 5) 安装 vLLM v0.23.0（源码方式，TARGET_DEVICE=empty；0.23 无 rust 前端）
@@ -153,5 +164,33 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
 
 RUN echo 'export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD' >> ~/.bashrc && \
     echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib' >> ~/.bashrc
+
+# 10) 内置 etcd（MindIE-Motor 服务发现；离线运行不再依赖外部 etcd）
+ARG ETCD_VERSION=v3.5.21
+RUN set -e; \
+    case "$(uname -m)" in \
+        aarch64) ETCD_ARCH=arm64 ;; \
+        x86_64)  ETCD_ARCH=amd64 ;; \
+        *) echo "ERROR: 不支持的架构 $(uname -m)"; exit 1 ;; \
+    esac; \
+    ETCD_PKG="etcd-${ETCD_VERSION}-linux-${ETCD_ARCH}"; \
+    curl -fsSL "https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/${ETCD_PKG}.tar.gz" \
+        -o /tmp/etcd.tgz; \
+    tar -xzf /tmp/etcd.tgz -C /tmp; \
+    install -m 0755 "/tmp/${ETCD_PKG}/etcd" /usr/local/bin/; \
+    install -m 0755 "/tmp/${ETCD_PKG}/etcdctl" /usr/local/bin/; \
+    rm -rf /tmp/etcd.tgz "/tmp/${ETCD_PKG}"; \
+    etcd --version; etcdctl version
+
+# 11) MindIE-Motor（PD 分离服务）：官方 wheel 打入镜像，运行期离线可用
+COPY offline/motor/ /opt/offline/motor/
+RUN set -e; \
+    ls /opt/offline/motor/*.whl >/dev/null 2>&1 || { \
+        echo "ERROR: 缺少 MindIE-Motor wheel，请把官方 wheel 放到构建上下文 offline/motor/"; \
+        exit 1; \
+    }; \
+    python3 -m pip install /opt/offline/motor/*.whl && \
+    python3 -m pip cache purge && \
+    rm -rf /opt/offline/motor
 
 CMD ["/bin/bash"]
