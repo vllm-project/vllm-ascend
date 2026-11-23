@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 
 from tests.ut.kv_offload.mooncake_v2 import test_push_sending
+from tests.ut.kv_offload.mooncake_v2.helpers import vllm_dcp_ranks_by_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, push_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import MooncakeConnectorMetadata
 
@@ -18,23 +19,12 @@ from .test_push_dcp import configure, metadata
 worker = test_push_sending.worker
 
 
-def dcp_ranks_by_global_rank(tp_size: int, pcp_size: int, dcp_size: int) -> dict[int, int]:
-    # Match vLLM's group construction: span PCP first, then sort each group's members.
-    members = [pcp * tp_size + tp for tp in range(tp_size) for pcp in range(pcp_size)]
-    ranks = {}
-    for start in range(0, len(members), dcp_size):
-        group = sorted(members[start : start + dcp_size])
-        for dcp_rank, global_rank in enumerate(group):
-            ranks[global_rank] = dcp_rank
-    return ranks
-
-
 @pytest.fixture
 def producers(worker, monkeypatch):
     created = []
 
     def make(dcp, tp, remote, interleave, scale, cache_kind, pcp=1):
-        dcp_ranks = dcp_ranks_by_global_rank(tp, pcp, dcp)
+        dcp_ranks = vllm_dcp_ranks_by_worker(tp, pcp, dcp)
         for physical_rank in range(tp * pcp):
             pcp_rank, tp_rank = divmod(physical_rank, tp)
             config = SimpleNamespace(
@@ -49,7 +39,7 @@ def producers(worker, monkeypatch):
             obj.register_kv_caches({})
             obj.dcp_size, obj.tp_size, obj.tp_rank = dcp, tp, tp_rank
             obj.pcp_size, obj.pcp_rank = pcp, pcp_rank
-            obj.dcp_rank = dcp_ranks[physical_rank]
+            obj.dcp_rank = dcp_ranks[tp_rank * pcp + pcp_rank]
             obj.transfer_metadata = replace(
                 worker.transfer_metadata,
                 cp_kv_cache_interleave_size=interleave,
@@ -140,7 +130,7 @@ def test_bilateral_chunks_copy_each_token_once(
     if cache_kind in ("d_replicated", "both_replicated"):
         pp.indexer_replication_sizes[:] = [d_dcp]
     senders = producers(p_dcp, p_tp, remote, p_interleave, p_scale, cache_kind, pcp=p_pcp)
-    destination_dcp_ranks = dcp_ranks_by_global_rank(d_tp, d_pcp, d_effective)
+    destination_dcp_ranks = vllm_dcp_ranks_by_worker(d_tp, d_pcp, d_effective)
     source_blocks = tuple(1 + 2 * i for i in range(16))
     target_blocks = tuple(10 + 3 * i for i in range(16))
     sources = [(ctypes.c_ubyte * 1024)(*([254] * 1024)) for _ in senders]
@@ -192,9 +182,9 @@ def test_bilateral_chunks_copy_each_token_once(
         ready = end // 4 * 4 if end < 29 else 32
         for rank, target in enumerate(targets):
             expected = [254] * 1024
-            owned = [
-                token for token in range(32) if (token // d_interleave) % d_effective == destination_dcp_ranks[rank]
-            ]
+            pcp_rank, tp_rank = divmod(rank, d_tp)
+            dcp_rank = destination_dcp_ranks[tp_rank * d_pcp + pcp_rank]
+            owned = [token for token in range(32) if (token // d_interleave) % d_effective == dcp_rank]
             for position, token in enumerate(owned):
                 if prefix // 4 * 4 <= token < ready:
                     page, offset = divmod(position, 4 * d_scale)
