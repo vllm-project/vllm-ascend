@@ -1,5 +1,5 @@
 pr: 22539
 entries:
   - category: performance
-    text: A3 W4A8/W8A8 All2AllV MoE dispatch now fuses token routing with INT8 activation quantization for batches of 1024 rows or more, removing the separate permutation-then-quantization pass. Native-operator probes on 1024-8192 rows are 1.314x to 2.456x faster than the previous path. Smaller batches, FP8/MXFP, LoRA, and other hardware are unchanged.
+    text: A3 W4A8/W8A8 All2AllV MoE dispatch now fuses token routing with INT8 activation quantization for batches of 1024 rows or more, removing the separate permutation-then-quantization pass. Native-operator probes on 1024-8192 rows are 1.314x to 2.456x faster than the previous path; the official end-to-end serving A/B did not show a consistent gain. Smaller batches, FP8/MXFP, LoRA, and other hardware are unchanged.
     hardware: [A3]
