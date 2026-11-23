@@ -98,7 +98,7 @@
 /vllm_ascend/distributed/kv_transfer/sparse_kv_offload @weiguihua2 @zhangsicheng5 @zhenwenqi2024 @pisceskkk @weijinqian0
 
 # lora
-/vllm_ascend/lora @paulyu12 @voidvelocity
+/vllm_ascend/lora @paulyu12 @voidvelocity @wangx700
 
 # ops
 /vllm_ascend/ops @zzzzwwjj
