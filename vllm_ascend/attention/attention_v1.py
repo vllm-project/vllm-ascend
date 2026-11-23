@@ -335,6 +335,11 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
 
         block_table = common_attn_metadata.block_table_tensor
+        # The pre-padding view (the runner-persistent buffer slice) must be
+        # captured BEFORE the synthetic zero-row padding below rebinds
+        # block_table to a torch.cat copy: the captured HND gather sources
+        # this view, and the copy's storage is never refreshed at replay.
+        block_table_pre_padding = block_table
 
         # TODO: This will be moved to propose and deleted after fia ops fixed.
         seq_lens = _select_seq_lens(
@@ -447,7 +452,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # replay re-executes only captured device work, so a captured
         # gather that consumed the copy would read capture-time physical
         # ids forever. See AscendMetadata.block_tables_pre_padding.
-        attn_metadata.block_tables_pre_padding = block_table if block_table is not None else None
+        attn_metadata.block_tables_pre_padding = block_table_pre_padding
         if pcp_shard_slot_mapping is not None:
             self._finalize_pcp_metadata(attn_metadata, pcp_shard_slot_mapping)
         return attn_metadata

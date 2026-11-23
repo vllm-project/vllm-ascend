@@ -472,6 +472,74 @@ class TestCapturedGatherUsesPersistentTable:
         assert torch.equal(gathered_now[padding_slot], block_zero)
 
 
+class TestBuilderRetainsPrePaddingTable:
+    """The REAL AscendAttentionMetadataBuilder.build() must retain the
+    pre-padding view, not the torch.cat copy.
+
+    The captured HND gather sources AscendMetadata.block_tables_pre_padding;
+    if the builder stored the padded copy there (the cat rebinds the local
+    block_table before the attribute is set), the captured gather would
+    still consume the stale snapshot this attribute exists to avoid.
+    """
+
+    def _build_with_padding(self):
+        from vllm_ascend.attention.attention_v1 import (
+            AscendAttentionMetadataBuilder,
+            AscendMetadata,
+        )
+
+        builder = AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)
+        builder.metadata_cls = AscendMetadata
+        builder.use_pcp = False
+        builder.decode_threshold = 1
+        builder.kv_cache_spec = None
+        builder.speculative_config = None
+        builder.vllm_config = SimpleNamespace(use_v2_model_runner=True)
+        builder.model_config = SimpleNamespace(runner_type="generate")
+        builder.attn_mask_builder = SimpleNamespace(get_attention_mask=lambda causal, mc: None)
+
+        persistent = PHYSICAL_TABLE.clone()
+        num_reqs = NUM_ROWS
+        seq_lens = torch.tensor([3, 2], dtype=torch.int32)
+        common = SimpleNamespace(
+            num_reqs=num_reqs,
+            num_actual_tokens=2,
+            query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+            query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+            slot_mapping=torch.tensor([0, 1], dtype=torch.int32),
+            attn_state=AscendAttentionState.DecodeOnly,
+            causal=True,
+            block_table_tensor=persistent,
+            seq_lens=seq_lens,
+            is_prefilling=None,
+            # max_query_len > 1 and num_input_tokens beyond the last
+            # cumulative query length: build() appends the synthetic
+            # padding request, growing the FIA batch to num_reqs + 1 and
+            # firing the block-table torch.cat padding.
+            max_query_len=2,
+            num_input_tokens=4,
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(attention_v1, "uses_pcp_sharded_layout", lambda *a, **k: False)
+            mp.setattr(builder, "_split_decodes_and_prefills", lambda common: (num_reqs, 0, 2, 0))
+            mp.setattr(attention_v1, "_select_seq_lens", lambda *a, **k: seq_lens)
+            metadata = builder.build(common_prefix_len=0, common_attn_metadata=common)
+        return metadata, persistent
+
+    def test_build_pads_block_table_and_retains_pre_padding_view(self):
+        metadata, persistent = self._build_with_padding()
+        # The padded table grew by the synthetic request row (a cat copy)...
+        assert metadata.block_tables.shape[0] == NUM_ROWS + 1
+        assert metadata.block_tables.data_ptr() != persistent.data_ptr()
+        # ...while the retained pre-padding view is the runner-persistent
+        # buffer slice itself (rows == real requests, shared storage).
+        assert metadata.block_tables_pre_padding is not None
+        assert metadata.block_tables_pre_padding.shape[0] == NUM_ROWS
+        assert metadata.block_tables_pre_padding.data_ptr() == persistent.data_ptr(), (
+            "block_tables_pre_padding retained the torch.cat copy instead of the runner-persistent pre-padding view"
+        )
+
+
 class TestGatheredLayoutHelper:
     @pytest.mark.parametrize(
         ("layout", "expected"),
