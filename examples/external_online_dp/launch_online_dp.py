@@ -6,6 +6,9 @@ import os
 import signal
 import subprocess
 import sys
+import time
+
+POLL_INTERVAL = 0.1
 
 
 def parse_args():
@@ -62,9 +65,18 @@ def main():
             # Start all local ranks before waiting; each rank owns a process group.
             processes.append(subprocess.Popen(command, start_new_session=True))
 
-        # Wait for every rank and propagate failure to the launcher exit status.
-        exit_codes = [process.wait() for process in processes]
-        return 1 if any(code != 0 for code in exit_codes) else 0
+        # Check every rank so a running rank cannot hide another rank's failure.
+        while True:
+            running = False
+            for i, process in enumerate(processes):
+                code = process.poll()
+                if code is None:
+                    running = True
+                elif code != 0:
+                    raise RuntimeError(f"DP rank {args.dp_rank_start + i} exited with code {code}")
+            if not running:
+                return 0
+            time.sleep(POLL_INTERVAL)
     except BaseException:
         # Notify every recorded rank, including workers whose shell has exited.
         for process in processes:

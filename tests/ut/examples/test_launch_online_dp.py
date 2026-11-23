@@ -42,8 +42,8 @@ class LauncherTests(unittest.TestCase):
             str(self.template),
         ]
 
-    def capture(self, *extra, statuses=(0, 0)):
-        workers = [mock.Mock(wait=mock.Mock(return_value=status)) for status in statuses]
+    def capture(self, *extra):
+        workers = [mock.Mock(poll=mock.Mock(return_value=0)) for _ in range(2)]
         with (
             mock.patch.object(launcher.sys, "argv", ["launch_online_dp.py", *self.base, *extra]),
             mock.patch.object(launcher.subprocess, "Popen", side_effect=workers) as popen,
@@ -114,11 +114,56 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(args.template, str(self.template))
         self.assertEqual(args.dp_size_local, 1)
 
-    def test_waits_for_all_ranks_and_reports_failure(self):
-        result, _, workers = self.capture(statuses=(7, 0))
-        self.assertEqual(result, 1)
+    def test_success_requires_all_ranks_to_exit(self):
+        workers = [mock.Mock(), mock.Mock()]
+        workers[0].poll.side_effect = [None, 0, 0]
+        workers[1].poll.side_effect = [None, None, 0]
+        with (
+            mock.patch.object(launcher.sys, "argv", ["launch_online_dp.py", *self.base]),
+            mock.patch.object(launcher.subprocess, "Popen", side_effect=workers),
+            mock.patch.object(launcher.time, "sleep") as sleep,
+            mock.patch.object(launcher.os, "killpg", create=True) as killpg,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            result = launcher.main()
+        self.assertEqual(result, 0)
+        self.assertEqual(sleep.call_args_list, [mock.call(launcher.POLL_INTERVAL)] * 2)
+        killpg.assert_not_called()
         for worker in workers:
-            worker.wait.assert_called_once()
+            self.assertEqual(worker.poll.call_count, 3)
+
+    def test_second_rank_failure_stops_running_first_rank(self):
+        for code in (7, -signal.SIGTERM):
+            with self.subTest(code=code):
+                workers = [mock.Mock(pid=101), mock.Mock(pid=102)]
+                workers[0].poll.return_value = None
+                workers[1].poll.return_value = code
+
+                events = mock.Mock()
+                events.attach_mock(workers[1].poll, "poll_second")
+                events.attach_mock(workers[0].wait, "wait_first")
+                with (
+                    mock.patch.object(launcher.sys, "argv", ["launch_online_dp.py", *self.base]),
+                    mock.patch.object(launcher.subprocess, "Popen", side_effect=workers),
+                    mock.patch.object(launcher.time, "sleep") as sleep,
+                    mock.patch.object(launcher.os, "killpg", create=True) as killpg,
+                    contextlib.redirect_stdout(io.StringIO()),
+                    self.assertRaisesRegex(RuntimeError, f"DP rank 3 exited with code {code}"),
+                ):
+                    events.attach_mock(killpg, "signal_group")
+                    launcher.main()
+                # Detect and signal the failure before waiting on the live rank.
+                events.assert_has_calls(
+                    [
+                        mock.call.poll_second(),
+                        mock.call.signal_group(101, signal.SIGTERM),
+                        mock.call.signal_group(102, signal.SIGTERM),
+                        mock.call.wait_first(),
+                    ]
+                )
+                sleep.assert_not_called()
+                for worker in workers:
+                    worker.wait.assert_called_once()
 
     def test_spawn_failure_cleans_started_groups(self):
         worker = mock.Mock(pid=101)
@@ -135,11 +180,11 @@ class LauncherTests(unittest.TestCase):
         killpg.assert_called_once_with(101, signal.SIGTERM)
         worker.wait.assert_called_once()
 
-    def test_interrupt_during_wait_cleans_all_groups(self):
+    def test_interrupt_during_monitoring_cleans_all_groups(self):
         for error in (KeyboardInterrupt(), SystemExit(1)):
             with self.subTest(error=type(error).__name__):
                 workers = [mock.Mock(pid=101), mock.Mock(pid=102)]
-                workers[0].wait.side_effect = [error, 0]
+                workers[0].poll.side_effect = error
                 with (
                     mock.patch.object(launcher.sys, "argv", ["launch_online_dp.py", *self.base]),
                     mock.patch.object(launcher.subprocess, "Popen", side_effect=workers),
@@ -154,13 +199,13 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(
                     killpg.call_args_list, [mock.call(101, signal.SIGTERM), mock.call(102, signal.SIGTERM)]
                 )
-                self.assertEqual(workers[0].wait.call_count, 2)
+                workers[0].wait.assert_called_once()
                 workers[1].wait.assert_called_once()
 
     def test_exited_shell_group_is_still_signalled(self):
         workers = [mock.Mock(pid=101, returncode=0), mock.Mock(pid=102)]
-        workers[0].wait.return_value = 0
-        workers[1].wait.side_effect = [KeyboardInterrupt(), 0]
+        workers[0].poll.return_value = 0
+        workers[1].poll.side_effect = KeyboardInterrupt()
         with (
             mock.patch.object(launcher.sys, "argv", ["launch_online_dp.py", *self.base]),
             mock.patch.object(launcher.subprocess, "Popen", side_effect=workers),
@@ -171,7 +216,7 @@ class LauncherTests(unittest.TestCase):
             launcher.main()
         self.assertEqual(killpg.call_args_list, [mock.call(101, signal.SIGTERM), mock.call(102, signal.SIGTERM)])
         for worker in workers:
-            self.assertEqual(worker.wait.call_count, 2)
+            worker.wait.assert_called_once()
 
     @unittest.skipUnless(os.name == "posix", "Requires POSIX process groups")
     def test_real_keyboard_interrupt_notifies_shell_descendants(self):

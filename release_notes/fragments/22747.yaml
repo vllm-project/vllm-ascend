@@ -10,3 +10,5 @@ entries:
       Launcher exceptions, including Ctrl+C, now trigger SIGTERM notifications
       to recorded rank process groups and a wait for their shells; cleanup
       relies on workers responding to the signal and has no forced timeout.
+      A nonzero exit from any local rank now triggers this cleanup without
+      waiting for earlier ranks to finish, and the launcher exits with failure.

@@ -43,14 +43,17 @@ shown below. DCP reuses existing workers and is configured in the template rathe
 than multiplied into the device count.
 
 Template paths and paths used inside the template are relative to the current
-working directory. Templates should run vLLM in the foreground. The launcher waits
-for every shell process and returns a nonzero exit status if any rank fails; it
-does not automatically stop the remaining ranks. Bash `pipefail` also preserves
-failures when a template pipes vLLM output through `tee`.
+working directory. Templates should run vLLM in the foreground. The launcher
+checks every local rank's exit status every 0.1 seconds. A nonzero exit from any
+rank triggers cleanup of the recorded rank process groups and a nonzero launcher
+exit; a running rank cannot hide another rank's failure. The launcher succeeds
+only after all ranks exit successfully. Bash `pipefail` also preserves failures
+when a template pipes vLLM output through `tee`.
 
-On Linux, each rank runs in its own process group. If starting or waiting for
-ranks raises an exception, including `KeyboardInterrupt` from `Ctrl+C`, the
-launcher sends `SIGTERM` to every recorded group, waits for its shell, then
+On Linux, each rank runs in its own process group. If starting or monitoring
+ranks raises an exception, including a detected rank failure or
+`KeyboardInterrupt` from `Ctrl+C`, the launcher sends `SIGTERM` to every recorded
+group, waits for its shell, then
 re-raises the exception. Templates must keep their workers in the same process
 group; do not daemonize them or use `setsid` inside the template.
 
