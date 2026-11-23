@@ -1096,7 +1096,7 @@ class BaseKVPoolWorker(ABC):
                 # rather than inventing per-block outcomes.
                 evidence.note_blocks_failed(sorted(evidence.expected_blocks))
                 return True
-            for logical, code in zip(logical_ids, ret):
+            for logical, code in zip(logical_ids or [], ret):
                 evidence.note_block_outcome(logical, code == 0)
             return False
         if (self.backend_name == "memcache" or self.enable_partial_hash_hits) and (

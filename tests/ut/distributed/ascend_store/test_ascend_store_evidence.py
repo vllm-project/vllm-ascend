@@ -506,7 +506,7 @@ class _WorkerHarnessMixin:
 
         harness = TestKVPoolWorkerRegisterAndTransfer("test_start_load_kv_sync")
         harness.setUp()
-        self.addCleanup(harness.tearDown)
+        self.addCleanup(harness.tearDown)  # type: ignore[attr-defined]
         harness._patch_all()
         cfg = harness._make_config(
             kv_role="kv_consumer",
@@ -743,7 +743,7 @@ class TestSyncLoadEvidence(_WorkerHarnessMixin, unittest.TestCase):
 
         harness = TestKVPoolWorkerRegisterAndTransfer("test_start_load_kv_sync")
         harness.setUp()
-        self.addCleanup(harness.tearDown)
+        self.addCleanup(harness.tearDown)  # type: ignore[attr-defined]
         harness._patch_all()
         cfg = harness._make_config(kv_role="kv_consumer")
         cfg.kv_transfer_config.kv_load_failure_policy = "repair"
@@ -786,7 +786,7 @@ class TestAsyncLoadEvidence(_WorkerHarnessMixin, unittest.TestCase):
         )
         return thread, buf
 
-    def _req(self, req_id="r1", gen=1):
+    def _req(self, req_id="r1", gen=1, n=None):  # type: ignore[override, arg-type]
         load_spec = LoadSpec(
             vllm_cached_tokens=0,
             kvpool_cached_tokens=TOKEN_LEN,
@@ -983,7 +983,7 @@ class TestFlatChannelCompatibility(_WorkerHarnessMixin, unittest.TestCase):
 
         harness = TestKVPoolWorkerRegisterAndTransfer("test_start_load_kv_sync")
         harness.setUp()
-        self.addCleanup(harness.tearDown)
+        self.addCleanup(harness.tearDown)  # type: ignore[attr-defined]
         harness._patch_all()
         cfg = harness._make_config(
             kv_role="kv_consumer",
@@ -996,7 +996,7 @@ class TestFlatChannelCompatibility(_WorkerHarnessMixin, unittest.TestCase):
         worker.m_store = MagicMock()
         return worker
 
-    def _req(self, n=N_BLOCKS):
+    def _req(self, req_id="r1", gen=1, n=N_BLOCKS):  # type: ignore[override]
         load_spec = LoadSpec(
             vllm_cached_tokens=0,
             kvpool_cached_tokens=n * BLOCK,

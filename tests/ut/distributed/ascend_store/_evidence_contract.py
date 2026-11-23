@@ -80,5 +80,5 @@ def install() -> None:
     if isinstance(existing, type) and hasattr(existing, "certifies_content"):
         # Real (or already-installed) classes: keep them.
         return
-    outputs.KVLoadAttestation = KVLoadAttestation
-    outputs.KVLoadFailureReport = KVLoadFailureReport
+    outputs.KVLoadAttestation = KVLoadAttestation  # type: ignore[attr-defined]
+    outputs.KVLoadFailureReport = KVLoadFailureReport  # type: ignore[attr-defined]
