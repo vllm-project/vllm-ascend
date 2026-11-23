@@ -16,7 +16,7 @@
 
 from copy import copy
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
 import torch
 from vllm.config import VllmConfig
@@ -57,9 +57,20 @@ from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
 from .lightning_indexer import QSAIndexerMetadataProtocol, qsa_select_paged_tokens_lightning_v2
 
 if TYPE_CHECKING:
+    import vllm.models.qwen4_exp.amd.qsa_indexer as upstream_indexer
+    import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer
+    from vllm.models.qwen4_exp.common.qsa_indexer import (
+        QSAIndexerBackend,
+        QSAIndexerMetadataBuilder,
+        QSARawKeyCache,
+    )
+
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
-if vllm_version_is("0.33.0"):
+    class _PCPQSAIndexerMetadata(QSAIndexerMetadataProtocol, Protocol):
+        write_metadata: QSAIndexerMetadataProtocol
+
+elif vllm_version_is("0.33.0"):
     import vllm.models.qwen4_exp.amd.indexer_qsa as upstream_indexer  # type: ignore[import-not-found]
     import vllm.models.qwen4_exp.common.qsa_cache as qsa_indexer  # type: ignore[import-not-found]
 
@@ -199,6 +210,10 @@ def apply_qsa_rope(
 
 class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     """QSA indexer using NPU-compatible cache, RoPE and top-k operators."""
+
+    if TYPE_CHECKING:
+        raw_key_cache: QSARawKeyCache
+        compressed_key_cache: qsa_indexer.QSACompressedKeyCache
 
     def configure_pcp_cache_backends(self, vllm_config: VllmConfig) -> None:
         # Only the cache owners need new backends. Keep upstream's indexer
@@ -440,6 +455,9 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     ) -> None:
         pcp_context = getattr(raw_metadata, "pcp_context", None)
         if pcp_context is not None:
+            if TYPE_CHECKING:
+                raw_metadata = cast(_PCPQSAIndexerMetadata, raw_metadata)
+                compressed_metadata = cast(_PCPQSAIndexerMetadata, compressed_metadata)
             raw_metadata = raw_metadata.write_metadata
             compressed_metadata = compressed_metadata.write_metadata
             num_write_tokens = raw_metadata.num_actual_tokens

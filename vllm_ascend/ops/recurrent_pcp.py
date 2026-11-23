@@ -3,14 +3,23 @@
 """Graph-stable PCP token permutations for recurrent layers."""
 
 from copy import copy
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
 
+if TYPE_CHECKING:
+    from vllm.v1.attention.backend import AttentionMetadataBuilder as _RecurrentMetadataBuilder
+else:
+    # The concrete metadata builder comes next in the mixin's runtime MRO.
+    _RecurrentMetadataBuilder = object
 
-class PCPRecurrentMetadataBuilderMixin:
+
+class PCPRecurrentMetadataBuilderMixin(_RecurrentMetadataBuilder):
+    decode_cudagraph_max_bs: int
+
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         if pcp_size > 1:

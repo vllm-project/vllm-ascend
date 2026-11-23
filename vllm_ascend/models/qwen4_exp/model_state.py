@@ -44,6 +44,8 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
     """
 
     _skip_spec_cpu_length_sync: bool
+    ngram_context: torch.Tensor
+    ple_query_start_loc: torch.Tensor
 
     def __init__(
         self,
