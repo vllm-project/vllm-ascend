@@ -1888,11 +1888,14 @@ def test_speculative_decode_keeps_draft_tokens_on_pcp_ranks(pcp_rank):
     assert manager._hidden_restore_idx[:4].tolist() == [0, 1, 2, 3]
 
 
+@pytest.mark.parametrize("kpool", [False, True])
 @pytest.mark.parametrize("num_prefill_tokens", [1, 3, 7])
-def test_mla_short_prefill_uses_decode_request_ownership(num_prefill_tokens):
+def test_short_prefill_uses_decode_request_ownership(num_prefill_tokens, kpool):
     manager = AscendPCPManager(8, 0, torch.device("cpu"), shard_decode_requests=True)
     manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
     manager.vllm_config.parallel_config.prefill_context_parallel_size = 8
+    if kpool:
+        manager.vllm_config.model_config.hf_text_config.index_kpool = 4
     counts = np.array([4, 4, 4, num_prefill_tokens], dtype=np.int32)
     prefilling = np.array([False, False, False, True])
     draft_tokens = np.array([3, 3, 3, num_prefill_tokens - 1], dtype=np.int32)
@@ -1921,7 +1924,7 @@ def test_mla_short_prefill_uses_decode_request_ownership(num_prefill_tokens):
     assert manager.get_num_tokens_for_dispatch(counts, prefilling) == max(4, num_prefill_tokens)
 
 
-@pytest.mark.parametrize("next_step", ["dummy", "decode", "fresh", "dcp", "kpool"])
+@pytest.mark.parametrize("next_step", ["dummy", "decode", "fresh", "dcp"])
 def test_pcp_short_prefill_dispatch_mask_does_not_leak_between_steps(next_step):
     manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=True)
     manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
@@ -1952,8 +1955,6 @@ def test_pcp_short_prefill_dispatch_mask_does_not_leak_between_steps(next_step):
         batch_state = batch_state._replace(num_computed_prefill_tokens_np=np.array([0, 128], dtype=np.int32))
     elif next_step == "dcp":
         manager.vllm_config.parallel_config.decode_context_parallel_size = 2
-    else:
-        manager.vllm_config.model_config.hf_text_config.index_kpool = 4
 
     result = manager.prepare_pcp_batch_req_state(batch_state)
     assert result is batch_state
