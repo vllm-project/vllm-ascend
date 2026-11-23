@@ -64,6 +64,13 @@ vllm serve <supported-model> \
 
 Unlike DCP, PCP adds extra ranks: `world_size_with_pcp = prefill_context_parallel_size * original_world_size`.
 
+For supported models, decode requests are sharded when
+`--prefill-context-parallel-size` is greater than 1 and
+`--decode-context-parallel-size` is 1. Each decode request in a batch is
+assigned to one PCP rank in round-robin order, including during speculative
+target verification. When `--decode-context-parallel-size` is greater than 1,
+decode requests remain replicated across PCP ranks.
+
 When PCP size is greater than 1, PCP stores embedding and LM Head weights as TP×PCP resident shards by default for every supported attention backend. Set `enable_pcp_embedding_lmhead_weight_sharding` to `false` to disable this behavior.
 
 With PCP enabled, O-projection weight sharding is on by default for SFA-PCP O-projection and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set `enable_pcp_o_proj_weight_sharding` to `false` to disable it. Other attention backends do not use this option. O-projection sharding is incompatible with fine-grained TP for the same modules.
