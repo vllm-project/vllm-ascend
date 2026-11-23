@@ -153,7 +153,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # Fault tolerance: the dead-rank mask is passed to the MC2 operators
         # as an explicit elastic_info tensor on every call; dead ranks are
         # excluded purely via elastic_info.
-        self._ft_enabled = vllm_config.parallel_config.enable_fault_tolerance
+        self.fault_tolerance_enabled = vllm_config.parallel_config.enable_fault_tolerance
 
     def refresh_hccl_group(self) -> None:
         """Refresh MC2 communicator metadata after HCCL groups are recreated."""
@@ -194,7 +194,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "global_bs": self.global_bs,
             "expert_token_nums_type": expert_token_nums_type,
         }
-        if self._ft_enabled:
+        if self.fault_tolerance_enabled:
             kwargs_mc2["elastic_info"] = get_ep_all2all_manager().get_elastic_info()
         if self.global_bs == 0:
             kwargs_mc2["x_active_mask"] = token_dispatch_input.routing.mc2_mask
@@ -323,7 +323,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "moe_expert_num": self.moe_expert_num,
             "global_bs": self.global_bs,
         }
-        if self._ft_enabled:
+        if self.fault_tolerance_enabled:
             # The combine's alltoallv spans the same EP group and must
             # exclude dead ranks with the identical elastic_info tensor.
             kwargs_mc2["elastic_info"] = get_ep_all2all_manager().get_elastic_info()
