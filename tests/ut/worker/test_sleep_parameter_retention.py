@@ -58,6 +58,19 @@ def device_parameters(model, monkeypatch):
     return dict(mocks)
 
 
+@pytest.mark.parametrize("backend", ["cumem", "third_party"])
+def test_sleep_rejects_non_camem_backend(worker, backend):
+    worker.model_config.sleep_mode_backend = backend
+    backend_obj = MagicMock()
+    worker._sleep_mode_backend = backend_obj
+
+    with pytest.raises(ValueError, match="Only the in-tree camem backend"):
+        worker.sleep(level=2)
+
+    worker.synchronize_device.assert_not_called()
+    backend_obj.suspend.assert_not_called()
+
+
 def test_save_matches_globs_and_deduplicates_parameters(worker, monkeypatch):
     model = worker.model_runner.model
     parameters = device_parameters(model, monkeypatch)
