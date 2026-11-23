@@ -357,7 +357,7 @@ def test_select_moe_comm_method_a2_uses_mc2_within_capacity(monkeypatch, num_tok
         (4097, 128, MoECommType.ALLGATHER),
     ],
 )
-def test_select_moe_comm_method_a2_enable_fused_mc2_mode_1(
+def test_select_moe_comm_method_a2_enable_fused_mc2(
     monkeypatch,
     num_tokens,
     ep_world_size,
@@ -376,7 +376,7 @@ def test_select_moe_comm_method_a2_enable_fused_mc2_mode_1(
 
 
 @pytest.mark.parametrize("cann_megamoe_available", [True, False])
-def test_select_moe_comm_method_a2_cann_megamoe_selector(monkeypatch, cann_megamoe_available):
+def test_select_moe_comm_method_a2_cann_megamoe_selection(monkeypatch, cann_megamoe_available):
     # EP=48 is above the plain dispatch_ffn_combine bound (32), so only the
     # MegaMoe capability branch can select FUSED_MC2 here.
     _patch_select_moe_comm_method_deps(
