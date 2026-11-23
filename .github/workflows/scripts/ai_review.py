@@ -262,9 +262,28 @@ class Orchestrator:
                 "then set state=waiting-human.\n"
             )
 
+        environment = (
+            "## Working environment\n\n"
+            "- Your working directory is a full checkout of the vllm-ascend"
+            " repository (BASE branch).\n"
+            "- The PR's own code is checked out read-only under `head/`."
+            " Finding line numbers refer to files under `head/` — when you"
+            " need context around a changed line, read the file at"
+            " `head/<path>` from there, never from the base checkout.\n"
+            "- Project documentation lives under `head/docs/source/`; the"
+            " contributor guidelines are `head/AGENTS.md` (background only —"
+            " the review rules are the checklists below).\n"
+            "- The knowledge base map paths are relative to the working"
+            " directory (the trusted BASE checkout).\n"
+            "- You have read access to all of it. Do not modify, build or"
+            " execute anything; this is a review-only environment.\n"
+        )
+
         prompt = (
             instructions
-            + "\n\n## Knowledge base map\n\n"
+            + "\n\n"
+            + environment
+            + "\n## Knowledge base map\n\n"
             + kb_map
             + "\n"
             + "\n\n## Domains this PR touches\n\n"

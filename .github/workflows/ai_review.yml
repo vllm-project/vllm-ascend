@@ -27,6 +27,16 @@ jobs:
         with:
           persist-credentials: false
 
+      # The PR's own code, checked out read-only into ./head/ so the agent
+      # reviews the actual proposed changes: instructions, knowledge base
+      # and allowlist still come from the BASE checkout above and cannot be
+      # tampered with; the PR checkout is never executed and never pushed.
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number || github.event.issue.number }}/head
+          path: head
+          persist-credentials: false
+
       - name: Persist comment body to file
         # The comment body travels through a file, never through argv or a
         # shell variable interpolated into a command line.
