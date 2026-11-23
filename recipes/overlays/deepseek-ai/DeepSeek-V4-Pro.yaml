@@ -8,6 +8,12 @@ variants:
     vram_minimum_gb: 790
     supported_hardware:
       - ascend_910c
+    supported_features:
+      # This variant pins the checkpoint's speculative config statically
+      # (see extra_args), so the spec_decoding toggle is not offered for it —
+      # enabling the toggle would duplicate --speculative-config.
+      - tool_calling
+      - reasoning
     tp: 16
     extra_args:
       - '--quantization'
@@ -55,6 +61,10 @@ variants:
           pip: false
           docker: true
     description: "ModelSlim W4A8+MTP (weights on ModelScope: Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp) — 2x Atlas 800 A3 multi-node DP2xTP16 + MTP (first-party verified 2026-10-28, 390 tok/s; also fits 2x A3 128G / 4x A2 per the upstream tutorial). Node orchestration args (--data-parallel-address / --data-parallel-rpc-port / --data-parallel-start-rank) are per-node; see the companion Ascend recipe."
+hardware_notes:
+  ascend_910c:
+    title: "Verified topology is 2-node DP2×TP16"
+    body: "Verified on hardware 2026-10-28 on 2× Atlas 800 A3 with the v0.23.0rc1-a3 image: DP2×TP16 + MTP with a FULL_DECODE_ONLY compilation config (390 tok/s). The single-node TEP/TP renderings, the strategy-emitted FULL_AND_PIECEWISE compilation config, and the multi-node TEP/DEP renderings are builder defaults not yet run on NPU — treat them as untested here; the verified topology is orchestrated with per-node args (see the companion Ascend recipe) rather than a builder strategy output."
 meta:
   hardware:
     # Performance first-party verified 2026-10-28 (multi-node DP2/TP16 + MTP,
