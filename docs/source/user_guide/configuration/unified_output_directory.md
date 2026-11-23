@@ -8,16 +8,16 @@ This section explains how to configure these paths in an existing deployment, us
 
 Set these variables in the existing launcher before it starts the relevant process. For example, add `export XDG_CACHE_HOME=/root/ascend/log/cache` before `vllm serve`. For a deployment that already defines the service environment, set the same name and value there.
 
-| Output | Environment variable | Set it to |
-| --- | --- | --- |
-| vLLM disk cache | `XDG_CACHE_HOME` | `/root/ascend/log/cache` |
-| vLLM configuration root | `XDG_CONFIG_HOME` | `/root/ascend/log/config` |
-| [Ascend component working directory](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/maintenref/envvar/envref_07_0007.html), including logs | `ASCEND_WORK_PATH` | `/root/ascend/log/cann/work` |
-| [Ascend component cache directory](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/maintenref/envvar/envref_07_0006.html) | `ASCEND_CACHE_PATH` | `/root/ascend/log/cann/cache` |
-| `torch_npu` [Inductor compilation cache](https://docs.pytorch.org/tutorials/recipes/torch_compile_caching_configuration_tutorial.html) | `TORCHINDUCTOR_CACHE_DIR` | `/root/ascend/log/cann/torchinductor` |
-| [Triton Ascend base directory](https://github.com/triton-lang/triton-ascend/blob/main/docs/en/environment_variable_and_compiler_options_reference.md) | `TRITON_HOME` | `/root/ascend/log/triton` |
-| Triton Ascend compilation cache override | `TRITON_CACHE_DIR` | `/root/ascend/log/cache/triton` |
-| vLLM FX graph dump directory override | `VLLM_DEBUG_DUMP_PATH` | `/root/ascend/log/debug/fx` |
+| Component | Output | Environment variable | Example path |
+| --- | --- | --- | --- |
+| **vLLM** | Disk cache | `XDG_CACHE_HOME` | `/root/ascend/log/cache` |
+| | Configuration root | `XDG_CONFIG_HOME` | `/root/ascend/log/config` |
+| | FX graph dump directory override | `VLLM_DEBUG_DUMP_PATH` | `/root/ascend/log/debug/fx` |
+| **Ascend / CANN** | [Working directory](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/maintenref/envvar/envref_07_0007.html), including logs | `ASCEND_WORK_PATH` | `/root/ascend/log/cann/work` |
+| | [Cache directory](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/maintenref/envvar/envref_07_0006.html) | `ASCEND_CACHE_PATH` | `/root/ascend/log/cann/cache` |
+| **PyTorch / torch_npu** | [Inductor compilation cache](https://docs.pytorch.org/tutorials/recipes/torch_compile_caching_configuration_tutorial.html) | `TORCHINDUCTOR_CACHE_DIR` | `/root/ascend/log/cann/torchinductor` |
+| **Triton Ascend** | [Base directory](https://github.com/triton-lang/triton-ascend/blob/main/docs/en/environment_variable_and_compiler_options_reference.md) | `TRITON_HOME` | `/root/ascend/log/triton` |
+| | Compilation cache override | `TRITON_CACHE_DIR` | `/root/ascend/log/cache/triton` |
 
 With the XDG settings above, vLLM uses `/root/ascend/log/cache/vllm` and `/root/ascend/log/config/vllm`. If your deployment already sets `VLLM_CACHE_ROOT` or `VLLM_CONFIG_ROOT`, update those values to the corresponding paths. Explicit feature cache paths such as `VLLM_ASSETS_CACHE` also need to point under the common root if you use them. See [vLLM environment variables](https://docs.vllm.ai/en/latest/configuration/env_vars/).
 
