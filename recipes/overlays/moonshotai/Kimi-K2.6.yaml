@@ -8,6 +8,14 @@ variants:
     vram_minimum_gb: 600
     supported_hardware:
       - ascend_910c
+    supported_features:
+      # The checkpoint's speculative config is pinned statically (DFlash, see
+      # extra_args); the upstream eagle3 spec_decoding toggle would override
+      # it on this variant, so the toggle is not offered here.
+      - tool_calling
+      - reasoning
+      - text_only
+      - encoder_parallel
     tp: 4
     extra_args:
       - '--quantization'
@@ -52,6 +60,32 @@ variants:
           pip: false
           docker: true
     description: "ModelSlim W4A8 (weights on ModelScope: Eco-Tech/Kimi-K2.6-W4A8) — 1 Atlas 800 A3 (64G x 16), TP4xDP4 + DFlash; first-party verified 2026-10-28 on a nightly build (release-tag re-verify pending). System-level tuning (cpufreq governor, sysctl) from the companion Ascend recipe is host-side and skipped in unprivileged environments."
+strategy_hardware:
+  single_node_tep:
+    # TEP pins TP to the full node (16 NPUs on one Atlas 800 A3); combined
+    # with this variant's static --data-parallel-size 4 the commands would
+    # request 64 NPUs from a 16-NPU node, so the strategy is not offered
+    # here. The verified single-node deployment is TP4×DP4 under
+    # single_node_tp.
+    ascend_910c: unsupported
+  multi_node_tp:
+    # The multi-node TP/TP+PP/TEP emitters size TP across the whole cluster
+    # (per node for TP+PP) and leave no room for this variant's static
+    # --data-parallel-size 4, so these strategies are not offered on
+    # Ascend 910C.
+    ascend_910c: unsupported
+  multi_node_tp_pp:
+    ascend_910c: unsupported
+  multi_node_tep:
+    ascend_910c: unsupported
+  pd_cluster:
+    # The default PD pools render one full node per role (TP16) on this
+    # 16-NPU hardware; combined with the variant's static
+    # --data-parallel-size 4 this exceeds a single node, and this recipe's
+    # PD preset targets NVIDIA multi-node systems, not Ascend. Not offered
+    # on ascend_910c.
+    ascend_910c: unsupported
+
 meta:
   hardware:
     # First-party verification 2026-10-28 plus official runner-CI end-to-end
