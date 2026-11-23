@@ -435,19 +435,8 @@ class NPUWorker(GPUWorker):
         return apply_process_metrics_level(level)
 
     def sleep(self, level: int = 1) -> None:
-        backend_name = getattr(self.model_config, "sleep_mode_backend", "cumem")
-        if backend_name == "cumem":
-            raise ValueError(
-                "Sleep mode requires the Ascend 'camem' backend; the default "
-                "'cumem' name was not normalized. NPUPlatform.check_and_update_config "
-                "must run before sleep."
-            )
-        if hasattr(GPUWorker, "_discardable_parameters") and backend_name != "camem":
-            raise ValueError(
-                "Third-party sleep-mode backends are not supported on this vLLM "
-                "version until discardable support is added; use the in-tree "
-                "camem backend."
-            )
+        if self.model_config.sleep_mode_backend != "camem":
+            raise ValueError("Only the in-tree camem backend is supported in this version.")
 
         # Resolve the backend before cleanup or KV unregistration so a bad
         # backend configuration leaves the worker state intact.
