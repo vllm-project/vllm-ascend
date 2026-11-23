@@ -319,7 +319,10 @@ class AisbenchRunner:
                 match = re.search(r"Current exp folder: (.*)", line)
                 if match is None:
                     raise RuntimeError(f"Failed to parse experiment folder from aisbench output: {line!r}")
-                self.exp_folder = match.group(1)
+                # rstrip(): the captured group may carry a trailing '\r' because
+                # _check_runtime_stdout decodes raw bytes without newline
+                # normalization.
+                self.exp_folder = match.group(1).rstrip()
                 print(f"Current exp folder: {self.exp_folder}")
                 return
             self._check_runtime_error(line)
@@ -351,7 +354,14 @@ class AisbenchRunner:
         match = re.search(r"Performance Result files located in (.*)", self.result_line)
         if match is None:
             raise RuntimeError(f"Failed to parse performance result path from aisbench output: {self.result_line!r}")
-        result_dir = match.group(1)[:-1]
+        # rstrip() instead of the former [:-1]: the slice dropped a valid path
+        # character whenever the line had no trailing '\r'.
+        result_dir = match.group(1).rstrip()
+        if not os.path.isdir(result_dir):
+            raise RuntimeError(
+                f"Performance result directory not found: {result_dir!r} "
+                f"(parsed from aisbench output: {self.result_line!r})"
+            )
         dataset_type = self.dataset_conf.split("/")[0]
         result_csv_file = os.path.join(result_dir, f"{dataset_type}.csv")
         result_json_file = os.path.join(result_dir, f"{dataset_type}.json")
@@ -365,7 +375,11 @@ class AisbenchRunner:
         match = re.search(r"write csv to (.*)", self.result_line)
         if match is None:
             raise RuntimeError(f"Failed to parse accuracy csv path from aisbench output: {self.result_line!r}")
-        acc_file = match.group(1)
+        acc_file = match.group(1).rstrip()
+        if not os.path.isfile(acc_file):
+            raise RuntimeError(
+                f"Accuracy csv file not found: {acc_file!r} (parsed from aisbench output: {self.result_line!r})"
+            )
         df = pd.read_csv(acc_file)
         self.result = float(df.iloc[0, -1])
 
