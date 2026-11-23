@@ -301,21 +301,67 @@ def list_tracked_files(repo_root: str) -> list[str]:
     return out.stdout.splitlines()
 
 
-def is_contentless_file(path: str) -> bool:
+EMPTY_BLOB_SHA = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+
+
+def get_empty_blob_paths(repo_root: str) -> set[str] | None:
+    """Set of zero-byte tracked paths, read from the git index.
+
+    Every blob has a content hash and the empty blob's hash is a fixed
+    constant, so "is this file zero-byte" is answerable from the index
+    alone, without reading blob content. This matters in CI: the gate job
+    checks out only ``.github/`` (sparse), and actions/checkout turns that
+    into a ``blob:none`` partial clone, so blob content for the rest of the
+    tree is simply not there (an earlier attempt read sizes via
+    ``ls-tree --long``, which made git lazily fetch every missing blob and
+    hung the job for hours). The index, by contrast, always lists every
+    tracked path with its SHA - offline and instantly.
+
+    Returns ``None`` when git is unavailable (fixture-only callers);
+    the caller then falls back to working-tree inspection.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "-s"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=repo_root,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    empty: set[str] = set()
+    for line in out.stdout.splitlines():
+        meta, path = line.split("\t", 1)
+        if meta.split()[1] == EMPTY_BLOB_SHA:
+            empty.add(path)
+    return empty
+
+
+def is_contentless_file(path: str, empty_blob_paths: set[str] | None = None) -> bool:
     """True for zero-byte files (empty ``__init__.py``, ``.gitkeep``, ...).
 
     Contentless files carry no behavior to own, so they are exempt from the
-    ownership requirement. Files missing from the working tree are NOT
-    exempt: CI always checks out full trees, so a missing file only happens
-    in partial local checkouts and must still be reported as unowned.
+    ownership requirement. With ``empty_blob_paths`` (from
+    ``get_empty_blob_paths``) the answer comes from the git index, so it
+    works regardless of working-tree sparsity. Otherwise the working tree
+    is consulted; files missing there are NOT exempt: a missing file only
+    happens in partial local checkouts and must still be reported as
+    unowned.
     """
+    if empty_blob_paths is not None:
+        return path in empty_blob_paths
     try:
         return os.path.getsize(path) == 0 and not os.path.islink(path)
     except OSError:
         return False
 
 
-def check_coverage(rules: list[Rule], tracked: list[str]) -> tuple[list[str], list[str]]:
+def check_coverage(
+    rules: list[Rule],
+    tracked: list[str],
+    empty_blob_paths: set[str] | None = None,
+) -> tuple[list[str], list[str]]:
     """CODEOWNERS health: ownership of tracked files + stale entries.
 
     Returns ``(errors, warnings)``:
@@ -333,7 +379,7 @@ def check_coverage(rules: list[Rule], tracked: list[str]) -> tuple[list[str], li
     warnings: list[str] = []
 
     for path in tracked:
-        if path == CODEOWNERS_PATH or is_contentless_file(path):
+        if path == CODEOWNERS_PATH or is_contentless_file(path, empty_blob_paths):
             continue
         owners, skipped = resolve_owners(rules, path)
         if skipped or owners:
@@ -423,7 +469,7 @@ def main() -> int:
             tracked = load_files_from_file(args.files_json)
         else:
             tracked = list_tracked_files(args.repo_root)
-        errors, warnings = check_coverage(rules, tracked)
+        errors, warnings = check_coverage(rules, tracked, get_empty_blob_paths(args.repo_root))
         cov_out = os.environ.get("COVERAGE_ERRORS_OUT")
         if cov_out is not None:
             with open(cov_out, "w") as f:

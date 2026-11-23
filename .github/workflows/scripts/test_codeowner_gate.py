@@ -6,6 +6,8 @@
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 
 import pytest
@@ -384,6 +386,72 @@ class TestContentlessExemption:
         rules = gate.parse_codeowners("# TODO(owner): /pkg\n# /pkg\n")
         errors, warnings = gate.check_coverage(rules, ["ghost.py"])
         assert errors == [] and warnings == ["file has no CODEOWNERS owner: ghost.py"]
+
+
+class TestEmptyBlobPathExemption:
+    """Index-based exemption works without blob content (partial clone).
+
+    The CI gate checks out only .github/ (sparse), which actions/checkout
+    turns into a blob:none partial clone: blob content outside .github/ is
+    absent, so working-tree getsize cannot answer. The git index, however,
+    always lists every tracked path with its SHA - and the empty blob's
+    SHA is a fixed constant.
+    """
+
+    @staticmethod
+    def _init_repo(tmp_path):
+        def git(*args):
+            subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+
+        git("init", "-q")
+        git("config", "user.email", "t@example.com")
+        git("config", "user.name", "t")
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / "__init__.py").write_bytes(b"")
+        (tmp_path / "pkg" / "real.py").write_text("x = 1\n")
+        git("add", "-A")
+        git("commit", "-qm", "init")
+
+    def test_sparse_working_tree_exempts_empty_file(self, tmp_path):
+        """Files absent from the working tree are still exempted via the index."""
+        self._init_repo(tmp_path)
+        # Simulate the CI sparse checkout: delete the checked-out copies,
+        # the git index keeps every path with its blob SHA.
+        shutil.rmtree(tmp_path / "pkg")
+        rules = gate.parse_codeowners("# TODO(owner): /pkg\n# /pkg\n")
+        empty = gate.get_empty_blob_paths(str(tmp_path))
+        assert gate.is_contentless_file("pkg/__init__.py", empty) is True
+        assert gate.is_contentless_file("pkg/real.py", empty) is False
+        errors, warnings = gate.check_coverage(rules, ["pkg/real.py"], empty)
+        assert errors == [] and warnings == ["file has no CODEOWNERS owner: pkg/real.py"]
+
+    def test_partial_clone_reaches_deep_nesting(self, tmp_path):
+        """Any depth of nesting is covered - no glob enumeration needed."""
+        self._init_repo(tmp_path)
+        deep = tmp_path / "pkg" / "a" / "b" / "c"
+        deep.mkdir(parents=True)
+        (deep / "__init__.py").write_bytes(b"")
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True)
+        empty = gate.get_empty_blob_paths(str(tmp_path))
+        assert "pkg/a/b/c/__init__.py" in empty
+
+    def test_non_git_dir_falls_back_to_working_tree(self, tmp_path, monkeypatch):
+        """When git is unavailable, get_empty_blob_paths returns None and the
+        working-tree fallback decides (missing file = not exempt)."""
+        self._init_repo(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        empty = gate.get_empty_blob_paths(str(tmp_path))
+        assert empty is not None and "pkg/__init__.py" in empty
+
+        # git failing (e.g. no repo at all) -> None -> working-tree fallback
+        def boom(*args, **kwargs):
+            raise subprocess.CalledProcessError(128, "git")
+
+        monkeypatch.setattr(gate.subprocess, "run", boom)
+        assert gate.get_empty_blob_paths(str(tmp_path)) is None
+        rules = gate.parse_codeowners("# TODO(owner): /pkg\n# /pkg\n")
+        errors, warnings = gate.check_coverage(rules, ["pkg/__init__.py"], None)
+        assert errors == [] and warnings == []
 
 
 class TestNoRulePollution:
