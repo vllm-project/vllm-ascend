@@ -1181,17 +1181,9 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _can_use_quant_flashmla(self) -> bool:
         config = self.vllm_config
-        speculative_config = config.speculative_config
-        is_dspark_draft = (
-            (self.is_draft_model or backends.model_tag == "dspark_head")
-            and speculative_config is not None
-            and speculative_config.method == "dspark"
-        )
-        if config.model_config.hf_config.model_type not in ("kimi_k3", "kimi_linear") and not is_dspark_draft:
+        if not self._is_k3_dspark_draft:
             return False
         if not getattr(config, "use_v2_model_runner", False):
-            return False
-        if speculative_config is not None and speculative_config.method != "dspark":
             return False
         hardware = get_current_hardware_profile()
         if not hardware.supports(HardwareCapability.MLA_FLASH) or not self.support_fp8_attention:
@@ -2123,7 +2115,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         return current_rope, current_nope
 
-    def _exec_quant_flashmla_kv_writer(self, kv_no_split, cos, sin, kv_cache, slots, *, return_quantized_current=False):
+    def _exec_quant_flashmla_kv_writer(
+        self, kv_no_split, cos, sin, kv_cache, slots, *, return_bf16_kv=False, return_quantized_current=False
+    ):
         """Quantize into dense staging pages, then scatter into fused FP8 pages.
 
         ``npu_kv_rmsnorm_rope_cache`` may materialize its non-contiguous cache
@@ -2139,7 +2133,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         if num_tokens > indices.numel():
             raise RuntimeError("QuantFlashMLA KV input exceeds the profiled writer capacity")
         if num_tokens == 0:
-            return rope.flatten(0, 1)[:0], nope.flatten(0, 1)[:0]
+            current_rope, current_nope = rope.flatten(0, 1)[:0], nope.flatten(0, 1)[:0]
+            if return_bf16_kv:
+                return current_rope.to(kv_no_split.dtype), current_nope.to(kv_no_split.dtype)
+            return current_rope, current_nope
         self._validate_prolog_v3_cache(kv_cache)
         scales = self._quant_flashmla_writer_scales
         if scales is None:
@@ -2159,7 +2156,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             c_kv_scale=latent_scale,
             epsilon=self.kv_a_layernorm.variance_epsilon,
             cache_mode="PA",
-            is_output_kv=True,
+            is_output_kv=return_bf16_kv,
         )
         # is_output_kv returns unquantized BF16 tensors for prefill. Only
         # the dense staging caches contain the scaled FP8 values to persist.
@@ -2819,6 +2816,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         slots: torch.Tensor,
         *,
         attn_metadata: AscendMLAMetadata | None = None,
+        return_bf16_kv: bool = True,
     ):
         pcp_local_range = None
         if self.use_pcp:
@@ -2859,7 +2857,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         if not self.use_mla_rope:
             k_pe, k_nope = self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
         elif getattr(self, "use_quant_flashmla", False) and any(not cache.is_contiguous() for cache in kv_cache):
-            k_pe, k_nope = self._exec_quant_flashmla_kv_writer(kv_no_split, cos, sin, kv_cache, slots)
+            k_pe, k_nope = self._exec_quant_flashmla_kv_writer(
+                kv_no_split, cos, sin, kv_cache, slots, return_bf16_kv=return_bf16_kv
+            )
         elif self._uses_strided_kv_adapter() and any(not cache.is_contiguous() for cache in kv_cache):
             k_pe, k_nope = self._exec_strided_kv_writer(kv_no_split, cos, sin, kv_cache, slots)
         else:

@@ -115,7 +115,7 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
     assert not AscendMLAImpl._can_use_flashmla(impl)
 
 
-def test_quant_flashmla_selection_is_k3_c8_mrv2_only(monkeypatch):
+def test_quant_flashmla_selection_is_k3_dspark_c8_mrv2_only(monkeypatch):
     config = SimpleNamespace(
         use_v2_model_runner=True,
         speculative_config=None,
@@ -124,7 +124,7 @@ def test_quant_flashmla_selection_is_k3_c8_mrv2_only(monkeypatch):
     )
     impl = SimpleNamespace(
         vllm_config=config,
-        is_draft_model=False,
+        _is_k3_dspark_draft=False,
         support_fp8_attention=True,
         num_heads=8,
         num_kv_heads=1,
@@ -139,11 +139,16 @@ def test_quant_flashmla_selection_is_k3_c8_mrv2_only(monkeypatch):
     monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
     monkeypatch.setattr(mla_v1, "get_quant_flashmla_ops", lambda: (object(), object()))
 
-    assert AscendMLAImpl._can_use_quant_flashmla(impl)
-
-    config.model_config.hf_config.model_type = "deepseek_v3"
     assert not AscendMLAImpl._can_use_quant_flashmla(impl)
     config.model_config.hf_config.model_type = "kimi_k3"
+    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
+
+    config.speculative_config = SimpleNamespace(method="dspark")
+    impl._is_k3_dspark_draft = True
+    assert AscendMLAImpl._can_use_quant_flashmla(impl)
+    config.use_v2_model_runner = False
+    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
+    config.use_v2_model_runner = True
     impl.fa_quant_layer = False
     assert not AscendMLAImpl._can_use_quant_flashmla(impl)
     impl.fa_quant_layer = True
@@ -166,7 +171,7 @@ def test_quant_flashmla_selection_supports_k31_dspark_draft_c8(monkeypatch):
     )
     impl = SimpleNamespace(
         vllm_config=config,
-        is_draft_model=False,
+        _is_k3_dspark_draft=True,
         support_fp8_attention=True,
         num_heads=96,
         num_kv_heads=1,
@@ -180,18 +185,11 @@ def test_quant_flashmla_selection_supports_k31_dspark_draft_c8(monkeypatch):
     monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
     monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
     monkeypatch.setattr(mla_v1, "get_quant_flashmla_ops", lambda: (object(), object()))
-    monkeypatch.setattr(mla_v1.backends, "model_tag", "dspark_head")
-
     assert AscendMLAImpl._can_use_quant_flashmla(impl)
 
     # K3.1 target SFA remains on its sparse attention path. Only a DSpark
     # draft is allowed to use the dense 576-wide QuantFlashMLA cache.
-    monkeypatch.setattr(mla_v1.backends, "model_tag", "backbone")
-    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
-    monkeypatch.setattr(mla_v1.backends, "model_tag", "dspark_head")
-    config.speculative_config.method = "eagle"
-    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
-    config.speculative_config = None
+    impl._is_k3_dspark_draft = False
     assert not AscendMLAImpl._can_use_quant_flashmla(impl)
 
 

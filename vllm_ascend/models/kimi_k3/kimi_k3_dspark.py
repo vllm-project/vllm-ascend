@@ -277,6 +277,7 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
                 sin,
                 normalized_cache,
                 slots,
+                return_bf16_kv=False,
             )
 
     def forward(

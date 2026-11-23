@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -77,6 +77,8 @@ def test_quant_staging_survives_manager_replanning_and_reload():
     buffers = impl._flashmla_writer_buffers
     scales = impl._quant_flashmla_writer_scales
     addresses = [x.data_ptr() for x in (*buffers, *scales)]
+    torch.testing.assert_close(scales[0], torch.ones_like(scales[0]))
+    torch.testing.assert_close(scales[1], torch.full_like(scales[1], 4.0))
     impl.vllm_config.cache_config.block_size = MANAGER_BLOCK_SIZES[-1]
     impl.fak_descale_reciprocal.fill_(8.0)
     AscendMLAImpl._prepare_flashmla_writer_buffers(impl)
@@ -86,8 +88,21 @@ def test_quant_staging_survives_manager_replanning_and_reload():
     torch.testing.assert_close(scales[1], torch.full_like(scales[1], 8.0))
 
 
-@pytest.mark.parametrize("edge", ("empty", "one", "before_page", "page", "after_page", "capacity"))
-def test_quant_writer_scatter_independent_page_geometry(monkeypatch, edge):
+@pytest.mark.parametrize(
+    "edge,output_kv",
+    [
+        ("empty", "bf16"),
+        ("one", "bf16"),
+        ("before_page", "bf16"),
+        ("page", "bf16"),
+        ("after_page", "bf16"),
+        ("capacity", "bf16"),
+        ("after_page", "fp8"),
+        ("one", "decode"),
+        ("one", "context"),
+    ],
+)
+def test_quant_writer_scatter_independent_page_geometry(monkeypatch, edge, output_kv):
     kernel_page = min(AscendMLABackend.get_supported_kernel_block_sizes())
     capacity = kernel_page * 2 + 1
     tokens = {
@@ -99,7 +114,12 @@ def test_quant_writer_scatter_independent_page_geometry(monkeypatch, edge):
         "capacity": capacity,
     }[edge]
     impl = _impl(MANAGER_BLOCK_SIZES[0], capacity)
+    impl.use_pcp = False
+    impl.use_mla_rope = True
+    impl._uses_strided_kv_adapter = lambda: False
+    impl._exec_quant_flashmla_kv_writer = MethodType(AscendMLAImpl._exec_quant_flashmla_kv_writer, impl)
     AscendMLAImpl._prepare_flashmla_writer_buffers(impl)
+    rope_scale, latent_scale = impl._quant_flashmla_writer_scales
     # Persist into differently sized fused pages with reversed token slots.
     persistent_page = kernel_page * 2
     pages = mla_v1.cdiv(capacity, persistent_page)
@@ -114,15 +134,19 @@ def test_quant_writer_scatter_independent_page_geometry(monkeypatch, edge):
     )
 
     def writer(*args, **kwargs):
+        assert kwargs["k_rope_scale"] is rope_scale
+        assert kwargs["c_kv_scale"] is latent_scale
+        assert kwargs["is_output_kv"] is (output_kv == "bf16")
         rope, nope = args[5], args[6]
         assert rope.shape[1] == nope.shape[1] == kernel_page
         assert rope.shape[0] == mla_v1.cdiv(tokens, kernel_page)
         torch.testing.assert_close(args[4], torch.arange(tokens))
         nope.flatten(0, 1)[:tokens].copy_(expected_nope)
         rope.flatten(0, 1)[:tokens].copy_(expected_rope)
-        return rope, nope, *current
+        return rope, nope, *(current if output_kv == "bf16" else (None, None))
 
     def scatter(**kwargs):
+        assert kwargs["key"].dtype == kwargs["value"].dtype == torch.float8_e4m3fn
         assert kwargs["slot_mapping"] is slots
         assert kwargs["key_cache"] is cache[0] and kwargs["value_cache"] is cache[1]
         for i, slot in enumerate(slots.tolist()):
@@ -133,22 +157,38 @@ def test_quant_writer_scatter_independent_page_geometry(monkeypatch, edge):
     scatter_mock = MagicMock(side_effect=scatter)
     monkeypatch.setattr(mla_v1.torch_npu, "npu_kv_rmsnorm_rope_cache", writer_mock)
     monkeypatch.setattr(mla_v1.DeviceOperator, "reshape_and_cache", scatter_mock)
-    returned = AscendMLAImpl._exec_quant_flashmla_kv_writer(
-        impl,
+    inputs = (
         torch.zeros(tokens, mla_v1.FLASHMLA_QK_DIM, dtype=torch.bfloat16),
         torch.ones(tokens, impl.qk_rope_head_dim),
         torch.zeros(tokens, impl.qk_rope_head_dim),
         cache,
         slots,
     )
+    if output_kv in ("bf16", "context"):
+        returned = AscendMLAImpl.exec_kv_prefill(impl, *inputs, return_bf16_kv=output_kv == "bf16")
+    else:
+        cached_rope, cached_nope, *returned = AscendMLAImpl.exec_kv_decode(
+            impl, *inputs, return_current_kv=output_kv == "fp8"
+        )
+        assert cached_rope is cache[1] and cached_nope is cache[0]
     if not tokens:
         writer_mock.assert_not_called()
         scatter_mock.assert_not_called()
         assert returned[0].shape[0] == returned[1].shape[0] == 0
+        assert returned[0].dtype == returned[1].dtype == torch.bfloat16
         return
     writer_mock.assert_called_once()
     scatter_mock.assert_called_once()
-    assert returned[0] is current[0] and returned[1] is current[1]
+    if output_kv == "bf16":
+        assert returned[0] is current[0] and returned[1] is current[1]
+    elif output_kv == "fp8":
+        assert returned[0].dtype == returned[1].dtype == torch.float8_e4m3fn
+        torch.testing.assert_close(returned[0].float(), expected_rope)
+        torch.testing.assert_close(returned[1].float(), expected_nope)
+    elif output_kv == "context":
+        assert returned == (None, None)
+    else:
+        assert not returned
     flat = fused.flatten(0, 1).float()
     torch.testing.assert_close(flat[slots, :, : impl.kv_lora_rank], expected_nope)
     torch.testing.assert_close(flat[slots, :, impl.kv_lora_rank :], expected_rope)

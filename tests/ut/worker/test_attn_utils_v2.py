@@ -1285,13 +1285,25 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
     assert spec.non_causal_multi_token_decode is non_causal
 
 
-@pytest.mark.parametrize("quantized", [False, True])
-def test_k31_dspark_mla_cache_spec_uses_layer_dtype(monkeypatch, quantized):
+@pytest.mark.parametrize(
+    "is_draft,method,model_type,quantized,expected_dtype",
+    [
+        (True, "dspark", "k3_dspark", False, torch.bfloat16),
+        (True, "dspark", "k3_dspark", True, torch.float8_e4m3fn),
+        (False, "dspark", "k3_dspark", False, torch.float8_e4m3fn),
+        (True, "eagle3", "k3_dspark", False, torch.float8_e4m3fn),
+        (True, "dspark", "other_draft", False, torch.float8_e4m3fn),
+    ],
+)
+def test_k31_dspark_mla_cache_spec_uses_layer_dtype(
+    monkeypatch, is_draft, method, model_type, quantized, expected_dtype
+):
     source_spec = MLAAttentionSpec(
         block_size=1536,
         num_kv_heads=1,
         head_size=576,
         dtype=torch.bfloat16 if quantized else torch.float8_e4m3fn,
+        cache_dtype_str=None if quantized else "fp8",
         kv_quant_mode=KVQuantMode.NONE if quantized else KVQuantMode.FP8_PER_TENSOR,
         non_causal_multi_token_decode=True,
     )
@@ -1311,13 +1323,13 @@ def test_k31_dspark_mla_cache_spec_uses_layer_dtype(monkeypatch, quantized):
     layer.qk_rope_head_dim = 64
     layer.model_version = None
     layer.indexes_kv_by_block_stride = False
-    layer.is_draft_layer = True
+    layer.is_draft_layer = is_draft
     layer.kv_sharing_target_layer_name = None
     monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source_spec)
     vllm_config = SimpleNamespace(
         speculative_config=SimpleNamespace(
-            method="dspark",
-            draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="k3_dspark")),
+            method=method,
+            draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=model_type)),
         ),
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
@@ -1348,12 +1360,16 @@ def test_k31_dspark_mla_cache_spec_uses_layer_dtype(monkeypatch, quantized):
     spec = attn_utils.get_kv_cache_spec(vllm_config)["model.layers.93.self_attn.attn"]
 
     assert isinstance(spec, AscendMLAAttentionSpec)
-    assert spec.is_draft
+    assert spec.is_draft is is_draft
     assert spec.num_heads == 1
     assert spec.head_size == 576
-    assert spec.dtype == (torch.float8_e4m3fn if quantized else torch.bfloat16)
-    if not quantized:
+    assert spec.dtype == expected_dtype
+    if quantized or expected_dtype == torch.bfloat16:
+        assert spec.cache_dtype_str is None
         assert spec.kv_quant_mode == KVQuantMode.NONE
+    else:
+        assert spec.cache_dtype_str == "fp8"
+        assert spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
     assert not spec.cache_sparse_sfa_c8
     assert not spec.store_on_host
     assert spec.page_size_bytes == 1536 * 576 * torch.empty((), dtype=spec.dtype).element_size()

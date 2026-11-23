@@ -1,0 +1,18 @@
+pr: 22115
+entries:
+  - category: feature
+    text: >-
+      Added QuantFlashMLA decode for compatible Kimi DSpark C8 drafts on
+      Ascend A5 with Model Runner V2 and supported DCP configurations.
+    model: kimi-dspark
+    hardware: [A5]
+  - category: bugfix
+    text: >-
+      Fixed C8 draft weight loading, query quantization, and first-request KV
+      cache initialization with the default cache block size.
+  - category: bugfix
+    text: >-
+      Fixed floating-point DSpark KV initialization when the target uses FP8,
+      and fixed C8 graph initialization at larger batch sizes.
+    model: kimi-dspark
+    hardware: [A5]

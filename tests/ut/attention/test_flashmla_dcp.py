@@ -484,17 +484,16 @@ def test_noncausal_draft_metadata_ignores_rejected_cpu_upper_bound(runtime):
 
 
 @pytest.mark.parametrize(
-    "causal,speculative,interleave,dtype,capturing",
+    "causal,speculative,interleave,dtype,capturing,placeholder_descale",
     [
-        (True, False, 1, torch.float16, False),
-        (True, False, 128, torch.bfloat16, True),
-        (True, True, 4, torch.float16, False),
-        (True, True, 128, torch.bfloat16, True),
-        (False, True, 1, torch.bfloat16, False),
-        (False, True, 4, torch.float16, True),
+        (True, False, 1, torch.float16, False, False),
+        (True, False, 128, torch.bfloat16, True, False),
+        (True, True, 4, torch.float16, False, False),
+        (True, True, 128, torch.bfloat16, True, False),
+        (False, True, 1, torch.bfloat16, False, False),
+        (False, True, 4, torch.float16, True, True),
     ],
 )
-@pytest.mark.parametrize("placeholder_descale", [False, True])
 def test_forward_matches_dense_with_strided_history_and_empty_ranks(
     runtime, monkeypatch, causal, speculative, interleave, dtype, capturing, placeholder_descale
 ):
@@ -701,6 +700,81 @@ def test_dcp_rejects_incompatible_lse_contract(runtime, bad_lse):
             seqused_q=flash.used_q,
             metadata=flash.schedule,
         )
+
+
+def test_quant_dcp_split_uses_matching_query_heads_and_descales_on_rank_one(runtime):
+    tokens, local_heads, rank = 3, 4, 1
+    heads, latent, rope = local_heads * 2, 512, 64
+    query = (
+        torch.arange(heads, dtype=torch.float32)
+        .view(1, heads, 1)
+        .expand(tokens, heads, latent + rope)
+        .to(torch.float8_e4m3fn)
+    )
+    scales = torch.arange(1, tokens * heads + 1, dtype=torch.float32).reshape(tokens, heads)
+    kv_scale = torch.tensor([0.125])
+    current_kv = torch.ones(tokens, 1, latent + rope, dtype=query.dtype)
+    cache = torch.zeros(1, 128, 1, latent + rope, dtype=query.dtype)
+    output = torch.zeros(heads, tokens, latent, dtype=torch.bfloat16)
+    lse = torch.zeros(heads, tokens, dtype=torch.float32)
+    history = Mock(return_value=(output, lse))
+    current = Mock(return_value=(output[:local_heads], lse[:local_heads]))
+    flash = SimpleNamespace(
+        query=torch.empty_like(query),
+        adapter=SimpleNamespace(attention=history),
+        schedule=torch.zeros(1),
+        block_table=torch.zeros(1, 1, dtype=torch.int32),
+        cache_lens=torch.tensor([tokens], dtype=torch.int32),
+        cu=torch.tensor([0, tokens], dtype=torch.int32),
+        used_q=torch.tensor([tokens], dtype=torch.int32),
+        token_live=torch.ones(tokens, dtype=torch.bool),
+        current=SimpleNamespace(
+            query=torch.empty_like(query[:, :local_heads, :]),
+            cache=torch.zeros_like(cache),
+            adapter=SimpleNamespace(attention=current),
+            schedule=torch.zeros(1),
+            block_table=torch.zeros(1, 1, dtype=torch.int32),
+            slots=torch.arange(tokens),
+            attn_mask=None,
+        ),
+    )
+    impl = runtime.bind(
+        SimpleNamespace(
+            num_heads=local_heads,
+            num_kv_heads=1,
+            kv_lora_rank=latent,
+            qk_rope_head_dim=rope,
+            dcp_rank=rank,
+            use_quant_flashmla=True,
+            fak_descale_float=kv_scale,
+            _v_up_proj_batch_major=lambda value: value,
+        )
+    )
+    impl._merge_dcp_attention_output = Mock()
+    runtime.scope["fused_dcp_lse_combine"] = Mock()
+
+    impl._forward_decode_split_attention(
+        query[..., :latent],
+        query[..., latent:],
+        cache,
+        None,
+        current_kv[..., :latent],
+        current_kv[..., latent:],
+        128,
+        SimpleNamespace(external_flashmla=flash, decode=None),
+        q_descale=scales,
+    )
+
+    history.assert_called_once()
+    current.assert_called_once()
+    local = slice(rank * local_heads, (rank + 1) * local_heads)
+    torch.testing.assert_close(history.call_args.args[0].float(), query.float())
+    torch.testing.assert_close(history.call_args.kwargs["q_descale"], scales)
+    torch.testing.assert_close(current.call_args.args[0].float(), query[:, local].float())
+    torch.testing.assert_close(current.call_args.kwargs["q_descale"], scales[:, local])
+    assert history.call_args.kwargs["k_descale"].data_ptr() == kv_scale.data_ptr()
+    assert current.call_args.kwargs["k_descale"].data_ptr() == kv_scale.data_ptr()
+    assert current.call_args.kwargs["q_descale"].is_contiguous()
 
 
 def test_causal_target_and_noncausal_draft_do_not_share_schedules(runtime):

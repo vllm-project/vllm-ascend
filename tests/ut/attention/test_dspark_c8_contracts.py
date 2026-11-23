@@ -19,24 +19,25 @@ from vllm_ascend.quantization import utils as quant_utils
 from vllm_ascend.quantization.configs import modelslim_config
 
 
-@pytest.mark.parametrize("layer_offset", [0, 1, 93])
-@pytest.mark.parametrize("quantized", [False, True])
-def test_dspark_maps_its_recipe_before_building_layers(monkeypatch, layer_offset, quantized):
+@pytest.mark.parametrize("layer_offset,precision", [(0, "c8"), (1, "c8"), (93, "c8"), (93, "bf16"), (93, "w8a8")])
+def test_dspark_maps_its_recipe_before_building_layers(monkeypatch, layer_offset, precision):
+    weight_type = "W8A8_DYNAMIC" if precision == "w8a8" else "FLOAT"
     recipe = {
-        "fa_quant_type": "FAKQuant",
-        "layers.0.self_attn.fa_k.scale": "FAQuant",
-        "layers.0.self_attn.q_a_proj.weight": "FLOAT",
-        "layers.0.self_attn.kv_a_proj_with_mqa.weight": "FLOAT",
+        "layers.0.self_attn.q_a_proj.weight": weight_type,
+        "layers.0.self_attn.kv_a_proj_with_mqa.weight": weight_type,
         "layers.1.mlp.gate_proj.weight": "W8A8_DYNAMIC",
     }
-    draft_quant = modelslim_config.AscendModelSlimConfig(recipe.copy()) if quantized else None
+    if precision == "c8":
+        recipe.update({"fa_quant_type": "FAKQuant", "layers.0.self_attn.fa_k.scale": "FAQuant"})
+    draft_quant = modelslim_config.AscendModelSlimConfig(recipe.copy()) if precision != "bf16" else None
     target_quant = modelslim_config.AscendModelSlimConfig({"model.layers.0.self_attn.q_a_proj.weight": "FLOAT"})
     config = SimpleNamespace(
         speculative_config=SimpleNamespace(
             method="dspark",
+            kv_cache_dtype=None,
             draft_model_config=SimpleNamespace(
                 use_mla=True,
-                quantization="ascend" if quantized else None,
+                quantization="ascend" if draft_quant is not None else None,
                 hf_config=SimpleNamespace(
                     model_type="k3_dspark",
                     num_hidden_layers=2,
@@ -90,24 +91,26 @@ def test_dspark_maps_its_recipe_before_building_layers(monkeypatch, layer_offset
     assert mlp.prefix == f"model.layers.{layer_offset + 1}.mlp"
     assert attn.quant_config is mlp.quant_config is draft.quant_config
     draft_fa_quant = quant_utils.enable_fa_quant(config, f"{attn.prefix}.attn", draft_quant_config=draft.quant_config)
-    assert draft_fa_quant is quantized
+    assert draft_fa_quant is (precision == "c8")
     assert not quant_utils.enable_fa_quant(
         config, f"{draft.layers[1].self_attn.prefix}.attn", draft_quant_config=draft.quant_config
     )
     assert target_quant.quant_description == {"model.layers.0.self_attn.q_a_proj.weight": "FLOAT"}
-    if quantized:
+    if draft_quant is not None:
         fallback_quant.assert_not_called()
         assert draft_quant.quant_description == recipe
-        assert draft.quant_config.quant_description[f"{attn.prefix}.fa_k.scale"] == "FAQuant"
+        if precision == "c8":
+            assert draft.quant_config.quant_description[f"{attn.prefix}.fa_k.scale"] == "FAQuant"
         assert draft.quant_config.quant_description[f"{mlp.prefix}.gate_proj.weight"] == "W8A8_DYNAMIC"
-        assert (
-            modelslim_config.get_quant_type_for_layer(
-                draft.quant_config.quant_description,
-                f"{attn.prefix}.fused_qkv_a_proj",
-                {"fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]},
-            )
-            is None
-        )
+        assert modelslim_config.get_quant_type_for_layer(
+            draft.quant_config.quant_description,
+            f"{attn.prefix}.fused_qkv_a_proj",
+            {"fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]},
+        ) == ("W8A8_DYNAMIC" if precision == "w8a8" else None)
+    if precision == "w8a8":
+        config.speculative_config.kv_cache_dtype = "fp8"
+        with pytest.raises(ValueError, match="corresponding quantized weights are required"):
+            quant_utils.enable_fa_quant(config, f"{attn.prefix}.attn", draft_quant_config=draft.quant_config)
 
 
 @pytest.mark.parametrize("quant_backend", [False, True])

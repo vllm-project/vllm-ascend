@@ -280,10 +280,16 @@ def enable_fa_quant(vllm_config, layer_name=None, *, draft_quant_config: "Quanti
         return False
     if not is_dspark_draft and enable_sfa(vllm_config):
         return False
-    # V2 shares the target cache config with the draft. An unquantized
-    # draft must not inherit the target's request for an FP8 attention cache.
-    # Keep errors for a declared quantization method whose recipe is missing.
-    if is_dspark_draft and quant_config is None and getattr(model_config, "quantization", None) is None:
+    has_fa_recipe = quant_config is not None and getattr(quant_config, "enable_fa_quant", False)
+    # A draft that inherits the target cache dtype can keep floating KV even
+    # with projection quantization. Preserve errors for explicit FP8 KV or
+    # a declared weight quantization method with no recipe.
+    if (
+        is_dspark_draft
+        and getattr(speculative_config, "kv_cache_dtype", None) is None
+        and not has_fa_recipe
+        and (quant_config is not None or getattr(model_config, "quantization", None) is None)
+    ):
         return False
     cache_config = getattr(vllm_config, "cache_config", None)
     if cache_config is None or cache_config.cache_dtype not in ["fp8", "int8"]:
@@ -291,7 +297,7 @@ def enable_fa_quant(vllm_config, layer_name=None, *, draft_quant_config: "Quanti
     is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
     if not is_kv_consumer and not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
         return False
-    if quant_config is not None and getattr(quant_config, "enable_fa_quant", False):
+    if quant_config is not None and has_fa_recipe:
         if layer_name is not None:
             # Determine whether quantization is enabled at each layer.
             return quant_config.enabling_fa_quant(vllm_config, layer_name)
