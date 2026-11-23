@@ -167,6 +167,7 @@ guide_sections:
 
     ```bash
     #!/bin/sh
+    export VLLM_USE_MODELSCOPE=True
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export OMP_PROC_BIND=false
