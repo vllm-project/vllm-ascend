@@ -317,7 +317,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             slot_mapping: torch.Tensor | None = None,
             gate_out: torch.Tensor | None = None,
         ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
-            """Run separate Ascend preparation with main's packed-input ABI."""
+            """Run the fused Ascend QSA path (main's fused-prepare signature)."""
             del attn, qkv, slot_mapping, gate_out
             metadata = self._metadata()
             if metadata is None:
@@ -390,7 +390,10 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             position_rows = qsa_indexer.canonical_qsa_rope_positions(positions)[:num_tokens].to(
                 device=raw_key_cache.device
             )
-        pooled, first_positions = _compress_qsa_groups(
+        if not self._fused_norm_rope_eligible(token_k, positions):
+            raise ValueError("QSA compressed-key fused norm+RoPE ABI is not satisfied")
+        rotary_cache = self.rotary_emb._match_cos_sin_cache_dtype(token_k)  # noqa: SLF001
+        qsa_compress_groups_with_ratio_fused(
             token_k[:num_tokens],
             position_rows,
             raw_key_cache,
@@ -401,13 +404,13 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             compressed_metadata.slot_mapping,
             self.compress_ratio,
             rope_position_cache,
+            norm_weight=self.k_layernorm.weight,
+            rotary_cache=rotary_cache,
+            compressed_cache=self.compressed_key_cache.kv_cache,
+            norm_eps=self.k_layernorm.variance_epsilon,
         )
-        normalized = self.normalize_compressed_keys(pooled, first_positions)
-        _store_qsa_cache_rows(
-            self.compressed_key_cache.kv_cache,
-            compressed_metadata.slot_mapping,
-            normalized,
-        )
+        # Keep ring writes after the fused launch: other rows can still read
+        # the previous ring contents while producing compressed groups.
         _store_qsa_cache_rows(raw_key_cache, raw_metadata.slot_mapping, token_k[:num_tokens])
         if rope_position_cache is not None:
             _store_qsa_cache_rows(
@@ -765,9 +768,9 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
 
         # Newer vLLM revisions call the owner with the packed projection when
         # ``use_fused_qsa_prepare`` is enabled. The upstream indexer consumes
-        # that projection itself; Ascend materializes Q/K/V and gate through
-        # the inherited projection before its separate indexer preparation
-        # and the existing cache/update transaction.
+        # that projection itself; Ascend keeps its independently fused main
+        # Q/K/V preparation and indexer paths, so materialize the same outputs
+        # here before entering the existing cache/update transaction.
         if qkv is not None:
             q, k, v, projected_gate = self._project_qkv_gate(qkv, positions)
             query = q.view(-1, self.num_heads, self.head_dim)
@@ -788,7 +791,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             )
         else:
             # Main's indexer returns (selection, prepared main outputs); Ascend
-            # prepares Q/K/V above, so the second element stays None.
+            # fuses its own Q/K/V preparation, so the second element stays None.
             selected = self.indexer(
                 hidden_states,
                 positions,
