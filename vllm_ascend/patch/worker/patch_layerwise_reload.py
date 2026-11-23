@@ -15,6 +15,8 @@ from vllm_ascend.quantization.quant_type import QuantType
 def _copy_mxfp4_tensor(destination: torch.Tensor, source: torch.Tensor) -> None:
     # Native FP4 schemes expose a transpose of contiguous NZ storage. Ascend950
     # copy_ requires metadata matching that storage, so undo both transposes.
+    # detach also clears autograd's view marker, which CANN copy_ rejects even
+    # when the inverse transpose matches the storage base metadata.
     # This copies on device without replacing either captured storage or layout.
     if (
         destination.ndim >= 2
@@ -22,7 +24,7 @@ def _copy_mxfp4_tensor(destination: torch.Tensor, source: torch.Tensor) -> None:
         and destination.transpose(-1, -2).is_contiguous()
         and source.transpose(-1, -2).is_contiguous()
     ):
-        destination.transpose(-1, -2).copy_(source.transpose(-1, -2))
+        destination.transpose(-1, -2).detach().copy_(source.transpose(-1, -2).detach())
     else:
         destination.copy_(source)
 

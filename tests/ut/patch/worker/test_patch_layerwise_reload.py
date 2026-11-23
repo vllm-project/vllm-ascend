@@ -13,13 +13,22 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 @pytest.mark.parametrize("shape", [(8, 4), (2, 8, 4)])
 @pytest.mark.parametrize("transposed", [False, True])
-def test_copy_preserves_bytes_layout_and_storage(shape, transposed):
+def test_copy_preserves_bytes_layout_and_storage(shape, transposed, monkeypatch):
     destination = torch.zeros(shape, dtype=torch.uint8)
     source = torch.arange(destination.numel(), dtype=torch.uint8).reshape(shape)
     if transposed:
         destination = destination.transpose(-1, -2)
         source = source.transpose(-1, -2)
     pointer, stride = destination.data_ptr(), destination.stride()
+    original_copy = torch.Tensor.copy_
+
+    def copy_without_views(target, value):
+        if transposed:
+            assert target._base is None
+            assert value._base is None
+        return original_copy(target, value)
+
+    monkeypatch.setattr(torch.Tensor, "copy_", copy_without_views)
     reload_patch._copy_mxfp4_tensor(destination, source)
     assert torch.equal(destination, source)
     assert destination.data_ptr() == pointer
