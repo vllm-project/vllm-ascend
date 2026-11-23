@@ -16,6 +16,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
 import torch
 from torch import nn
 from vllm.forward_context import ForwardContext, override_forward_context
@@ -61,7 +62,7 @@ class _GDNForwardWrapper(nn.Module):
     _forward_core = AscendGatedDeltaNetAttention._forward_core
     _split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
 
-    def __init__(self):
+    def __init__(self, ssm_state_dtype: torch.dtype = torch.float32):
         super().__init__()
         self.in_proj_qkv = _Linear(2)
         self.in_proj_ba = _Linear(2)
@@ -81,7 +82,10 @@ class _GDNForwardWrapper(nn.Module):
         self.register_buffer("A_log", torch.zeros(1))
         self.register_buffer("dt_bias", torch.zeros(1))
         self.register_buffer("conv_state", torch.zeros(1, 1, 2))
-        self.register_buffer("ssm_state", torch.zeros(1, 1, 2, 2))
+        self.register_buffer(
+            "ssm_state",
+            torch.zeros(1, 1, 2, 2, dtype=ssm_state_dtype),
+        )
         self.prefix = "layers.0.linear_attn"
 
     @property
@@ -137,9 +141,12 @@ def _make_prefill_metadata(device: torch.device | str = "cpu") -> GDNAttentionMe
     return metadata
 
 
-def test_fla_prefill_uses_host_metadata_with_strided_ssm_cache():
-    model = _GDNForwardWrapper()
-    ssm_storage = torch.zeros(16)
+@pytest.mark.parametrize("ssm_state_dtype", [torch.bfloat16, torch.float32])
+def test_fla_prefill_uses_host_metadata_with_strided_ssm_cache(
+    ssm_state_dtype,
+):
+    model = _GDNForwardWrapper(ssm_state_dtype=ssm_state_dtype)
+    ssm_storage = torch.zeros(16, dtype=ssm_state_dtype)
     model.ssm_state = torch.as_strided(
         ssm_storage,
         size=(2, 1, 2, 2),
@@ -184,12 +191,14 @@ def test_fla_prefill_uses_host_metadata_with_strided_ssm_cache():
 
     def gather_state(state, indices, has_initial_state, **kwargs):
         assert state is model.ssm_state
+        assert state.dtype is ssm_state_dtype
         assert kwargs == {}
         assert has_initial_state.tolist() == [True]
         return state.index_select(0, indices).contiguous()
 
     def scatter_state(state, indices, values):
         assert state is model.ssm_state
+        assert values.dtype is ssm_state_dtype
         state.index_copy_(0, indices, values)
 
     def fla_prefill(**kwargs):
@@ -229,6 +238,7 @@ def test_fla_prefill_uses_host_metadata_with_strided_ssm_cache():
     triton_fallback.assert_not_called()
     torch.testing.assert_close(model.ssm_state[0], torch.zeros_like(model.ssm_state[0]))
     torch.testing.assert_close(model.ssm_state[1], torch.full_like(model.ssm_state[1], 3))
+    assert model.ssm_state.dtype is ssm_state_dtype
 
 
 def test_non_bf16_prefill_falls_back_to_triton_pipeline_with_strided_ssm_cache():
