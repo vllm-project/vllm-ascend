@@ -52,10 +52,24 @@ upstream_hc.hc_silu = hc_silu
 patch_upstream_ple_short_conv()
 
 from vllm.models.qwen4_exp.amd import model as upstream_model  # noqa: E402
+from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer  # noqa: E402
 
 from .qsa import AscendQwen4ExpQSAAttention  # noqa: E402
 
 upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
+
+
+def _build_ascend_ple(config, vllm_config: VllmConfig, **kwargs) -> Qwen4ExpPLELayer:
+    # Each DP replica builds its own decoder. Choose the PCP backend before
+    # the constructor allocates and registers the pinned embedding table.
+    parallel = vllm_config.parallel_config
+    if parallel.data_parallel_size > 1 and parallel.prefill_context_parallel_size > 1:
+        return AscendPCPPLELayer(config, vllm_config=vllm_config, **kwargs)
+    return Qwen4ExpPLELayer(config, vllm_config=vllm_config, **kwargs)
+
+
+# The upstream decoder resolves this module global when it creates each PLE.
+upstream_model.Qwen4ExpPLELayer = _build_ascend_ple
 
 
 class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
@@ -82,7 +96,7 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
             for layer in self.layers[self.start_layer : self.end_layer]:
                 if hasattr(layer, "linear_attn"):
                     shard_gdn_heads_over_pcp(layer.linear_attn, parallel)
-                if layer.ple is not None:
+                if layer.ple is not None and not isinstance(layer.ple, AscendPCPPLELayer):
                     ple_prefix = layer.ple.prefix
                     ple_id = layer.ple.ple_dense_layer_id
                     del static_context[ple_prefix]
