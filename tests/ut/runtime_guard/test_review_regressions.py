@@ -945,12 +945,11 @@ def test_v17e_spec_acceptance_low_rate_triggers_incident():
 
 
 def test_v17f_spec_acceptance_padded_row_uses_num_draft_tokens():
-    """Discriminate draft_len_hint from the -1 strip fallback (MRV2 shape).
+    """Discriminate draft_len_hint from skip-when-missing (MRV2 shape).
 
     Production MRV2 has ``runner.input_batch is None`` at check_after_spec; the
-    wave batch must be threaded in. On ``[bonus, d1, d2, -1, -1]`` the pad-strip
-    fallback always yields ``draft_len=2``, so a hint of ``4`` is the only way
-    this assertion can pass — reverting the hint plumbing makes the test fail.
+    wave batch must be threaded in. Without it the step is skipped; with
+    ``num_draft_tokens_per_req=[4]`` draft_len must be 4.
     """
     from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
 
@@ -984,18 +983,17 @@ def test_v17f_spec_acceptance_padded_row_uses_num_draft_tokens():
             return_value=0,
         ),
     ):
-        # Negative control: no wave batch → pad-strip only → draft_len=2.
+        # Negative control: no wave batch → skip (do not invent draft_len).
         assert det.check_all(sampled, [3], req_ids=["r1"]) == []
-        assert det._history["r1"][0][1] == 2
-        det._history.clear()
-        # Hint source: same row, num_draft_tokens_per_req=4 must not collapse to 2.
+        assert "r1" not in det._history
+        # Hint source: threaded num_draft_tokens_per_req must drive draft_len.
         wave = SimpleNamespace(req_ids=["r1"], num_draft_tokens_per_req=[4])
         assert det.check_all(sampled, [3], req_ids=["r1"], input_batch=wave) == []
         assert det._history["r1"][0][1] == 4
 
 
-def test_v17g_spec_acceptance_pad_fallback_strips_minus_one():
-    """Without draft metadata, ignore -1 pads when inferring draft_len."""
+def test_v17g_spec_acceptance_skips_without_draft_metadata():
+    """Missing draft metadata must skip — sampled width is not draft width."""
     from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
 
     section = {
@@ -1028,9 +1026,8 @@ def test_v17g_spec_acceptance_pad_fallback_strips_minus_one():
             return_value=0,
         ),
     ):
-        det.check_all(sampled, [3], req_ids=["r1"])
-    _accepted, draft_len, _sampled, _acc = det._history["r1"][0]
-    assert draft_len == 2  # len([10,11,12]) - 1, not len(row) - 1 == 4
+        assert det.check_all(sampled, [3], req_ids=["r1"]) == []
+    assert "r1" not in det._history
 
 
 def test_v17b_spec_acceptance_v2_threads_req_ids_without_input_batch():

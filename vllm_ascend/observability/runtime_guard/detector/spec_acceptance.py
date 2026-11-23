@@ -237,22 +237,21 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
         runner = self._runner
         log_leader = runner_tp_rank(runner) == 0
         sampled_norm = self._normalize_token_ids(sampled_ids)
-        # Priority: batch num_draft_tokens_per_req → req_state.prev_num_draft_len
-        # → non-padded sampled width - 1. Never use raw padded row length as
-        # draft_len (adaptive verification pads to max draft width with -1).
+        # Priority: batch num_draft_tokens_per_req → req_state.prev_num_draft_len.
+        # Do not infer draft_len from sampled width: after rejection the row is
+        # shorter than the proposal, so len(valid)-1 over-estimates acceptance.
+        # Missing metadata → skip this step (same refuse-wrong-attribution rule
+        # as PCP local-batch resolve).
         draft_len = int(draft_len_hint) if draft_len_hint is not None else 0
         if draft_len <= 0:
             draft_len = int(getattr(req_state, "prev_num_draft_len", 0) or 0)
         if draft_len <= 0:
-            # sampled_norm is already normalized; drop async/pad placeholders only.
-            valid_sampled = [tid for tid in sampled_norm if tid != -1]
-            draft_len = max(0, len(valid_sampled) - 1)
-        if draft_len <= 0:
             if log_leader:
-                logger.info_once(
-                    "[runtime_guard: spec short] req_id=%s skip: draft_len=0 sampled_len=%d",
+                logger.warning_once(
+                    "[runtime_guard: spec] req_id=%s missing draft_len metadata "
+                    "(num_draft_tokens_per_req / prev_num_draft_len); "
+                    "skipping attribution — sampled width is not draft width",
                     req_id,
-                    len(sampled_norm),
                 )
             return None
         accepted_draft_tokens = max(0, accepted_token_num - 1)
