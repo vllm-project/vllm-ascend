@@ -17,7 +17,6 @@
 
 import types
 import unittest
-from itertools import product
 from unittest.mock import MagicMock, patch
 
 # isort: off
@@ -215,30 +214,18 @@ class TestAscendStoreConnector(unittest.TestCase):
         config.parallel_config.rank = 0
         return config
 
-    def test_sharded_mamba_rejects_joint_tp_pcp_before_pool_initialization(self):
-        spec = MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,))
-        cache = types.SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(["state"], spec)])
-        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
-        for role, layerwise in product((KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER), (False, True)):
-            with self.subTest(role=role, layerwise=layerwise):
-                config = self._make_vllm_config(extra_config={"use_layerwise": layerwise})
-                config.parallel_config.tensor_parallel_size = 2
-                config.parallel_config.prefill_context_parallel_size = 2
-                with (
-                    patch(f"{module}.create_kv_pool_scheduler") as scheduler,
-                    patch(f"{module}.create_kv_pool_worker") as worker,
-                ):
-                    with self.assertRaisesRegex(ValueError, "sharded Mamba.*PCP=1 or TP=1"):
-                        AscendStoreConnector(config, role, cache)
-                    scheduler.assert_not_called()
-                    worker.assert_not_called()
-
-    def test_parallel_validation_allows_replicas_and_single_axis_state_shards(self):
+    def test_parallel_validation_allows_replicas_and_state_shards(self):
         attention = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
         sharded = MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,))
         replicated = MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,), tp_replicated=True)
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
-        for spec, tp_size, pcp_size in ((attention, 2, 2), (replicated, 2, 2), (sharded, 2, 1), (sharded, 1, 2)):
+        for spec, tp_size, pcp_size in (
+            (attention, 2, 2),
+            (replicated, 2, 2),
+            (sharded, 2, 1),
+            (sharded, 1, 2),
+            (sharded, 2, 2),
+        ):
             with self.subTest(spec=spec, tp_size=tp_size, pcp_size=pcp_size):
                 config = self._make_vllm_config()
                 config.parallel_config.tensor_parallel_size = tp_size
@@ -246,6 +233,7 @@ class TestAscendStoreConnector(unittest.TestCase):
                 cache = types.SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)])
                 with patch(f"{module}.create_kv_pool_scheduler") as scheduler:
                     connector = AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
+                    scheduler.assert_called_once_with(config, False, cache)
                     self.assertIs(connector.connector_scheduler, scheduler.return_value)
 
     def test_pp_handshake_metadata_is_ignored(self):
@@ -512,12 +500,12 @@ class TestAscendStoreConnector(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_worker")
-    def test_save_kv_layer_consumer_with_put_enabled(self, mock_worker_cls, mock_lookup_cls):
+    def test_save_kv_layer_consumer_with_decode_save_enabled(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config(
             kv_role="kv_consumer",
             extra_config={
                 "use_layerwise": True,
-                "consumer_is_to_put": True,
+                "save_decode_cache": True,
             },
         )
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
@@ -559,8 +547,8 @@ class TestAscendStoreConnector(unittest.TestCase):
         mock_worker_cls.return_value.wait_for_save.assert_called_once_with(metadata)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
-    def test_consumer_save_decode_cache_rejects_layerwise(self, mock_worker_cls, mock_lookup_cls):
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_worker")
+    def test_consumer_save_decode_cache_enables_layerwise(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config(
             kv_role="kv_consumer",
             extra_config={
@@ -570,12 +558,30 @@ class TestAscendStoreConnector(unittest.TestCase):
         )
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
-        with self.assertRaisesRegex(ValueError, "does not support use_layerwise"):
-            AscendStoreConnector(
-                vllm_config=config,
-                role=KVConnectorRole.WORKER,
-                kv_cache_config=None,
-            )
+        connector = AscendStoreConnector(
+            vllm_config=config,
+            role=KVConnectorRole.WORKER,
+            kv_cache_config=None,
+        )
+        connector._get_connector_metadata = MagicMock(return_value=MagicMock())
+        connector.save_kv_layer("layer_0", MagicMock(), MagicMock())
+
+        self.assertTrue(connector.can_put)
+        mock_worker_cls.return_value.save_kv_layer.assert_called_once()
+
+    def test_replaced_consumer_options_report_new_names(self):
+        for old_option, new_option in (
+            ("consumer_is_to_put", "save_decode_cache"),
+            ("consumer_is_to_load", "enable_lookup"),
+        ):
+            with self.subTest(option=old_option):
+                config = self._make_vllm_config(kv_role="kv_consumer", extra_config={old_option: True})
+                with self.assertRaisesRegex(ValueError, new_option):
+                    AscendStoreConnector(
+                        vllm_config=config,
+                        role=KVConnectorRole.WORKER,
+                        kv_cache_config=None,
+                    )
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")

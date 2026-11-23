@@ -169,11 +169,13 @@ class AisbenchRunner:
             self.input_throughput_baseline = aisbench_config.get("input_throughput_baseline", 1)
             if self.task_type == "accuracy":
                 self.threshold = aisbench_config.get("threshold", 1)
-                self.verify_mode = aisbench_config.get("verify_mode", "range")
-                if self.verify_mode == "ge":
+                self.verify_mode = aisbench_config.get("verify_mode", "ge")
+                if self.verify_mode == "range":
+                    self._accuracy_verify()
+                elif self.verify_mode == "ge":
                     self._accuracy_verify_ge()
                 else:
-                    self._accuracy_verify()
+                    raise ValueError(f"Invalid verify_mode: {self.verify_mode}. Expected 'ge' or 'range'.")
             if self.task_type == "performance":
                 self.threshold = aisbench_config.get("threshold")
                 self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold")
@@ -408,6 +410,14 @@ class AisbenchRunner:
             f"The accuracy of {self.dataset_path} is {acc_value}, "
             f"which is not greater than or equal to baseline {self.baseline}."
         )
+        if self.threshold is not None and acc_value > self.baseline + self.threshold:
+            logging.warning(
+                "Accuracy of %s is %s, above baseline %s + threshold %s; consider re-baselining this case.",
+                self.dataset_path,
+                acc_value,
+                self.baseline,
+                self.threshold,
+            )
 
     def _spec_decode_verify(self):
         from tools.spec_decode_metrics import (

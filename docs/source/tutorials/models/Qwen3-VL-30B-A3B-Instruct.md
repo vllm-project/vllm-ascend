@@ -4,7 +4,7 @@
 
 Qwen3-VL-30B-A3B-Instruct is a sparse MoE vision-language model in the Qwen3-VL family, with about 30B total parameters and about 3B activated parameters per token. It is suitable for image understanding, video understanding, multimodal dialogue, and long-context online serving on Ascend hardware.
 
-This document describes the main validation steps for the model, including supported features, prerequisites, installation, image and video online deployment, offline inference, functional verification, accuracy and performance evaluation, performance tuning, and FAQs.
+This document describes the main validation steps for the model, including supported features, prerequisites, installation, image-only online serving, functional verification, accuracy and performance evaluation, performance tuning, and FAQs.
 
 The `Qwen3-VL-30B-A3B-Instruct` tutorial was introduced for the `vllm-ascend` `v0.13.0` validation cycle. Use `v0.13.0` or later for this model. The examples below use the version placeholder configured by the documentation build system.
 
@@ -25,17 +25,17 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 It is recommended to download the model weight to a shared directory across multiple nodes.
 
->**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+> **Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
+Select an image based on your machine type and start the Docker image on your node, refer to [using Docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "950DT Products"
 
-    Start the docker image on your each node.
+    Start the Docker image on your each node.
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
@@ -72,7 +72,7 @@ Select an image based on your machine type and start the docker image on your no
 
 === "A3 series"
 
-    Start the docker image on each node.
+    Start the Docker image on each node.
 
     ```bash
 
@@ -114,7 +114,7 @@ Select an image based on your machine type and start the docker image on your no
 
 === "A2 series"
 
-    Start the docker image on each node.
+    Start the Docker image on each node.
 
     ```bash
 
@@ -202,7 +202,7 @@ Single-node deployment runs both Prefill and Decode on the same node. The follow
 
 === "950DT Products"
 
-    Run the following script to execute online inference on 1 950DT Products (96G x 8). The quantized version (`Qwen3-VL-30B-A3B-Instruct-w8a8-mxfp8`) can be deployed on a single 950DT Products node. The W8A8 version needs `--quantization ascend`.
+    Run the following script to execute online inference on 1 950DT Products (96GB x 8). The quantized version (`Qwen3-VL-30B-A3B-Instruct-w8a8-mxfp8`) can be deployed on a single 950DT Products node. The W8A8 version needs `--quantization ascend`.
 
     ```shell
     #!/bin/sh
@@ -240,7 +240,7 @@ Single-node deployment runs both Prefill and Decode on the same node. The follow
 
 === "A3 series"
 
-    Run the following script to start image-only serving on 1 Atlas 800 A3 (64G x 16) node.
+    Run the following script to start image-only serving on 1 Atlas 800 A3 (64GB x 16) node.
 
     ```shell
     #!/bin/sh
@@ -276,7 +276,7 @@ Single-node deployment runs both Prefill and Decode on the same node. The follow
 
 === "A2 series"
 
-    The A3 series script above also works on 1 Atlas 800 A2 (64G x 8) node with `--tensor-parallel-size 2`.
+    The A3 series script above also works on 1 Atlas 800 A2 (64GB x 8) node with `--tensor-parallel-size 2`.
 
 Key Parameter Descriptions:
 
@@ -339,7 +339,7 @@ Expected result: the HTTP status is 200 and the JSON response contains a `choice
 
 ## 7 Accuracy Evaluation
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -397,7 +397,7 @@ After several minutes, you can get the performance evaluation result. This rando
 | Video serving | Single-node online serving | 2 or more NPUs | BF16 | Use local media paths, lower concurrency, and reduce video length or frame sampling if OOM occurs. |
 | Functional graph validation | Single-node PP | 2 NPUs | BF16 | Use shorter context and explicit capture sizes to validate full decode ACLGraph behavior. |
 
-> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64GB × 16 NPUs).
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64GB x 16 NPUs).
 
 #### Table 2: Detailed Node Configuration
 

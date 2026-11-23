@@ -1,4 +1,5 @@
 import importlib
+import logging
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -25,7 +26,6 @@ from vllm_ascend.platform import (
     _validate_deepseek_v41_adaptive_config,
     _validate_draft_decode_context_parallel_config,
     _validate_eplb_config,
-    _validate_glm5next_dflash2_pp_config,
     _validate_parallel_config,
     _validate_sfa_dcp_kv_sp,
     _validate_target_dcp_config,
@@ -71,36 +71,6 @@ def test_kimi_hybrid_pd_rejects_sub_kernel_interleave(connector, interleave):
         pytest.raises(ValueError, match="interleave.*kernel block size"),
     ):
         _validate_sfa_dcp_kv_sp(config)
-
-
-@pytest.mark.parametrize(
-    ("pp_size", "method", "architecture", "model_type", "should_raise"),
-    [
-        (2, "dflash", "DFlash2DraftModel", "glm5_next_text", True),
-        (2, "dflash", "DFlash2DraftModel", "glm5_next", True),
-        (1, "dflash", "DFlash2DraftModel", "glm5_next_text", False),
-        (2, "dflash", "DFlashDraftModel", "glm5_next_text", False),
-        (2, "dspark", "DFlash2DraftModel", "glm5_next_text", False),
-        (2, "dflash", "DFlash2DraftModel", "qwen3", False),
-    ],
-)
-def test_glm5next_dflash2_rejects_pipeline_parallel_size_above_one(
-    pp_size, method, architecture, model_type, should_raise
-):
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=model_type)),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
-        speculative_config=SimpleNamespace(
-            method=method,
-            draft_model_config=SimpleNamespace(architectures=[architecture]),
-        ),
-    )
-
-    if should_raise:
-        with pytest.raises(ValueError, match="requires pipeline_parallel_size=1"):
-            _validate_glm5next_dflash2_pp_config(config)
-    else:
-        _validate_glm5next_dflash2_pp_config(config)
 
 
 @pytest.mark.parametrize(
@@ -463,6 +433,35 @@ def test_setup_compile_backend_disables_static_kernel_flags_without_cudagraph():
     assert ascend_cfg["enable_npugraph_ex"] is False
     assert ascend_cfg["enable_static_kernel"] is False
     assert ascend_cfg["enable_super_kernel"] is False
+
+
+@pytest.mark.parametrize("use_custom_path", [True, False])
+def test_platform_startup_log_directory(tmp_path, monkeypatch, use_custom_path):
+    import vllm_ascend.ascend_config as ascend_config
+    import vllm_ascend.logger as ascend_logger
+
+    default_dir = tmp_path / "default"
+    custom_dir = tmp_path / "custom"
+    config = TestNPUPlatform.mock_vllm_config()
+    config.additional_config = {"ascend_log_path": str(custom_dir)} if use_custom_path else {}
+    config.model_config = None  # The platform logs a startup warning before full config initialization.
+
+    monkeypatch.setattr(ascend_config, "_ASCEND_CONFIG", None)
+    monkeypatch.setattr(ascend_logger, "_LOG_DIR", str(default_dir))
+    monkeypatch.setattr(ascend_logger, "_file_logging_configured", False)
+    monkeypatch.setattr(ascend_logger, "_file_handler", None)
+    for name in ("vllm", "vllm_ascend"):
+        monkeypatch.setattr(logging.getLogger(name), "handlers", [])
+    try:
+        NPUPlatform.check_and_update_config(config)
+        expected_dir = custom_dir if use_custom_path else default_dir
+        (log_file,) = expected_dir.glob("vllm_ascend_*.log")
+        assert "Model config is missing" in log_file.read_text(encoding="utf-8")
+        if use_custom_path:
+            assert not default_dir.exists()
+    finally:
+        if ascend_logger._file_handler is not None:
+            ascend_logger._file_handler.close()
 
 
 class TestNPUPlatform(TestBase):
