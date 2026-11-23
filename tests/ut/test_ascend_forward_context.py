@@ -370,7 +370,7 @@ def test_select_moe_comm_method_a2_enable_fused_mc2_mode_1(
         ep_world_size=ep_world_size,
         enable_fused_mc2=1,
     )
-    vllm_config = _make_vllm_config(quant_type="w4a8")
+    vllm_config = _make_vllm_config(world_size=ep_world_size, num_experts=128, quant_type="w4a8")
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 
@@ -387,7 +387,7 @@ def test_select_moe_comm_method_a2_cann_megamoe_selector(monkeypatch, cann_megam
         enable_fused_mc2=1,
     )
     monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: cann_megamoe_available)
-    vllm_config = _make_vllm_config(quant_type="w4a8")
+    vllm_config = _make_vllm_config(world_size=48, num_experts=128, quant_type="w4a8")
 
     expected = MoECommType.FUSED_MC2 if cann_megamoe_available else MoECommType.ALLTOALL
     assert afc.select_moe_comm_method(4097, vllm_config) == expected
