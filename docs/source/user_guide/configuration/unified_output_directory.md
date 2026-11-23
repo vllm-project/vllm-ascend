@@ -1,8 +1,8 @@
 # Configure a Unified Directory for Logs and Runtime Outputs
 
-Set these paths in your existing deployment so logs, caches, and diagnostic files go under `/root/ascend/log` inside the inference container. Before starting the service, create the directories you select or the parent directories of any target files. The process that writes each output needs write access.
+vLLM Ascend and its supporting components generate logs, caches, and diagnostic files in different locations. Organizing these files under a common directory simplifies troubleshooting and operational maintenance by making them easier to locate, collect, and manage.
 
-For the base setup, set `ascend_log_path` for service logs, `runtime_config_path` for Runtime Guard, and `XDG_CACHE_HOME` and `XDG_CONFIG_HOME` for vLLM. **Watchdog** is recommended when your build supports it and you want stack dumps on timeout. All other rows are optional. Set them only for components or diagnostic outputs you need to collect. The [minimal example](#minimal-example) shows the base settings and Watchdog together.
+This section explains how to configure these paths in an existing deployment, using `/root/ascend/log` as the common root directory inside the inference container. Before starting the service, create the required directories or parent directories for target files, and ensure that each process has write access to its output location.
 
 ## Environment variables
 
