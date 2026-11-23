@@ -1,0 +1,14 @@
+pr: 22385
+entries:
+  - category: feature
+    text: >-
+      Extended the fused matmul-collective (MC2) sequence-parallel ops to
+      accept Ascend-quantized (MXFP8 / W8A8 INT8) attention projections, so
+      Qwen3.5 MoE MXFP8 models (e.g. Qwen3.6-35B-A3B) now fuse AllGather+Matmul
+      on qkv_proj and Matmul+ReduceScatter on o_proj / GDN out_proj under
+      sequence-parallel MoE. The shared-expert MLP's W8A8MXFP path is also
+      routed through the A5 dedicated fused quant operators alongside the
+      existing W4A8MXFP path. Fusion activates on prefill-sized batches
+      (>=128 tokens); decode batches fall back to the unfused GEMM + collective
+      path.
+    hardware: [A5]

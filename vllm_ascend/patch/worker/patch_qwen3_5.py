@@ -21,9 +21,11 @@ import os
 from functools import wraps
 
 import torch
+import torch_npu
 from vllm.config import VllmConfig
-from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.distributed import get_tp_group, tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention, Qwen3NextSparseMoeBlock
@@ -36,12 +38,69 @@ except ImportError:
     IntermediateTensors = None
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_scatter
+from vllm_ascend.models.common.ops.sequence_parallel import (
+    _DENSE_SP_FUSED_DTYPES,
+    _DENSE_SP_FUSED_QUANT_WEIGHT_DTYPES,
+    DENSE_SP_FUSED_TP_SIZES,
+    DenseSpAllGatherMmOp,
+    DenseSpMmReduceScatterOp,
+    sp_all_gather,
+    sp_reduce_scatter,
+)
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
 from vllm_ascend.ops.gdn_checkpoint import initialize_gdn_checkpoints
+from vllm_ascend.quantization.method_adapters import AscendLinearMethod
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 _GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
+
+
+def _owns_sequence_collective(proj, op_cls) -> bool:
+    """Whether ``proj`` carries the fused custom op that owns its boundary collective."""
+    return isinstance(getattr(proj, "custom_op", None), op_cls)
+
+
+def _install_dense_sp_fused_op(proj, op_cls) -> bool:
+    """Attach a fused matmul-collective custom op to ``proj`` when eligible.
+
+    Construction-time guards cover the configuration that cannot change
+    after the layer is built (an already-installed custom op, TP size,
+    quantization, weight layout); the per-forward dtype / shape guards
+    live in the custom op's runtime implementation and are purely
+    structural so the same fused path runs in every phase.
+    """
+    if getattr(proj, "custom_op", None) is not None:
+        return False
+    quant_method = getattr(proj, "quant_method", None)
+    is_unquantized = isinstance(quant_method, UnquantizedLinearMethod)
+    is_ascend_quant = isinstance(quant_method, AscendLinearMethod)
+    if not (is_unquantized or is_ascend_quant):
+        return False
+    if get_tp_group().world_size not in DENSE_SP_FUSED_TP_SIZES:
+        return False
+    if op_cls is DenseSpAllGatherMmOp and getattr(proj, "gather_output", False):
+        # The fused path has no separate output to gather.
+        return False
+    weight = getattr(proj, "weight", None)
+    if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
+        return False
+    if is_unquantized and weight.dtype not in _DENSE_SP_FUSED_DTYPES:
+        return False
+    if is_ascend_quant and weight.dtype not in _DENSE_SP_FUSED_QUANT_WEIGHT_DTYPES:
+        return False
+    if is_ascend_quant and not hasattr(proj, "weight_scale"):
+        return False
+    # MXFP8 (float8_e4m3fn) uses the dedicated A5 quant fused operators;
+    # int8 and unquantized use the base fused operators.
+    is_mxfp8 = is_ascend_quant and weight.dtype == torch.float8_e4m3fn
+    if is_mxfp8:
+        fused_op_name = "npu_all_gather_quant_mm" if op_cls is DenseSpAllGatherMmOp else "npu_quant_mm_reduce_scatter"
+    else:
+        fused_op_name = "npu_all_gather_base_mm" if op_cls is DenseSpAllGatherMmOp else "npu_mm_reduce_scatter_base"
+    if not callable(getattr(torch_npu, fused_op_name, None)):
+        return False
+    proj.custom_op = op_cls(proj)
+    return True
 
 
 def _flashcomm_switch_enabled(vllm_config) -> bool:
@@ -65,6 +124,14 @@ def _flashcomm_switch_enabled(vllm_config) -> bool:
 # FlashComm switch on Ascend. The Qwen3.5 dense family covers Qwen3.5-27B,
 # Qwen3.6-27B and Qwen3.8-27B dense checkpoints (model_type "qwen3_5_text").
 DENSE_SP_MODEL_TYPES = ("qwen3_5_text",)
+
+# MoE model families where the upstream SP-MoE path is already active
+# (use_sequence_parallel_moe=True via FlashComm + EP).  Their attention
+# projections (qkv_proj / o_proj) use the same AllGather / ReduceScatter
+# communication pattern as dense SP, so the fused matmul-collective ops
+# can be installed on those projections without changing the MoE-specific
+# All-to-All dispatch for experts.
+MOE_SP_FUSED_OP_MODEL_TYPES = ("qwen3_5_moe_text",)
 
 
 def enable_dense_sp(vllm_config=None) -> bool:
@@ -119,6 +186,48 @@ def enable_dense_sp(vllm_config=None) -> bool:
     return _flashcomm_switch_enabled(vllm_config)
 
 
+def _enable_moe_sp_fused_ops(vllm_config=None) -> bool:
+    """Whether to install fused matmul-collective ops on MoE SP attention projections.
+
+    MoE models activate SP via the upstream ``use_sequence_parallel_moe`` path
+    (FlashComm + expert parallelism).  Their attention projections use the same
+    AllGather / ReduceScatter communication pattern as dense SP, so the fused
+    ops can be installed without touching the expert All-to-All dispatch.
+
+    This predicate only controls **op installation** — the SP flag
+    (``use_attn_reduce_scatter_for_moe``) and projection ``reduce_results``
+    adjustments are already handled by the upstream MoE SP path.
+    """
+    if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
+        return False
+
+    if vllm_config is None:
+        try:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+        except AssertionError:
+            vllm_config = None
+
+    if vllm_config is None:
+        return False
+
+    parallel_config = vllm_config.parallel_config
+    tp_size = getattr(parallel_config, "tensor_parallel_size", 0)
+    pp_size = getattr(parallel_config, "pipeline_parallel_size", 0)
+    if tp_size <= 1 or pp_size != 1:
+        return False
+
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None:
+        return False
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    if getattr(hf_text_config, "model_type", None) not in MOE_SP_FUSED_OP_MODEL_TYPES:
+        return False
+
+    return _flashcomm_switch_enabled(vllm_config)
+
+
 def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
     """Return whether a Qwen3.5 attention layer exposes multimodal RoPE."""
     return "qwen3_5" in attention.config.model_type and hasattr(attention.rotary_emb, "mrope_section")
@@ -127,6 +236,12 @@ def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
 class AscendQwen3NextAttention(Qwen3NextAttention):
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
         qkv, _ = self.qkv_proj(hidden_states)
+        if _owns_sequence_collective(self.qkv_proj, DenseSpAllGatherMmOp):
+            # The projection owns the sequence all-gather (fused into its
+            # GEMM, or the unfused fallback inside the same custom op), so
+            # it returns the padded full-token rows; trim back to the real
+            # token count that RoPE and the attention kernels expect.
+            qkv = qkv[: positions.shape[-1]]
         if _uses_multimodal_rope(self):
             # MRV2 MTP uses 1D text positions; the fused kernel reads three planes.
             if positions.ndim == 1:
@@ -186,7 +301,15 @@ def _sequence_parallel_dense_mlp_forward(mlp: torch.nn.Module, hidden_states: to
     must see the same (padded) token rows: all-gather the shard, run the
     column-parallel / row-parallel GEMMs (``down_proj.reduce_results=False``
     leaves partial sums) and reduce-scatter back to the rank-local shard.
+    When both projections carry fused matmul-collective custom ops, each
+    collective lives inside its projection and this helper reduces to the
+    plain GEMM chain on the padded full-token rows.
     """
+    if _owns_sequence_collective(mlp.down_proj, DenseSpMmReduceScatterOp):
+        gate_up, _ = mlp.gate_up_proj(hidden_states)
+        hidden_states = mlp.act_fn(gate_up)
+        hidden_states, _ = mlp.down_proj(hidden_states)
+        return hidden_states
     hidden_states = sp_all_gather(hidden_states)
     gate_up, _ = mlp.gate_up_proj(hidden_states)
     hidden_states = mlp.act_fn(gate_up)
@@ -228,7 +351,16 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
             # Attention (full and GDN) needs the full token sequence; the
             # sequence-parallel output projection above it leaves partial
             # sums that the reduce-scatter below completes on the shard.
-            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+            # A qkv projection carrying the fused AllGather+Matmul op owns
+            # the gather, so the decoder skips its own collective (the
+            # patched attention trims the padded rows the op returns). The
+            # GDN in-projections consume the gathered activation in several
+            # places inside the mixer core, so GDN layers always gather here.
+            qkv_gathers = self.layer_type == "full_attention" and _owns_sequence_collective(
+                self.self_attn.qkv_proj, DenseSpAllGatherMmOp
+            )
+            if not qkv_gathers:
+                hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         if self.layer_type == "linear_attention":
             hidden_states = self.linear_attn(hidden_states=hidden_states)
@@ -247,7 +379,12 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
                 hidden_states = hidden_states * (self.attn_layer_scale.to(hidden_states.dtype) + 1)
 
         if use_sp:
-            hidden_states = sp_reduce_scatter(hidden_states)
+            # An output projection carrying the fused Matmul+ReduceScatter
+            # op completes the TP partial sums itself and returns the
+            # rank-local shard, so the decoder skips its reduce-scatter.
+            out_proj = self.linear_attn.out_proj if self.layer_type == "linear_attention" else self.self_attn.o_proj
+            if not _owns_sequence_collective(out_proj, DenseSpMmReduceScatterOp):
+                hidden_states = sp_reduce_scatter(hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -284,21 +421,57 @@ def _qwen3_5_decoder_layer_init_with_dense_sp(
     prefix: str = "",
 ) -> None:
     _QWEN3_5_LAYER_ORIGINAL_INIT(self, vllm_config, layer_type, prefix=prefix)
-    if not enable_dense_sp(vllm_config) or self.use_attn_reduce_scatter_for_moe:
+
+    is_dense_sp = enable_dense_sp(vllm_config)
+    is_moe_sp = (
+        not is_dense_sp
+        and self.use_attn_reduce_scatter_for_moe
+        and _enable_moe_sp_fused_ops(vllm_config)
+    )
+    if not (is_dense_sp or is_moe_sp):
         return
-    # Dense FlashComm SP reuses the upstream SP-MoE layer contract: the flag
-    # drives Qwen3NextModel's entry chunk / exit all-gather, the MTP head's
-    # chunk / gather, and this patch's gather / scatter decoder layout.
-    self.use_attn_reduce_scatter_for_moe = True
-    # The output projections were built with reduce_results=True (the upstream
-    # flag is False for dense checkpoints); under SP the decoder layer's
-    # reduce-scatter completes the sum instead.
+
+    if is_dense_sp:
+        # Dense FlashComm SP reuses the upstream SP-MoE layer contract: the flag
+        # drives Qwen3NextModel's entry chunk / exit all-gather, the MTP head's
+        # chunk / gather, and this patch's gather / scatter decoder layout.
+        self.use_attn_reduce_scatter_for_moe = True
+        # The output projections were built with reduce_results=True (the upstream
+        # flag is False for dense checkpoints); under SP the decoder layer's
+        # reduce-scatter completes the sum instead.
+        if layer_type == "linear_attention":
+            self.linear_attn.out_proj.reduce_results = False
+        else:
+            self.self_attn.o_proj.reduce_results = False
+        if not isinstance(self.mlp, Qwen3NextSparseMoeBlock):
+            self.mlp.down_proj.reduce_results = False
+    # MoE SP: the upstream MoE SP path has already set
+    # ``use_attn_reduce_scatter_for_moe=True`` and adjusted
+    # ``reduce_results`` on the output projections — skip flag setup.
+
+    # Fused matmul-collective ops for prefill-sized batches: the column side
+    # folds the sequence all-gather into the GEMM and the row side folds the
+    # reduce-scatter in, so the decoder-level collectives disappear for the
+    # layers whose boundary projections took them. The GDN in-projections are
+    # deliberately left stock (their gather feeds several consumers inside the
+    # mixer core).
+    # For MoE SP models, only attention projections get fused ops — the expert
+    # MLP uses All-to-All dispatch, not AllGather/ReduceScatter.
     if layer_type == "linear_attention":
-        self.linear_attn.out_proj.reduce_results = False
+        _install_dense_sp_fused_op(self.linear_attn.out_proj, DenseSpMmReduceScatterOp)
     else:
-        self.self_attn.o_proj.reduce_results = False
+        _install_dense_sp_fused_op(self.self_attn.qkv_proj, DenseSpAllGatherMmOp)
+        _install_dense_sp_fused_op(self.self_attn.o_proj, DenseSpMmReduceScatterOp)
     if not isinstance(self.mlp, Qwen3NextSparseMoeBlock):
-        self.mlp.down_proj.reduce_results = False
+        gate_up_installed = _install_dense_sp_fused_op(self.mlp.gate_up_proj, DenseSpAllGatherMmOp)
+        down_installed = _install_dense_sp_fused_op(self.mlp.down_proj, DenseSpMmReduceScatterOp)
+        if gate_up_installed != down_installed:
+            # The dense-MLP helper assumes the pair either both own their
+            # collective or neither does; unwind a half-installed pair.
+            if gate_up_installed:
+                self.mlp.gate_up_proj.custom_op = None
+            if down_installed:
+                self.mlp.down_proj.custom_op = None
 
 
 if Qwen3_5MultiTokenPredictor is not None:
