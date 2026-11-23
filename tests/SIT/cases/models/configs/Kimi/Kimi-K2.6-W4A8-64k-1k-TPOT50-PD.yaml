@@ -159,3 +159,11 @@ benchmarks:
     threshold: 10
     temperature: 1.0
     top_p: 1
+test_content:
+  - spec_decode_acceptance
+acceptance_rate:
+  benchmark: acc_aime2025
+  # pos10-14 measured 0.01/0.006/0.003/0.001/0.0005, below the sampling noise floor of this
+  # workload, so no lower bound is enforced for them (0 means the position is not validated).
+  baseline: [0.68, 0.46, 0.32, 0.22, 0.16, 0.11, 0.07, 0.05, 0.03, 0.02, 0.00, 0.00, 0.00, 0.00, 0.00]
+  tolerance: 0.05

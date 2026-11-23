@@ -151,6 +151,12 @@ test_cases:
       - "--enable-prefix-caching"
     benchmarks:
       <<: *benchmarks_acc
+    test_content:
+      - spec_decode_acceptance
+    acceptance_rate:
+      benchmark: acc
+      baseline: [0.88, 0.74, 0.62]
+      tolerance: 0.05
   - name: "Qwen3.6-27B-3500-50"
     model: "Eco-Tech/Qwen3.6-27B-w8a8"
     envs:
