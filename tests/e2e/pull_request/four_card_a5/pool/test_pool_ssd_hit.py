@@ -72,7 +72,9 @@ def _build_memcache_pool_config() -> MemcacheKVPoolConfig:
                 "local": {
                     "ock.mmc.log_level": "error",
                     "ock.mmc.local_service.world_size": 256,
-                    "ock.mmc.local_service.protocol": "device_urma",
+                    # device_sdma is the data path the known-good A5 memcache
+                    # case (two_card/pool/test_qwen38_mamba_pool.py) uses.
+                    "ock.mmc.local_service.protocol": "device_sdma",
                     # Per engine; 16K/36K prompts need well under 1GB of KV, and
                     # 8 DP engines each reserve this much host memory.
                     "ock.mmc.local_service.dram.size": "4GB",
@@ -92,13 +94,13 @@ def _build_memcache_pool_config() -> MemcacheKVPoolConfig:
             "local": {
                 "ock.mmc.log_level": "error",
                 "ock.mmc.local_service.world_size": 256,
-                "ock.mmc.local_service.protocol": "device_urma",
+                "ock.mmc.local_service.protocol": "device_sdma",
                 "ock.mmc.local_service.dram.size": "0GB",
             },
             "standalone": {
                 "ock.mmc.log_level": "error",
                 "ock.mmc.local_service.world_size": 256,
-                "ock.mmc.local_service.protocol": "device_urma",
+                "ock.mmc.local_service.protocol": "device_sdma",
                 "ock.mmc.local_service.dram.size": "10GB",
                 "ock.mmc.local_service.storage.enabled": "true",
                 "ubsio.disk.path": SSD_DEV,
