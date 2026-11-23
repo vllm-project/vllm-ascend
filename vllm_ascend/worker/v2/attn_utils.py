@@ -121,7 +121,6 @@ from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.utils import (
     get_single_raw_mla_backing,
     make_page_strided_cache_view,
-    reshape_combined_attention_kv_cache,
 )
 
 if TYPE_CHECKING:
@@ -694,6 +693,41 @@ def _reshape_combined_mla_kv_cache(
         )
 
     return component_view(k_shape, 0), component_view(v_shape, k_block_bytes)
+
+
+def _reshape_combined_attention_kv_cache(
+    raw_cache: torch.Tensor,
+    kv_cache_shape: tuple[int, ...],
+    dtype: torch.dtype,
+    page_stride_bytes: int,
+    num_blocks_per_kv_block: int = 1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Create block-strided K/V views over padded physical pages."""
+    if len(kv_cache_shape) != 5 or kv_cache_shape[0] != 2:
+        raise ValueError("Combined Attention cache must have shape [K/V, blocks, block_size, heads, dim].")
+    dtype_size = get_dtype_size(dtype)
+    if page_stride_bytes % dtype_size:
+        raise ValueError("Physical Attention page is not aligned to its dtype.")
+
+    hidden_size = math.prod(kv_cache_shape[2:])
+    if num_blocks_per_kv_block < 1:
+        raise ValueError("The number of kernel blocks per KV block must be positive.")
+    if page_stride_bytes % (num_blocks_per_kv_block * dtype_size):
+        raise ValueError("Padded combined Attention pages must split into dtype-aligned kernel blocks.")
+    kernel_stride_bytes = page_stride_bytes // num_blocks_per_kv_block
+    if kernel_stride_bytes < 2 * hidden_size * dtype_size:
+        raise ValueError("Physical Attention page is too small for its kernel blocks.")
+    dense_strides = [math.prod(kv_cache_shape[dim + 1 :]) for dim in range(len(kv_cache_shape))]
+    combined_cache = torch.as_strided(
+        raw_cache.view(dtype),
+        size=kv_cache_shape,
+        stride=(
+            hidden_size,
+            kernel_stride_bytes // dtype_size,
+            *dense_strides[2:],
+        ),
+    )
+    return combined_cache[0], combined_cache[1]
 
 
 def _align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
@@ -2086,7 +2120,7 @@ def _reshape_kv_cache_v2(
                         raw_cache, k_shape, v_shape, k_dtype, page_stride_bytes, num_blocks_per_kv_block
                     )
                 else:
-                    k_cache, v_cache = reshape_combined_attention_kv_cache(
+                    k_cache, v_cache = _reshape_combined_attention_kv_cache(
                         raw_cache,
                         kv_cache_shape,
                         k_dtype,

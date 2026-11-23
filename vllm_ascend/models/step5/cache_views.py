@@ -7,7 +7,7 @@ import torch
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import AttentionSpec, compute_layer_kv_cache_shape_bytes
 
-from vllm_ascend.worker.utils import make_page_strided_cache_view, reshape_combined_attention_kv_cache
+from vllm_ascend.worker.utils import make_page_strided_cache_view
 
 
 class Step5AttentionCacheView:
@@ -21,6 +21,9 @@ class Step5AttentionCacheView:
         cache_dtype: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Expose the page's K and V with the backend's axis order."""
+        # Import the V2 reshape lazily to keep worker initialization out of model import.
+        from vllm_ascend.worker.v2.attn_utils import _reshape_combined_attention_kv_cache
+
         kernel_blocks_per_page, remainder = divmod(spec.block_size, kernel_block_size)
         if remainder:
             raise ValueError("Kernel block size must divide the Step5 cache block size.")
@@ -31,7 +34,7 @@ class Step5AttentionCacheView:
             spec.head_size,
             (getattr(spec, "cache_dtype_str", None) or "auto") if spec.is_draft else cache_dtype,
         )
-        return reshape_combined_attention_kv_cache(raw_cache, shape, spec.dtype, block_stride, kernel_blocks_per_page)
+        return _reshape_combined_attention_kv_cache(raw_cache, shape, spec.dtype, block_stride, kernel_blocks_per_page)
 
 
 class Step5AuxiliaryCacheView:

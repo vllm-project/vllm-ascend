@@ -60,7 +60,7 @@ from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.models.step5.cache_views import Step5AuxiliaryCacheView
-from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes, reshape_combined_attention_kv_cache
+from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2 import model_runner as v2_model_runner
 from vllm_ascend.worker.v2 import utils as v2_utils
@@ -484,7 +484,7 @@ def test_mrv2_attention_views_interleave_kv_per_physical_page():
         dtype=torch.int8,
     )
 
-    key, value = reshape_combined_attention_kv_cache(
+    key, value = attn_utils._reshape_combined_attention_kv_cache(
         raw,
         (2, num_blocks, block_size, num_heads, head_size),
         torch.float16,
@@ -1658,7 +1658,7 @@ def test_combined_attention_kernel_blocks_match_physical_rows(splits):
     shape = (2, 3 * splits, 128, 2, 256)
     block_elements = 128 * 2 * 256
     raw = torch.zeros(2 * shape[1] * block_elements, dtype=torch.float16)
-    key, value = reshape_combined_attention_kv_cache(
+    key, value = attn_utils._reshape_combined_attention_kv_cache(
         raw.view(torch.int8), shape, raw.dtype, splits * 2 * block_elements * 2, splits
     )
     physical = raw.view(3, splits, 2, 128, 2, 256)
@@ -1671,7 +1671,9 @@ def test_combined_attention_kernel_blocks_match_physical_rows(splits):
     assert key.stride(0) == 2 * block_elements
     assert key.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr()
     with pytest.raises(ValueError, match="Padded combined"):
-        reshape_combined_attention_kv_cache(raw.view(torch.int8), shape, raw.dtype, 9 * 2 * block_elements * 2 + 64, 9)
+        attn_utils._reshape_combined_attention_kv_cache(
+            raw.view(torch.int8), shape, raw.dtype, 9 * 2 * block_elements * 2 + 64, 9
+        )
 
 
 @pytest.mark.parametrize("splits", [1, 2, 4, 8])
@@ -1684,7 +1686,9 @@ def test_padded_attention_kernel_writes_preserve_other_pages_and_padding(splits,
     kernel_stride_elements = page_bytes // splits // dtype_size
     raw = torch.full((num_blocks, splits, kernel_stride_elements), -7, dtype=dtype)
     shape = (2, num_blocks * splits, block_size, heads, dim)
-    key, value = reshape_combined_attention_kv_cache(raw.view(torch.int8).flatten(), shape, dtype, page_bytes, splits)
+    key, value = attn_utils._reshape_combined_attention_kv_cache(
+        raw.view(torch.int8).flatten(), shape, dtype, page_bytes, splits
+    )
     assert key.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr()
     assert value.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr()
     assert not key.is_contiguous()
@@ -1711,7 +1715,7 @@ def test_padded_attention_kernel_writes_preserve_other_pages_and_padding(splits,
 def test_combined_attention_rejects_invalid_kernel_page_geometry(splits, page_bytes, message):
     raw = torch.zeros(4096, dtype=torch.int8)
     with pytest.raises(ValueError, match=message):
-        reshape_combined_attention_kv_cache(raw, (2, 4, 128, 1, 1), torch.float16, page_bytes, splits)
+        attn_utils._reshape_combined_attention_kv_cache(raw, (2, 4, 128, 1, 1), torch.float16, page_bytes, splits)
 
 
 @pytest.mark.parametrize("for_capture", [False, True])
