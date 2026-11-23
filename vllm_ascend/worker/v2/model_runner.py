@@ -385,22 +385,29 @@ class NPUModelRunner(GPUModelRunner):
 
         # A rank-local mapping can fail after the shared Engram tables have
         # been loaded. Its rollback must only close the mappings it acquired.
-        with track_host_offload_owners() as owners:
+        with DeviceMemoryProfiler(self.device) as memory, track_host_offload_owners() as owners:
             try:
-                with DeviceMemoryProfiler(self.device) as memory:
-                    embeddings = offload_input_embeddings(layers)
-                if memory.consumed_memory >= 0:
-                    raise RuntimeError("Host VMM input embeddings released no NPU tensor memory")
-                self.model_memory_usage += memory.consumed_memory
-                torch.npu.empty_cache()
+                embeddings = offload_input_embeddings(layers)
             except BaseException:
                 self._release_failed_host_offload(owners)
                 raise
-        self._input_embedding_host_vmm_owners = embeddings
+            # Register installed mappings before the profiler takes its final sample.
+            self._input_embedding_host_vmm_owners = embeddings
+
+        memory_delta = memory.consumed_memory
+        self.model_memory_usage += memory_delta
+        if memory_delta >= 0:
+            logger.warning(
+                "Host VMM input embeddings: moved %d table(s) with no net NPU tensor memory savings (change: %d bytes)",
+                len(embeddings),
+                memory_delta,
+            )
+            return
+        torch.npu.empty_cache()
         logger.info(
             "Host VMM input embeddings: moved %d table(s) and released %d bytes of NPU tensor memory",
             len(embeddings),
-            -memory.consumed_memory,
+            -memory_delta,
         )
 
     def reload_weights(self, *args, **kwargs) -> None:
