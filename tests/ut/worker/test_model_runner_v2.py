@@ -2791,6 +2791,22 @@ def test_shutdown_releases_uva_owner_without_shared_pool_client():
     assert calls == ["parent", "release"]
 
 
+def test_shutdown_releases_shared_engram_after_input_embedding_release_fails():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    rank_local = Mock(local_vmm=False)
+    rank_local.close_host_offload.side_effect = RuntimeError("input embedding unmap failed")
+    collective = Mock(local_vmm=True)
+    runner._input_embedding_host_vmm_owners = [rank_local]
+    runner.model = Mock()
+    runner.model.modules.return_value = [collective]
+
+    with patch.object(GPUModelRunner, "shutdown"), pytest.raises(RuntimeError, match="input embedding unmap failed"):
+        runner.shutdown()
+
+    collective.close_host_offload.assert_called_once_with()
+    assert runner._shared_engram_shutdown_pending == [rank_local]
+
+
 @pytest.mark.parametrize("published_model,cleanup_fails", [(False, False), (False, True), (True, True)])
 def test_load_failure_closes_unpublished_host_owners(published_model, cleanup_fails):
     from vllm_ascend.model_executor.warmup import nz_warmup

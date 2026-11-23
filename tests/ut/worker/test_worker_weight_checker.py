@@ -43,7 +43,7 @@ def mock_ascend_config(monkeypatch):
     monkeypatch.setattr(
         npu_worker_module,
         "get_ascend_config",
-        lambda: SimpleNamespace(weight_nz_mode=0),
+        lambda: SimpleNamespace(weight_nz_mode=0, input_embedding_host_vmm=False),
     )
 
 
@@ -88,12 +88,24 @@ def test_reset_weights_zeroes_params_not_buffers(mock_parallel_groups, mock_asce
     assert model.scale.item() == 2.0
 
 
+def test_reset_weights_rejects_host_vmm_before_mutating_params(monkeypatch):
+    monkeypatch.setattr(npu_worker_module, "get_ascend_config", lambda: SimpleNamespace(input_embedding_host_vmm=True))
+    model = _TinyModel()
+    worker = _make_worker(dp_rank=0)
+    worker.model_runner = cast(Any, SimpleNamespace(get_model=lambda: model))
+
+    with pytest.raises(RuntimeError, match="Weight reset is unavailable with Host VMM"):
+        worker.reset_weights()
+
+    assert torch.all(model.linear.weight == 1)
+
+
 def test_reset_weights_warns_under_nz_mode(mock_parallel_groups, monkeypatch):
     """weight_nz_mode=1: reset still zeroes params and logs the NZ warning."""
     monkeypatch.setattr(
         npu_worker_module,
         "get_ascend_config",
-        lambda: SimpleNamespace(weight_nz_mode=1),
+        lambda: SimpleNamespace(weight_nz_mode=1, input_embedding_host_vmm=False),
     )
     mock_logger = MagicMock()
     monkeypatch.setattr(npu_worker_module, "logger", mock_logger)

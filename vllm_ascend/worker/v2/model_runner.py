@@ -688,23 +688,25 @@ class NPUModelRunner(GPUModelRunner):
             super().shutdown()
             self._shared_engram_parent_stopped = True
         first_error = None
+        pending = []
         for embedding in shared_embeddings:
             if getattr(embedding, "local_vmm", False) is True:
+                pending.append(embedding)
                 continue
             try:
                 embedding.close_host_offload()
             except Exception as exc:
+                pending.append(embedding)
                 if first_error is None:
                     first_error = exc
-        if first_error is not None:
-            raise first_error
-        pending = [owner for owner in shared_embeddings if getattr(owner, "local_vmm", False) is True]
         self._shared_engram_shutdown_pending = pending
         if pending:
             from vllm_ascend.models.deepseek_v41.engram.local_shared_vmm import EngramSharedReleaseError
 
             errors = []
             for index in range(len(pending) - 1, -1, -1):
+                if getattr(pending[index], "local_vmm", False) is not True:
+                    continue
                 try:
                     pending[index].close_host_offload()
                 except EngramSharedReleaseError as exc:
@@ -713,6 +715,9 @@ class NPUModelRunner(GPUModelRunner):
                     del pending[index]
             if errors:
                 raise EngramSharedReleaseError("; ".join(errors))
+        # Every peer must enter the shared Engram collectives even after a local error.
+        if first_error is not None:
+            raise first_error
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         """Bind host pools before the V2 KV connector registers its destinations."""

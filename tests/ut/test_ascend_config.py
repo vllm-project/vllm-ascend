@@ -26,7 +26,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import PropertyMock, patch
 
-from vllm.config import DeviceConfig, KVTransferConfig
+import pytest
+from vllm.config import DeviceConfig, KVTransferConfig, SpeculativeConfig
 from vllm.config import VllmConfig as _VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 
@@ -74,7 +75,6 @@ def test_shared_engram_requires_v2_runner():
 
 
 def test_shared_engram_config_schema():
-    import pytest
     from pydantic import TypeAdapter
 
     config = SharedEngramConfig(backend="a3", endpoint="owner:29500")
@@ -90,8 +90,11 @@ def test_shared_engram_config_schema():
             TypeAdapter(SharedEngramConfig).validate_python(values)
 
 
-def test_input_embedding_host_vmm_allows_colocated_dspark_with_tensor_parallelism():
+@pytest.mark.parametrize("method", ["dspark", "ngram", "ngram_gpu"])
+def test_input_embedding_host_vmm_allows_colocated_speculation_with_tensor_parallelism(method):
     config = AscendConfig(input_embedding_host_vmm=True)
+    spec = SpeculativeConfig.__new__(SpeculativeConfig)
+    spec.method = method
     vc = SimpleNamespace(
         use_v2_model_runner=True,
         model_config=SimpleNamespace(
@@ -99,9 +102,7 @@ def test_input_embedding_host_vmm_allows_colocated_dspark_with_tensor_parallelis
         ),
         kv_transfer_config=None,
         parallel_config=SimpleNamespace(tensor_parallel_size=2),
-        speculative_config=SimpleNamespace(
-            method="dspark", draft_parallel_config=SimpleNamespace(tensor_parallel_size=2)
-        ),
+        speculative_config=spec,
         offload_config=SimpleNamespace(
             uva=SimpleNamespace(cpu_offload_gb=0), prefetch=SimpleNamespace(offload_group_size=0)
         ),

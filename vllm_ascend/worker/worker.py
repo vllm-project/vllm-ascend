@@ -1289,7 +1289,10 @@ class NPUWorker(GPUWorker):
         return {prefix + name: digest for name, digest in digests.items()}
 
     def reset_weights(self) -> None:
-        if get_ascend_config().weight_nz_mode:
+        ascend_config = get_ascend_config()
+        if ascend_config.input_embedding_host_vmm:
+            raise RuntimeError("Weight reset is unavailable with Host VMM input embeddings")
+        if ascend_config.weight_nz_mode:
             logger.warning(
                 "weight_nz_mode is enabled: weight transfer update is unavailable, "
                 "reset weights can only be restored via checkpoint reload (reload_weights)."

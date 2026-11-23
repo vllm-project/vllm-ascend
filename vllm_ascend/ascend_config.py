@@ -1112,8 +1112,8 @@ class AscendConfig:
         ):
             raise ValueError("input_embedding_host_vmm requires DeepSeek V4.1 on A3 with Model Runner V2")
         spec = vllm_config.speculative_config
-        if spec is not None and spec.method != "dspark":
-            raise ValueError("input_embedding_host_vmm requires DSpark when speculative decoding is enabled")
+        if spec is not None and not (spec.use_dspark() or spec.use_ngram()):
+            raise ValueError("input_embedding_host_vmm supports DSpark and n-gram speculative decoding")
         offload = vllm_config.offload_config
         if (
             model.enable_sleep_mode
