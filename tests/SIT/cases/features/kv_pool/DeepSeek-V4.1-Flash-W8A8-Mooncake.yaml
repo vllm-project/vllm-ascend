@@ -18,6 +18,7 @@ kv_pool:
   config:
     metadata_server: "P2PHANDSHAKE"
     protocol: "ascend"
+    device_name: ""
     global_segment_size: "1GB"
     local_buffer_size: "1GB"
     preferred_segment: false
