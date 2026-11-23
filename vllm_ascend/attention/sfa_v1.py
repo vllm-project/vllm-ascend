@@ -29,7 +29,6 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
-    is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.indexer import AscendSFAIndexerCache
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
@@ -563,7 +562,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.nope_states: dict[int | None, SparseMLAMetadataState] = {}
 
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
-        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
+        self.is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         if self.speculative_config:
@@ -845,7 +844,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.vllm_config = get_current_vllm_config()
         self.pcp_enabled = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
-        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
+        self.is_pcp_decode_sharded = self.vllm_config.parallel_config.pcp_shard_decode_requests
         # SFA absorbs kv_b_proj (and, for KV consumers on PROLOG_V3, the fused
         # qkv/q projections) and disposes the source parameters. A disposed
         # parameter is no longer a valid destination for the in-place weight
@@ -1932,6 +1931,9 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _on_kv_cache_written(self, kv_cache: tuple[torch.Tensor, ...], attn_metadata: M) -> None:
         """Allow parallel implementations to overlap communication with the indexer."""
 
+    def _before_indexer(self, attn_metadata: M) -> None:
+        """Order parallel attention communication before indexer cache gathers."""
+
     def _start_o_proj_weight_gather(self) -> None:
         """Prefetch PCP output weights after the cache-input collectives."""
         if self._parallel_o_proj is not None:
@@ -2257,12 +2259,14 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert k_hidden_states is not None
             assert indexer_attn_metadata is not None
             self._prepare_indexer_metadata(indexer_attn_metadata, attn_metadata)
+            self._before_indexer(attn_metadata)
             topk_indices = self.indexer(
                 hidden_states,
                 q_c,
                 k_hidden_states,
                 indexer_attn_metadata,
-                compute_topk=not self.skip_topk and has_local_query,
+                compute_topk=not self.skip_topk
+                and (has_local_query or getattr(indexer_attn_metadata, "kv_gather_block_ids", None) is not None),
             )
             # Release pending indexer receive buffers after their consumer.
             k_hidden_states = None

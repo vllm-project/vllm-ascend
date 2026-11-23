@@ -70,6 +70,7 @@ def test_skip_moe_padding_requires_supported_layout(
 def test_sp_mask_seen_by_first_layer(monkeypatch, skip):
     padding = torch.tensor([False, False, True, True])
     context = SimpleNamespace(is_padding=padding)
+    monkeypatch.setattr(model_module, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True))
     monkeypatch.setattr(model_module, "get_forward_context", lambda: context)
     monkeypatch.setattr(model_module, "is_forward_context_available", lambda: True)
     monkeypatch.setattr(model_module.envs, "VLLM_MOE_SKIP_PADDING", True)
@@ -97,6 +98,8 @@ def test_sp_mask_seen_by_first_layer(monkeypatch, skip):
         use_sequence_parallel=True,
         skip_padding_tokens_in_moe=skip,
         layers=[Layer()],
+        start_layer=0,
+        end_layer=1,
         decoder_replay_layers=None,
         shared_attention_state=SimpleNamespace(reset=lambda: None),
         aux_hidden_state_layers=(),

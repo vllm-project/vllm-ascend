@@ -170,10 +170,10 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
     @property
     def attn_vllm_config(self) -> VllmConfig:
-        config = super().attn_vllm_config
-        # Builders and graph replay must use the same topology as model loading.
-        config.parallel_config = self.draft_vllm_config.parallel_config
-        return config
+        # Preserve upstream attention settings without mutating shared config.
+        attn_config = copy(super().attn_vllm_config)
+        attn_config.parallel_config = self.draft_vllm_config.parallel_config
+        return attn_config
 
     # TODO: Remove this method once vllm-project/vllm#53458 or an
     # equivalent upstream fix is merged.

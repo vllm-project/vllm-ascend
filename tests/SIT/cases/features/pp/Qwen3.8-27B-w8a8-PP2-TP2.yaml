@@ -19,7 +19,7 @@ test_cases:
       - --kv-cache-dtype
       - auto
       - --max-model-len
-      - "81920"
+      - "102400"
       - --block-size
       - "128"
       - --max-num-batched-tokens

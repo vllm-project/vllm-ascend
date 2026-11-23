@@ -85,15 +85,29 @@ def test_glm_kda_backend_declares_pcp_support() -> None:
 
     assert backend.supports_pcp()
     assert not model_kda.AscendGDNHostMetadataBackend.supports_pcp()
-    assert backend.get_builder_cls() is model_kda.AscendGDNHostMetadataBackend.get_builder_cls()
+    assert backend.get_builder_cls() is model_kda.Glm5NextGDNHostMetadataBuilder
 
 
-@pytest.mark.parametrize(("pcp_size", "pcp_rank"), [(1, 0), (2, 0), (2, 1)])
-@pytest.mark.parametrize("is_prefilling", [[False], [True], [False, True]], ids=["decode", "prefill", "mixed"])
+@pytest.mark.parametrize(
+    "pcp_size,pcp_rank,is_prefilling,decode_sharded",
+    [
+        pytest.param(
+            pcp_size,
+            pcp_rank,
+            is_prefilling,
+            decode_sharded,
+            id=f"pcp{pcp_size}-rank{pcp_rank}-{batch_kind}-sharded{decode_sharded}",
+        )
+        for pcp_size, pcp_rank in ((1, 0), (2, 0), (2, 1))
+        for batch_kind, is_prefilling in (("decode", [False]), ("prefill", [True]), ("mixed", [False, True]))
+        # The flag only changes execution for PCP decode and mixed batches.
+        for decode_sharded in ((False, True) if pcp_size > 1 and batch_kind != "prefill" else (False,))
+    ],
+)
 @pytest.mark.parametrize("needs_output_buffer", [False, True])
 @pytest.mark.parametrize("pcp_projection", [False, True])
-def test_kda_pcp_restores_prefill_and_skips_decode_gather(
-    monkeypatch, pcp_size, pcp_rank, is_prefilling, needs_output_buffer, pcp_projection
+def test_kda_pcp_restores_global_order_and_returns_local_output(
+    monkeypatch, pcp_size, pcp_rank, is_prefilling, needs_output_buffer, pcp_projection, decode_sharded
 ):
     layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
@@ -103,6 +117,7 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(
     # the variant returning its own output.
     layer._needs_output_buffer = needs_output_buffer
     layer.projection_tp = None
+    layer.is_pcp_decode_sharded = decode_sharded and pcp_size > 1
     layer.local_projection_size = 2
     layer.local_num_heads = 1
     layer.head_dim = 2
@@ -144,25 +159,35 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(
 
     layer._forward_core = run_kda
     mixed = is_prefilling == [False, True]
+    gathered_rows = [0, 1, 2, 5, 0, 1, 3, 4] if mixed else [0, 1, 6, -1, 2, 3, 4, 5]
+    restore = [0, 1, 2, 6, 7, 3] if mixed else [0, 1, 4, 5, 6, 7, 2]
+    mapping = [0, 1, 2, 5, 0, 1, 3, 4] if mixed else [0, 1, 6, 0, 2, 3, 4, 5]
+    if decode_sharded and mixed:
+        gathered_rows, restore, mapping = (
+            [0, 1, 2, 5, 3, 4, -1, -1],
+            [0, 1, 2, 4, 5, 3],
+            [0, 1, 2, 5, 3, 4, 0, 0],
+        )
+    elif decode_sharded and not any(is_prefilling):
+        # One request: the other PCP rank still advances its state heads.
+        gathered_rows, restore, mapping = [0, -1, -1, -1, -1, -1, -1, -1], [0], [0] * 8
     pcp_context = SimpleNamespace(
-        global_batch=SimpleNamespace(is_prefilling_np=torch.tensor(is_prefilling)),
-        hidden_restore_idx=torch.tensor([0, 1, 2, 6, 7, 3] if mixed else [0, 1, 4, 5, 6, 7, 2]),
-        padded_gather_idx=torch.tensor([0, 1, 2, 5, 0, 1, 3, 4] if mixed else [0, 1, 6, 0, 2, 3, 4, 5]),
+        global_batch=SimpleNamespace(is_prefilling_np=torch.tensor(is_prefilling), has_prefill=any(is_prefilling)),
+        hidden_restore_idx=torch.tensor(restore),
+        padded_gather_idx=torch.tensor(mapping),
     )
-    uses_pcp_prefill = pcp_size > 1 and any(is_prefilling)
+    gathers_pcp = pcp_size > 1 and (any(is_prefilling) or decode_sharded)
     metadata = SimpleNamespace(pcp_context=pcp_context if pcp_size > 1 else None)
     monkeypatch.setattr(
         model_kda,
         "get_forward_context",
         lambda: SimpleNamespace(attn_metadata={"layer": metadata}, no_compile_layers={"layer": layer}),
     )
-    # The mixed layout repeats both decode rows on each PCP rank.
-    gathered_rows = [0, 1, 2, 5, 0, 1, 3, 4] if mixed else [0, 1, 6, -1, 2, 3, 4, 5]
     gathered = torch.tensor(gathered_rows, dtype=torch.float32)[:, None].expand(-1, 2).clone()
     pcp_group = SimpleNamespace(
         world_size=pcp_size,
         rank_in_group=pcp_rank,
-        all_gather=lambda x, dim: gathered if uses_pcp_prefill else pytest.fail("batch must not gather PCP tokens"),
+        all_gather=lambda x, dim: gathered if gathers_pcp else pytest.fail("batch must not gather PCP tokens"),
     )
     layer.pcp_group = pcp_group
     layer.pcp_size = pcp_group.world_size
@@ -176,18 +201,72 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(
     local_input = gathered[pcp_rank * 4 : (pcp_rank + 1) * 4]
     output = layer(local_input, torch.arange(4))
 
-    assert seen == (list(range(6 if mixed else 7)) if uses_pcp_prefill else local_input[:, 0].tolist())
-    expected = local_input[:, 0].tolist()
-    if uses_pcp_prefill and not mixed:
-        expected = [0.0, 1.0, 6.0, 0.0] if pcp_rank == 0 else [2.0, 3.0, 4.0, 5.0]
+    assert seen == (list(range(len(restore))) if gathers_pcp else local_input[:, 0].tolist())
+    expected = mapping[pcp_rank * 4 : (pcp_rank + 1) * 4] if gathers_pcp else local_input[:, 0].tolist()
     assert output[:, 0].tolist() == expected
     assert torch.count_nonzero(output[:, 1]) == 0
     if pcp_projection:
-        use_reduce_scatter = uses_pcp_prefill and not mixed
+        use_reduce_scatter = gathers_pcp and (decode_sharded or not mixed)
         assert projection.pcp_group.reduce_scatter.call_count == int(use_reduce_scatter)
         assert projection.pcp_group.all_reduce.call_count == int(pcp_size > 1 and not use_reduce_scatter)
-        if mixed and pcp_size > 1:
+        if mixed and pcp_size > 1 and not decode_sharded:
             assert projection.pcp_group.all_reduce.call_args.args[0].shape[0] == 6
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("needs_output_buffer", [False, True])
+def test_kda_decode_advances_state_when_request_ownership_changes(monkeypatch, rank, needs_output_buffer):
+    layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "layer"
+    layer.is_pcp_decode_sharded = True
+    layer.pcp_size, layer.pcp_rank = 2, rank
+    layer.projection_tp = None
+    layer.local_projection_size, layer.local_num_heads, layer.head_dim = 2, 1, 2
+    layer.in_proj_qkvbfg_a = lambda x: (torch.nn.functional.pad(x, (0, 9)), None)
+    layer.f_b_proj = layer.g_b_proj = lambda x: (torch.zeros(x.shape[0], 2), None)
+    layer.o_norm = lambda output, gate: output
+    layer.o_proj = lambda x: (x, None)
+    metadata = SimpleNamespace()
+    context = SimpleNamespace(attn_metadata={"layer": metadata})
+    monkeypatch.setattr(model_kda, "get_forward_context", lambda: context)
+    state: dict[str, float] = {}
+
+    def recurrent(qkv_proj_states, g1, beta, core_attn_out):
+        # A CPU recurrence makes stale or misordered request state observable;
+        # the device convolution and KDA kernels are outside this routing test.
+        assert qkv_proj_states.shape[0] == len(metadata.request_ids)
+        core_attn_out.zero_()
+        for row, req in enumerate(metadata.request_ids):
+            state[req] = state.get(req, 0) + qkv_proj_states[row, 0].item()
+            core_attn_out[0, row, 0, 0] = state[req]
+
+    layer._forward_core = recurrent
+    steps = [
+        (["a", "b", "c"], [10, 20, 30], [0, 2, 1, 0], [0, 2, 1], [10, 20, 30]),
+        (["b", "c"], [1, 2], [0, 1], [0, 1], [21, 32]),
+        (["c"], [3], [0, 0], [0], [35]),
+    ]
+    for requests, values, mapping, restore, expected_global in steps:
+        metadata.request_ids = requests
+        metadata.pcp_context = SimpleNamespace(
+            global_batch=SimpleNamespace(
+                is_prefilling_np=torch.zeros(len(requests), dtype=torch.bool), has_prefill=False
+            ),
+            hidden_restore_idx=torch.tensor(restore),
+            padded_gather_idx=torch.tensor(mapping),
+        )
+        global_hidden = torch.tensor([[value, 0] for value in values], dtype=torch.float32)
+        gathered = global_hidden[mapping]
+        layer.pcp_group = SimpleNamespace(all_gather=Mock(return_value=gathered))
+        local_input = gathered.chunk(2)[rank]
+        output_buffer = torch.empty_like(local_input) if needs_output_buffer else None
+        result = layer._forward(local_input, output_buffer)
+        output = output_buffer if needs_output_buffer else result
+        expected = torch.tensor(expected_global, dtype=torch.float32)[mapping].chunk(2)[rank]
+        torch.testing.assert_close(output[:, 0], expected)
+        layer.pcp_group.all_gather.assert_called_once()
+    assert state == {"a": 10, "b": 21, "c": 35}
 
 
 @pytest.mark.parametrize("recover", [False, True])

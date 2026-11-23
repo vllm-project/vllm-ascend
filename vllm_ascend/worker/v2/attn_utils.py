@@ -358,6 +358,7 @@ def build_attn_metadata(
     offload_dummy: bool = False,
     req_topk_buffer_slots: torch.Tensor | None = None,
     req_topk_buffer_active: torch.Tensor | None = None,
+    req_topk_buffer_stable_prefixes: torch.Tensor | None = None,
     copy_sfa_draft_index: int | None = None,
     copy_sfa_restore_tails: bool = False,
     draft_layer_names: set[str] | None = None,
@@ -491,6 +492,7 @@ def build_attn_metadata(
             offload_dummy=offload_dummy,
             req_topk_buffer_slots=req_topk_buffer_slots,
             req_topk_buffer_active=req_topk_buffer_active,
+            req_topk_buffer_stable_prefixes=req_topk_buffer_stable_prefixes,
             copy_sfa_draft_index=copy_sfa_draft_index,
             copy_sfa_restore_tails=copy_sfa_restore_tails,
             dcp_local_seq_lens=dcp_local_seq_lens,
@@ -507,15 +509,20 @@ def build_attn_metadata(
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_v41_builder = isinstance(attn_metadata_builder, AscendDSAV41MetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
-            if isinstance(attn_metadata_builder, QSAMetadataBuilder) and num_reqs > num_actual_reqs:
+            is_qsa_indexer = isinstance(attn_metadata_builder, QSAMetadataBuilder)
+            layer_common = common_attn_metadata
+            if is_qsa_indexer and num_reqs > num_actual_reqs:
                 # FULL graph padding appends dummy request boundaries to the
                 # shared query_start_loc, while QSA reads the CPU tail as its
                 # mapped-token count. Expose only the live request boundaries.
-                common_attn_metadata = replace(  # type: ignore[call-arg]
-                    common_attn_metadata,
-                    query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu[: num_actual_reqs + 1],
+                layer_common = layer_common.replace(
+                    query_start_loc_cpu=layer_common.query_start_loc_cpu[: num_actual_reqs + 1],
                 )
-            metadata_variants = [(attn_group.layer_names, common_attn_metadata)]
+            if pcp_context is not None and (full_graph_mode or for_cudagraph_capture):
+                backend = getattr(attn_group, "backend", None)
+                if is_qsa_indexer or getattr(backend, "uses_qsa_page_major_kv_view", False):
+                    layer_common = layer_common.replace(graph_pad_size=num_input_tokens)
+            metadata_variants = [(attn_group.layer_names, layer_common)]
             if is_sfa_builder and draft_layer_names:
                 target_names = [name for name in attn_group.layer_names if name not in draft_layer_names]
                 draft_names = [name for name in attn_group.layer_names if name in draft_layer_names]

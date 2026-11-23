@@ -20,7 +20,9 @@ from vllm.model_executor.offloader.base import create_offloader as create_vllm_o
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
-from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.model_runner import BatchReqState, ExecuteModelState, GPUModelRunner
+from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.attention.attention_c8_mxfp import (
@@ -37,6 +39,9 @@ from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.spec_decode import pcp_utils as draft_pcp_utils
+from vllm_ascend.worker.v2.spec_decode.dflash import speculator as ascend_dflash
+from vllm_ascend.worker.v2.spec_decode.dspark import speculator as ascend_dspark
 from vllm_ascend.worker.v2.utils import C8KVBlockZeroer
 
 
@@ -967,6 +972,99 @@ def test_dummy_run_flushes_dump_window_without_writing(is_profile, lmhead_tp):
     debugger.step.assert_called_once_with(dump=False)
     # The lmhead TP join happens inside execute_model; do not repeat it here.
     runner.model.compute_logits.assert_not_called()
+
+
+@pytest.mark.parametrize("speculator_cls", [ascend_dflash.AscendDFlashSpeculator, ascend_dspark.AscendDSparkSpeculator])
+@pytest.mark.parametrize(
+    "pcp,is_profile,skip_attn,expected,fail",
+    [
+        (8, True, True, 32, False),
+        (2, True, True, 16, False),
+        (1, True, True, 8, False),
+        (8, False, False, 8, False),
+        (8, True, False, 8, False),
+        (8, True, True, 32, True),
+    ],
+)
+def test_replicated_draft_profile_keeps_target_sampling_local(
+    monkeypatch, speculator_cls, pcp, is_profile, skip_attn, expected, fail
+):
+    runner = _make_runner()
+    runner.device = torch.device("cpu")
+    runner.is_first_pp_rank = runner.is_last_pp_rank = True
+    runner.max_num_tokens, runner.max_num_reqs = 8, 2
+    runner.vllm_config.parallel_config.prefill_context_parallel_size = pcp
+    runner.speculative_config = SimpleNamespace(max_num_new_slots_for_drafting=0)
+    runner.input_buffers = InputBuffers(2, 32, runner.device)
+    runner.kv_connector = Mock()
+    runner.lora_config = None
+    runner.maybe_dummy_run_with_lora = Mock(return_value=nullcontext())
+    runner.step_timing = Mock()
+    runner.model = torch.nn.Identity()
+    runner.draft_context = nullcontext
+    runner._draft_workspace_lane = int(speculator_cls is ascend_dspark.AscendDSparkSpeculator)
+    speculator = object.__new__(speculator_cls)
+    speculator.num_query_per_req, speculator.supports_mm_inputs = 3, False
+    speculator.pcp_manager = None  # KV cache initialization has not run.
+    speculator.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+    speculator.use_dcp, speculator.max_num_tokens = False, 32
+    speculator.input_buffers = InputBuffers(2, 32, runner.device)
+    speculator.input_buffers.is_padding.fill_(True)
+    runner.speculator = speculator
+    runner.req_states = Mock()
+    runner.sampler = Mock()
+    local_batch = InputBatch.make_dummy(2, 8, runner.input_buffers, is_padding=False)
+    local_hidden = torch.arange(32, dtype=torch.float32).reshape(4, 8).T
+    state = ExecuteModelState(local_batch, None, None, local_hidden, [local_hidden + 1], None, set(), None, None, 3)
+
+    def target_forward(scheduler_output, **kwargs):
+        assert scheduler_output.total_num_scheduled_tokens == 8
+        runner.execute_model_state = state
+
+    runner.execute_model = target_forward
+
+    def gather(hidden, dim):
+        assert hidden.is_contiguous() and dim == 0
+        if fail:
+            raise RuntimeError("profile gather failed")
+        return torch.cat([hidden] * pcp, dim=dim)
+
+    collective = Mock(side_effect=gather)
+    group = SimpleNamespace(world_size=pcp, all_gather=collective)
+    monkeypatch.setattr(draft_pcp_utils, "get_pcp_group", lambda: group)
+    monkeypatch.setattr(ascend_dflash, "build_attn_metadata_wrapper", nullcontext)
+    monkeypatch.setattr(ascend_dspark, "build_attn_metadata_wrapper", nullcontext)
+    monkeypatch.setattr(ascend_dspark, "build_attn_metadata_factory", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(
+        ascend_dspark.AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config)
+    )
+    propose = Mock()
+    monkeypatch.setattr(DFlashSpeculator, "propose", propose)
+    if fail:
+        with pytest.raises(RuntimeError, match="profile gather failed"):
+            GPUModelRunner._dummy_run(runner, 8, skip_attn=skip_attn, is_profile=is_profile)
+        assert runner.execute_model_state is None
+        propose.assert_not_called()
+        return
+
+    hidden, sample = GPUModelRunner._dummy_run(runner, 8, skip_attn=skip_attn, is_profile=is_profile)
+    assert collective.call_count == (2 if expected > 8 else 0)
+    draft_batch, _, _, draft_hidden, draft_aux, *_ = propose.call_args.args
+    assert draft_batch is speculator.input_batch
+    assert draft_batch.num_tokens == expected
+    assert draft_batch.num_reqs == 2
+    if expected > 8:
+        assert draft_batch is not local_batch
+        assert not speculator.input_buffers.is_padding[:expected].any()
+        torch.testing.assert_close(draft_hidden, local_hidden.repeat(pcp, 1)[:expected])
+    else:
+        assert draft_batch is local_batch
+        assert draft_hidden is local_hidden
+    torch.testing.assert_close(draft_aux[0], draft_hidden + 1)
+    assert hidden is local_hidden
+    torch.testing.assert_close(local_batch.query_start_loc, torch.tensor([0, 4, 8], dtype=torch.int32))
+    torch.testing.assert_close(sample, hidden[local_batch.logits_indices])
+    assert runner.execute_model_state is None
 
 
 @pytest.mark.parametrize("num_reqs,num_tokens", [(4, 4), (2, 6)])

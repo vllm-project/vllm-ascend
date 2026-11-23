@@ -271,13 +271,14 @@ def test_base_scheduler_abstract_contract_and_legacy_metadata_delegation() -> No
 def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_truncate, params):
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.need_truncate = need_truncate
+    scheduler.kv_cache_config = SimpleNamespace(hash_block_size=2)
+    scheduler.vllm_config = SimpleNamespace(num_hash_lookahead_tokens=1)
     request = make_request(
         prompt_token_ids=[1, 2, 3],
         num_prompt_tokens=3,
         _all_token_ids=[1, 2, 3],
         kv_transfer_params=None if params is None else dict(params),
         max_tokens=8,
-        block_hashes=["full-prompt-hash"],
     )
 
     scheduler.on_new_request(request)
@@ -288,12 +289,10 @@ def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_tru
     assert request._all_token_ids == request.prompt_token_ids
     assert request.num_prompt_tokens == (2 if truncated else 3)
     assert request.max_tokens == (1 if truncated else 8)
-    # Keep the two list literals in separate statements. A conditional
-    # expression would join list[tuple[int, int]] with list[str] and fail mypy.
     if truncated:
-        assert request.block_hashes == [(1, 2)]
+        request.truncate_block_hashes.assert_called_once_with(2, 1)
     else:
-        assert request.block_hashes == ["full-prompt-hash"]
+        request.truncate_block_hashes.assert_not_called()
 
 
 @pytest.mark.parametrize(
