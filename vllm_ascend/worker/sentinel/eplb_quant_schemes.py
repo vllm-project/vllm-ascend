@@ -98,7 +98,11 @@ def _down_proj(suffix: str, *, shard: bool = False) -> Callable[[dict[str, torch
 def _apply_stack_transform_to_one_expert(
     transform: Callable[[torch.Tensor], torch.Tensor],
 ) -> Callable[[torch.Tensor], torch.Tensor]:
-    """Apply a transform that expects the full expert stack to one expert's tensor."""
+    """Apply a transform that expects the full expert stack to one expert's tensor.
+
+    Exists so the reload can reuse the load path's transform unchanged while
+    handling one expert at a time.
+    """
 
     def convert(expert: torch.Tensor) -> torch.Tensor:
         return transform(expert.unsqueeze(0)).squeeze(0)
