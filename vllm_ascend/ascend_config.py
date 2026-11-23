@@ -1233,6 +1233,8 @@ class AscendConfig:
                 )
             ):
                 raise ValueError("online_quantize_weights requires ModelSlim MXFP8 or W4A8 MXFP4 weight descriptions")
+            if quant_config.quant_description.get("group_size", 32) != 32:
+                raise ValueError("online_quantize_weights requires ModelSlim group_size=32")
             unsupported = {
                 value
                 for key, value in quant_config.quant_description.items()

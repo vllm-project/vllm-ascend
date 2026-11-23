@@ -51,6 +51,14 @@ def test_online_modelslim_rejects_expert_list_paths(feature):
         config._validate_online_quantization(vc, AscendModelSlimConfig({"layer.weight": "W8A8_MXFP8"}))
 
 
+@pytest.mark.parametrize("group_size", [16, 64, 128])
+def test_online_modelslim_rejects_incompatible_scale_groups(group_size):
+    config = AscendConfig(online_quantize_weights=True, sparse_kv_offload_config=SimpleNamespace(enabled=False))
+    quant = AscendModelSlimConfig({"layer.weight": "W8A8_MXFP8", "group_size": group_size})
+    with pytest.raises(ValueError, match="group_size=32"):
+        config._validate_online_quantization(SimpleNamespace(), quant)
+
+
 @pytest.mark.parametrize("description", [{}, {"layer.weight": "W8A8_DYNAMIC"}, {"model_quant_type": "W8A8_MXFP8"}])
 def test_online_modelslim_requires_mx_weight_entries(description):
     with pytest.raises(ValueError, match="ModelSlim"):
