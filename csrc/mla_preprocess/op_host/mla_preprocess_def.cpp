@@ -120,12 +120,12 @@ public:
             .AutoContiguous();
         this->Input("descale1")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_FLOAT})
+            .DataTypeList({ge::DT_FLOAT, ge::DT_INT64})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("descale2")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_FLOAT})
+            .DataTypeList({ge::DT_FLOAT, ge::DT_INT64})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("ctkvScale")
@@ -166,6 +166,10 @@ public:
         this->Attr("enableRope").AttrType(OPTIONAL).Bool(true);
         this->Attr("kvCacheStride0").AttrType(REQUIRED).Int(0);
         this->Attr("kvCacheRopeStride0").AttrType(REQUIRED).Int(0);
+        this->Attr("directOutput").AttrType(OPTIONAL).Bool(false);
+        this->Attr("writebackKBase").AttrType(OPTIONAL).Int(0);
+        this->Attr("writebackRopeBase").AttrType(OPTIONAL).Int(0);
+        this->Attr("writebackCapacity").AttrType(OPTIONAL).Int(0);
 
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)
