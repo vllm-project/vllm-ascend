@@ -1,7 +1,0 @@
-pr: 20567
-entries:
-  - category: feature
-    text: >-
-      GLM-5.3-Flash on A3 can opt in to an INT8 PoolKeyIndexer cache with
-      --attention-config.indexer_kv_dtype int8 when using a compatible CANN
-      ops-transformer build. The default BF16 indexer path is unchanged.

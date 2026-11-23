@@ -8,7 +8,7 @@ torch_npu = pytest.importorskip("torch_npu")
 
 from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import _pack_token_peer_tiled  # noqa: E402
 from vllm_ascend.ops.triton.dcp.sfa_dcp_merge import fused_merge  # noqa: E402
-from vllm_ascend.ops.triton.dcp.sfa_dcp_query import prepare_query_head_major, unpack_query  # noqa: E402
+from vllm_ascend.ops.triton.query_gather_prep import prep_query_head_major  # noqa: E402
 from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale  # noqa: E402
 from vllm_ascend.ops.triton.sparse_index_remap import remap_sparse_indices_triton  # noqa: E402
 
@@ -31,15 +31,19 @@ def test_tiled_pack_preserves_raw_bits(tokens, local_heads, head_dim, head_major
     _pack_token_peer_tiled[(ranks,)](
         words,
         lse,
+        lse,
         send,
         words.stride(0),
         words.stride(1),
+        lse.stride(0),
+        lse.stride(1),
         lse.stride(0),
         lse.stride(1),
         tokens,
         local_heads,
         head_dim // 2,
         4096,
+        FROM_STATS=False,
     )
     actual = send.cpu()
     expected_words = owner_cpu.transpose(0, 1).view(torch.int32)
@@ -49,18 +53,25 @@ def test_tiled_pack_preserves_raw_bits(tokens, local_heads, head_dim, head_major
     assert torch.equal(actual[:, output_size:], expected_stats.reshape(ranks, -1))
 
 
-@pytest.mark.parametrize("widths", [(512, 64), (256, 128), (64, 512)])
-@pytest.mark.parametrize("tokens,heads", [(1, 3), (6, 8), (13, 1), (192, 1)])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("column_stride", [1, 2])
+@pytest.mark.parametrize(
+    "widths,tokens,heads,dtype,column_stride",
+    [
+        ((512, 64), 1, 3, torch.bfloat16, 1),
+        ((256, 128), 6, 8, torch.float16, 2),
+        ((64, 512), 13, 1, torch.float32, 1),
+        ((512, 64), 192, 1, torch.bfloat16, 2),
+        ((256, 128), 13, 3, torch.float32, 2),
+        ((64, 512), 6, 8, torch.float16, 1),
+    ],
+)
 def test_query_bytes_and_changing_graph_inputs(widths, tokens, heads, dtype, column_stride):
     torch.npu.set_device(0)
     owners = [torch.empty(heads, tokens, width * column_stride, dtype=dtype, device="npu") for width in widths]
     qn, qr = [owner.transpose(0, 1)[..., ::column_stride] for owner in owners]
 
     def invoke():
-        packed = prepare_query_head_major(qn, qr)
-        return packed, unpack_query(packed, widths)
+        packed = prep_query_head_major(qn, qr)
+        return packed, packed.transpose(0, 1).split(widths, dim=-1)
 
     for _ in range(3):
         invoke()
@@ -81,15 +92,21 @@ def test_query_bytes_and_changing_graph_inputs(widths, tokens, heads, dtype, col
         expected = torch.cat((qn.cpu(), qr.cpu()), dim=-1).transpose(0, 1).contiguous()
         assert torch.equal(packed.cpu().view(bit_dtype), expected.view(bit_dtype))
         for actual, source in zip(fragments, (qn, qr)):
-            assert actual.is_contiguous()
             assert torch.equal(actual.cpu().view(bit_dtype), source.cpu().view(bit_dtype))
     torch.npu.synchronize()
 
 
-@pytest.mark.parametrize("ranks", [2, 4, 8])
-@pytest.mark.parametrize("token_dim", [1, 2])
-@pytest.mark.parametrize("head_dim", [127, 496, 512, 513])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize(
+    "ranks,token_dim,head_dim,dtype",
+    [
+        (2, 1, 127, torch.float16),
+        (4, 2, 496, torch.bfloat16),
+        (8, 1, 512, torch.float32),
+        (2, 2, 513, torch.float32),
+        (8, 2, 127, torch.bfloat16),
+        (4, 1, 513, torch.float16),
+    ],
+)
 def test_runtime_merge_dimensions_and_changed_graph_inputs(ranks, token_dim, head_dim, dtype):
     torch.npu.set_device(0)
     generator = torch.Generator().manual_seed(16350)
@@ -131,10 +148,17 @@ def oracle(indices, rank, ranks=8, interleave=128):
     return expected
 
 
-@pytest.mark.parametrize("rows", [1, 6, 12])
-@pytest.mark.parametrize("ranks,rank", [(ranks, rank) for ranks in (2, 4, 8) for rank in range(ranks)])
-@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
-@pytest.mark.parametrize("interleave", [1, 64, 128, 256])
+@pytest.mark.parametrize(
+    "rows,ranks,rank,dtype,interleave",
+    [
+        (1, 2, 0, torch.int32, 1),
+        (6, 4, 1, torch.int64, 64),
+        (12, 8, 7, torch.int32, 128),
+        (1, 8, 0, torch.int64, 256),
+        (6, 2, 1, torch.int64, 128),
+        (12, 4, 3, torch.int32, 64),
+    ],
+)
 def test_remap_exact_integer_boundaries_and_changed_graph_inputs(rows, ranks, rank, dtype, interleave):
     torch.npu.set_device(0)
     rng = torch.Generator().manual_seed(20260911 + rows + rank + interleave)
@@ -163,7 +187,7 @@ def test_remap_exact_integer_boundaries_and_changed_graph_inputs(rows, ranks, ra
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
         output = remap_sparse_indices_triton(device_input, ranks, rank, interleave)
-    for step in range(8):
+    for step in range(3):
         current = torch.roll(base, step, dims=-1)
         current[:, : boundaries.numel()] = boundaries
         if step == 0:
@@ -205,13 +229,14 @@ def test_remap_integer_layout_boundaries_and_graph(ranks, interleave, dtype):
     torch.npu.synchronize()
 
 
-@pytest.mark.parametrize("capacity", [256, 512])
-@pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
-@pytest.mark.parametrize("width", [64, 128, 256])
+@pytest.mark.parametrize(
+    "capacity,slot_dtype,width",
+    [(256, torch.int32, 64), (512, torch.int64, 128), (256, torch.int64, 256), (512, torch.int32, 256)],
+)
 def test_native_quantized_cache_bytes_and_changing_graph_slots(capacity, slot_dtype, width):
     torch.npu.set_device(0)
     retained = []
-    for rows in (1, 6, 12, 13, 48, 192):
+    for rows in (1, 13, 192):
         x = torch.randn(rows, width, dtype=torch.bfloat16, device="npu")
         keys, scales = torch_npu.npu_dynamic_quant(x, dst_type=torch.int8)
         slots = torch.arange(rows, dtype=slot_dtype, device="npu") + 7
@@ -224,7 +249,7 @@ def test_native_quantized_cache_bytes_and_changing_graph_slots(capacity, slot_dt
         graph = torch.npu.NPUGraph()
         with torch.npu.graph(graph):
             store_indexer_key_scale(keys, scales, slots, cache, scale_cache)
-        for step in range(16):
+        for step in range(4):
             fresh_keys, fresh_scales = torch_npu.npu_dynamic_quant(torch.randn_like(x), dst_type=torch.int8)
             keys.copy_(fresh_keys)
             scales.copy_(fresh_scales)

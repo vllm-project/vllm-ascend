@@ -55,7 +55,7 @@ class RuntimeGuardReportMixin:
     # Defined on RuntimeGuardDumpMixin / RuntimeGuardProcessor.
     _run_kv_dumps: Any
 
-    def _maybe_fire_manual_local(self, *, allow_manual_dump: bool) -> None:
+    def _maybe_fire_manual_local(self, *, has_scheduled_tokens: bool) -> None:
         """Fire ``manual_dump`` locally on each last-PP TP (no job bcast).
 
         Config watermark ``N`` (or continuous ``true``) → every dump rank
@@ -63,12 +63,12 @@ class RuntimeGuardReportMixin:
         dumps still use the TP dump lane. Each dump rank bumps its own
         in-process ``done`` counter; JSON is never rewritten.
         """
-        if not allow_manual_dump:
+        if not has_scheduled_tokens:
             return
         if not should_dump_kv_on_rank():
             return
         cfg = self.runtime_config
-        remaining = cfg.manual_trigger_count()
+        remaining = cfg.manual_dump_remaining()
         if remaining <= 0:
             return
         if not cfg.dump_enabled():
@@ -87,7 +87,7 @@ class RuntimeGuardReportMixin:
 
         wave = self.wave_tracker.current_wave()
         arm_id = uuid4().hex
-        continuous = cfg.manual_trigger_continuous()
+        continuous = cfg.manual_dump_continuous()
         # Sequence for this wave (1-based) before consume bumps done.
         dump_seq = int(cfg.manual_dumps_done()) + 1 if not continuous else None
         target = cfg.manual_dump_target()
@@ -135,7 +135,7 @@ class RuntimeGuardReportMixin:
         if jobs:
             self._run_kv_dumps(jobs)
 
-        if cfg.consume_manual_trigger():
+        if cfg.consume_manual_dump():
             logger.info(
                 "[runtime_guard manual_trigger] manual_dump consumed done=%d target=%d",
                 cfg.manual_dumps_done(),
@@ -283,7 +283,7 @@ class RuntimeGuardReportMixin:
                 inject_manual_dump_kv=True,
             )
 
-        if consume and self.runtime_config.consume_manual_trigger():
+        if consume and self.runtime_config.consume_manual_dump():
             logger.info(
                 "[runtime_guard manual_trigger] manual_dump consumed done=%d target=%d",
                 self.runtime_config.manual_dumps_done(),

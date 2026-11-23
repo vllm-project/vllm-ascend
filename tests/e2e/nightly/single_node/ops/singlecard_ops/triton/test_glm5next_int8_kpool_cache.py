@@ -7,8 +7,12 @@ import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache
 from vllm_ascend.ops.triton.glm5_next_cann_keypool import write_keypool_caches
+
+pytestmark = pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A3, reason="Requires Ascend A3")
 
 
 @pytest.mark.parametrize("use_graph", [False, True])

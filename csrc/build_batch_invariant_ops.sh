@@ -61,7 +61,7 @@ unset ASCEND_CUSTOM_OPP_PATH
 if curl --max-time 120 -sS -k -O "${BATCH_INVARIANT_RUN_URL}" && [[ -f "${BATCH_INVARIANT_RUN_FILE}" ]]; then
     chmod +x "${BATCH_INVARIANT_RUN_FILE}"
     log "Running installer: ${BATCH_INVARIANT_RUN_FILE}"
-    if "./${BATCH_INVARIANT_RUN_FILE}"; then
+    if "./${BATCH_INVARIANT_RUN_FILE}" --install-for-all; then
         log "batch_invariant run package installed successfully"
     else
         log "Failed to install batch_invariant run package"

@@ -11,14 +11,18 @@ from vllm_ascend.patch.platform import patch_replayssm_config
 
 def make_config():
     return SimpleNamespace(
-        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm5_next_text")),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm5_next_text"), enforce_eager=False),
         speculative_config=SimpleNamespace(),
         cache_config=SimpleNamespace(
             use_replayssm=True, use_kda_recoverssm=False, mamba_cache_mode="none", enable_prefix_caching=False
         ),
         mamba_config=SimpleNamespace(enable_stochastic_rounding=False),
         parallel_config=SimpleNamespace(
-            pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            tensor_parallel_size=1,
+            data_parallel_size=1,
         ),
         kv_transfer_config=None,
     )
@@ -36,7 +40,9 @@ def test_default_does_not_change_native_cache_contract():
     assert not config.cache_config.use_kda_recoverssm
 
 
-@pytest.mark.parametrize("connector", [None, "MooncakeConnectorV2", "MooncakePullConnector"])
+@pytest.mark.parametrize(
+    "connector", [None, "MooncakeConnectorV2", "MooncakePullConnector", "AscendStoreConnector", "MultiConnector"]
+)
 @pytest.mark.parametrize("prefix_caching", [False, True])
 def test_configuration_validation_derives_recoverssm_before_worker_initialization(connector, prefix_caching):
     config = make_config()
@@ -63,18 +69,63 @@ def test_initialization_requires_speculative_decoding():
     [
         ("cache_config", "mamba_cache_mode", "align", "Mamba cache mode none"),
         ("cache_config", "enable_prefix_caching", True, "Mamba cache mode align"),
-        ("parallel_config", "pipeline_parallel_size", 2, "PP=1 and PCP=1"),
-        ("parallel_config", "prefill_context_parallel_size", 2, "PP=1 and PCP=1"),
+        ("parallel_config", "pipeline_parallel_size", 2, "PP=1"),
+        ("parallel_config", "prefill_context_parallel_size", 2, "requires a KV producer"),
         ("parallel_config", "decode_context_parallel_size", 2, "DCP=1"),
-        (None, "kv_transfer_config", SimpleNamespace(kv_connector="AscendStoreConnector"), "requires Mooncake"),
     ],
 )
 def test_initialization_rejects_unsupported_execution(section, field, value, message):
     config = make_config()
-    setattr(getattr(config, section) if section else config, field, value)
+    setattr(getattr(config, section), field, value)
     with pytest.raises(ValueError, match=message):
         validate_glm_recoverssm(config)
     assert not config.cache_config.use_kda_recoverssm
+
+
+@pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector"])
+@pytest.mark.parametrize("prefix_caching", [False, True])
+@pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize(("tp_size", "pcp_size"), [(1, 8), (2, 4), (4, 2)])
+def test_pcp_prefill_producer_and_dp_decode_consumer(connector, prefix_caching, enforce_eager, tp_size, pcp_size):
+    for producer in (True, False):
+        config = make_config()
+        config.cache_config.enable_prefix_caching = prefix_caching
+        config.cache_config.mamba_cache_mode = "align" if prefix_caching else "none"
+        config.model_config.enforce_eager = enforce_eager
+        config.parallel_config.tensor_parallel_size = tp_size if producer else 1
+        config.parallel_config.prefill_context_parallel_size = pcp_size if producer else 1
+        config.parallel_config.data_parallel_size = 1 if producer else 8
+        config.kv_transfer_config = SimpleNamespace(
+            kv_connector=connector, kv_role="kv_producer" if producer else "kv_consumer"
+        )
+        assert patch_replayssm_config.validate_mamba_cached_kernel(config) is config
+        assert config.cache_config.use_kda_recoverssm
+
+
+@pytest.mark.parametrize(("tp_size", "pcp_size"), [(1, 8), (2, 4), (4, 2)])
+@pytest.mark.parametrize("kv_role", [None, "kv_consumer", "kv_both"])
+def test_pcp_rejects_unsupported_execution(tp_size, pcp_size, kv_role):
+    config = make_config()
+    config.parallel_config.tensor_parallel_size = tp_size
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    config.model_config.enforce_eager = True
+    if kv_role is not None:
+        config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2", kv_role=kv_role)
+    with pytest.raises(ValueError, match="PCP requires a KV producer"):
+        patch_replayssm_config.validate_mamba_cached_kernel(config)
+    assert not config.cache_config.use_kda_recoverssm
+
+
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+def test_pcp_store_enables_recoverssm(tp_size):
+    config = make_config()
+    config.parallel_config.tensor_parallel_size = tp_size
+    config.parallel_config.prefill_context_parallel_size = 2
+    config.cache_config.enable_prefix_caching = True
+    config.cache_config.mamba_cache_mode = "align"
+    config.kv_transfer_config = SimpleNamespace(kv_connector="AscendStoreConnector", kv_role="kv_producer")
+    assert patch_replayssm_config.validate_mamba_cached_kernel(config) is config
+    assert config.cache_config.use_kda_recoverssm
 
 
 def test_other_models_and_disabled_switch_keep_upstream_validation(monkeypatch):

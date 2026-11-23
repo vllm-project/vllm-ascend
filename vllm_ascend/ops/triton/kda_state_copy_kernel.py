@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """KDA state-copy kernel and metadata validation for worker-owned plans.
 
-Production selects its plan by device/cache layout. The sole prepare/seal
-lifecycle lives in ops/kda_state_copy_plan.py; independent tests use that same plan.
+Production selects its plan by device/cache layout. The prepare/seal
+lifecycle and registry wrappers live in ops/kda_state_copy_plan.py; tests use the same plans.
 This module has no launcher registry.
 
 Contract:
@@ -122,10 +122,9 @@ def _kda_state_copy_kernel(
 def _validate_cache_layout(state: torch.Tensor) -> tuple[int, int, int]:
     """Validate a real fused cache once at startup and extract launch scalars.
 
-    ``prepare`` builds its own disposable packed row and index vectors from
-    this cache's metadata. Their shape, dtype, device and contiguous layout
-    are construction guarantees, not external inputs to validate here. Actual
-    request indices and packed final states are checked by the sealed plan.
+    ``prepare`` registers compile-only pointer metadata for this cache layout.
+    Actual request indices and packed final states are checked by the sealed
+    plan; no live tensor contents are accessed during registration.
     """
     if state.device.type != "npu":
         raise RuntimeError("state must be an NPU tensor")

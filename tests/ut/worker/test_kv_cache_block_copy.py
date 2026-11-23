@@ -5,6 +5,18 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
 
+def test_copy_paired_hybrid_slot_does_not_replay_overlapping_state_views():
+    storage = torch.arange(4 * 128, dtype=torch.int32).reshape(4, 128)
+    main = storage.view(8, 64)
+    conv_state = storage[:, :32]
+    recurrent_state = storage[:, 32:64]
+    before = storage.clone()
+    copies = [KVCacheBlockCopy(src_block_id=1, dst_block_id=2), KVCacheBlockCopy(src_block_id=2, dst_block_id=1)]
+    copy_kv_cache_blocks_inplace([main, conv_state, recurrent_state], 4, copies)
+    assert torch.equal(storage[1], before[2])
+    assert torch.equal(storage[2], before[1])
+
+
 def test_copy_kv_cache_blocks_with_segmented_storage():
     """Each state segment must use its own leading block dimension."""
     num_blocks = 4

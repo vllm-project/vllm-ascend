@@ -50,6 +50,7 @@ def make_mock_vllm_config(
         parallel_config=SimpleNamespace(pipeline_parallel_size=pipeline_parallel_size),
         speculative_config=speculative_config,
         kernel_config=SimpleNamespace(enable_jit_warmup=enable_jit_warmup),
+        compilation_config=SimpleNamespace(static_forward_context={}),
     )
     return config
 

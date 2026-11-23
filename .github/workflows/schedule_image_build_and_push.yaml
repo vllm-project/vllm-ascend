@@ -14,8 +14,8 @@
 # the sync tool then mirrors swr.cn-north-12 -> quay.io.
 #
 # All dependency versions (CANN, torch-npu, triton-ascend, memcache, memfabric,
-# vLLM) are pinned in the root Dockerfiles. This workflow only selects the source
-# branch and does not accept or pass any version overrides.
+# vLLM, mooncake) are pinned in requirements.txt and the root Dockerfiles. This
+# workflow only selects the source branch and does not accept or pass any version overrides.
 name: Image Build and Push
 on:
   push:
@@ -55,7 +55,7 @@ permissions:
 
 jobs:
   setup-matrix:
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-amd64-cpu-1-hk
     if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'image-build' }}
     outputs:
       build_meta: ${{ steps.matrix.outputs.build_meta }}

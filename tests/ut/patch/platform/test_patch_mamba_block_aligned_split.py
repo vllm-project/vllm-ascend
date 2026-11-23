@@ -44,6 +44,7 @@ def _scheduler(
     return SimpleNamespace(
         vllm_config=SimpleNamespace(
             kv_transfer_config=kv_transfer_config,
+            speculative_config=None,
             model_config=SimpleNamespace(
                 hf_config=SimpleNamespace(),
                 hf_text_config=SimpleNamespace(**indexer_config),
@@ -53,6 +54,7 @@ def _scheduler(
         block_size=128,
         use_eagle=True,
         use_eagle_block_drop=True,
+        num_hash_lookahead_tokens=0,
         max_num_scheduled_tokens=8192,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         hash_block_size=384,
@@ -152,6 +154,19 @@ def test_producer_decode_fast_path_remains_unsplit():
     assert result == 8
 
 
+@pytest.mark.parametrize("length,expected", [(384, 384), (768, 384), (1536, 1152), (1537, 1536)])
+def test_producer_materializes_resend_checkpoint_for_aligned_prompt(length, expected):
+    scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True)
+    request = _request(num_computed_tokens=0, num_prompt_tokens=length, num_tokens=length)
+    assert _mamba_block_aligned_split(scheduler, request, num_new_tokens=length) == expected
+
+
+def test_producer_finishes_after_materializing_resend_checkpoint():
+    scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True)
+    request = _request(num_computed_tokens=384, num_prompt_tokens=768, num_tokens=768)
+    assert _mamba_block_aligned_split(scheduler, request, num_new_tokens=384) == 384
+
+
 def test_sparse_index_kpool_prefill_uses_resolved_common_block_size():
     result = _mamba_block_aligned_split(
         _scheduler(is_kv_consumer=False, uses_sparse_index_kpool=True),
@@ -202,6 +217,25 @@ def test_sparse_index_kpool_pd_consumer_still_preserves_verifier_window():
     )
 
     assert result == 8
+
+
+@pytest.mark.parametrize(
+    ("has_internal_checkpoint", "checkpoint_alignment", "expected_tokens"),
+    [(False, 1, 32), (True, 1, 33), (True, 64, 32)],
+)
+def test_consumer_uses_internal_checkpoint_only_when_export_is_valid(
+    has_internal_checkpoint, checkpoint_alignment, expected_tokens
+):
+    scheduler = _scheduler(is_kv_consumer=True)
+    scheduler.block_size = scheduler.cache_config.block_size = scheduler.hash_block_size = 16
+    scheduler.use_eagle = scheduler.use_eagle_block_drop = False
+    scheduler.mamba_has_prefill_checkpoint_blocks = has_internal_checkpoint
+    scheduler.mamba_prefill_checkpoint_alignment = checkpoint_alignment
+    request = _request(num_computed_tokens=16, num_prompt_tokens=49, num_tokens=49)
+
+    # A valid backend checkpoint exports state at 48 inside this final query.
+    # Without that export, scheduling must stop at 48 before the final token.
+    assert _mamba_block_aligned_split(scheduler, request, num_new_tokens=33) == expected_tokens
 
 
 def test_patch_is_registered_with_upstream_signature():

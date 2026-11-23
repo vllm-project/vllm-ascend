@@ -6,19 +6,30 @@ from typing import TYPE_CHECKING
 import vllm.envs as envs
 import zmq
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (
-    LOOKUP_MSG,
-    RESET_MSG,
-    RESP_ERR,
-    RESP_OK,
-)
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.33.0"):
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (  # type: ignore[import-not-found]
+        LOOKUP_MSG,
+        RESET_MSG,
+        RESP_ERR,
+        RESP_OK,
+    )
+else:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import (
+        LOOKUP_MSG,
+        RESET_MSG,
+        RESP_ERR,
+        RESP_OK,
+    )
+
 if TYPE_CHECKING:
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
 
 
 def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
@@ -112,7 +123,7 @@ class LookupKeyClient:
 class LookupKeyServer:
     def __init__(
         self,
-        pool_worker: KVPoolWorker,
+        pool_worker: BaseKVPoolWorker,
         vllm_config: VllmConfig,
     ):
         self.decoder = MsgpackDecoder()

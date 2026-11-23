@@ -19,6 +19,5 @@ def _stub_ascend_config(monkeypatch):
             finegrained_tp_config=SimpleNamespace(lmhead_tensor_parallel_size=0),
             ascend_compilation_config=object(),
             eplb_config=object(),
-            draft_window_size=None,
         ),
     )

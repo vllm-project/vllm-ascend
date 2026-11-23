@@ -1,0 +1,4 @@
+pr: 20643
+entries:
+  - category: performance
+    text: Improved Qwen PLE decode performance on Ascend for batches with multiple active requests.

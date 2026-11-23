@@ -100,3 +100,14 @@ variants:
 meta:
   hardware:
     ascend_950dt: verified
+strategy_overrides:
+  single_node_dep:
+    hardware_overrides:
+      # The single-node 950DT deployment uses one TP8 replica with EP.
+      # DEP ignores variant.tp and would replace the variants' DP1 with DP8.
+      ascend_950dt:
+        extra_args:
+          - '--tensor-parallel-size'
+          - '8'
+          - '--data-parallel-size'
+          - '1'

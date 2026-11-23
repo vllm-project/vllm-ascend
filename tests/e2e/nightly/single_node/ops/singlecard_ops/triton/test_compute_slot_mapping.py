@@ -19,6 +19,7 @@ from vllm_ascend.worker.v2.block_table import (
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
+@pytest.mark.parametrize("replicated_draft", [False, True])
 @pytest.mark.parametrize(
     ("cp_size", "cp_rank", "cp_interleave"),
     [
@@ -28,8 +29,10 @@ from vllm_ascend.worker.v2.block_table import (
         pytest.param(4, 2, 128, id="cp4_logical_block_interleaved"),
     ],
 )
-def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_interleave: int) -> None:
-    """Check the Ascend V2 kernel against the logical CP/block mapping."""
+def test_compute_slot_mapping_npu_kernel_cp(
+    cp_size: int, cp_rank: int, cp_interleave: int, replicated_draft: bool
+) -> None:
+    """Check sharded and replicated groups against global-token CPU mapping."""
     device = "npu"
     max_num_tokens = 8192
     # Empty requests use -1 as their mapping sentinel. The Ascend kernel must
@@ -51,6 +54,7 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
     )
 
     num_groups = 2
+    sharded = torch.tensor([True, not replicated_draft], dtype=torch.bool, device=device)
     block_tables = [torch.randint(0, 320, (3, 320), dtype=torch.int32, device=device) for _ in range(num_groups)]
     block_table_ptrs = torch.tensor(
         [table.data_ptr() for table in block_tables],
@@ -71,6 +75,7 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
     min_kernel_block_size = min(kernel_block_sizes.tolist())
     block_table_window_size = triton.next_power_of_2((1024 + min_kernel_block_size - 1) // min_kernel_block_size + 1)
     slot_mappings = torch.zeros((num_groups, max_num_tokens), dtype=torch.int32, device=device)
+    ref_slot_mappings = torch.full((num_groups, max_num_tokens), -1, dtype=torch.int32)
 
     kernel_args = (
         max_num_tokens,
@@ -96,30 +101,33 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
         cp_rank,
         **kernel_kwargs,
         BLOCK_TABLE_WINDOW_SIZE=block_table_window_size,
+        dcp_sharded=sharded,
     )
-    ref_slot_mappings = torch.full((num_groups, max_num_tokens), -1, dtype=torch.int32, device="cpu")
-    host_mapping = idx_mapping.cpu().tolist()
-    host_starts = query_start_loc.cpu().tolist()
-    host_positions = positions.cpu().tolist()
-    for group, (table, kv_block_size, kernel_block_size) in enumerate(
-        zip(block_tables, kv_block_sizes.cpu().tolist(), kernel_block_sizes.cpu().tolist())
+    # Resolve ownership in global interleave units independently of the
+    # kernel's allocation-page arithmetic and block-table window staging.
+    boundaries = query_start_loc.cpu().tolist()
+    global_positions = positions.cpu()
+    for group, (table, kernel_size, is_sharded) in enumerate(
+        zip(block_tables, kernel_block_sizes.cpu().tolist(), sharded.cpu().tolist())
     ):
         table = table.cpu()
-        for request, state_idx in enumerate(host_mapping):
-            if state_idx < 0:
+        for req, row in enumerate(idx_mapping.cpu().tolist()):
+            if row < 0:
                 continue
-            for token in range(host_starts[request], host_starts[request + 1]):
-                position = host_positions[token]
-                if cp_size > 1:
-                    virtual_block, offset = divmod(position, kv_block_size * cp_size)
-                    if offset // cp_interleave % cp_size != cp_rank:
-                        continue
-                    rounds, remainder = divmod(offset, cp_interleave * cp_size)
-                    position = virtual_block * kv_block_size + rounds * cp_interleave + remainder % cp_interleave
-                block, offset = divmod(position, kernel_block_size)
-                ref_slot_mappings[group, token] = int(table[state_idx, block]) * kernel_block_size + offset
+            start, end = boundaries[req : req + 2]
+            pos = global_positions[start:end]
+            if is_sharded:
+                local = pos // (cp_size * cp_interleave) * cp_interleave + pos % cp_interleave
+                owned = pos // cp_interleave % cp_size == cp_rank
+            else:
+                local = pos
+                owned = torch.ones_like(pos, dtype=torch.bool)
+            slots = table[row, local // kernel_size] * kernel_size + local % kernel_size
+            ref_slot_mappings[group, start:end] = torch.where(owned, slots, -1).to(torch.int32)
 
     torch.testing.assert_close(slot_mappings.cpu(), ref_slot_mappings)
+    if replicated_draft:
+        assert torch.all(slot_mappings[1, : positions.numel()] >= 0)
 
 
 @pytest.mark.skipif(
@@ -149,6 +157,7 @@ def test_ascend_block_tables_compute_slot_mappings_out() -> None:
     block_tables._triton_block_size = 1024
     block_tables._block_table_window_size = 512
     block_tables.slot_mapping_enabled = torch.tensor([True], dtype=torch.bool, device=device)
+    block_tables.dcp_sharded = torch.tensor([True], dtype=torch.bool, device=device)
 
     out = torch.full((1, 12), 777, dtype=torch.int32, device=device)
     result = block_tables.compute_slot_mappings(

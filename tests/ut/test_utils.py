@@ -25,9 +25,29 @@ import torch
 import torch_npu
 
 from tests.ut.base import TestBase
-from vllm_ascend import utils
+from vllm_ascend import ascend_forward_context, utils
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
+
+
+def test_use_updatable_graph_does_not_require_current_vllm_config():
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+    from vllm_ascend.attention.mla_v1 import AscendMLABackend
+
+    with (
+        mock.patch(
+            "vllm_ascend.attention.utils.get_current_vllm_config",
+            side_effect=AssertionError("Current vLLM config is not set"),
+        ),
+        mock.patch("vllm.distributed.get_dcp_group") as get_dcp_group,
+    ):
+        get_dcp_group.return_value.world_size = 1
+        assert utils.use_updatable_graph(AscendMLABackend)
+        get_dcp_group.return_value.world_size = 2
+        assert not utils.use_updatable_graph(AscendMLABackend)
+        assert utils.use_updatable_graph(AscendAttentionBackend)
+        assert not utils.use_updatable_graph(None)
 
 
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
@@ -198,7 +218,11 @@ class TestUtils(TestBase):
             parallel_config=SimpleNamespace(
                 use_sequence_parallel_moe=True,
                 enable_expert_parallel=False,
-            )
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+            ),
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3_5_text")),
+            additional_config={},
         )
         self.assertTrue(utils.enable_sp(sequence_parallel_config))
 
@@ -206,7 +230,11 @@ class TestUtils(TestBase):
             parallel_config=SimpleNamespace(
                 use_sequence_parallel_moe=False,
                 enable_expert_parallel=True,
-            )
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+            ),
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3_5_text")),
+            additional_config={},
         )
         self.assertFalse(utils.enable_sp(shared_expert_dp_config))
 
@@ -214,7 +242,11 @@ class TestUtils(TestBase):
             parallel_config=SimpleNamespace(
                 use_sequence_parallel_moe=False,
                 enable_expert_parallel=False,
-            )
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+            ),
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3_5_text")),
+            additional_config={},
         )
         self.assertFalse(utils.enable_sp(no_sequence_parallel_config))
 
@@ -928,3 +960,38 @@ def test_finegrained_tp_enable_requires_weight_sharding(knob, enable_fn, size, e
     config = SimpleNamespace(finegrained_tp_config=SimpleNamespace(**{knob: size}))
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=config):
         assert getattr(utils, enable_fn)() is enabled
+
+
+@pytest.mark.parametrize("input_proj_tp_size", [1, 2, 4])
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_qkv_iproj_tp_keeps_dp_coordination(monkeypatch, input_proj_tp_size, is_draft):
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=128),
+        compilation_config=SimpleNamespace(cudagraph_mode=SimpleNamespace(separate_routine=lambda: False)),
+    )
+    ascend = SimpleNamespace(
+        get_mc2_comm_alg=lambda: "fullmesh",
+        scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
+        finegrained_tp_config=SimpleNamespace(qkv_iproj_tensor_parallel_size=input_proj_tp_size),
+    )
+    monkeypatch.setattr(utils, "get_ascend_config", lambda: ascend)
+    monkeypatch.setattr(utils, "is_mega_moe_supported", lambda: False)
+    monkeypatch.setattr(utils, "is_moe_model", lambda _: True)
+    monkeypatch.setattr(utils, "is_drafter_moe_model", lambda _: True)
+    monkeypatch.setattr(utils, "get_potential_max_tokens", lambda: 128)
+    monkeypatch.setattr(ascend_forward_context, "use_cann_megamoe", lambda _: False)
+    monkeypatch.setattr(ascend_forward_context, "select_moe_comm_method", lambda *_: MoECommType.MC2)
+    assert utils.should_skip_allreduce_across_dp_group(config, is_draft_model=is_draft) is (input_proj_tp_size == 1)
+
+
+@pytest.mark.parametrize("v2", [False, True])
+@pytest.mark.parametrize("lmhead", [False, True])
+@pytest.mark.parametrize("dcp", [1, 2])
+def test_requires_lmhead_dp_sync_is_scoped_to_v2_reduced_padding(monkeypatch, v2, lmhead, dcp):
+    config = SimpleNamespace(
+        use_v2_model_runner=v2,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
+    )
+    monkeypatch.setattr(utils, "lmhead_tp_enable", lambda: lmhead)
+    assert utils.requires_lmhead_dp_sync(config) is (v2 and lmhead and dcp == 1)

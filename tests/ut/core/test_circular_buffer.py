@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
-from unittest.mock import Mock
 
-import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -18,7 +16,6 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, is_prefix_cacheable
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
-from vllm_ascend.worker.block_table import BlockTable
 
 
 def ring_spec():
@@ -113,14 +110,3 @@ def test_scratch_groups_do_not_reduce_prefix_hits_or_truncation():
         SimpleNamespace(block_size=32),
     ]
     assert KVCacheManager.truncate_computed_blocks(host, SimpleNamespace(blocks=([1, 2], [], [])), 128) == ([1], [], [])
-
-
-@pytest.mark.parametrize("draft", [False, True])
-def test_ring_bypasses_position_to_page_mapping(draft):
-    mapping = torch.zeros(8, dtype=torch.int64)
-    table = SimpleNamespace(is_circular_group=True, slot_mapping=SimpleNamespace(gpu=mapping))
-    if draft:
-        BlockTable.compute_slot_mapping_draft(table, Mock(), Mock())
-    else:
-        BlockTable.compute_slot_mapping(table, 1, Mock(), Mock())
-    assert mapping.tolist() == [-1] * 8

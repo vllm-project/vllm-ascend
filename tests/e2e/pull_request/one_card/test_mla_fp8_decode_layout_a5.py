@@ -22,7 +22,7 @@ import torch_npu
 from vllm_ascend.attention import mla_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl, DecodeMLAPreprocessResult
-from vllm_ascend.compilation import acl_graph
+from vllm_ascend.compilation.updatable_graph import ContextSource, UpdatableGraph
 from vllm_ascend.device.device_config import check_ascend_device_type, is_950
 
 NUM_HEADS = 16
@@ -81,6 +81,7 @@ def _case(monkeypatch, num_tokens, speculative, fp8):
     impl.support_fp8_attention = True
     impl.fa_quant_layer = fp8
     impl.fak_descale_float = torch.ones(1, device="npu")
+    impl.layer_name = "attn"
     query_tokens_per_seq = num_tokens if speculative else 1
     if speculative and fp8:
         # The tested CANN 9.2 FP8 path supports at most 16 queries per sequence.
@@ -108,15 +109,7 @@ def _case(monkeypatch, num_tokens, speculative, fp8):
     )
     extra_context = SimpleNamespace(capturing=False, is_draft_model=False, is_draft_model_prefill=False)
     monkeypatch.setattr(mla_v1, "_EXTRA_CTX", extra_context)
-    params = acl_graph.GraphParams(
-        events={num_tokens: []},
-        workspaces={num_tokens: None},
-        handles={num_tokens: []},
-        attn_params={num_tokens: []},
-    )
-    monkeypatch.setattr(acl_graph, "_graph_params", params)
-    assert mla_v1.get_graph_params() is params
-    return impl, metadata, extra_context, params
+    return impl, metadata, extra_context
 
 
 def _reference(impl, inputs, metadata, speculative):
@@ -195,7 +188,7 @@ def _assert_output(actual, expected):
 @pytest.mark.parametrize("fp8", [True, False], ids=["fp8", "bf16_control"])
 @torch.inference_mode()
 def test_mla_decode_output_to_v_projection_a5(monkeypatch, num_tokens, speculative, fp8):
-    impl, metadata, _, _ = _case(monkeypatch, num_tokens, speculative, fp8)
+    impl, metadata, _ = _case(monkeypatch, num_tokens, speculative, fp8)
     inputs = _inputs(num_tokens, fp8, seed=41)
     expected, explicit_copy = _reference(impl, inputs, metadata, speculative)
     actual = impl._forward_decode(inputs, BLOCK_SIZE, metadata)
@@ -212,22 +205,22 @@ def test_mla_decode_output_to_v_projection_a5(monkeypatch, num_tokens, speculati
 @pytest.mark.parametrize("fp8", [True, False], ids=["fp8", "bf16_control"])
 @torch.inference_mode()
 def test_mla_decode_graph_replay_changed_inputs_a5(monkeypatch, num_tokens, speculative, fp8):
-    impl, metadata, extra_context, params = _case(monkeypatch, num_tokens, speculative, fp8)
+    impl, metadata, extra_context = _case(monkeypatch, num_tokens, speculative, fp8)
     inputs = _inputs(num_tokens, fp8, seed=41)
     expected, explicit_copy = _reference(impl, inputs, metadata, speculative)
     for _ in range(2):
         impl._forward_decode(inputs, BLOCK_SIZE, metadata)
     torch.npu.synchronize()
 
-    graph = torch.npu.NPUGraph()
+    graph = UpdatableGraph()
     extra_context.capturing = True
     try:
         with torch.npu.graph(graph):
             actual = impl._forward_decode(inputs, BLOCK_SIZE, metadata)
     finally:
         extra_context.capturing = False
-    assert len(params.attn_params[num_tokens]) == 1
-    saved_layout = params.attn_params[num_tokens][0][6]
+    assert len(graph.tasks) == 1
+    saved_layout = graph.tasks[0].kwargs["input_layout"]
     if speculative:
         expected_layout = "TND" if fp8 else "TND_NTD"
     else:
@@ -235,12 +228,8 @@ def test_mla_decode_graph_replay_changed_inputs_a5(monkeypatch, num_tokens, spec
     assert saved_layout == expected_layout
     update_stream = torch.npu.Stream()
     # The captured FIA task waits for its ExternalEvent on the first replay too.
-    AscendMLAImpl.update_graph_params(
-        update_stream,
-        SimpleNamespace(attn_metadata={"attn": metadata}),
-        num_tokens,
-        speculative_config=impl.speculative_config,
-    )
+    resolved_tasks = graph.resolve_tasks(ContextSource({impl.layer_name: metadata}))
+    graph.update(update_stream, resolved_tasks)
     torch.npu.current_stream().wait_stream(update_stream)
     graph.replay()
     _assert_output(actual, expected)
@@ -260,12 +249,8 @@ def test_mla_decode_graph_replay_changed_inputs_a5(monkeypatch, num_tokens, spec
         changed_expected, changed_copy = _reference(impl, inputs, metadata, speculative)
         assert not torch.allclose(changed_expected.float(), expected.float(), rtol=1e-3, atol=1e-3)
         torch.npu.synchronize()
-        AscendMLAImpl.update_graph_params(
-            update_stream,
-            SimpleNamespace(attn_metadata={"attn": metadata}),
-            num_tokens,
-            speculative_config=impl.speculative_config,
-        )
+        resolved_tasks = graph.resolve_tasks(ContextSource({impl.layer_name: metadata}))
+        graph.update(update_stream, resolved_tasks)
         torch.npu.current_stream().wait_stream(update_stream)
         graph.replay()
         _assert_output(actual, changed_expected)
@@ -297,7 +282,7 @@ def _projection_time_us(project):
 @pytest.mark.parametrize("num_tokens", TOKEN_COUNTS[1:])
 @torch.inference_mode()
 def test_mla_fp8_v_projection_fusion_a5(monkeypatch, record_property, num_tokens):
-    impl, _, _, _ = _case(monkeypatch, num_tokens, speculative=False, fp8=True)
+    impl, _, _ = _case(monkeypatch, num_tokens, speculative=False, fp8=True)
     generator = torch.Generator(device="cpu").manual_seed(151)
     token_major = torch.randn(num_tokens, NUM_HEADS, LATENT_DIM, generator=generator).bfloat16().npu()
     expected = _cpu_projection_reference(impl, token_major)

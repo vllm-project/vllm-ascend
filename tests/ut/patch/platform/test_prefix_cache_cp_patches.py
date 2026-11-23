@@ -7,10 +7,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+import vllm.v1.core.kv_cache_planning as planning
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_planning import _pool_bytes_per_block_from_builder
 from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     generate_scheduler_kv_cache_config,
+    resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
@@ -30,7 +33,14 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
+from vllm_ascend.core import kv_cache_config_builder
+from vllm_ascend.core.kv_cache_config_builder import (
+    AscendKVCacheConfigBuilder,
+    _get_kimi_k3_dspark_mixed_kv_cache_groups,
+    _get_kv_cache_config_deepseek_v4_main,
+    get_ascend_kv_cache_config_from_groups,
+    group_and_unify_kv_cache_specs,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendCircularBufferSpec,
     AscendIndexerKPoolTailSpec,
@@ -43,22 +53,11 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     _is_deepseek_v4_kv_cache_spec,
     get_kv_cache_coordinator,
 )
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _ascend_annotate_eagle_groups,
-    _ascend_resolve_kv_cache_block_sizes,
-    _get_kimi_k3_dspark_mixed_kv_cache_groups,
-    _get_kv_cache_config_deepseek_v4_main,
-    group_and_unify_kv_cache_specs,
-)
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
-from vllm_ascend.utils import vllm_version_is
 
 # vLLM #60043 removed the leftover `mamba_cache_mode="all"` path and now asserts
 # that prefix caching requires `mamba_cache_mode="align"` in both supported lanes.
 _MAMBA_CACHING_MODE = "align"
-
-# v0.32.0 keeps the two-argument admission API; verified main requires a builder.
-_UPSTREAM_MAX_MEMORY_TAKES_BUILDER = not vllm_version_is("0.32.0")
 
 
 def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
@@ -154,17 +153,28 @@ def test_disabled_prefix_cache_preserves_private_tail_allocation(with_private_ta
     groups = [KVCacheGroupSpec(["full"], full)]
     if with_private_tail:
         tail = AscendIndexerKPoolTailSpec(
-            block_size=9, sliding_window=4, compress_ratio=4, num_kv_heads=1, head_size=8, dtype=torch.float32
+            block_size=4,
+            ring_capacity=9,
+            sliding_window=4,
+            compress_ratio=4,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float32,
         )
         groups.append(KVCacheGroupSpec(["tail"], UniformTypeKVCacheSpecs.from_specs({"tail": tail})))
     cfg = KVCacheConfig(num_blocks=32, kv_cache_tensors=[], kv_cache_groups=groups)
-    scheduler_size, hash_size = _ascend_resolve_kv_cache_block_sizes(
+    scheduler_size, hash_size = resolve_kv_cache_block_sizes(
         cfg,
         SimpleNamespace(
-            cache_config=SimpleNamespace(enable_prefix_caching=False, block_size=full.block_size),
+            model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="glm_moe_dsa")),
+            cache_config=SimpleNamespace(
+                enable_prefix_caching=False, block_size=full.block_size, prefix_match_unit=None
+            ),
+            kv_transfer_config=None,
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         ),
     )
+    # The physical nine-row ring must not enlarge logical scheduling units.
     assert scheduler_size == hash_size == full.block_size
     coordinator = get_kv_cache_coordinator(
         cfg,
@@ -201,14 +211,21 @@ def test_disabled_prefix_cache_preserves_private_tail_allocation(with_private_ta
 
 @pytest.mark.parametrize("wrapped", [False, True])
 @pytest.mark.parametrize("scheduler_size", [16, 32])
-def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrapped, scheduler_size):
+@pytest.mark.parametrize("ring_capacity", [4, 9])
+def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrapped, scheduler_size, ring_capacity):
     from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
 
     register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
     full = FullAttentionSpec(block_size=scheduler_size, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
     tail = AscendIndexerKPoolTailSpec(
-        block_size=4, sliding_window=4, compress_ratio=4, num_kv_heads=1, head_size=8, dtype=torch.float32
+        block_size=4,
+        ring_capacity=ring_capacity,
+        sliding_window=4,
+        compress_ratio=4,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float32,
     )
     group_tail = UniformTypeKVCacheSpecs.from_specs({"tail": tail}) if wrapped else tail
     cfg = KVCacheConfig(
@@ -216,6 +233,10 @@ def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrappe
         kv_cache_tensors=[],
         kv_cache_groups=[KVCacheGroupSpec(["full"], full), KVCacheGroupSpec(["tail"], group_tail)],
     )
+    resolved_scheduler_size, hash_size = resolve_kv_cache_block_sizes(
+        cfg, _make_vllm_config(enable_prefix_caching=True, dcp=1, prefix_match_unit=16)
+    )
+    assert resolved_scheduler_size == scheduler_size
     coordinator = AscendHybridKVCacheCoordinator(
         cfg,
         max_model_len=4096,
@@ -224,8 +245,8 @@ def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrappe
         enable_kv_cache_events=False,
         dcp_world_size=1,
         pcp_world_size=1,
-        hash_block_size=16,
-        scheduler_block_size=scheduler_size,
+        hash_block_size=hash_size,
+        scheduler_block_size=resolved_scheduler_size,
         max_in_flight_tokens=64,
     )
     full_mgr, tail_mgr = coordinator.single_type_managers
@@ -257,6 +278,47 @@ def _make_kv_cache_tensor(size: int, layer_names: list[str]) -> KVCacheTensor:
     return KVCacheTensor(size=size, layers=layer_names, layer_stride=0, block_stride=0, offset=0)
 
 
+@pytest.mark.parametrize("dcp", [1, 2])
+def test_glm_speculative_tail_preserves_main_and_mamba_scheduler_boundaries(dcp):
+    register_all_kvcache_specs(None)
+    register_ascend_kv_cache_specs()
+    full = FullAttentionSpec(block_size=4480, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
+    tail = AscendIndexerKPoolTailSpec(
+        block_size=4,
+        ring_capacity=9,
+        sliding_window=4,
+        compress_ratio=4,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float32,
+    )
+    mamba = MambaSpec(block_size=4480, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+    cfg = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([name], spec) for name, spec in (("full", full), ("tail", tail), ("mamba", mamba))
+        ],
+    )
+    scheduler_size, hash_size = resolve_kv_cache_block_sizes(
+        cfg, _make_vllm_config(enable_prefix_caching=True, dcp=dcp)
+    )
+    assert (scheduler_size, hash_size) == (4480 * dcp, 4480)
+    coordinator = AscendHybridKVCacheCoordinator(
+        cfg,
+        max_model_len=131072,
+        use_eagle=False,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=dcp,
+        pcp_world_size=1,
+        hash_block_size=hash_size,
+        scheduler_block_size=scheduler_size,
+        max_in_flight_tokens=4480,
+    )
+    assert coordinator._cache_hit_alignment_tokens == 4480
+
+
 def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
     register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
@@ -265,7 +327,13 @@ def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
         MambaSpec(block_size=64, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align"),
         SlidingWindowMLASpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.bfloat16, sliding_window=16),
         AscendIndexerKPoolTailSpec(
-            block_size=4, sliding_window=4, compress_ratio=4, num_kv_heads=1, head_size=8, dtype=torch.float32
+            block_size=4,
+            ring_capacity=4,
+            sliding_window=4,
+            compress_ratio=4,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float32,
         ),
     ]
     cfg = KVCacheConfig(
@@ -355,11 +423,13 @@ def _make_hybrid_kv_cache_config(
 def _make_kimi_k3_dspark_kv_cache_specs(
     *,
     block_size: int = 384,
+    mamba_block_size: int | None = None,
     page_size: int = 488448,
     target_layer_count: int = 24,
     draft_layer_count: int = 5,
     mamba_layer_count: int = 69,
     draft_uses_mla: bool = False,
+    draft_replication_size: int = 1,
 ) -> dict:
     target_mla_spec = AscendMLAAttentionSpec(
         block_size=block_size,
@@ -387,8 +457,10 @@ def _make_kimi_k3_dspark_kv_cache_specs(
             dtype=torch.bfloat16,
             page_size_padded=page_size,
         )
+        if draft_replication_size > 1:
+            draft_attention_spec = replace(draft_attention_spec, dcp_sharded=False)
     mamba_spec = MambaSpec(
-        block_size=block_size,
+        block_size=mamba_block_size or block_size,
         shapes=((10, 2304), (6, 128, 128)),
         dtypes=(torch.bfloat16, torch.float32),
         page_size_padded=page_size,
@@ -453,6 +525,7 @@ def _make_vllm_config(
     prefix_match_unit: int | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k3")),
         cache_config=SimpleNamespace(
             block_size=block_size,
             enable_prefix_caching=enable_prefix_caching,
@@ -475,6 +548,36 @@ def _make_coordinator_for_effective_block_size(
     coordinator.dcp_world_size = dcp_world_size
     coordinator.enable_caching = enable_caching
     return coordinator
+
+
+@pytest.mark.parametrize("prefix_match_unit,expected_hash", [(None, 128), (64, 64)])
+def test_dcp1_hybrid_hash_unit_divides_every_group(prefix_match_unit, expected_hash):
+    config = _make_vllm_config(enable_prefix_caching=True, dcp=1, block_size=128)
+    config.cache_config.prefix_match_unit = prefix_match_unit
+    cache = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=FullAttentionSpec(
+                    block_size=128,
+                    num_kv_heads=1,
+                    head_size=64,
+                    dtype=torch.bfloat16,
+                )
+            ),
+            SimpleNamespace(
+                kv_cache_spec=MambaSpec(
+                    block_size=3072,
+                    shapes=((1,),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                )
+            ),
+        ],
+    )
+    assert resolve_kv_cache_block_sizes(cache, config) == (3072, expected_hash)
+    config.cache_config.prefix_match_unit = 96
+    with pytest.raises(ValueError, match="Invalid prefix_match_unit"):
+        resolve_kv_cache_block_sizes(cache, config)
 
 
 def test_ascend_mla_page_size_includes_scale_storage() -> None:
@@ -520,28 +623,35 @@ def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
 
 
 @pytest.mark.parametrize(
-    ("enable_prefix_caching", "expected_hash_block_size"),
+    ("enable_prefix_caching", "mamba_cache_mode", "expected_hash_block_size"),
     [
-        pytest.param(False, math.lcm(16, 32) * 2, id="dcp-without-prefix-caching"),
-        pytest.param(True, math.gcd(16, 32), id="dcp-with-prefix-caching"),
+        pytest.param(False, "none", 64, id="dcp-without-prefix-caching"),
+        pytest.param(True, "none", 64, id="dcp-without-aligned-checkpoints"),
+        pytest.param(True, "align", 32, id="dcp-with-aligned-checkpoints"),
     ],
 )
 def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
     enable_prefix_caching: bool,
+    mamba_cache_mode: str,
     expected_hash_block_size: int,
 ) -> None:
-    kv_cache_config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=32)
+    kv_cache_config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=64)
+    mamba_group = kv_cache_config.kv_cache_groups[1]
+    kv_cache_config.kv_cache_groups[1] = replace(
+        mamba_group, kv_cache_spec=replace(mamba_group.kv_cache_spec, mamba_cache_mode=mamba_cache_mode)
+    )
     vllm_config = _make_vllm_config(
         enable_prefix_caching=enable_prefix_caching,
         dcp=2,
     )
 
-    scheduler_block_size, hash_block_size = _ascend_resolve_kv_cache_block_sizes(
+    scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
         kv_cache_config,
         vllm_config,
     )
 
-    expected_scheduler_block_size = math.lcm(16, 32) * 2
+    # Only token-history attention is sharded; recurrent state keeps its span.
+    expected_scheduler_block_size = math.lcm(16 * 2, 64)
     assert scheduler_block_size == expected_scheduler_block_size
     assert hash_block_size == expected_hash_block_size
 
@@ -577,6 +687,7 @@ def test_glm5_next_hashes_exclude_private_tail_after_engine_min_block_update(
     )
     state_spec = AscendIndexerKPoolTailSpec(
         block_size=16,
+        ring_capacity=16,
         sliding_window=16,
         compress_ratio=16,
         num_kv_heads=1,
@@ -637,7 +748,7 @@ def test_glm5_next_hashes_exclude_private_tail_after_engine_min_block_update(
     assert vllm_config.cache_config.block_size == 16
     assert state_spec.block_size == state_spec.compress_ratio == 16
     assert not state_spec.prefix_cacheable
-    scheduler_block_size, hash_block_size = _ascend_resolve_kv_cache_block_sizes(
+    scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
         scheduler_config,
         vllm_config,
     )
@@ -670,6 +781,7 @@ def test_glm5_next_single_cacheable_group_ignores_private_tail_block_size() -> N
     )
     tail_spec = AscendIndexerKPoolTailSpec(
         block_size=16,
+        ring_capacity=16,
         sliding_window=16,
         compress_ratio=16,
         num_kv_heads=1,
@@ -693,11 +805,11 @@ def test_glm5_next_single_cacheable_group_ignores_private_tail_block_size() -> N
     )
 
     # Match EngineCore: the tail participates in the global minimum before
-    # resolve filters request-private groups from prefix-cache planning.
+    # resolve excludes request-private groups from prefix hashing.
     assert vllm_config.cache_config.block_size == tail_spec.block_size
     assert not tail_spec.prefix_cacheable
 
-    assert _ascend_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config) == (384, 384)
+    assert resolve_kv_cache_block_sizes(kv_cache_config, vllm_config) == (384, 384)
 
 
 def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> None:
@@ -766,6 +878,70 @@ def test_kimi_k3_dspark_uses_four_mixed_kv_groups(block_size, page_size, draft_u
     assert all(isinstance(spec, FullAttentionSpec) for spec in mixed_specs.values())
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("group_kind", ["empty", "attention", "mamba", "mixed"])
+def test_native_mamba_detection_and_zeroing(wrapped, group_kind) -> None:
+    attention = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float32)
+    mamba = MambaSpec(block_size=16, shapes=((2, 3),), dtypes=(torch.float32,))
+    groups = []
+    for kind, spec in (("attention", attention), ("mamba", mamba)):
+        if group_kind not in (kind, "mixed"):
+            continue
+        specs = {f"{kind}.0": spec}
+        if kind == "mamba":
+            # Homogeneous Mamba groups may contain different per-layer layouts.
+            specs[f"{kind}.1"] = replace(mamba, shapes=((3, 2),))
+        group_spec = UniformTypeKVCacheSpecs.from_specs(specs) if wrapped else spec
+        assert group_spec is not None
+        groups.append(KVCacheGroupSpec(layer_names=list(specs), kv_cache_spec=group_spec))
+    config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=groups)
+
+    assert KVCacheConfig.has_mamba_layers.fget.__module__ == "vllm.v1.kv_cache_interface"
+    assert config.has_mamba_layers is (group_kind in ("mamba", "mixed"))
+    assert config.needs_kv_cache_zeroing is config.has_mamba_layers
+
+
+@pytest.mark.parametrize("dcp", [1, 4])
+@pytest.mark.parametrize("num_speculative_blocks", [0, 3])
+@pytest.mark.parametrize("cache_mode", ["align", "none"])
+def test_native_uniform_width_preserves_mamba_speculative_slots(dcp, num_speculative_blocks, cache_mode) -> None:
+    config = _make_vllm_config(enable_prefix_caching=True, dcp=dcp)
+    config.cache_config.mamba_cache_mode = cache_mode
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((2, 3),),
+        dtypes=(torch.float32,),
+        num_speculative_blocks=num_speculative_blocks,
+        mamba_cache_mode=cache_mode,
+    )
+    wrapped = UniformTypeKVCacheSpecs.from_specs({"mamba.0": spec, "mamba.1": replace(spec, shapes=((3, 2),))})
+    assert wrapped is not None
+    assert UniformTypeKVCacheSpecs.max_num_blocks_per_req.__module__ == "vllm.v1.kv_cache_interface"
+    expected = (5 if cache_mode == "align" else 1) + num_speculative_blocks
+    assert wrapped.max_num_blocks_per_req(config, 65) == spec.max_num_blocks_per_req(config, 65) == expected
+
+
+@pytest.mark.parametrize("dcp", [1, 4])
+def test_native_uniform_attention_width_uses_dcp(dcp) -> None:
+    config = _make_vllm_config(enable_prefix_caching=True, dcp=dcp)
+    spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float32)
+    wrapped = UniformTypeKVCacheSpecs.from_specs({"attention.0": spec, "attention.1": spec})
+    assert wrapped is not None
+    assert wrapped.max_num_blocks_per_req(config, 65) == math.ceil(65 / (16 * dcp))
+
+
+def test_native_uniform_width_rejects_inconsistent_inner_widths() -> None:
+    config = _make_vllm_config(enable_prefix_caching=True, dcp=2)
+    spec = MambaSpec(block_size=16, shapes=((1,),), dtypes=(torch.float32,))
+    # Bypass from_specs to exercise the native assertion on malformed groups.
+    wrapped = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={"mamba.0": spec, "mamba.1": replace(spec, num_speculative_blocks=3)},
+    )
+    with pytest.raises(AssertionError, match="same number of block table entries"):
+        wrapped.max_num_blocks_per_req(config, 65)
+
+
 def test_kimi_k3_gqa_mixed_groups_preserve_scheduler_and_mamba_contracts() -> None:
     groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(_make_kimi_k3_dspark_kv_cache_specs())
     assert groups is not None
@@ -802,7 +978,7 @@ def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> N
     expected_num_blocks = 100
     available_memory = page_size * 29 * expected_num_blocks
     monkeypatch.setattr(
-        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        "vllm_ascend.core.kv_cache_config_builder.may_override_num_blocks",
         lambda _config, num_blocks: num_blocks,
     )
 
@@ -890,7 +1066,7 @@ def test_deepseek_v4_scheduler_lcm_uses_logical_group_sizes() -> None:
         block_size=128,
     )
 
-    scheduler_block_size, hash_block_size = _ascend_resolve_kv_cache_block_sizes(
+    scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
         kv_cache_config,
         vllm_config,
     )
@@ -904,15 +1080,16 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     planned_tensor = _make_kv_cache_tensor(4096, ["c4_attn", "c128_attn"])
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(prefix_cache_retention_interval=None),
-        model_config=SimpleNamespace(max_model_len=4096),
+        model_config=SimpleNamespace(max_model_len=4096, hf_config=SimpleNamespace(model_type="deepseek_v4")),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         max_in_flight_tokens=1,
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
 
     planner = MagicMock(return_value=(7, [planned_tensor]))
-    monkeypatch.setattr(kv_cache_utils_patch, "_get_kv_cache_config_deepseek_v4_main", planner)
+    monkeypatch.setattr(kv_cache_config_builder, "_get_kv_cache_config_deepseek_v4_main", planner)
 
-    result = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(
+    result = get_ascend_kv_cache_config_from_groups(
         vllm_config,
         kv_cache_config.kv_cache_groups,
         available_memory=1 << 30,
@@ -922,24 +1099,16 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     assert result.num_blocks == 7
     assert result.kv_cache_tensors == [planned_tensor]
 
-    if _UPSTREAM_MAX_MEMORY_TAKES_BUILDER:
-        # vLLM #42309 threads the KVCacheConfigBuilder through admission on
-        # main; the DSV4 shared-tuple branch does not read it.
-        needed_memory = kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(
-            MagicMock(),
-            vllm_config,
-            kv_cache_config.kv_cache_groups,
-        )
-    else:
-        needed_memory = kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(
-            vllm_config,
-            kv_cache_config.kv_cache_groups,
-        )
+    needed_memory = planning._max_memory_usage_bytes_from_groups(
+        AscendKVCacheConfigBuilder(),
+        vllm_config,
+        kv_cache_config.kv_cache_groups,
+    )
     full_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
     assert isinstance(full_spec, UniformTypeKVCacheSpecs)
     layer_tuple_bytes = sum(spec.page_size_bytes for spec in full_spec.kv_cache_specs.values())
     num_layer_tuples = max(
-        kv_cache_utils_patch._get_max_layers_per_page_size(group.kv_cache_spec)
+        group.kv_cache_spec.get_max_layers_per_page_size()
         for group in kv_cache_config.kv_cache_groups
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
     )
@@ -965,7 +1134,7 @@ def test_deepseek_v4_main_planner_uses_shared_backing_geometry(monkeypatch) -> N
     expected_num_blocks = 7
     available_memory = page_size * expected_num_blocks
     monkeypatch.setattr(
-        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        "vllm_ascend.core.kv_cache_config_builder.may_override_num_blocks",
         lambda _config, num_blocks: num_blocks,
     )
 
@@ -1016,22 +1185,27 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
         )
     ]
     vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v4")),
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=None,
             prefix_cache_retention_interval=None,
             # Both supported lanes (#57169) resolve the KV cache layout when
             # computing the pool bytes per block.
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBHNC,
-        )
+        ),
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
-    ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(vllm_config, kv_cache_groups)
-    upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
+    builder = AscendKVCacheConfigBuilder()
+    ascend_bytes_per_block = builder._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
+    upstream_bytes_per_block = planning._pool_bytes_per_block(vllm_config, kv_cache_groups)
     assert ascend_bytes_per_block != upstream_bytes_per_block
-    live_module = kv_cache_utils_patch._kv_cache_planning
-    assert live_module._pool_bytes_per_block is kv_cache_utils_patch._ascend_pool_bytes_per_block
+    # The builder declares the accounting, so Core reads it instead of probing
+    # a one-block placement, which this shared-slot layout cannot express.
+    probed_bytes_per_block = planning._pool_bytes_per_block_from_builder(builder, vllm_config, kv_cache_groups)
+    assert probed_bytes_per_block == ascend_bytes_per_block
 
     expected_num_blocks = 7
-    replanned_config = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(
+    replanned_config = get_ascend_kv_cache_config_from_groups(
         vllm_config,
         kv_cache_groups,
         expected_num_blocks * ascend_bytes_per_block,
@@ -1059,6 +1233,69 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
     assert mtp_tensor.offset == tuple_stride + large_page_offset
     assert mtp_tensor.layer_stride == 0
     assert mtp_tensor.block_stride == large_page_spec.page_size_bytes
+
+
+def test_deepseek_v4_admission_matches_generic_divisor_accounting() -> None:
+    """DSV4 admission must use the divisor the planner materializes with.
+
+    The generic planner scales the builder's shared-tuple divisor by the same
+    page counts the tensors are laid out with. They have to agree, otherwise
+    Core derives `num_blocks` from one divisor while the tensors are laid out
+    with another.
+    """
+    c4_spec = MLAAttentionSpec(
+        block_size=128 * 4,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        **_ratio_kwargs(4),
+        model_version="deepseek_v4",
+    )
+    c128_spec = MLAAttentionSpec(
+        block_size=128 * 128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        **_ratio_kwargs(128),
+        model_version="deepseek_v4",
+    )
+    mtp_name = "mtp.layers.0.self_attn"
+    c4_group = UniformTypeKVCacheSpecs.from_specs({"c4_attn": c4_spec})
+    c128_group = UniformTypeKVCacheSpecs.from_specs({"c128_attn": c128_spec, mtp_name: c128_spec})
+    assert c4_group is not None
+    assert c128_group is not None
+    kv_cache_groups = [
+        KVCacheGroupSpec(layer_names=["c4_attn"], kv_cache_spec=c4_group),
+        KVCacheGroupSpec(layer_names=["c128_attn", mtp_name], kv_cache_spec=c128_group),
+    ]
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBHNC,
+        ),
+        model_config=SimpleNamespace(
+            max_model_len=4096,
+            hf_config=SimpleNamespace(model_type="deepseek_v4"),
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        max_in_flight_tokens=1,
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+
+    builder = AscendKVCacheConfigBuilder()
+    generic_bytes = planning._max_memory_usage_bytes_from_groups(
+        builder,
+        vllm_config,
+        kv_cache_groups,
+    )
+    layer_tuple_bytes = sum(spec.page_size_bytes for spec in c4_group.kv_cache_specs.values())
+    num_layer_tuples = max(group.kv_cache_spec.get_max_layers_per_page_size() for group in kv_cache_groups)
+    expected_bytes = sum(
+        num_layer_tuples * group.kv_cache_spec.max_memory_usage_pages(vllm_config) * layer_tuple_bytes
+        for group in kv_cache_groups
+    )
+
+    assert generic_bytes == expected_bytes
 
 
 @pytest.mark.parametrize(
@@ -1262,161 +1499,6 @@ def test_verify_and_split_propagates_eagle_to_managers() -> None:
     assert coordinator.single_type_managers[0].use_eagle is False
 
 
-def test_qwen4_exp_annotates_only_actual_mtp_group() -> None:
-    target_spec = FullAttentionSpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=8,
-        dtype=torch.bfloat16,
-    )
-    mamba_spec = MambaSpec(
-        block_size=16,
-        shapes=((2, 4),),
-        dtypes=(torch.float32,),
-    )
-    groups = [
-        KVCacheGroupSpec(
-            ["model.layers.0.self_attn.attn"],
-            target_spec,
-        ),
-        KVCacheGroupSpec(
-            ["model.layers.48.self_attn.attn"],
-            target_spec,
-        ),
-        KVCacheGroupSpec(
-            ["model.layers.1.linear_attn"],
-            mamba_spec,
-        ),
-    ]
-    speculative_config = SimpleNamespace(
-        use_eagle_block_drop=lambda: True,
-        draft_model_config=SimpleNamespace(
-            architectures=["Qwen4ExpMTP"],
-            hf_text_config=SimpleNamespace(
-                mtp_num_hidden_layers=1,
-            ),
-        ),
-    )
-    vllm_config = SimpleNamespace(
-        speculative_config=speculative_config,
-        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(num_hidden_layers=48)),
-    )
-    kv_cache_spec = {layer_name: group.kv_cache_spec for group in groups for layer_name in group.layer_names}
-
-    _ascend_annotate_eagle_groups(
-        vllm_config,
-        kv_cache_spec,
-        groups,
-    )
-
-    assert [group.is_eagle_group for group in groups] == [False, True, False]
-
-
-@pytest.mark.parametrize(
-    ("text_model_type", "text_architectures"),
-    [
-        ("qwen4_exp_mtp", []),
-        ("qwen4_exp_text", ["Qwen4ExpMTP"]),
-    ],
-)
-def test_qwen4_exp_mtp_text_config_fallback_annotation(
-    text_model_type,
-    text_architectures,
-) -> None:
-    spec = FullAttentionSpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=8,
-        dtype=torch.bfloat16,
-    )
-    groups = [
-        KVCacheGroupSpec(["mtp.layers.48.self_attn.attn"], spec),
-    ]
-    speculative_config = SimpleNamespace(
-        use_eagle_block_drop=lambda: True,
-        draft_model_config=SimpleNamespace(
-            architectures=[],
-            hf_text_config=SimpleNamespace(
-                model_type=text_model_type,
-                architectures=text_architectures,
-                mtp_num_hidden_layers=1,
-            ),
-        ),
-    )
-    vllm_config = SimpleNamespace(
-        speculative_config=speculative_config,
-        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(num_hidden_layers=48)),
-    )
-
-    _ascend_annotate_eagle_groups(
-        vllm_config,
-        {groups[0].layer_names[0]: spec},
-        groups,
-    )
-
-    assert groups[0].is_eagle_group is True
-
-
-def test_non_qwen_mtp_does_not_use_positional_annotation() -> None:
-    spec = FullAttentionSpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=8,
-        dtype=torch.bfloat16,
-    )
-    groups = [KVCacheGroupSpec(["model.layers.48.self_attn.attn"], spec)]
-    speculative_config = SimpleNamespace(
-        use_eagle_block_drop=lambda: True,
-        draft_model_config=SimpleNamespace(
-            architectures=["OtherMTP"],
-            hf_text_config=SimpleNamespace(
-                model_type="other_mtp",
-                architectures=["OtherMTP"],
-            ),
-        ),
-    )
-    vllm_config = SimpleNamespace(
-        speculative_config=speculative_config,
-        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(num_hidden_layers=48)),
-    )
-
-    _ascend_annotate_eagle_groups(
-        vllm_config,
-        {groups[0].layer_names[0]: spec},
-        groups,
-    )
-
-    assert groups[0].is_eagle_group is False
-
-
-def test_qwen4_exp_mtp_missing_draft_group_fails_fast() -> None:
-    spec = FullAttentionSpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=8,
-        dtype=torch.bfloat16,
-    )
-    groups = [KVCacheGroupSpec(["model.layers.47.self_attn.attn"], spec)]
-    speculative_config = SimpleNamespace(
-        use_eagle_block_drop=lambda: True,
-        draft_model_config=SimpleNamespace(
-            architectures=["Qwen4ExpMTP"],
-            hf_text_config=SimpleNamespace(mtp_num_hidden_layers=1),
-        ),
-    )
-    vllm_config = SimpleNamespace(
-        speculative_config=speculative_config,
-        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(num_hidden_layers=48)),
-    )
-
-    with pytest.raises(ValueError, match="no KV cache group"):
-        _ascend_annotate_eagle_groups(
-            vllm_config,
-            {groups[0].layer_names[0]: spec},
-            groups,
-        )
-
-
 def test_verify_and_split_propagates_eagle_to_merged_spec_siblings() -> None:
     """Upstream ``_annotate_eagle_groups_deepseek_v4`` flags only the single
     group holding the MTP layer, but the read path merges same-spec groups and
@@ -1472,7 +1554,8 @@ def test_deepseek_v4_detection_handles_non_mapping_nested_specs() -> None:
     assert not _is_deepseek_v4_kv_cache_spec(unknown_spec)
 
 
-def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> None:
+@pytest.mark.parametrize("dcp,pcp", [(1, 1), (2, 1), (2, 4)])
+def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching(dcp, pcp) -> None:
     mamba_spec = MambaSpec(
         block_size=16,
         shapes=((1,),),
@@ -1492,12 +1575,14 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
         block_pool=block_pool,
         enable_caching=True,
         kv_cache_group_id=1,
-        dcp_world_size=2,
-        pcp_world_size=1,
+        dcp_world_size=dcp,
+        pcp_world_size=pcp,
     )
     manager_kwargs["scheduler_block_size"] = mamba_spec.block_size
     manager = AscendMambaManager(**manager_kwargs)
 
+    assert AscendMambaManager.__init__ is AscendMambaManager.__base__.__init__
+    assert manager.dcp_world_size == manager.pcp_world_size == 1
     assert manager.block_size == mamba_spec.block_size
     assert manager.get_num_blocks_to_allocate("prefill", 16, [], 0, 0, 16, prefill_end=16) == 1
 
@@ -1579,3 +1664,81 @@ def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
         f"expected {expected} cached blocks ({4}/{128} per segment), got {true_blocks}/{total_blocks}"
     )
     assert true_blocks > 0 and true_blocks < total_blocks, f"mask should be sparse, got {true_blocks}/{total_blocks}"
+
+
+@pytest.mark.parametrize("dcp", [1, 2, 8])
+def test_native_replicated_draft_owns_separate_group_and_block_span(dcp):
+    specs = _make_kimi_k3_dspark_kv_cache_specs(draft_replication_size=2)
+    assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is None
+    groups = planning._get_kv_cache_groups_uniform_page_size(specs)
+    assert any(not g.kv_cache_spec.dcp_sharded and isinstance(g.kv_cache_spec, FullAttentionSpec) for g in groups)
+    config = _make_vllm_config(enable_prefix_caching=True, dcp=dcp, block_size=384)
+    cache = KVCacheConfig(num_blocks=100, kv_cache_tensors=[], kv_cache_groups=groups)
+    scheduler, hashed = resolve_kv_cache_block_sizes(cache, config)
+    assert scheduler == 384 * dcp
+    assert hashed == 384
+    coordinator = object.__new__(AscendHybridKVCacheCoordinator)
+    coordinator.dcp_world_size = dcp
+    coordinator.enable_caching = True
+    for group in groups:
+        spec = group.kv_cache_spec
+        assert coordinator._get_effective_block_size(spec) == spec.block_size * (dcp if spec.dcp_sharded else 1)
+
+
+@pytest.mark.parametrize("dcp", [1, 2, 8])
+@pytest.mark.parametrize("layout", ["LBHNC", "BLHNC"])
+@pytest.mark.parametrize("num_blocks_override", [None, 5])
+def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp, layout, num_blocks_override):
+    from vllm.config import CacheConfig
+
+    target = AscendMLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    draft = FullAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=16,
+        dtype=torch.bfloat16,
+        page_size_padded=target.page_size_bytes,
+        dcp_sharded=False,
+    )
+    state = MambaSpec(
+        block_size=4,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        page_size_padded=target.page_size_bytes,
+        mamba_cache_mode="align",
+    )
+    groups = [
+        KVCacheGroupSpec(["target"], target),
+        KVCacheGroupSpec(["draft"], draft),
+        KVCacheGroupSpec(["state"], state),
+    ]
+    config = SimpleNamespace(
+        cache_config=CacheConfig(block_size=4, num_gpu_blocks_override=num_blocks_override),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k3")),
+        attention_config=SimpleNamespace(hisparse_config=None),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
+    )
+    config.cache_config.kv_cache_layout = layout
+    bytes_per_block = AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(config, groups)
+    assert bytes_per_block == target.page_size_bytes + draft.page_size_bytes
+    assert _pool_bytes_per_block_from_builder(AscendKVCacheConfigBuilder(), config, groups) == bytes_per_block
+    budget = 11 * bytes_per_block + bytes_per_block // 2
+    planned = get_ascend_kv_cache_config_from_groups(config, groups, budget)
+    expected_blocks = 11 if num_blocks_override is None else num_blocks_override
+    assert planned.num_blocks == expected_blocks
+    assert planned.kv_cache_groups is groups
+    assert {tensor.size for tensor in planned.kv_cache_tensors} == {expected_blocks * bytes_per_block}
+    assert all(tensor.size <= budget for tensor in planned.kv_cache_tensors)
+    regions = {tensor.layers[0]: tensor for tensor in planned.kv_cache_tensors}
+    assert regions["target"].offset == regions["state"].offset == 0
+    assert regions["draft"].offset == expected_blocks * target.page_size_bytes
+    backing = torch.zeros(expected_blocks * bytes_per_block, dtype=torch.uint8)
+    # Reproduce the contiguous K/V tail view, including padding in the spec.
+    draft_end = regions["draft"].offset + expected_blocks * draft.page_size_bytes
+    draft_start = draft_end - expected_blocks * draft.real_page_size_bytes
+    backing[draft_start:draft_end].fill_(91)
+    assert not backing[: expected_blocks * target.page_size_bytes].any()
+    assert backing[draft_start:draft_end].eq(91).all()
+    # Rank re-planning must retain exactly the agreed block count.
+    replanned = get_ascend_kv_cache_config_from_groups(config, groups, 7 * bytes_per_block)
+    assert replanned.num_blocks == (7 if num_blocks_override is None else num_blocks_override)

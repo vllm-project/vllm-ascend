@@ -36,11 +36,19 @@ from vllm_ascend.distributed.eplb.tensor_ops import (
     count_allgather_tokens,
     make_allgather_mask,
 )
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.33.0"):
+    from vllm.config.utils import hash_config_cached
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 _EPLB_CLOSE_TIMEOUT_SECONDS = 300
 _EPLB_EVENT_POLL_SECONDS = 0.1
 EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar("vllm_ascend_expert_mapping_ep_size", default=1)
+# ForwardContext.additional_kwargs key holding one gathered AllGather source
+# mask per micro-batch. Read directly rather than through _EXTRA_CTX: the
+# proxy cannot create the list atomically, which DBO needs.
+_ALLGATHER_SOURCE_MASK_SLOTS = "eplb_allgather_source_mask_slots"
 
 
 @contextmanager
@@ -125,18 +133,36 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         if all_gather_mask is not None:
             assert self.num_unpadded_tokens_tensors is not None and self.should_record_tensor is not None
             num_unpadded_tokens = self.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
-            is_padding = self.allgather_source_is_padding
-            if is_padding is None:
-                is_padding = getattr(get_forward_context(), "is_padding", None)
-            token_mask = make_allgather_mask(
-                num_source_tokens,
-                num_unpadded_tokens,
-                self.should_record_tensor,
-                is_padding=is_padding,
-                tp_size=get_tensor_model_parallel_world_size() if is_sequence_parallel else 1,
-                tp_rank=get_tensor_model_parallel_rank() if is_sequence_parallel else 0,
+            # Every MoE layer of this model derives the same mask from the same
+            # per-forward inputs, so gathering it in each one repeats a
+            # collective as many times as the model has MoE layers. Hold it on
+            # the forward context, which lives exactly as long as the mask is
+            # valid: warmup, graph capture and draft forwards each enter their
+            # own, and none of them passes through the EPLB controller.
+            # ``setdefault`` because DBO runs its micro-batches on two threads
+            # that share one context, and a lost list would leave the ranks
+            # gathering a different number of times.
+            ubatch = dbo_current_ubatch_id()
+            forward_context = get_forward_context()
+            slots = forward_context.additional_kwargs.setdefault(
+                _ALLGATHER_SOURCE_MASK_SLOTS,
+                [None] * len(self.num_unpadded_tokens_tensors),
             )
-            token_mask = all_gather_mask(token_mask)
+            token_mask = slots[ubatch]
+            if token_mask is None:
+                is_padding = self.allgather_source_is_padding
+                if is_padding is None:
+                    is_padding = getattr(forward_context, "is_padding", None)
+                token_mask = make_allgather_mask(
+                    num_source_tokens,
+                    num_unpadded_tokens,
+                    self.should_record_tensor,
+                    is_padding=is_padding,
+                    tp_size=get_tensor_model_parallel_world_size() if is_sequence_parallel else 1,
+                    tp_rank=get_tensor_model_parallel_rank() if is_sequence_parallel else 0,
+                )
+                token_mask = all_gather_mask(token_mask)
+                slots[ubatch] = token_mask
             local_load = count_allgather_tokens(topk_ids, token_mask, self.local_expert_start, self.local_expert_count)
             assert self.allgather_record_tensor is not None
             torch.maximum(
@@ -210,7 +236,9 @@ def refresh_model_routing_tables(
             layer_state.refresh_expert_replica_routing_table()
     if hasattr(model_state, "_allgather_physical_map"):
         current_map = model_state.physical_to_logical_map
-        if not torch.equal(current_map, model_state._allgather_physical_map):
+        # Async layer refreshes follow changed-layer commits. Comparing the
+        # device maps here would synchronize the foreground inference stream.
+        if layer_idx is not None or not torch.equal(current_map, model_state._allgather_physical_map):
             if model_state._allgather_physical_map.shape == current_map.shape:
                 model_state._allgather_physical_map.copy_(current_map)
             else:
@@ -284,11 +312,20 @@ class AscendEplbState(_eplb_state.EplbState):
                 super().add_model(model, model_config, model_name=model_name)
         finally:
             EXPERT_MAPPING_EP_SIZE.reset(token)
-        if get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE:
-            model_state = self.model_states[model_config.compute_hash()]
-            model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
+        # Snapshot the placement for every profile, not just AllGather. The load
+        # history is keyed by physical slot, so a committed rearrangement that
+        # moves a different logical expert into a slot invalidates it, and
+        # refresh_model_routing_tables needs the previous placement to notice.
+        # Seeding here rather than on first use also covers the first commit,
+        # which already carries the new mapping by the time the tables refresh.
+        if vllm_version_is("0.33.0"):
+            key = model_config.compute_hash()
+        else:
+            key = hash_config_cached(model_config)
+        model_state = self.model_states[key]
+        model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
         if self.uses_custom_load_stats:
-            self._initialize_load_stats_state(self.model_states[model_config.compute_hash()])
+            self._initialize_load_stats_state(model_state)
 
     def _propagate_shared_tensors(self, model, num_unpadded_tokens_tensors) -> None:
         super()._propagate_shared_tensors(model, num_unpadded_tokens_tensors)
@@ -697,7 +734,11 @@ class AscendEplbState(_eplb_state.EplbState):
         super().update_mapping(model_config, expanded_physical_to_logical)
         # Verified main updates a live state during elastic EP. Refresh the
         # Ascend replica table in place so captured graphs use the new mapping.
-        refresh_model_routing_tables(self.model_states[model_config.compute_hash()])
+        if vllm_version_is("0.33.0"):
+            key = model_config.compute_hash()
+        else:
+            key = hash_config_cached(model_config)
+        refresh_model_routing_tables(self.model_states[key])
 
     @classmethod
     def from_mapping(
@@ -731,6 +772,7 @@ class AscendEplbState(_eplb_state.EplbState):
                 state._initialize_load_stats_state(model_state)
         for model_state in state.model_states.values():
             refresh_model_routing_tables(model_state)
-            if get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE:
-                model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
+            # Elastic EP builds the state here instead of through add_model, so
+            # seed the placement snapshot on the same terms.
+            model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
         return state

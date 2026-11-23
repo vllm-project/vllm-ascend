@@ -20,7 +20,7 @@ Unified Cache Manager (UCM) provides an external KV-cache storage layer designed
 
 UCM adopts a **centralized architecture** for KV cache management, constructing a three-tier cache hierarchy:
 
-```bash
+```text
 HBM (GPU Memory) → DRAM (Local Cache) → Storage Backend (SSD/NFS/3FS)
 ```
 
@@ -452,7 +452,7 @@ vllm bench serve \
 
 After the second run, a significant reduction in TTFT should be observed due to UCM prefix cache hits. Review the vLLM logs for cache hit information:
 
-```bash
+```output
 INFO ucm_connector.py:xxx: request_id: xxx, total_blocks_num: xxx, hit hbm: 0, hit external: xxx
 ```
 

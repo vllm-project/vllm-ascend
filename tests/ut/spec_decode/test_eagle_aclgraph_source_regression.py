@@ -34,6 +34,6 @@ def test_eagle_aclgraph_uses_verified_main_speculator_contract() -> None:
 def test_eagle_patch_replaces_verified_main_manager_symbol() -> None:
     source = PATCH.read_text()
 
-    assert "vllm_speculator_module.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager" in source
+    assert "ar_speculator.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager" in source
     assert "PrefillSpeculatorCudaGraphManager" not in source
     assert "DecodeSpeculatorCudaGraphManager" not in source

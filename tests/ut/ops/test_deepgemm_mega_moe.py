@@ -173,6 +173,20 @@ def test_config_constraints(invalid):
                 config._validate_deepgemm_mega_moe(vc)
 
 
+def test_config_rejects_per_layer_swiglu_limits():
+    from vllm_ascend.ascend_config import AscendConfig
+
+    config = AscendConfig(sparse_kv_offload_config={})
+    vc = model_config()
+    vc.model_config.hf_text_config.expert_swiglu_limit_list = [0, 10]
+    with (
+        patch("vllm_ascend.ascend_config.get_current_hardware_profile") as hw,
+        pytest.raises(ValueError, match="per-layer SwiGLU limits"),
+    ):
+        hw.return_value.supports.return_value = True
+        config._validate_deepgemm_mega_moe(vc)
+
+
 def test_config_rejects_rl_weight_reloading():
     from vllm_ascend.ascend_config import AscendConfig
 

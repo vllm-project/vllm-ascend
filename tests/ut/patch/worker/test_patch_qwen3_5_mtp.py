@@ -14,16 +14,29 @@ from vllm_ascend.patch.worker import patch_qwen3_5
     not hasattr(patch_qwen3_5, "_gdn_init_with_packed_weight"),
     reason="The 310P branch intentionally does not install packed GDN weights.",
 )
-def test_standard_gdn_constructor_registers_packed_weight_after_base_init():
+@pytest.mark.parametrize("checkpoint_enabled", [False, True])
+def test_standard_gdn_constructor_registers_packed_weight_after_base_init(checkpoint_enabled: bool):
     def fake_original_init(layer, *args, **kwargs):
         del args, kwargs
         torch.nn.Module.__init__(layer)
         layer.model_config = SimpleNamespace(dtype=torch.bfloat16)
+        # The real base constructor sets this before checkpoint initialization.
+        # This packed-weight test uses the non-checkpoint cache mode.
+        layer.vllm_config = SimpleNamespace(
+            model_config=layer.model_config,
+            cache_config=SimpleNamespace(mamba_cache_mode="none"),
+        )
         layer.conv1d = torch.nn.Module()
         layer.conv1d.weight = torch.nn.Parameter(torch.empty(6, 1, 4))
         layer.conv1d.quant_method = SimpleNamespace(process_weights_after_loading=lambda _layer: None)
 
-    with patch.object(patch_qwen3_5, "_GDN_ORIGINAL_INIT", fake_original_init):
+    with (
+        patch.object(patch_qwen3_5, "_GDN_ORIGINAL_INIT", fake_original_init),
+        patch(
+            "vllm_ascend.ops.gdn_checkpoint.get_ascend_config",
+            return_value=SimpleNamespace(gdn_internal_prefill_checkpoints=checkpoint_enabled),
+        ),
+    ):
         layer = object.__new__(patch_qwen3_5._GDN_PATCH_TARGET)
         patch_qwen3_5._gdn_init_with_packed_weight(layer)
 
@@ -32,6 +45,7 @@ def test_standard_gdn_constructor_registers_packed_weight_after_base_init():
     assert packed.shape == (4, 6)
     assert packed.dtype == torch.bfloat16
     assert not packed.requires_grad
+    assert not getattr(layer, "_ascend_internal_checkpoint_enabled", False)
 
 
 def test_qwen3_5_text_attention_uses_standard_rope():

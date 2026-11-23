@@ -119,12 +119,16 @@ class EngramModelState(AscendModelState):
         self._replay_start_np[req_index] = int(getattr(new_req_data, "replay_start", 0))
         if self.decoder_replay_state is not None:
             params = new_req_data.sampling_params
-            self.decoder_replay_state.keeps_rows[req_index] = params is not None and params.prompt_logprobs is not None
+            self.decoder_replay_state.keeps_rows[req_index] = params is not None and (
+                params.prompt_logprobs is not None or params.prompt_logprob_token_ids is not None
+            )
 
     def finish_execution(self, *, failed: bool) -> None:
         # Engram owns its lookup buffers and events. Keep their retirement
         # beside the input preparation instead of exposing them to the runner.
         try:
+            if self.decoder_replay_state is not None:
+                self.decoder_replay_state.wait_for_metadata()
             self._engram_inputs = None
             self.model.retire_engram_lookups(reset_events=failed)
         finally:
@@ -235,7 +239,15 @@ class EngramModelState(AscendModelState):
         if self.decoder_replay_state is not None:
             self.decoder_replay_state.prepare(
                 DecoderReplayInputs(
-                    input_batch, block_tables, slot_mappings, attn_groups, replay_start, self.pcp_context
+                    input_batch,
+                    block_tables,
+                    slot_mappings,
+                    attn_groups,
+                    replay_start,
+                    self.pcp_context,
+                    metadata_producer_stream=(
+                        self.device_metadata.executor.stream if self.device_metadata is not None else None
+                    ),
                 ),
                 cudagraph_mode,
                 for_capture=for_capture,
