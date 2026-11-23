@@ -346,6 +346,14 @@ def _select_capacity_and_expert_density_moe_comm_method(
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
+    # Mirror the A3 selector (_select_fused_or_capacity_moe_comm_method):
+    # when the mega_moe op package is available and the A2 profile grants
+    # CANN_MEGAMOE, run FUSED_MC2 (MegaMoe); a plain enable_fused_mc2=1
+    # keeps the dispatch_ffn_combine path.
+    if use_cann_megamoe(vllm_config):
+        return MoECommType.FUSED_MC2
+    if get_ascend_config().enable_fused_mc2 == 1 and get_ep_group().world_size <= 32:
+        return MoECommType.FUSED_MC2
     num_experts = vllm_config.model_config.get_num_experts()
     ep_world_size = (
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
