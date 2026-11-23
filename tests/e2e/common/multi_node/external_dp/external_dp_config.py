@@ -10,6 +10,11 @@ from tests.e2e.common.kv_pool.config import (
     parse_kv_pool_config,
     validate_kv_pool_config,
 )
+from tests.e2e.common.multi_node.external_dp.mooncake_ports import (
+    MAX_TCP_PORT,
+    MooncakePortRetryConfig,
+    with_kv_port,
+)
 from tests.e2e.common.multi_node.utils import (
     load_yaml_mapping,
     resolve_cluster_ips,
@@ -81,6 +86,7 @@ class NodeTemplate:
 
     envs: dict[str, Any]
     server_cmd_template: list[str]
+    mooncake_port_retry: MooncakePortRetryConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -356,6 +362,7 @@ class ExternalDPConfigLoader:
                 NodeTemplate(
                     envs=dict(envs),
                     server_cmd_template=[str(arg) for arg in server_cmd_template],
+                    mooncake_port_retry=MooncakePortRetryConfig.parse(raw_template.get("mooncake_port_retry")),
                 )
             )
         return templates
@@ -380,6 +387,31 @@ class ExternalDPConfigLoader:
         cls._validate_routing(config)
         cls._validate_node_parallel_config(config)
         cls._validate_kv_pool(config)
+        cls._validate_mooncake_port_retry(config)
+
+    @staticmethod
+    def _validate_mooncake_port_retry(config: ExternalDPConfig) -> None:
+        for index, template in enumerate(config.launch_templates):
+            policy = template.mooncake_port_retry
+            if policy is None:
+                continue
+            node = config.nodes[index]
+            if (
+                index != 0
+                or index not in config.routing.groups.get("prefiller", [])
+                or node.dp_size != 1
+                or node.dp_size_local != 1
+                or node.nnodes != 1
+                or node.cp_size != 1
+                or node.sp_size != 1
+            ):
+                raise ValueError("mooncake_port_retry requires a single-node producer on node 0 with DP=CP=SP=1")
+            count = node.tp_size * node.pp_size
+            if any(base + count - 1 > MAX_TCP_PORT for base in policy.bases):
+                raise ValueError("mooncake_port_retry block exceeds TCP port range")
+            if any(abs(left - right) < count for i, left in enumerate(policy.bases) for right in policy.bases[i + 1 :]):
+                raise ValueError("mooncake_port_retry blocks must not overlap")
+            with_kv_port(template.server_cmd_template, policy.bases[0])
 
     @staticmethod
     def _validate_config_sizes(config: ExternalDPConfig) -> None:
