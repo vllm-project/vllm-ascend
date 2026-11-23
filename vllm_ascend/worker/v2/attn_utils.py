@@ -354,17 +354,17 @@ def _prepare_qsa_step_metadata(
     for layer_names, builder in qsa_main_builders:
         if not layer_names:
             continue
+        main_metadata = attn_metadata.get(layer_names[0])
+        request_plan = getattr(main_metadata, "qsa_request_plan", None)
+        if request_plan is None:
+            continue
         layer = builder.vllm_config.compilation_config.static_forward_context.get(layer_names[0])
         if not hasattr(layer, "indexer"):
             continue
-        main_metadata = attn_metadata.get(layer_names[0])
         compressed_metadata = attn_metadata.get(layer.indexer.compressed_key_cache.prefix)
-        if main_metadata is None or compressed_metadata is None:
+        if compressed_metadata is None:
             continue
         if id(main_metadata) in prepared_metadata_ids:
-            continue
-        request_plan = getattr(main_metadata, "qsa_request_plan", None)
-        if request_plan is None:
             continue
         rows = min(
             num_actual_tokens,
