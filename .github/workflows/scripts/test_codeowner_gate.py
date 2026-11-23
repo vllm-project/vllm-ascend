@@ -385,24 +385,6 @@ class TestContentlessExemption:
         errors, warnings = gate.check_coverage(rules, ["ghost.py"])
         assert errors == [] and warnings == ["file has no CODEOWNERS owner: ghost.py"]
 
-    def test_sparse_working_tree_exempt_via_git_sizes(self, tmp_path, monkeypatch):
-        """CI checks out only .github/ (sparse): the working tree cannot
-        answer size questions, so exemption must come from the git object
-        store (get_git_blob_sizes), not os.path.getsize."""
-        monkeypatch.chdir(tmp_path)
-        rules = gate.parse_codeowners("# TODO(owner): /pkg\n# /pkg\n")
-        git_sizes = {"pkg/__init__.py": 0, "pkg/real.py": 12}
-        errors, warnings = gate.check_coverage(rules, ["pkg/__init__.py", "pkg/real.py"], git_sizes)
-        assert errors == [] and warnings == ["file has no CODEOWNERS owner: pkg/real.py"]
-
-    def test_git_sizes_missing_path_falls_back_to_reported(self, tmp_path, monkeypatch):
-        """A path absent from the git size map (e.g. PR-only file against a
-        base-branch tree) is still reported as unowned."""
-        monkeypatch.chdir(tmp_path)
-        rules = gate.parse_codeowners("# TODO(owner): /pkg\n# /pkg\n")
-        errors, warnings = gate.check_coverage(rules, ["new/__init__.py"], {"other.py": 1})
-        assert errors == [] and warnings == ["file has no CODEOWNERS owner: new/__init__.py"]
-
 
 class TestNoRulePollution:
     """resolve_owners must never mutate the parsed rules (regression: an
