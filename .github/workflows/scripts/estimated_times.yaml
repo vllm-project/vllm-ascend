@@ -156,7 +156,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 1520
   tests/e2e/pull_request/four_card/model_runner_v2/test_qwen35_pp_mtp.py: 300
   tests/e2e/pull_request/four_card/model_runner_v2/test_qwen38_pp_mtp_prefix_cache.py: 300
-  tests/e2e/pull_request/four_card/model_runner_v2/test_spec_pp_accuracy.py: 900
+  tests/e2e/pull_request/four_card/model_runner_v2/test_spec_pp_accuracy.py: 1500
   tests/e2e/pull_request/four_card/model_runner_v2/test_spec_decode_data_parallel.py: 540
   tests/e2e/pull_request/four_card/rlhf/consistency/batch_invariant/test_qwen.py: 360
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 520
@@ -166,7 +166,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_ec_mooncake_cross_encoder_store.py: 900
   tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py: 1190
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 580
-  tests/e2e/pull_request/four_card/test_deepseek_v4.py: 600
+  tests/e2e/pull_request/four_card/test_deepseek_v4.py: 1200
   tests/e2e/pull_request/four_card/test_pipeline_parallel.py: 280
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 550
   tests/e2e/pull_request/four_card/lora/test_qwen35_27b_multi_lora_mtp_eager.py: 1200
@@ -175,6 +175,8 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_graph_mode.py: 480
   tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py: 300
   tests/e2e/pull_request/four_card/test_sparse_hccl_checkpoint.py: 250
+  # DSA-PCP MTP pool watch: A/B legs with 32K perf prompts.
+  tests/e2e/pull_request/four_card/context_parallel/pool/test_deepseek_v4_pool.py: 1500
   tests/e2e/pull_request/two_card/test_gemma4.py: 290
   tests/e2e/pull_request/four_card/test_minimax_m3.py: 240
   tests/e2e/pull_request/four_card/test_kimi_k3.py: 600
