@@ -683,6 +683,7 @@ class NPUPlatform(Platform):
 
         # 8.Setup worker class, custom ops and scheduler (ascend_config -> vllm_config).
         _setup_worker_and_scheduler(vllm_config, ascend_config)
+        _setup_hbm_recovery_extensions(vllm_config)
 
         # 9.Validate SFA / DCP / KV and SP consistency (vllm_config)
         _validate_sfa_dcp_kv_sp(vllm_config)
@@ -2311,3 +2312,31 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
             f"parallel for GQA draft model "
             f"({decode_context_parallel_size})."
         )
+
+
+def _setup_hbm_recovery_extensions(vllm_config) -> None:
+    """Select VA classes through existing config fields, without FT patches."""
+    parallel = vllm_config.parallel_config
+    if not parallel.enable_fault_tolerance:
+        return
+    prefix = "vllm_ascend.core.hbm_recovery."
+    executor = prefix + "HbmRecoveryExecutor"
+    async_scheduling = vllm_config.scheduler_config.async_scheduling
+    scheduler = prefix + ("HbmRecoveryAsyncScheduler" if async_scheduling else "HbmRecoveryScheduler")
+    recompute_base = "vllm_ascend.core.recompute_scheduler." + (
+        "AsyncRecomputeScheduler" if async_scheduling else "RecomputeScheduler"
+    )
+    recompute_scheduler = prefix + (
+        "HbmRecoveryAsyncRecomputeScheduler" if async_scheduling else "HbmRecoveryRecomputeScheduler"
+    )
+    if parallel.distributed_executor_backend not in ("mp", executor):
+        raise ValueError("Ascend HBM recovery currently requires the multiprocessing executor")
+    current = vllm_config.scheduler_config.scheduler_cls
+    if current in (recompute_base, recompute_scheduler):
+        # Preserve decode-side preemption/offload and return-to-prefill behavior.
+        # Platform config validation can run again and select the base anew.
+        scheduler = recompute_scheduler
+    elif current not in (None, scheduler):
+        raise ValueError(f"Ascend HBM recovery cannot replace another custom scheduler: {current}")
+    parallel.distributed_executor_backend = executor
+    vllm_config.scheduler_config.scheduler_cls = scheduler

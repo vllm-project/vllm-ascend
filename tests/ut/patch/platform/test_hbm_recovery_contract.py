@@ -205,7 +205,7 @@ def test_retry_plan_uses_local_blocks_and_rejects_failed_phases(failure):
         assert sentinel.worker_faulted
     else:
         prepare(sentinel, request)
-        assert sentinel.retry_cache_plan == {"blocks": [2, 3], "hbm_detected": True}
+        assert sentinel.retry_cache_plan == {"request_id": "round", "blocks": [2, 3], "hbm_detected": True}
     registry.invalidate_blocks.assert_not_called()
     if failure in ("non_kv", "peer_non_kv", "restart"):
         sentinel._restart_device.assert_called_once()

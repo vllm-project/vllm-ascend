@@ -12,7 +12,9 @@ entries:
       faults by clearing affected blocks and recapturing the original V2 target-model graph plan, including PIECEWISE
       and mixed graph modes. Draft and encoder graph recovery is not supported.
       Enable fault tolerance to use recovery; unsupported faults fail recovery
-      and require engine restart.
+      and require engine restart. HBM retry requires abort=true and evicts cleared
+      pages from the local prefix cache before recovery succeeds; non-HBM retry
+      does not perform this eviction.
   - category: config
     text: >-
       Add additional_config.ft_communication_abort_timeout to configure the
