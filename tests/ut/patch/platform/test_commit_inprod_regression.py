@@ -34,6 +34,15 @@ from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 import vllm_ascend.patch.platform.patch_eplb as patch_eplb
 from vllm_ascend.patch.platform.patch_eplb import _AscendAsyncLayerResult
 
+# Device-level stream-ordering regression: needs real NPU streams/events and
+# real device memory. The CPU UT environment mocks torch.npu (no privateuse1
+# allocator, no-op stream stubs), so the ordering contract cannot be expressed
+# there; skip on CPU runners, run on real NPU runners.
+pytestmark = pytest.mark.skipif(
+    not (hasattr(torch, "npu") and torch.npu.is_available()),
+    reason="requires a real Ascend NPU (stream-order regression; cpu-ut mocks torch.npu)",
+)
+
 DEV = "npu"
 NUM_ROWS = 8  # physical expert slots
 HIDDEN = 16384  # wide row -> long per-row copy, like real expert weights
