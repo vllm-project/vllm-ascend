@@ -27,7 +27,7 @@ from vllm_ascend.utils import vllm_version_is
 
 def test_fused_bfg_head_parallel_keeps_unpadded_checkpoint_layout():
     with (
-        patch("vllm_ascend.ops.kimi_kda.get_kda_parallel_rank", return_value=0),
+        patch("vllm_ascend.ops.kimi_kda.get_head_parallel_rank", return_value=0),
         patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=0),
         patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=2),
     ):
