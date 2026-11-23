@@ -125,7 +125,7 @@ def test_push_advertises_the_worker_layout(configuration):
     assert worker._shared_layer_indices == ({entry: 0} if shared else {})
     registry = load(PUSH, "supports_layerwise_buffer_reuse", {}, OWNER)
     worker.supports_layerwise_buffer_reuse = registry(worker)
-    facade = SimpleNamespace(engine_id="p")
+    facade = SimpleNamespace(engine_id="p", connector_worker=None)
     roles = SimpleNamespace(WORKER="worker", SCHEDULER="scheduler")
     init_connector = load(
         CONNECTOR,
@@ -137,8 +137,15 @@ def test_push_advertises_the_worker_layout(configuration):
         },
         "MooncakePushConnector",
     )
+    supports_reuse = load(
+        CONNECTOR,
+        "supports_layerwise_buffer_reuse",
+        {"MooncakePushConnectorWorker": type(worker)},
+        "MooncakePushConnector",
+    )
+    assert supports_reuse(facade) is False
     init_connector(facade, vllm_config, roles.WORKER, cache_config)
-    assert facade.supports_layerwise_buffer_reuse is shared
+    assert supports_reuse(facade) is shared
     if configuration == "consumer":
         get_layout.assert_not_called()
     else:

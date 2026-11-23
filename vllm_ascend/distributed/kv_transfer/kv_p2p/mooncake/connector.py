@@ -278,9 +278,13 @@ class MooncakePushConnector(MooncakeBaseConnector):
             self.connector_scheduler = MooncakePushConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)
         elif role == KVConnectorRole.WORKER:
             self.connector_worker = MooncakePushConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
-            self.supports_layerwise_buffer_reuse = self.connector_worker.supports_layerwise_buffer_reuse
         else:
             raise ValueError(f"Unsupported KVConnectorRole: {role}")
+
+    @property
+    def supports_layerwise_buffer_reuse(self) -> bool:
+        worker = self.connector_worker
+        return isinstance(worker, MooncakePushConnectorWorker) and worker.supports_layerwise_buffer_reuse
 
     def save_kv_layer(
         self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs: Any
