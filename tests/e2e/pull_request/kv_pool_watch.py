@@ -471,12 +471,17 @@ def _control_hit_outputs(
     prompt_tokens: int,
     max_tokens: int,
     prompt_ids: list[int] | None = None,
+    replicas: int = 1,
 ) -> tuple[list[list[int]], float]:
-    """B leg: cold write + one local-hit round; no local hit is CONTROL_DEFECT."""
+    """B leg: cold write + one local-hit round; no local hit is CONTROL_DEFECT.
+
+    ``replicas`` matches the DP width so the control outputs line up with the
+    pool leg's per-rank outputs for the H3 token comparison.
+    """
     prompt = prompt_ids if prompt_ids is not None else build_pool_prompts(prompt_tokens)[0]
-    runner.generate_greedy([prompt], max_tokens)
+    runner.generate_greedy([prompt] * replicas, max_tokens)
     before = _prefix_cache_hits(runner)
-    outputs = [list(ids) for ids, _ in runner.generate_greedy([prompt], max_tokens)]
+    outputs = [list(ids) for ids, _ in runner.generate_greedy([prompt] * replicas, max_tokens)]
     after = _prefix_cache_hits(runner)
     local_hits = after - before
     assert local_hits > 0, f"CONTROL_DEFECT: B leg got no local prefix-cache hit (prefix_cache_hits Δ{local_hits:.0f})"
@@ -547,6 +552,7 @@ def run_pool_ab(
     perf_prompt_tokens: int | None = None,
     max_tokens: int = POOL_MAX_TOKENS,
     token_identity: bool = True,
+    replicas: int = 1,
     perf_reset_local: bool = False,
     perf_seed_concurrency: bool = False,
     gate: bool = True,
@@ -574,7 +580,7 @@ def run_pool_ab(
                     hits = float(summary.get("r3", 0.0))
                     local_hits = 0.0
                 else:
-                    outputs, local_hits = _control_hit_outputs(runner, prompt_tokens, max_tokens, prompt_ids)
+                    outputs, local_hits = _control_hit_outputs(runner, prompt_tokens, max_tokens, prompt_ids, replicas)
                     # B leg records local-hit output, not pool hits.
                     hits = 0.0
                 phase = "perf"

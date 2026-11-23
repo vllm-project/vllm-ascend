@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-"""Pool A/B watch for DeepSeek-V4.1-Flash memcache GVA layerwise + optional SSD.
+"""Pool A/B watch for DeepSeek-V4.1-Flash DP8 x TP1 memcache GVA layerwise + optional SSD.
 
 The SSD tier is behind ``KV_POOL_SSD_ENABLE`` (default off): the standalone
 memcache runtime it needs is not in the #22849 base yet. With the switch off
@@ -19,7 +19,7 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
 from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
-from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.kv_pool_watch import (
     POOL_SECRET,
     build_pool_accuracy_prompt,
@@ -36,11 +36,13 @@ SSD_DEV = os.environ.get("KV_POOL_SSD_DEV", "/dev/loop0")
 SSD_ENABLED = os.environ.get("KV_POOL_SSD_ENABLE", "0").lower() in ("1", "true", "yes", "on")
 METRICS_PORT = get_open_port()
 
-TENSOR_PARALLEL_SIZE = 8
+DATA_PARALLEL_SIZE = 8
+TENSOR_PARALLEL_SIZE = 1
 POOL_PROMPT_TOKENS = 16388
 POOL_PERF_PROMPT_TOKENS = 2 * 16384 + 2 * 16384 // 9
 POOL_MAX_MODEL_LEN = max(POOL_PROMPT_TOKENS, POOL_PERF_PROMPT_TOKENS) + 128
-POOL_BATCHED_TOKENS = 16384
+# Keep 4,096 chunked prefill on a5-8: each DP8 rank owns a whole die.
+POOL_BATCHED_TOKENS = 4096
 SSD_PREFIX_COUNT = 8
 SSD_MAIN_REQUESTS = 32
 CASE_NAME = "dsv4_1_memcache_layerwise_ssd"
@@ -112,6 +114,7 @@ def _build_memcache_pool_config() -> MemcacheKVPoolConfig:
 def _leg(use_pool: bool, case_name: str):
     with ExitStack() as stack:
         kwargs: dict[str, Any] = dict(
+            data_parallel_size=DATA_PARALLEL_SIZE,
             tensor_parallel_size=TENSOR_PARALLEL_SIZE,
             enable_expert_parallel=True,
             max_model_len=POOL_MAX_MODEL_LEN,
@@ -119,10 +122,9 @@ def _leg(use_pool: bool, case_name: str):
             max_num_seqs=64,
             tokenizer_mode="deepseek_v41",
             block_size=128,
-            distributed_executor_backend="mp",
             gpu_memory_utilization=0.9,
             quantization="deepseek_v4_fp8",
-            engram_config={"cpu_offload": True, "dp_shared_memory": False},
+            engram_config={"cpu_offload": True, "dp_shared_memory": True},
             additional_config={"multistream_overlap_shared_expert": True, "combine_quant_mode": 4},
             compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
             enable_prefix_caching=not use_pool,
@@ -133,7 +135,7 @@ def _leg(use_pool: bool, case_name: str):
             stack.enter_context(patch.dict(os.environ, pool.server_envs))
             kwargs["kv_transfer_config"] = POOL_KV_TRANSFER_CONFIG
         print(f"[kv_pool_leg] {case_name} pool={use_pool}", flush=True)
-        yield stack.enter_context(VllmRunner(MODEL, **kwargs))
+        yield stack.enter_context(DPVllmRunner(MODEL, **kwargs))
 
 
 def _read_pool_metrics() -> dict[str, float]:
@@ -189,7 +191,7 @@ def _assert_ssd_evidence(before: dict[str, float], after: dict[str, float]) -> N
 @pytest.mark.e2e_coverage(
     arch="moe",
     feature="prefix_caching",
-    parallel="TP,EP",
+    parallel="DP,TP,EP",
     deploy="pd_mix",
     hardware="A5",
     quantization="FP8",
@@ -201,6 +203,15 @@ def _assert_ssd_evidence(before: dict[str, float], after: dict[str, float]) -> N
         "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "PYTHONHASHSEED": "0",
+        # DP8 settings mirrored from PR #22258's known-good A5 config.
+        "HCCL_OP_EXPANSION_MODE": "CCU_SCHED",
+        "HCCL_BUFFSIZE": "1600",
+        "HCCL_CONNECT_TIMEOUT": "1200",
+        "HCCL_EXEC_TIMEOUT": "2040",
+        "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "3000",
+        "OMP_PROC_BIND": "false",
+        "OMP_NUM_THREADS": "10",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
@@ -218,6 +229,7 @@ def test_deepseek_v4_1_flash_memcache_layerwise_ssd_hit() -> None:
             block_size=128,
             prompt_tokens=POOL_PROMPT_TOKENS,
             prompt_ids=prompt_ids,
+            replicas=DATA_PARALLEL_SIZE,
             check_output=True,
             answer_secret=POOL_SECRET,
             tag="P7",
@@ -243,4 +255,5 @@ def test_deepseek_v4_1_flash_memcache_layerwise_ssd_hit() -> None:
         prompt_ids=prompt_ids,
         perf_prompt_tokens=POOL_PERF_PROMPT_TOKENS,
         token_identity=True,
+        replicas=DATA_PARALLEL_SIZE,
     )
