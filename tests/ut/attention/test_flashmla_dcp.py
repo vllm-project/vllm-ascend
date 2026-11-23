@@ -182,8 +182,25 @@ def runtime(monkeypatch):
     )
 
     def builder(
-        *, size=8, rank=0, interleave=1, heads=8, dtype=torch.float16, use_rope=False, speculative=True, pcp_size=1
+        *,
+        size=8,
+        rank=0,
+        interleave=1,
+        heads=8,
+        dtype=torch.float16,
+        use_rope=False,
+        speculative=True,
+        pcp_size=1,
+        kimi_draft=False,
     ):
+        spec = (
+            SimpleNamespace(
+                method="dspark",
+                draft_model_config=SimpleNamespace(architectures=["K3DSparkModel"]) if kimi_draft else None,
+            )
+            if speculative
+            else None
+        )
         impl = SimpleNamespace(
             num_heads=heads,
             scale=0.125,
@@ -192,9 +209,13 @@ def runtime(monkeypatch):
             dcp_size=size,
             dcp_rank=rank,
             pcp_group=SimpleNamespace(world_size=pcp_size),
+            use_pcp=False,
             vllm_config=SimpleNamespace(
-                parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave),
-                speculative_config=SimpleNamespace(method="dspark") if speculative else None,
+                model_config=SimpleNamespace(architecture="KimiK31ForConditionalGeneration" if kimi_draft else ""),
+                parallel_config=SimpleNamespace(
+                    cp_kv_cache_interleave_size=interleave, decode_context_parallel_size=size
+                ),
+                speculative_config=spec,
             ),
         )
         return api.FlashMLAMetadataBuilder(
@@ -447,6 +468,90 @@ def test_noncausal_draft_metadata_ignores_rejected_cpu_upper_bound(runtime):
     metadata.seq_lens_cpu_upper_bound.fill_(9999)
     second = builder.build(metadata, 1, 7, False)
     assert second.cache_lens[0] == 87
+
+
+@pytest.mark.parametrize(
+    "target_arch, draft_arch, dcp_size, use_pcp, fa_quant_layer, expected",
+    [
+        ("KimiK31ForConditionalGeneration", "K3DSparkModel", 1, False, False, True),
+        ("KimiK31ForConditionalGeneration", "K3DSparkModel", 2, False, False, False),
+        ("KimiK31ForConditionalGeneration", "K3DSparkModel", 1, True, False, False),
+        ("KimiK31ForConditionalGeneration", "K3DSparkModel", 1, False, True, False),
+        ("KimiK31ForConditionalGeneration", "Glm5DSparkForCausalLM", 1, False, False, False),
+        ("KimiK3ForConditionalGeneration", "K3DSparkModel", 1, False, False, False),
+    ],
+)
+def test_six_flashmla_heads_are_only_padded_for_local_kimi_k31_draft(
+    runtime, target_arch, draft_arch, dcp_size, use_pcp, fa_quant_layer, expected
+):
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        model_config=SimpleNamespace(architecture=target_arch),
+        speculative_config=SimpleNamespace(
+            method="dspark", draft_model_config=SimpleNamespace(architectures=[draft_arch])
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
+    )
+    impl = SimpleNamespace(
+        vllm_config=config,
+        num_heads=6,
+        num_kv_heads=1,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        fa_quant_layer=fa_quant_layer,
+        dtype=torch.bfloat16,
+        enable_kv_nz=False,
+        use_pcp=use_pcp,
+    )
+    scope = {
+        "torch": torch,
+        "FLASHMLA_QK_DIM": runtime.api.FLASHMLA_QK_DIM,
+        "FLASHMLA_V_DIM": runtime.api.FLASHMLA_V_DIM,
+        "MLA_FLASH_SUPPORTED_Q_HEADS": runtime.api.MLA_FLASH_SUPPORTED_Q_HEADS,
+        "flashmla_query_heads": runtime.api.flashmla_query_heads,
+        "HardwareCapability": SimpleNamespace(MLA_FLASH=object()),
+        "get_current_hardware_profile": lambda: SimpleNamespace(supports=lambda _: True),
+        "supports_component_major_mla_pd": lambda _: True,
+        "get_flashmla_ops": lambda: (object(), object()),
+    }
+    can_use = load_method("vllm_ascend/attention/mla_v1.py", "AscendMLAImpl", "_can_use_flashmla", scope)
+    assert can_use(impl) is expected
+
+
+def test_kimi_dspark_padded_heads_match_dense_attention_after_graph_buffer_refresh(runtime):
+    builder = runtime.builder(size=1, heads=6, dtype=torch.bfloat16, kimi_draft=True)
+    forward = load_method(
+        "vllm_ascend/attention/mla_v1.py", "AscendMLAImpl", "_forward_external_flashmla", runtime.scope
+    )
+    implementation = SimpleNamespace(num_heads=6, kv_lora_rank=512, _v_up_proj=Mock(side_effect=lambda output: output))
+    prepare_lengths = load_method(
+        "vllm_ascend/worker/v2/spec_decode/dspark/speculator.py",
+        "AscendDSparkSpeculator",
+        "_prepare_draft_dcp_metadata_inputs",
+        runtime.scope,
+    )
+    spec = SimpleNamespace(attn_architecture="MLA", use_flashmla=True)
+    assert prepare_lengths(spec, 1, 1, 0)[0] is None
+
+    rng = torch.Generator().manual_seed(42)
+    cache = torch.randn(1, 128, 1, 576, generator=rng, dtype=torch.bfloat16) * 0.2
+    flash = None
+    for length in (87, 93):
+        previous = flash
+        flash = builder.build(common([length], [7], causal=False), 1, 7, False, retain_for_graph=True)
+        if previous is not None:
+            assert flash is previous
+        assert flash.query.shape == (7, 8, 576)
+        assert flash.adapter.config.num_heads == 8
+        assert flash.cache_lens[0] == length
+        q = torch.randn(7, 6, 576, generator=rng, dtype=torch.bfloat16) * 0.2
+        preprocessed = SimpleNamespace(ql_nope=q[..., :512], q_pe=q[..., 512:])
+        result = forward(implementation, preprocessed, cache, SimpleNamespace(external_flashmla=flash))
+        assert torch.equal(flash.query[:, :6], q)
+        assert torch.count_nonzero(flash.query[:, 6:]) == 0
+        keys = cache[0, :length, 0].double()
+        expected = ((q.double() @ keys.T * 0.125).softmax(-1) @ keys[:, :512]).transpose(0, 1)
+        torch.testing.assert_close(result, expected.to(q.dtype))
 
 
 @pytest.mark.parametrize(

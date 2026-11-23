@@ -30,6 +30,26 @@ FLASHMLA_MASK_SIZE = 2048
 FLASHMLA_MAX_BATCH_SIZE = 65535
 
 
+def flashmla_query_heads(impl) -> int:
+    """Return the physical Q head count for local FlashMLA attention."""
+    if impl.num_heads != 6 or impl.use_pcp:
+        return impl.num_heads
+    config = impl.vllm_config
+    spec = config.speculative_config
+    if (
+        config.parallel_config.decode_context_parallel_size == 1
+        and config.model_config.architecture == "KimiK31ForConditionalGeneration"
+        and spec is not None
+        and spec.method == "dspark"
+        and spec.draft_model_config is not None
+        and "K3DSparkModel" in (spec.draft_model_config.architectures or ())
+    ):
+        # K3.1 DSpark has 96 Q heads. At TP16, pad six local heads to an
+        # operator-supported eight without changing the KV or V projection.
+        return 8
+    return impl.num_heads
+
+
 def prepare_flashmla_batch_req_state(
     batch_state: "BatchReqState", uniform_token_count: int | None
 ) -> tuple["BatchReqState", int | None]:
@@ -318,7 +338,9 @@ class FlashMLAMetadataBuilder:
         # speculative causal queries need the replicated current chunk.
         self.use_spec_decode = impl.vllm_config.speculative_config is not None
         self.cp_interleave = impl.vllm_config.parallel_config.cp_kv_cache_interleave_size if self.dcp_size > 1 else 1
-        adapter = FlashMLAImpl.load(FlashMLAConfig(impl.num_heads, impl.scale, return_softmax_lse=self.dcp_size > 1))
+        self.logical_heads = impl.num_heads
+        query_heads = flashmla_query_heads(impl)
+        adapter = FlashMLAImpl.load(FlashMLAConfig(query_heads, impl.scale, return_softmax_lse=self.dcp_size > 1))
         self.current_adapter = adapter
         # Match DCPImplMixin's query gather. PCP ranks replicate Q heads even
         # when DSpark exposes a PCP=1 config for its global query batch.
@@ -326,7 +348,7 @@ class FlashMLAMetadataBuilder:
         query_gather_size = max(1, self.dcp_size // pcp_size)
         history_adapter = replace(
             adapter,
-            config=replace(adapter.config, num_heads=impl.num_heads * query_gather_size, mask_mode=0),
+            config=replace(adapter.config, num_heads=query_heads * query_gather_size, mask_mode=0),
         )
         self.adapters = {True: history_adapter if self.dcp_size > 1 else adapter, False: history_adapter}
         self.device = device
@@ -348,11 +370,14 @@ class FlashMLAMetadataBuilder:
             torch.empty_like(used, device="meta"),
         )
         rope_shape = (tokens, 1, 1, FLASHMLA_QK_DIM - FLASHMLA_V_DIM)
+        query = torch.empty((tokens, adapter.config.num_heads, FLASHMLA_QK_DIM), dtype=self.dtype, device=self.device)
+        if self.dcp_size == 1 and adapter.config.num_heads != self.logical_heads:
+            # Only real heads are overwritten. Initialize the padding once per
+            # buffer so graph replay keeps those extra heads at zero.
+            query[:, self.logical_heads :].zero_()
         flash = FlashMLADecode(
             adapter=adapter,
-            query=torch.empty(
-                (tokens, adapter.config.num_heads, FLASHMLA_QK_DIM), dtype=self.dtype, device=self.device
-            ),
+            query=query,
             schedule=torch.empty_like(schedule_meta, device=self.device),
             cu=cu,
             used_q=used,

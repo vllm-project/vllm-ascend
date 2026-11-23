@@ -41,6 +41,7 @@ from vllm_ascend.attention.flashmla import (
     FLASHMLA_V_DIM,
     FlashMLADecode,
     FlashMLAMetadataBuilder,
+    flashmla_query_heads,
     get_flashmla_ops,
     split_flashmla_requests,
 )
@@ -1139,7 +1140,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             return False
         if not get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH):
             return False
-        if self.num_heads not in MLA_FLASH_SUPPORTED_Q_HEADS or self.num_kv_heads != 1:
+        query_heads = flashmla_query_heads(self)
+        if query_heads not in MLA_FLASH_SUPPORTED_Q_HEADS or self.num_kv_heads != 1:
             return False
         if self.kv_lora_rank != FLASHMLA_V_DIM or self.qk_rope_head_dim != FLASHMLA_QK_DIM - FLASHMLA_V_DIM:
             return False
@@ -1151,7 +1153,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # gathers only distinct TP heads, as _dcp_all_gather_fragments does.
         pcp_size = get_pcp_group().world_size if dcp_size > 1 else 1
         query_gather_size = max(1, dcp_size // pcp_size)
-        if self.use_pcp or self.num_heads * query_gather_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
+        if self.use_pcp or query_heads * query_gather_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
         if not supports_component_major_mla_pd(config):
             return False
@@ -2917,8 +2919,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         # Pack the separate NoPE (512) and RoPE (64) outputs into FlashMLA's
         # TND(576) query. The backend retains this buffer for captured capacities
         # so replay reuses its address.
-        flash.query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
-        flash.query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
+        padded_heads = flash.query.shape[1] != self.num_heads
+        query = flash.query[:, : self.num_heads] if padded_heads else flash.query
+        query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
+        query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
         record_attention_compute_start()
         latent, _ = flash.adapter.attention(
             flash.query,
@@ -2930,6 +2934,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             metadata=flash.schedule,
             attn_mask=flash.attn_mask,
         )
+        if padded_heads:
+            latent = latent[: self.num_heads]
         return self._v_up_proj(latent)
 
     def mla_preprocess_only_decode(self, hidden_states, kv_cache, attn_metadata):
