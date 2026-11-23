@@ -10,7 +10,20 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 UNIFIED_BUFFER_SIZE = 1572864
 
 
-@triton.jit(do_not_specialize=["seq_len", "NUM_HEADS", "NUM_BATCHES", "beta", "threshold", "ROW_ITER"])
+@triton.jit(
+    do_not_specialize=[
+        "seq_len",
+        "NUM_HEADS",
+        "NUM_BATCHES",
+        "beta",
+        "threshold",
+        "ROW_ITER",
+        "stride_a_row",
+        "stride_a_head",
+        "stride_b_row",
+        "stride_b_head",
+    ]
+)
 def fused_gdn_gating_kernel(
     g,
     beta_output,
@@ -18,6 +31,10 @@ def fused_gdn_gating_kernel(
     a,
     b,
     dt_bias,
+    stride_a_row,
+    stride_a_head,
+    stride_b_row,
+    stride_b_head,
     seq_len,
     NUM_HEADS,
     NUM_BATCHES,
@@ -26,6 +43,8 @@ def fused_gdn_gating_kernel(
     BLK_HEADS: tl.constexpr,
     BLK_BATCHES: tl.constexpr,
     ROW_ITER,
+    CONTIGUOUS_INPUTS: tl.constexpr,
+    UNIT_HEAD_STRIDES: tl.constexpr,
 ):
     i_b, i_s = tl.program_id(0), tl.program_id(1)
     COL_ITER = tl.cdiv(NUM_HEADS, BLK_HEADS)
@@ -41,8 +60,21 @@ def fused_gdn_gating_kernel(
             mask = head_mask[None, :] & (batch_off[:, None] < NUM_BATCHES)
 
             blk_A_log = tl.load(A_log + head_off, mask=head_mask)
-            blk_a = tl.load(a + off, mask=mask)
-            blk_b = tl.load(b + off, mask=mask)
+            # Specialize only on layout categories. Keep arbitrary strides and
+            # token counts dynamic while retaining the original dense loads.
+            if CONTIGUOUS_INPUTS:
+                a_off = off
+                b_off = off
+            else:
+                token_off = batch_off[:, None] * seq_len + i_s
+                if UNIT_HEAD_STRIDES:
+                    a_off = token_off * stride_a_row + head_off[None, :]
+                    b_off = token_off * stride_b_row + head_off[None, :]
+                else:
+                    a_off = token_off * stride_a_row + head_off[None, :] * stride_a_head
+                    b_off = token_off * stride_b_row + head_off[None, :] * stride_b_head
+            blk_a = tl.load(a + a_off, mask=mask)
+            blk_b = tl.load(b + b_off, mask=mask)
             blk_bias = tl.load(dt_bias + head_off, mask=head_mask)
 
             x = blk_a.to(tl.float32) + blk_bias.to(tl.float32)[None, :]
@@ -87,6 +119,10 @@ def fused_gdn_gating_patch(
         a,
         b,
         dt_bias,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
         seq_len,
         num_heads,
         batch,
@@ -95,5 +131,7 @@ def fused_gdn_gating_patch(
         BLK_HEADS=BLK_HEADS,
         BLK_BATCHES=BLK_BATCHES,
         ROW_ITER=ROW_ITER,
+        CONTIGUOUS_INPUTS=a.is_contiguous() and b.is_contiguous(),
+        UNIT_HEAD_STRIDES=a.stride(1) == 1 and b.stride(1) == 1,
     )
     return g, beta_output
