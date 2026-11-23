@@ -43,7 +43,11 @@ Add the fields below to the JSON objects passed to the listed flags in your exis
 
 After starting with the recommended settings, look for `vllm_ascend_*.log` in the service log directory and for the Runtime Guard JSON file. Diagnostic files appear when the corresponding feature produces them, for example after a Watchdog timeout, a Runtime Guard report action, or the end of a profiling capture.
 
-## MemCache and MemFabric logs
+## KV transfer and storage logs
+
+This section covers logging for components used in disaggregated serving and KV pooling.
+
+### MemCache and MemFabric logs
 
 | Output | Default location |
 | --- | --- |
@@ -51,7 +55,7 @@ After starting with the recommended settings, look for `vllm_ascend_*.log` in th
 | MemFabric runtime messages | Standard output of the process using MemFabric. [MemFabric logger](https://gitcode.com/Ascend/memfabric_hybrid/blob/master/src/util/csrc/mf_out_logger.h) |
 | MemFabric ptracer (when enabled) | `/var/log/memfabric_hybrid/ptracer_<pid>.dat`. [Ptracer guide](https://gitcode.com/Ascend/memfabric_hybrid/blob/master/docs/zh/wiki/developer_guide/debugging/ptracer.md) |
 
-## Mooncake logs
+### Mooncake logs
 
 | Process | Where to set the log directory |
 | --- | --- |
