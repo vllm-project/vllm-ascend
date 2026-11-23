@@ -7,7 +7,3 @@ entries:
       than 1 and --decode-context-parallel-size is 1. This also supports
       decode graph capture when the combined batch exceeds the per-rank
       capture limit. No new switch is required.
-  - category: feature
-    text: >-
-      AscendStoreConnector now accepts sharded Mamba state configurations with
-      tensor parallelism and prefill context parallelism both greater than one.
