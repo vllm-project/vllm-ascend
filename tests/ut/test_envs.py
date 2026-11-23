@@ -78,7 +78,6 @@ class TestEnvVariables(TestBase):
         expected_defaults = {
             "COMPILE_CUSTOM_KERNELS": True,
             "VERBOSE": False,
-            "VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY": False,
         }
         # Fail loudly if a boolean variable is added without covering it here.
         self.assertEqual(set(expected_defaults), self.boolean_vars)

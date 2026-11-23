@@ -10,7 +10,7 @@ TND nor the PagedAttention capture path can serve this geometry.
 specialized there, so this module provides a dedicated backend that
 ``AscendPlatform.get_attn_backend_cls`` selects per layer:
 
-* only when ``VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY`` is on,
+* only when ``b1_paged_verify_config.enabled`` is set in ``--additional-config``,
 * only with speculative decoding (MTP),
 * only for decoder self-attention with ``head_dim == 512`` and
   ``sliding_window is None``, and with no MLA/sparse/compress/PCP/DCP/
@@ -26,6 +26,7 @@ capture paths cannot serve this geometry.
 """
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, cast
 
 import torch
@@ -52,8 +53,11 @@ from vllm_ascend.compilation.updatable_graph import (
 
 _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
 
-_VERIFY_MASK_KPOS_CACHE: dict[tuple[int, torch.device], torch.Tensor] = {}
-_VERIFY_MASK_KPOS_CACHE_MAX = 8
+
+@lru_cache(maxsize=8)
+def _get_verify_mask_kpos(width: int, device: torch.device) -> torch.Tensor:
+    """Cached 1x1x1xW index row reused across paged-verify mask builds."""
+    return torch.arange(width, device=device).view(1, 1, 1, width)
 
 
 def build_paged_verify_mask(
@@ -77,13 +81,7 @@ def build_paged_verify_mask(
     qlen = k + 1
     B = seq_lens.shape[0]
     W = block_table.shape[1] * block_size
-    cache_key = (W, device)
-    kpos = _VERIFY_MASK_KPOS_CACHE.get(cache_key)
-    if kpos is None:
-        if len(_VERIFY_MASK_KPOS_CACHE) >= _VERIFY_MASK_KPOS_CACHE_MAX:
-            _VERIFY_MASK_KPOS_CACHE.clear()
-        kpos = torch.arange(W, device=device).view(1, 1, 1, W)
-        _VERIFY_MASK_KPOS_CACHE[cache_key] = kpos
+    kpos = _get_verify_mask_kpos(W, device)
     seqv = seq_lens.to(device=device, dtype=torch.int32).view(B, 1, 1, 1)
     qpos = torch.arange(qlen, device=device).view(1, 1, qlen, 1)
     mask = kpos > (seqv - qlen + qpos)

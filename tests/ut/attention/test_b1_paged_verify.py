@@ -70,7 +70,7 @@ def test_build_paged_verify_mask_is_causal_over_the_paged_width():
 
 
 def test_build_paged_verify_mask_reuses_the_kpos_cache():
-    attention_v2_b1._VERIFY_MASK_KPOS_CACHE.clear()
+    attention_v2_b1._get_verify_mask_kpos.cache_clear()
     block_table = torch.zeros((1, 2), dtype=torch.int32)
     seq_lens = torch.tensor([5], dtype=torch.int32)
 
@@ -83,7 +83,7 @@ def test_build_paged_verify_mask_reuses_the_kpos_cache():
             device=torch.device("cpu"),
         )
 
-    assert len(attention_v2_b1._VERIFY_MASK_KPOS_CACHE) == 1
+    assert attention_v2_b1._get_verify_mask_kpos.cache_info().currsize == 1
 
 
 def test_expand_pa_per_token_rows_splits_multi_query_rows():
@@ -256,11 +256,12 @@ def _speculative_config(dynamic: bool = False):
 
 
 @pytest.fixture
-def b1_enabled(monkeypatch):
-    # Drive the switch through os.environ: monkeypatching the module attribute
-    # writes a plain global on undo, which then shadows envs.__getattr__ for
-    # the rest of the session and breaks tests/ut/test_envs.py.
-    monkeypatch.setenv("VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY", "1")
+def b1_enabled():
+    from vllm_ascend import ascend_config
+
+    config = SimpleNamespace(b1_paged_verify_config=SimpleNamespace(enabled=True))
+    with patch.object(ascend_config, "get_ascend_config", return_value=config):
+        yield config
 
 
 def test_want_b1_paged_verify_accepts_gemma4_mtp_geometry(b1_enabled):
@@ -273,11 +274,14 @@ def test_want_b1_paged_verify_accepts_gemma4_mtp_geometry(b1_enabled):
         assert platform._want_b1_paged_verify(_gemma4_selector()) is True
 
 
-def test_want_b1_paged_verify_requires_explicit_opt_in(monkeypatch):
-    import vllm_ascend.platform as platform
+def test_want_b1_paged_verify_requires_explicit_opt_in():
+    from vllm_ascend import ascend_config, platform
 
-    monkeypatch.delenv("VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY", raising=False)
-    with patch("vllm.config.get_current_vllm_config_or_none", return_value=_speculative_config()):
+    config = SimpleNamespace(b1_paged_verify_config=SimpleNamespace(enabled=False))
+    with (
+        patch.object(ascend_config, "get_ascend_config", return_value=config),
+        patch("vllm.config.get_current_vllm_config_or_none", return_value=_speculative_config()),
+    ):
         assert platform._want_b1_paged_verify(_gemma4_selector()) is False
 
 
@@ -386,7 +390,7 @@ def test_config_hook_drops_stale_backend_cache_for_dynamic_speculation(b1_enable
 
         # A second engine is configured; its hook drops the geometry-keyed memo
         # before the selector runs for the dynamic-SD config.
-        platform._reset_b1_attn_backend_cache()
+        platform._reset_b1_attn_backend_cache(b1_enabled)
         with patch("vllm.config.get_current_vllm_config_or_none", return_value=_speculative_config(dynamic=True)):
             dynamic_backend = attn_selector._cached_get_attn_backend(**cache_kwargs)
 

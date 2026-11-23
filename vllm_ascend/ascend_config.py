@@ -520,6 +520,19 @@ class ExpertOffloadConfig:
 
 
 @config
+class B1PagedVerifyConfig:
+    """Opt-in paged verify capture for head_dim=512 MTP layers.
+
+    Gemma4 MTP on A2/A3 needs the B1 paged-verify backend to capture the
+    head_dim=512 verify step in ``FULL_DECODE_ONLY`` ACLGraph. Disabled by
+    default, and only the exact geometry that the default TND/PagedAttention
+    capture paths cannot serve is switched over.
+    """
+
+    enabled: bool = False
+
+
+@config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
 
@@ -616,6 +629,9 @@ class AscendConfig:
             "quantized_all_reduce_config": {
                 "enable": false,
                 "min_numel": 16777216
+            },
+            "b1_paged_verify_config": {
+                "enabled": false
             },
             "xlite_graph_config": {
                 "enabled": false,
@@ -757,6 +773,7 @@ class AscendConfig:
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
     quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
+    b1_paged_verify_config: B1PagedVerifyConfig = dataclasses.field(default_factory=B1PagedVerifyConfig)
 
     # ---- sub-configs declared later in this module ----
     # Lambdas defer class lookup until construction, after module initialization.

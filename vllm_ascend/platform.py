@@ -656,11 +656,6 @@ class NPUPlatform(Platform):
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
 
-        # The attention-backend memo is keyed by geometry alone, so an opted-in
-        # engine must not inherit B1 from a sibling engine with a different
-        # speculative mode. See _reset_b1_attn_backend_cache.
-        _reset_b1_attn_backend_cache()
-
         # vLLM #61392 folds `compress_ratios` into `layer_types`/`compress_rates`.
         # Restore the legacy field before any runner/model/cache component reads
         # it (e.g. NPUModelRunner.__init__ setting `use_compress`).
@@ -704,6 +699,10 @@ class NPUPlatform(Platform):
         # (fused MC2 exclusivity + scheduler extension policies)
         # ascend_config is only used for verification, this object must NOT be modified here
         ascend_config = init_ascend_config(vllm_config)
+        # The attention-backend memo is keyed by geometry alone, so an opted-in
+        # engine must not inherit B1 from a sibling engine with a different
+        # speculative mode. See _reset_b1_attn_backend_cache.
+        _reset_b1_attn_backend_cache(ascend_config)
         _validate_deepseek_v4_tp_config(vllm_config)
         _check_ascend_config(vllm_config, ascend_config)
 
@@ -2016,7 +2015,7 @@ def _uses_dynamic_speculative_decoding(speculative_config) -> bool:
     return bool(getattr(speculative_config, "uses_dynamic_speculative_decoding", lambda: False)())
 
 
-def _reset_b1_attn_backend_cache() -> None:
+def _reset_b1_attn_backend_cache(ascend_config) -> None:
     """Drop vLLM's memoized attention-backend selection for an opted-in run.
 
     ``vllm.v1.attention.selector`` caches the selected backend class by
@@ -2029,9 +2028,7 @@ def _reset_b1_attn_backend_cache() -> None:
     """
     from vllm.v1.attention import selector as attn_selector
 
-    from vllm_ascend import envs as ascend_envs
-
-    if not ascend_envs.VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY:
+    if not ascend_config.b1_paged_verify_config.enabled:
         return
     cache_clear = getattr(getattr(attn_selector, "_cached_get_attn_backend", None), "cache_clear", None)
     if cache_clear is not None:
@@ -2053,11 +2050,17 @@ def _want_b1_paged_verify(attn_selector_config) -> bool:
     from vllm.config import get_current_vllm_config_or_none
     from vllm.v1.attention.backend import AttentionType
 
-    from vllm_ascend import envs as ascend_envs
+    from vllm_ascend.ascend_config import get_ascend_config
     from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
     from vllm_ascend.utils import is_950
 
-    if not ascend_envs.VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY:
+    try:
+        ascend_config = get_ascend_config()
+    except RuntimeError:
+        # Backend selection can run without Ascend config init; the switch is
+        # opt-in, so treat that as disabled.
+        return False
+    if not ascend_config.b1_paged_verify_config.enabled:
         return False
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None:
@@ -2071,7 +2074,7 @@ def _want_b1_paged_verify(attn_selector_config) -> bool:
     # SD on the default backend until those narrower graphs are supported.
     if _uses_dynamic_speculative_decoding(spec_cfg):
         logger.warning_once(
-            "VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY is ignored with dynamic speculative decoding "
+            "b1_paged_verify_config.enabled is ignored with dynamic speculative decoding "
             "(num_speculative_tokens_per_batch_size): B1 capture only supports the uniform "
             "k+1 verify width, so the default attention backend is used."
         )
