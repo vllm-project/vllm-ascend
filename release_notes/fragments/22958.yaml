@@ -1,0 +1,34 @@
+pr: 22958
+entries:
+  - category: feature
+    text: >-
+      Owner-sharded PCP KV prefill can now run with the AscendStore connector
+      (including MooncakeConnectorStoreV1) in P/D disaggregation deployments.
+      The prefill engine keeps only its share of the KV cache, the decode engine
+      keeps a replicated cache, and complete logical KV pages still flow through
+      the existing block id and block table contract. Unsupported connectors and
+      layerwise transfer fall back to the replicated cache with a warning.
+      Owner sharing remains opt-in through `additional_config.pcp_config`.
+    model: deepseek-v4.1
+    hardware: [A2]
+  - category: config
+    text: >-
+      Added `kv_connector_extra_config.enable_timing` (default `false`) to emit
+      request-aligned `[KVPD_TIMING]` and `[KVPD_STATS]` diagnostics for
+      AscendStore transfers. When enabled, the connector also records
+      enqueue-to-transfer queue waits in `vllm:ascend_store_load_get_queue_wait_seconds`
+      and `vllm:ascend_store_save_put_queue_wait_seconds`. Load/save duration,
+      key, and byte metrics remain available without the switch. No environment
+      variable is introduced.
+  - category: bugfix
+    text: >-
+      Fixed corrupted decode output under concurrent P/D traffic when MRV2 block
+      zeroing could run after AscendStore had restored a prefix into the same
+      blocks. The decode path now drains pending compute-stream work before the
+      store GET.
+  - category: bugfix
+    text: >-
+      Fixed AscendStore startup failures on DP16 fabric-memory deployments where
+      scheduler-side store clients exhausted device virtual address space or
+      RoCE endpoints. Each DP scheduler now uses the first device of its own DP
+      shard, and the unused scheduler-side client is no longer created.
