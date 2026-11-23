@@ -9,7 +9,7 @@ from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.models.deepseek_v41.engram.common import restore_engram_hidden
 from vllm_ascend.models.deepseek_v41.engram.layer import AscendEngram
-from vllm_ascend.ops.triton.engram_gate import fused_engram_gate
+from vllm_ascend.ops.triton.engram_gate import fused_engram_gate, fused_rotated_engram_gate
 
 HC = 4
 ROTATION_BLOCK = 32
@@ -70,9 +70,11 @@ def test_engram_gate(tokens, dim, rotation_kind, dtype):
         if rotation_kind == "per_block":
             shape = (dim // ROTATION_BLOCK, *shape)
         rotation = torch.randn(shape, device="npu", dtype=torch.float32) / ROTATION_BLOCK**0.5
-    gate_hidden = None if rotation is None else restore_engram_hidden(hidden, rotation)
     expected = reference(hidden, kv, qw, kw, mask, rotation)
-    actual = fused_engram_gate(hidden, kv, qw, kw, mask, EPS, gate_hidden=gate_hidden)
+    if rotation is None:
+        actual = fused_engram_gate(hidden, kv, qw, kw, mask, EPS)
+    else:
+        actual = fused_rotated_engram_gate(hidden, kv, qw, kw, mask, EPS, restore_engram_hidden(hidden, rotation))
     torch.npu.synchronize()
     tolerance = 1e-2 if dtype == torch.bfloat16 else 1e-4
     torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)

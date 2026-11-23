@@ -97,16 +97,12 @@ def _rotated_engram_gate_kernel(
     tl.store(output + (token * HC + branch) * DIM + col, h + gate * value, valid)
 
 
-def fused_engram_gate(hidden, kv, q_weight, k_weight, token_mask, eps, *, gate_hidden=None):
-    """Fuse RMS/dot/gate/residual, keeping wkv projection outside this kernel."""
+def fused_engram_gate(hidden, kv, q_weight, k_weight, token_mask, eps):
+    """Fuse the original unrotated RMS/dot/gate/residual path."""
     tokens, branches, dim = hidden.shape
     if hidden.stride(-1) != 1 or kv.stride(-1) != 1:
         raise ValueError("fused Engram gate requires contiguous hidden/key channels")
     output = torch.empty(hidden.shape, dtype=hidden.dtype, device=hidden.device)
-    if gate_hidden is not None:
-        return _launch_rotated_engram_gate(
-            hidden, gate_hidden, kv, q_weight, k_weight, token_mask, eps, output, tokens, branches, dim
-        )
     if tokens:
         _engram_gate_kernel[(tokens, branches)](
             hidden,
@@ -131,16 +127,18 @@ def fused_engram_gate(hidden, kv, q_weight, k_weight, token_mask, eps, *, gate_h
     return output
 
 
-def _launch_rotated_engram_gate(
-    hidden, gate_hidden, kv, q_weight, k_weight, token_mask, eps, output, tokens, branches, dim
-):
-    """Launch the A3 kernel that scores restored FP32 hidden and residuals separately."""
+def fused_rotated_engram_gate(hidden, kv, q_weight, k_weight, token_mask, eps, gate_hidden):
+    """Fuse A3 scoring against a restored FP32 basis while residual stays on hidden."""
     if not get_current_hardware_profile().supports(HardwareCapability.ENGRAM_ROTATED_GATE):
         raise ValueError("Rotated Engram gate fusion requires ENGRAM_ROTATED_GATE")
     if gate_hidden.shape != hidden.shape or gate_hidden.stride(-1) != 1:
         raise ValueError("gate_hidden must match hidden with contiguous channels")
     if gate_hidden.dtype != torch.float32 or gate_hidden.device != hidden.device:
         raise ValueError("gate_hidden must be FP32 on the hidden device")
+    tokens, branches, dim = hidden.shape
+    if hidden.stride(-1) != 1 or kv.stride(-1) != 1:
+        raise ValueError("fused Engram gate requires contiguous hidden/key channels")
+    output = torch.empty(hidden.shape, dtype=hidden.dtype, device=hidden.device)
     if not tokens:
         return output
     # Strided channel gathers can exceed A3 UB capacity during lowering.

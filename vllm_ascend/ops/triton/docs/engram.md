@@ -19,12 +19,13 @@ table layout or arithmetic.
 Hash generation and lookback gathering are shared model paths, including A3.
 Lookup also serves A3 BF16/INT8 tables; its MXFP8 path is selected by
 `ENGRAM_MXFP8`, currently an A5 capability. The fused `engram_gate.py` path is
-selected by `ENGRAM_UNROTATED_GATE`, also currently an A5 capability. That
-unrotated kernel is unchanged. Moving these kernels into `ops/triton` does not
-change their hardware routing. Rotated A3 checkpoints use `ENGRAM_ROTATED_GATE`:
-the FP32 rotation GEMM remains separate, then a distinct fused kernel consumes
-both restored and original hidden states. A5 does not compile that rotated
-kernel. Other hardware retains its existing fallback for rotated checkpoints.
+selected by `ENGRAM_UNROTATED_GATE`, also currently an A5 capability. The model
+calls `fused_engram_gate` for that path, and the kernel is unchanged. Moving
+these kernels into `ops/triton` does not change their hardware routing. Rotated
+A3 checkpoints use `ENGRAM_ROTATED_GATE`: the FP32 rotation GEMM remains
+separate, then the model calls `fused_rotated_engram_gate` with both restored
+and original hidden states. A5 does not compile that rotated kernel.
+Other hardware retains its existing fallback for rotated checkpoints.
 These call-path descriptions do not establish A3 runtime validation or CI coverage.
 
 ## Memory and synchronization
