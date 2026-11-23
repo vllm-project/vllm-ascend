@@ -835,17 +835,19 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         row_counts = combine_metadata.group_list
         if row_counts is None:
             raise ValueError("Fused publish requires counts for a masked tail")
-        # Native publication writes valid rows and zeros the SHMEM tail.
-        # Do not materialize a mask, a sum scalar, or a BF16 clean tensor.
-        combine_input = hidden_states
+        # MoonEP plans gather only rows in the published prefix.
+        publish_options = {}
+        if getattr(buffer, "supports_prefix_publish", False):
+            publish_options["clear_publish_tail"] = False
         out, _, _ = buffer.combine_weighted(
             plan=combine_metadata.plan,
-            hidden_nvsh=combine_input,
+            hidden_nvsh=hidden_states,
             source_topk_weights_sk=combine_metadata.source_topk_weights_sk,
             num_tokens=T,
             inter_rank_sync=True,
             fused_publish=True,
             row_counts=row_counts,
+            **publish_options,
         )
         return out[:T].view(combine_metadata.hidden_shape)
 
