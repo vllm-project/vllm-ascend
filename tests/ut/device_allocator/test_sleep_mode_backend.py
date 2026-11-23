@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Unit tests for the Ascend sleep-mode backend."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -58,3 +59,17 @@ def test_backend_accepts_allocator_factory(allocator):
 
 def test_backend_registered_with_upstream_factory():
     assert SleepModeBackendFactory.get_backend_class("camem") is CaMemBackend
+
+
+def test_worker_import_registers_backend():
+    import vllm_ascend.worker.worker  # noqa: F401
+
+    assert SleepModeBackendFactory.get_backend_class("camem") is CaMemBackend
+
+
+def test_factory_creates_camem_backend():
+    model_config = SimpleNamespace(sleep_mode_backend="camem")
+
+    backend = SleepModeBackendFactory.create_backend(model_config)
+
+    assert isinstance(backend, CaMemBackend)

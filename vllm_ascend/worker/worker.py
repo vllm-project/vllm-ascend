@@ -435,9 +435,6 @@ class NPUWorker(GPUWorker):
         return apply_process_metrics_level(level)
 
     def sleep(self, level: int = 1) -> None:
-        if self.model_config.sleep_mode_backend != "camem":
-            raise ValueError("Only the in-tree camem backend is supported in this version.")
-
         # Resolve the backend before cleanup or KV unregistration so a bad
         # backend configuration leaves the worker state intact.
         backend = self.sleep_mode_backend
