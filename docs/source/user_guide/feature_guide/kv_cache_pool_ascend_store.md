@@ -27,7 +27,7 @@ KV Cache supports the following three external storage backends, choose the stor
 | Hardware | Supported hardware A2/A3/950PR&950DT Products. |
 | Software Dependencies | For HDK/CANN requirements of each series, see the [HDK and CANN Version Compatibility Reference](#hdk-and-cann-version-compatibility-reference). |
 | Model | `kv_load_failure_policy=recompute` does not yet support hybrid attention models (e.g., DeepSeekV4, Qwen 3.5). |
-| Layerwise | Mooncake and Memcache support `use_layerwise` on Prefill and Decode. Decode saving requires `save_decode_cache=true`. |
+| Feature Mutex | On Mooncake and Memcache, `use_layerwise` on Decode requires `save_decode_cache=true`; otherwise, `use_layerwise` is supported only on Prefill. |
 
 **Backend-specific**
 
@@ -1599,7 +1599,6 @@ Refer to the verification operations in Steps 1-5 of Configuration Examples.
 | `use_layerwise` | bool | false | No | true / false | Layer-by-layer KV save/load, supported by both Mooncake and Memcache backends. Decode saving requires `save_decode_cache=true`. |
 | `prefill_pp_size` | int | 1 | Required when Prefill PP + consumer writes | Positive integer | Prefill PP size. |
 | `prefill_pp_layer_partition` | str | No default | No | Comma-separated layer numbers, e.g., "30,31" | Prefill PP layer partition. If not configured, layers are evenly divided by `prefill_pp_size`. |
-
 | `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | KV Pool transfer QoS priority. |
 
 Existing configurations must replace `consumer_is_to_load` with `enable_lookup` and `consumer_is_to_put` with `save_decode_cache`. The latter saves complete Decode KV blocks and fills missing Prefill ancestors when Decode saving starts; it does not save transferred Prefill KV during Prefill. The old options raise an error at startup.

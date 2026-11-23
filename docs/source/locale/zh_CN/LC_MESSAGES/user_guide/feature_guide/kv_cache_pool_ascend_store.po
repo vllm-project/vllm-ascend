@@ -111,8 +111,8 @@ msgstr ""
 "| 模型 | `kv_load_failure_policy=recompute` 尚不支持混合注意力模型（例如 DeepSeekV4、Qwen "
 "3.5）。 |"
 
-msgid "| Layerwise | Mooncake and Memcache support `use_layerwise` on Prefill and Decode. Decode saving requires `save_decode_cache=true`. |"
-msgstr "| 逐层传输 | Mooncake 和 Memcache 在 Prefill 和 Decode 节点上均支持 `use_layerwise`。Decode 保存需设置 `save_decode_cache=true`。 |"
+msgid "| Feature Mutex | On Mooncake and Memcache, `use_layerwise` on Decode requires `save_decode_cache=true`; otherwise, `use_layerwise` is supported only on Prefill. |"
+msgstr "| 特性互斥 | 在 Mooncake 和 Memcache 后端，Decode 节点使用 `use_layerwise` 需要设置 `save_decode_cache=true`；否则仅 Prefill 节点支持 `use_layerwise`。 |"
 
 msgid "**Backend-specific**"
 msgstr "**后端特定**"
@@ -410,8 +410,8 @@ msgstr "2. 启动 proxy_server（连接 Prefill 和 Decode 节点），将 local
 msgid "3. To save complete Decode KV blocks from the Decode node, set `save_decode_cache: true` on `AscendStoreConnector`. KV received from Prefill is not saved during the Prefill phase. On the first Decode save, missing Prefill ancestor blocks are filled so the new Decode blocks form a reusable prefix. If Prefill enables PP, also set `prefill_pp_size` or `prefill_pp_layer_partition`:"
 msgstr "3. 要从 Decode 节点保存完整的 Decode KV 块，请在 `AscendStoreConnector` 中设置 `save_decode_cache: true`。Prefill 阶段从 Prefill 节点收到的 KV 不会保存。首次保存 Decode KV 时，只补齐资源池中缺失的 Prefill 前缀块，使新生成的 Decode 块形成可复用的前缀。如果 Prefill 启用了 PP，还需设置 `prefill_pp_size` 或 `prefill_pp_layer_partition`："
 
-msgid "Later saves resume from the last successful offset. `save_decode_cache` supports blockwise and layerwise transfer. It writes KV to the Store for reuse and does not free the active request's NPU KV."
-msgstr "后续保存从上次成功的偏移量继续。`save_decode_cache` 支持按块和逐层传输。它将 KV 写入 Store 以供复用，不会释放活动请求的 NPU KV。"
+msgid "Later saves resume from the last successful offset; failed ranges are checked again at the next completed-block boundary. `save_decode_cache` supports blockwise and layerwise transfer. It writes KV to the Store for reuse and does not free the active request's NPU KV."
+msgstr "后续保存从上次成功的偏移量继续；失败的范围会在下一个完成块边界处重新检查。`save_decode_cache` 支持按块和逐层传输。它将 KV 写入 Store 以供复用，不会释放活动请求的 NPU KV。"
 
 msgid ""
 "When Prefill uses PP, configure `prefill_pp_size` or "
