@@ -1,0 +1,4 @@
+pr: 21935
+entries:
+  - category: feature
+    text: Added Qwen4-Exp batch-invariant execution support on Ascend, including stable GBSA scheduling and selected-KV packing.

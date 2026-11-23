@@ -15,9 +15,17 @@ from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer
 from vllm_ascend.models import qwen3_5_vl
 from vllm_ascend.models.qwen3_5_vl import AscendQwen2VLImageProcessor, AscendQwen3_5VLProcessor
 from vllm_ascend.models.qwen4_exp import model as qwen4
+from vllm_ascend.models.qwen4_exp.qsa import QSAIndexerBackend
 
 PATCH_SIZE = 16
 PATCH_DIM = 3 * 2 * PATCH_SIZE**2
+
+
+def test_aux_cache_backends_support_batch_invariance():
+    # The CI version matrix resolves the release and main backend class names.
+    assert qwen4.QSAIndexerBackend is QSAIndexerBackend
+    assert QSAIndexerBackend.supports_batch_invariance()
+    assert qwen4.PleShortConvAttentionBackend.supports_batch_invariance()
 
 
 def test_qwen4_registers_raw_processor_without_losing_config_type():

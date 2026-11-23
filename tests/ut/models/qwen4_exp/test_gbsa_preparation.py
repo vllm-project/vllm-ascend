@@ -33,10 +33,10 @@ class _Language:
     int32, int64, float32 = np.int32, np.int64, np.float32
     constexpr = object
     static_range = staticmethod(range)
-    row = 0
+    program_ids = (0,)
 
     def program_id(self, axis):
-        return _value(self.row)
+        return _value(self.program_ids[axis])
 
     @staticmethod
     def arange(start, end):
@@ -87,11 +87,14 @@ class _Kernel:
                 if isinstance(argument, torch.Tensor):
                     storage = argument.as_strided(
                         (argument.untyped_storage().nbytes() // argument.element_size(),), (1,), storage_offset=0
-                    ).numpy()
+                    )
+                    if storage.dtype == torch.bfloat16:
+                        storage = storage.view(torch.int16)
+                    storage = storage.numpy()
                     argument = _Pointer(storage, argument.storage_offset())
                 pointers.append(argument)
-            for row in range(grid[0]):
-                self.language.row = row
+            for program_ids in np.ndindex(grid):
+                self.language.program_ids = program_ids
                 self.function(*pointers, **kwargs)
 
         return launch
