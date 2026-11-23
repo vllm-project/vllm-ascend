@@ -280,18 +280,25 @@ class AscendTreeMambaHybridModelState(AscendMambaHybridModelState):
             tree_prev_num_sampled=tree_prev_num_sampled,
             tree_depths=input_batch.tree_depths,
         )
-        # Share topology for a real, complete BS1 FULL verify.
+        # Uniform real-only FULL batches already have token-major Tree rows.
+        # Keep mixed, truncated and padded batches on the generic metadata path.
         if (
             not for_capture
             and not input_batch.is_dummy
             and cudagraph_mode == CUDAGraphMode.FULL
-            and input_batch.num_reqs == num_reqs == 1
-            and input_batch.num_tokens == num_tokens == tree_slots
+            and input_batch.num_reqs == num_reqs > 0
+            and (num_reqs == 1 or not self.vllm_config.scheduler_config.async_scheduling)
+            and input_batch.num_tokens == num_tokens == num_reqs * tree_slots
             and num_decode_draft_tokens_cpu is not None
-            and int(num_decode_draft_tokens_cpu[0]) == tree_slots - 1
-            and not bool(is_prefilling[0])
+            and (num_decode_draft_tokens_cpu.numpy() == tree_slots - 1).all()
+            and not is_prefilling_np.any()
+            and input_batch.query_start_loc_np.shape == (num_reqs + 1,)
+            and input_batch.query_start_loc_np[0] == 0
+            and (np.diff(input_batch.query_start_loc_np) == tree_slots).all()
         ):
-            self._prepare_shared_gdn_tree(model_specific_metadata, attn_groups, input_batch.req_ids[0])
+            req_ids = input_batch.req_ids
+            req_key = req_ids[0] if num_reqs == 1 else tuple(req_ids[:num_reqs])
+            self._prepare_shared_gdn_tree(model_specific_metadata, attn_groups, req_key)
         # Varlen graphs capture evenly split dummy rows (possibly one token
         # each), but must allow the descriptor's full K+1 replay query bound.
         max_query_len = getattr(input_batch, "max_query_len", None)
@@ -471,7 +478,7 @@ class AscendTreeMambaHybridModelState(AscendMambaHybridModelState):
         self,
         metadata: AscendTreeMambaHybridAttnMetadata,
         attn_groups,
-        request_id: str,
+        request_id: str | tuple[str, ...],
     ) -> None:
         """Create the shared draft-tree geometry before the layer loop.
 
@@ -512,7 +519,7 @@ class AscendTreeMambaHybridModelState(AscendMambaHybridModelState):
         if (
             not self.vllm_config.scheduler_config.async_scheduling
             and metadata.tree_parents.device.type == "npu"
-            and metadata.tree_parents.shape[1] + 1 == GDNTreePageBatch.SLOTS
+            and metadata.tree_parents.shape == (1, GDNTreePageBatch.SLOTS - 1)
         ):
             if self._gdn_page_pointers is None:
                 self._gdn_page_pointers = GDNTreePagePointers()

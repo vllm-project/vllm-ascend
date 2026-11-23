@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class SharedGDNTreeMetadata:
-    """Logical metadata for one complete BS1 tree, without physical state pages.
+    """Logical metadata for complete uniform verification rows, before physical page binding.
 
     A model state's prepare_attn owns this object for one step. Builders bind
     their own page tables, then retain their existing graph-stable copy targets.
@@ -30,7 +30,7 @@ class SharedGDNTreeMetadata:
     init_state_columns: torch.Tensor
     conv_window_rows: torch.Tensor
     conv_prefix_src: torch.Tensor
-    request_id: str | None = None
+    request_id: str | tuple[str, ...] | None = None
     page_batch: "GDNTreePageBatch | None" = field(default=None, repr=False, compare=False)
     _written_graph_inputs: set[int] = field(default_factory=set, init=False, repr=False, compare=False)
 
@@ -45,18 +45,19 @@ class SharedGDNTreeMetadata:
         prev_num_sampled: torch.Tensor,
         conv_width: int,
         *,
-        request_id: str | None = None,
+        request_id: str | tuple[str, ...] | None = None,
         use_fused_topology: bool = False,
         page_batch: "GDNTreePageBatch | None" = None,
     ) -> "SharedGDNTreeMetadata":
-        if parents.ndim != 2 or parents.shape[0] != 1 or parents.shape[1] < 1:
-            raise ValueError("Shared GDN tree metadata requires BS1 rootless parents [1, budget].")
+        if parents.ndim != 2 or not parents.shape[0] or not parents.shape[1]:
+            raise ValueError("Shared GDN tree metadata requires rootless parents [rows, budget].")
+        rows = parents.shape[0]
         if depths.shape != parents.shape:
-            raise ValueError("TreeLayout depths must have the same rootless [1, budget] shape as parents.")
-        if any(tensor.shape != (1,) for tensor in (num_nodes, num_accepted_tokens, prev_num_sampled)):
-            raise ValueError("Shared GDN tree counts must have shape [1].")
-        if prev_path_node_ids.ndim != 2 or prev_path_node_ids.shape[0] != 1:
-            raise ValueError("The previous accepted path must have shape [1, path_capacity].")
+            raise ValueError("TreeLayout depths must have the same shape as parents.")
+        if any(tensor.shape != (rows,) for tensor in (num_nodes, num_accepted_tokens, prev_num_sampled)):
+            raise ValueError("Shared GDN tree counts must have shape [rows].")
+        if prev_path_node_ids.ndim != 2 or prev_path_node_ids.shape[0] != rows:
+            raise ValueError("The previous accepted path must have shape [rows, path_capacity].")
         if conv_width < 1:
             raise ValueError("The GDN convolution width must be positive.")
 
@@ -101,16 +102,20 @@ class SharedGDNTreeMetadata:
                 parents,
                 num_nodes,
                 conv_width,
-                conv_width - 1,
+                rows * (conv_width - 1),
                 tree_depths=depths,
             ),
             conv_prefix_src=compute_tree_prefix_source(prev_path_node_ids, prev_num_sampled, conv_width),
         )
 
+    @property
+    def rows(self) -> int:
+        return self.init_state_columns.shape[0]
+
     def _check_state_table(self, state_indices: torch.Tensor) -> None:
-        if state_indices.shape != (1, self.slots):
+        if state_indices.shape != (self.rows, self.slots):
             raise ValueError(
-                f"Expected a complete BS1 state table [1, {self.slots}], got {tuple(state_indices.shape)}."
+                f"Expected a complete state table [{self.rows}, {self.slots}], got {tuple(state_indices.shape)}."
             )
         if state_indices.device != self.init_state_columns.device:
             raise ValueError("Shared GDN topology and group state pages must be on the same device.")
@@ -123,8 +128,8 @@ class SharedGDNTreeMetadata:
     @cached_property
     def _verify_geometry(self) -> tuple[torch.Tensor, torch.Tensor]:
         device = self.init_state_columns.device
-        token_indices = torch.arange(self.slots, dtype=torch.long, device=device)
-        actual_seq_lengths = torch.zeros(2, dtype=torch.int32, device=device)
+        token_indices = torch.arange(self.rows * self.slots, dtype=torch.long, device=device)
+        actual_seq_lengths = torch.zeros(self.rows + 1, dtype=torch.int32, device=device)
         actual_seq_lengths[1:].fill_(self.slots)
         return token_indices, actual_seq_lengths
 
@@ -133,16 +138,16 @@ class SharedGDNTreeMetadata:
         state_indices: torch.Tensor,
         init_state_indices: torch.Tensor,
     ) -> TreeVerifyPlan:
-        """Bind a complete row in token order to this group's physical pages."""
+        """Bind complete rows in token order to this group's physical pages."""
         self._check_state_table(state_indices)
         self._check_state_table(init_state_indices)
         token_indices, actual_seq_lengths = self._verify_geometry
         return TreeVerifyPlan(
-            rows=1,
+            rows=self.rows,
             slots=self.slots,
             token_indices=token_indices,
-            state_indices=state_indices[0],
-            init_state_indices=init_state_indices[0],
+            state_indices=state_indices.reshape(-1),
+            init_state_indices=init_state_indices.reshape(-1),
             out_indices=token_indices,
             actual_seq_lengths=actual_seq_lengths,
         )

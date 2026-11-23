@@ -30,7 +30,8 @@ class TreeCommitCoordinator:
 
     def compact_queries(self, tensors, query_start_loc, path_node_ids, active, positions, *, input_batch=None) -> None:
         """Prepare accepted hidden/aux rows and positions for the next draft."""
-        if self.qwen_query_graphs is not None and self.qwen_query_graphs.eligible(input_batch):
-            self.qwen_query_graphs.compact_queries(tensors, query_start_loc, path_node_ids, active, positions)
+        if self.qwen_query_graphs is not None and self.qwen_query_graphs.eligible(input_batch, tensors):
+            real_query_offsets = query_start_loc[: input_batch.num_reqs + 1]
+            self.qwen_query_graphs.compact_queries(tensors, real_query_offsets, path_node_ids, active, positions)
         else:
             compact_accepted_query_rows(tensors, query_start_loc, path_node_ids, active, positions)

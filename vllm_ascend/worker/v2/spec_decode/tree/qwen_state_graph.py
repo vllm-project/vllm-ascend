@@ -35,9 +35,10 @@ class QwenTreeStateGraphs:
 
     def run(self, idx_mapping, resume_state_cursor, path, num_sampled, tree_rows, num_computed_tokens):
         state = self.model_state
-        # Recovery-by-recomputation has its own Python step lifecycle. Tree
-        # state copying records the regular page-based postprocessor instead.
-        if idx_mapping.device.type != "npu" or idx_mapping.shape != (1,) or state.recoverssm is not None:
+        # Recovery and ReplaySSM consume per-step Python state during postprocess.
+        if state.recoverssm is not None or getattr(state, "_use_replayssm_trackers", False):
+            return False
+        if idx_mapping.device.type != "npu" or idx_mapping.ndim != 1 or idx_mapping.numel() == 0:
             return False
         state._tree_buffers(idx_mapping.device)
         inputs = (idx_mapping, resume_state_cursor, path, num_sampled, tree_rows, num_computed_tokens)

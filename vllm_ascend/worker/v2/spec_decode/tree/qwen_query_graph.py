@@ -13,15 +13,23 @@ class TreeQueryGraph:
     """Accepted hidden/aux rows and logical positions for the next draft."""
 
     def __init__(self, tensors, qsl, path_node_ids, active, positions, *, pool=None, stream=None, stats=None):
-        from vllm_ascend.worker.v2.spec_decode.tree.kv_layout import compact_accepted_query_rows
+        from vllm_ascend.worker.v2.spec_decode.tree.kv_layout import (
+            compact_accepted_query_rows,
+            get_accepted_query_index_constants,
+        )
 
         self.qsl = qsl.clone()
         self.path_node_ids = torch.full_like(path_node_ids, -1)
         self.active = torch.zeros_like(active)
+        # Keep each captured gear's constant addresses live when the cache grows.
+        num_reqs, spec_len = path_node_ids.shape
+        self.index_constants = get_accepted_query_index_constants(num_reqs, spec_len, path_node_ids.device)
         self.stats = stats if stats is not None else TreeGraphStats()
 
         def run():
-            compact_accepted_query_rows(tensors, self.qsl, self.path_node_ids, self.active, positions)
+            compact_accepted_query_rows(
+                tensors, self.qsl, self.path_node_ids, self.active, positions, index_constants=self.index_constants
+            )
 
         # Disabled request rows make warmup/capture non-mutating.
         with torch.inference_mode():
@@ -70,32 +78,45 @@ class QwenTreeQueryGraphs:
         self.query_len = runner.speculator.tree_shape.target_verification_width
         self.graphs = {}
 
-    def eligible(self, input_batch):
+    def eligible(self, input_batch, tensors):
         # These fields are scheduler-owned CPU metadata, never device values.
-        if input_batch is None or input_batch.num_reqs != 1 or input_batch.has_prefill:
+        if input_batch is None or input_batch.has_prefill:
             return False
-        if input_batch.is_prefilling_np[:1].any():
+        num_reqs = input_batch.num_reqs
+        if num_reqs < 1 or input_batch.is_prefilling_np[:num_reqs].any():
             return False
-        if input_batch.num_tokens != self.query_len:
+        if input_batch.num_tokens != num_reqs * self.query_len:
             return False
-        if not (input_batch.num_scheduled_tokens[:1] == self.query_len).all():
+        if not (input_batch.num_scheduled_tokens[:num_reqs] == self.query_len).all():
             return False
-        qsl = input_batch.query_start_loc_np
-        if qsl.shape != (2,) or qsl[1] - qsl[0] != self.query_len:
+        # FULL metadata may include additional query offsets for padded rows.
+        qsl = input_batch.query_start_loc_np[: num_reqs + 1]
+        if qsl.shape != (num_reqs + 1,) or qsl[0] != 0:
             return False
-        # Configuring FULL is insufficient: its target output addresses must
-        # belong to a captured FULL gear, rather than fresh eager allocations.
+        if not ((qsl[1:] - qsl[:-1]) == self.query_len).all():
+            return False
+
+        desc = input_batch.tree_target_graph_desc
         manager = self.runner.cudagraph_manager
-        return (
-            manager is not None
-            and manager._graphs_captured
-            and any(
-                desc.cg_mode == CUDAGraphMode.FULL
-                and desc.num_reqs == 1
-                and desc.num_tokens == self.query_len
-                and desc.uniform_token_count == self.query_len
-                for desc in manager.graphs
-            )
+        if (
+            desc is None
+            or desc.cg_mode != CUDAGraphMode.FULL
+            or desc.uniform_token_count != self.query_len
+            or desc.num_reqs != input_batch.num_reqs_after_padding
+            or desc.num_tokens != input_batch.num_tokens_after_padding
+            or desc.num_tokens != desc.num_reqs * self.query_len
+            or manager is None
+            or desc not in manager.graphs
+            or manager.hidden_states is None
+        ):
+            return False
+
+        # Only compact actual target graph outputs in place. A modified or
+        # newly allocated eager output could otherwise leak one graph per step.
+        graph_outputs = (manager.hidden_states, *manager.aux_hidden_states)
+        return len(tensors) == len(graph_outputs) and all(
+            _tensor_view(tensor) == _tensor_view(output[: desc.num_tokens])
+            for tensor, output in zip(tensors, graph_outputs)
         )
 
     def compact_queries(self, tensors, qsl, path_node_ids, active, positions):

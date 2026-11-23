@@ -1436,18 +1436,18 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 # than the tree width, see _build_tree_init_state_indices.
                 spec_row_widths = query_lens_cpu[spec_sequence_masks_cpu]
                 if shared_gdn_tree is not None:
-                    # A complete BS1 row is already token-major. Share logical
-                    # columns/windows, but gather this group's state pages.
+                    # Complete uniform rows already have token-major order.
+                    # Share logical columns/windows and bind this group's pages.
                     if (
                         self.spec_tree_slots != shared_gdn_tree.slots
                         or self.spec_conv_width != shared_gdn_tree.conv_width
-                        or graph_request_count != 1
-                        or num_spec_decodes != 1
+                        or graph_request_count != shared_gdn_tree.rows
+                        or num_spec_decodes != shared_gdn_tree.rows
                         or num_prefills != 0
                         or num_decodes != 0
-                        or int(spec_row_widths[0]) != shared_gdn_tree.slots
+                        or not (spec_row_widths.numpy() == shared_gdn_tree.slots).all()
                     ):
-                        raise ValueError("shared GDN tree metadata requires one complete speculative tree row")
+                        raise ValueError("shared GDN tree metadata requires complete speculative tree rows")
                     spec_init_state_indices = shared_gdn_tree.bind_init_state_indices(spec_state_indices_tensor)
                     spec_conv_window_rows = shared_gdn_tree.conv_window_rows
                     spec_conv_prefix_src = shared_gdn_tree.conv_prefix_src
@@ -1704,7 +1704,7 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self._full_tree_metadata: GDNAttentionMetadata | None = None
-        self._full_tree_request_id: str | None = None
+        self._full_tree_request_id: str | tuple[str, ...] | None = None
         self._using_full_tree_inputs = False
         self._tree_input_layouts = None
         self._conv_layer_name = layer_names[0] if layer_names else None
@@ -1921,7 +1921,7 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         draft_widths_cpu: torch.Tensor | None,
         num_actual_reqs: int | None,
     ) -> bool:
-        # The producer supplies shared topology only for a complete BS1 FULL
+        # The producer supplies shared topology only for complete uniform FULL
         # decode. Other users of build(), including capture, may call it directly.
         return (
             self.use_full_cuda_graph
@@ -1933,17 +1933,19 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             and getattr(common, "pcp_context", None) is None
             and self.spec_tree_slots == tree.slots
             and self.spec_conv_width == tree.conv_width
-            and num_actual_reqs == common.num_reqs == 1
-            and common.num_actual_tokens == common.max_query_len == tree.slots
-            and common.query_start_loc_cpu.shape == (2,)
-            and tuple(common.query_start_loc_cpu.numpy()) == (0, tree.slots)
+            and num_actual_reqs == common.num_reqs == tree.rows
+            and common.num_actual_tokens == tree.rows * tree.slots
+            and common.max_query_len == tree.slots
+            and common.query_start_loc_cpu.shape == (tree.rows + 1,)
+            and common.query_start_loc_cpu.numpy()[0] == 0
+            and (np.diff(common.query_start_loc_cpu.numpy()) == tree.slots).all()
             and draft_widths_cpu is not None
             and draft_widths_cpu.device.type == "cpu"
-            and draft_widths_cpu.shape == (1,)
-            and int(draft_widths_cpu.numpy()[0]) == tree.slots - 1
+            and draft_widths_cpu.shape == (tree.rows,)
+            and (draft_widths_cpu.numpy() == tree.slots - 1).all()
             and num_accepted_tokens is not None
-            and num_accepted_tokens.shape == (1,)
-            and common.block_table_tensor.shape[0] == common.seq_lens.shape[0] == 1
+            and num_accepted_tokens.shape == (tree.rows,)
+            and common.block_table_tensor.shape[0] == common.seq_lens.shape[0] == tree.rows
         )
 
     def select_full_tree_inputs(self, active: bool, common_buffers: dict) -> None:
@@ -2035,13 +2037,14 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             and tree.page_batch.add(tree.init_state_columns, table, self, metadata)
         ):
             return metadata
-        pages = table[:1, : tree.slots]
+        pages = table[: tree.rows, : tree.slots]
         init_pages = tree.bind_init_state_indices(pages)
         metadata.spec_state_indices_tensor.copy_(pages)
         spec.init_state_indices.copy_(init_pages)
         if not self._using_full_tree_inputs:
-            spec.verify_plan.state_indices.copy_(pages[0])
-            spec.verify_plan.init_state_indices.copy_(init_pages[0])
+            page_grid = spec.verify_plan.state_indices.view(tree.rows, tree.slots)
+            page_grid.copy_(pages)
+            spec.verify_plan.init_state_indices.copy_(init_pages.reshape(-1))
         return self._finalize_metadata(metadata)
 
     def build(
@@ -2103,14 +2106,14 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             spec = metadata.spec_decode_metadata
             plan = spec.verify_plan
             if (
-                metadata.num_spec_decodes == 1
+                metadata.num_spec_decodes == shared_gdn_tree.rows
                 and metadata.num_prefills == metadata.num_decodes == 0
-                and metadata.spec_state_indices_tensor.shape == (1, shared_gdn_tree.slots)
+                and metadata.spec_state_indices_tensor.shape == (shared_gdn_tree.rows, shared_gdn_tree.slots)
                 and spec.init_state_indices is not None
                 and spec.conv_window_rows is not None
                 and spec.conv_prefix_src is not None
                 and plan is not None
-                and plan.rows == 1
+                and plan.rows == shared_gdn_tree.rows
                 and plan.slots == shared_gdn_tree.slots
             ):
                 self._full_tree_metadata = metadata

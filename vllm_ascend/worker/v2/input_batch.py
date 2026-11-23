@@ -28,6 +28,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+
     from vllm_ascend.worker.v2.spec_decode.tree.acceptance import TreeAcceptance
 
 
@@ -93,6 +95,7 @@ class AscendInputBatch(InputBatch):
     tree_next_sibling: torch.Tensor | None = None
     kv_cache_positions: torch.Tensor | None = None
     tree_acceptance: "TreeAcceptance | None" = None
+    tree_target_graph_desc: "BatchExecutionDescriptor | None" = None
     # attn_state is used to build attention metadata.
     attn_state: AscendAttentionState | None = None
     is_dummy: bool = False

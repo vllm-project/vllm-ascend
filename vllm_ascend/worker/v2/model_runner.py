@@ -1272,6 +1272,7 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         if tree_depths is not None:
+            input_batch.tree_target_graph_desc = batch_desc
             input_batch.tree_visibility = self.req_states.tree_visibility[idx_mapping]
             input_batch.tree_num_nodes = self.req_states.tree_num_nodes[idx_mapping]
             input_batch.tree_tokens = self.req_states.draft_tokens[idx_mapping]

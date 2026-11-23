@@ -33,6 +33,15 @@ def _cached_col(
     return buf[:num_reqs]
 
 
+def get_accepted_query_index_constants(
+    num_reqs: int, spec_len: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    root = _cached_col(_root_col, num_reqs, device, torch.long, 0)
+    offsets = _cached_arange(_dst_off_arange, spec_len + 1, device, dtype=torch.long)
+    valid_root = _cached_col(_valid_root_col, num_reqs, device, torch.bool, True)
+    return root, offsets.unsqueeze(0).expand(num_reqs, -1), valid_root
+
+
 def iter_unique_kv_cache_tensors(kv_cache) -> list[torch.Tensor]:
     """Yield slot-major K/V tensors from a layer ``kv_cache`` binding."""
     if kv_cache is None:
@@ -58,6 +67,8 @@ def compact_accepted_query_rows(
     path_node_ids: torch.Tensor,
     active: torch.Tensor,
     query_positions: torch.Tensor,
+    *,
+    index_constants: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> None:
     """Move accepted-path query rows onto the linear prefix of each request.
 
@@ -78,12 +89,10 @@ def compact_accepted_query_rows(
         return
     node = path_node_ids.to(dtype=torch.long)
     qsl = query_start_loc[:num_reqs].to(dtype=torch.long)
-    root = _cached_col(_root_col, num_reqs, node.device, torch.long, 0)
+    if index_constants is None:
+        index_constants = get_accepted_query_index_constants(num_reqs, spec_len, node.device)
+    root, dst_off, valid_root = index_constants
     src_off = torch.cat([root, node.clamp(min=0)], dim=1)
-    dst_off = (
-        _cached_arange(_dst_off_arange, spec_len + 1, node.device, dtype=torch.long).unsqueeze(0).expand(num_reqs, -1)
-    )
-    valid_root = _cached_col(_valid_root_col, num_reqs, node.device, torch.bool, True)
     valid = torch.cat([valid_root, node >= 0], dim=1)
     valid &= active.unsqueeze(1)
     src_off = torch.where(valid, src_off, dst_off)
