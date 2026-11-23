@@ -65,12 +65,12 @@
     | [Qwen3-Next](../../tutorials/models/Qwen3-Next.md) | 🔴 | A2/A3 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
     | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) | 🔴 | A2 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
 
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
 
     | Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Prefill-decode Disaggregation | Piecewise ACLGraph | Fullgraph ACLGraph | max-model-len | Doc |
     |-------|---------|------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------------------|--------------------|--------------------|---------------|-----|
-    | Qwen3-Dense | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 20k | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
-    | Qwen3-30B-A3B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md) |
+    | Qwen3-Dense | ✅ |  | ❌ | Atlas 300I Duo | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 20k | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
+    | Qwen3-30B-A3B | ✅ |  | ❌ | Atlas 300I Duo | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md) |
 
 ### Pooling Models
 
@@ -93,15 +93,15 @@
     | Qwen3-VL-Reranker             | 🔴        |                                                                      |         A2/A3        | 🔵 | [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md)|
     | Qwen2.5-Math-RM-72B           | 🔴        | Reward Model, gsm8k_correctness accuracy=0.80 | A2 || [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
 
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
 
     | Model | Support | Note | Supported Hardware | W8A8|Doc |
     |-------|---------|------|--------------------|-----|------|
-    | Qwen3-Embedding | 🔴 | FP16 | Atlas 300I DUO |🟡| [Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md) |
-    | Qwen3-VL-Embedding | 🔴 | FP16 | Atlas 300I DUO |🔵| [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md) |
-    | SigLIP2 | ✅ | FP16; text/image embedding | Atlas 300I DUO |🔵| [SigLIP2](../../tutorials/models/SigLIP2.md) |
-    | Qwen3-Reranker  | 🔴 | FP16 | Atlas 300I DUO |🟡| [Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md) |
-    | Qwen3-VL-Reranker | 🔴 | FP16 | Atlas 300I DUO |🔵| [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md) |
+    | Qwen3-Embedding | 🔴 | FP16 | Atlas 300I Duo |🟡| [Qwen3-Embedding](../../tutorials/models/Qwen3-Embedding.md) |
+    | Qwen3-VL-Embedding | 🔴 | FP16 | Atlas 300I Duo |🔵| [Qwen3-VL-Embedding](../../tutorials/models/Qwen3-VL-Embedding.md) |
+    | SigLIP2 | ✅ | FP16; text/image embedding | Atlas 300I Duo |🔵| [SigLIP2](../../tutorials/models/SigLIP2.md) |
+    | Qwen3-Reranker  | 🔴 | FP16 | Atlas 300I Duo |🟡| [Qwen3-Reranker](../../tutorials/models/Qwen3-Reranker.md) |
+    | Qwen3-VL-Reranker | 🔴 | FP16 | Atlas 300I Duo |🔵| [Qwen3-VL-Reranker](../../tutorials/models/Qwen3-VL-Reranker.md) |
 
 ## Multimodal Language Models
 
@@ -120,7 +120,7 @@
     | [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) | ✅ | 950DT Products | 🟡 | ✅ | 🟡 | 🟡 | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | 🟡 | 🟡 | ✅ | ✅ | 3 | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 |
     | [Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) | ✅ | 950DT Products | 🟡 | ✅ | 🟡 | 🟡 | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | 3 | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
     | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) | ✅ | 950DT Products | 🟡 | ✅ | 🟡 | 🟡 | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | 🟡 | 🟡 | 3 | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ | ❌ | ❌ |
-    | [Qwen3.8-Flash-Next](../../tutorials/models/Qwen3.8-Flash-Next.md) | ✅ | 950DT Products | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | / | ❌ | ✅ | ✅ | 🟡 | 3 | ❌ | ❌ | ❌ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | 🟡 | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+    | [Qwen3.8-Flash-Next](../../tutorials/models/Qwen3.8-Flash-Next.md) | ✅ | 950DT Products | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | 🟡 | ❌ | ❌ | ✅ | ✅ | ✅ | / | ❌ | ✅ | ✅ | 🟡 | 3 | ❌ | ❌ | ❌ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | 🟡 | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
     | [Step-5-Preview](../../tutorials/models/Step-5-Preview.md) | 🔵 | 950DT Products | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
 
 === "A2/A3"
@@ -141,7 +141,7 @@
     | [Kimi-K3.1-Pro](../../tutorials/models/Kimi-K3.1-Pro.md) | 🔵 | A3 | | | | | | | 🔵 | 🔵 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
     | [MiniMax-M3](../../tutorials/models/MiniMax-M3.md) | ✅ | A2/A3 | 🟡 | ✅ | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | 🟡 | ❌ | 3 | ❌ | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 |
     | [MiniMax-M3.1-Flash](../../tutorials/models/MiniMax-M3.1-Flash.md) | ✅ | A2/A3 | 🟡 | ✅ | 🟡 | 🟡 | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | 🟡 | ❌ | ❌ | 7 | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 |
-    | [Qwen3.8-Flash-Next](../../tutorials/models/Qwen3.8-Flash-Next.md) | ✅ | A2/A3 | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | / | ❌ | ✅ | ✅ | ❌ | 3 | ❌ | ❌ | ❌ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | 🟡 | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+    | [Qwen3.8-Flash-Next](../../tutorials/models/Qwen3.8-Flash-Next.md) | ✅ | A2/A3 | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | 🟡 | ❌ | ❌ | ✅ | ✅ | ✅ | / | ❌ | ✅ | ✅ | ❌ | 3 | ❌ | ❌ | ❌ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | 🟡 | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
     | [Qwen3-VL](../../tutorials/models/Qwen-VL-Dense.md) | ✅ | A2/A3 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
     | [Qwen3-VL-30B-A3B](../../tutorials/models/Qwen3-VL-30B-A3B-Instruct.md) | ✅ | A2/A3 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
     | [Qwen3-VL-235B-A22B](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md) | 🔴 | A2/A3 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
@@ -152,16 +152,15 @@
     | [Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md) | 🔴 | A2/A3 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
     | [PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md) | 🔴 | A2/A3 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
 
-=== "Atlas 300I DUO"
+=== "Atlas 300I Duo"
 
     | Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Prefill-decode Disaggregation | Piecewise ACLGraph | Fullgraph ACLGraph | max-model-len | Doc |
     |-------|---------|------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------------------|--------------------|--------------------|---------------|-----|
-    | Qwen3-VL | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
-    | Qwen3.5-Dense | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.5-Dense](../../tutorials/models/Qwen3.5-Dense.md) |
-    | Qwen3.5-35B-A3B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.5-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
-    | Qwen3.5-27B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.5-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
-    | Qwen3.6-27B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
-    | Qwen3.6-35B-A3B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
-    | Qwen3.8-27B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.8-27B](../../tutorials/models/Qwen3.8-27B.md) |
-    | PaddleOCR-VL | 🔴 |  | ❌ | Atlas 300I DUO | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | 16k | [PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md) |
-    | Qwen3-ASR | 🔴 |  | ❌ | Atlas 300I DUO | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | 🟡 | ❌ | ✅ | ✅ | 4096 | [Qwen3-ASR-1.7B](../../tutorials/models/Qwen3-ASR-1.7B.md) |
+    | Qwen3-VL | ✅ |  | ❌ | Atlas 300I Duo | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen3-VL](../../tutorials/models/Qwen-VL-Dense.md) |
+    | Qwen3.5-Dense | ✅ |  | ❌ | Atlas 300I Duo | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.5-Dense](../../tutorials/models/Qwen3.5-Dense.md) |
+    | Qwen3.5-27B | ✅ |  | ❌ | Atlas 300I Duo | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.5-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
+    | Qwen3.6-27B | ✅ |  | ❌ | Atlas 300I Duo | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
+    | Qwen3.6-35B-A3B | ✅ |  | ❌ | Atlas 300I Duo | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
+    | Qwen3.8-27B | ✅ |  | ❌ | Atlas 300I Duo | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.8-27B](../../tutorials/models/Qwen3.8-27B.md) |
+    | PaddleOCR-VL | 🔴 |  | ❌ | Atlas 300I Duo | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | 16k | [PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md) |
+    | Qwen3-ASR | 🔴 |  | ❌ | Atlas 300I Duo | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | 🟡 | ❌ | ✅ | ✅ | 4096 | [Qwen3-ASR-1.7B](../../tutorials/models/Qwen3-ASR-1.7B.md) |

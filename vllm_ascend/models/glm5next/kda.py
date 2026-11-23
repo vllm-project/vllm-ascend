@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash KDA layer with a fused convolution and a bounded safe gate."""
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -39,17 +40,92 @@ from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjecti
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
 from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendGDNHostMetadataBuilder
+from vllm_ascend.ops.recurrent_pcp import prepare_recurrent_pcp_config
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 
 if TYPE_CHECKING:
     from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords
 
 
+def prepare_glm_pcp_config(vllm_config):
+    if (
+        vllm_config.use_v2_model_runner
+        and vllm_config.parallel_config.pcp_shard_decode_requests
+        and vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+    ):
+        return prepare_recurrent_pcp_config(vllm_config)
+    return vllm_config
+
+
+class Glm5NextPCPMetadataMixin:
+    def _init_pcp_permutation(self, vllm_config, device, decode_cudagraph_max_bs: int) -> None:
+        self._pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self._is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
+        self._pcp_gather_indices: torch.Tensor | None = None
+        if self._pcp_size > 1:
+            capacity = max(vllm_config.scheduler_config.max_num_batched_tokens, decode_cudagraph_max_bs)
+            self._pcp_gather_indices = torch.empty(capacity * self._pcp_size, dtype=torch.int64, device=device)
+
+    def _attach_pcp_permutation(self, metadata):
+        context = getattr(metadata, "pcp_context", None)
+        if context is None or self._pcp_size == 1:
+            return metadata
+        if not self._is_pcp_decode_sharded and not context.global_batch.has_prefill:
+            # Replicated decode never gathers KDA tokens or consumes this permutation.
+            return metadata
+        local_tokens = context.local_num_tokens
+        if local_tokens is None or local_tokens <= 0:
+            raise ValueError("GLM KDA PCP metadata requires a positive padded local token count")
+        count = self._pcp_size * local_tokens
+        if self._pcp_gather_indices is None or count > self._pcp_gather_indices.numel():
+            raise ValueError("GLM KDA PCP permutation exceeds the metadata buffer capacity")
+        indices = self._pcp_gather_indices[:count]
+        source = context.padded_gather_idx
+        if source is not None:
+            if source.numel() != count:
+                raise ValueError("GLM KDA PCP permutation does not match the padded local token count")
+            indices.copy_(source)
+        elif context.global_batch.is_dummy:
+            global_tokens = context.global_batch.num_tokens_after_padding
+            if global_tokens <= 0:
+                raise ValueError("GLM KDA PCP dummy metadata requires positive global tokens")
+            torch.arange(count, device=indices.device, out=indices)
+            if global_tokens == local_tokens:
+                # Nonuniform profiling and replicated decode share one global view.
+                indices.remainder_(global_tokens)
+            else:
+                # Sharded capture has disjoint rank segments, with capped global padding.
+                indices.masked_fill_(indices >= global_tokens, 0)
+        else:
+            raise ValueError("GLM KDA PCP runtime metadata requires a partitioned token layout")
+        # Only GLM KDA retains this address in a graph. Keep the common PCP
+        # context and upstream partition indices unchanged for other consumers.
+        metadata.pcp_context = replace(context, padded_gather_idx=indices)
+        return metadata
+
+
+class Glm5NextGDNHostMetadataBuilder(Glm5NextPCPMetadataMixin, AscendGDNHostMetadataBuilder):
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        vllm_config = prepare_glm_pcp_config(vllm_config)
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._init_pcp_permutation(vllm_config, device, self.decode_cudagraph_max_bs)
+
+    def build(self, *args, **kwargs):
+        return self._attach_pcp_permutation(super().build(*args, **kwargs))
+
+
 class Glm5NextGDNHostMetadataBackend(AscendGDNHostMetadataBackend):
+    @staticmethod
+    def get_builder_cls():
+        builder_cls = AscendGDNHostMetadataBackend.get_builder_cls()
+        if builder_cls is AscendGDNHostMetadataBuilder:
+            return Glm5NextGDNHostMetadataBuilder
+        return builder_cls
+
     @classmethod
     def supports_pcp(cls) -> bool:
-        # The GLM KDA layer gathers PCP prefill tokens before its head-sharded
+        # The GLM KDA layer gathers PCP tokens before its head-sharded
         # recurrent update and restores the PCP-local output afterward.
         return True
 
@@ -330,6 +406,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.pcp_group = get_pcp_group()
         self.pcp_size = self.pcp_group.world_size
         self.pcp_rank = self.pcp_group.rank_in_group
+        self.is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         self.use_pcp_head_sharding = self.pcp_size > 1
         column_linear = ColumnParallelLinear
         merged_linear = _Glm5NextMergedColumnParallelLinear
@@ -519,14 +596,17 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         attn_metadata_raw = get_forward_context().attn_metadata
         attn_metadata = attn_metadata_raw.get(self.prefix) if isinstance(attn_metadata_raw, dict) else None
         pcp_context = getattr(attn_metadata, "pcp_context", None)
-        has_pcp_prefill = pcp_context is not None and bool(pcp_context.global_batch.is_prefilling_np.any())
+        gather_pcp_tokens = pcp_context is not None and (
+            self.is_pcp_decode_sharded or pcp_context.global_batch.has_prefill
+        )
         local_num_tokens = hidden_states.size(0)
-        if has_pcp_prefill:
+        if gather_pcp_tokens:
             assert pcp_context is not None
             assert pcp_context.padded_gather_idx is not None
-            # PCP assigns the first and last chunks of a prefill to the same
-            # rank. Reconstruct causal order before advancing the head-sharded
-            # recurrent state across the combined TP and PCP head shards.
+            # Restore both split prefills and single-owner decodes to global
+            # request order. Every rank must advance its KDA state, including
+            # ranks with no local requests and requests whose owner changes.
+            # State heads are sharded across the combined TP and PCP ranks.
             hidden_states = self.pcp_group.all_gather(hidden_states, dim=0)[pcp_context.hidden_restore_idx]
         if self.projection_tp is not None:
             projections = self.projection_tp.project(self, hidden_states)
@@ -579,22 +659,22 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
         use_pcp_reduce_scatter = False
-        if has_pcp_prefill:
+        if gather_pcp_tokens:
             assert pcp_context is not None
             if pcp_context.padded_gather_idx.numel() != self.pcp_size * local_num_tokens:
                 raise RuntimeError("KDA PCP token mapping does not match the rank-local model input.")
-            # Mixed batches replicate decode rows in every rank's packed output.
-            # Keep them on AllReduce to avoid expanding the communication input.
-            use_pcp_reduce_scatter = isinstance(self.o_proj, PCPRowParallelLinear) and bool(
-                pcp_context.global_batch.is_prefilling_np.all()
+            # Sharded decodes have one owner, just like prefill chunks. Only
+            # replicated mixed batches need the full AllReduce output.
+            use_pcp_reduce_scatter = isinstance(self.o_proj, PCPRowParallelLinear) and (
+                self.is_pcp_decode_sharded or bool(pcp_context.global_batch.is_prefilling_np.all())
             )
         if use_pcp_reduce_scatter:
             assert pcp_context is not None
-            logger.info_once("KDA PCP pure-prefill output uses packed ReduceScatter.")
+            logger.info_once("KDA PCP sharded output uses packed ReduceScatter.")
             output = self.o_proj(core_attn_out, pcp_output_indices=pcp_context.padded_gather_idx)[0]
         else:
             output = self.o_proj(core_attn_out)[0]
-            if has_pcp_prefill:
+            if gather_pcp_tokens:
                 assert pcp_context is not None
                 local_start = self.pcp_rank * local_num_tokens
                 local_indices = pcp_context.padded_gather_idx[local_start : local_start + local_num_tokens]

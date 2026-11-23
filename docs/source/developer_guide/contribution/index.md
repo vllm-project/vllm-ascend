@@ -62,9 +62,10 @@ bash format.sh ci
 
 #### Submit the commit
 
+Use `-s` to add the DCO sign-off and write the [commit message](#commit-message-content) in your editor.
+
 ```bash
-# Commit changed files using `-s`
-git commit -sm "your commit info"
+git commit -s
 ```
 
 🎉 Congratulations! You have completed the development environment setup.
@@ -92,6 +93,18 @@ in the design document.
 When contributing changes to this project, you must agree to the DCO. Commits must include a `Signed-off-by:` header which certifies agreement with the terms of the DCO (Developer Certificate of Origin).
 
 Using `-s` with `git commit` will automatically add this header.
+
+## Commit message content
+
+Keep the commit body brief.
+
+- **Problem** — Describe when the issue occurs and how it affects users or developers.
+  For a feature, explain which capability is missing.
+- **Fix** — Explain what this commit changes and why it addresses the problem.
+- **Validation** — Summarize what you checked and the outcome in one sentence. Mention any relevant check still pending.
+
+Put detailed accuracy and performance results under **How was this patch tested?** in the
+[PR template](https://github.com/vllm-project/vllm-ascend/blob/main/.github/PULL_REQUEST_TEMPLATE.md#how-was-this-patch-tested).
 
 ## PR Title and Classification
 

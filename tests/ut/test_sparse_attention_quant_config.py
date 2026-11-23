@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from vllm_ascend.ascend_config import SparseAttentionQuantConfig
+from vllm_ascend.ascend_config import AscendConfig, SparseAttentionQuantConfig, draft_config_context
 
 
 def make_config():
@@ -23,6 +23,46 @@ def test_default_preserves_native_behavior():
     config = SparseAttentionQuantConfig()
     assert not config.enable_a8c4
     config.validate(make_config())
+
+
+def test_draft_does_not_inherit_target_a8c4():
+    config = make_config()
+    config.additional_config = {"sparse_attention_quant_config": {"enable_a8c4": True}}
+    with draft_config_context():
+        assert not SparseAttentionQuantConfig.from_vllm_config(config).enable_a8c4
+    assert SparseAttentionQuantConfig.from_vllm_config(config).enable_a8c4
+    assert config.additional_config["sparse_attention_quant_config"]["enable_a8c4"]
+
+
+def test_typed_draft_config_masks_a8c4_before_validation():
+    config = AscendConfig(sparse_attention_quant_config={"enable_a8c4": True})
+
+    # Stop at the next validator after observing the effective sparse config,
+    # so this regression does not depend on unrelated full VllmConfig fields.
+    class ValidationReached(Exception):
+        pass
+
+    def observe(sparse_config, vllm_config):
+        assert not sparse_config.enable_a8c4
+        raise ValidationReached
+
+    with (
+        draft_config_context(),
+        patch.object(SparseAttentionQuantConfig, "validate", observe),
+        pytest.raises(ValidationReached),
+    ):
+        config.derive_and_validate(make_config())
+
+
+def test_draft_scope_restores_target_config_after_error():
+    config = make_config()
+    config.additional_config = {"sparse_attention_quant_config": {"enable_a8c4": True}}
+    with pytest.raises(RuntimeError, match="draft loading failed"), draft_config_context():
+        with draft_config_context():
+            assert not SparseAttentionQuantConfig.from_vllm_config(config).enable_a8c4
+        assert not SparseAttentionQuantConfig.from_vllm_config(config).enable_a8c4
+        raise RuntimeError("draft loading failed")
+    assert SparseAttentionQuantConfig.from_vllm_config(config).enable_a8c4
 
 
 def test_typed_config_rejects_invalid_boolean():

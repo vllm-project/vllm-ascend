@@ -837,8 +837,9 @@ jobs:
     # for fork PRs, so the PR number must travel through this run's
     # artifacts instead. Runs regardless of test outcomes because the
     # comment workflow fires on any completed run.
-    if: ${{ !cancelled() }}
-    runs-on: linux-amd64-cpu-2-hk
+    if: ${{ !cancelled() && needs.pre-commit.outputs.src == 'true' }}
+    needs: pre-commit
+    runs-on: linux-amd64-cpu-1-hk
     steps:
       - name: Write PR context
         run: |

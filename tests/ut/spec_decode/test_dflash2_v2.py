@@ -27,13 +27,14 @@ import pytest
 import torch
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.forward_context import is_forward_context_available, override_forward_context
+from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 import vllm_ascend.worker.v2.pcp_manager as pcp_module
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode
-from vllm_ascend.worker.v2.spec_decode import init_speculator
+from vllm_ascend.worker.v2.spec_decode import init_speculator, pcp_utils
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
     AscendDFlashSpeculator,
     draft_metadata_request_count,
@@ -595,7 +596,9 @@ def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
     speculator.pcp_manager = object.__new__(pcp_module.AscendPCPManager) if pcp_enabled else None
     speculator.draft_logits = None
+    speculator.input_buffers = InputBuffers(8, 8, torch.device("cpu"))
     monkeypatch.setattr(pcp_module, "get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor))
+    monkeypatch.setattr(pcp_utils, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
     batch = SimpleNamespace(num_reqs=8, idx_mapping=torch.arange(8))
     sync_state = SimpleNamespace(num_reqs=1)
     result = torch.zeros(8, 1, dtype=torch.int64)
@@ -614,7 +617,12 @@ def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run
     dp_sync_kwarg = "dp_sync_state"
     assert (
         speculator.propose(
-            batch, *[None] * 10, **{dp_sync_kwarg: sync_state}, dummy_run=dummy_run, skip_attn_for_dummy_run=skip_attn
+            batch,
+            *[None] * 10,
+            **{dp_sync_kwarg: sync_state},
+            dummy_run=dummy_run,
+            skip_attn_for_dummy_run=skip_attn,
+            is_profile=dummy_run and skip_attn,
         )
         is result
     )

@@ -106,10 +106,10 @@ def test_scatter_fp4_and_scales(tokens, heads):
     assert torch.all(flat[..., 128 * heads * 208 :] == 0xCD)
 
 
-@pytest.mark.parametrize("tokens", [1, 8, 224])
-def test_fused_qknorm_produces_a8c4_without_standalone_pack(tokens):
+@pytest.mark.parametrize("tokens,kv_heads", [(1, 1), (8, 1), (224, 1), (8, 4)])
+def test_fused_qknorm_produces_a8c4_without_standalone_pack(tokens, kv_heads):
     generator = torch.Generator().manual_seed(16154)
-    heads, kv_heads, index_heads, dim = 16, 1, 1, 128
+    heads, index_heads, dim = 16, 1, 128
     packed = torch.randn(
         (tokens, (heads + 2 * kv_heads + index_heads + 1) * dim), dtype=torch.bfloat16, generator=generator
     )

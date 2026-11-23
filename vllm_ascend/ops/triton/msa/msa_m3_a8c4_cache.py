@@ -46,8 +46,10 @@ def a8c4_cache_views(caches: tuple[torch.Tensor, torch.Tensor] | torch.Tensor):
 
 
 @triton.jit
-def _store_fp4(values, data, scales, slot, HEADS: tl.constexpr, DATA_BLOCK: tl.constexpr, SCALE_BLOCK: tl.constexpr):
-    x = values.to(tl.float32).reshape(HEADS * 8, 16)
+def _store_fp4_head(
+    values, data, scales, slot, ROW_HEADS: tl.constexpr, DATA_BLOCK: tl.constexpr, SCALE_BLOCK: tl.constexpr
+):
+    x = values.to(tl.float32).reshape(8, 16)
     amax = tl.max(tl.abs(x), axis=1)
     scale = tl.where(amax > 0, amax / 6.0, 1.0).to(tl.bfloat16).to(tl.float32)
     y = tl.minimum(tl.abs(x / scale[:, None]), 6.0)
@@ -63,13 +65,24 @@ def _store_fp4(values, data, scales, slot, HEADS: tl.constexpr, DATA_BLOCK: tl.c
     even_lower_tie = (y == 0.25) | (y == 1.25) | (y == 2.5) | (y == 5.0)
     code = code - even_lower_tie.to(tl.int32)
     code = code | ((x < 0).to(tl.int32) << 3)
-    pair = code.reshape(HEADS, 64, 2)
-    packed = tl.sum(pair << (tl.arange(0, 2)[None, None, :] * 4), axis=2).to(tl.uint8)
+    pair = code.reshape(64, 2)
+    packed = tl.sum(pair << (tl.arange(0, 2)[None, :] * 4), axis=1).to(tl.uint8)
     row = slot % 128
     block = slot // 128
-    h = tl.arange(0, HEADS)
-    tl.store(data + block * DATA_BLOCK + row * HEADS * 64 + h[:, None] * 64 + tl.arange(0, 64)[None, :], packed)
-    tl.store(scales + block * SCALE_BLOCK + row * HEADS * 8 + tl.arange(0, HEADS * 8), scale)
+    tl.store(data + block * DATA_BLOCK + row * ROW_HEADS * 64 + tl.arange(0, 64), packed)
+    tl.store(scales + block * SCALE_BLOCK + row * ROW_HEADS * 8 + tl.arange(0, 8), scale)
+
+
+@triton.jit
+def _store_fp4(values, data, scales, slot, HEADS: tl.constexpr, DATA_BLOCK: tl.constexpr, SCALE_BLOCK: tl.constexpr):
+    # Quantize one head per tile. The Ascend lowering of a multi-head tile
+    # broadcasts FP4 magnitudes across packed bytes; the one-head tile is exact.
+    for head in tl.static_range(HEADS):
+        if HEADS == 1:
+            one = values
+        else:
+            one = tl.gather(values, tl.full((1, 128), head, tl.int32), axis=0)
+        _store_fp4_head(one, data + head * 64, scales + head * 8, slot, HEADS, DATA_BLOCK, SCALE_BLOCK)
 
 
 @triton.jit

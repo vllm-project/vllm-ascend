@@ -86,3 +86,17 @@ The fallback scatter specializes head counts and strides. No new warmup registry
 or mutable module state is introduced. Startup-versus-serving compilation counts
 on a model evaluation workload remain to be collected; a kernel launch count is
 not a compilation count.
+
+## Draft isolation and multi-head packing
+
+The A8C4 option applies to the target model. DSpark draft construction keeps
+its own native cache format, including BF16 drafts, without changing the target
+configuration. Both typed configuration validation and config reconstruction
+mask this target-only option inside the existing draft context.
+
+FP4 packing processes one KV head per tile to avoid incorrect packed bytes
+from the Ascend compiler lowering of multi-head reductions. The public wrapper
+and page layout are unchanged. KV head count remains a compile-time parameter;
+the head loop introduces no device-to-host synchronization or new runtime state.
+Regression coverage includes one- and four-head scatter and fused production
+paths, cache padding, and draft-scope restoration after exceptions.
