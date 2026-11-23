@@ -394,10 +394,12 @@ class Orchestrator:
             "HOME": os.environ.get("HOME", "/tmp"),
             "AI_REVIEW_KEY": os.environ.get("AI_REVIEW_KEY", ""),
             "AI_REVIEW_API": os.environ.get("AI_REVIEW_API", ""),
-            # dsh's DeepSeek provider is redirected by these two names
-            # (docs/user/guide/providers.md): the key + the custom base URL
+            # dsh's DeepSeek provider is redirected by these names
+            # (docs/user/guide/providers.md + env-vars reference): key,
+            # custom base URL, and the default model override
             "DEEPSEEK_API_KEY": os.environ.get("AI_REVIEW_KEY", ""),
             "DEEPSEEK_BASE_URL": os.environ.get("AI_REVIEW_API", ""),
+            "DEEPSEEK_DEFAULT_MODEL": os.environ.get("AI_REVIEW_MODEL", ""),
             # Picked up by dsh's config surface once confirmed in the smoke
             # test; harmless to expose until then.
             "AI_REVIEW_MODEL": os.environ.get("AI_REVIEW_MODEL", "deepseek-v4.1-flash"),
