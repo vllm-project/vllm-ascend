@@ -1531,7 +1531,7 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         event_id = req_meta.event_id
         assert event_id is not None
         self.assertGreaterEqual(event_id, 0)
-        self.assertLessEqual(event_id, 0xFFFF_FFFF)
+        self.assertLess(event_id, 1 << 128)
         # Neither the null block nor speculative scratch may be pinned.
         pinned_blocks = scheduler._block_pool.blocks[1:3]
         scheduler._block_pool.touch.assert_called_once_with(pinned_blocks)
@@ -1553,18 +1553,17 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         scheduler._block_pool.blocks = [MagicMock() for _ in range(5)]
         first = ReqMeta("r1", block_ids_by_group=[[1, 2]], can_save=True)
         second = ReqMeta("r1", block_ids_by_group=[[3, 4]], can_save=True)
-        first_uuid = UUID("00000000-5566-4788-99aa-bbccddeeff01")
-        colliding_uuid = UUID("00000000-5566-4788-99aa-bbccddeeff02")
+        first_uuid = UUID("ffffffff-5566-4788-99aa-bbccddeeff01")
         second_uuid = UUID("ffffffff-5566-4788-99aa-bbccddeeff02")
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks.uuid.uuid4",
-            side_effect=[first_uuid, colliding_uuid, first_uuid, second_uuid],
+            side_effect=[first_uuid, first_uuid, first_uuid, second_uuid],
         ):
             scheduler.retain_blocks_for_save(first)
             scheduler.retain_blocks_for_save(second)
 
-        first_event_id = 0
-        second_event_id = 0xFFFF_FFFF
+        first_event_id = first_uuid.int
+        second_event_id = second_uuid.int
         self.assertEqual(first.event_id, first_event_id)
         self.assertEqual(second.event_id, second_event_id)
         worker_meta = AscendStoreKVConnectorWorkerMetadata({second_event_id: 1})
