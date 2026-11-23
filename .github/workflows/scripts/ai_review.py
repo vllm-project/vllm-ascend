@@ -476,8 +476,18 @@ class Orchestrator:
                 rel = os.path.relpath(path, self.workspace)
                 with open(path) as f:
                     entry_ids = re.findall(r"^-\s+`([\w-]+#\w[\w-]*)`", f.read(), re.M)
-                ids = ", ".join(f"`{i}`" for i in entry_ids) or "(n/a)"
-                lines.append(f"- `{rel}` — rules with IDs: {ids}")
+                ids = ", ".join(f"`{i}`" for i in entry_ids)
+                if ids:
+                    lines.append(f"- `{rel}` — rules with IDs: {ids}")
+                else:
+                    # orientation files carry no citable rule IDs; hint at
+                    # when reading them pays off
+                    hint = (
+                        "orientation map — read when the diff touches modules you cannot place"
+                        if "/context/" in rel.replace(os.sep, "/")
+                        else "maintenance doc, no rules"
+                    )
+                    lines.append(f"- `{rel}` — {hint}")
         return "\n".join(lines)
 
     def _waived_findings(self) -> list[str]:

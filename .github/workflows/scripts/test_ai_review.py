@@ -149,6 +149,8 @@ class TestKnowledgeBaseMap:
         (kb / "L2" / "ci" / "checklist.md").write_text("# L2\n\n- `L2-ci#container-contract`: declare containers\n")
         (kb / "instructions.md").write_text("# instructions")
         (kb / "README.md").write_text("# KB readme for humans")
+        (kb / "context").mkdir()
+        (kb / "context" / "architecture.md").write_text("# map, no rule IDs")
 
         orch = object.__new__(ai.Orchestrator)
         orch.workspace = str(tmp_path)
@@ -158,6 +160,7 @@ class TestKnowledgeBaseMap:
         assert "`L2-ci#container-contract`" in kb_map
         assert "instructions.md" not in kb_map  # protocol, not a rule file
         assert "README.md" not in kb_map  # for humans, not for the agent
+        assert "orientation map" in kb_map  # context files get a read hint
         # map lists relative paths the agent can read from the workspace
         assert ".github/agent-review/L1/checklist.md" in kb_map
 
