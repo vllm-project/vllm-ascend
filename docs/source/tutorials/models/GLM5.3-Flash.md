@@ -662,8 +662,7 @@ For DP>1, the launcher executes the role script without filtering.
                 "enable_cpu_binding": true,
                 "enable_flashcomm1": true,
                 "enable_fused_mc2": 2,
-                "enable_shared_expert_dp": true,
-                "multistream_overlap_shared_expert": true
+                "enable_shared_expert_dp": true
               }' \
               --kv-transfer-config '{
                 "kv_connector": "MooncakeConnectorV2",
@@ -806,7 +805,7 @@ For DP>1, the launcher executes the role script without filtering.
       `--max-num-batched-tokens 32768`; Decode sets `60` and `360`,
       respectively. Tune these per-engine scheduler limits for the workload.
     - Prefill sets CPU binding, FlashComm1, fused MC2 (`2`),
-      shared-expert DP and multistream overlap. Its target and MTP draft
+      shared-expert DP. Its target and MTP draft
       run eagerly. Decode disables fused MC2 (`0`) and enables shared-expert
       multistream overlap and recomputation scheduling through `scheduler_config`.
       Decode uses `FULL_DECODE_ONLY` with `enable_npugraph_ex: true`,
