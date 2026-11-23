@@ -14,9 +14,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.timing import (
 
 
 def _config(extra_config):
-    return SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(kv_connector_extra_config=extra_config)
-    )
+    return SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector_extra_config=extra_config))
 
 
 def test_timing_is_opt_in():
@@ -34,17 +32,13 @@ def test_sum_transfer_bytes_handles_nested_sizes():
 
 
 def test_log_kvpd_timing_is_silent_when_disabled():
-    with patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.timing.logger"
-    ) as logger:
+    with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.timing.logger") as logger:
         log_kvpd_timing(False, "p_prefill_done", req_id="req-0")
         logger.info.assert_not_called()
 
 
 def test_log_kvpd_timing_emits_one_json_line_when_enabled():
-    with patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.timing.logger"
-    ) as logger:
+    with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.timing.logger") as logger:
         log_kvpd_timing(True, "d_load_done", req_id="req-0", bytes=4096)
 
     logger.info.assert_called_once()
