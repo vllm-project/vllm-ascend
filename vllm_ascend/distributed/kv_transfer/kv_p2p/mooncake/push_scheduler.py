@@ -60,7 +60,6 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
         # The component identity also identifies DSV4 after scheduler projection.
         component_identity = getattr(kv_cache_config, "dsv4_component_identity", None)
         self._is_dsv4 = component_identity is not None or is_deepseek_v4_cache(kv_cache_config.kv_cache_groups)
-        self.need_truncate |= self._is_dsv4
         self._metadata_thread: MooncakePushMetadataThread | None = None
         self._reqs_pending_recv: dict[str, tuple[Request, BlockIds, int]] = {}
         self._reqs_need_send_layerwise: dict[str, tuple[Request, BlockIds, int]] = {}

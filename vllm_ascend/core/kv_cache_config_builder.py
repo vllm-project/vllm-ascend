@@ -44,7 +44,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     LAYERWISE_REUSE_BACKING_BYTES,
     get_layerwise_reuse_backing_bytes,
 )
-from vllm_ascend.models.deepseek_v4.cache_config import _get_deepseek_v4_cache_layout
+from vllm_ascend.models.deepseek_v4.cache_config import _get_deepseek_v4_cache_layout, is_deepseek_v4_cache
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -358,13 +358,7 @@ def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
         or not all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups)
     ):
         return False
-    for group in kv_cache_groups:
-        group_spec = group.kv_cache_spec
-        assert isinstance(group_spec, UniformTypeKVCacheSpecs)
-        specs = group_spec.kv_cache_specs.values()
-        if any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in specs):
-            return True
-    return False
+    return is_deepseek_v4_cache(kv_cache_groups)
 
 
 def _deepseek_v4_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
