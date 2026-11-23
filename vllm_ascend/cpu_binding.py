@@ -186,6 +186,11 @@ class DeviceInfo:
             devices_list: list[int] = []
             for token in ASCEND_RT_VISIBLE_DEVICES.split(","):
                 token = token.strip()
+                if not token:
+                    # Tolerate empty tokens from leading/trailing/double
+                    # commas (e.g. "0,1,"). Skipping them never changes the
+                    # selected device set.
+                    continue
                 if not token.isdecimal():
                     raise RuntimeError(
                         "Invalid ASCEND_RT_VISIBLE_DEVICES value "
