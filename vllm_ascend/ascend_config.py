@@ -26,7 +26,7 @@ from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
+from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -34,6 +34,7 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.config_utils import config
 from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.expert_transfer.expert_offload_config import validate_expert_offload_config
 from vllm_ascend.kv_trace.kv_trace_config import KVTraceConfig
 
 if TYPE_CHECKING:
@@ -48,8 +49,8 @@ def is_mega_moe_supported() -> bool:
 
     Always read _MEGA_MOE_SUPPORTED through this accessor instead of
     ``from ascend_config import _MEGA_MOE_SUPPORTED``: the global is rebound
-    during config init (AscendConfig._validate_user_input_ranges rolls back
-    megamoe), and a direct import binds a stale snapshot for the bool.
+    when the worker config is published, and a direct import binds a stale
+    snapshot for the bool.
     """
     global _MEGA_MOE_SUPPORTED
     if _MEGA_MOE_SUPPORTED is None:
@@ -413,19 +414,24 @@ class RlConfig:
 class QuantizedAllReduceConfig:
     """Configuration Object for ``additional_config["quantized_all_reduce_config"]``.
 
-    Opt-in int8 quantized all-reduce for large bf16 TP collectives (Atlas A2 only,
-    1 < TP <= 8). A collective takes the int8 path only when its payload reaches
-    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data: the default
-    16,777,216 elements is 32 MiB, the measured break-even rounded up.
+    Opt-in quantized all-reduce for large bf16 collectives. ``quant_dtype``
+    selects shared-scale int8 (default on A2) or MXFP8 AllToAll/AllGather
+    with BF16 dequantization and local SUM output (default on A5). An explicit
+    value overrides the hardware default. Both select calls by group size,
+    dtype, shape and payload rather than forward phase.
+    A collective takes the selected path only when its payload reaches
+    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data. The
+    default is 16,777,216 elements (32 MiB), retained from the INT8 crossover
+    measurements. Benchmark MXFP8 independently on the intended A5 workload.
 
-    The wrapper is built for every parallel group, but only groups with at most
-    8 ranks take the int8 path; EP/MC2 groups (``DP x PCP x TP``) keep bf16. The
-    TP degree itself is validated here, so an unsupported TP fails at config
-    parsing time instead of when some parallel group is constructed.
+    The wrapper is built for every parallel group; unsupported group sizes
+    keep bf16. MXFP8 supports groups of 2/4/8 ranks, while INT8 supports up to
+    8 ranks. The TP degree itself is validated here before group construction.
     """
 
     enable: bool = False
     min_numel: int = 16777216
+    quant_dtype: Literal["int8", "mxfp8"] = dataclasses.field(default_factory=lambda: "mxfp8" if is_950() else "int8")
 
     @field_validator("min_numel")
     @classmethod
@@ -444,13 +450,22 @@ class QuantizedAllReduceConfig:
         )
 
         tp_size = vllm_config.parallel_config.tensor_parallel_size
-        if tp_size > _MAX_VALID_WORLD_SIZE:
+        if self.quant_dtype == "int8" and tp_size > _MAX_VALID_WORLD_SIZE:
             raise ValueError(
                 "additional_config.quantized_all_reduce_config supports "
                 f"tensor_parallel_size <= {_MAX_VALID_WORLD_SIZE} (the integer-safe "
                 f"int8 bound leaves too few quantization levels beyond that), but "
                 f"tensor_parallel_size is {tp_size}. Disable the feature or lower TP."
             )
+        if self.quant_dtype == "mxfp8":
+            from vllm_ascend.distributed.device_communicators.mxfp8_all_reduce import (
+                _SUPPORTED_WORLD_SIZES,
+            )
+
+            if not is_950():
+                raise ValueError("quantized_all_reduce_config.quant_dtype='mxfp8' requires Atlas A5.")
+            if tp_size != 1 and tp_size not in _SUPPORTED_WORLD_SIZES:
+                raise ValueError("MXFP8 AllToAll quantized all-reduce requires TP=2/4/8 (or TP=1 to bypass).")
 
 
 @config
@@ -490,6 +505,20 @@ class SharedEngramConfig:
         return self
 
 
+@config(config=ConfigDict(frozen=True))
+class ExpertOffloadConfig:
+    """Configuration for exact single-worker expert offload."""
+
+    enabled: bool = False
+    num_device_experts: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_capacity(self):
+        if self.enabled and self.num_device_experts is None:
+            raise ValueError("expert_offload_config.num_device_experts is required when enabled")
+        return self
+
+
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -514,6 +543,9 @@ class AscendConfig:
     Example: pass this dict via ``--additional-config '<json>'``. All keys
     are optional; the values below show every supported key with its default
     value (see the mutex/validation notes below before copying).
+
+    ``quantized_all_reduce_config.quant_dtype`` is omitted below because its
+    default depends on the hardware: ``mxfp8`` on A5 and ``int8`` on A2.
 
         {
             "refresh": false,
@@ -734,6 +766,7 @@ class AscendConfig:
     # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
+    expert_offload_config: ExpertOffloadConfig = dataclasses.field(default_factory=ExpertOffloadConfig)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
     # This switches the prefill recurrence; keep opt-in until cold/cache-hit
@@ -750,6 +783,7 @@ class AscendConfig:
     num_head_replica: int = 1
 
     # ---- private derived state (init=False) ----
+    _megamoe_supported: bool = dataclasses.field(default=False, init=False, repr=False)
     _sparse_li_c8_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c8_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c4_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
@@ -767,16 +801,15 @@ class AscendConfig:
         # We will first roll back the megamoe internally and keep `enable_fused_mc2=2`
         # to enable the megamoe for testing capabilities.
         # These codes will be removed after megamoe is ready.
-        global _MEGA_MOE_SUPPORTED
         if self.enable_fused_mc2 in (0, 1):
             # When enable_fused_mc2=1, roll back to dispatch_ffn_combine.
-            _MEGA_MOE_SUPPORTED = False
+            self._megamoe_supported = False
         elif self.enable_fused_mc2 in (2, 3):
             # =2: MegaMoe with the shared expert kept separate; =3: MegaMoe
             # with the shared expert fused into the operator.
             self.megamoe_shared_expert_fusion = self.enable_fused_mc2 == 3
-            _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
-            if self.enable_fused_mc2 == 3 and not _MEGA_MOE_SUPPORTED:
+            self._megamoe_supported = importlib.util.find_spec("cann_ops_transformer") is not None
+            if self.enable_fused_mc2 == 3 and not self._megamoe_supported:
                 logger.warning_once(
                     "enable_fused_mc2=3 requires the cann_ops_transformer package; "
                     "MegaMoe (and its shared-expert fusion) will be disabled."
@@ -794,6 +827,7 @@ class AscendConfig:
     # pydantic after-validator). Preserves the original __init__ ordering —
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        validate_expert_offload_config(self.expert_offload_config, vc, self)
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:
                 raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")
@@ -912,7 +946,7 @@ class AscendConfig:
         is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
         # dispatch_ffn_combine (enable_fused_mc2=1 after MegaMoe rollback) does not
         # support MiniMax M3 SwiGLU-OAI. MegaMoe (enable_fused_mc2=2) is allowed.
-        assert not (self.enable_fused_mc2 == 1 and is_minimax_m3 and not is_mega_moe_supported()), (
+        assert not (self.enable_fused_mc2 == 1 and is_minimax_m3 and not self._megamoe_supported), (
             "MiniMax M3 does not support enable_fused_mc2=1 (dispatch_ffn_combine). "
             "Set additional_config.enable_fused_mc2 to 2 to enable MegaMoe, or 0 to disable fused MC2."
         )
@@ -922,7 +956,7 @@ class AscendConfig:
                 "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
-        if self.enable_fused_mc2 == 1 and is_mega_moe_supported() and not self._is_megamoe_supported_by_config(vc):
+        if self.enable_fused_mc2 == 1 and self._megamoe_supported and not self._is_megamoe_supported_by_config(vc):
             self.enable_fused_mc2 = 0
             logger.warning_once(
                 "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
@@ -1098,14 +1132,16 @@ class AscendConfig:
             )
 
     def _validate_megamoe_shared_expert_fusion(self, vllm_config: VllmConfig) -> None:
-        """Reject ``enable_fused_mc2=3`` on A3 and latent-MoE models.
+        """Reject ``enable_fused_mc2=3`` on unsupported hardware and latent-MoE models.
 
-        The shared expert is fused into the routed A5 MegaMoe operator, so this
-        contract is A5-only (``CANN_MEGAMOE_SHARED_EXPERT_FUSION``) and assumes
-        the shared expert and routed experts share the residual width. Latent-MoE
-        models (e.g. Kimi K3) project the residual stream before the routed FFN and
-        expose ``routed_expert_hidden_size``; the shared expert cannot be fused in
-        that layout. Fail fast instead of silently downgrading, because a silent
+        The shared expert is fused into the routed MegaMoe operator. The
+        capability ``CANN_MEGAMOE_SHARED_EXPERT_FUSION`` states that the platform
+        can run it; the payload family follows the machine's routed MegaMoe
+        contract (A5 MXFP, A3 arch22 INT8). Both assume the shared expert and the
+        routed experts share the residual width. Latent-MoE models (e.g. Kimi K3)
+        project the residual stream before the routed FFN and expose
+        ``routed_expert_hidden_size``; the shared expert cannot be fused in that
+        layout. Fail fast instead of silently downgrading, because a silent
         downgrade would change results without failing the launch.
         """
         if not self.megamoe_shared_expert_fusion:
@@ -1114,8 +1150,8 @@ class AscendConfig:
         hardware_profile = get_current_hardware_profile()
         if not hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION):
             raise NotImplementedError(
-                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) is only supported on A5; "
-                "the current hardware profile does not support it. "
+                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) is only supported on "
+                "A5 (MXFP) or A3 (INT8); the current hardware profile does not support it. "
                 "Set additional_config.enable_fused_mc2 to 0, 1, or 2."
             )
 
@@ -1874,7 +1910,7 @@ _ASCEND_CONFIG: AscendConfig | None = None
 # ``getattr(_ASCEND_CONFIG, "vllm_config", None) is vllm_config`` check, now
 # that vllm_config is no longer a member of AscendConfig.
 _INIT_VLLM_CONFIG: Any = None
-# Only marks synchronous draft construction/loading for platform validation.
+# Marks synchronous draft construction/loading for validation and config publication.
 # Nested scopes restore their caller's marker, including on failure.
 _DRAFT_CONFIG_CONTEXT: ContextVar[bool] = ContextVar("ascend_draft_config", default=False)
 
@@ -1938,9 +1974,11 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # Do not reuse a cached config: let AscendConfig's normal nested
         # pydantic validation report the invalid sub-config input below.
         refresh = True
-    global _ASCEND_CONFIG, _INIT_VLLM_CONFIG
+    global _ASCEND_CONFIG, _INIT_VLLM_CONFIG, _MEGA_MOE_SUPPORTED
+    is_draft = is_draft_config_context()
     if (
-        _ASCEND_CONFIG is not None
+        not is_draft
+        and _ASCEND_CONFIG is not None
         and not refresh
         and _is_ascend_config_initialized(_ASCEND_CONFIG)
         and _INIT_VLLM_CONFIG is vllm_config
@@ -2048,9 +2086,12 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     new_config.rl_config.apply(new_config)
     new_config.finegrained_tp_config._validate_preconditions(vllm_config)
     new_config.xlite_graph_config._validate_preconditions(vllm_config)
+    if is_draft:
+        return new_config
     if _is_ascend_config_initialized(new_config):
         _ASCEND_CONFIG = new_config
         _INIT_VLLM_CONFIG = vllm_config
+        _MEGA_MOE_SUPPORTED = new_config._megamoe_supported
         # Publish the fully validated singleton before invalidating derived
         # process caches. The next runtime read rebuilds them from new_config;
         # failed construction leaves the previous singleton/cache untouched.

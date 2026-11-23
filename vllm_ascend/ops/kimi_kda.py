@@ -54,7 +54,7 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
-from vllm_ascend.utils import npu_stream_switch
+from vllm_ascend.utils import npu_stream_switch, vllm_version_is
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
@@ -83,6 +83,9 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
     ) -> None:
         projection_size = num_heads * head_dim
         if head_parallel:
+            # This path bypasses MergedColumnParallelLinear.__init__, whose
+            # #66784 weight loaders now require the padding state.
+            self.padding_size = 0
             self.output_sizes = [num_heads, projection_size, projection_size]
             ColumnParallelLinear.__init__(
                 self,
@@ -302,7 +305,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         )
         self.in_proj_padding = -local_output_size % alignment
         output_sizes = [self.projection_size] * 4 + [self.head_dim, self.num_heads]
-        if self.in_proj_padding:
+        # Main's merged layer owns padding allocation after vLLM #66784.
+        if self.in_proj_padding and vllm_version_is("0.33.0"):
             output_sizes.append(self.in_proj_padding * self.tp_size)
         self.in_proj_qkvgfab = KDAInputParallelLinear(
             self.hidden_size,

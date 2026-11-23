@@ -17,9 +17,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     requires_padded_page_layout,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    apply_layerwise_kv_cache_plan,
-)
 from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
@@ -176,7 +173,6 @@ def test_v2_glm_shared_slots_preserve_backings(monkeypatch, v2_glm_cache_plan, u
         config.kv_transfer_config = SimpleNamespace(
             kv_connector="AscendStoreConnector", kv_connector_extra_config=extra_config
         )
-    apply_layerwise_kv_cache_plan(plan, config)
     allocated_sizes = []
     allocate = attn_utils._allocate_int8_cache_tensor
 

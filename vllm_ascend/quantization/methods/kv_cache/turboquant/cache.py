@@ -112,11 +112,6 @@ def pool_bytes_per_block(groups):
     return sum(size for size, _ in packed_layout(groups))
 
 
-def max_memory_usage(vllm_config, groups):
-    request_blocks = sum(group.kv_cache_spec.max_memory_usage_pages(vllm_config) for group in groups)
-    return pool_bytes_per_block(groups) * request_blocks
-
-
 def cache_config(vllm_config, groups, available_memory):
     layout = packed_layout(groups)
     page_bytes = sum(size for size, _ in layout)

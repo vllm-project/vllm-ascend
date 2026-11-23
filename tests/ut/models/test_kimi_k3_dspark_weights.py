@@ -194,7 +194,9 @@ def test_real_loader_preserves_head_and_embedding_policy(draft_model, monkeypatc
     assert original_mapper._map_name("lm_head.weight") is None
 
 
-def test_checkpoint_head_survives_quarot_alignment(draft, monkeypatch):
+@pytest.mark.parametrize("lmhead_tp", [False, True])
+def test_checkpoint_head_survives_quarot_alignment(draft, monkeypatch, lmhead_tp):
+    monkeypatch.setattr(quarot_utils, "lmhead_tp_enable", lambda: lmhead_tp)
     model, _ = draft
     monkeypatch.setattr(
         kimi_k3_dspark,

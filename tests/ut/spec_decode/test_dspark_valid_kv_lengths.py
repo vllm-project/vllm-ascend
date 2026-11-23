@@ -14,12 +14,14 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as speculator_module
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
 
 def _spec(lengths, *, architecture="MLA", use_dcp=False):
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.attn_architecture = architecture
+    spec.attn_backends = {"draft.0": AscendMLABackend}
     spec.use_flashmla = False
     spec.use_dcp = use_dcp
     spec.input_buffers = SimpleNamespace(seq_lens=torch.tensor(lengths, dtype=torch.int32), positions=object())
@@ -29,10 +31,11 @@ def _spec(lengths, *, architecture="MLA", use_dcp=False):
     return spec
 
 
+@pytest.mark.parametrize("use_dcp", [False, True])
 @pytest.mark.parametrize("length,padded", [(73, 1), (22666, 2), (81, 4), (22667, 4)])
-def test_exact_valid_lengths_ignore_target_upper_bound(length, padded):
+def test_exact_valid_lengths_ignore_target_upper_bound(length, padded, use_dcp):
     # The observed target upper bound + width overstated the draft by 1 or 8.
-    spec = _spec([length, 99999, 99999, 99999])
+    spec = _spec([length, 99999, 99999, 99999], use_dcp=use_dcp)
     actual, prefilling = spec._prepare_draft_dcp_metadata_inputs(1, padded, 8)
     assert actual is not None
     assert actual.device.type == "cpu"
@@ -42,8 +45,9 @@ def test_exact_valid_lengths_ignore_target_upper_bound(length, padded):
     assert spec.input_buffers.seq_lens.tolist() == [length, 99999, 99999, 99999]
 
 
-def test_exact_lengths_refresh_after_rejection():
-    spec = _spec([22666, 19051, 99999, 99999])
+@pytest.mark.parametrize("use_dcp", [False, True])
+def test_exact_lengths_refresh_after_rejection(use_dcp):
+    spec = _spec([22666, 19051, 99999, 99999], use_dcp=use_dcp)
     first, _ = spec._prepare_draft_dcp_metadata_inputs(2, 4, 8)
     spec.input_buffers.seq_lens[:2].copy_(torch.tensor([22667, 19059]))
     second, _ = spec._prepare_draft_dcp_metadata_inputs(2, 4, 8)
@@ -52,8 +56,9 @@ def test_exact_lengths_refresh_after_rejection():
     assert second.tolist() == [22667, 19059, 0, 0]
 
 
-def test_padded_idle_has_zero_valid_lengths():
-    actual, prefilling = _spec([99999] * 4)._prepare_draft_dcp_metadata_inputs(0, 4, 8)
+@pytest.mark.parametrize("use_dcp", [False, True])
+def test_padded_idle_has_zero_valid_lengths(use_dcp):
+    actual, prefilling = _spec([99999] * 4, use_dcp=use_dcp)._prepare_draft_dcp_metadata_inputs(0, 4, 8)
     assert actual is not None
     assert actual.tolist() == [0] * 4
     assert not prefilling.any()
@@ -66,31 +71,36 @@ def test_non_mla_unchanged(architecture):
     assert not prefilling.any()
 
 
-def test_dcp_existing_delegate():
-    spec = _spec([73], use_dcp=True)
-    expected = torch.tensor([73, 0], dtype=torch.int32)
-    spec.dcp_manager = SimpleNamespace(prepare_draft_dcp_metadata_inputs=MagicMock(return_value=(expected, object())))
-    result = spec._prepare_draft_dcp_metadata_inputs(1, 2, 8)
-    assert result[0] is expected
-    assert spec.dcp_manager.prepare_draft_dcp_metadata_inputs.call_args.kwargs["target_seq_lens_cpu"] is (
-        spec.target_input_buffers.seq_lens_cpu
-    )
+@pytest.mark.parametrize("architecture", ["MLA", "GQA"])
+def test_dcp_does_not_add_query_width_to_stale_target_lengths(architecture):
+    spec = _spec([73, 99999], architecture=architecture, use_dcp=True)
+    actual, _ = spec._prepare_draft_dcp_metadata_inputs(1, 2, 8)
+    assert actual.tolist() == [73, 0]
+    assert spec.target_input_buffers.seq_lens_cpu.tolist() == [99999]
 
 
 @pytest.mark.parametrize("entrypoint", ["regular", "ACL_update"])
-def test_regular_and_graph_metadata_get_same_exact_cpu_view(monkeypatch, entrypoint):
-    spec = _spec([22666, 99999, 99999, 99999])
+@pytest.mark.parametrize("use_dcp", [False, True])
+def test_regular_and_graph_metadata_get_same_exact_cpu_view(monkeypatch, entrypoint, use_dcp):
+    spec = _spec([22666, 99999, 99999, 99999], use_dcp=use_dcp)
     spec.num_query_per_req = 8
     spec.arange_np = np.arange(5, dtype=np.int32)
     spec.input_batch = SimpleNamespace(num_reqs=1)
     spec._group_causal = False
     spec.vllm_config = SimpleNamespace(parallel_config=object())
     monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
-    decode = SimpleNamespace(actual_seq_lengths_q=[8])
+    decode = SimpleNamespace(
+        actual_seq_lengths_q=[8],
+        seq_lens_list=[22666, 0, 0, 0, 0],
+        seq_lens=torch.tensor([22666, 0, 0, 0, 0], dtype=torch.int32),
+        block_table=torch.zeros(5, 1, dtype=torch.int32),
+    )
     metadata = {"draft.0": SimpleNamespace(decode=decode)}
     monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", MagicMock(return_value=metadata))
     monkeypatch.setattr(speculator_module, "build_attn_metadata_wrapper", nullcontext)
     supplied = []
+    prepare = MagicMock(wraps=spec._prepare_draft_dcp_metadata_inputs)
+    monkeypatch.setattr(spec, "_prepare_draft_dcp_metadata_inputs", prepare)
 
     @contextmanager
     def factory(*args, **kwargs):
@@ -113,6 +123,8 @@ def test_regular_and_graph_metadata_get_same_exact_cpu_view(monkeypatch, entrypo
             causal=False,
         )
     assert result is metadata
-    assert supplied and all(value is not None and value.tolist() == [22666, 0, 0, 0] for value in supplied)
+    assert any(value is not None and value.tolist() == [22666, 0, 0, 0] for value in supplied)
+    assert all(value is None or value.tolist() == [22666, 0, 0, 0] for value in supplied)
+    prepare.assert_called_once_with(1, 4, 8)
     assert upper_bound.tolist() == [22666]
     assert decode.actual_seq_lengths_q == [8, 16, 24, 32]

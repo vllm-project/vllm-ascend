@@ -12,6 +12,13 @@ from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 
 from vllm_ascend.models.glm5next import mtp as mtp_module
+from vllm_ascend.utils import vllm_version_is
+
+
+def _draft_pp_context(pp_size):
+    if vllm_version_is("0.33.0"):
+        return patch.object(eagle_utils, "get_pp_group", return_value=SimpleNamespace(world_size=pp_size))
+    return patch.object(eagle_utils, "in_single_pp_stage", return_value=pp_size > 1)
 
 
 @pytest.fixture
@@ -45,7 +52,7 @@ def test_loads_checkpoint_embedding_on_last_pp_stage(mtp, prefix):
     torch.testing.assert_close(mtp.model.embed_tokens.weight, embedding)
     local_embedding = mtp.model.embed_tokens
     target = SimpleNamespace(embed_tokens=PPMissingLayer())
-    with patch.object(eagle_utils, "get_pp_group", return_value=SimpleNamespace(world_size=2)):
+    with _draft_pp_context(2):
         eagle_utils.maybe_share_target_embed(mtp, mtp.model, target)
     assert mtp.model.embed_tokens is local_embedding
 
@@ -54,7 +61,7 @@ def test_no_pp_reuses_equal_target_embedding(mtp):
     embedding = torch.arange(32, dtype=torch.float32).reshape(8, 4)
     mtp.load_weights([("model.embed_tokens.weight", embedding), _mtp_weight()])
     target = SimpleNamespace(embed_tokens=nn.Embedding.from_pretrained(embedding))
-    with patch.object(eagle_utils, "get_pp_group", return_value=SimpleNamespace(world_size=1)):
+    with _draft_pp_context(1):
         eagle_utils.maybe_share_target_embed(mtp, mtp.model, target)
     assert mtp.model.embed_tokens is target.embed_tokens
 
@@ -64,7 +71,7 @@ def test_missing_checkpoint_embedding_is_rejected_without_target_copy(mtp):
     assert not mtp.has_own_embed_tokens
     target = SimpleNamespace(embed_tokens=PPMissingLayer())
     with (
-        patch.object(eagle_utils, "get_pp_group", return_value=SimpleNamespace(world_size=2)),
+        _draft_pp_context(2),
         pytest.raises(RuntimeError, match="needs the target input embedding"),
     ):
         eagle_utils.maybe_share_target_embed(mtp, mtp.model, target)

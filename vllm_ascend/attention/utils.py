@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import import_module
 from importlib.util import find_spec
+from math import prod
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -37,6 +38,7 @@ from vllm_ascend.utils import (
     enable_sfa,
     get_ascend_config,
     is_pd_decode_recompute_scheduler_enabled,
+    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -54,6 +56,27 @@ MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
 SUFFIX_FIA_HEAD_GEOMETRY = (32, 8, 128)
 SUFFIX_FIA_BLOCK_SIZE = 128
 SUFFIX_FIA_NUM_SPECULATIVE_TOKENS = 4
+
+
+RuntimeComponentShape = tuple[int, int, int, int]
+KVCacheRuntimeShapes = tuple[RuntimeComponentShape, ...]
+
+
+def combine_cache_components(data: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """Recover a packed-page alias from adjacent data and scale components.
+
+    The alias preserves [all data | all scales] packing; its logical rows do
+    not imply token-interleaved metadata. Both inputs must share this page ABI.
+    """
+    if (
+        data.untyped_storage().data_ptr() != scales.untyped_storage().data_ptr()
+        or scales.data_ptr() - data.data_ptr() != prod(data.shape[1:]) * data.element_size()
+        or data.stride(0) * data.element_size() != scales.stride(0) * scales.element_size()
+    ):
+        raise ValueError("Combined cache views require adjacent components in the same physical pages.")
+    shape = (*data.shape[:-1], data.shape[-1] + scales.shape[-1] * scales.element_size() // data.element_size())
+    inner = tuple(prod(shape[dim + 1 :]) for dim in range(1, len(shape)))
+    return torch.as_strided(data, shape, (data.stride(0), *inner), storage_offset=data.storage_offset())
 
 
 def supports_strided_mla_cache(
@@ -827,10 +850,16 @@ def _select_seq_lens(
 
     if isinstance(kv_cache_spec, CrossAttentionSpec):
         seq_lens = common_attn_metadata.seq_lens
-    if speculative_config is not None and speculative_config.parallel_drafting:
+    if speculative_config is not None:
+        # vLLM #63373 moved this capability off the deprecated legacy field.
+        parallel_drafting = (
+            speculative_config.parallel_drafting
+            if vllm_version_is("0.33.0")
+            else speculative_config.speculator_config.parallel_drafting
+        )
         # PARD / DFlash (and DSpark on other models) keep the NPU seq_lens;
         # only DSpark on the GLM5.2 family keeps the CPU mirror above.
-        if not (speculative_config.use_dspark() and _is_glm_model(model_config)):
+        if parallel_drafting and not (speculative_config.use_dspark() and _is_glm_model(model_config)):
             seq_lens = common_attn_metadata.seq_lens
     return seq_lens
 

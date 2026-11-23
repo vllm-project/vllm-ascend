@@ -54,7 +54,6 @@ from vllm_ascend.attention.suffix_bsh_attention import eligible as suffix_bsh_el
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
-    is_dcp_enabled,
     is_suffix_fia_cache_enabled,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
@@ -109,26 +108,17 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendAttentionBackendImpl"]:
-        if is_dcp_enabled():
-            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
-
-            return AscendAttentionDCPImpl
         return AscendAttentionBackendImpl
 
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
-        if is_dcp_enabled():
-            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPMetadataBuilder
-
-            return AscendAttentionDCPMetadataBuilder
         return AscendAttentionMetadataBuilder
 
     @classmethod
     def supports_pcp(cls) -> bool:
-        # vLLM checks this capability before any instance-level PCP dispatch.
-        # The main backend owns both the ordinary GQA implementation and its
-        # DCP specialization. Keep derived backends such as 310P and C8 opted
-        # out unless they declare support themselves.
+        # vLLM checks this capability before instance-level PCP dispatch.
+        # Enable PCP for this concrete GQA backend only. Subclasses must
+        # explicitly declare their own PCP support.
         return cls is AscendAttentionBackend
 
     @staticmethod
@@ -325,24 +315,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             treat_short_extends_as_decodes=not self.use_pcp,
         )
 
-    def _build_backend_metadata(
-        self,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-        *,
-        block_table: torch.Tensor,
-        query_lens: torch.Tensor,
-        seq_lens: torch.Tensor,
-        num_decodes: int,
-        num_prefills: int,
-    ) -> dict[str, Any]:
-        """Extension point for layouts such as DCP.
-
-        The base builder owns common token classification, padding, masks and
-        cache metadata. Specialized backends only add their phase-specific
-        metadata here.
-        """
-        return {}
-
     def build(
         self,
         common_prefix_len: int,
@@ -467,17 +439,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 dim=0,
             )
 
-        if type(self)._build_backend_metadata is AscendAttentionMetadataBuilder._build_backend_metadata:
-            backend_metadata = {}
-        else:
-            backend_metadata = self._build_backend_metadata(
-                common_attn_metadata,
-                block_table=block_table,
-                query_lens=query_start_loc_cpu[1:] - query_start_loc_cpu[:-1],
-                seq_lens=seq_lens,
-                num_decodes=num_decodes,
-                num_prefills=num_prefills,
-            )
         attn_metadata = self.metadata_cls(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -497,7 +458,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_decodes=num_decodes,
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
-            **backend_metadata,
         )
         if pcp_shard_slot_mapping is not None:
             self._finalize_pcp_metadata(attn_metadata, pcp_shard_slot_mapping)
@@ -561,16 +521,28 @@ class FIAParamProvider:
         metadata = attn_metadata[self.layer_name]
 
         if self.is_draft_model or not self.sliding_window:
-            return {
+            params = {
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
                 "actual_seq_lengths_kv": metadata.seq_lens_list,
                 "block_table": None if self.is_non_pa else metadata.block_tables,
             }
         else:
-            return {
+            params = {
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
                 "actual_seq_lengths_kv": metadata.seq_lens_list,
             }
+        # Replay-time mask choice (cf. PR #17682 review, issue #16889):
+        # FULL graphs are captured with the right-aligned causal mask +
+        # sparse_mode=3, which must stay valid for every replay shape.
+        # For genuine single-token decode batches causal masking is
+        # implicit, so the maskless parameterization (atten_mask=None,
+        # sparse_mode=0) is valid and avoids redundant mask construction.
+        # Sliding-window decode and multi-token replays (speculative-decode
+        # verification, draft expansion, chunked prefill) keep the mask.
+        if self.sliding_window is None and getattr(metadata, "max_query_len", 0) == 1:
+            params["atten_mask"] = None
+            params["sparse_mode"] = 0
+        return params
 
 
 @dataclass(frozen=True, slots=True)
@@ -711,6 +683,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self._non_causal_swa_attn_mask = AttentionMaskBuilder(device).get_splitfuse_attn_mask()
             radius = self.sliding_window - 1
             return self._non_causal_swa_attn_mask, 4, radius, radius
+        # Graph capture must keep the mask + sparse_mode=3 (right-aligned
+        # causal): FULL-graph capture dummies are always DecodeOnly with one
+        # query token per request (AscendInputBatch.make_dummy), but the
+        # captured graphs also replay multi-token batches (speculative-decode
+        # verification, adaptive verification, chunked prefill). FIA graph
+        # replay cannot rebind atten_mask/sparse_mode (FIAParamProvider only
+        # updates lengths/block tables), so capture-time parameters must stay
+        # valid for every replay shape. The mask is only skipped on the eager
+        # path, where the metadata describes the real batch.
         return (
             attn_metadata.attn_mask,
             4 if self.sliding_window else 3,
@@ -1175,6 +1156,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         cached_pure = can
                         attn_metadata._can_pure_pfa = cached_pure  # type: ignore[attr-defined]
                     pure_chunked_pfa = bool(cached_pure)
+                # Decode-only eager batches: every query token attends to all
+                # its cached keys, so causal masking is implicit. Skip the
+                # explicit mask and use sparse_mode=0 to avoid redundant mask
+                # construction in FIA (issue #16889, same pattern as #10302).
+                # max_query_len == 1 guarantees every request has a single
+                # query token; multi-token batches labeled DecodeOnly
+                # (spec-decode draft/verify) keep the mask, cf. #17948.
+                is_decode = (
+                    attn_metadata.attn_state == AscendAttentionState.DecodeOnly and attn_metadata.max_query_len == 1
+                )
                 if pure_no_cache_pfa or pure_chunked_pfa:
                     if pure_chunked_pfa:
                         pfa_k = passed_key[:num_tokens]
@@ -1216,7 +1207,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         query=query,
                         key=key,
                         value=value,
-                        atten_mask=attn_metadata.attn_mask,
+                        atten_mask=None if is_decode else attn_metadata.attn_mask,
                         block_table=block_table,
                         input_layout="TND",
                         block_size=block_size,
@@ -1227,7 +1218,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         scale=self.scale,
                         pre_tokens=SWA_INT_MAX,
                         next_tokens=SWA_INT_MAX,
-                        sparse_mode=3,
+                        sparse_mode=0 if is_decode else 3,
                         inner_precise=1 if (key.is_contiguous() and value.is_contiguous()) else 0,
                         out=[out_view, _get_fia_lse_dummy(query.device)],
                     )
@@ -1237,7 +1228,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         query=query,
                         key=key,
                         value=value,
-                        atten_mask=attn_metadata.attn_mask,
+                        atten_mask=None if is_decode else attn_metadata.attn_mask,
                         block_table=block_table,
                         input_layout="TND",
                         block_size=block_size,
@@ -1253,7 +1244,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         current_value=passed_value,
                         attn_metadata=attn_metadata,
                         is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
-                        sparse_mode=3,
+                        sparse_mode=0 if is_decode else 3,
                         **(
                             {"inner_precise": 1}
                             if (self.head_size != 512 and key.is_contiguous() and value.is_contiguous())
@@ -1291,6 +1282,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # decode part
         if num_decode_tokens > 0:
+            # Only skip the explicit mask when every decode request carries
+            # exactly one query token: split_decodes_and_prefills classifies
+            # short extends (query_len <= decode_threshold) and speculative
+            # verification blocks as decodes too, and those multi-token
+            # queries still need the causal mask (issue #16889, cf. #17948).
+            decode_skips_mask = num_decode_tokens == num_decodes
             if (
                 query.device.type == "npu"
                 and _uses_base_fia_op()
@@ -1303,7 +1300,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     query=query[:num_decode_tokens],
                     key=key,
                     value=value,
-                    atten_mask=attn_metadata.attn_mask,
+                    atten_mask=None if decode_skips_mask else attn_metadata.attn_mask,
                     block_table=block_table[:num_decodes],
                     input_layout="TND",
                     block_size=block_size,
@@ -1314,7 +1311,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     scale=self.scale,
                     pre_tokens=SWA_INT_MAX,
                     next_tokens=SWA_INT_MAX,
-                    sparse_mode=3,
+                    sparse_mode=0 if decode_skips_mask else 3,
                     inner_precise=1 if (key.is_contiguous() and value.is_contiguous()) else 0,
                     out=[dec_view, _get_fia_lse_dummy(query.device)],
                 )
@@ -1323,7 +1320,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     query=query[:num_decode_tokens],
                     key=key,
                     value=value,
-                    atten_mask=attn_metadata.attn_mask,
+                    atten_mask=None if decode_skips_mask else attn_metadata.attn_mask,
                     block_table=block_table[:num_decodes],
                     input_layout="TND",
                     block_size=block_size,
@@ -1340,7 +1337,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     current_value=current_value,
                     attn_metadata=attn_metadata,
                     is_prefill_no_cache=False,
-                    sparse_mode=3,
+                    sparse_mode=0 if decode_skips_mask else 3,
                 )
                 output[:num_decode_tokens] = decode_out.view(num_decode_tokens, self.num_heads, self.head_size)
 

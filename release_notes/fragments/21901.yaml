@@ -1,0 +1,6 @@
+pr: 21901
+entries:
+  - category: performance
+    text: Qwen4Exp HyperConnection gate-mix now processes eight rows per Triton program for large prefills, reducing the number of launched programs by up to 8x and amortizing scheduling overhead while preserving the original FP32 accumulation order. The row-block path starts at 2048 rows on Ascend A2/A3 and 1024 rows on A5, based on the measured integrated crossover; smaller batches retain the one-row path.
+    model: qwen4exp
+    hardware: [A2, A3, A5]

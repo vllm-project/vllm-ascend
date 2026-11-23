@@ -20,6 +20,7 @@ pytest.importorskip(
     reason="DeepSeek V4.1 is unavailable on this vLLM release",
 )
 
+from vllm.model_executor.model_loader import weight_utils
 from vllm.models.deepseek_v41.common import engram as upstream_engram
 
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
@@ -27,6 +28,50 @@ from vllm_ascend.models.deepseek_v41.engram import npu
 from vllm_ascend.models.deepseek_v41.engram.common import engram_gate, load_engram_rotation_block
 from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgramHashState
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
+
+
+@pytest.mark.skipif(
+    not hasattr(weight_utils, "finalize_model_weights"),
+    reason="This vLLM revision does not dispatch module post-load hooks",
+)
+def test_finalize_ascend_engram_without_gpu_peer_storage():
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    weight = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
+    table.weight = weight
+
+    weight_utils.finalize_model_weights(torch.nn.Sequential(table))
+
+    assert table.weight is weight
+
+
+def test_vmm_allocation_failure_disables_vmm_for_later_layers(monkeypatch):
+    group = SimpleNamespace(_engram_local_vmm_available=True)
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(current_device=lambda: 0), raising=False)
+    device = torch.device
+    monkeypatch.setattr(torch, "device", lambda *_args, **_kwargs: device("cpu"))
+    vmm = Mock(side_effect=embedding_mod.EngramSharedInitError("all ranks cleaned up"))
+    registered = Mock(side_effect=lambda *_args: SimpleNamespace(tensor=object()))
+    monkeypatch.setattr(embedding_mod, "LocalSharedVmmBuffer", vmm)
+    monkeypatch.setattr(embedding_mod, "SharedUvaBuffer", registered)
+
+    def layer(local_vmm):
+        table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+        torch.nn.Module.__init__(table)
+        table.part_num_embeddings, table.dim, table.block_size = 8, 64, 32
+        table.storage_dtype, table.scale_dtype = torch.int8, torch.float32
+        table.cpu_offload, table.local_vmm = True, local_vmm
+        table._shared_group, table._shared_pool_spec = group, (None, None, None)
+        table._scales_uva = None
+        return table
+
+    first = layer(True)
+    first._allocate_weights()
+    assert not first.local_vmm and group._engram_local_vmm_available is False
+    second = layer(embedding_mod.local_vmm_available(group))
+    second._allocate_weights()
+    assert not second.local_vmm
+    assert vmm.call_count == 1 and registered.call_count == 4
 
 
 def test_remote_host_offload_close_retires_reader():

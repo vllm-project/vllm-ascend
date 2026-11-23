@@ -15,11 +15,11 @@ const codes = (value) => checkScenario(value).map((x) => x.code);
 test("custom NPU image does not require an ascend repository or a5 suffix", () => {
   assert.deepEqual(codes(scenario()), []);
 });
-test("missing image is an error even when generation produced a default image", () => {
+test("missing image fallback remains visible even when generation produced a default image", () => {
   assert.ok(codes(scenario({ installation: { dockerEnabled: true, pipEnabled: false,
     image: "vllm/vllm-openai:latest", imageSource: "renderer-default" } })).includes("ASC001"));
 });
-test("explicit NVIDIA parent image inheritance is rejected", () => {
+test("NVIDIA parent image inheritance is reported", () => {
   assert.ok(codes(scenario({ installation: { dockerEnabled: true, pipEnabled: false,
     image: "custom/nvidia-build:v1", imageSource: "model.docker_image.nvidia" } })).includes("ASC001"));
 });
@@ -27,9 +27,38 @@ test("pip-only configuration does not require a docker image", () => {
   assert.deepEqual(codes(scenario({ installation: { dockerEnabled: false, pipEnabled: true,
     pipCommand: "pip install ./vllm-ascend", defaultPip: false } })), []);
 });
-test("missing pip override is rejected independently from a valid image", () => {
+test("missing pip override is reported independently from a valid image", () => {
   assert.ok(codes(scenario({ installation: { dockerEnabled: true, pipEnabled: true,
     defaultPip: true, image: "custom/ascend:1", imageSource: "explicit" } })).includes("ASC002"));
+});
+
+test("installation fallbacks and missing PD expectations warn without blocking the default gate", () => {
+  const workers = ["prefill", "decode"].map((role) => ({ role, env: {}, argv: ["--kv-transfer-config",
+    JSON.stringify({ kv_connector: "NixlConnector", kv_role: role === "prefill" ? "kv_producer" : "kv_consumer" })] }));
+  const findings = checkScenario(scenario({ deployType: "pd_cluster", workers,
+    installation: { dockerEnabled: true, pipEnabled: true, image: "vllm/vllm-openai:latest",
+      imageSource: "renderer-default", defaultPip: true } }));
+  assert.deepEqual(findings.map((f) => [f.code, f.severity]),
+    [["ASC001", "warning"], ["ASC002", "warning"], ["ASC010", "warning"]]);
+  assert.equal(compareFindings(findings).blocking.length, 0);
+});
+
+test("explicit incompatible installation and structural errors still block", () => {
+  const findings = checkScenario(scenario({ installation: { dockerEnabled: true, pipEnabled: true,
+    image: "registry.example/custom:1", imageSource: "explicit", defaultPip: false,
+    pipCommand: "pip install vllm --index-url https://wheels.vllm.ai/nightly/cu130",
+    dockerCommand: "docker pull vllm/vllm-openai:latest" },
+  workers: [{ role: "server", argv: [], env: { ASCEND_RT_VISIBLE_DEVICES: "0,0" } }] }));
+  assert.deepEqual(compareFindings(findings).blocking.map((f) => f.code), ["ASC003", "ASC005", "ASC022"]);
+});
+
+test("findings from different presets and points cannot mask each other in comparison", () => {
+  const finding = { model: "test/model", hardware: "a5", variant: "ascend", strategy: "single_node_tp",
+    preset: "tuned", point: "low", code: "ASC024", severity: "error", message: "capacity" };
+  const compared = compareFindings([{ ...finding, point: "high" }, { ...finding, preset: "other" }], [finding]);
+  assert.equal(compared.blocking.length, 2);
+  assert.equal(compared.existing.length, 0);
+  assert.equal(compared.resolved.length, 1);
 });
 test("explicit CUDA wheel index is rejected", () => {
   assert.ok(codes(scenario({ installation: { dockerEnabled: false, pipEnabled: true,

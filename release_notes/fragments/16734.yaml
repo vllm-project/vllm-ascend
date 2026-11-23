@@ -1,0 +1,6 @@
+pr: 16734
+entries:
+  - category: feature
+    text: >-
+      Added `--load-format bigtensorloader`, an opt-in snapshot fast-restore path that caches the per-rank final post-process device weights (blob + manifest) and restores them via mmap + batched H2D, skipping safetensors parsing, quantization repacking, and NZ layout conversion on restart (2x-7.7x faster model load on Ascend 910).
+    highlight: true

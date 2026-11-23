@@ -45,7 +45,7 @@ def _dspark_swa_indices_kernel(
     num_blocks,  # block_table.shape[1]
     num_reqs,  # active request count == block_table.shape[0]
     num_rows_padded,  # padded row count == R_alloc * num_query_per_req
-    num_rows,  # active row count == sum(query_lens)
+    num_rows,  # fixed output row count (may exceed sum(query_lens) in graphs)
     num_query_per_req,  # row-expansion factor per request slot
     num_slots,  # request-slot capacity (row bands are [r*nqp, (r+1)*nqp))
     WINDOW_SIZE: tl.constexpr,  # sliding window size (model constant)
@@ -63,6 +63,7 @@ def _dspark_swa_indices_kernel(
     pid = tl.program_id(0)
     num_progs = tl.num_programs(0)
     total_items = num_slots * NUM_CB
+    active_rows = tl.load(qsl_ptr + num_reqs).to(tl.int32)
 
     # Grid-stride: each program claims w = pid, pid + num_progs, ...
     for w in range(pid, total_items, num_progs):
@@ -70,9 +71,9 @@ def _dspark_swa_indices_kernel(
         cb = w % NUM_CB
 
         # Distributed pad-row cleanup: reset the slice of
-        # [num_rows, num_rows_padded) in this item's row band
+        # [active_rows, num_rows_padded) in this item's row band
         # [r*nqp, (r+1)*nqp). Must precede every guard below.
-        row_lo = tl.maximum(r * num_query_per_req, num_rows)
+        row_lo = tl.maximum(r * num_query_per_req, active_rows)
         row_hi = tl.minimum((r + 1) * num_query_per_req, num_rows_padded)
         if row_lo < row_hi:
             pad_offs = tl.arange(0, BLOCK_W)
@@ -451,5 +452,5 @@ def build_dspark_swa_slot_indices_triton(
         grid_size=grid,
     )
 
-    # Return views sized to the active extent, mirroring the eager function.
+    # Return the fixed output extent, including any graph-padding rows.
     return out_slots[:num_rows], out_lens[:num_rows]
