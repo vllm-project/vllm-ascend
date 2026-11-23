@@ -698,10 +698,6 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
 
     Docker containers need to mount key paths. Example command (the command needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the host and selects the NPUs with `ASCEND_VISIBLE_DEVICES`):
 
-    !!! note "Docker version"
-
-        Docker Engine 20.10 or later is recommended when the host uses cgroup v2. Earlier Docker versions do not support cgroup v2; devices passed with `--device` may therefore be inaccessible inside the container, causing NPU initialization to fail. Check the Docker Engine and cgroup versions on the host if this occurs.
-
     ```shell
     docker run -u root -it -d --name ${NAME} --net=host \
         -e ASCEND_VISIBLE_DEVICES=0-7 \

@@ -26,10 +26,6 @@ docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.3.12-vllm-as
 
 Once that is built, run it with the following cmd
 
-!!! note "Docker version"
-
-    Docker Engine 20.10 or later is recommended when the host uses cgroup v2. Earlier Docker versions do not support cgroup v2; devices passed with `--device` may therefore be inaccessible inside the container, causing NPU initialization to fail. Check the Docker Engine and cgroup versions on the host if this occurs.
-
 ```bash
 DEVICE_LIST="0,1,2,3,4,5,6,7"
 docker run -it \
