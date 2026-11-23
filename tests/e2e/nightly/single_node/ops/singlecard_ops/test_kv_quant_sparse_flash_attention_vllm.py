@@ -635,11 +635,35 @@ def test_a5_address_precompute_non_power_of_two_page_fallback(rope_dim):
 )
 @torch.inference_mode()
 def test_a5_packed_qsfa_address_precompute(kv_dtype, page_size, query_rows, sparse_width, heads, rope_dim, remap_pages):
+    _check_a5_packed_qsfa_address_precompute(
+        kv_dtype, page_size, query_rows, sparse_width, heads, rope_dim, remap_pages
+    )
+
+
+@pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A5, reason="Requires A5 packed QSFA.")
+@torch.inference_mode()
+def test_a5_fp8_rope0_random_qk_crosses_address_batches():
+    _check_a5_packed_qsfa_address_precompute(
+        kv_dtype=torch.float8_e4m3fn,
+        page_size=128,
+        query_rows=3,
+        sparse_width=384,
+        heads=8,
+        rope_dim=0,
+        remap_pages=True,
+        random_qk=True,
+    )
+
+
+def _check_a5_packed_qsfa_address_precompute(
+    kv_dtype, page_size, query_rows, sparse_width, heads, rope_dim, remap_pages, *, random_qk=False
+):
     kv_length, nope_dim, tile_size = 768, 512, 128
     pages = kv_length // page_size
     rng = torch.Generator().manual_seed(1024)
     raw = torch.randint(-8, 9, (pages, page_size, 1, nope_dim), generator=rng)
-    raw[..., 0] = 0
+    if not random_qk:
+        raw[..., 0] = 0
     key_nope = raw.to(kv_dtype)
     scales = torch.rand((pages, page_size, 1, nope_dim // tile_size), generator=rng) * 0.05 + 0.01
     key_rope = torch.zeros((pages, page_size, 1, rope_dim), dtype=torch.bfloat16)
@@ -647,16 +671,24 @@ def test_a5_packed_qsfa_address_precompute(kv_dtype, page_size, query_rows, spar
     assert packed.shape[-1] == 528 + 2 * rope_dim
     cache = packed.view(kv_dtype)
 
-    candidates = (torch.arange(64, dtype=torch.int32)[:, None] * 4 + torch.arange(2, dtype=torch.int32)).flatten()
-    logical = candidates[None, :] + (torch.arange(query_rows, dtype=torch.int32) % 127)[:, None]
+    if random_qk:
+        valid_sparse_count = 257
+        candidates = torch.randperm(kv_length - query_rows + 1, generator=rng, dtype=torch.int32)[:valid_sparse_count]
+        logical = candidates.sort().values.expand(query_rows, -1)
+    else:
+        candidates = (torch.arange(64, dtype=torch.int32)[:, None] * 4 + torch.arange(2, dtype=torch.int32)).flatten()
+        logical = candidates[None, :] + (torch.arange(query_rows, dtype=torch.int32) % 127)[:, None]
     assert int(logical.max()) < kv_length - query_rows + 1
     sparse_indices = torch.full((query_rows, 1, sparse_width), -1, dtype=torch.int32)
     sparse_indices[:, 0, : logical.shape[-1]] = logical
     block_table = torch.arange(pages, dtype=torch.int32)
     if remap_pages:
         block_table = block_table.roll(1).flip(0)
-    query = torch.zeros((query_rows, heads, nope_dim + rope_dim), dtype=torch.bfloat16)
-    query[..., 0] = 1
+    if random_qk:
+        query = torch.randn((query_rows, heads, nope_dim), generator=rng).to(torch.bfloat16)
+    else:
+        query = torch.zeros((query_rows, heads, nope_dim + rope_dim), dtype=torch.bfloat16)
+        query[..., 0] = 1
 
     inputs = dict(
         query=query,
@@ -683,13 +715,20 @@ def test_a5_packed_qsfa_address_precompute(kv_dtype, page_size, query_rows, spar
 
     values = (key_nope.float() * scales.repeat_interleave(tile_size, dim=-1)).to(torch.bfloat16).float()
     physical_pages = block_table[logical // page_size].long()
-    expected = values[physical_pages, logical % page_size, 0].mean(dim=1)
-    expected = expected.unsqueeze(1).expand(-1, heads, -1)
+    selected = values[physical_pages, logical % page_size, 0]
+    if random_qk:
+        scores = (query.float() @ selected.transpose(-1, -2)) * inputs["scale_value"]
+        probabilities = scores.softmax(dim=-1)
+        assert torch.all(probabilities.amax(dim=-1) > probabilities.amin(dim=-1))
+        expected = probabilities.to(torch.bfloat16).float() @ selected
+    else:
+        expected = selected.mean(dim=1).unsqueeze(1).expand(-1, heads, -1)
     assert output.shape == (query_rows, heads, nope_dim)
     assert output.dtype == torch.bfloat16
-    result = output.cpu().float()
+    result = output.cpu()
     assert torch.isfinite(result).all()
-    torch.testing.assert_close(result, expected, atol=2e-3, rtol=1e-2)
+    torch.testing.assert_close(result.float(), expected, atol=2e-3, rtol=1e-2)
+    return result
 
 
 @pytest.mark.skipif(
