@@ -70,10 +70,10 @@ class _NpuAll2AllManager:
         Built on CPU on purpose: this is called while a fault is being
         probed, when the NPU may be hung — any device op would fail.
         """
-        return torch.tensor(
-            [int(rank in self._dead) for rank in range(self._ep_world_size)],
-            dtype=torch.int32,
-        )
+        mask = torch.zeros(self._ep_world_size, dtype=torch.int32)
+        for rank in self._dead:
+            mask[rank] = 1
+        return mask
 
     def query_fault(self) -> torch.Tensor:
         # MC2 has no in-kernel fault detection; faults surface as aborted ops.
