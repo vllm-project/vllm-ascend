@@ -1,7 +1,7 @@
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
 
 import numpy as np
 import pytest
@@ -26,7 +26,7 @@ from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.gpu import model_runner as upstream_model_runner
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.attention import dsa_attn_kv_plan, dsa_v1
+from vllm_ascend.attention import dsa_attn_kv_plan, dsa_v1, sfa_hisparse
 from vllm_ascend.attention import utils as attention_utils
 from vllm_ascend.attention.attention_c8_mxfp import mxfp_cache_spec, mxfp_paged_cache_views
 from vllm_ascend.attention.attention_v1 import (
@@ -59,6 +59,7 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
+from vllm_ascend.models.glm5next.kda import Glm5NextGDNHostMetadataBuilder
 from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2 import model_runner as v2_model_runner
@@ -2144,6 +2145,55 @@ def test_dsa_builder_receives_full_graph_mode(capture, full_graph):
     assert len(calls) == 2
     for call in calls:
         assert call["full_graph_mode"] is (capture or full_graph)
+
+
+@pytest.mark.parametrize("pcp", [False, True])
+def test_glm_flash_q6_uses_grouped_gdn_only_without_pcp(monkeypatch, pcp):
+    monkeypatch.setattr(sfa_hisparse, "supports_flash_resident_decode_graph", lambda _: True)
+    builder = Glm5NextGDNHostMetadataBuilder.__new__(Glm5NextGDNHostMetadataBuilder)
+    builder.vllm_config = SimpleNamespace()
+    builder.speculative_config = None
+    builder.num_spec = 5
+    grouped = Mock()
+    builder.begin_grouped_spec_gdn = Mock(return_value=grouped)
+    builder.build_grouped_spec_gdn = Mock(return_value=object())
+    builder.build = Mock(return_value=object())
+    group = SimpleNamespace(layer_names=["layer.0"], get_metadata_builder=lambda _: builder)
+    query_start = torch.tensor([0, 6], dtype=torch.int32)
+    model_metadata = SimpleNamespace(
+        get_extra_common_attn_kwargs=lambda *_: {},
+        get_extra_attn_kwargs=lambda *_: {
+            "num_accepted_tokens": torch.tensor([1]),
+            "num_decode_draft_tokens_cpu": torch.tensor([5]),
+        },
+    )
+
+    metadata = attn_utils.build_attn_metadata(
+        attn_groups=[[group]],
+        num_reqs=1,
+        num_tokens=6,
+        query_start_loc_gpu=query_start,
+        query_start_loc_cpu=query_start,
+        max_query_len=6,
+        seq_lens=torch.tensor([64], dtype=torch.int32),
+        max_seq_len=64,
+        block_tables=(torch.zeros((1, 1), dtype=torch.int32),),
+        slot_mappings=(torch.zeros(6, dtype=torch.int64),),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())]),
+        is_prefilling=torch.tensor([False]),
+        model_specific_attn_metadata=model_metadata,
+        full_graph_mode=True,
+        pcp_context=object() if pcp else None,
+    )
+
+    if pcp:
+        assert metadata["layer.0"] is builder.build.return_value
+        builder.build_grouped_spec_gdn.assert_not_called()
+        grouped.launch.assert_not_called()
+    else:
+        assert metadata["layer.0"] is builder.build_grouped_spec_gdn.return_value
+        grouped.launch.assert_called_once_with(clear_conv_tokens=6)
+        builder.build.assert_not_called()
 
 
 @pytest.mark.parametrize("for_cudagraph_capture", [False, True])

@@ -10,6 +10,7 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadataBuilder
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 
+from vllm_ascend.models.glm5next.kda import Glm5NextPCPMetadataMixin, prepare_glm_pcp_config
 from vllm_ascend.ops.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
     GDNDecodeMetadata,
@@ -171,3 +172,13 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
         metadata.spec_query_start_loc = starts
         metadata.num_accepted_tokens = accepted
         metadata.recoverssm_commit = replace(metadata.recoverssm_commit, state_indices=states, query_start_loc=starts)
+
+
+class Glm5NextRecoverSSMMetadataBuilder(Glm5NextPCPMetadataMixin, AscendKDARecoverSSMMetadataBuilder):
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        vllm_config = prepare_glm_pcp_config(vllm_config)
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._init_pcp_permutation(vllm_config, device, self.decode_cudagraph_max_bs)
+
+    def build(self, *args, **kwargs):
+        return self._attach_pcp_permutation(super().build(*args, **kwargs))

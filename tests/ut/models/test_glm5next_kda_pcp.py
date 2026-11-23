@@ -167,6 +167,7 @@ def test_kda_projection_and_state_sharding_follow_tp_times_pcp(
             prefill_context_parallel_size=pcp_size,
             pipeline_parallel_size=1,
             decode_context_parallel_size=1,
+            pcp_shard_decode_requests=pcp_size > 1,
         ),
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=config, hf_text_config=config),
         cache_config=SimpleNamespace(

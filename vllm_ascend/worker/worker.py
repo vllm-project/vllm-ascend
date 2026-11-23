@@ -217,10 +217,10 @@ class NPUWorker(GPUWorker):
             _register_atb_extensions()
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
-        init_ascend_config(vllm_config)
+        ascend_config = init_ascend_config(vllm_config)
         from vllm_ascend.logger import configure_ascend_file_logging
 
-        configure_ascend_file_logging()
+        configure_ascend_file_logging(ascend_config.ascend_log_path)
         check_ascend_device_type()
 
         if getattr(vllm_config.parallel_config, "enable_fault_tolerance", False):
