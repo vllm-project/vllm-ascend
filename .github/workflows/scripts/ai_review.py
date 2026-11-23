@@ -783,7 +783,7 @@ class Orchestrator:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--comment-body-file", default="")
-    parser.add_argument("--comment-id", type=int, default=0)
+    parser.add_argument("--comment-id", default="0")  # empty on non-comment events
     parser.add_argument("--workspace", default=".")
     parser.add_argument("--pr", type=int, required=True)
     parser.add_argument("--event", required=True)
@@ -796,7 +796,11 @@ def main() -> int:
             comment_body = f.read()
 
     orch = Orchestrator(args.workspace, args.pr, args.event, args.actor, comment_body)
-    orch._event_comment_id = args.comment_id
+    try:
+        comment_id = int(args.comment_id)
+    except ValueError:
+        comment_id = 0
+    orch._event_comment_id = comment_id
     return orch.handle()
 
 
