@@ -18,6 +18,7 @@
 #
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
+from itertools import chain
 from typing import Any
 
 import torch
@@ -68,24 +69,24 @@ def collect_sorted_captured_token_sizes(capture_descs: dict) -> list[int]:
 def _get_graph_update_backend(
     attn_groups: list[list[AttentionGroup]],
 ) -> type[AttentionBackend]:
-    builder_managed_backend = None
-    for groups in attn_groups:
-        for group in groups:
-            backend = group.backend
-            try:
-                impl_cls = backend.get_impl_cls()
-            except NotImplementedError:
-                # Metadata-only backends such as GDN have no attention impl.
+    fallback = None
+    for group in chain.from_iterable(attn_groups):
+        backend = group.backend
+        try:
+            if backend.get_impl_cls() is None:
                 continue
-            if impl_cls is None:
-                continue
-            if not getattr(backend, "graph_params_managed_by_builder", False):
-                return backend
-            if builder_managed_backend is None:
-                builder_managed_backend = backend
-    if builder_managed_backend is not None:
-        return builder_managed_backend
-    raise RuntimeError("No executable attention backend is available for full-graph parameter updates.")
+        except NotImplementedError:
+            # Metadata-only backends such as GDN have no attention impl.
+            continue
+
+        if not getattr(backend, "graph_params_managed_by_builder", False):
+            return backend
+        if fallback is None:
+            fallback = backend
+
+    if fallback is None:
+        raise RuntimeError("No executable attention backend is available for full-graph parameter updates.")
+    return fallback
 
 
 class ModelAclGraphManager(ModelCudaGraphManager):
