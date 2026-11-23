@@ -1265,10 +1265,15 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                 )
         req_ids = attn_metadata.req_ids_tensor[:num_reqs].to(device=device, dtype=torch.long)
         current_req_ids = req_ids[token_to_req]
+        # Reused buffers may have more capacity than this step has active rows.
+        selection_kv_block_status = selection_kv_block_status[:num_tokens]
+        topk_head_count = selection_kv_block_status.shape[1]
         # Row reuse by a different request: drop the whole selection status row.
         changed_rows = last_req_ids != current_req_ids
         selection_kv_block_status.masked_fill_(changed_rows.view(num_tokens, 1, 1), -1)
-        membership_rows = selection_membership_map.reshape(num_tokens, -1, selection_membership_map.shape[-1])
+        membership_rows = selection_membership_map[: num_tokens * topk_head_count].reshape(
+            num_tokens, topk_head_count, selection_membership_map.shape[-1]
+        )
         membership_control = membership_rows[
             ...,
             FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT : FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT
