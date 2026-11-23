@@ -13,11 +13,16 @@ from vllm.distributed.parallel_state import (
     get_ep_group,
     get_tp_group,
 )
+from vllm.distributed.utils import set_gloo_backend_timeout
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.model_executor.models.interfaces import get_mixture_of_experts_model
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
+from vllm.v1.worker.sentinel.eplb_redistribute import (
+    mark_dead_expert_slots_inplace,
+    redistribute_expert_placement,
+)
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import (
     WorkerSentinel as GPUWorkerSentinel,
 )
@@ -144,10 +149,6 @@ class WorkerSentinel(GPUWorkerSentinel):
         self._validate_scale_down_preconditions()
         super().scale_down(ft_request)
 
-        # Imported lazily: vLLM v0.33.0 does not export it, and normal worker
-        # startup imports this module without running scale_down.
-        from vllm.distributed.utils import set_gloo_backend_timeout
-
         # Verify the redistributed model is runnable before reporting healthy.
         parallel_config = self.worker.parallel_config
         timeout = timedelta(seconds=self.worker.parallel_config.fault_tolerance_config.engine_recovery_timeout_sec)
@@ -257,13 +258,6 @@ class WorkerSentinel(GPUWorkerSentinel):
         dead_ep_ranks: set[int],
     ) -> None:
         """Redistribute one model and reload through its own checkpoint config."""
-        # Imported lazily: the helper was added after vLLM v0.33.0, and normal
-        # worker startup imports this module without running this path.
-        from vllm.v1.worker.sentinel.eplb_redistribute import (
-            mark_dead_expert_slots_inplace,
-            redistribute_expert_placement,
-        )
-
         physical_to_logical = model_state.physical_to_logical_map
         num_logical = model_state.logical_replica_count.shape[1]
         num_local_experts = _num_local_experts(model_state)

@@ -2,10 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End-to-end tests for the fault-tolerance framework on Ascend NPU.
 
-Requires the vLLM main (>= v0.34) lane and 4 NPUs (DP=4); the vLLM
-v0.33.0 release lane predates the FT API used here. Retry is gated
-behind ``has_npu_ft_capability()``; scale-down additionally behind
-``has_npu_scale_down_capability()`` (CANN V3+).
+Requires 4 NPUs (DP=4). Retry is gated behind ``has_npu_ft_capability()``;
+scale-down additionally behind ``has_npu_scale_down_capability()`` (CANN V3+).
 """
 
 import contextlib
@@ -24,7 +22,6 @@ import requests
 import torch
 
 from tests.e2e.conftest import RemoteOpenAIServer
-from vllm_ascend.utils import vllm_version_is
 
 MODEL_NAME = os.getenv("MODEL_NAME", "vllm-ascend/Qwen3-30B-A3B-W8A8")
 DP_SIZE = 4
@@ -434,14 +431,7 @@ def _wait_for_ft_apply_outcome(server: RemoteOpenAIServer, request_id: str, dead
 
 
 def has_npu_ft_capability() -> bool:
-    """Require the FT-capable vLLM lane and at least 4 visible NPUs for DP=4.
-
-    The v0.33.0 release lane has no /v1 fault_tolerance API or scale-down
-    helpers and only accepts retry, so FT runs on the vLLM main (>= v0.34)
-    lane only.
-    """
-    if vllm_version_is("0.33.0"):
-        return False
+    """Require at least 4 visible NPUs for DP=4 fault-tolerance testing."""
     if not torch.npu.is_available():
         return False
     try:
@@ -480,7 +470,7 @@ def has_npu_scale_down_capability() -> bool:
 
 @pytest.mark.skipif(
     not has_npu_ft_capability(),
-    reason="Requires the vLLM main (>= v0.34) FT lane and at least 4 NPUs for DP=4 fault-tolerance testing",
+    reason="Requires at least 4 NPUs for DP=4 fault-tolerance testing",
 )
 def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
     """An exception injected after the DP allreduce drives full
@@ -543,10 +533,7 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
 
 @pytest.mark.skipif(
     not has_npu_scale_down_capability(),
-    reason=(
-        "Requires the vLLM main (>= v0.34) FT lane, at least 4 NPUs and "
-        "npu_moe_distribute_dispatch_v2 (CANN V3+) for DP=4 scale-down testing"
-    ),
+    reason="Requires at least 4 NPUs and npu_moe_distribute_dispatch_v2 (CANN V3+) for DP=4 scale-down testing",
 )
 def test_scale_down_removes_dead_rank_and_recovers():
     """scale_down removes the dead DP rank; survivors keep serving.
