@@ -17,6 +17,7 @@ from vllm_ascend.attention.sfa_kv_offload import (  # noqa: E402
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (  # noqa: E402
     FSA_EXTERNAL_PLAN_READY_MARKER,
+    FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT,
     FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT,
     FSA_SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT,
 )
@@ -207,6 +208,67 @@ def test_mtp_rewrite_invalidates_membership_slot_map():
 
     assert bool((selection_status[:, 0, :topk_count] == -1).all())
     assert bool((control[:, 0] == -1).all())
+
+
+@pytest.mark.parametrize("capturing", [False, True])
+@pytest.mark.parametrize("num_tokens", [0, 1, 3, 4])
+@pytest.mark.parametrize("topk_head_count", [1, 2])
+def test_fallback_invalidation_only_touches_active_rows(capturing, num_tokens, topk_head_count):
+    impl = _make_fused_overlap_impl()
+    token_capacity = 8
+    topk_count = 4
+    status = torch.full((token_capacity, topk_head_count, 8), -1, dtype=torch.int32)
+    status[..., :topk_count] = torch.arange(topk_count)
+    status[..., topk_count] = 64
+    if num_tokens > 1:
+        status[num_tokens - 1, 0, topk_count - 1] = 63
+    membership = torch.full(
+        (token_capacity * topk_head_count, FSA_SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT),
+        123,
+        dtype=torch.int16,
+    )
+    last_req_ids = torch.full((token_capacity,), 7, dtype=torch.int64)
+    if num_tokens:
+        last_req_ids[0] = 0
+    num_reqs = int(num_tokens > 0)
+    metadata = SimpleNamespace(
+        token_to_req=torch.zeros(num_tokens, dtype=torch.int32),
+        req_ids_tensor=torch.full((num_reqs,), 7, dtype=torch.int64),
+    )
+
+    expected_status = status.clone()
+    expected_membership = membership.clone()
+    expected_control = expected_membership[
+        :,
+        FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT : FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT
+        + FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT,
+    ].reshape(token_capacity, topk_head_count, FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT)
+    if num_tokens:
+        # A new owner invalidates every head, including the status metadata slot.
+        expected_status[0].fill_(-1)
+        expected_control[0].fill_(-1)
+    if num_tokens > 1:
+        # An MTP rewrite invalidates only the head containing the rewritten hit.
+        expected_status[num_tokens - 1, 0, topk_count - 1] = -1
+        expected_control[num_tokens - 1, 0].fill_(-1)
+
+    with patch("vllm_ascend.attention.sfa_kv_offload._EXTRA_CTX", SimpleNamespace(capturing=capturing)):
+        impl._invalidate_fused_overlap_selection_rows(
+            status,
+            membership,
+            last_req_ids[:num_tokens],
+            metadata,
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            topk_count=topk_count,
+            seq_lens=torch.full((num_reqs,), 64, dtype=torch.int32),
+            cum_query_lens=torch.tensor([num_tokens] if num_reqs else [], dtype=torch.int32),
+        )
+
+    # Compare the complete allocations: inactive rows and membership payload stay unchanged.
+    torch.testing.assert_close(status, expected_status)
+    torch.testing.assert_close(membership, expected_membership)
+    torch.testing.assert_close(last_req_ids, torch.full_like(last_req_ids, 7))
 
 
 def test_fused_overlap_external_plan_passes_raw_topk_and_full_selection_state():
