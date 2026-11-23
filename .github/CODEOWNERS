@@ -106,6 +106,7 @@
 /vllm_ascend/ops/linear_op.py @xuchi-0808
 /vllm_ascend/ops/vocab_parallel_embedding.py @xuchi-0808
 /vllm_ascend/ops/triton @ShyRa1n @ZT-AIA @yiz-liu
+/vllm_ascend/ops/triton/nova_kv/ @sywang24
 /vllm_ascend/ops/triton/eplb.py @freyfwt
 /vllm_ascend/ops/triton/batch_invariant @Ronald1995
 /vllm_ascend/ops/triton/dcp/ @weiguihua2 @zhenwenqi2024 @pisceskkk @zhaochuang001 @li1how @wzx0726

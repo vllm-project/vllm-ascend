@@ -29,6 +29,8 @@ if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton  # noqa
 
 
+import vllm_ascend.patch.worker.patch_nova_kv  # noqa
+
 # Apply before model construction on every device, including 310P.
 
 import vllm_ascend.patch.worker.patch_distributed  # noqa

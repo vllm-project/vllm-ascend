@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
+from vllm_ascend.attention.nova_kv import NovaAttentionBackend
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -40,6 +41,7 @@ from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
+from vllm_ascend.worker.v2.nova_kv import NovaKVRuntime
 
 if not hasattr(_cp_utils, "prepare_dcp_local_seq_lens") and hasattr(_cp_utils, "maybe_prepare_dcp_local_seq_lens"):
     _cp_utils.prepare_dcp_local_seq_lens = (
@@ -1437,3 +1439,99 @@ def test_prepare_attn_uses_promised_varlen_capture_bound(mock_build_attn_metadat
     )
 
     assert mock_build_attn_metadata.call_args.kwargs["max_query_len"] == 9
+
+
+@pytest.mark.parametrize("for_capture", [False, True])
+@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+def test_nova_slots_reach_hybrid_attention_without_replacing_mamba_metadata(for_capture, mode):
+    runtime = NovaKVRuntime(4, torch.device("cpu"))
+    runtime.state.prepare(["a", "b"], [0, 0], [9, 17])
+    state = SimpleNamespace(
+        nova_kv=runtime,
+        vllm_config=SimpleNamespace(num_speculative_tokens=0, parallel_config=SimpleNamespace()),
+        max_model_len=128,
+        recoverssm=None,
+    )
+    input_batch = SimpleNamespace(
+        req_ids=["b", "a"],
+        num_reqs=2,
+        num_reqs_after_padding=4,
+        num_tokens=2,
+        num_tokens_after_padding=4,
+        num_computed_tokens_np=np.array([17, 9]),
+        num_scheduled_tokens=np.array([1, 1]),
+        is_prefilling_np=np.zeros(4, dtype=bool),
+        prefill_runs_as_decode_np=None,
+        query_start_loc=torch.arange(5, dtype=torch.int32),
+        query_start_loc_np=np.arange(5, dtype=np.int32),
+        seq_lens=torch.tensor([18, 10, 0, 0], dtype=torch.int32),
+        seq_lens_np=np.array([18, 10, 0, 0]),
+        dcp_local_seq_lens=None,
+        positions=None,
+        attn_state=None,
+        is_dummy=False,
+    )
+    with patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata") as build:
+        AscendMambaHybridModelState.prepare_attn(
+            state, input_batch, mode, (), torch.empty(0), [], MagicMock(), for_capture=for_capture
+        )
+    kwargs = build.call_args.kwargs
+    expected = [-1, -1] if for_capture else [1, 0]
+    if mode == CUDAGraphMode.FULL:
+        expected += [-1, -1]
+    assert kwargs["nova_request_slots_cpu"] == expected
+    assert kwargs["nova_request_slots"].tolist() == expected
+    assert kwargs["seq_lens"] is input_batch.seq_lens
+    assert kwargs["model_specific_attn_metadata"].is_prefilling.tolist() == [False] * len(expected)
+
+
+@patch("vllm_ascend.worker.v2.attn_utils.get_current_vllm_config")
+def test_nova_packed_views_preserve_hybrid_page_stride_and_backing(config):
+    config.return_value = SimpleNamespace(kv_transfer_config=None, additional_config={})
+    spec = FullAttentionSpec(
+        block_size=128,
+        num_kv_heads=2,
+        head_size=256,
+        dtype=torch.uint8,
+        state_content_bytes=134,
+        page_size_padded=65536,
+    )
+    mamba = MambaSpec(
+        block_size=128,
+        shapes=((3, 4), (8, 8)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=65536,
+    )
+    groups = [
+        SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, layer_names=["full"], backend=NovaAttentionBackend),
+        SimpleNamespace(kv_cache_group_id=1, kv_cache_spec=mamba, layer_names=["linear"]),
+    ]
+    backing = torch.zeros(128 + 2 * spec.page_size_bytes, dtype=torch.int8)
+    raw = backing[128:]
+    caches = _reshape_kv_cache_v2(
+        groups,
+        {"full": raw, "linear": raw},
+        "auto",
+        [128, 128],
+        {},
+        KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(layer_names=["full"], kv_cache_spec=spec),
+                KVCacheGroupSpec(layer_names=["linear"], kv_cache_spec=mamba),
+            ],
+        ),
+    )
+    packed = caches["full"]
+    assert packed.shape == (2, 128, 2, 134)
+    assert packed.dtype == torch.uint8
+    assert packed.stride(0) == 65536
+    assert packed.data_ptr() == raw.data_ptr()
+    for component in caches["linear"]:
+        assert component.untyped_storage().data_ptr() == backing.data_ptr()
+        assert component.stride(0) * component.element_size() == 65536
+    packed[0].fill_(13)
+    assert not backing[:128].any()
+    assert not raw[128 * 2 * 134 : 65536].any()
+    assert not raw[65536:].any()

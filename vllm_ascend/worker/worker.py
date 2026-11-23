@@ -176,6 +176,9 @@ def allow_v2_model_runner_without_triton() -> Iterator[None]:
 
 
 class NPUWorker(GPUWorker):
+    def get_missing_nova_windows(self, request_ids, computed_tokens):
+        return self.model_runner._nova_request_state.missing(request_ids, computed_tokens)
+
     def __init__(
         self,
         vllm_config: VllmConfig,

@@ -30,6 +30,7 @@ import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 import vllm.v1.engine.core as _engine_core_mod
 from vllm.v1.engine.core import DPEngineCoreProc as _UpstreamDPEngineCoreProc
 from vllm.v1.engine.core import EngineCore
@@ -38,6 +39,38 @@ from vllm.v1.engine.core import EngineCoreProc as _UpstreamEngineCoreProc
 import vllm_ascend.patch.platform.patch_engine_core as _engine_core_patch
 from vllm_ascend.patch.platform.patch_balance_schedule import BalanceDPEngineCoreProc
 from vllm_ascend.patch.platform.patch_dyntra_lb_core import DyntraLBDPEngineCoreProc
+
+
+@pytest.mark.parametrize("enabled,fail", [(False, False), (True, False), (True, True)])
+def test_nova_scheduler_selection_and_config_cleanup(monkeypatch, enabled, fail):
+    config = SimpleNamespace(
+        additional_config={"nova_kv": {"artifact_path": "/artifacts"}} if enabled else {},
+        scheduler_config=SimpleNamespace(async_scheduling=False, scheduler_cls=None),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+    )
+    observed = []
+
+    class FakeEngine:
+        def __init__(self, vllm_config):
+            observed.append(vllm_config.scheduler_config.scheduler_cls)
+            if fail:
+                raise RuntimeError("initialization failed")
+            self.model_executor = object()
+            self.scheduler = SimpleNamespace()
+
+    monkeypatch.setattr(_engine_core_mod, "EngineCore", FakeEngine)
+    _engine_core_patch._apply_nova_scheduler_patch()
+    if fail:
+        with pytest.raises(RuntimeError, match="initialization failed"):
+            FakeEngine(config)
+    else:
+        engine = FakeEngine(config)
+        if enabled:
+            assert engine.scheduler.nova_executor is engine.model_executor
+        else:
+            assert not hasattr(engine.scheduler, "nova_executor")
+    assert observed == ["vllm_ascend.core.nova_scheduler.NovaScheduler" if enabled else None]
+    assert config.scheduler_config.scheduler_cls is None
 
 
 def _ascend_config():

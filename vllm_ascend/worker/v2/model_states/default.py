@@ -48,6 +48,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 from vllm_ascend.utils import embedding_tp_enable, should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
+from vllm_ascend.worker.v2.nova_kv import NovaKVRuntime
 
 
 class ReplayAttnMetadata(ModelSpecificAttnMetadata):
@@ -79,14 +80,23 @@ class AscendModelState(DefaultModelState):
     kvpp_runtime: "KVPPRuntime | None" = None
     kvpp_is_dummy_run: bool = False
     device_metadata: "TargetDeviceMetadata | None" = None
+    nova_kv: NovaKVRuntime | None = None
 
     def finish_execution(self, *, failed: bool) -> None:
         """Join auxiliary metadata work even if input preparation failed."""
+        if self.nova_kv is not None:
+            self.nova_kv.finish_execution(failed=failed)
         if self.device_metadata is not None:
             self.device_metadata.finish()
 
     def __init__(self, vllm_config, model, encoder_cache, device):
         super().__init__(vllm_config, model, encoder_cache, device)
+        nova_options = (vllm_config.additional_config or {}).get("nova_kv") or {}
+        self.nova_kv = (
+            NovaKVRuntime(vllm_config.scheduler_config.max_num_seqs, device)
+            if nova_options.get("artifact_path")
+            else None
+        )
         self._offload_req_ids: CpuGpuBuffer | None = None
         self._offload_token_to_req: CpuGpuBuffer | None = None
         self._offload_pool_slots: CpuGpuBuffer | None = None
@@ -344,6 +354,8 @@ class AscendModelState(DefaultModelState):
         super().remove_request(req_id)
         if self._offload_request_identity is not None:
             self._offload_request_identity.remove(req_id)
+        if self.nova_kv is not None:
+            self.nova_kv.state.release([req_id])
         if self._offload_request_states is not None:
             self._offload_request_states.remove_request(req_id)
 
@@ -570,6 +582,8 @@ class AscendModelState(DefaultModelState):
             build_metadata = partial(self.device_metadata.run_build, build_attn_metadata)
         self._decoder_replay_common_metadata = {}
         xlite_cfg: XliteGraphConfig | None = getattr(get_ascend_config(), "xlite_graph_config", None)
+        nova_runtime = getattr(self, "nova_kv", None)
+        nova_metadata = nova_runtime.prepare(input_batch, num_reqs, for_capture=for_capture) if nova_runtime else {}
         self.attn_metadata = build_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -590,6 +604,7 @@ class AscendModelState(DefaultModelState):
             parallel_config=self.vllm_config.parallel_config,
             # extra attributes for ascend npus.
             seq_lens_np=input_batch.seq_lens_np,
+            **nova_metadata,
             positions=input_batch.positions,
             attn_state=input_batch.attn_state,
             pcp_context=pcp_context,

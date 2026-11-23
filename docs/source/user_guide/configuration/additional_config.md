@@ -36,6 +36,7 @@ The following table lists additional configuration options available in vLLM Asc
 
 | Name                                | Type | Default | Description                                                                                               |
 |-------------------------------------|------|---------|-----------------------------------------------------------------------------------------------------------|
+| `nova_kv` | dict | `None` | Experimental NOVA-KV 2-bit full-attention cache for Qwen3.5. See [NOVA-KV](../feature_guide/nova_kv.md). |
 | `xlite_graph_config`                | dict | `{}`    | Configuration options for Xlite graph mode                                                                |
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for fine-grained tensor parallelism. See [Fine-Grained Tensor Parallelism](../feature_guide/Fine_grained_TP.md). |
 | `kv_trace`                  | dict | `{}`    | Per-engine KV cache address diagnostics for Model Runner V2. `enabled` defaults to `false`; `action` accepts `"log"` (default) or `"raise"`. See [KV Trace](../feature_guide/kv_trace.md). |

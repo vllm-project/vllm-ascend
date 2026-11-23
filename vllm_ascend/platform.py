@@ -477,6 +477,13 @@ class NPUPlatform(Platform):
 
     @classmethod
     def _align_hybrid_block_size(cls, vllm_config: VllmConfig, backend_cls) -> None:
+        nova_options = (vllm_config.additional_config or {}).get("nova_kv")
+        if nova_options is not None and not nova_options.get("capture_path"):
+            # Platform discovery precedes worker backend construction. Use the
+            # packed per-token size when balancing attention and Mamba pages.
+            from vllm_ascend.attention.nova_kv import NovaAttentionBackend
+
+            backend_cls = NovaAttentionBackend
         if (
             vllm_config.model_config.use_mla
             and vllm_config.cache_config.cache_dtype in ("int8", "fp8")

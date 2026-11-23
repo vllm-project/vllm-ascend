@@ -1,0 +1,11 @@
+pr: 23051
+entries:
+  - category: feature
+    text: >-
+      Added experimental NOVA-KV 2-bit KV cache quantization for calibrated
+      dense Qwen3.5 D256 full attention on Ascend 950. Enable it through
+      nova_kv.artifact_path in additional configuration with Model Runner V2.
+      Keys use calibrated group vector quantization and values use packed
+      INT2 storage, with original BF16 sink and recent-token windows.
+      Supports chunked prefill, captured decode and synchronous window recovery.
+      Full model/task accuracy remains pending.
