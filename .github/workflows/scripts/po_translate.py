@@ -48,6 +48,7 @@ SYSTEM_PROMPT = (
     "- '950PR Products'        -> 'Ascend 950PR系列产品'"
     "- 'Atlas A2 Products'     -> 'Atlas A2系列产品'"
     "- 'Atlas A3 Products'     -> 'Atlas A3系列产品'"
+    "- 'Atlas 850E SuperPoD (Air-Cooled)'     -> 'Atlas 850E 风冷超节点'"
     "IMPORTANT: In all five cases there MUST be NO space between the model"
     "number (e.g. '950DT', 'A2', 'A3') and '系列产品'. The '&' in '950PR&950DT'"
     "has NO surrounding spaces. Do NOT output '950DT 系列产品' (with a space) or '950DT系列 产品' (split)."
@@ -121,40 +122,41 @@ CRITICAL RULES — violations will cause the translation to be rejected:
 16. '950PR Products'       → 'Ascend 950PR系列产品'
 17. 'Atlas A2 Products'    → 'Atlas A2系列产品'
 18. 'Atlas A3 Products'    → 'Atlas A3系列产品'
+19. 'Atlas 850E SuperPoD (Air-Cooled)'    → 'Atlas 850E 风冷超节点'
 
 --- MkDocs MATERIAL EXTENSIONS ---
-19. ADMONITIONS (!!! type): Keep "!!!" and type keyword (note, warning, tip)
+20. ADMONITIONS (!!! type): Keep "!!!" and type keyword (note, warning, tip)
     in English. Only translate the title text after type.
     Example: msgid "!!! note" → msgstr "!!! note"
     Example: msgid "!!! note \"Important\"" → msgstr "!!! note \"重要\""
 
-20. COLLAPSIBLE BLOCKS (??? type / ???+ type): Keep the exact "???" or
+21. COLLAPSIBLE BLOCKS (??? type / ???+ type): Keep the exact "???" or
     "???+" marker, the type keyword, and quote syntax unchanged. The "+"
     means expanded by default and MUST NOT be added or removed. Translate only
     the title text inside quotes.
     Example: msgid "??? note \\"Click here...\\"" → msgstr "??? note \\"点击这里...\\""
     Example: msgid "???+ warning \\"Important\\"" → msgstr "???+ warning \\"重要\\""
 
-21. CONTENT TABS (===): Keep "===" and quote syntax. Translate only the label.
+22. CONTENT TABS (===): Keep "===" and quote syntax. Translate only the label.
     Example: msgid "=== \"Before using pip\"" → msgstr "=== \"使用pip之前\""
 
 
 
 --- TRANSLATION QUALITY ---
-22. Use natural, fluent Chinese technical documentation style. Avoid word-by-word
+23. Use natural, fluent Chinese technical documentation style. Avoid word-by-word
     literal translation.
-23. Use standard Chinese technical terminology consistently.
-24. For markdown links [text](url): translate the display text in [] but keep
+24. Use standard Chinese technical terminology consistently.
+25. For markdown links [text](url): translate the display text in [] but keep
     the URL in () exactly as-is.
     Example: [Quick Start](quick_start.md) → [快速开始](quick_start.md)
-25. For headings: translate the heading text but KEEP the "#" / "##" / "###"
+26. For headings: translate the heading text but KEEP the "#" / "##" / "###"
     prefix exactly as in the msgid.
     Example: msgid "# Quick Start" → msgstr "# 快速开始"
     Example: msgid "## Overview" → msgstr "## 概述"
-26. DO NOT add "#, fuzzy" markers.
-27. If a msgid is purely structural (symbols, code, file paths only), copy it
+27. DO NOT add "#, fuzzy" markers.
+28. If a msgid is purely structural (symbols, code, file paths only), copy it
     verbatim to msgstr.
-28. Never invent or guess content. If unsure about a term, leave it in English.
+29. Never invent or guess content. If unsure about a term, leave it in English.
 
 {content}"""
 
