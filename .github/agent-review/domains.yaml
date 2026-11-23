@@ -31,8 +31,8 @@ domains:
     paths:
       - "vllm_ascend/patch/**"
   - name: model-execution
-    description: inheritance surfaces over upstream vLLM (worker, model runner
-      V1/V2, 310P, attention, compilation, sample, spec_decode)
+    description: inheritance surfaces over upstream vLLM (worker, the V2 model
+      runner, the 310P stack, attention, compilation)
     paths:
       - "vllm_ascend/worker/**"
       - "vllm_ascend/_310p/**"
