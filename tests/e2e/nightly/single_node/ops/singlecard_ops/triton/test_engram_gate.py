@@ -16,6 +16,19 @@ ROTATION_BLOCK = 32
 EPS = 1e-6
 
 
+def _rotation_cases():
+    # Rotated fusion is an A3 kernel. A5 keeps the original unrotated launch.
+    rotated_on_a3 = get_ascend_device_type() == AscendDeviceType.A3
+    for kind in ("none", "shared", "per_block"):
+        if kind == "none" or rotated_on_a3:
+            yield kind
+        else:
+            yield pytest.param(
+                kind,
+                marks=pytest.mark.skip(reason="Rotated Engram gate fusion runs on A3"),
+            )
+
+
 def reference(hidden, kv, qw, kw, mask, rotation):
     # Independently express the reference; residual must stay in its original basis.
     dim = hidden.shape[-1]
@@ -41,7 +54,7 @@ def reference(hidden, kv, qw, kw, mask, rotation):
     reason="Engram gate routes on A3 (rotated) and A5 (unrotated)",
 )
 @pytest.mark.parametrize("tokens,dim", [(0, 5120), (1, 96), (7, 5120), (132, 5120)])
-@pytest.mark.parametrize("rotation_kind", ["none", "shared", "per_block"])
+@pytest.mark.parametrize("rotation_kind", _rotation_cases())
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_engram_gate(tokens, dim, rotation_kind, dtype):
     torch.manual_seed(42)

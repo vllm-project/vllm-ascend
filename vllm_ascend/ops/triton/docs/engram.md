@@ -12,19 +12,20 @@ table layout or arithmetic.
 | `engram_lookup.py`: `_decode_e8m0` | Decode unsigned exponent bytes. Code 0 represents `2^-127`, and 255 represents NaN. Mask sign extension before constructing FP32 bits. |
 | `engram_hash.py` | Map tokens to requests, read preceding tokens from the current chunk, lookback window or slot cache, then calculate per-layer n-gram hashes. Image/dead tokens stop valid history. Empty requests must not steal another request's tokens. |
 | `engram_lookback.py` | Gather the tokens preceding each request's chunk from device token history. Respect request-state reordering and fill missing history and padded requests with `-1`. |
-| `engram_gate.py` | Fuse the FP32 normalization, key/query weighting, gate and residual addition used by Engram checkpoints. Rotated inputs supply a separate FP32 scoring tensor while the residual stays in its checkpoint basis. Retain the unfused operation order rather than contracting the residual into an FMA. |
+| `engram_gate.py` | Fuse the FP32 normalization, key/query weighting, gate and residual addition used by Engram checkpoints. Unrotated checkpoints keep the original single hidden load. Rotated A3 inputs supply a separate FP32 scoring tensor while the residual stays in its checkpoint basis. Retain the unfused operation order rather than contracting the residual into an FMA. |
 
 ## Current hardware usage
 
 Hash generation and lookback gathering are shared model paths, including A3.
 Lookup also serves A3 BF16/INT8 tables; its MXFP8 path is selected by
 `ENGRAM_MXFP8`, currently an A5 capability. The fused `engram_gate.py` path is
-selected by `ENGRAM_UNROTATED_GATE`, also currently an A5 capability. Moving
-these kernels into `ops/triton` does not change their hardware routing.
-Rotated A3 checkpoints use `ENGRAM_ROTATED_GATE`: the FP32 rotation GEMM
-remains separate, then the fused gate consumes both restored and original hidden
-states. Other hardware retains its existing fallback for rotated checkpoints. These
-call-path descriptions do not establish A3 runtime validation or CI coverage.
+selected by `ENGRAM_UNROTATED_GATE`, also currently an A5 capability. That
+unrotated kernel is unchanged. Moving these kernels into `ops/triton` does not
+change their hardware routing. Rotated A3 checkpoints use `ENGRAM_ROTATED_GATE`:
+the FP32 rotation GEMM remains separate, then a distinct fused kernel consumes
+both restored and original hidden states. A5 does not compile that rotated
+kernel. Other hardware retains its existing fallback for rotated checkpoints.
+These call-path descriptions do not establish A3 runtime validation or CI coverage.
 
 ## Memory and synchronization
 
@@ -48,8 +49,8 @@ pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_engram_ga
 
 The test covers the profiled `[132, 4, 5120]` shape, empty input, a non-power-of-two
 channel count, shared and per-block rotations, BF16/FP32, strided tensors and
-masked-token residual identity. A model-dispatch test also captures and replays
-the rotated path with updated inputs and masks. Kernel compilation, graph replay, model accuracy
-and latency still require NPU evidence before merging. No hardware speedup is
-claimed from reducing the number of launches alone. The rotation also retains
-its FP32 input conversion; this is not a claim of exactly three launches.
+masked-token residual identity. Shared and per-block rotations, and the model-dispatch
+graph replay, run on A3. A5 runs the unrotated cases only. Kernel compilation, graph
+replay, model accuracy and latency still require NPU evidence before merging. No
+hardware speedup is claimed from reducing the number of launches alone. The rotation
+also retains its FP32 input conversion; this is not a claim of exactly three launches.
