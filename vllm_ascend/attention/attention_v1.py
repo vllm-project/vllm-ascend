@@ -1352,7 +1352,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         with attention_transfer_window():
-            if isinstance(getattr(attn_metadata, "diffusion_causal", None), torch.Tensor):
+            diffusion_causal = getattr(attn_metadata, "diffusion_causal", None)
+            if isinstance(diffusion_causal, torch.Tensor):
                 # KV has already been written once by forward(). Both calls
                 # read the same cache; each has a fixed FIA mask mode even
                 # when request phases change between graph replays.
@@ -1362,7 +1363,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.forward_fused_infer_attention(query, key, value, causal, output, kv_cache)
                 self.forward_fused_infer_attention(query, key, value, bidirectional, alternate, kv_cache)
                 num_tokens = attn_metadata.actual_seq_lengths_q[-1]
-                mask = attn_metadata.diffusion_causal[:num_tokens].view(-1, 1, 1)
+                mask = diffusion_causal[:num_tokens].view(-1, 1, 1)
                 output[:num_tokens].copy_(torch.where(mask, output[:num_tokens], alternate[:num_tokens]))
                 return output
 
