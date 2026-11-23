@@ -945,10 +945,10 @@ def test_v17e_spec_acceptance_low_rate_triggers_incident():
 
 
 def test_v17f_spec_acceptance_padded_row_uses_num_draft_tokens():
-    """Adaptive/padded rows: draft_len from num_draft_tokens_per_req, not pad width.
+    """MRV2 shape: runner.input_batch is None; draft_len comes from threaded wave batch.
 
-    Row width 5 with two real drafts + bonus and two -1 pads must not treat
-    pads as drafts (would report 50% when acceptance is 100%).
+    Same padded row with hint=2 vs hint=4 must yield different draft_len so the
+    test fails if only the -1 strip fallback were used (that always gives 2).
     """
     from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
 
@@ -964,15 +964,18 @@ def test_v17f_spec_acceptance_padded_row_uses_num_draft_tokens():
         detector_section=lambda name: section,
         detector_get=lambda sec, key, default=None: section.get(key, default),
     )
+    # Match production MRV2: no runner.input_batch after sample_tokens pops state.
     runner = SimpleNamespace(
         tp_rank=0,
         speculative_config=SimpleNamespace(),
-        input_batch=SimpleNamespace(req_ids=["r1"], num_draft_tokens_per_req=[2]),
+        input_batch=None,
         requests=None,
     )
     det = SpecAcceptanceDetector(runtime_config=rc, runner=runner)
-    # bonus + 2 drafts + 2 pads; accepted_token_num=3 → full accept of 2 drafts
+    # bonus + 2 real drafts + 2 pads; strip-fallback alone would always yield 2.
     sampled = torch.tensor([[10, 11, 12, -1, -1]])
+    wave_batch_2 = SimpleNamespace(req_ids=["r1"], num_draft_tokens_per_req=[2])
+    wave_batch_4 = SimpleNamespace(req_ids=["r1"], num_draft_tokens_per_req=[4])
     with (
         patch(
             "vllm_ascend.observability.runtime_guard.detector.spec_acceptance.get_pp_group",
@@ -983,10 +986,11 @@ def test_v17f_spec_acceptance_padded_row_uses_num_draft_tokens():
             return_value=0,
         ),
     ):
-        alerts = det.check_all(sampled, [3], req_ids=["r1"])
-    assert alerts == []
-    _accepted, draft_len, _sampled, _acc = det._history["r1"][0]
-    assert draft_len == 2
+        assert det.check_all(sampled, [3], req_ids=["r1"], input_batch=wave_batch_2) == []
+        assert det._history["r1"][0][1] == 2
+        det._history.clear()
+        assert det.check_all(sampled, [3], req_ids=["r1"], input_batch=wave_batch_4) == []
+        assert det._history["r1"][0][1] == 4
 
 
 def test_v17g_spec_acceptance_pad_fallback_strips_minus_one():
@@ -1069,9 +1073,10 @@ def test_v17c_check_after_spec_forwards_req_ids():
     seen: dict[str, object] = {}
 
     class _FakeSpec:
-        def check_all(self, sampled, accepted, skip_req_ids=None, req_ids=None):
+        def check_all(self, sampled, accepted, skip_req_ids=None, req_ids=None, input_batch=None):
             seen["req_ids"] = req_ids
             seen["skip"] = skip_req_ids
+            seen["input_batch"] = input_batch
             return []
 
     runner = SimpleNamespace(tp_rank=0, input_batch=None)
@@ -1082,8 +1087,15 @@ def test_v17c_check_after_spec_forwards_req_ids():
     mgr = DetectorManager(runtime_config=rc, runner=runner, detection_gate=lambda: True)
     mgr._spec_det = _FakeSpec()  # type: ignore[method-assign]
     mgr._gated = lambda _phase: False  # type: ignore[method-assign]
-    mgr.check_after_spec(sampled_tokens=[[1]], accepted_token_nums=[0], req_ids=["cmpl-a"])
+    wave = SimpleNamespace(num_draft_tokens_per_req=[2])
+    mgr.check_after_spec(
+        sampled_tokens=[[1]],
+        accepted_token_nums=[0],
+        req_ids=["cmpl-a"],
+        input_batch=wave,
+    )
     assert seen["req_ids"] == ["cmpl-a"]
+    assert seen["input_batch"] is wave
 
 
 # ---------------------------------------------------------------- payload (B'6)

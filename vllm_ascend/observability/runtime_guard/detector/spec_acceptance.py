@@ -126,6 +126,7 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
         accepted_token_nums: Any,
         skip_req_ids: set[str] | None = None,
         req_ids: list[str] | None = None,
+        input_batch: Any | None = None,
     ) -> list[Incident]:
         """Batch entry: return alerts for the processor / ActionExecutor.
 
@@ -136,6 +137,12 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
 
         ``skip_req_ids`` (optional): requests to skip (stopped after
         ``report.max_per_req``). Batch index alignment is preserved for the rest.
+
+        ``input_batch`` should be the wave batch that still carries
+        ``num_draft_tokens_per_req`` (processor ``_last_input_batch``). MRV2
+        clears ``runner.input_batch`` / ``execute_model_state`` before
+        ``check_after_spec``, so reading the runner alone always misses the
+        draft-len hint.
         """
         runner = self._runner
         if not self._precheck():
@@ -149,7 +156,8 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
             if runner_tp_rank(runner) == 0:
                 logger.info_once("[runtime_guard: spec short] skip: speculative_config is None")
             return []
-        input_batch = getattr(runner, "input_batch", None)
+        if input_batch is None:
+            input_batch = getattr(runner, "input_batch", None)
         req_ids = resolve_batch_req_ids(runner, req_ids)
         if not req_ids:
             return []

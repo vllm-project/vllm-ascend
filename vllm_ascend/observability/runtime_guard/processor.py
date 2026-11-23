@@ -435,15 +435,25 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         sampled_tokens: Any,
         accepted_token_nums: Any,
         req_ids: list[str] | None = None,
+        input_batch: Any | None = None,
     ) -> None:
         """Speculative step hook: record accepted tokens + run registered spec detectors.
 
         Callers should gate with :meth:`should_check_after_spec` when they need
         to skip expensive accepted-count materialization.
+
+        Prefer passing the wave ``input_batch`` (``_last_input_batch``): MRV2
+        has already cleared ``runner.input_batch`` by the time this runs.
         """
+        batch = input_batch if input_batch is not None else self._last_input_batch
 
         def _run() -> None:
-            for alert in self.detectors.check_after_spec(sampled_tokens, accepted_token_nums, req_ids=req_ids):
+            for alert in self.detectors.check_after_spec(
+                sampled_tokens,
+                accepted_token_nums,
+                req_ids=req_ids,
+                input_batch=batch,
+            ):
                 self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
 
         self._soft_fail("check_after_spec", _run)
@@ -536,6 +546,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                 sampled_tokens=result.sampler_output.sampled_token_ids,
                 accepted_token_nums=accepted_token_nums,
                 req_ids=result.req_ids_output_copy,
+                input_batch=self._last_input_batch,
             )
         # Hook 5: record_sample_waves (sync: all ranks; async: output-rank TP0 only)
         if self._should_record_sample_waves(use_async=use_async):

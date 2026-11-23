@@ -173,17 +173,28 @@ class DetectorManager:
         sampled_tokens: Any,
         accepted_token_nums: Any,
         req_ids: list[str] | None = None,
+        input_batch: Any | None = None,
     ) -> list[Incident]:
         """Run spec-acceptance detect only (no cumulative IO append).
 
         Accepted tokens are recorded once in :meth:`check_after_sample` from
         the engine's validated sampled ids. Appending here as well doubled
         MTP/Eagle output in reports.
+
+        ``input_batch`` is the retained wave batch (see processor
+        ``_last_input_batch``) so ``num_draft_tokens_per_req`` survives MRV2
+        clearing ``runner.input_batch``.
         """
         if self._gated("after_spec"):
             return []
         skip = RequestGuardStore.get().stopped_req_ids()
-        return self._spec_det.check_all(sampled_tokens, accepted_token_nums, skip_req_ids=skip, req_ids=req_ids)
+        return self._spec_det.check_all(
+            sampled_tokens,
+            accepted_token_nums,
+            skip_req_ids=skip,
+            req_ids=req_ids,
+            input_batch=input_batch,
+        )
 
     def after_sample_hot_path(
         self,
