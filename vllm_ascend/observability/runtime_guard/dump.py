@@ -568,7 +568,39 @@ class KvCacheReader:
         self._runner = runner
 
     def _kv_sources(self) -> list[tuple[str, Any]]:
-        kv = getattr(self._runner, "kv_caches", None)
+        """Prefer dict/tuple KV (preserves C8/TQ4 part names) over flattened list.
+
+        Ascend binds a flattened ``runner.kv_caches`` list for attention kernels.
+        ``compilation_config.static_forward_context[layer].kv_cache`` still holds
+        the original tensor or ``(k, v[, scale…])`` tuple per logical layer.
+        """
+        runner = self._runner
+        ctx = None
+        try:
+            cfg = getattr(runner, "compilation_config", None)
+            ctx = getattr(cfg, "static_forward_context", None) if cfg is not None else None
+        except Exception:
+            ctx = None
+        if isinstance(ctx, dict) and ctx:
+            rebuilt: dict[str, Any] = {}
+            for layer_name, module in ctx.items():
+                kv = getattr(module, "kv_cache", None)
+                if kv is None:
+                    continue
+                # Some bindings store a list of virtual-engine caches; take [0].
+                if isinstance(kv, list) and kv and not isinstance(kv[0], torch.Tensor):
+                    # list of tuples / tensors per VE
+                    first = kv[0] if kv else None
+                    if first is not None:
+                        rebuilt[str(layer_name)] = first
+                elif isinstance(kv, list) and kv and isinstance(kv[0], torch.Tensor):
+                    rebuilt[str(layer_name)] = tuple(kv) if len(kv) > 1 else kv[0]
+                else:
+                    rebuilt[str(layer_name)] = kv
+            if rebuilt:
+                return [("static_forward_context", rebuilt)]
+
+        kv = getattr(runner, "kv_caches", None)
         if isinstance(kv, dict) and kv:
             return [("kv_caches", kv)]
         if isinstance(kv, list) and kv:
