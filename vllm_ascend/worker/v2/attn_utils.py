@@ -1605,6 +1605,7 @@ def _reshape_kv_cache_v2(
 
     vllm_config = get_current_vllm_config()
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    # Reshape the whole slot by component only when no other group can use its pages.
     use_contiguous_components = (
         len(kv_cache_config.kv_cache_groups) == 1 and get_layerwise_reuse_layout(kv_cache_config) is not None
     )
