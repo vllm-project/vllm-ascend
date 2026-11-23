@@ -66,6 +66,9 @@ def get_scheduler_device_id(parallel_config: ParallelConfig) -> int:
     DP schedulers on one device exhausts that address space at DP>8.
     """
     assigned_ids = parallel_config.assigned_physical_gpu_ids
+    # Both None and an empty list mean the platform did not pin a per-shard
+    # device range. Indexing an empty range would be meaningless, so both fall
+    # back to the process's current device.
     if assigned_ids:
         set_assigned_physical_gpu_ids(assigned_ids)
         dp_rank = getattr(parallel_config, "data_parallel_rank_local", None)

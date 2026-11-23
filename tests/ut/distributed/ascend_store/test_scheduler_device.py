@@ -33,4 +33,11 @@ def test_scheduler_device_follows_dp_shard(monkeypatch):
 
 def test_scheduler_device_without_assignment_uses_current_device(monkeypatch):
     monkeypatch.setattr(base.torch.npu, "current_device", lambda: 7)
+    assigned_calls = []
+    monkeypatch.setattr(base, "set_assigned_physical_gpu_ids", assigned_calls.append)
+
     assert base.get_scheduler_device_id(_config(assigned=None, dp=4)) == 7
+    # An empty assignment list has no shard range to index; it is treated like
+    # "not pinned" and must not call the physical-id setter.
+    assert base.get_scheduler_device_id(_config(assigned=[], dp=4)) == 7
+    assert assigned_calls == []
