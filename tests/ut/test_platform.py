@@ -479,6 +479,8 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.model_config = MagicMock()
         mock_vllm_config.model_config.is_hybrid = False
         mock_vllm_config.model_config.is_encoder_decoder = False
+        mock_vllm_config.model_config.enable_sleep_mode = False
+        mock_vllm_config.model_config.sleep_mode_backend = "cumem"
         mock_vllm_config.device_config = MagicMock()
         mock_vllm_config.device_config.device_type = "npu"
         mock_vllm_config.parallel_config = MagicMock()
