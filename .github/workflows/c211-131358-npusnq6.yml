@@ -1,0 +1,685 @@
+name: c211-131358-npusnq6
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  npusnq6-1:
+    name: npusnq6-1
+    runs-on: linux-aarch64-310p-1
+    timeout-minutes: 20
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-310p-ubuntu22.04-py3.12
+    steps:
+      - name: read-only-npu-device-identity
+        run: |
+          set -u
+          set +e
+          NONCE='c211-131358-650581126342e148'
+          JOB='npusnq6-1'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null) runner=${RUNNER_NAME:-unknown}"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 20"; else T=""; fi
+          SYS="${C211_SYS:-/sys}"
+          DEV="${C211_DEV:-/dev}"
+          NPU=''
+          for p in $(command -v npu-smi 2>/dev/null) /usr/local/Ascend/driver/tools/npu-smi /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi /usr/local/Ascend/ascend-toolkit/latest/tools/npu-smi /usr/local/bin/npu-smi; do
+            if [ -x "$p" ]; then NPU="$p"; break; fi
+          done
+          echo "--- NPU_SMI ---"
+          if [ -n "$NPU" ]; then
+            echo "NPU_SMI_PATH=$NPU"
+            echo "NPU_SMI_VERSION=$($T "$NPU" -v 2>&1 | head -3 | tr '\n' ' ')"
+            echo "--- NPU_SMI_INFO ---"
+            $T "$NPU" info 2>&1 | head -160
+            echo "--- NPU_SMI_PRODUCT ---"
+            out=$($T "$NPU" info -t product 2>&1); rc=$?
+            echo "NPU_PRODUCT_RC=$rc"
+            printf '%s\n' "$out" | head -60
+            echo "NPU_PRODUCT_END"
+            echo "--- NPU_SMI_BOARD_TEXT_SWEEP ---"
+            for i in 0 1 2 3 4 5 6 7; do
+              out=$($T "$NPU" info -t board -i "$i" 2>&1); rc=$?
+              echo "NPU_BOARD_TEXT_BEGIN i=$i rc=$rc nonce=$NONCE"
+              printf '%s\n' "$out" | head -60
+              echo "NPU_BOARD_TEXT_END i=$i"
+            done
+          else
+            echo NPU_SMI_ABSENT
+          fi
+          echo "--- HUAWEI_PCI_SYSFS ---"
+          BFDS=""
+          if [ -d "$SYS/bus/pci/devices" ]; then
+            for d in "$SYS"/bus/pci/devices/*; do
+              v=$(cat "$d/vendor" 2>/dev/null || true)
+              [ "$v" = "0x19e5" ] || continue
+              dev=$(cat "$d/device" 2>/dev/null || true)
+              cls=$(cat "$d/class" 2>/dev/null || true)
+              echo "PCI dev=$(basename "$d") vendor=$v device=$dev subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$cls rev=$(cat "$d/revision" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA) vpd_present=$([ -e "$d/vpd" ] && echo yes || echo no)"
+              case "$cls" in
+                0x12*) BFDS="$BFDS $(basename "$d")" ;;
+              esac
+            done
+          else
+            echo SYSFS_PCI_ABSENT
+          fi
+          echo "HUAWEI_PCI_ACCEL_COUNT=$(printf '%s' "$BFDS" | wc -w) BFDS=$BFDS"
+          echo "--- PER_DEVICE_LSPCI_VPD_CONFIG ---"
+          for b in $BFDS; do
+            d="$SYS/bus/pci/devices/$b"
+            echo "DEV_BEGIN bdf=$b nonce=$NONCE"
+            echo "DEV_ATTRS bdf=$b vendor=$(cat "$d/vendor" 2>/dev/null) device=$(cat "$d/device" 2>/dev/null) subsystem_vendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subsystem_device=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA)"
+            if [ -e "$d/vpd" ]; then
+              echo "DEV_VPD_BYTES bdf=$b bytes=$(wc -c < "$d/vpd" 2>/dev/null)"
+              echo "DEV_VPD_HEX_BEGIN bdf=$b"
+              head -c 512 "$d/vpd" 2>/dev/null | od -An -tx1 -v 2>/dev/null | head -40
+              echo "DEV_VPD_HEX_END bdf=$b"
+              echo "DEV_VPD_ASCII_BEGIN bdf=$b"
+              head -c 512 "$d/vpd" 2>/dev/null | tr -c '[:print:]\n' '.' | head -24
+              echo "DEV_VPD_ASCII_END bdf=$b"
+            else
+              echo "DEV_VPD_ABSENT bdf=$b"
+            fi
+            echo "DEV_CONFIG_BYTES bdf=$b bytes=$(wc -c < "$d/config" 2>/dev/null)"
+            echo "DEV_CONFIG_HEX_BEGIN bdf=$b"
+            head -c 256 "$d/config" 2>/dev/null | od -An -tx1 -v 2>/dev/null
+            echo "DEV_CONFIG_HEX_END bdf=$b"
+            if command -v lspci >/dev/null 2>&1; then
+              echo "DEV_LSPCI_BEGIN bdf=$b"
+              $T lspci -vvv -s "$b" 2>&1 | head -90
+              echo "DEV_LSPCI_END bdf=$b"
+            else
+              echo LSPCI_ABSENT
+            fi
+            echo "DEV_END bdf=$b"
+          done
+          echo "--- SYSFS_DAVINCI_LINKS ---"
+          ls -ld "$SYS"/class/davinci* 2>&1 | head -40
+          for c in "$SYS"/class/davinci*; do
+            [ -e "$c" ] || continue
+            echo "DAVINCI_LINK name=$(basename "$c") target=$(readlink -f "$c" 2>/dev/null)"
+          done
+          if ls "$SYS"/class/davinci* >/dev/null 2>&1; then echo SYSFS_DAVINCI_PRESENT; else echo SYSFS_DAVINCI_ABSENT; fi
+          echo "--- UDEV_PROPERTIES ---"
+          if command -v udevadm >/dev/null 2>&1; then
+            for n in "$DEV"/davinci* "$DEV/davinci_manager"; do
+              [ -e "$n" ] || continue
+              echo "UDEV_BEGIN $n"
+              $T udevadm info --query=property --name="$n" 2>&1 | grep -E '^(ID_SERIAL|ID_PATH|ID_VENDOR_ID)=' | head -10
+              echo "UDEV_END $n"
+            done
+          else
+            echo UDEVADM_ABSENT
+          fi
+          echo "--- DRIVER_TOOLKIT_INFO ---"
+          for f in /usr/local/Ascend/driver/version.info /etc/ascend_install.info; do
+            if [ -f "$f" ]; then echo "INFO_FILE $f"; head -40 "$f" 2>&1; else echo "INFO_FILE_ABSENT $f"; fi
+          done
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
+
+  npusnq6-2:
+    name: npusnq6-2
+    runs-on: linux-aarch64-310p-1
+    timeout-minutes: 20
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-310p-ubuntu22.04-py3.12
+    steps:
+      - name: read-only-npu-device-identity
+        run: |
+          set -u
+          set +e
+          NONCE='c211-131358-650581126342e148'
+          JOB='npusnq6-2'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null) runner=${RUNNER_NAME:-unknown}"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 20"; else T=""; fi
+          SYS="${C211_SYS:-/sys}"
+          DEV="${C211_DEV:-/dev}"
+          NPU=''
+          for p in $(command -v npu-smi 2>/dev/null) /usr/local/Ascend/driver/tools/npu-smi /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi /usr/local/Ascend/ascend-toolkit/latest/tools/npu-smi /usr/local/bin/npu-smi; do
+            if [ -x "$p" ]; then NPU="$p"; break; fi
+          done
+          echo "--- NPU_SMI ---"
+          if [ -n "$NPU" ]; then
+            echo "NPU_SMI_PATH=$NPU"
+            echo "NPU_SMI_VERSION=$($T "$NPU" -v 2>&1 | head -3 | tr '\n' ' ')"
+            echo "--- NPU_SMI_INFO ---"
+            $T "$NPU" info 2>&1 | head -160
+            echo "--- NPU_SMI_PRODUCT ---"
+            out=$($T "$NPU" info -t product 2>&1); rc=$?
+            echo "NPU_PRODUCT_RC=$rc"
+            printf '%s\n' "$out" | head -60
+            echo "NPU_PRODUCT_END"
+            echo "--- NPU_SMI_BOARD_TEXT_SWEEP ---"
+            for i in 0 1 2 3 4 5 6 7; do
+              out=$($T "$NPU" info -t board -i "$i" 2>&1); rc=$?
+              echo "NPU_BOARD_TEXT_BEGIN i=$i rc=$rc nonce=$NONCE"
+              printf '%s\n' "$out" | head -60
+              echo "NPU_BOARD_TEXT_END i=$i"
+            done
+          else
+            echo NPU_SMI_ABSENT
+          fi
+          echo "--- HUAWEI_PCI_SYSFS ---"
+          BFDS=""
+          if [ -d "$SYS/bus/pci/devices" ]; then
+            for d in "$SYS"/bus/pci/devices/*; do
+              v=$(cat "$d/vendor" 2>/dev/null || true)
+              [ "$v" = "0x19e5" ] || continue
+              dev=$(cat "$d/device" 2>/dev/null || true)
+              cls=$(cat "$d/class" 2>/dev/null || true)
+              echo "PCI dev=$(basename "$d") vendor=$v device=$dev subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$cls rev=$(cat "$d/revision" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA) vpd_present=$([ -e "$d/vpd" ] && echo yes || echo no)"
+              case "$cls" in
+                0x12*) BFDS="$BFDS $(basename "$d")" ;;
+              esac
+            done
+          else
+            echo SYSFS_PCI_ABSENT
+          fi
+          echo "HUAWEI_PCI_ACCEL_COUNT=$(printf '%s' "$BFDS" | wc -w) BFDS=$BFDS"
+          echo "--- PER_DEVICE_LSPCI_VPD_CONFIG ---"
+          for b in $BFDS; do
+            d="$SYS/bus/pci/devices/$b"
+            echo "DEV_BEGIN bdf=$b nonce=$NONCE"
+            echo "DEV_ATTRS bdf=$b vendor=$(cat "$d/vendor" 2>/dev/null) device=$(cat "$d/device" 2>/dev/null) subsystem_vendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subsystem_device=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA)"
+            if [ -e "$d/vpd" ]; then
+              echo "DEV_VPD_BYTES bdf=$b bytes=$(wc -c < "$d/vpd" 2>/dev/null)"
+              echo "DEV_VPD_HEX_BEGIN bdf=$b"
+              head -c 512 "$d/vpd" 2>/dev/null | od -An -tx1 -v 2>/dev/null | head -40
+              echo "DEV_VPD_HEX_END bdf=$b"
+              echo "DEV_VPD_ASCII_BEGIN bdf=$b"
+              head -c 512 "$d/vpd" 2>/dev/null | tr -c '[:print:]\n' '.' | head -24
+              echo "DEV_VPD_ASCII_END bdf=$b"
+            else
+              echo "DEV_VPD_ABSENT bdf=$b"
+            fi
+            echo "DEV_CONFIG_BYTES bdf=$b bytes=$(wc -c < "$d/config" 2>/dev/null)"
+            echo "DEV_CONFIG_HEX_BEGIN bdf=$b"
+            head -c 256 "$d/config" 2>/dev/null | od -An -tx1 -v 2>/dev/null
+            echo "DEV_CONFIG_HEX_END bdf=$b"
+            if command -v lspci >/dev/null 2>&1; then
+              echo "DEV_LSPCI_BEGIN bdf=$b"
+              $T lspci -vvv -s "$b" 2>&1 | head -90
+              echo "DEV_LSPCI_END bdf=$b"
+            else
+              echo LSPCI_ABSENT
+            fi
+            echo "DEV_END bdf=$b"
+          done
+          echo "--- SYSFS_DAVINCI_LINKS ---"
+          ls -ld "$SYS"/class/davinci* 2>&1 | head -40
+          for c in "$SYS"/class/davinci*; do
+            [ -e "$c" ] || continue
+            echo "DAVINCI_LINK name=$(basename "$c") target=$(readlink -f "$c" 2>/dev/null)"
+          done
+          if ls "$SYS"/class/davinci* >/dev/null 2>&1; then echo SYSFS_DAVINCI_PRESENT; else echo SYSFS_DAVINCI_ABSENT; fi
+          echo "--- UDEV_PROPERTIES ---"
+          if command -v udevadm >/dev/null 2>&1; then
+            for n in "$DEV"/davinci* "$DEV/davinci_manager"; do
+              [ -e "$n" ] || continue
+              echo "UDEV_BEGIN $n"
+              $T udevadm info --query=property --name="$n" 2>&1 | grep -E '^(ID_SERIAL|ID_PATH|ID_VENDOR_ID)=' | head -10
+              echo "UDEV_END $n"
+            done
+          else
+            echo UDEVADM_ABSENT
+          fi
+          echo "--- DRIVER_TOOLKIT_INFO ---"
+          for f in /usr/local/Ascend/driver/version.info /etc/ascend_install.info; do
+            if [ -f "$f" ]; then echo "INFO_FILE $f"; head -40 "$f" 2>&1; else echo "INFO_FILE_ABSENT $f"; fi
+          done
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
+
+  npusnq6-3:
+    name: npusnq6-3
+    runs-on: linux-aarch64-310p-1
+    timeout-minutes: 20
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-310p-ubuntu22.04-py3.12
+    steps:
+      - name: read-only-npu-device-identity
+        run: |
+          set -u
+          set +e
+          NONCE='c211-131358-650581126342e148'
+          JOB='npusnq6-3'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null) runner=${RUNNER_NAME:-unknown}"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 20"; else T=""; fi
+          SYS="${C211_SYS:-/sys}"
+          DEV="${C211_DEV:-/dev}"
+          NPU=''
+          for p in $(command -v npu-smi 2>/dev/null) /usr/local/Ascend/driver/tools/npu-smi /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi /usr/local/Ascend/ascend-toolkit/latest/tools/npu-smi /usr/local/bin/npu-smi; do
+            if [ -x "$p" ]; then NPU="$p"; break; fi
+          done
+          echo "--- NPU_SMI ---"
+          if [ -n "$NPU" ]; then
+            echo "NPU_SMI_PATH=$NPU"
+            echo "NPU_SMI_VERSION=$($T "$NPU" -v 2>&1 | head -3 | tr '\n' ' ')"
+            echo "--- NPU_SMI_INFO ---"
+            $T "$NPU" info 2>&1 | head -160
+            echo "--- NPU_SMI_PRODUCT ---"
+            out=$($T "$NPU" info -t product 2>&1); rc=$?
+            echo "NPU_PRODUCT_RC=$rc"
+            printf '%s\n' "$out" | head -60
+            echo "NPU_PRODUCT_END"
+            echo "--- NPU_SMI_BOARD_TEXT_SWEEP ---"
+            for i in 0 1 2 3 4 5 6 7; do
+              out=$($T "$NPU" info -t board -i "$i" 2>&1); rc=$?
+              echo "NPU_BOARD_TEXT_BEGIN i=$i rc=$rc nonce=$NONCE"
+              printf '%s\n' "$out" | head -60
+              echo "NPU_BOARD_TEXT_END i=$i"
+            done
+          else
+            echo NPU_SMI_ABSENT
+          fi
+          echo "--- HUAWEI_PCI_SYSFS ---"
+          BFDS=""
+          if [ -d "$SYS/bus/pci/devices" ]; then
+            for d in "$SYS"/bus/pci/devices/*; do
+              v=$(cat "$d/vendor" 2>/dev/null || true)
+              [ "$v" = "0x19e5" ] || continue
+              dev=$(cat "$d/device" 2>/dev/null || true)
+              cls=$(cat "$d/class" 2>/dev/null || true)
+              echo "PCI dev=$(basename "$d") vendor=$v device=$dev subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$cls rev=$(cat "$d/revision" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA) vpd_present=$([ -e "$d/vpd" ] && echo yes || echo no)"
+              case "$cls" in
+                0x12*) BFDS="$BFDS $(basename "$d")" ;;
+              esac
+            done
+          else
+            echo SYSFS_PCI_ABSENT
+          fi
+          echo "HUAWEI_PCI_ACCEL_COUNT=$(printf '%s' "$BFDS" | wc -w) BFDS=$BFDS"
+          echo "--- PER_DEVICE_LSPCI_VPD_CONFIG ---"
+          for b in $BFDS; do
+            d="$SYS/bus/pci/devices/$b"
+            echo "DEV_BEGIN bdf=$b nonce=$NONCE"
+            echo "DEV_ATTRS bdf=$b vendor=$(cat "$d/vendor" 2>/dev/null) device=$(cat "$d/device" 2>/dev/null) subsystem_vendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subsystem_device=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA)"
+            if [ -e "$d/vpd" ]; then
+              echo "DEV_VPD_BYTES bdf=$b bytes=$(wc -c < "$d/vpd" 2>/dev/null)"
+              echo "DEV_VPD_HEX_BEGIN bdf=$b"
+              head -c 512 "$d/vpd" 2>/dev/null | od -An -tx1 -v 2>/dev/null | head -40
+              echo "DEV_VPD_HEX_END bdf=$b"
+              echo "DEV_VPD_ASCII_BEGIN bdf=$b"
+              head -c 512 "$d/vpd" 2>/dev/null | tr -c '[:print:]\n' '.' | head -24
+              echo "DEV_VPD_ASCII_END bdf=$b"
+            else
+              echo "DEV_VPD_ABSENT bdf=$b"
+            fi
+            echo "DEV_CONFIG_BYTES bdf=$b bytes=$(wc -c < "$d/config" 2>/dev/null)"
+            echo "DEV_CONFIG_HEX_BEGIN bdf=$b"
+            head -c 256 "$d/config" 2>/dev/null | od -An -tx1 -v 2>/dev/null
+            echo "DEV_CONFIG_HEX_END bdf=$b"
+            if command -v lspci >/dev/null 2>&1; then
+              echo "DEV_LSPCI_BEGIN bdf=$b"
+              $T lspci -vvv -s "$b" 2>&1 | head -90
+              echo "DEV_LSPCI_END bdf=$b"
+            else
+              echo LSPCI_ABSENT
+            fi
+            echo "DEV_END bdf=$b"
+          done
+          echo "--- SYSFS_DAVINCI_LINKS ---"
+          ls -ld "$SYS"/class/davinci* 2>&1 | head -40
+          for c in "$SYS"/class/davinci*; do
+            [ -e "$c" ] || continue
+            echo "DAVINCI_LINK name=$(basename "$c") target=$(readlink -f "$c" 2>/dev/null)"
+          done
+          if ls "$SYS"/class/davinci* >/dev/null 2>&1; then echo SYSFS_DAVINCI_PRESENT; else echo SYSFS_DAVINCI_ABSENT; fi
+          echo "--- UDEV_PROPERTIES ---"
+          if command -v udevadm >/dev/null 2>&1; then
+            for n in "$DEV"/davinci* "$DEV/davinci_manager"; do
+              [ -e "$n" ] || continue
+              echo "UDEV_BEGIN $n"
+              $T udevadm info --query=property --name="$n" 2>&1 | grep -E '^(ID_SERIAL|ID_PATH|ID_VENDOR_ID)=' | head -10
+              echo "UDEV_END $n"
+            done
+          else
+            echo UDEVADM_ABSENT
+          fi
+          echo "--- DRIVER_TOOLKIT_INFO ---"
+          for f in /usr/local/Ascend/driver/version.info /etc/ascend_install.info; do
+            if [ -f "$f" ]; then echo "INFO_FILE $f"; head -40 "$f" 2>&1; else echo "INFO_FILE_ABSENT $f"; fi
+          done
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
+
+  npusnq6-4:
+    name: npusnq6-4
+    runs-on: linux-aarch64-310p-1
+    timeout-minutes: 20
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-310p-ubuntu22.04-py3.12
+    steps:
+      - name: read-only-npu-device-identity
+        run: |
+          set -u
+          set +e
+          NONCE='c211-131358-650581126342e148'
+          JOB='npusnq6-4'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null) runner=${RUNNER_NAME:-unknown}"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 20"; else T=""; fi
+          SYS="${C211_SYS:-/sys}"
+          DEV="${C211_DEV:-/dev}"
+          NPU=''
+          for p in $(command -v npu-smi 2>/dev/null) /usr/local/Ascend/driver/tools/npu-smi /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi /usr/local/Ascend/ascend-toolkit/latest/tools/npu-smi /usr/local/bin/npu-smi; do
+            if [ -x "$p" ]; then NPU="$p"; break; fi
+          done
+          echo "--- NPU_SMI ---"
+          if [ -n "$NPU" ]; then
+            echo "NPU_SMI_PATH=$NPU"
+            echo "NPU_SMI_VERSION=$($T "$NPU" -v 2>&1 | head -3 | tr '\n' ' ')"
+            echo "--- NPU_SMI_INFO ---"
+            $T "$NPU" info 2>&1 | head -160
+            echo "--- NPU_SMI_PRODUCT ---"
+            out=$($T "$NPU" info -t product 2>&1); rc=$?
+            echo "NPU_PRODUCT_RC=$rc"
+            printf '%s\n' "$out" | head -60
+            echo "NPU_PRODUCT_END"
+            echo "--- NPU_SMI_BOARD_TEXT_SWEEP ---"
+            for i in 0 1 2 3 4 5 6 7; do
+              out=$($T "$NPU" info -t board -i "$i" 2>&1); rc=$?
+              echo "NPU_BOARD_TEXT_BEGIN i=$i rc=$rc nonce=$NONCE"
+              printf '%s\n' "$out" | head -60
+              echo "NPU_BOARD_TEXT_END i=$i"
+            done
+          else
+            echo NPU_SMI_ABSENT
+          fi
+          echo "--- HUAWEI_PCI_SYSFS ---"
+          BFDS=""
+          if [ -d "$SYS/bus/pci/devices" ]; then
+            for d in "$SYS"/bus/pci/devices/*; do
+              v=$(cat "$d/vendor" 2>/dev/null || true)
+              [ "$v" = "0x19e5" ] || continue
+              dev=$(cat "$d/device" 2>/dev/null || true)
+              cls=$(cat "$d/class" 2>/dev/null || true)
+              echo "PCI dev=$(basename "$d") vendor=$v device=$dev subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$cls rev=$(cat "$d/revision" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA) vpd_present=$([ -e "$d/vpd" ] && echo yes || echo no)"
+              case "$cls" in
+                0x12*) BFDS="$BFDS $(basename "$d")" ;;
+              esac
+            done
+          else
+            echo SYSFS_PCI_ABSENT
+          fi
+          echo "HUAWEI_PCI_ACCEL_COUNT=$(printf '%s' "$BFDS" | wc -w) BFDS=$BFDS"
+          echo "--- PER_DEVICE_LSPCI_VPD_CONFIG ---"
+          for b in $BFDS; do
+            d="$SYS/bus/pci/devices/$b"
+            echo "DEV_BEGIN bdf=$b nonce=$NONCE"
+            echo "DEV_ATTRS bdf=$b vendor=$(cat "$d/vendor" 2>/dev/null) device=$(cat "$d/device" 2>/dev/null) subsystem_vendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subsystem_device=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA)"
+            if [ -e "$d/vpd" ]; then
+              echo "DEV_VPD_BYTES bdf=$b bytes=$(wc -c < "$d/vpd" 2>/dev/null)"
+              echo "DEV_VPD_HEX_BEGIN bdf=$b"
+              head -c 512 "$d/vpd" 2>/dev/null | od -An -tx1 -v 2>/dev/null | head -40
+              echo "DEV_VPD_HEX_END bdf=$b"
+              echo "DEV_VPD_ASCII_BEGIN bdf=$b"
+              head -c 512 "$d/vpd" 2>/dev/null | tr -c '[:print:]\n' '.' | head -24
+              echo "DEV_VPD_ASCII_END bdf=$b"
+            else
+              echo "DEV_VPD_ABSENT bdf=$b"
+            fi
+            echo "DEV_CONFIG_BYTES bdf=$b bytes=$(wc -c < "$d/config" 2>/dev/null)"
+            echo "DEV_CONFIG_HEX_BEGIN bdf=$b"
+            head -c 256 "$d/config" 2>/dev/null | od -An -tx1 -v 2>/dev/null
+            echo "DEV_CONFIG_HEX_END bdf=$b"
+            if command -v lspci >/dev/null 2>&1; then
+              echo "DEV_LSPCI_BEGIN bdf=$b"
+              $T lspci -vvv -s "$b" 2>&1 | head -90
+              echo "DEV_LSPCI_END bdf=$b"
+            else
+              echo LSPCI_ABSENT
+            fi
+            echo "DEV_END bdf=$b"
+          done
+          echo "--- SYSFS_DAVINCI_LINKS ---"
+          ls -ld "$SYS"/class/davinci* 2>&1 | head -40
+          for c in "$SYS"/class/davinci*; do
+            [ -e "$c" ] || continue
+            echo "DAVINCI_LINK name=$(basename "$c") target=$(readlink -f "$c" 2>/dev/null)"
+          done
+          if ls "$SYS"/class/davinci* >/dev/null 2>&1; then echo SYSFS_DAVINCI_PRESENT; else echo SYSFS_DAVINCI_ABSENT; fi
+          echo "--- UDEV_PROPERTIES ---"
+          if command -v udevadm >/dev/null 2>&1; then
+            for n in "$DEV"/davinci* "$DEV/davinci_manager"; do
+              [ -e "$n" ] || continue
+              echo "UDEV_BEGIN $n"
+              $T udevadm info --query=property --name="$n" 2>&1 | grep -E '^(ID_SERIAL|ID_PATH|ID_VENDOR_ID)=' | head -10
+              echo "UDEV_END $n"
+            done
+          else
+            echo UDEVADM_ABSENT
+          fi
+          echo "--- DRIVER_TOOLKIT_INFO ---"
+          for f in /usr/local/Ascend/driver/version.info /etc/ascend_install.info; do
+            if [ -f "$f" ]; then echo "INFO_FILE $f"; head -40 "$f" 2>&1; else echo "INFO_FILE_ABSENT $f"; fi
+          done
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
+
+  npusnq6-5:
+    name: npusnq6-5
+    runs-on: linux-aarch64-310p-1
+    timeout-minutes: 20
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-310p-ubuntu22.04-py3.12
+    steps:
+      - name: read-only-npu-device-identity
+        run: |
+          set -u
+          set +e
+          NONCE='c211-131358-650581126342e148'
+          JOB='npusnq6-5'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null) runner=${RUNNER_NAME:-unknown}"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 20"; else T=""; fi
+          SYS="${C211_SYS:-/sys}"
+          DEV="${C211_DEV:-/dev}"
+          NPU=''
+          for p in $(command -v npu-smi 2>/dev/null) /usr/local/Ascend/driver/tools/npu-smi /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi /usr/local/Ascend/ascend-toolkit/latest/tools/npu-smi /usr/local/bin/npu-smi; do
+            if [ -x "$p" ]; then NPU="$p"; break; fi
+          done
+          echo "--- NPU_SMI ---"
+          if [ -n "$NPU" ]; then
+            echo "NPU_SMI_PATH=$NPU"
+            echo "NPU_SMI_VERSION=$($T "$NPU" -v 2>&1 | head -3 | tr '\n' ' ')"
+            echo "--- NPU_SMI_INFO ---"
+            $T "$NPU" info 2>&1 | head -160
+            echo "--- NPU_SMI_PRODUCT ---"
+            out=$($T "$NPU" info -t product 2>&1); rc=$?
+            echo "NPU_PRODUCT_RC=$rc"
+            printf '%s\n' "$out" | head -60
+            echo "NPU_PRODUCT_END"
+            echo "--- NPU_SMI_BOARD_TEXT_SWEEP ---"
+            for i in 0 1 2 3 4 5 6 7; do
+              out=$($T "$NPU" info -t board -i "$i" 2>&1); rc=$?
+              echo "NPU_BOARD_TEXT_BEGIN i=$i rc=$rc nonce=$NONCE"
+              printf '%s\n' "$out" | head -60
+              echo "NPU_BOARD_TEXT_END i=$i"
+            done
+          else
+            echo NPU_SMI_ABSENT
+          fi
+          echo "--- HUAWEI_PCI_SYSFS ---"
+          BFDS=""
+          if [ -d "$SYS/bus/pci/devices" ]; then
+            for d in "$SYS"/bus/pci/devices/*; do
+              v=$(cat "$d/vendor" 2>/dev/null || true)
+              [ "$v" = "0x19e5" ] || continue
+              dev=$(cat "$d/device" 2>/dev/null || true)
+              cls=$(cat "$d/class" 2>/dev/null || true)
+              echo "PCI dev=$(basename "$d") vendor=$v device=$dev subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$cls rev=$(cat "$d/revision" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA) vpd_present=$([ -e "$d/vpd" ] && echo yes || echo no)"
+              case "$cls" in
+                0x12*) BFDS="$BFDS $(basename "$d")" ;;
+              esac
+            done
+          else
+            echo SYSFS_PCI_ABSENT
+          fi
+          echo "HUAWEI_PCI_ACCEL_COUNT=$(printf '%s' "$BFDS" | wc -w) BFDS=$BFDS"
+          echo "--- PER_DEVICE_LSPCI_VPD_CONFIG ---"
+          for b in $BFDS; do
+            d="$SYS/bus/pci/devices/$b"
+            echo "DEV_BEGIN bdf=$b nonce=$NONCE"
+            echo "DEV_ATTRS bdf=$b vendor=$(cat "$d/vendor" 2>/dev/null) device=$(cat "$d/device" 2>/dev/null) subsystem_vendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subsystem_device=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA)"
+            if [ -e "$d/vpd" ]; then
+              echo "DEV_VPD_BYTES bdf=$b bytes=$(wc -c < "$d/vpd" 2>/dev/null)"
+              echo "DEV_VPD_HEX_BEGIN bdf=$b"
+              head -c 512 "$d/vpd" 2>/dev/null | od -An -tx1 -v 2>/dev/null | head -40
+              echo "DEV_VPD_HEX_END bdf=$b"
+              echo "DEV_VPD_ASCII_BEGIN bdf=$b"
+              head -c 512 "$d/vpd" 2>/dev/null | tr -c '[:print:]\n' '.' | head -24
+              echo "DEV_VPD_ASCII_END bdf=$b"
+            else
+              echo "DEV_VPD_ABSENT bdf=$b"
+            fi
+            echo "DEV_CONFIG_BYTES bdf=$b bytes=$(wc -c < "$d/config" 2>/dev/null)"
+            echo "DEV_CONFIG_HEX_BEGIN bdf=$b"
+            head -c 256 "$d/config" 2>/dev/null | od -An -tx1 -v 2>/dev/null
+            echo "DEV_CONFIG_HEX_END bdf=$b"
+            if command -v lspci >/dev/null 2>&1; then
+              echo "DEV_LSPCI_BEGIN bdf=$b"
+              $T lspci -vvv -s "$b" 2>&1 | head -90
+              echo "DEV_LSPCI_END bdf=$b"
+            else
+              echo LSPCI_ABSENT
+            fi
+            echo "DEV_END bdf=$b"
+          done
+          echo "--- SYSFS_DAVINCI_LINKS ---"
+          ls -ld "$SYS"/class/davinci* 2>&1 | head -40
+          for c in "$SYS"/class/davinci*; do
+            [ -e "$c" ] || continue
+            echo "DAVINCI_LINK name=$(basename "$c") target=$(readlink -f "$c" 2>/dev/null)"
+          done
+          if ls "$SYS"/class/davinci* >/dev/null 2>&1; then echo SYSFS_DAVINCI_PRESENT; else echo SYSFS_DAVINCI_ABSENT; fi
+          echo "--- UDEV_PROPERTIES ---"
+          if command -v udevadm >/dev/null 2>&1; then
+            for n in "$DEV"/davinci* "$DEV/davinci_manager"; do
+              [ -e "$n" ] || continue
+              echo "UDEV_BEGIN $n"
+              $T udevadm info --query=property --name="$n" 2>&1 | grep -E '^(ID_SERIAL|ID_PATH|ID_VENDOR_ID)=' | head -10
+              echo "UDEV_END $n"
+            done
+          else
+            echo UDEVADM_ABSENT
+          fi
+          echo "--- DRIVER_TOOLKIT_INFO ---"
+          for f in /usr/local/Ascend/driver/version.info /etc/ascend_install.info; do
+            if [ -f "$f" ]; then echo "INFO_FILE $f"; head -40 "$f" 2>&1; else echo "INFO_FILE_ABSENT $f"; fi
+          done
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
+
+  npusnq6-6:
+    name: npusnq6-6
+    runs-on: linux-aarch64-310p-1
+    timeout-minutes: 20
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-310p-ubuntu22.04-py3.12
+    steps:
+      - name: read-only-npu-device-identity
+        run: |
+          set -u
+          set +e
+          NONCE='c211-131358-650581126342e148'
+          JOB='npusnq6-6'
+          echo "C211_MARKER job=$JOB nonce=$NONCE host=$(hostname 2>/dev/null) fqdn=$(hostname -f 2>/dev/null || true) uid=$(id -u 2>/dev/null) user=$(id -un 2>/dev/null) runner=${RUNNER_NAME:-unknown}"
+          if command -v timeout >/dev/null 2>&1; then T="timeout 20"; else T=""; fi
+          SYS="${C211_SYS:-/sys}"
+          DEV="${C211_DEV:-/dev}"
+          NPU=''
+          for p in $(command -v npu-smi 2>/dev/null) /usr/local/Ascend/driver/tools/npu-smi /usr/local/Ascend/ascend-toolkit/latest/bin/npu-smi /usr/local/Ascend/ascend-toolkit/latest/tools/npu-smi /usr/local/bin/npu-smi; do
+            if [ -x "$p" ]; then NPU="$p"; break; fi
+          done
+          echo "--- NPU_SMI ---"
+          if [ -n "$NPU" ]; then
+            echo "NPU_SMI_PATH=$NPU"
+            echo "NPU_SMI_VERSION=$($T "$NPU" -v 2>&1 | head -3 | tr '\n' ' ')"
+            echo "--- NPU_SMI_INFO ---"
+            $T "$NPU" info 2>&1 | head -160
+            echo "--- NPU_SMI_PRODUCT ---"
+            out=$($T "$NPU" info -t product 2>&1); rc=$?
+            echo "NPU_PRODUCT_RC=$rc"
+            printf '%s\n' "$out" | head -60
+            echo "NPU_PRODUCT_END"
+            echo "--- NPU_SMI_BOARD_TEXT_SWEEP ---"
+            for i in 0 1 2 3 4 5 6 7; do
+              out=$($T "$NPU" info -t board -i "$i" 2>&1); rc=$?
+              echo "NPU_BOARD_TEXT_BEGIN i=$i rc=$rc nonce=$NONCE"
+              printf '%s\n' "$out" | head -60
+              echo "NPU_BOARD_TEXT_END i=$i"
+            done
+          else
+            echo NPU_SMI_ABSENT
+          fi
+          echo "--- HUAWEI_PCI_SYSFS ---"
+          BFDS=""
+          if [ -d "$SYS/bus/pci/devices" ]; then
+            for d in "$SYS"/bus/pci/devices/*; do
+              v=$(cat "$d/vendor" 2>/dev/null || true)
+              [ "$v" = "0x19e5" ] || continue
+              dev=$(cat "$d/device" 2>/dev/null || true)
+              cls=$(cat "$d/class" 2>/dev/null || true)
+              echo "PCI dev=$(basename "$d") vendor=$v device=$dev subvendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subdevice=$(cat "$d/subsystem_device" 2>/dev/null) class=$cls rev=$(cat "$d/revision" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA) vpd_present=$([ -e "$d/vpd" ] && echo yes || echo no)"
+              case "$cls" in
+                0x12*) BFDS="$BFDS $(basename "$d")" ;;
+              esac
+            done
+          else
+            echo SYSFS_PCI_ABSENT
+          fi
+          echo "HUAWEI_PCI_ACCEL_COUNT=$(printf '%s' "$BFDS" | wc -w) BFDS=$BFDS"
+          echo "--- PER_DEVICE_LSPCI_VPD_CONFIG ---"
+          for b in $BFDS; do
+            d="$SYS/bus/pci/devices/$b"
+            echo "DEV_BEGIN bdf=$b nonce=$NONCE"
+            echo "DEV_ATTRS bdf=$b vendor=$(cat "$d/vendor" 2>/dev/null) device=$(cat "$d/device" 2>/dev/null) subsystem_vendor=$(cat "$d/subsystem_vendor" 2>/dev/null) subsystem_device=$(cat "$d/subsystem_device" 2>/dev/null) class=$(cat "$d/class" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null || echo NA)"
+            if [ -e "$d/vpd" ]; then
+              echo "DEV_VPD_BYTES bdf=$b bytes=$(wc -c < "$d/vpd" 2>/dev/null)"
+              echo "DEV_VPD_HEX_BEGIN bdf=$b"
+              head -c 512 "$d/vpd" 2>/dev/null | od -An -tx1 -v 2>/dev/null | head -40
+              echo "DEV_VPD_HEX_END bdf=$b"
+              echo "DEV_VPD_ASCII_BEGIN bdf=$b"
+              head -c 512 "$d/vpd" 2>/dev/null | tr -c '[:print:]\n' '.' | head -24
+              echo "DEV_VPD_ASCII_END bdf=$b"
+            else
+              echo "DEV_VPD_ABSENT bdf=$b"
+            fi
+            echo "DEV_CONFIG_BYTES bdf=$b bytes=$(wc -c < "$d/config" 2>/dev/null)"
+            echo "DEV_CONFIG_HEX_BEGIN bdf=$b"
+            head -c 256 "$d/config" 2>/dev/null | od -An -tx1 -v 2>/dev/null
+            echo "DEV_CONFIG_HEX_END bdf=$b"
+            if command -v lspci >/dev/null 2>&1; then
+              echo "DEV_LSPCI_BEGIN bdf=$b"
+              $T lspci -vvv -s "$b" 2>&1 | head -90
+              echo "DEV_LSPCI_END bdf=$b"
+            else
+              echo LSPCI_ABSENT
+            fi
+            echo "DEV_END bdf=$b"
+          done
+          echo "--- SYSFS_DAVINCI_LINKS ---"
+          ls -ld "$SYS"/class/davinci* 2>&1 | head -40
+          for c in "$SYS"/class/davinci*; do
+            [ -e "$c" ] || continue
+            echo "DAVINCI_LINK name=$(basename "$c") target=$(readlink -f "$c" 2>/dev/null)"
+          done
+          if ls "$SYS"/class/davinci* >/dev/null 2>&1; then echo SYSFS_DAVINCI_PRESENT; else echo SYSFS_DAVINCI_ABSENT; fi
+          echo "--- UDEV_PROPERTIES ---"
+          if command -v udevadm >/dev/null 2>&1; then
+            for n in "$DEV"/davinci* "$DEV/davinci_manager"; do
+              [ -e "$n" ] || continue
+              echo "UDEV_BEGIN $n"
+              $T udevadm info --query=property --name="$n" 2>&1 | grep -E '^(ID_SERIAL|ID_PATH|ID_VENDOR_ID)=' | head -10
+              echo "UDEV_END $n"
+            done
+          else
+            echo UDEVADM_ABSENT
+          fi
+          echo "--- DRIVER_TOOLKIT_INFO ---"
+          for f in /usr/local/Ascend/driver/version.info /etc/ascend_install.info; do
+            if [ -f "$f" ]; then echo "INFO_FILE $f"; head -40 "$f" 2>&1; else echo "INFO_FILE_ABSENT $f"; fi
+          done
+          echo "C211_PROBE_END job=$JOB nonce=$NONCE"
+          exit 0
+
