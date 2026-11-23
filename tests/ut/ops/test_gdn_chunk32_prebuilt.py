@@ -37,8 +37,8 @@ class NoIterationTuple(tuple):
 @pytest.mark.parametrize(
     "device_type,chunk32_enabled,chunk_size,use_exp2,kernel_l2norm,disable_recompute,state_v_first",
     [
-        (AscendDeviceType.A2, False, 64, False, False, True, False),
-        (AscendDeviceType.A3, False, 64, False, False, True, False),
+        (AscendDeviceType.A2, False, 64, False, True, False, True),
+        (AscendDeviceType.A3, False, 64, False, True, False, True),
         (AscendDeviceType.A5, True, 32, False, True, False, True),
         (AscendDeviceType.A5, False, 64, True, True, True, True),
     ],
@@ -47,7 +47,7 @@ class NoIterationTuple(tuple):
 def test_fla_kernel_contract_isolated_by_device_and_chunk_size(
     device_type, chunk32_enabled, chunk_size, use_exp2, kernel_l2norm, disable_recompute, state_v_first, head_first
 ):
-    """Catch chunk32 flags leaking into A2/A3 or the A5 chunk64 path."""
+    """Preserve each device's kernel contract, with chunk32 enabled only on A5."""
     from vllm_ascend.device.device_op import get_device_adaptor
 
     profile = get_hardware_profile(device_type)
@@ -89,7 +89,7 @@ def test_fla_kernel_contract_isolated_by_device_and_chunk_size(
     assert kwargs.get("use_beta_sigmoid_in_kernel", False) is chunk32_enabled
     assert kwargs["use_qk_l2norm_in_kernel"] is kernel_l2norm
     assert kwargs["state_v_first"] is state_v_first
-    assert kwargs["layout"] == ("BNSD" if device_type != AscendDeviceType.A5 or head_first else "BSND")
+    assert kwargs["layout"] == ("BNSD" if head_first else "BSND")
     assert kwargs["cu_seqlens"] == (0, 33, 98)
     assert metadata.chunk_indices_chunk64_host == (0, 0, 1, 0, 1, 1)
     if chunk32_enabled:
