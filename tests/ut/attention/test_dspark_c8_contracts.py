@@ -6,41 +6,107 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+import vllm_ascend.ops  # noqa: F401
+from torch import nn
 from vllm.compilation import backends
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-
-import vllm_ascend.ops  # noqa: F401
+from vllm.model_executor.models import utils as model_utils
 from vllm_ascend.attention import mla_v1
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
-from vllm_ascend.quantization.utils import resolve_k3_dspark_quant_prefix
+from vllm_ascend.models.kimi_k3 import kimi_k3_dspark
+from vllm_ascend.quantization import utils as quant_utils
+from vllm_ascend.quantization.configs import modelslim_config
 
 
-@pytest.mark.parametrize(
-    "prefix, expected",
-    [
-        ("model.layers.93.self_attn.attn", "layers.0.self_attn.attn"),
-        ("model.layers.97.self_attn.attn", "layers.4.self_attn.attn"),
-        ("model.layers.92.self_attn.attn", "model.layers.92.self_attn.attn"),
-        ("model.layers.98.self_attn.attn", "model.layers.98.self_attn.attn"),
-        ("layers.0.self_attn.attn", "layers.0.self_attn.attn"),
-    ],
-)
-def test_dspark_prefix_mapping_is_scoped_and_idempotent(monkeypatch, prefix, expected):
+@pytest.mark.parametrize("layer_offset", [0, 1, 93])
+@pytest.mark.parametrize("quantized", [False, True])
+def test_dspark_maps_its_recipe_before_building_layers(monkeypatch, layer_offset, quantized):
+    recipe = {
+        "fa_quant_type": "FAKQuant",
+        "layers.0.self_attn.fa_k.scale": "FAQuant",
+        "layers.0.self_attn.q_a_proj.weight": "FLOAT",
+        "layers.0.self_attn.kv_a_proj_with_mqa.weight": "FLOAT",
+        "layers.1.mlp.gate_proj.weight": "W8A8_DYNAMIC",
+    }
+    draft_quant = modelslim_config.AscendModelSlimConfig(recipe.copy()) if quantized else None
+    target_quant = modelslim_config.AscendModelSlimConfig({"model.layers.0.self_attn.q_a_proj.weight": "FLOAT"})
     config = SimpleNamespace(
         speculative_config=SimpleNamespace(
             method="dspark",
-            draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="k3_dspark", num_hidden_layers=5)),
+            draft_model_config=SimpleNamespace(
+                use_mla=True,
+                quantization="ascend" if quantized else None,
+                hf_config=SimpleNamespace(
+                    model_type="k3_dspark",
+                    num_hidden_layers=2,
+                    hidden_size=8,
+                    target_hidden_size=8,
+                    num_target_layers=1,
+                    vocab_size=8,
+                    draft_vocab_size=8,
+                    markov_rank=2,
+                    rms_norm_eps=1e-6,
+                    num_attention_heads=2,
+                    qk_nope_head_dim=2,
+                    qk_rope_head_dim=2,
+                    v_head_dim=2,
+                    q_lora_rank=2,
+                    kv_lora_rank=2,
+                    intermediate_size=8,
+                    hidden_act="silu",
+                ),
+            ),
         ),
-        model_config=SimpleNamespace(get_num_layers=lambda _: 93),
-        parallel_config=SimpleNamespace(),
+        model_config=SimpleNamespace(use_mla=True, hf_text_config=SimpleNamespace(index_topk=2048)),
+        quant_config=target_quant,
+        cache_config=SimpleNamespace(cache_dtype="fp8"),
+        kv_transfer_config=None,
     )
+    monkeypatch.setattr(kimi_k3_dspark, "get_draft_quant_config", lambda _: draft_quant)
+    fallback_quant = MagicMock(return_value=draft_quant)
+    monkeypatch.setattr(model_utils, "get_draft_quant_config", fallback_quant)
     monkeypatch.setattr(backends, "model_tag", "dspark_head")
-    mapped = resolve_k3_dspark_quant_prefix(config, prefix)
-    assert mapped == expected
-    assert resolve_k3_dspark_quant_prefix(config, mapped) == expected
-    monkeypatch.setattr(backends, "model_tag", "backbone")
-    assert resolve_k3_dspark_quant_prefix(config, prefix) == prefix
-    assert resolve_k3_dspark_quant_prefix(None, prefix) == prefix
+    profile = SimpleNamespace(supports=lambda _: True)
+    monkeypatch.setattr(modelslim_config, "get_current_hardware_profile", lambda: profile)
+    monkeypatch.setattr(quant_utils, "get_current_hardware_profile", lambda: profile)
+    monkeypatch.setattr(kimi_k3_dspark, "get_pp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(kimi_k3_dspark, "ColumnParallelLinear", lambda *args, **kwargs: nn.Module())
+    monkeypatch.setattr(kimi_k3_dspark, "RMSNorm", lambda *args, **kwargs: nn.Module())
+    monkeypatch.setattr(kimi_k3_dspark, "DSparkMarkovHead", lambda *args, **kwargs: nn.Module())
+
+    def capture_layer(*, prefix, quant_config, **kwargs):
+        layer = nn.Module()
+        layer.prefix = prefix
+        layer.quant_config = quant_config
+        return layer
+
+    monkeypatch.setattr(kimi_k3_dspark, "AscendKimiMLAAttention", capture_layer)
+    monkeypatch.setattr(kimi_k3_dspark, "KimiMLP", capture_layer)
+    draft = kimi_k3_dspark.AscendK3DSparkModel(vllm_config=config, start_layer_id=layer_offset, prefix="model")
+    attn = draft.layers[0].self_attn
+    mlp = draft.layers[1].mlp
+    assert attn.prefix == f"model.layers.{layer_offset}.self_attn"
+    assert mlp.prefix == f"model.layers.{layer_offset + 1}.mlp"
+    assert attn.quant_config is mlp.quant_config is draft.quant_config
+    draft_fa_quant = quant_utils.enable_fa_quant(config, f"{attn.prefix}.attn", draft_quant_config=draft.quant_config)
+    assert draft_fa_quant is quantized
+    assert not quant_utils.enable_fa_quant(
+        config, f"{draft.layers[1].self_attn.prefix}.attn", draft_quant_config=draft.quant_config
+    )
+    assert target_quant.quant_description == {"model.layers.0.self_attn.q_a_proj.weight": "FLOAT"}
+    if quantized:
+        fallback_quant.assert_not_called()
+        assert draft_quant.quant_description == recipe
+        assert draft.quant_config.quant_description[f"{attn.prefix}.fa_k.scale"] == "FAQuant"
+        assert draft.quant_config.quant_description[f"{mlp.prefix}.gate_proj.weight"] == "W8A8_DYNAMIC"
+        assert (
+            modelslim_config.get_quant_type_for_layer(
+                draft.quant_config.quant_description,
+                f"{attn.prefix}.fused_qkv_a_proj",
+                {"fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]},
+            )
+            is None
+        )
 
 
 @pytest.mark.parametrize("quant_backend", [False, True])

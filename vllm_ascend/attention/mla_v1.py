@@ -1155,7 +1155,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
 
         self.layer_name = kwargs.get("layer_name")
-        self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
+        self.fa_quant_layer = enable_fa_quant(
+            self.vllm_config,
+            self.layer_name,
+            draft_quant_config=kwargs.get("layer_quant_config") if self._is_k3_dspark_draft else None,
+        )
         self.dtype = kv_cache_dtype_str_to_dtype(
             self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
         )

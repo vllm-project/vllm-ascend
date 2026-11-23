@@ -50,7 +50,7 @@ from vllm_ascend.utils import (
 )
 
 from ..methods import get_scheme_class
-from ..utils import is_fused_moe_layer, resolve_k3_dspark_quant_prefix
+from ..utils import is_fused_moe_layer
 
 _MOE_WEIGHT_LOADER_NAME_MAP = {
     "w13_scale_bias": "w13_scale",
@@ -703,11 +703,6 @@ class AscendModelSlimConfig(QuantizationConfig):
         return False
 
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
-        draft_prefix = resolve_k3_dspark_quant_prefix(get_current_vllm_config_or_none(), prefix)
-        if draft_prefix != prefix:
-            # The surrounding config describes the target, not this draft.
-            # Do not apply target-specific prefix rewrites to draft recipes.
-            return draft_prefix
         self.model_type = model_type
         # Some model paths, e.g. qwen3-vl and qwen3_5_moe MTP drafter,
         # initialize lm_head with prefix="lm_head", while the quant description
@@ -946,7 +941,6 @@ class AscendModelSlimConfig(QuantizationConfig):
         return None
 
     def is_fa_quant_layer(self, prefix):
-        prefix = resolve_k3_dspark_quant_prefix(get_current_vllm_config_or_none(), prefix)
         if self.enable_fa_quant:
             layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
             if layer_id_str.isdigit() and int(layer_id_str) in self.kvcache_quant_layers:

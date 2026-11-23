@@ -17,8 +17,8 @@
 
 from enum import IntEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import regex as re
 import torch
 import torch_npu  # noqa: F401
 from vllm import envs
@@ -29,6 +29,9 @@ from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     enable_sfa,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization import QuantizationConfig
 
 # TODO(zzzzzz198): Currently three formats(float8_e8m0fnu, float4_e2m1fn_x2, hifloat8) have to be
 # specified for some operators like GMM in Ascend950, while float8_e4m3fn does not. Remove these
@@ -256,35 +259,7 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
     vllm_config.quant_config = _VllmConfig._get_quantization_config(model_config, vllm_config.load_config)
 
 
-def resolve_k3_dspark_quant_prefix(vllm_config, prefix: str) -> str:
-    """Resolve K3 DSpark runtime layer names in the draft checkpoint namespace.
-
-    The model offsets draft attention IDs by the target's layer count, but
-    ModelSlim recipes retain local draft IDs. Do not mutate recipes or target
-    names, and do not offset names that have already been resolved.
-    """
-    speculative_config = getattr(vllm_config, "speculative_config", None)
-    if speculative_config is None or speculative_config.method != "dspark":
-        return prefix
-    draft_config = getattr(speculative_config, "draft_model_config", None)
-    draft_hf_config = getattr(draft_config, "hf_config", None)
-    if draft_hf_config is None or getattr(draft_hf_config, "model_type", None) != "k3_dspark":
-        return prefix
-    from vllm.compilation import backends
-
-    if backends.model_tag != "dspark_head":
-        return prefix
-    match = re.match(r"^model\.layers\.(\d+)(?=\.|$)", prefix)
-    if match is None:
-        return prefix
-    start_layer_id = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
-    local_layer_id = int(match.group(1)) - start_layer_id
-    if not 0 <= local_layer_id < draft_hf_config.num_hidden_layers:
-        return prefix
-    return f"layers.{local_layer_id}{prefix[match.end() :]}"
-
-
-def enable_fa_quant(vllm_config, layer_name=None) -> bool:
+def enable_fa_quant(vllm_config, layer_name=None, *, draft_quant_config: "QuantizationConfig | None" = None) -> bool:
     model_config = getattr(vllm_config, "model_config", None)
     quant_config = getattr(vllm_config, "quant_config", None)
     speculative_config = getattr(vllm_config, "speculative_config", None)
@@ -300,7 +275,7 @@ def enable_fa_quant(vllm_config, layer_name=None) -> bool:
             from vllm.model_executor.models.utils import get_draft_quant_config
 
             model_config = speculative_config.draft_model_config
-            quant_config = get_draft_quant_config(vllm_config)
+            quant_config = draft_quant_config if draft_quant_config is not None else get_draft_quant_config(vllm_config)
     if model_config is None or not model_config.use_mla:
         return False
     if not is_dspark_draft and enable_sfa(vllm_config):
