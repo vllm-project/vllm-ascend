@@ -109,6 +109,30 @@ def _run_gdn_forward(
     return model(hidden_states)
 
 
+def test_head_sharded_gdn_projects_global_tokens_and_returns_local_rows():
+    model = _GDNForwardWrapper()
+    model.out_proj.pcp_group = SimpleNamespace(world_size=2)
+    global_hidden = torch.arange(8, dtype=torch.float32).view(4, 2)
+    local_hidden = global_hidden[[0, 3]]
+    gather = Mock(return_value=global_hidden)
+    output = torch.empty_like(local_hidden)
+
+    def core(qkv, b, a, out, prefix, use_aiter):
+        torch.testing.assert_close(qkv, global_hidden)
+        out.copy_(qkv.view_as(out) + 1)
+
+    with (
+        patch.object(torch.ops.vllm, "pcp_gather_tokens", gather),
+        patch.object(torch.ops.vllm, "qwen_gdn_attention_core", side_effect=core),
+        patch.object(torch.ops.vllm, "pcp_scatter_tokens", side_effect=lambda rows, *_: rows[[0, 3]]),
+    ):
+        result = model(local_hidden, output)
+
+    gather.assert_called_once_with(local_hidden, 2, model.prefix)
+    torch.testing.assert_close(result, local_hidden + 1)
+    torch.testing.assert_close(output, result)
+
+
 def _make_prefill_metadata(device: torch.device | str = "cpu") -> GDNAttentionMetadata:
     metadata = GDNAttentionMetadata(
         num_prefills=1,
@@ -274,6 +298,19 @@ def test_non_bf16_prefill_falls_back_to_triton_pipeline_with_strided_ssm_cache()
         assert kwargs["initial_state"].shape == (1, 1, 2, 2)
         return kwargs["v"].clone(), kwargs["initial_state"] + 1
 
+    # The padded-cache branch gathers and scatters through Triton kernels.
+    # CPU CI disables Triton, so swap in the equivalent torch reference.
+    def gather_state(state, indices, has_initial_state, **kwargs):
+        assert state is model.ssm_state
+        assert kwargs == {}
+        out = state.index_select(0, indices).contiguous()
+        out[~has_initial_state] = 0
+        return out
+
+    def scatter_state(state, indices, values):
+        assert state is model.ssm_state
+        state.index_copy_(0, indices, values)
+
     with (
         override_forward_context(forward_context),
         patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
@@ -285,6 +322,8 @@ def test_non_bf16_prefill_falls_back_to_triton_pipeline_with_strided_ssm_cache()
         patch("vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
         patch("vllm_ascend.ops.gdn.DeviceOperator.fla_gdn_prefill", side_effect=fla_prefill),
         patch("vllm_ascend.ops.gdn.chunk_gated_delta_rule", side_effect=triton_prefill) as triton_fallback,
+        patch("vllm_ascend.ops.gdn.gather_ssm_states", side_effect=gather_state) as gather_mock,
+        patch("vllm_ascend.ops.gdn.scatter_ssm_states_", side_effect=scatter_state) as scatter_mock,
         patch("vllm_ascend.ops.gdn.clear_ssm_states") as clear_mock,
         patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=lambda x, *a, **k: x.clone()),
         patch("vllm_ascend.ops.gdn.wait_for_kv_layer_from_connector"),
@@ -299,7 +338,9 @@ def test_non_bf16_prefill_falls_back_to_triton_pipeline_with_strided_ssm_cache()
             core_attn_out,
         )
 
-    clear_mock.assert_called_once()
+    gather_mock.assert_called_once()
+    scatter_mock.assert_called_once()
+    clear_mock.assert_not_called()
     triton_fallback.assert_called_once()
     torch.testing.assert_close(model.ssm_state[0], torch.zeros_like(model.ssm_state[0]))
     torch.testing.assert_close(model.ssm_state[1], torch.full_like(model.ssm_state[1], 3))

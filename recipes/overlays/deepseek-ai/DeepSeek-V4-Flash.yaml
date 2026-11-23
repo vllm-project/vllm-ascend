@@ -144,6 +144,28 @@ strategy_overrides:
           - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
           - '--additional-config'
           - '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true}'
+      # DEP does not read variant.tp. Keep the A3 topology and memory settings
+      # after the generic DEP and NPU layers, which otherwise select DP4 on
+      # four devices and replace the W8A8 variant's A3 settings with A5 values.
+      ascend_910c:
+        extra_env:
+          HCCL_BUFFSIZE: '2560'
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+        extra_args:
+          - '--tensor-parallel-size'
+          - '8'
+          - '--data-parallel-size'
+          - '2'
+          - '--block-size'
+          - '128'
+          - '--max-num-seqs'
+          - '32'
+          - '--max-num-batched-tokens'
+          - '10240'
+          - '--gpu-memory-utilization'
+          - '0.90'
+          - '--additional-config'
+          - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true}'
 features:
   spec_decoding:
     modes:

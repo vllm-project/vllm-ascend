@@ -84,7 +84,6 @@ def test_deepseek_v4_dspark_spec_decoding_dp4_full_graph() -> None:
             "cudagraph_capture_sizes": [6, 12],
         },
         additional_config={
-            "enable_dsa_cp": False,
             "enable_fused_mc2": 0,
         },
     ) as vllm_model:

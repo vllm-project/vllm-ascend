@@ -4,6 +4,8 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import lru_cache
+from importlib import import_module
 from typing import Any
 
 import torch
@@ -21,7 +23,15 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 
-_BF16_KV_CACHE_DTYPES = frozenset({"bfloat16", "bf16"})
+# "auto" means the model dtype, bfloat16, so it selects the bfloat16 layout on A5 and
+# belongs with the requests that name it.
+_BF16_KV_CACHE_DTYPES = frozenset({"auto", "bfloat16", "bf16"})
+
+
+@lru_cache(maxsize=1)
+def _get_kv_compress_epilog() -> Callable[..., Any]:
+    import_module("cann_ops_transformer")
+    return torch.ops.cann_ops_transformer.kv_compress_epilog
 
 
 def _supports_dsv4_compressed_cache() -> bool:
@@ -31,11 +41,9 @@ def _supports_dsv4_compressed_cache() -> bool:
 def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str) -> str:
     """Return the KV cache dtype the platform should pin for DeepSeek-V4.
 
-    On A5 the launch request has to stay readable afterwards, because it is the
-    only thing that separates an explicit bfloat16 KV request from ``auto``.
-    ``auto`` and the model dtype resolve identically everywhere downstream, so
-    collapsing every non-bfloat16 request to ``auto`` preserves the upstream
-    values while keeping the mode recoverable.
+    On A5 the two layouts a request can select are bfloat16 and fp8, so an unset
+    request is pinned to the bfloat16 one it means -- the model dtype -- and every
+    other request keeps a string that says it is not bfloat16.
     """
     if not _supports_dsv4_compressed_cache():
         return model_dtype
@@ -44,6 +52,12 @@ def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str) -> str:
 
 def is_a5_bf16_kv_enabled(vllm_config) -> bool:
     """Return whether BF16 SparseFlashMla KV is enabled on A5.
+
+    An unset request means the model dtype, bfloat16, and has to select the same
+    layout an explicit bfloat16 request does. Reading the literal alone is what put
+    the fp8 plan on a bfloat16 page: the plan asked for ``head_size + 96`` and the
+    page had ``head_size``, which the operator reports as ``ori_kv head dimension ...
+    512, should be 608``.
 
     Callers must pass the engine ``vllm_config``. Do not look it up from the
     process-global current config: that context is only set during
@@ -201,7 +215,7 @@ class DsaAttnKvPlan:
         # (same 8-bit storage; the in-place update lands in the original
         # tensor). quant_mode="fp8_bf16" (int 0): group(64) FP8(e4m3) with
         # bf16 scale, rope kept bf16.
-        torch.ops.cann_ops_transformer.kv_compress_epilog(
+        _get_kv_compress_epilog()(
             cache=cache.view(torch.uint8),
             x=x.view(-1, x.shape[-1]),
             slot_mapping=slot_mapping,

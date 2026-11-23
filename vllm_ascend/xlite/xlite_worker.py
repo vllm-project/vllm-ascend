@@ -33,13 +33,8 @@ class XliteWorker(NPUWorker):
         num_ubatches = 1
         init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
-        if self.use_v2_model_runner:
-            logger.warning_once("xlite: npu model runner v2 is in developing, some features doesn't work for now.")
-            runner_cls = XliteModelRunnerV2
-        else:
-            from vllm_ascend.worker.v1.xlite.xlite_model_runner import XliteModelRunner
-
-            runner_cls = XliteModelRunner
+        logger.warning_once("xlite: npu model runner v2 is in developing, some features doesn't work for now.")
+        runner_cls = XliteModelRunnerV2
         logger.info_once("XliteModelRunner: using xlite model runner class `%s`", runner_cls.__name__)
         self.xlite_runner = self.model_runner = runner_cls(self.vllm_config, self.device)  # type: ignore[assignment]
         if self.rank == 0:

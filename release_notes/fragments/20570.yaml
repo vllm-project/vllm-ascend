@@ -1,0 +1,4 @@
+pr: 20570
+entries:
+  - category: bugfix
+    text: Fixed draft startup when DSpark loading or its PCP-specific policy disables draft EPLB while inheriting phase-specific EPLB load collection from the target. Target configuration validation remains strict.

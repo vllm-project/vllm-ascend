@@ -53,12 +53,14 @@ repos:
     stages: [manual] # Only run in CI
 
 - repo: https://github.com/rhysd/actionlint
-  rev: v1.7.11
+  rev: fd33e9f582a01a02885c93ae3775e1190cf63653
   hooks:
   # This hook runs actionlint directly, without tools/actionlint.sh. When
   # ShellCheck is on PATH, export SHELLCHECK_OPTS=--exclude=SC2046,SC2006,SC2086
   # before pre-commit run --all-files to use the repository's existing policy.
   - id: actionlint
+    # actionlint v1.7.11 does not recognize GitHub's concurrency.queue yet.
+    args: ['-ignore', '^unexpected key "queue" for "concurrency" section']
     exclude: '.*\.github/workflows/(scripts|configs)/.*\.ya?ml$'
         
 - repo: local

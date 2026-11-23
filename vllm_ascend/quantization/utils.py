@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from enum import IntEnum
 from pathlib import Path
 
 import torch
@@ -41,6 +42,11 @@ def is_fused_moe_layer(layer: torch.nn.Module) -> bool:
     return isinstance(layer, (MoERunner, RoutedExperts))
 
 
+class DynamicMXQuantScaleAlg(IntEnum):
+    MAX_EXPONENT = 0
+    CEIL = 1
+
+
 def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
     """Select the MX scale algorithm used by DynamicMxQuantV3.
 
@@ -50,7 +56,7 @@ def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
     quantization overflow. MiniMax M3 checkpoints require the latter.
     """
     if not get_current_hardware_profile().supports(HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE):
-        return 0
+        return DynamicMXQuantScaleAlg.MAX_EXPONENT
 
     if vllm_config is None:
         from vllm.forward_context import get_forward_context, is_forward_context_available
@@ -74,8 +80,8 @@ def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
         any(isinstance(architecture, str) and architecture.startswith("MiniMaxM3") for architecture in architectures)
         or model_type == "minimax_m3"
     ):
-        return 1
-    return 0
+        return DynamicMXQuantScaleAlg.CEIL
+    return DynamicMXQuantScaleAlg.MAX_EXPONENT
 
 
 def get_model_file(

@@ -1,0 +1,6 @@
+pr: 19537
+entries:
+  - category: feature
+    text: Added MiniMax-M3 DSpark draft FlashAttention support on Ascend A5 with Model Runner V2.
+    model: minimax-m3
+    hardware: [A5]

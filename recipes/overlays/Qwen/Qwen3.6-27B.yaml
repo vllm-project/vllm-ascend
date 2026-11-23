@@ -121,3 +121,12 @@ meta:
   hardware:
     ascend_950dt: verified
     ascend_910c: verified
+strategy_overrides:
+  multi_node_tp:
+    hardware_overrides:
+      # TP already spans every device in this strategy. The single-node DP8
+      # setting must not create eight copies of that cluster-wide TP group.
+      ascend_910c:
+        extra_args: ['--data-parallel-size', '1']
+      ascend_950dt:
+        extra_args: ['--data-parallel-size', '1']

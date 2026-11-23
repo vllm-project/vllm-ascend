@@ -63,9 +63,10 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
     get_transfer_timeout_value,
     inject_qos,
+    truncate_block_hashes_fallback,
     validate_register_region_count,
 )
-from vllm_ascend.utils import enable_custom_op, get_kv_cache_tensor_layers, is_vl_model, vllm_version_is
+from vllm_ascend.utils import enable_custom_op, get_kv_cache_tensor_layers, is_vl_model
 
 # isort: off
 if TYPE_CHECKING:
@@ -116,12 +117,13 @@ def _reconstruct_shared_pages(
     ``layer_stride == 0`` retains the legacy ``shared_by`` contract: all
     descriptor layers alias one standalone tensor. For nonzero layer strides,
     a layer's physical start is ``base + offset + index * layer_stride`` and
-    layers resolving to the same start and block stride share one page. Runtime
-    view addresses can still differ because a layer may start at an inner-page
-    offset.
+    component placements within the first block of a slot share one page.
+    Runtime view addresses can differ from descriptor placements when the
+    backend exposes an inner-page component.
     """
     pages_by_key: dict[tuple[str, int, int], list[tuple[str, int]]] = {}
     page_strides: dict[tuple[str, int, int], int] = {}
+    strided_placements: list[tuple[str, int, int, int]] = []
     for descriptor_idx, descriptor in enumerate(kv_cache_config.kv_cache_tensors):
         descriptor_layers: list[tuple[str, int, tuple[torch.Tensor, ...]]] = []
         for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):
@@ -153,14 +155,27 @@ def _reconstruct_shared_pages(
         )
         for layer_name, placement_start, layer_tensors in descriptor_layers:
             layer_start = descriptor_base + placement_start
-            page_key = ("strided", descriptor.block_stride, layer_start)
-            pages_by_key.setdefault(page_key, []).append(
-                (
-                    layer_name,
-                    min(tensor.data_ptr() for tensor in layer_tensors) - layer_start,
-                )
+            strided_placements.append(
+                (layer_name, descriptor.block_stride, layer_start, min(t.data_ptr() for t in layer_tensors))
             )
-            page_strides[page_key] = descriptor.block_stride
+
+    # Singleton descriptors can place K, indexer and scale at different offsets
+    # in one slot. Recover the slot's first-block base before registering full
+    # pages; an inner component must not become an independent page transfer.
+    page_bases: dict[tuple[int, int], int] = {}
+    last_base_by_stride: dict[int, int] = {}
+    for stride, start in sorted({(stride, start) for _, stride, start, _ in strided_placements}):
+        base = last_base_by_stride.get(stride)
+        if base is None or start >= base + stride:
+            base = start
+            last_base_by_stride[stride] = base
+        page_bases[stride, start] = base
+
+    for layer_name, stride, start, pointer in strided_placements:
+        base = page_bases[stride, start]
+        page_key = ("strided", stride, base)
+        pages_by_key.setdefault(page_key, []).append((layer_name, pointer - base))
+        page_strides[page_key] = stride
 
     return [
         _SharedPage(
@@ -1204,16 +1219,11 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def supports_divergent_local_hybrid_hits(self) -> bool:
         return True
 
-    def __init__(  # type: ignore[misc]
-        self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
-    ):
+    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         assert vllm_config.kv_transfer_config is not None
-        if vllm_version_is("0.31.0"):
-            self._kv_transfer_config = vllm_config.kv_transfer_config
-        else:
-            # vLLM main's KVConnectorBase_V1.__init__ tracks `_kv_cache_config`
-            # (and `_role`), which `get_loaded_kv_cache_group_ids` reads.
-            super().__init__(vllm_config, role, kv_cache_config)
+        # vLLM main's KVConnectorBase_V1.__init__ tracks `_kv_cache_config`
+        # (and `_role`), which `get_loaded_kv_cache_group_ids` reads.
+        super().__init__(vllm_config, role, kv_cache_config)
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         self._connector_metadata = MooncakeConnectorMetadata()
 
@@ -1226,16 +1236,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_scheduler = None
             self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
 
-    ############################################################
-    # Scheduler Side Methods
-    ############################################################
-
-    if not vllm_version_is("0.31.0"):
-
-        def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
-            # vLLM main's scheduler uses this for skip_zeroing_group_ids.
-            # Mooncake restores the request's own transfer blocks.
-            return self._kv_cache_config.transfer_group_ids
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        # vLLM main's scheduler uses this for skip_zeroing_group_ids.
+        # Mooncake restores the request's own transfer blocks.
+        return self._kv_cache_config.transfer_group_ids
 
     def on_new_request(self, request: "Request") -> None:
         assert self.connector_scheduler is not None
@@ -1457,6 +1461,14 @@ class MooncakeConnectorScheduler:
             request._all_token_ids.pop()
             request.num_prompt_tokens -= 1
             request.max_tokens = 1
+            hash_block_size = self.kv_cache_config.hash_block_size
+            assert hash_block_size is not None
+            lookahead = self.vllm_config.num_hash_lookahead_tokens
+            truncate_hashes = getattr(request, "truncate_block_hashes", None)
+            if callable(truncate_hashes):
+                truncate_hashes(hash_block_size, lookahead)
+            else:
+                truncate_block_hashes_fallback(request, hash_block_size, lookahead)
             params["_p_side_truncated"] = True
 
     def _compute_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:

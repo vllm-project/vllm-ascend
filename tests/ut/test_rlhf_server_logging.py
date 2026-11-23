@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import torch
 
-from tests.e2e.pull_request.one_card.rlhf import conftest as rlhf
+from tests.e2e.common.rlhf import common as rlhf
 
 
 def test_server_does_not_block_when_stderr_exceeds_pipe_capacity(tmp_path, monkeypatch, capfd):

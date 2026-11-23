@@ -14,16 +14,15 @@ import torch_npu
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
-from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.forward_context import BatchDescriptor, get_forward_context
+from vllm.forward_context import BatchDescriptor, get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
-from ..utils import super_kernel_scope, use_updatable_graph, weak_ref_tensors
+from ..utils import super_kernel_scope, use_updatable_graph, vllm_version_is, weak_ref_tensors
 from .updatable_graph import (
     ContextSource,
     SharedSource,
@@ -31,6 +30,12 @@ from .updatable_graph import (
 )
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
+
+if vllm_version_is("0.33.0"):
+    # Removed from upstream main by #63373; retained until v0.33.0 support ends.
+    from vllm.compilation.monitor import validate_cudagraph_capturing_enabled  # type: ignore[attr-defined]
+
+
 _STREAM_RESOURCE_ERROR_CODE = "207008"
 _STREAM_RESOURCE_ERROR_MARKERS = (
     "insufficient_stream_resources",
@@ -66,6 +71,10 @@ class ACLGraphEntry:
 class ACLGraphWrapper:
     """Wraps a runnable to add acl graph capturing and replaying ability. And
     provide attribute access to the underlying `runnable` via `__getattr__`.
+
+    Calls without a forward context invoke the runnable directly, bypassing
+    this wrapper's capture/replay. Device operations still participate in an
+    already-active outer capture.
 
     The workflow of this wrapper in the aclgraph dispatching is as follows:
     1. At initialization, a runtime mode is assigned to the wrapper (FULL or
@@ -154,6 +163,10 @@ class ACLGraphWrapper:
         return self.runnable
 
     def __call__(self, *args, **kwargs):
+        if not is_forward_context_available():
+            # Standalone modules can run outside the model's forward context.
+            return self.runnable(*args, **kwargs)
+
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
         aclgraph_runtime_mode = forward_context.cudagraph_runtime_mode
@@ -181,7 +194,8 @@ class ACLGraphWrapper:
                 # piecewise mode.
                 logger.debug("Capturing ACL graph (%s, %s)", self.runtime_mode.name, entry.batch_descriptor)
             # validate that aclgraph capturing is legal at this point.
-            validate_cudagraph_capturing_enabled()
+            if vllm_version_is("0.33.0"):
+                validate_cudagraph_capturing_enabled()
 
             input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             entry.input_addresses = input_addresses

@@ -36,7 +36,6 @@ get_row_parallel_op.
 """
 
 from functools import lru_cache
-from types import SimpleNamespace
 
 import regex as re
 import torch
@@ -55,7 +54,6 @@ from vllm_ascend.distributed.parallel_state import (
     get_otp_group,
 )
 from vllm_ascend.utils import (
-    enable_dsa_cp,
     mlp_tp_enable,
     oproj_tp_enable,
     shared_expert_dp_enabled,
@@ -112,6 +110,24 @@ class CustomColumnParallelOp(CustomLinearOp):
     def update_attrs(self):
         super().update_attrs()
         self.gather_output = self.layer.gather_output
+
+
+class DCPGroupColumnParallelOp(CustomColumnParallelOp):
+    @property
+    def tp_rank(self):
+        return super().tp_rank // self.layer.group_size
+
+    @property
+    def tp_size(self):
+        size = super().tp_size
+        return size // self.layer.group_size
+
+    def apply_impl(self, input_):
+        # Every rank already has the group's full Q heads. No output gather.
+        assert self.quant_method is not None
+        bias = None if self.skip_bias_add else self.layer.bias
+        output = self.quant_method.apply(self.layer, input_, bias)
+        return output, self.layer.bias if self.skip_bias_add else None
 
 
 class CustomRowParallelOp(CustomLinearOp):
@@ -384,34 +400,11 @@ class OProjRowParallelOp(CustomRowParallelOp):
         self.input_size_per_partition = self.layer.input_size_per_partition
 
 
-class ShardedCPColumnParallelOp(CustomColumnParallelOp):
-    @property
-    def comm_group(self):
-        # fake comm group to bypass tp logic
-        return SimpleNamespace(world_size=1, rank_in_group=0, device_group=None)
-
-    def apply_impl(
-        self,
-        input_,
-    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        bias = self.bias if not self.skip_bias_add else None
-        assert self.quant_method is not None
-        output = self.quant_method.apply(self.layer, input_, bias)
-        output_bias = self.bias if self.skip_bias_add else None
-        if not self.return_bias:
-            return output
-        return output, output_bias
-
-
 def _is_shared_expert_layer(prefix: str) -> bool:
     return "shared_experts" in prefix or "shared_expert" in prefix or "share_expert" in prefix
 
 
-def _get_column_parallel_op(
-    prefix, layer
-) -> MLPColumnParallelOp | DSV4OProjColumnParallelOp | ShardedCPColumnParallelOp | None:
-    if enable_dsa_cp() and ("q_b_proj" in prefix or "kv_b_proj" in prefix):
-        return ShardedCPColumnParallelOp(layer)
+def _get_column_parallel_op(prefix, layer) -> MLPColumnParallelOp | DSV4OProjColumnParallelOp | None:
     if "wo_a" in prefix and oproj_tp_enable():
         return DSV4OProjColumnParallelOp(layer)
     if "gate_up_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
@@ -430,6 +423,9 @@ def _get_row_parallel_op(prefix, layer) -> MLPRowParallelOp | OProjRowParallelOp
 
 
 def get_parallel_op(disable_tp, prefix, layer, direct):
+    if direct == "column" and getattr(layer, "qrep_active", False) is True:
+        dcp_group_op = DCPGroupColumnParallelOp(layer)
+        return dcp_group_op, dcp_group_op.tp_rank, dcp_group_op.tp_size
     if _is_shared_expert_layer(prefix):
         # Shared-expert weight layout is decoupled from sequence parallelism:
         # only the shared-expert DP switch replicates weights. Models still
@@ -445,7 +441,6 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
         | MLPRowParallelOp
         | OProjRowParallelOp
         | DSV4OProjRowParallelOp
-        | ShardedCPColumnParallelOp
         | None
     ) = None
     if direct == "row":

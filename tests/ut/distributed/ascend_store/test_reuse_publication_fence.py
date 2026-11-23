@@ -6,10 +6,23 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker as module
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise import pool_worker as module
 
 
 class TestReusePublicationFence(unittest.TestCase):
+    def test_wait_for_previous_save_drains_once(self):
+        worker = module.LayerwiseKVPoolWorker.__new__(module.LayerwiseKVPoolWorker)
+        worker._pending_last_save_drain = True
+        worker.kv_send_thread = object()
+        worker.num_layers = 2
+
+        with patch.object(worker, "_wait_for_final_layer_save") as wait:
+            worker.wait_for_previous_save()
+            worker.wait_for_previous_save()
+
+        wait.assert_called_once_with(2)
+        self.assertFalse(worker._pending_last_save_drain)
+
     def test_fence_order_and_scope(self):
         for transfer, reuse, tp_size, sync in [
             (True, True, 16, True),
@@ -19,8 +32,9 @@ class TestReusePublicationFence(unittest.TestCase):
         ]:
             for requests in ([], [object()]):
                 with self.subTest(transfer=transfer, reuse=reuse, tp_size=tp_size, empty=not requests):
-                    worker = module.KVPoolWorker.__new__(module.KVPoolWorker)
+                    worker = module.LayerwiseKVPoolWorker.__new__(module.LayerwiseKVPoolWorker)
                     worker.use_layerwise = True
+                    worker.use_kvpp = False
                     worker.use_layerwise_transfer = transfer
                     worker.layerwise_offload = reuse
                     worker.tp_size = tp_size
@@ -38,7 +52,7 @@ class TestReusePublicationFence(unittest.TestCase):
                     self.assertEqual(calls, ["drain", "barrier", "prepare"] if sync else ["drain", "prepare"])
 
     def test_failed_local_save_does_not_query(self):
-        worker = module.KVPoolWorker.__new__(module.KVPoolWorker)
+        worker = module.LayerwiseKVPoolWorker.__new__(module.LayerwiseKVPoolWorker)
         worker.use_layerwise = True
         with (
             patch.object(worker, "_drain_deferred_last_save", side_effect=RuntimeError("save failed")),

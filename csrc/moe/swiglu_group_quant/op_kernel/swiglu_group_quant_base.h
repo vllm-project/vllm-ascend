@@ -526,18 +526,17 @@ __aicore__ inline void VFComputeData(const LocalTensor<U>& xQuantLocal,  const L
         MaskReg maskAllB16 = CreateMask<uint16_t, MaskPattern::ALL>();
         MaskReg maskAllB32 = CreateMask<float, MaskPattern::ALL>();
         for (uint16_t i = 0; i < curRowNum; i++) {
-            uint32_t sreg0 = curColNum;
-            uint32_t sreg1 = curColNum;
-            uint32_t sreg2 = curColNum;
-            uint32_t sreg3 = curColNum;
+            // Four packed stores consume consecutive portions of the same row.
+            // Share the tail counter to avoid overwriting adjacent UB storage.
+            uint32_t remainingCols = curColNum;
             xLocalAddr = xOriginLocalAddr + i * xCurColNumAlign;
             invScaleLocalAddr = invScaleOriginLocalAddr + i * scaleCurColNumAlign;
             xQuantLocalAddr = xQuantOriginLocalAddr + i * xQuantCurColNumAlign;
-            for (uint16_t i = 0; i < loopCount; i++) {
-                maskXQuant0B32 = UpdateMask<float>(sreg0);
-                maskXQuant1B32 = UpdateMask<float>(sreg1);
-                maskXQuant2B32 = UpdateMask<float>(sreg2);
-                maskXQuant3B32 = UpdateMask<float>(sreg3);
+            for (uint16_t j = 0; j < loopCount; j++) {
+                maskXQuant0B32 = UpdateMask<float>(remainingCols);
+                maskXQuant1B32 = UpdateMask<float>(remainingCols);
+                maskXQuant2B32 = UpdateMask<float>(remainingCols);
+                maskXQuant3B32 = UpdateMask<float>(remainingCols);
 
                 DataCopy<T, PostLiteral::POST_MODE_UPDATE, LoadDist::DIST_DINTLV_B16>(x0, x1, xLocalAddr, vlForT * 2);
                 DataCopy<uint16_t, PostLiteral::POST_MODE_UPDATE, LoadDist::DIST_E2B_B16>(invScale, invScaleLocalAddr,

@@ -131,6 +131,23 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         else:
             self.attn_backend = AscendDSASWABackend
 
+        # These layers assign their backend here instead of asking the platform
+        # selector, so they never reach ``get_attn_backend_cls``. Ask the backend the
+        # same question it answers there.
+        if not self.attn_backend.supports_kv_cache_dtype(kv_cache_dtype):
+            # List what this backend accepts *here*: the device narrows the declared
+            # set, and naming a dtype that was just refused would contradict it.
+            supported = sorted(
+                dtype
+                for dtype in self.attn_backend.supported_kv_cache_dtypes
+                if self.attn_backend.supports_kv_cache_dtype(dtype)
+            )
+            hint = f" Supported kv_cache_dtype values: {', '.join(supported)}." if supported else ""
+            raise ValueError(
+                f"KV cache dtype {kv_cache_dtype!r} is not supported by the attention "
+                f"backend {self.attn_backend.__name__}. Reasons: kv_cache_dtype not supported.{hint}"
+            )
+
         # NOTE(zxr): vllm_is_batch_invariant is delete during updating to v0.20.1
         if (
             cache_config is not None
@@ -170,6 +187,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         ]
         self.kv_cache_dtype = kv_cache_dtype
 
+        self.act_dtype = torch.get_default_dtype()
         self.use_sparse = True
 
     def forward(
@@ -181,7 +199,10 @@ class DSAAttention(nn.Module, AttentionLayerBase):
     ) -> torch.Tensor:
         return q
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
+    def process_weights_after_loading(self, act_dtype: torch.dtype | None = None):
+        # #57678 calls attention hooks without arguments on main.
+        if act_dtype is None:
+            act_dtype = self.act_dtype
         if hasattr(self.impl, "process_weights_after_loading"):
             self.impl.process_weights_after_loading(act_dtype)
 

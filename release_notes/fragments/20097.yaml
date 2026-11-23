@@ -1,0 +1,21 @@
+pr: 20097
+entries:
+  - category: breaking
+    text: >-
+      Removed Model Runner V1 from vLLM Ascend. Model Runner V2 is now the only
+      runner, so `VLLM_USE_V2_MODEL_RUNNER` no longer selects anything: an
+      explicit `VLLM_USE_V2_MODEL_RUNNER=0` fails at startup instead of falling
+      back to Model Runner V1. Speculative decoding setups that only ran on
+      Model Runner V1 (`suffix`, `custom_class`, and EAGLE with
+      `parallel_drafting`) are now rejected at startup.
+    highlight: true
+  - category: breaking
+    text: >-
+      Removed `rejection_sampler_config.enable_block_verify`. Block Verify was
+      implemented only in Model Runner V1, so enabling it now fails at startup
+      instead of being silently ignored; use `enable_entropy_verify` instead.
+  - category: config
+    text: >-
+      Removed `additional_config.draft_window_size`, which only configured the
+      Model Runner V1 draft window. Configurations that still set it are
+      rejected at startup as an unknown key.

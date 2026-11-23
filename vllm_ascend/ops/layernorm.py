@@ -54,6 +54,13 @@ class AscendRMSNorm(RMSNorm):
         dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
+
+        # Register weight tensors that are neither parameters nor buffers as buffers
+        if not has_weight:
+            weight = self.weight
+            del self.weight
+            self.register_buffer("weight", weight, persistent=False)
+
         vllm_config = get_current_vllm_config()
         self.bias = None
         self.bias_loaded = False
@@ -86,12 +93,16 @@ class AscendRMSNorm(RMSNorm):
         import torch_npu
 
         if residual is not None:
-            import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
-
-            enable_custom_op()
-            x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                x, residual, self.weight, self.bias, self.variance_epsilon
-            )
+            if enable_custom_op():
+                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                    x, residual, self.weight, self.bias, self.variance_epsilon
+                )
+            else:
+                # Under VLLM_BATCH_INVARIANT, batch_invariant.py patches npu_add_rms_norm
+                # for bitwise batch invariance; bias is added elementwise below.
+                x, _, residual = torch_npu.npu_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
+                if self.bias is not None:
+                    x.add_(self.bias)
             return x, residual
 
         x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
@@ -110,12 +121,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         import torch_npu
 
         if residual is not None:
-            if enable_custom_op():
-                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                    x, residual, 1.0 + self.weight, None, self.variance_epsilon
-                )
-            else:
-                x, _, residual = torch_npu.npu_add_rms_norm(x, residual, 1.0 + self.weight, self.variance_epsilon)
+            x, _, residual = torch_npu.npu_add_rms_norm(x, residual, 1.0 + self.weight, self.variance_epsilon)
             return x, residual
 
         x = DeviceOperator.npu_gemma_rms_norm(x, self.weight, self.variance_epsilon)
@@ -161,6 +167,7 @@ class LayerNormFn(torch.autograd.Function):
             group_size=group_size,
             norm_before_gate=norm_before_gate,
             is_rms_norm=is_rms_norm,
+            activation=activation,
         )
         ctx.save_for_backward(x, weight, bias, mean, rstd, z)
         ctx.x_shape_og = x_shape_og
@@ -210,7 +217,17 @@ class AscendRMSNormGated(RMSNormGated):
 
     def forward_oot(self, x, z=None):
         """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
-        return LayerNormFn.apply(x, self.weight, self.bias, z, self.eps, self.group_size, self.norm_before_gate, True)
+        return LayerNormFn.apply(
+            x,
+            self.weight,
+            self.bias,
+            z,
+            self.eps,
+            self.group_size,
+            self.norm_before_gate,
+            True,
+            self.activation,
+        )
 
 
 def __getattr__(name: str):

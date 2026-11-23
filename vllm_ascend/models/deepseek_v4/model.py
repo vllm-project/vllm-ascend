@@ -23,16 +23,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+"""[Role] DeepSeek V4 model integration.
+[Invariants] Projection weights follow their linear method's layout policy.
+[Timeouts & Locks] Model runner owns execution synchronization.
+[Side-Effect Policy] Parameters are prepared at load time.
+"""
+
 import math
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
 
 import torch
-import torch.nn.functional as F
 import vllm.envs as envs
 from torch import nn
-from transformers import DeepseekV2Config, DeepseekV3Config
+
+# vLLM #61392 switched DeepseekV4Config to the upstream Transformers class on
+# main; the v0.33.0 lane still ships it under
+# `vllm.transformers_utils.configs.deepseek_v4`.
+from transformers import DeepseekV2Config, DeepseekV3Config, DeepseekV4Config
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
@@ -45,7 +54,11 @@ from vllm.distributed import (
 from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory, fused_moe_make_expert_params_mapping
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -93,11 +106,8 @@ from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 from vllm_ascend.utils import (
     dsv4_skips_indexer_topk,
-    enable_custom_op,
-    enable_dsa_cp,
     extract_dsv4_layer_index,
     get_dsv4_compress_ratio,
-    vllm_version_is,
 )
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
@@ -107,14 +117,6 @@ from vllm_ascend.worker.v2.pp_transport import (
 from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
-
-# vLLM #61392 switched DeepseekV4Config to the upstream Transformers class on
-# main; the v0.31.0 lane still ships it under
-# `vllm.transformers_utils.configs.deepseek_v4`.
-if vllm_version_is("0.31.0"):
-    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config  # type: ignore[import-not-found]
-else:
-    from transformers import DeepseekV4Config
 
 sequence_parallel_chunk = sp_shard
 
@@ -303,10 +305,15 @@ class DeepseekV4MoE(nn.Module):
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. Only silu is supported for now.")
 
-        self.gate = ReplicatedLinear(
-            config.hidden_size, config.n_routed_experts, bias=False, quant_config=None, prefix=f"{prefix}.gate"
+        self.gate = GateLinear(
+            input_size=config.hidden_size,
+            output_size=self.n_routed_experts,
+            bias=False,
+            out_dtype=torch.float32,
+            force_fp32_compute=torch.get_default_dtype() != torch.bfloat16,
+            prefix=f"{prefix}.gate",
+            return_bias=False,
         )
-        self.gate.precast_fp32_weight = True
 
         # Load balancing settings.
         eplb_config = parallel_config.eplb_config
@@ -341,8 +348,7 @@ class DeepseekV4MoE(nn.Module):
 
         # vLLM main folded `num_hash_layers` into the per-layer `mlp_layer_types`;
         # judge Hash-MoE per layer (it need not be a contiguous prefix) and fall
-        # back to the legacy count on the v0.31.0 lane, which has no
-        # `mlp_layer_types`.
+        # back to the legacy count for checkpoints without `mlp_layer_types`.
         if is_draft_layer:
             self.hash = False
         else:
@@ -406,33 +412,20 @@ class DeepseekV4MoE(nn.Module):
         self,
         hidden_states: torch.Tensor,
         input_ids: torch.Tensor | None = None,
-        hidden_states_fp32: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.gate.tid2eid is not None and input_ids is None:
             raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
 
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-        if hidden_states_fp32 is not None:
-            hidden_states_fp32 = hidden_states_fp32.view(-1, hidden_dim)
 
-        if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoEFactory class
-            router_input = hidden_states if hidden_states_fp32 is None else hidden_states_fp32
-            fused_moe_out = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_input,
-                input_ids=input_ids,
-            )
-        else:
-            # router_logits: (num_tokens, n_experts)
-            router_input = hidden_states.float() if hidden_states_fp32 is None else hidden_states_fp32
-            router_logits = F.linear(router_input, self.gate.weight)
-            fused_moe_out = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                input_ids=input_ids,
-            )
+        # An internal router applies the gate inside the MoE runner.
+        router_logits = hidden_states if self.experts.is_internal_router else self.gate(hidden_states)
+        fused_moe_out = self.experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            input_ids=input_ids,
+        )
 
         fused_moe_out_is_tuple = isinstance(fused_moe_out, tuple)
         if fused_moe_out_is_tuple:
@@ -492,7 +485,6 @@ class DeepseekV4Attention(nn.Module):
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
         reduce_results: bool = True,
-        need_gather_q_kv: bool = False,
     ) -> None:
         super().__init__()
         layer_idx = int(prefix.split(sep=".")[-2])
@@ -513,10 +505,8 @@ class DeepseekV4Attention(nn.Module):
         self.eps = config.rms_norm_eps
         self.norm_eps = config.rms_norm_eps
         self.scale = self.head_dim**-0.5
-        self.enable_dsa_cp = enable_dsa_cp()
 
-        attn_sink_heads = self.n_heads if self.enable_dsa_cp else self.n_local_heads
-        self.attn_sink = nn.Parameter(torch.empty(attn_sink_heads, dtype=torch.float32))
+        self.attn_sink = nn.Parameter(torch.empty(self.n_local_heads, dtype=torch.float32))
         self.wq_a = ReplicatedLinear(
             self.dim,
             self.q_lora_rank,
@@ -527,8 +517,7 @@ class DeepseekV4Attention(nn.Module):
         )
         self.q_norm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
         self.q_norm_without_weight = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
-        wq_b_cls = ReplicatedLinear if self.enable_dsa_cp else ColumnParallelLinear
-        self.wq_b = wq_b_cls(
+        self.wq_b = ColumnParallelLinear(
             self.q_lora_rank,
             self.n_heads * self.head_dim,
             bias=False,
@@ -554,10 +543,6 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_a",
             return_bias=False,
         )
-        # Every DSA o_proj path consumes wo_a.weight directly via
-        # npu_transpose_batchmatmul / npu_transpose_quant_batchmatmul,
-        # so the weight must remain ND.
-        self.wo_a.skip_weight_nz_conversion = True
         self.wo_b = RowParallelLinear(
             self.n_groups * config.o_lora_rank,
             self.dim,
@@ -575,13 +560,12 @@ class DeepseekV4Attention(nn.Module):
         else:
             rope_theta = config.rope_theta
             rope_groups = ["default"]
-        # vLLM #61392 keys the checkpoint's YaRN values under the compressor
-        # (CSA/HCA) group; the v0.31.0 lane keeps a single flat dict.
+        # Both supported lanes accept flat and per-group checkpoint RoPE dicts.
+        # Use compressor (CSA/HCA) YaRN values when the nested group is present.
         yarn_rope_parameters = config.rope_parameters
-        if not vllm_version_is("0.31.0"):
-            compress_rope_parameters = yarn_rope_parameters.get("compress")
-            if isinstance(compress_rope_parameters, dict):
-                yarn_rope_parameters = compress_rope_parameters
+        compress_rope_parameters = yarn_rope_parameters.get("compress")
+        if isinstance(compress_rope_parameters, dict):
+            yarn_rope_parameters = compress_rope_parameters
         self.rotary_emb = ComplexExpRotaryEmbedding(
             vllm_config=vllm_config,
             layername=f"{prefix}.attn",
@@ -683,7 +667,6 @@ class DeepseekV4Attention(nn.Module):
             quant_config=quant_config,
             # prefix=f'{prefix}.attn',
             prefix=f"{prefix}",
-            need_gather_q_kv=need_gather_q_kv,
         )
 
     def forward(
@@ -708,30 +691,28 @@ class DeepseekV4DecoderLayer(nn.Module):
 
         if config is None:
             config = vllm_config.model_config.hf_config
-        if not vllm_version_is("0.31.0"):
-            # vLLM #61392 folded `compress_ratios` into `layer_types`; the
-            # Ascend helpers and the KV-store metadata still index the legacy
-            # field, so restore it.
-            if getattr(config, "compress_ratios", None) is None:
-                # `vllm.transformers_utils.deepseek_v4_utils` only exists on
-                # main (added by #61392), so keep the import lazy.
-                from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
+        # vLLM #61392 folded `compress_ratios` into `layer_types`; the
+        # Ascend helpers and the KV-store metadata still index the legacy
+        # field, so restore it.
+        if getattr(config, "compress_ratios", None) is None:
+            # `vllm.transformers_utils.deepseek_v4_utils` only exists on
+            # main (added by #61392), so keep the import lazy.
+            from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 
-                compress_ratios = get_compress_ratios(config)
-                if compress_ratios:
-                    config.compress_ratios = list(compress_ratios)
+            compress_ratios = get_compress_ratios(config)
+            if compress_ratios:
+                config.compress_ratios = list(compress_ratios)
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
 
         self.hidden_size = config.hidden_size
-        # vLLM #61392 keys the checkpoint's YaRN values under the compressor
-        # (CSA/HCA) group; the v0.31.0 lane keeps a single flat dict.
+        # Both supported lanes accept flat and per-group checkpoint RoPE dicts.
+        # Use compressor (CSA/HCA) YaRN values when the nested group is present.
         yarn_rope_parameters = config.rope_parameters
-        if not vllm_version_is("0.31.0"):
-            compress_rope_parameters = yarn_rope_parameters.get("compress")
-            if isinstance(compress_rope_parameters, dict):
-                yarn_rope_parameters = compress_rope_parameters
+        compress_rope_parameters = yarn_rope_parameters.get("compress")
+        if isinstance(compress_rope_parameters, dict):
+            yarn_rope_parameters = compress_rope_parameters
         max_position_embeddings = yarn_rope_parameters.get(
             "original_max_position_embeddings", config.max_position_embeddings
         )
@@ -741,7 +722,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
         self.norm_eps = config.rms_norm_eps
         self.use_sequence_parallel_moe = parallel_config.use_sequence_parallel_moe
-        self.enable_dsa_cp = enable_dsa_cp()  # TODO: delete this when enable_dsa_cp is sunset.
 
         attn_cls = DeepseekV4Attention
 
@@ -754,7 +734,6 @@ class DeepseekV4DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
             reduce_results=not self.use_sequence_parallel_moe,
-            need_gather_q_kv=self.use_sequence_parallel_moe and self.enable_dsa_cp,
         )
 
         self.mlp = DeepseekV4MoE(
@@ -778,17 +757,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
         self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
         self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
-
-    def rms_norm_cast(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Normalize once and provide the exact FP32 routing input."""
-        if enable_custom_op():
-            return torch.ops._C_ascend.npu_rms_norm_cast(
-                hidden_states,
-                self.post_attention_layernorm.weight,
-                self.post_attention_layernorm.variance_epsilon,
-            )
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        return hidden_states, hidden_states.float()
 
     def hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
         y = torch.ops._C_ascend.npu_hc_pre_v2(
@@ -815,25 +783,21 @@ class DeepseekV4DecoderLayer(nn.Module):
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
         hidden_states = self.input_layernorm(hidden_states)
 
-        if self.use_sequence_parallel_moe and not self.enable_dsa_cp:
+        if self.use_sequence_parallel_moe:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         attn_kwargs = {"positions": positions, "hidden_states": hidden_states, "llama_4_scaling": llama_4_scaling}
         hidden_states = self.self_attn(**attn_kwargs)
 
-        if self.use_sequence_parallel_moe and not self.enable_dsa_cp:
+        if self.use_sequence_parallel_moe:
             hidden_states = sp_reduce_scatter(hidden_states)
 
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
 
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
-        hidden_states, hidden_states_fp32 = self.rms_norm_cast(hidden_states)
-        hidden_states = self.mlp(
-            hidden_states,
-            input_ids=input_ids,
-            hidden_states_fp32=hidden_states_fp32,
-        )
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states, input_ids=input_ids)
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
 
         return hidden_states, residual
@@ -1287,12 +1251,9 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 # lands on the meta tensor (a no-op), so attention sinks would
                 # silently keep their dummy values after an update.
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                if enable_dsa_cp():
-                    weight_loader(param, loaded_weight)
-                else:
-                    # Handle attention sinks (distributed across ranks)
-                    narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                    weight_loader(param, narrow_weight)
+                # Handle attention sinks (distributed across ranks)
+                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
+                weight_loader(param, narrow_weight)
                 loaded_params.add(name)
                 continue
 

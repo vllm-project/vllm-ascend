@@ -1,0 +1,6 @@
+pr: 21209
+entries:
+  - category: feature
+    text: >-
+      Enabled LM head TP with probabilistic draft sampling in Model Runner V2
+      for MTP, Eagle, Gemma4 MTP, DFlash, and DSpark.

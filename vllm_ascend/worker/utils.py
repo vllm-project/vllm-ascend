@@ -2,15 +2,12 @@ from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 
 import torch
-from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
-    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import (
@@ -40,7 +37,9 @@ def copy_kv_cache_blocks_inplace(
         return
 
     cache_tensors: list[torch.Tensor] = []
-    seen_tensors: set[int] = set()
+    seen_tensors: set[tuple[torch.device, int] | tuple[torch.device, int, tuple[int, ...], tuple[int, ...], int]] = (
+        set()
+    )
     for entry in kv_caches:
         if entry is None:
             continue
@@ -52,13 +51,55 @@ def copy_kv_cache_blocks_inplace(
             if tensor is None:
                 continue
             data_ptr = tensor.data_ptr()
-            if data_ptr in seen_tensors:
+            # Hybrid models can overlay layers of different kinds on one
+            # allocation, so views at the same address can differ in geometry.
+            # Main keys on that geometry; the release lane keys on (device, address).
+            key = (
+                (tensor.device, data_ptr)
+                if vllm_version_is("0.33.0")
+                else (tensor.device, data_ptr, tuple(tensor.shape), tuple(tensor.stride()), tensor.element_size())
+            )
+            if key in seen_tensors:
                 continue
-            seen_tensors.add(data_ptr)
+            seen_tensors.add(key)
             cache_tensors.append(tensor)
 
     if not cache_tensors:
         return
+
+    # A paired hybrid slot exposes a contiguous main-page view and strided
+    # recurrent component views of the same storage. Copying both can replay a
+    # cyclic copy over already-updated source bytes. Keep the enclosing view
+    # once; independent indexer key/scale planes still need their own copies.
+    contiguous_regions = [
+        (
+            i,
+            tensor.untyped_storage().data_ptr(),
+            tensor.data_ptr(),
+            tensor.data_ptr() + tensor.numel() * tensor.element_size(),
+        )
+        for i, tensor in enumerate(cache_tensors)
+        if tensor.is_contiguous()
+    ]
+    selected = []
+    for i, tensor in enumerate(cache_tensors):
+        storage = tensor.untyped_storage().data_ptr()
+        start = tensor.data_ptr()
+        span = (
+            1 + sum((size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride()))
+        ) * tensor.element_size()
+        end = start + span
+        enclosed = any(
+            storage == parent_storage
+            and parent_start <= start
+            and end <= parent_end
+            and (parent_end - parent_start > span or parent_index < i)
+            for parent_index, parent_storage, parent_start, parent_end in contiguous_regions
+            if parent_index != i
+        )
+        if not enclosed:
+            selected.append(tensor)
+    cache_tensors = selected
 
     device = cache_tensors[0].device
     for tensor in cache_tensors:
@@ -118,10 +159,6 @@ def prepare_ascend_kernel_block_sizes(
         List of kernel block sizes for each cache group.
     """
     kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
-    if vllm_version_is("0.31.0"):
-        # The release lane predates #57169 and always splits; its
-        # ``select_common_block_size`` also takes no per-group specs.
-        return kernel_block_sizes
 
     # Upstream drops only encoder-only groups, so this index tracks its output.
     index = 0
@@ -212,93 +249,3 @@ def disable_compilation(model: torch.nn.Module) -> Iterator[None]:
     finally:
         for module, previous in reversed(previous_states):
             module.do_not_compile = previous
-
-
-@triton.jit
-def _zero_kv_blocks_kernel(
-    seg_addrs_ptr,
-    seg_page_sizes_ptr,
-    block_ids_ptr,
-    n_blocks,
-    seg_page_strides_ptr,
-    N_SEGS: tl.constexpr,
-    MAX_CHUNKS: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    GRID_SIZE: tl.constexpr,
-):
-    """Zero KV cache blocks across all segments in a single launch.
-
-    Each segment is a contiguous region of one block's data.  For backends
-    where blocks are outermost (block_dim=0) there is one segment per
-    buffer.  For backends where K/V is outermost (block_dim=1) there are
-    two segments per buffer (one for K, one for V).
-
-    Segment payload sizes and physical page strides are independent.
-    Payload sizes bound writes; page strides advance scheduler block IDs
-    past neighboring caches and padding.
-
-    seg_addrs_ptr holds absolute byte addresses (int64) for each segment,
-    allowing segments to live in different CUDA allocations.
-
-    Programs are mapped as (block_index, seg_index, chunk_index).
-    """
-    pid = tl.program_id(0)
-    work_per_block = N_SEGS * MAX_CHUNKS
-    total_work = n_blocks * work_per_block
-    for work_idx in range(pid, total_work, GRID_SIZE):
-        block_index = work_idx // work_per_block
-        remainder = work_idx % work_per_block
-        seg_index = remainder // MAX_CHUNKS
-        chunk_index = remainder % MAX_CHUNKS
-        page_size_el = tl.load(seg_page_sizes_ptr + seg_index)
-        if chunk_index < page_size_el // BLOCK_SIZE:
-            block_id = tl.load(block_ids_ptr + block_index)
-            seg_addr = tl.load(seg_addrs_ptr + seg_index)
-            ptr = tl.cast(seg_addr, tl.pointer_type(tl.int32))
-            page_stride_el = tl.load(seg_page_strides_ptr + seg_index)
-            offset = block_id.to(tl.int64) * page_stride_el.to(tl.int64) + chunk_index.to(tl.int64) * BLOCK_SIZE
-            cols = tl.arange(0, BLOCK_SIZE).to(tl.int64)
-            tl.store(ptr + offset + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
-
-
-def _component_views_share_slot(kv_cache: object, spec: FullAttentionSpec) -> bool:
-    """Whether already-materialized MLA nope/rope views alias one physical page.
-
-    This is a post-reshape physical-aliasing check used by block zeroing and
-    COW. It deliberately differs from single-raw-backing eligibility:
-    eligibility decides how a cache may be allocated, while this function only
-    recognizes component-major views that were created over the same backing.
-    Legacy contiguous K/V tuples and independently backed tensors return false.
-    """
-
-    if not isinstance(spec, MLAAttentionSpec) or not isinstance(kv_cache, tuple) or len(kv_cache) != 2:
-        return False
-
-    nope, rope = kv_cache
-    if not isinstance(nope, torch.Tensor) or not isinstance(rope, torch.Tensor):
-        return False
-
-    storage_ptr = nope.untyped_storage().data_ptr()
-    first_offset = nope.storage_offset()
-    component_elements = nope[0].numel()
-    return (
-        rope.untyped_storage().data_ptr() == storage_ptr
-        and rope.stride(0) == nope.stride(0)
-        and not nope.is_contiguous()
-        and not rope.is_contiguous()
-        and rope.storage_offset() - first_offset == component_elements
-        and component_elements < nope.stride(0)
-    )
-
-
-def _is_page_strided_mla_cache(kv: torch.Tensor, spec: FullAttentionSpec, ratio: int) -> bool:
-    """Whether an MLA view advances by one physical page on its first axis."""
-
-    return (
-        isinstance(spec, MLAAttentionSpec)
-        and kv.ndim > 0
-        and kv.shape[0] > 0
-        and kv.shape[0] % ratio == 0
-        and not kv.is_contiguous()
-        and kv.stride(0) > kv[0].numel()
-    )

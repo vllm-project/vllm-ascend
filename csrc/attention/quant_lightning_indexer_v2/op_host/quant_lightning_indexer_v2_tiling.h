@@ -58,6 +58,7 @@ constexpr uint32_t BLOCK_TABLE_INDEX = 10;
 constexpr uint32_t OUTPUT_IDX_OFFSET_INDEX = 11;
 constexpr uint32_t METADATA_INDEX = 12;
 constexpr uint32_t CANDIDATE_TOPK_INDEX_INPUT_INDEX = 13;
+constexpr uint32_t CAUSAL_SEQLENS_KV_GLOBAL_INDEX = 14;  // DCP: 每请求全局 exclusive 上界 C
 constexpr uint32_t SPARSE_INDICES_INDEX = 0;
 constexpr uint32_t SPARSE_VALUES_INDEX = 1;
 constexpr uint32_t CANDIDATE_TOPK_INDEX_OUTPUT_INDEX = 2;
@@ -75,6 +76,11 @@ constexpr uint32_t ATTR_CANDIDATE_TOPK_BLOCKS_INDEX = 9;
 constexpr uint32_t ATTR_CANDIDATE_BLOCK_SIZE_INDEX = 10;
 constexpr uint32_t ATTR_KEY_STRIDE0_INDEX = 11;                 // A11: key 第0维 stride
 constexpr uint32_t ATTR_KEY_DEQUANT_SCALE_STRIDE0_INDEX = 12;   // A11: k_scale 第0维 stride
+// ---- DCP (Decode Context Parallel, 解码上下文并行) ----
+constexpr uint32_t ATTR_ENABLE_DCP_INDEX = 13;
+constexpr uint32_t ATTR_CP_WORLD_INDEX = 14;
+constexpr uint32_t ATTR_CP_RANK_INDEX = 15;
+constexpr uint32_t ATTR_CP_KV_CACHE_INTERLEAVE_SIZE_INDEX = 16;
 
 // Dim Index
 constexpr uint32_t DIM_IDX_ZERO = 0;
@@ -135,6 +141,11 @@ TILING_DATA_FIELD_DEF(uint32_t, quantMode)
 TILING_DATA_FIELD_DEF(uint32_t, candidateMode)
 TILING_DATA_FIELD_DEF(uint32_t, candidateTopkBlocks)
 TILING_DATA_FIELD_DEF(uint32_t, candidateBlockSize)
+// ---- DCP (Decode Context Parallel, 解码上下文并行) ----
+TILING_DATA_FIELD_DEF(uint32_t, dcpEnable)
+TILING_DATA_FIELD_DEF(uint32_t, cpWorld)
+TILING_DATA_FIELD_DEF(uint32_t, cpRank)
+TILING_DATA_FIELD_DEF(uint32_t, cpInterleaveSize)
 END_TILING_DATA_DEF
 REGISTER_TILING_DATA_CLASS(VllmAscendQuantLightningIndexerV2, QLIV2TilingData)
 
@@ -157,6 +168,7 @@ struct QLIV2ParaInfo {
     TilingOptionalParaInfo outputIdxOffset = {nullptr, nullptr};
     TilingOptionalParaInfo metadata = {nullptr, nullptr};
     TilingOptionalParaInfo candidateTopkIndex = {nullptr, nullptr};
+    TilingOptionalParaInfo causalSeqLensKvGlobal = {nullptr, nullptr};  // DCP: 全局 exclusive 上界 C
     TilingRequiredParaInfo attenOut = {nullptr, nullptr};
     TilingRequiredParaInfo sparseValues = {nullptr, nullptr};
 
@@ -174,6 +186,11 @@ struct QLIV2ParaInfo {
     const int32_t *candidateBlockSize = nullptr;
     const int32_t *keyStride0Attr = nullptr;               // A11: key 第0维 stride 显式属性
     const int32_t *keyDequantScaleStride0Attr = nullptr;   // A11: k_scale 第0维 stride 显式属性
+    // ---- DCP (Decode Context Parallel, 解码上下文并行) ----
+    const bool *enableDcp = nullptr;
+    const int32_t *cpWorld = nullptr;
+    const int32_t *cpRank = nullptr;
+    const int32_t *cpInterleaveSize = nullptr;
 };
 
 // -----------算子Tiling入参信息类---------------
@@ -201,7 +218,7 @@ public:
     // Others Flag
     uint32_t sparseCount = 0;
     uint32_t cmpRatio = 1;
-    bool returnValue = false;
+    uint32_t returnValue = 0;
     uint32_t keyStride0 = 0;
     uint32_t keyDequantScaleStride0 = 0;
     std::vector<uint32_t> keyStridesVec;
@@ -211,6 +228,11 @@ public:
     uint32_t candidateMode = CANDIDATE_MODE_OFF;
     uint32_t candidateTopkBlocks = CANDIDATE_TOPK_BLOCKS_FIX;
     uint32_t candidateBlockSize = CANDIDATE_BLOCK_SIZE_DEFAULT;
+    // ---- DCP (Decode Context Parallel, 解码上下文并行) ----
+    bool dcpEnable = false;
+    uint32_t cpWorld = 1;
+    uint32_t cpRank = 0;
+    uint32_t cpInterleaveSize = 1;
     // DType
     ge::DataType inputQType = ge::DT_FLOAT16;
     ge::DataType inputKType = ge::DT_FLOAT16;

@@ -1,0 +1,12 @@
+pr: 20111
+entries:
+  - category: bugfix
+    text: >-
+      Unified the disable semantics of the four finegrained_tp_config knobs
+      (oproj/lmhead/embedding/mlp tensor_parallel_size) on vLLM parallel-size
+      conventions: the default is now 1 and a knob is enabled only when its
+      size is greater than 1. Explicitly setting a knob to 1 now takes the
+      plain unsharded path (previously lmhead/embedding/mlp built a size-1
+      sharded group), and mlp_tensor_parallel_size=1 no longer requires
+      recompute_scheduler_enable=true. Configs using 0 keep working as
+      disabled, but 0 is no longer part of the documented range.

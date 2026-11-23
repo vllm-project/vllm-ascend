@@ -1,0 +1,4 @@
+pr: 19516
+entries:
+  - category: dependency
+    text: Updated vLLM compatibility to v0.32.0.

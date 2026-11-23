@@ -11,13 +11,13 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorRole,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake.scheduler import (
-    ECMooncakeScheduler,
-)
 from vllm.distributed.ec_transfer.ec_connector.mooncake_ec_connector import (
     ECMooncakeConnector,
 )
 
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.scheduler import (
+    AscendECMooncakeScheduler,
+)
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.worker import (
     AscendECMooncakeWorker,
 )
@@ -34,13 +34,14 @@ class AscendECMooncakeConnector(ECMooncakeConnector):
         # constructs its concrete worker in ``ECMooncakeConnector.__init__``;
         # relying on downstream factory hooks would couple this plugin to a
         # locally patched vLLM checkout.
+        """Create only the requested Ascend scheduler or worker role."""
         ECConnectorBase.__init__(self, vllm_config=vllm_config, role=role)
         self._scheduler = None
         self._worker = None
         self._closed = False
 
         if role == ECConnectorRole.SCHEDULER:
-            self._scheduler = ECMooncakeScheduler(vllm_config)
+            self._scheduler = AscendECMooncakeScheduler(vllm_config)
         elif role == ECConnectorRole.WORKER:
             self._worker = AscendECMooncakeWorker(vllm_config)
         else:

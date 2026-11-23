@@ -19,6 +19,7 @@
 import hashlib
 import json
 import math
+from collections import Counter
 from enum import Enum
 from typing import Any
 
@@ -54,9 +55,18 @@ def _canonicalize_fingerprint_value(value: Any, *, _active_ids: set[int] | None 
         if isinstance(value, Enum):
             return value.name
         if isinstance(value, dict):
+            # Distinct keys can render identically (for example 1 and "1"). Reject the
+            # ambiguity instead of letting insertion order decide which value survives.
+            labels = [str(key) for key in value]
+            ambiguous = sorted(label for label, count in Counter(labels).items() if count > 1)
+            if ambiguous:
+                raise ValueError(f"RFork fingerprint dict has distinct keys with one label: {ambiguous}")
             return {
-                str(key): _canonicalize_fingerprint_value(item, _active_ids=_active_ids)
-                for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+                label: _canonicalize_fingerprint_value(item, _active_ids=_active_ids)
+                for label, item in sorted(
+                    ((str(key), item) for key, item in value.items()),
+                    key=lambda pair: pair[0],
+                )
             }
         if isinstance(value, (list, tuple)):
             return [_canonicalize_fingerprint_value(item, _active_ids=_active_ids) for item in value]
@@ -279,7 +289,7 @@ def _resolve_sharded_dp_rank(vllm_config: VllmConfig) -> int | None:
         getattr(finegrained_tp_config, "mlp_tensor_parallel_size", 0),
     )
     finegrained_tp_enabled = any(
-        isinstance(size, int) and not isinstance(size, bool) and size > 0 for size in finegrained_tp_sizes
+        isinstance(size, int) and not isinstance(size, bool) and size > 1 for size in finegrained_tp_sizes
     )
     data_parallel_size = getattr(parallel_config, "data_parallel_size", None)
     content_sharded = finegrained_tp_enabled or (

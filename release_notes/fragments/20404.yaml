@@ -1,0 +1,8 @@
+pr: 20404
+entries:
+  - category: bugfix
+    text: Fixed the fork QSFA kernel leaving TND output padding rows uninitialized (stale or NaN residue after capacity-shrink) by zeroing the tail in-kernel on both arch32 and arch35.
+    hardware: [A2, A3, A5]
+  - category: performance
+    text: Removed the redundant per-layer masked_fill on the GLM-5.3-Flash SFA c8 decode path, saving three small ops per layer per decode step.
+    hardware: [A2, A3, A5]

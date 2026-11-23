@@ -4,30 +4,30 @@
 
 Covers the three adaptations introduced for decode-context parallel:
 
-- ``KVPoolWorker._is_layerwise_save_leader``: exactly one rank per
+- ``LayerwiseKVPoolWorker._is_layerwise_save_leader``: exactly one rank per
   (pcp, dcp, head_or_tp) group must save/allocate; the plain
   ``tp_rank % put_step`` dedup drops every non-zero DCP shard.
-- ``KVPoolWorker._global_group_alloc_size``: with DCP>1 and put_step>1
+- ``LayerwiseKVPoolWorker._global_group_alloc_size``: with DCP>1 and put_step>1
   the shared region must cover all shards, using a per-shard stride
   aligned up to the GVA hugepage size (hybrid DSA groups have
   non-uniform per-layer bytes).
 """
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 
 GVA_ALIGN = 2 * 1024 * 1024
 
 
-def _bare_worker(**attrs) -> KVPoolWorker:
-    """Construct a KVPoolWorker without running __init__."""
-    worker = object.__new__(KVPoolWorker)
+def _bare_worker(**attrs) -> LayerwiseKVPoolWorker:
+    """Construct a LayerwiseKVPoolWorker without running __init__."""
+    worker = object.__new__(LayerwiseKVPoolWorker)
     for key, value in attrs.items():
         setattr(worker, key, value)
     return worker
 
 
 class TestSaveLeader:
-    def _mla_worker(self, tp_rank: int, dcp_size: int = 2) -> KVPoolWorker:
+    def _mla_worker(self, tp_rank: int, dcp_size: int = 2) -> LayerwiseKVPoolWorker:
         # MLA: num_kv_head=1 < tp -> put_step == tp_size, head_or_tp_rank 0.
         return _bare_worker(
             tp_rank=tp_rank,
@@ -63,7 +63,7 @@ class TestSaveLeader:
 
 
 class TestGlobalGroupAllocSize:
-    def _sized_worker(self, block_len: list[int], put_step: int, dcp_size: int) -> KVPoolWorker:
+    def _sized_worker(self, block_len: list[int], put_step: int, dcp_size: int) -> LayerwiseKVPoolWorker:
         return _bare_worker(
             group_block_len={0: block_len},
             group_num_layers={0: len(block_len)},

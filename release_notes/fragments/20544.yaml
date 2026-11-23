@@ -1,0 +1,6 @@
+pr: 20544
+entries:
+  - category: performance
+    text: >-
+      Reduced CPU preparation overhead in AscendStore by replacing repeated scans
+      of scheduled request IDs and leased KV keys with linear-time lookups.

@@ -14,7 +14,7 @@ from vllm.v1.worker.gpu import buffer_utils
 
 pytest.importorskip("torch_npu")
 importlib.import_module("vllm_ascend.vllm_ascend_C")
-patch_uva = importlib.import_module("vllm_ascend.patch.worker.patch_v2.patch_uva")
+patch_uva = importlib.import_module("vllm_ascend.patch.worker.patch_uva")
 
 try:
     import triton  # type: ignore[import-untyped, import-not-found]

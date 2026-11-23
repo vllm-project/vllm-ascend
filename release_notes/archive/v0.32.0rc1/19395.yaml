@@ -1,0 +1,13 @@
+pr: 19395
+entries:
+  - category: breaking
+    text: >-
+      Deprecated the Model Runner V1 EPLB environment switches
+      `DYNAMIC_EPLB` and `EXPERT_MAP_RECORD` for Model Runner V2.
+      Model Runner V2 now warns and ignores these switches; use
+      `--enable-eplb` and `--eplb-config` instead.
+  - category: config
+    text: >-
+      Model Runner V2 now warns and filters unsupported
+      `additional_config.eplb_config` and `stair_config` fields instead of
+      failing at startup, while preserving supported values.

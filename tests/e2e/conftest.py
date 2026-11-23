@@ -400,7 +400,11 @@ class RemoteOpenAIServer:
         start = time.time()
         client = requests
 
-        ready = {node_ip: False for node_ip, _ in targets}
+        # Key by (node_ip, url): several servers may share one IP (e.g. the
+        # single-node PD/EPD modes start multiple engines on 127.0.0.1), so a
+        # plain-IP key would collapse their readiness state together and make
+        # the timeout message report an empty not-ready list.
+        ready = {(node_ip, url): False for node_ip, url in targets}
 
         last_log_time = 0.0
 
@@ -410,13 +414,13 @@ class RemoteOpenAIServer:
             should_log = (now - last_log_time) >= log_interval
 
             for node_ip, url in targets:
-                if ready[node_ip] and not always_check_nodes:
+                if ready[(node_ip, url)] and not always_check_nodes:
                     continue
 
                 try:
                     resp = client.get(url)
                     if resp.status_code == 200:
-                        ready[node_ip] = True
+                        ready[(node_ip, url)] = True
                         logger.info("[READY] Node %s: %s is ready.", node_ip, url)
                 except RequestException:
                     all_ready = False
@@ -436,7 +440,7 @@ class RemoteOpenAIServer:
                 break
 
             if now - start > timeout:
-                not_ready_nodes = [n for n, ok in ready.items() if not ok]
+                not_ready_nodes = [url for (_, url), ok in ready.items() if not ok]
                 self._terminate_server()
                 raise RuntimeError(
                     f"Timeout: these nodes did not become ready: {not_ready_nodes} in time: {timeout}s"
@@ -521,7 +525,8 @@ class RemotePDServer(RemoteOpenAIServer):
         vllm_serve_args: list[str] | list[list[str]],
         server_host: str = "127.0.0.1",
         env_dict: dict[str, str] | None = None,
-        max_wait_seconds: float | None = 600,
+        env_dicts: list[dict[str, str]] | None = None,
+        max_wait_seconds: float | None = 2800,
     ) -> None:
         self._proc_list = []
 
@@ -547,6 +552,15 @@ class RemotePDServer(RemoteOpenAIServer):
                 ]
         else:
             raise RuntimeError("vllm_serves_args must be a list")
+        if env_dicts is not None:
+            if not isinstance(env_dicts, list) or not all(isinstance(item, dict) for item in env_dicts):
+                raise TypeError("env_dicts must be a list of dicts")
+            if len(env_dicts) != len(self.vllm_serve_args_list):
+                raise ValueError(
+                    f"env_dicts has {len(env_dicts)} entries, "
+                    f"but there are {len(self.vllm_serve_args_list)} vllm serve instances"
+                )
+        self.env_dicts = env_dicts
         serve_arg_cmd = ["vllm", "serve"]
         start_device_id = 0
         visible_devices = self.env_dict.get(
@@ -563,6 +577,8 @@ class RemotePDServer(RemoteOpenAIServer):
 
             required_devices = _get_pd_server_required_devices(vllm_serve_arg)
             server_env = copy.deepcopy(self.env_dict)
+            if self.env_dicts is not None:
+                server_env.update(self.env_dicts[i])
             end_device_id = start_device_id + required_devices
             if available_device_ids is None:
                 assigned_device_ids = [str(device_id) for device_id in range(start_device_id, end_device_id)]
@@ -970,10 +986,30 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
             elif command == "score":
                 req_outputs = llm.score(request["text_1"], request["text_2"], *request["args"], **request["kwargs"])
                 result = [req_output.outputs.score for req_output in req_outputs]
+            elif command == "get_metrics":
+                # PromMetric objects are not picklable (they hold prometheus
+                # handles), so flatten to name -> value here.
+                result = {
+                    metric.name: float(metric.value)
+                    for metric in llm.get_metrics()
+                    if getattr(metric, "value", None) is not None
+                }
+            elif command == "get_acceptance":
+                # Vector metrics are not picklable either; reduce to the two
+                # scalars needed for per-position acceptance.
+                num_drafts = 0.0
+                accepted = [0.0] * request["num_speculative_tokens"]
+                for metric in llm.get_metrics():
+                    if metric.name == "vllm:spec_decode_num_drafts":
+                        num_drafts += float(metric.value)
+                    elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+                        for position, value in enumerate(metric.values):
+                            accepted[position] += float(value)
+                result = {"num_drafts": num_drafts, "accepted": accepted}
             else:
                 raise ValueError(f"Unsupported data parallel command: {command}")
 
-            conn.send({"status": "ok", "rank": dp_rank, "indices": request["indices"], "result": result})
+            conn.send({"status": "ok", "rank": dp_rank, "indices": request.get("indices", []), "result": result})
     except Exception:
         with contextlib.suppress(Exception):
             conn.send({"status": "error", "rank": dp_rank, "traceback": traceback.format_exc()})
@@ -1197,6 +1233,20 @@ class VllmRunner:
     ) -> list[float]:
         req_outputs = self.model.score(text_1, text_2, *args, **kwargs)
         return [req_output.outputs.score for req_output in req_outputs]
+
+    def get_metrics(self) -> dict[str, float]:
+        """Return engine metrics flattened to ``name -> value``.
+
+        PromMetric objects are not picklable and counters/gauges are all the
+        pool watch helpers need, so metrics without a ``value`` attribute
+        (histograms) are dropped. Requires ``disable_log_stats=False``;
+        ``LLM.get_metrics()`` asserts on disabled stats.
+        """
+        return {
+            metric.name: float(metric.value)
+            for metric in self.model.get_metrics()
+            if getattr(metric, "value", None) is not None
+        }
 
     def __enter__(self):
         return self
@@ -1471,6 +1521,49 @@ class DPVllmRunner(VllmRunner):
     @property
     def model(self) -> LLM:
         raise RuntimeError("Direct access to `runner.model` is not supported by `DPVllmRunner`.")
+
+    def get_metrics(self) -> dict[str, float]:
+        """Aggregate engine metrics across DP ranks.
+
+        Returns ``name -> value`` with counters/gauges summed over ranks, which
+        is what pool-hit assertions need when a prompt is served by one rank.
+        Requires ``disable_log_stats=False``.
+        """
+        merged: dict[str, float] = {}
+        for rank, conn in enumerate(self._dp_parent_conns):
+            conn.send({"command": "get_metrics"})
+            if not conn.poll(self._dp_request_timeout):
+                raise TimeoutError(f"Timed out waiting for data parallel worker {rank} to finish `get_metrics`")
+            message = conn.recv()
+            if message["status"] != "ok":
+                raise RuntimeError(
+                    f"Data parallel worker {rank} failed during `get_metrics`:\n"
+                    f"{message.get('traceback', 'unknown error')}"
+                )
+            for name, value in message["result"].items():
+                merged[name] = merged.get(name, 0.0) + float(value)
+        return merged
+
+    def get_acceptance(self, num_speculative_tokens: int) -> list[float]:
+        """Aggregate spec-decode acceptance per draft position across DP ranks."""
+        total_drafts = 0.0
+        accepted = [0.0] * num_speculative_tokens
+        for rank, conn in enumerate(self._dp_parent_conns):
+            conn.send({"command": "get_acceptance", "num_speculative_tokens": num_speculative_tokens})
+            if not conn.poll(self._dp_request_timeout):
+                raise TimeoutError(f"Timed out waiting for data parallel worker {rank} to finish `get_acceptance`")
+            message = conn.recv()
+            if message["status"] != "ok":
+                raise RuntimeError(
+                    f"Data parallel worker {rank} failed during `get_acceptance`:\n"
+                    f"{message.get('traceback', 'unknown error')}"
+                )
+            total_drafts += float(message["result"]["num_drafts"])
+            for position, value in enumerate(message["result"]["accepted"]):
+                accepted[position] += float(value)
+        if total_drafts <= 0:
+            return []
+        return [value / total_drafts for value in accepted]
 
     def _start_data_parallel_workers(self, llm_kwargs: dict[str, Any]) -> None:
         ctx = multiprocessing.get_context("spawn")

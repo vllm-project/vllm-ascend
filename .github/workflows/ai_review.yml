@@ -1,0 +1,117 @@
+name: AI Review
+on:
+  pull_request_target:
+    types: [labeled, unlabeled, synchronize]
+  issue_comment:
+    types: [created]
+
+# One agent round per PR at a time; a newer trigger (push, reply, waive,
+# stop) cancels the in-flight round and supersedes it — the cancelled
+# round's output would be stale or discarded anyway, so latest-wins is
+# both cheaper and closer to what the human intended.
+concurrency:
+  # issue_comment events carry the PR number at issue.number; without the
+  # fallback every PR's comment round would share one empty-key group and
+  # cancel each other
+  group: ai-review-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  ai-review:
+    # POC gray release: the workflow only reacts to the explicit `ai-review`
+    # command family and only for allowlisted PR authors. The job-level if
+    # keeps unrelated PR comments from even starting a job on the CPU pool —
+    # comment-triggered workflows otherwise spin up one container per repo
+    # comment. issue_comment also fires on plain issues, so require a PR.
+    # PR events fire on every push and every label of every PR in the repo;
+    # gate them on the ai-review label so unlabeled PRs never start a job
+    # (and their fork code is never checked out). synchronize requires the
+    # label on the PR; labeled/unlabeled require the event's own label to be
+    # ai-review (adding any other label must not re-trigger a round; the
+    # unlabeled arm is what lets the stop handler run). Comment events keep
+    # the command-body filter: only comments containing the command family
+    # start a job.
+    if: >-
+      (
+        github.event_name == 'pull_request_target' &&
+        (
+          (github.event.action == 'synchronize' &&
+            contains(github.event.pull_request.labels.*.name, 'ai-review')) ||
+          ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
+            github.event.label.name == 'ai-review')
+        )
+      ) ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        contains(github.event.comment.body, '/ai-review')
+      ) ||
+      (
+        github.event_name == 'pull_request_review_comment' &&
+        contains(github.event.comment.body, '/ai-review')
+      )
+    runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:ai-review
+    steps:
+      # pull_request_target / issue_comment both resolve to the BASE branch,
+      # so the instructions, knowledge base and allowlist read here cannot be
+      # tampered with by the PR under review.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # The PR's own code, checked out read-only into ./head/ so the agent
+      # reviews the actual proposed changes: instructions, knowledge base
+      # and allowlist still come from the BASE checkout above and cannot be
+      # tampered with; the PR checkout is never executed and never pushed.
+      # Opting into fork-PR checkout for this step only: the head/ tree is
+      # read-only reference material for the agent (never executed, never
+      # pushed, no credentials persisted), and the whole flow only starts
+      # after a reviewer applies the ai-review label. The base checkout
+      # above — instructions, knowledge base, allowlist — stays protected.
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number || github.event.issue.number }}/head
+          path: head
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+
+      - name: Persist comment body to file
+        # The comment body travels through a file, never through argv or a
+        # shell variable interpolated into a command line.
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: printf '%s' "$COMMENT_BODY" > /tmp/comment-body.md
+
+      - name: Orchestrate ai-review round
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          # pin the repo so gh never depends on cwd-based inference
+          GH_REPO: ${{ github.repository }}
+          # Dedicated credentials for the ai-review agent (same DeepSeek
+          # channel as the doc-translate job, separate key so usage is
+          # attributable and revocable independently).
+          AI_REVIEW_KEY: ${{ secrets.AI_REVIEW_KEY }}
+          AI_REVIEW_API: ${{ secrets.AI_REVIEW_API }}
+          AI_REVIEW_EVENT_NAME: ${{ github.event_name }}
+          AI_REVIEW_EVENT_ACTION: ${{ github.event.action }}
+          AI_REVIEW_ACTOR: ${{ github.actor }}
+          AI_REVIEW_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          # Set on comment events only; empty otherwise (label/push rounds).
+          AI_REVIEW_COMMENT_ID: ${{ github.event.comment.id }}
+          # The agent command is kept configurable so the engine stays
+          # pluggable (RFC: engine swap without workflow surgery). Override
+          # the repo variable to switch engines.
+          AI_REVIEW_DSH_CMD: ${{ vars.AI_REVIEW_DSH_CMD || 'dsh --profile headless' }}
+          # Model for the review agent, passed through to dsh once its
+          # config surface is confirmed in the smoke test (runner precheck).
+          AI_REVIEW_MODEL: deepseek-v4.1-flash
+        run: |
+          python3 .github/workflows/scripts/ai_review.py \
+            --comment-body-file /tmp/comment-body.md \
+            --workspace . \
+            --pr "${AI_REVIEW_PR_NUMBER}" \
+            --event "${AI_REVIEW_EVENT_NAME}/${AI_REVIEW_EVENT_ACTION}" \
+            --actor "${AI_REVIEW_ACTOR}" \
+            --comment-id "${AI_REVIEW_COMMENT_ID}"

@@ -1,0 +1,117 @@
+# Source: https://github.com/vllm-project/vllm/blob/52a65d7b19e9e3ad86bf1e3b6954e4e11eeec7da/recipes/models/Qwen/Qwen3-VL-235B-A22B-Instruct.yaml
+# Extracted with vllm-project/recipes@b08ad73889f9e33319d8ac9c887dec6a0975c55d.
+meta:
+  hardware:
+    ascend_910c: verified
+    ascend_950dt: supported
+variants:
+  ascend_w8a8_quarot_a3:
+    model_id: Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot
+    precision: int8
+    label: W8A8 (Ascend)
+    vram_minimum_gb: 282
+    supported_hardware:
+      - ascend_910c
+    # TP4 leaves each die with a quarter of the experts and OOMs on this 235B
+    # checkpoint (measured), so the variant uses the whole node: TP16 with EP,
+    # which is what single_node_tp / single_node_tep render. DP16 also fits.
+    tp: 16
+    min_vllm_version: 0.23.0
+    description: ModelSlim W8A8-QuaRot checkpoint for one Atlas 800 A3 node (16x Ascend 910C) with TP16+EP. Requires --quantization ascend.
+    extra_args:
+      - '--enable-expert-parallel'
+      - '--seed'
+      - '1024'
+      - '--quantization'
+      - ascend
+      - '--max-num-seqs'
+      - '32'
+      - '--max-model-len'
+      - '32768'
+      - '--max-num-batched-tokens'
+      - '16384'
+      - '--trust-remote-code'
+      - '--gpu-memory-utilization'
+      - '0.92'
+      - '--no-enable-prefix-caching'
+      - '--mm-processor-cache-gb'
+      - '0'
+      - '--limit-mm-per-prompt.image'
+      - '1'
+      - '--limit-mm-per-prompt.video'
+      - '0'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,32]}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_OP_EXPANSION_MODE: AIV
+      HCCL_BUFFSIZE: '1536'
+      OMP_NUM_THREADS: '1'
+      OMP_PROC_BIND: 'false'
+      TASK_QUEUE_ENABLE: '1'
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: '1'
+      VLLM_ASCEND_ENABLE_FUSED_MC2: '1'
+      VLLM_ASCEND_BALANCE_SCHEDULING: '1'
+    install:
+      pip: false
+      docker:
+        command: docker pull quay.io/ascend/vllm-ascend:v0.23.0.post1-a3
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.23.0.post1-a3
+        docker_serve_command: "vllm serve"
+
+  ascend_w8a8_mxfp8_a5:
+    model_id: Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-mxfp8
+    precision: mxfp8
+    label: W8A8 MXFP8 (Ascend)
+    vram_minimum_gb: 282
+    supported_hardware:
+      - ascend_950dt
+    tp: 8
+    min_vllm_version: 0.23.0
+    description: W8A8-MXFP8 checkpoint for one Ascend 950DT node (8x 96G NPUs) with DP1+TP8+EP and the mp executor.
+    extra_args:
+      - '--distributed-executor-backend'
+      - mp
+      - '--enable-expert-parallel'
+      - '--seed'
+      - '1024'
+      - '--quantization'
+      - ascend
+      - '--max-num-seqs'
+      - '32'
+      - '--max-model-len'
+      - '32768'
+      - '--max-num-batched-tokens'
+      - '8192'
+      - '--trust-remote-code'
+      - '--no-enable-prefix-caching'
+      - '--mm-processor-cache-gb'
+      - '0'
+      - '--limit-mm-per-prompt.image'
+      - '1'
+      - '--limit-mm-per-prompt.video'
+      - '0'
+      - '--gpu-memory-utilization'
+      - '0.9'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_OP_EXPANSION_MODE: AIV
+      HCCL_BUFFSIZE: '400'
+      OMP_PROC_BIND: 'false'
+      OMP_NUM_THREADS: '100'
+      TASK_QUEUE_ENABLE: '1'
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: '1'
+    install:
+      pip: false
+      docker:
+        command: docker pull quay.io/ascend/vllm-ascend:v0.23.0.post1-a5
+    hardware_overrides:
+      ascend_950dt:
+        docker_image: quay.io/ascend/vllm-ascend:v0.23.0.post1-a5
+        docker_serve_command: "vllm serve"

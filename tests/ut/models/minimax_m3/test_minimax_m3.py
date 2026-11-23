@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 import torch
 from torch import nn
 from transformers import PretrainedConfig
+from vllm.config import CompilationMode
 
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.minimax_m3 import (
@@ -19,6 +20,8 @@ from vllm_ascend.models.minimax_m3 import (
     _sparse_attention_layer_ids,
 )
 from vllm_ascend.models.minimax_m3.minimax_m3 import (
+    _MMRS_MAX_TOKENS,
+    _MMRS_MIN_TOKENS,
     MiniMaxM3DecoderLayer,
     MiniMaxM3MLP,
     MiniMaxM3Model,
@@ -127,17 +130,107 @@ def _make_decoder_layer(*, use_sequence_parallel: bool, is_moe: bool = True) -> 
 
 
 class TestMiniMaxM3Modeling(unittest.TestCase):
+    def test_mmrs_token_limits(self):
+        self.assertEqual(_MMRS_MIN_TOKENS, 256)
+        self.assertEqual(_MMRS_MAX_TOKENS, 16384)
+
+    def test_pp_auxiliary_states_match_unsplit_target(self):
+        from vllm.v1.worker.gpu.pp_utils import PPHandler
+
+        from vllm_ascend.utils import vllm_version_is
+
+        class TargetLayer(nn.Module):
+            use_sequence_parallel = False
+
+            def forward(self, positions, hidden, residual, input_is_sequence_parallel=False):
+                return hidden + 1, hidden * 10
+
+        module = "vllm_ascend.models.minimax_m3.minimax_m3"
+
+        def run(cuts):
+            incoming = None
+            for stage, (start, end) in enumerate(zip(cuts, cuts[1:])):
+                group = SimpleNamespace(
+                    world_size=len(cuts) - 1, is_first_rank=stage == 0, is_last_rank=stage == len(cuts) - 2
+                )
+                model = MiniMaxM3Model.__new__(MiniMaxM3Model)
+                nn.Module.__init__(model)
+                model.start_layer, model.end_layer = start, end
+                model.layers = nn.ModuleList([TargetLayer() for _ in range(6)])
+                model._enable_eagle3_aux_hidden_states = True
+                model.embed_input_ids = lambda ids: torch.ones(2, 3)
+                model.norm = lambda hidden, residual: (hidden + residual, None)
+                with (
+                    patch(f"{module}.get_pp_group", return_value=group),
+                    patch(f"{module}.is_forward_context_available", return_value=False),
+                    patch("vllm.distributed.parallel_state.get_pp_group", return_value=group),
+                    patch("vllm.distributed.parallel_state.model_parallel_is_initialized", return_value=True),
+                ):
+                    model.set_aux_hidden_state_layers((0, 1, 2, 4, 6))
+                    handler = SimpleNamespace()
+                    PPHandler.configure_aux_hidden_state_relay(handler, SimpleNamespace(model=model))
+                    output = model.forward(
+                        torch.zeros(2, dtype=torch.long) if group.is_first_rank else None, torch.arange(2), incoming
+                    )
+                    if not group.is_last_rank:
+                        incoming = PPHandler.relay_aux_hidden_states(handler, incoming, output)
+                    elif vllm_version_is("0.33.0"):
+                        return output
+                    else:
+                        return PPHandler.add_upstream_aux_hidden_states(handler, incoming, output)
+
+        expected = run((0, 6))
+        for cuts in ((0, 2, 4, 6), (0, 0, 3, 6), (0, 3, 6, 6)):
+            actual = run(cuts)
+            torch.testing.assert_close(actual, expected)
+            self.assertEqual(len(actual[1]), 5)
+
+    def test_dspark_receives_residual_added_auxiliary_states(self):
+        class _TargetLayer(nn.Module):
+            use_sequence_parallel = False
+
+            def forward(self, positions, hidden_states, residual, input_is_sequence_parallel=False):
+                return hidden_states + 1, hidden_states * 10
+
+        module = "vllm_ascend.models.minimax_m3.minimax_m3"
+        text_config = SimpleNamespace(vocab_size=16, hidden_size=4, num_hidden_layers=6, rms_norm_eps=1e-6)
+        for method in (None, "eagle3", "dspark"):
+            config = SimpleNamespace(
+                model_config=SimpleNamespace(hf_text_config=text_config),
+                cache_config=None,
+                quant_config=None,
+                speculative_config=SimpleNamespace(method=method) if method else None,
+                compilation_config=SimpleNamespace(mode=CompilationMode.NONE),
+            )
+            with (
+                self.subTest(method=method),
+                patch(f"{module}.get_pp_group", return_value=SimpleNamespace(is_first_rank=True, is_last_rank=True)),
+                patch(f"{module}.VocabParallelEmbedding", return_value=nn.Embedding(16, 4)),
+                patch(f"{module}.make_layers", return_value=(0, 6, nn.ModuleList([_TargetLayer() for _ in range(6)]))),
+                patch(f"{module}.GemmaRMSNorm", return_value=_PairNorm()),
+                patch(f"{module}.make_pp_empty_intermediate_tensors"),
+            ):
+                model = MiniMaxM3Model(vllm_config=config)
+                model.set_aux_hidden_state_layers((1, 2, 3, 4, 5, 6))
+                result = model.forward(None, torch.arange(2), None, inputs_embeds=torch.ones(2, 4))
+
+                if method is None:
+                    self.assertIsInstance(result, torch.Tensor)
+                else:
+                    hidden, auxiliary = result
+                    self.assertEqual(len(auxiliary), 6)
+                    torch.testing.assert_close(hidden, torch.full((2, 4), 7.0))
+                    for index, state in enumerate(auxiliary):
+                        torch.testing.assert_close(state, torch.full((2, 4), 12.0 + 11 * index))
+
     @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_shard")
-    @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_reduce_scatter")
     def test_decoder_enters_sequence_parallel(
         self,
-        reduce_scatter: Mock,
         shard: Mock,
     ) -> None:
         layer = _make_decoder_layer(use_sequence_parallel=True)
         hidden_states = torch.arange(6, dtype=torch.float32).reshape(3, 2)
         residual = hidden_states + 10
-        reduce_scatter.side_effect = lambda value: torch.nn.functional.pad(value, (0, 0, 0, 1))[:2]
         shard.side_effect = lambda value: torch.nn.functional.pad(value, (0, 0, 0, 1))[:2]
 
         output, output_residual = layer(
@@ -146,25 +239,23 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
             residual=residual,
         )
 
-        reduce_scatter.assert_called_once()
+        # The O-projection custom op owns the hidden-states ReduceScatter on
+        # every path, so the decoder only shards the residual.
         shard.assert_called_once()
         torch.testing.assert_close(shard.call_args.args[0], residual)
         self.assertEqual(layer.self_attn.input_shapes, [torch.Size([3, 2])])
-        self.assertEqual(output.shape, torch.Size([2, 2]))
+        self.assertEqual(output.shape, torch.Size([3, 2]))
         self.assertEqual(output_residual.shape, torch.Size([2, 2]))
 
-    @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_reduce_scatter")
     @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_all_gather")
     def test_consecutive_moe_keeps_residual_sharded(
         self,
         all_gather: Mock,
-        reduce_scatter: Mock,
     ) -> None:
         layer = _make_decoder_layer(use_sequence_parallel=True)
         hidden_states = torch.arange(4, dtype=torch.float32).reshape(2, 2)
         residual = hidden_states + 10
         all_gather.side_effect = lambda value: torch.cat((value, value + 100), dim=0)
-        reduce_scatter.side_effect = lambda value: value[:2]
 
         output, output_residual = layer(
             positions=torch.arange(3),
@@ -174,25 +265,21 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
         )
 
         # Only the normalized attention input is gathered. The residual stays
-        # sharded and the attention partial output is reduce-scattered.
+        # sharded and the O-projection owns the hidden ReduceScatter.
         all_gather.assert_called_once()
-        reduce_scatter.assert_called_once()
         self.assertEqual(layer.self_attn.input_shapes, [torch.Size([3, 2])])
         torch.testing.assert_close(output_residual, residual)
-        self.assertEqual(output.shape, torch.Size([2, 2]))
+        self.assertEqual(output.shape, torch.Size([3, 2]))
 
-    @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_reduce_scatter")
     @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_all_gather")
     def test_dense_decoder_keeps_sequence_parallel_region(
         self,
         all_gather: Mock,
-        reduce_scatter: Mock,
     ) -> None:
         layer = _make_decoder_layer(use_sequence_parallel=True, is_moe=False)
         hidden_states = torch.arange(4, dtype=torch.float32).reshape(2, 2)
         residual = hidden_states + 10
         all_gather.side_effect = lambda value: torch.cat((value, value + 100), dim=0)
-        reduce_scatter.side_effect = lambda value: value[:2]
 
         output, output_residual = layer(
             positions=torch.arange(3),
@@ -202,9 +289,8 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
         )
 
         all_gather.assert_called_once()
-        reduce_scatter.assert_called_once()
         self.assertEqual(layer.self_attn.input_shapes, [torch.Size([3, 2])])
-        self.assertEqual(output.shape, torch.Size([2, 2]))
+        self.assertEqual(output.shape, torch.Size([3, 2]))
         self.assertEqual(output_residual.shape, torch.Size([2, 2]))
 
     @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_reduce_scatter")
@@ -377,6 +463,57 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
         config = PretrainedConfig(sparse_attention_config={"sparse_attention_freq": [0, 1, 0, 2]})
 
         self.assertEqual(_sparse_attention_layer_ids(config), {1, 3})
+
+    def test_decoder_uses_transformers_layer_types(self) -> None:
+        self._assert_decoder_uses_transformers_layer_types()
+
+    def test_decoder_uses_transformers_layer_types_with_empty_legacy_config(self) -> None:
+        self._assert_decoder_uses_transformers_layer_types(sparse_attention_config={})
+
+    def _assert_decoder_uses_transformers_layer_types(self, **config_overrides) -> None:
+        config = PretrainedConfig(
+            hidden_size=16,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            rotary_dim=4,
+            rms_norm_eps=1e-6,
+            dense_intermediate_size=32,
+            mlp_layer_types=["dense", "sparse"],
+            layer_types=["full_attention", "minimax_m3_sparse"],
+            index_n_heads=4,
+            index_head_dim=8,
+            index_topk_blocks=16,
+            index_block_size=128,
+            index_local_blocks=1,
+            **config_overrides,
+        )
+        module = MiniMaxM3DecoderLayer.__module__
+        with (
+            patch(f"{module}.MiniMaxM3Attention") as attention,
+            patch(f"{module}.MiniMaxM3SparseAttention") as sparse_attention,
+            patch(f"{module}.MiniMaxM3MLP") as mlp,
+            patch(f"{module}.MiniMaxM3MoE") as moe,
+            patch(f"{module}.GemmaRMSNorm", return_value=nn.Identity()),
+        ):
+            for layer_id in range(2):
+                layer = MiniMaxM3DecoderLayer(
+                    config=config,
+                    prefix=f"model.layers.{layer_id}",
+                    model_config=Mock(),
+                    cache_config=None,
+                    quant_config=None,
+                    parallel_config=SimpleNamespace(use_sequence_parallel_moe=False),
+                )
+                self.assertEqual(layer.is_layer_sparse, layer_id == 1)
+
+        attention.assert_called_once()
+        sparse_attention.assert_called_once()
+        mlp.assert_called_once()
+        moe.assert_called_once()
+        self.assertEqual(mlp.call_args.kwargs["prefix"], "model.layers.0.mlp")
+        self.assertEqual(moe.call_args.kwargs["prefix"], "model.layers.1.block_sparse_moe")
+        self.assertTrue(sparse_attention.call_args.kwargs["disable_index_value"])
+        self.assertEqual(sparse_attention.call_args.kwargs["sparse_cfg"]["sparse_index_dim"], 8)
 
     def test_rope_parameters_are_copied_from_config(self) -> None:
         config = PretrainedConfig(

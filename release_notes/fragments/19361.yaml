@@ -1,0 +1,7 @@
+pr: 19361
+entries:
+  - category: feature
+    text: >-
+      Added PCP support to Mooncake layerwise KV pooling, including DeepSeek-V4
+      hybrid caches, with per-rank sessions and all-rank cache-hit checks.
+      Producer and consumer topologies must match and DCP must remain disabled.

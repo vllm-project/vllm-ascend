@@ -1,0 +1,6 @@
+pr: 21690
+entries:
+  - category: bugfix
+    text: Fixed missing KV block information when using MooncakePushConnector with AscendMultiConnector.
+  - category: feature
+    text: MooncakeConnectorV2 now selects layerwise push when kv_connector_extra_config.use_layerwise is true. Pull remains the default.

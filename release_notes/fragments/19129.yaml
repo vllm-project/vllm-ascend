@@ -1,0 +1,6 @@
+pr: 19129
+entries:
+  - category: bugfix
+    text: Fixed MiniMax-M3 ViT mRoPE setup compilation failures on Ascend A5 by using 16-token blocks through the upstream pluggable layer interface. Requires a vLLM version containing the VitMropeSetup extension point.
+    model: minimax-m3
+    hardware: [A5]

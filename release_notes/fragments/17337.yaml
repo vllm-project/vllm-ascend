@@ -1,0 +1,4 @@
+pr: 17337
+entries:
+  - category: performance
+    text: Reduced MC2 input padding allocations by materializing only the local tensor-parallel shard when padding is needed and TP is greater than one.

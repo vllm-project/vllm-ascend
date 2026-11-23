@@ -27,6 +27,10 @@ jobs:
             cluster: a2
           - runner: linux-aarch64-a3-800t-0
             cluster: a3
+          # Accuracy E2E tests use the dedicated 560T runner. Populate its
+          # cache as well; the 800T downloader does not run on this runner.
+          - runner: linux-aarch64-a3-800i-2
+            cluster: a3
           - runner: linux-aarch64-a5-0
             cluster: a5
     container:

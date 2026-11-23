@@ -16,22 +16,22 @@ import pytest
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LoadSpec, ReqMeta
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
-    KVPoolWorker,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes import make_data_plane
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import (
+    LayerwiseKVPoolWorker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LoadSpec, ReqMeta
 
 
 def test_reuse_layout_remap_to_stage_local():
-    stage_globals = list(range(38, 79))
-
-    local_map, local_independent = KVPoolWorker._remap_layout_to_stage_local(
-        {42: 39, 43: 40, 44: 41, 45: 42}, [38], stage_globals
+    stage_local = {layer: index for index, layer in enumerate(range(38, 79))}
+    local_map = LayerwiseKVPoolWorker._remap_layout_to_stage_local(
+        {42: (39,), 43: (40,), 44: (41,), 45: (39, 42)}, stage_local
     )
 
-    assert local_map == {4: 1, 5: 2, 6: 3, 7: 4}
-    assert local_independent == [0]
-    assert KVPoolWorker._remap_layout_to_stage_local({3: 0, 4: 1}, [0], list(range(38))) == ({3: 0, 4: 1}, [0])
+    assert local_map == {4: (1,), 5: (2,), 6: (3,), 7: (1, 4)}
+    first_stage = {layer: layer for layer in range(38)}
+    assert LayerwiseKVPoolWorker._remap_layout_to_stage_local({3: (0,), 4: (1,)}, first_stage) == {3: (0,), 4: (1,)}
 
 
 def _make_pp_layer_count_worker(pp_rank, pp_size=2, initial_num_layers=4, use_layerwise_transfer=False, num_groups=2):
@@ -40,7 +40,7 @@ def _make_pp_layer_count_worker(pp_rank, pp_size=2, initial_num_layers=4, use_la
         [f"model.layers.{layer_offset + i}.attn" for i in range(group_id, 4, num_groups)]
         for group_id in range(num_groups)
     ]
-    worker = KVPoolWorker.__new__(KVPoolWorker)
+    worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
     attention_spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.uint8)
     worker.kv_cache_config = KVCacheConfig(
         num_blocks=2,
@@ -90,22 +90,29 @@ def _make_pp_layer_count_worker(pp_rank, pp_size=2, initial_num_layers=4, use_la
     }
 
     worker.tp_rank = 0
+    worker.pcp_rank = 0
     worker.dcp_size = 1
     worker.put_step = 1
     # _is_layerwise_save_owner gates the save path; attention groups never use
     # align state, and a bare producer owns every save.
     worker.kv_role = "kv_producer"
-    worker.consumer_is_to_put = False
+    worker.save_decode_cache = False
     worker.group_uses_align_state = [False] * num_groups
+    worker.sharded_mamba_group_ids = set()
     worker.grouped_block_size = [16] * num_groups
     worker.hash_block_size = 16
     worker.cache_coordinator = None
     worker.use_block_key_layerwise = False
+    # The step entry points dispatch through the data plane; the GVA plane
+    # owns the layerwise GVA protocol matching use_block_key_layerwise=False
+    # above.
+    worker.layerwise_data_plane = "gva"
+    worker._data_plane = make_data_plane(worker)
     worker.kv_send_thread = None
     worker.kv_recv_thread = None
     # Supply backend allocation results; keep task and address construction real.
-    worker._prepare_load_gvas = Mock()
-    worker._alloc_gvas_for_save = Mock()
+    worker._data_plane._prepare_load_gvas = Mock()
+    worker._data_plane._alloc_gvas_for_save = Mock()
     worker._masked_runs_cache = {}
     # Builders only need the registered geometry; no real backend client.
     worker.token_database = worker
@@ -170,14 +177,14 @@ def test_pp_stage_maps_multiple_cache_groups_to_local_layers(
         worker._attention_saved_layers = set()
         worker.block_key_hybrid = False
         worker._wait_for_final_layer_save = Mock()
-        monkeypatch.setitem(KVPoolWorker.save_kv_layer.__globals__, "_LW_DEFER_LAST_SAVE", False)
+        monkeypatch.setitem(LayerwiseKVPoolWorker.save_kv_layer.__globals__, "_LW_DEFER_LAST_SAVE", False)
 
         worker.save_kv_layer(None)
 
         worker.sync_save_events[-1].record.assert_called_once_with()
         worker.kv_send_thread.add_stored_request.assert_called_once_with(request.req_id)
         worker.kv_send_thread.add_request.assert_called_once_with(tasks_by_layer[-1])
-        worker._wait_for_final_layer_save.assert_called_once_with(worker.num_layers, worker.kv_send_thread)
+        worker._wait_for_final_layer_save.assert_called_once_with(worker.num_layers)
         assert worker.current_layer == worker.num_layers
 
 

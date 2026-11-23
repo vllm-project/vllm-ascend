@@ -1,7 +1,5 @@
 # Scheduler metrics remain on generic Core handlers until their business logic
 # needs to follow a vLLM Ascend implementation.
-- symbol: vllm_ascend.core.scheduler_profiling_chunk:ProfilingChunkScheduler.schedule
-  handler: ms_service_metric.provider_handlers:scheduler_scheduler_hooker
 
 - symbol: vllm_ascend.core.recompute_scheduler:RecomputeScheduler.schedule
   handler: ms_service_metric.provider_handlers:scheduler_scheduler_hooker
@@ -10,15 +8,15 @@
   handler: ms_service_metric.provider_handlers:scheduler_scheduler_hooker
 
 # Model runner metrics.
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner.execute_model
+- symbol: vllm_ascend.worker.v2.model_runner:NPUModelRunner.execute_model
   handler: ms_service_metric.provider_handlers:init_data_parallel_worker
 
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner.execute_model
+- symbol: vllm_ascend.worker.v2.model_runner:NPUModelRunner.execute_model
   handler: ms_service_metric.provider_handlers:model_runner_phase_handler
   metrics:
     - name: executor:model_runner_execute_model:duration
 
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._prepare_inputs
+- symbol: vllm_ascend.worker.v2.model_runner:NPUModelRunner.prepare_inputs
   handler: ms_service_metric.provider_handlers:model_runner_phase_handler
   metrics:
     - name: executor:prepare_inputs:duration

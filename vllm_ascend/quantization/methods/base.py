@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch_npu
 
+from vllm_ascend.device.hardware_profile import WeightFormat, get_current_hardware_profile
 from vllm_ascend.ops.fused_moe.moe_utils import maybe_normalize_mxfp_scale_layout
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.quantization.quant_type import QuantType
@@ -52,6 +53,7 @@ __all__ = [
     "WeightSwitchRepeatSpec",
     "WeightSwitchMixin",
     "WeightSwitchState",
+    "require_mx_weight_format",
 ]
 
 if TYPE_CHECKING:
@@ -73,6 +75,26 @@ def get_moe_num_logical_experts(
     return int(num_experts - global_redundant_expert_num - num_shared_experts)
 
 
+def require_mx_weight_format(weight_format: WeightFormat) -> None:
+    """Reject an MXFP scheme on hardware that cannot execute the MX matmul.
+
+    Every MXFP quant type (W8A8_MXFP8, W4A8_MXFP, W4A4_MXFP4, W4A16_MXFP4 and
+    the MXFP8 KV-cache variants) quantizes with the A5 MX kernel, so A2/A3 can
+    never execute such a checkpoint as published. Failing here, at scheme
+    construction, keeps the failure visible before any weight is allocated or
+    loaded; without it the same request surfaces deep inside weight loading as
+    an obscure aclnn error (aclnnNpuFormatCast 161002) after the whole
+    checkpoint has been read.
+    """
+    if get_current_hardware_profile().supports_weight_format(weight_format):
+        return
+    raise NotImplementedError(
+        f"MXFP checkpoints requiring {weight_format.name} weights run on Ascend 950 only, and this "
+        "device has no MX matmul. Re-quantize the checkpoint with ModelSlim (e.g. W8A8_DYNAMIC) "
+        "or deploy on an Ascend 950 device."
+    )
+
+
 class AscendLinearScheme(WeightSwitchMixin, ABC):
     """Base class for all linear quantization schemes.
 
@@ -80,6 +102,17 @@ class AscendLinearScheme(WeightSwitchMixin, ABC):
     Other methods have default implementations that return empty dicts
     or do nothing.
     """
+
+    def validate_weight_shapes(
+        self,
+        layer: torch.nn.Module,
+        input_size: int,
+        output_size: int,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+    ) -> None:
+        """Validate the partition shapes before allocating linear weights."""
+        return None
 
     @abstractmethod
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
@@ -167,6 +200,10 @@ class AscendLinearScheme(WeightSwitchMixin, ABC):
         """
         ...
 
+    def apply_weight_shard(self, layer: torch.nn.Module, x: torch.Tensor, *, bias_rank: int) -> torch.Tensor:
+        """Include complete quantized bias on just one parallel contributor."""
+        return self.apply(layer, x, bias=None, tp_rank=bias_rank)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Post-loading weight processing (transpose, format conversion, etc.).
 
@@ -249,6 +286,10 @@ class AscendMoEScheme(ABC):
     # Activations that this method implements through a fused gmm1+act+quant
     # path (``apply_gmm1_act_quant``). Stored as activation string values.
     fused_activations: frozenset[str] = frozenset()
+
+    def validate_weight_shapes(self, layer: torch.nn.Module, intermediate_size_per_partition: int) -> None:
+        """Validate the partition shapes before allocating expert weights."""
+        return None
 
     @abstractmethod
     def get_weight(

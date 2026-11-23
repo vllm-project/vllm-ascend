@@ -16,7 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -46,7 +46,8 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
+from vllm_ascend.utils import use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -88,7 +89,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
+        decode_query_len: int | Mapping[int, int],
         model_runner: Any,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
@@ -108,6 +109,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
         self.model_runner = model_runner
         self.update_stream = self.model_runner.update_stream
+        expert_offload.prepare_graph_capture(self, super().needs_capture)
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
         if super().needs_capture():
             set_graph_params(self.capture_sizes)
@@ -158,10 +160,8 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
         num_tokens_across_dp = torch.full([self.model_runner.dp_size], num_tokens)
-        # sfa_v1.py:AscendSFABackend.get_impl_cls reaches
-        # sfa_cp.py:resolve_sfa_impl, whose SFA CP selector reads the current
-        # ModelConfig. Publish the target config because set_forward_context()
-        # does not update it.
+        # Attention graph updates must see the target ModelConfig.
+        # set_forward_context() does not update the current VllmConfig.
         # TODO: Remove this explicit current-config scope once ACL graph replay
         # passes VllmConfig directly through the graph-update interfaces.
         with (
@@ -217,6 +217,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Capture CUDA graphs for model forward pass."""
         metadata = getattr(model_state, "device_metadata", None)
         model = ModelWithContext(model, device_metadata=metadata)
+        legacy_kwargs = {"has_lora": has_lora} if vllm_version_is("0.33.0") else {}
         try:
             with communicator_switch():
                 return super().capture(
@@ -228,7 +229,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                     attn_groups,
                     kv_cache_config,
                     pcp_manager=pcp_manager,
-                    has_lora=has_lora,
+                    **legacy_kwargs,
                     use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
                     lora_capture_hook=lora_capture_hook,
                     progress_bar_desc=progress_bar_desc,
@@ -277,28 +278,6 @@ class ModelWithContext(nn.Module):
 
     def get_original_model(self):
         return self.original_model
-
-    def compute_logits(self, hidden_states: torch.Tensor):
-        # draft model has `compute_logits`, which is not in ModelWithContext
-        return self.original_model.compute_logits(hidden_states)
-
-    def compute_draft_logits(self, hidden_states: torch.Tensor):
-        return self.original_model.compute_draft_logits(hidden_states)
-
-    def markov_embed(self, token_ids: torch.Tensor):
-        return self.original_model.markov_embed(token_ids)
-
-    def markov_bias(self, markov_embed: torch.Tensor):
-        return self.original_model.markov_bias(markov_embed)
-
-    def map_draft_to_target(self, draft_ids: torch.Tensor):
-        return self.original_model.map_draft_to_target(draft_ids)
-
-    def embed_input_ids(self, *args, **kwargs):
-        return self.original_model.embed_input_ids(*args, **kwargs)
-
-    def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor):
-        return self.original_model.compute_confidence(head_hidden, markov_embed)
 
     def __getattr__(self, name: str):
         # vLLM #57632 moved the draft context-K/V precompute into the
