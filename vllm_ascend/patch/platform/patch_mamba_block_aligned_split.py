@@ -37,6 +37,7 @@ import functools
 import inspect
 
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position
 from vllm.v1.request import Request
 
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
@@ -45,6 +46,75 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 from vllm_ascend.patch.platform.patch_mamba_config import (
     _get_sparse_index_kpool,
 )
+
+# TEMPORARY P11 diagnosis: remove with the diagnostic PR. The pool (kv_both)
+# and standalone legs of the P11 case disagree on the last cacheable mamba
+# boundary, so log the scheduler-side split decision and allow the kv_both
+# leg to suppress the EAGLE backoff for the A/B parity experiment.
+_P11_DIAG = True
+_P11_SUPPRESS_DROP_FOR_KV_BOTH = True
+_p11_config_logged = False
+
+
+def _p11_skips_eagle_drop(kv_transfer_config) -> bool:
+    if (
+        _P11_SUPPRESS_DROP_FOR_KV_BOTH
+        and kv_transfer_config is not None
+        and getattr(kv_transfer_config, "is_kv_producer", False)
+        and getattr(kv_transfer_config, "is_kv_consumer", False)
+    ):
+        return True
+    return _skips_eagle_block_drop(kv_transfer_config)
+
+
+def _p11_log_config(scheduler: Scheduler) -> None:
+    global _p11_config_logged
+    if _p11_config_logged or not _P11_DIAG:
+        return
+    _p11_config_logged = True
+    kv_transfer_config = scheduler.vllm_config.kv_transfer_config
+    print(
+        f"[p11-sched] cfg hash_bs={scheduler.hash_block_size} bs={scheduler.cache_config.block_size} "
+        f"use_eagle={getattr(scheduler, 'use_eagle', None)} "
+        f"drop={getattr(scheduler, 'use_eagle_block_drop', None)} "
+        f"lookahead={getattr(scheduler, 'num_hash_lookahead_tokens', None)} "
+        f"ckpt_blocks={getattr(scheduler, 'mamba_has_prefill_checkpoint_blocks', None)} "
+        f"partial_hit={getattr(scheduler, 'mamba_partial_cache_hit', None)} "
+        f"manager_eagle={getattr(scheduler.kv_cache_manager, 'use_eagle', None)} "
+        f"skip_drop={_skips_eagle_block_drop(kv_transfer_config)} "
+        f"exp_skip={_p11_skips_eagle_drop(kv_transfer_config)} "
+        f"producer={getattr(kv_transfer_config, 'is_kv_producer', None)} "
+        f"consumer={getattr(kv_transfer_config, 'is_kv_consumer', None)}",
+        flush=True,
+    )
+
+
+def _p11_log_split(
+    scheduler: Scheduler,
+    request: Request,
+    start: int,
+    requested: int,
+    result: int,
+    last_cache_position: int,
+    skip_eagle_drop: bool,
+) -> None:
+    if not _P11_DIAG or request.num_prompt_tokens < 16000:
+        return
+    prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+    if start >= prefill_end:
+        return
+    block_size = scheduler.cache_config.block_size
+    if start + 3 * block_size < last_cache_position:
+        return
+    print(
+        f"[p11-sched] req={request.request_id[-6:]} prompt={request.num_prompt_tokens} "
+        f"num_tokens={request.num_tokens} start={start} in={requested} out={result} "
+        f"last_cache={last_cache_position} skip_drop={skip_eagle_drop} "
+        f"use_eagle={getattr(scheduler, 'use_eagle', None)} "
+        f"drop={getattr(scheduler, 'use_eagle_block_drop', None)}",
+        flush=True,
+    )
+
 
 _EXPECTED_PARAMETERS = (
     "self",
@@ -100,6 +170,9 @@ def _mamba_block_aligned_split(
     the split off would only erase cacheable hit length.
     """
     kv_transfer_config = self.vllm_config.kv_transfer_config
+    _p11_log_config(self)
+    requested_tokens = num_new_tokens
+    skip_eagle_drop = _p11_skips_eagle_drop(kv_transfer_config)
     # Extra verifier or asynchronous output rows need an unsplit window.
     # Ordinary prefills must still stop at reusable checkpoints.
     num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
@@ -123,7 +196,7 @@ def _mamba_block_aligned_split(
         ):
             block_size = self.block_size
             last_cache_position = request.num_tokens - request.num_tokens % block_size
-            if self.use_eagle and not _skips_eagle_block_drop(kv_transfer_config):
+            if self.use_eagle and not skip_eagle_drop:
                 last_cache_position = max(last_cache_position - block_size, 0)
             scheduled_end = num_computed_tokens + num_new_tokens
             if scheduled_end < last_cache_position:
@@ -132,16 +205,40 @@ def _mamba_block_aligned_split(
                     num_new_tokens = chunked_tokens
             elif num_computed_tokens < last_cache_position < scheduled_end:
                 num_new_tokens = last_cache_position - num_computed_tokens
+            _p11_log_split(
+                self,
+                request,
+                num_computed_tokens,
+                requested_tokens,
+                num_new_tokens,
+                last_cache_position,
+                skip_eagle_drop,
+            )
         return num_new_tokens
 
-    if not _skips_eagle_block_drop(kv_transfer_config):
-        return _original_mamba_block_aligned_split(
+    if not skip_eagle_drop:
+        result = _original_mamba_block_aligned_split(
             self,
             request,
             num_new_tokens,
             num_new_local_computed_tokens,
             num_external_computed_tokens,
         )
+        _p11_log_split(
+            self,
+            request,
+            num_computed_tokens,
+            requested_tokens,
+            result,
+            get_mamba_prefill_checkpoint_position(
+                request.num_tokens,
+                self.cache_config.block_size,
+                bool(getattr(self, "use_eagle_block_drop", False)),
+                num_hash_lookahead_tokens=getattr(self, "num_hash_lookahead_tokens", 0) or 0,
+            ),
+            skip_eagle_drop,
+        )
+        return result
     # vLLM 0.28.x and newer revisions use different names.  Some
     # transitional scheduler implementations expose both and different
     # wrapper layers consult different attributes, so clear every
@@ -175,6 +272,20 @@ def _mamba_block_aligned_split(
             replay_boundary = max(request.num_prompt_tokens - block_size, 0)
             if start < replay_boundary < start + result:
                 result = replay_boundary - start
+        _p11_log_split(
+            self,
+            request,
+            num_computed_tokens,
+            requested_tokens,
+            result,
+            get_mamba_prefill_checkpoint_position(
+                request.num_tokens,
+                block_size,
+                False,
+                num_hash_lookahead_tokens=getattr(self, "num_hash_lookahead_tokens", 0) or 0,
+            ),
+            skip_eagle_drop,
+        )
         return result
     finally:
         for name, value in original_drop_values.items():

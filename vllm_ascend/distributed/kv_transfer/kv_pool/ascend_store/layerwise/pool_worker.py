@@ -1188,7 +1188,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             ]
             # TEMPORARY P11 diagnosis: align-group mask inputs and result.
             print(
-                f"[p11-align] g={group_id} n={num_blocks} ids={len(block_ids)} "
+                f"[p11-align] req={request.req_id[-6:]} g={group_id} n={num_blocks} ids={len(block_ids)} "
                 f"tail={list(block_ids[max(0, num_blocks - 3):num_blocks + 3])} "
                 f"orig={None if original_mask is None else sum(original_mask)} "
                 f"orig_first={None if original_mask is None or not any(original_mask) else original_mask.index(True)} "

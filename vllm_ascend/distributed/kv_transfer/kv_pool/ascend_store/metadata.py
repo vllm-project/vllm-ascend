@@ -915,8 +915,9 @@ class RequestTracker:
             if group_id in (self.num_speculative_blocks_by_group or {}) and num_computed_tokens >= 13000:
                 tracker = self.allocated_block_ids_by_group[group_id]
                 print(
-                    f"[p11-track] g={group_id} nct={num_computed_tokens} delta={list(ids)} "
-                    f"len={len(tracker)} tail={list(tracker[max(0, len(tracker) - 6):])}",
+                    f"[p11-track] req={self.req_id[-6:]} g={group_id} nct={num_computed_tokens} "
+                    f"delta={list(ids)} len={len(tracker)} "
+                    f"tail={list(tracker[max(0, len(tracker) - 6):])}",
                     flush=True,
                 )
 
