@@ -6,30 +6,19 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from tests.ut.model_executor.warmup.helpers import make_mock_vllm_config, make_registry
+from tests.ut.model_executor.warmup.helpers import make_mock_vllm_config
 from vllm_ascend.ops.triton import hisparse
 
 
-def test_single_warmup_key_and_registration_window():
-    launcher = hisparse._TRITON_SCATTER_MIN_REPRESENTATIVES
-    config = make_mock_vllm_config()
-    keys = launcher.get_warmup_keys(config)
-    assert keys == [launcher.CompileKey(block_size=256)]
-    registry = make_registry(config)
-    launcher.register_warmup(config)
-    assert len(registry) == 0
-    with registry.activate():
-        launcher.register_warmup(config)
-        launcher.register_warmup(config)
-    assert len(registry) == 1
-
-
-def test_compile_binds_runtime_signature_without_executing():
+def test_single_warmup_key_compiles_without_executing():
     launcher = hisparse.TritonScatterMinRepresentativesKernel()
+    keys = launcher.get_warmup_keys(make_mock_vllm_config())
+    assert keys == [launcher.CompileKey(block_size=256)]
     kernel = MagicMock(arg_names=["index_ptr", "source_ptr", "representatives_ptr", "num_rows", "BLOCK_SIZE"])
     with patch.object(launcher, "kernel", kernel):
-        launcher.compile(launcher.CompileKey(block_size=256))
+        launcher.compile(keys[0])
     kernel.__getitem__.assert_not_called()
+    kernel.warmup.assert_called_once()
     args = kernel.warmup.call_args.kwargs
     assert set(args) == {"index_ptr", "source_ptr", "representatives_ptr", "num_rows", "BLOCK_SIZE", "grid"}
     assert args["num_rows"] == args["BLOCK_SIZE"] == 256

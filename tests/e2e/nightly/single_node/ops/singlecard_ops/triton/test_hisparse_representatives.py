@@ -6,13 +6,10 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.device.device_config import is_950
 from vllm_ascend.ops.triton.hisparse import (
     _scatter_min_representatives_kernel,
     scatter_min_representatives,
 )
-
-pytestmark = pytest.mark.skipif(not is_950(), reason="HiSparse requires Ascend 950")
 
 
 @pytest.mark.parametrize("value", [-(2**63), 2**63 - 1])

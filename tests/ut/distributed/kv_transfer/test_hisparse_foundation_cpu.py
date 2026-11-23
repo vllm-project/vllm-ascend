@@ -11,6 +11,8 @@ from types import SimpleNamespace as NS
 import pytest
 import torch
 
+from tests.ut.model_executor.warmup.helpers import make_mock_vllm_config, make_registry
+
 pytest.importorskip("vllm.v1.hisparse.backend")
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
@@ -469,6 +471,20 @@ def test_capture_metadata_prevents_warmup_host_mirrors(monkeypatch):
     assert submitted == []
     finish_hisparse_kv_update(cache, real_metadata)
     assert submitted == [True]
+
+
+def test_metadata_builder_registers_representative_warmup(monkeypatch):
+    config = make_mock_vllm_config()
+    config.compilation_config.max_cudagraph_capture_size = 0
+    registry = make_registry(config)
+    # Isolate parent setup while exercising HiSparse's real constructor and registration.
+    monkeypatch.setattr(
+        AscendSFAMetadataBuilder, "__init__", lambda self, *args, **kwargs: setattr(self, "use_pcp", False)
+    )
+    with registry.activate():
+        AscendHiSparseMetadataBuilder(NS(block_size=128), ["layer"], config, torch.device("cpu"))
+    launcher = sfa_hisparse._TRITON_SCATTER_MIN_REPRESENTATIVES
+    assert registry._registrations[launcher] == [((config,), {})]
 
 
 @pytest.fixture

@@ -5,7 +5,6 @@
 Residency planning is provided by the native AscendC resolver.
 """
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -74,15 +73,6 @@ class TritonScatterMinRepresentativesKernel(AscendTritonJitKernel["TritonScatter
             num_rows=num_rows,
             BLOCK_SIZE=BLOCK_SIZE,
         )
-
-    def launch(self, launch_spec: LaunchSpec, inputs: Mapping[str, Any]) -> Any:
-        if self._warming:
-            return super().launch(launch_spec, inputs)
-        # __call__ already binds the complete kernel signature. Avoid copying
-        # and rebinding that dictionary in the generic runtime launcher.
-        grid, launch_kwargs = launch_spec
-        self.kernel[grid](**launch_kwargs)
-        return None
 
 
 # One process-local launcher is shared by startup registration and runtime.
