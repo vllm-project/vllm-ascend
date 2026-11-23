@@ -23,6 +23,8 @@ from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMultiTokenPredictor
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
+from vllm.v1.sample.logits_processor import LogitsProcessors
+from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
 import vllm_ascend.spec_decode.llm_base_proposer as llm_base_proposer
@@ -2635,6 +2637,45 @@ class TestRunMergedDraft(TestBase):
             )
         )
         self.assertEqual(draft_token_ids.tolist(), [[151667], [32313]])
+
+    def test_dflash_probabilistic_replay_samples_live_rows_and_replaces_probs(self):
+        proposer = self.proposer
+        proposer.method = "dflash"
+        proposer._enable_probabilistic_draft_probs = True
+        proposer.num_speculative_tokens = 2
+        proposer.model = MockDraftModel(returns_tuple=False, vocab_size=8)
+        proposer.input_ids[:4] = torch.arange(4)
+        proposer._context_slot_mapping_buffers = MagicMock()
+        proposer.build_model_inputs_first_pass = MagicMock()
+        proposer.dynamic_spec = None
+        proposer.use_fp64_gumbel = False
+        greedy = SimpleNamespace(all_greedy=True)
+        with patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False):
+            # Capture with greedy metadata and room for two requests.
+            logits = proposer._run_merged_draft(
+                num_input_tokens=4, batch_size=2, token_indices_to_sample=torch.arange(4),
+                target_positions=proposer.positions[:4], inputs_embeds=None, multi_steps_attn_metadata=None,
+                num_tokens=4, sampling_metadata=greedy,
+            )
+
+        self.assertEqual(logits.shape, (4, 8))
+        # One live request reuses that bucket. Check two different replay outputs.
+        random = SamplingMetadata(
+            temperature=torch.tensor([0.5]), all_greedy=False, all_random=True,
+            top_k=None, top_p=None, generators={}, max_num_logprobs=None, no_penalties=True,
+            prompt_token_ids=None, frequency_penalties=torch.empty(0), presence_penalties=torch.empty(0),
+            repetition_penalties=torch.empty(0), output_token_ids=[[]], allowed_token_ids_mask=None,
+            bad_words_token_ids={}, logitsprocs=LogitsProcessors(),
+        )
+        for shift in (0, 1):
+            current = logits.roll(shift, dims=-1) / 1000
+            expected_probs = (current[:2] / 0.5).softmax(-1).view(1, 2, 8)
+            token_ids = proposer._sample_dflash_logits(current, 2, random)
+            self.assertEqual(token_ids.shape, (1, 2))
+            torch.testing.assert_close(proposer.take_last_draft_probs(), expected_probs)
+
+        proposer._sample_dflash_logits(logits, 2, greedy)
+        self.assertIsNone(proposer.take_last_draft_probs())
 
     def test_run_merged_draft_mtp_mrope_graph_and_lmhead_tp_preparation(self):
         self.proposer.method = "mtp"

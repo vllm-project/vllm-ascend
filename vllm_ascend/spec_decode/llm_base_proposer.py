@@ -1047,6 +1047,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # paths (which key off ``draft_token_ids.shape[1]``) stay consistent.
         # Mirrors vLLM's llm_base_proposer._propose empty-draft early return.
         if self.num_speculative_tokens == 0:
+            self._last_draft_probs = None
             return torch.empty(
                 batch_size,
                 0,
@@ -1386,13 +1387,26 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             if self.enable_enpu:
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
-                draft_token_ids = run_draft()
+                draft_output = run_draft()
             else:
-                draft_token_ids = run_draft()
+                draft_output = run_draft()
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
         if active_device_metadata_executor is not None:
             active_device_metadata_executor.release()
-        return draft_token_ids
+        if self.method == "dflash" and self._enable_probabilistic_draft_probs:
+            return self._sample_dflash_logits(draft_output, token_indices_to_sample_len, sampling_metadata)
+        return draft_output
+
+    def _sample_dflash_logits(
+        self, logits: torch.Tensor, num_rows: int, sampling_metadata: SamplingMetadata
+    ) -> torch.Tensor:
+        # A replay can return a padded graph bucket. Only real requests have sampling metadata.
+        logits = logits[:num_rows]
+        token_ids, probs = self._sample_draft_from_logits(logits, sampling_metadata)
+        self._last_draft_probs = None if probs is None else probs.view(-1, self.num_speculative_tokens, probs.shape[-1])
+        if self.dynamic_spec is not None:
+            self.dynamic_spec.update(logits=logits)
+        return token_ids.reshape(-1, self.num_speculative_tokens)
 
     def _sample_draft_from_logits(
         self,
@@ -1622,6 +1636,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         ori_token_indices_to_sample,
                         is_logits=True,
                     )
+                if self.method == "dflash" and self._enable_probabilistic_draft_probs:
+                    # Replay the LM head, then sample with the live request metadata outside the graph.
+                    return logits
                 draft_token_ids, draft_probs_step0 = self._sample_draft_from_logits(logits, sampling_metadata)
 
                 # Dynamic verify-length path for head-free DFlash only.
