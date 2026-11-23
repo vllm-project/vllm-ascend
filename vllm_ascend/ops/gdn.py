@@ -34,6 +34,7 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.third_party.flash_linear_attention.ops.fused_recurrent import fused_recurrent_gated_delta_rule
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import triton
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -48,6 +49,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend, AscendGDNPCPBackend
 from vllm_ascend.ops.gdn_checkpoint import ensure_gdn_checkpoint_workspace, run_gdn_checkpoint_prefill
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
+from vllm_ascend.ops.triton.fla.fused_gdn_prepare import fused_gdn_prepare
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_varlen, extract_last_width
@@ -447,6 +449,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         if pcp_group is not None:
             hidden_states = torch.ops.vllm.pcp_gather_tokens(hidden_states, pcp_group.world_size, self.prefix)
         num_tokens = hidden_states.size(0)
+        core_attn_out = None
+        packed_qkvz = None
+        packed_ba = None
         if hasattr(self, "in_proj_qkv"):
             mixed_qkv, _ = self.in_proj_qkv(hidden_states)
             ba, _ = self.in_proj_ba(hidden_states)
@@ -457,17 +462,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             a = a.contiguous()
         else:
             if not self.gqa_interleaved_layout:
-                mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-                num_tokens = mixed_qkvz.size(0)
-                qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-                z_size = self.value_dim // self.tp_size
-                mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
-                z = z.reshape(z.size(0), -1, self.head_v_dim)
-                ba, _ = self.in_proj_ba(hidden_states)
-                b, a = self._split_ba_for_tp(ba)
-
-                b = b.contiguous()
-                a = a.contiguous()
+                packed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+                packed_ba, _ = self.in_proj_ba(hidden_states)
+                num_tokens = packed_qkvz.size(0)
             else:
                 projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
                 projected_states_ba, _ = self.in_proj_ba(hidden_states)
@@ -485,32 +482,47 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
-        # Note: we should not use torch.empty here like other attention backends,
-        # see discussions in https://github.com/vllm-project/vllm/pull/28182
-        core_attn_out = torch.zeros(
-            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-
-        torch.ops.vllm.qwen_gdn_attention_core(
-            mixed_qkv,
-            b,
-            a,
-            core_attn_out,
-            self.prefix,
-            False,
-        )
+        if packed_qkvz is not None:
+            assert packed_ba is not None
+            # The packed custom op initializes every row in this buffer before
+            # recurrent GDN writes the live rows, so graph padding remains
+            # deterministic without a separate zero-fill launch.
+            core_attn_out = torch.empty(
+                (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            torch.ops.vllm.qwen_gdn_packed_attention_core_norm_with_output(
+                packed_qkvz,
+                packed_ba,
+                core_attn_out,
+                self.prefix,
+                False,
+            )
+        else:
+            core_attn_out = torch.zeros(
+                (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            torch.ops.vllm.qwen_gdn_attention_core_norm_with_output(
+                mixed_qkv,
+                b,
+                a,
+                z,
+                core_attn_out,
+                self.prefix,
+                False,
+            )
 
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        z_shape_og = z.shape
-        # Reshape input data into 2D tensor
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = core_attn_out.reshape(
+            num_tokens,
+            self.num_v_heads // self.tp_size,
+            self.head_v_dim,
+        )
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         out, _ = self.out_proj(core_attn_out)
         if pcp_group is not None:
@@ -525,6 +537,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         b: torch.Tensor,
         a: torch.Tensor,
         core_attn_out: torch.Tensor,
+        z: torch.Tensor | None = None,
     ):
         """
         Core attention computation (called by custom op).
@@ -1046,9 +1059,92 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
             merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
+            recurrent_out = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
-            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+            recurrent_out = core_attn_out_spec.squeeze(0)
         else:
-            core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+            recurrent_out = core_attn_out_non_spec.squeeze(0)
+        if z is None:
+            core_attn_out[:num_actual_tokens] = recurrent_out
+        else:
+            # Write the final gated RMSNorm result directly into the stable
+            # graph output. This removes the recurrent-output materialization
+            # while retaining the zero-filled padded tail.
+            self.norm.forward_oot(
+                recurrent_out,
+                z[:num_actual_tokens],
+                out=core_attn_out[:num_actual_tokens],
+            )
         maybe_save_kv_layer_to_connector("", [])
+
+
+def qwen_gdn_attention_core_norm_with_output(
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    z: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    is_prefill: bool,
+) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    layer._forward_core(mixed_qkv, b, a, core_attn_out, z=z)
+
+
+def qwen_gdn_attention_core_norm_with_output_fake(
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    z: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    is_prefill: bool,
+) -> None:
+    return None
+
+
+def qwen_gdn_packed_attention_core_norm_with_output(
+    mixed_qkvz: torch.Tensor,
+    mixed_ba: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    is_prefill: bool,
+) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    qkv_width = (layer.key_dim * 2 + layer.value_dim) // layer.tp_size
+    mixed_qkv, z, b, a, _ = fused_gdn_prepare(
+        mixed_qkvz,
+        mixed_ba,
+        qkv_width,
+        layer.num_v_heads // layer.tp_size,
+        layer.head_v_dim,
+        core_attn_out=core_attn_out,
+    )
+    layer._forward_core(mixed_qkv, b, a, core_attn_out, z=z)
+
+
+def qwen_gdn_packed_attention_core_norm_with_output_fake(
+    mixed_qkvz: torch.Tensor,
+    mixed_ba: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    is_prefill: bool,
+) -> None:
+    return None
+
+
+direct_register_custom_op(
+    op_name="qwen_gdn_attention_core_norm_with_output",
+    op_func=qwen_gdn_attention_core_norm_with_output,
+    fake_impl=qwen_gdn_attention_core_norm_with_output_fake,
+    mutates_args=["core_attn_out"],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="qwen_gdn_packed_attention_core_norm_with_output",
+    op_func=qwen_gdn_packed_attention_core_norm_with_output,
+    fake_impl=qwen_gdn_packed_attention_core_norm_with_output_fake,
+    mutates_args=["core_attn_out"],
+    dispatch_key="PrivateUse1",
+)
