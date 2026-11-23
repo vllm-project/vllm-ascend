@@ -504,8 +504,9 @@ def test_c8_resident_prefill_handles_hma_stride_and_pcp_padding(monkeypatch, blo
     )
     query = torch.zeros(4, 1, 8)
     query_rope = torch.zeros(4, 1, 4)
-    logical_topk = torch.full((4, 4), 99, dtype=torch.int32)
-    logical_topk[:2] = torch.tensor([[0, 129, -1, 300], [128, 5, 256, -1]], dtype=torch.int32)
+    logical_topk = torch.full((4, 128), -1, dtype=torch.int32)
+    logical_topk[:2, :4] = torch.tensor([[0, 129, -1, 300], [128, 5, 256, -1]], dtype=torch.int32)
+    logical_topk[2:] = 99
     query_ends = torch.tensor([1, 3], dtype=torch.int32)
     key_lengths = torch.tensor([10, 20], dtype=torch.int32)
 
@@ -521,7 +522,7 @@ def test_c8_resident_prefill_handles_hma_stride_and_pcp_padding(monkeypatch, blo
         assert out == "pa-bsnd-out"
         tnd.assert_not_called()
         q, q_rope, _, topk, _, q_ends, k_lens = pa_bsnd.call_args.args
-        assert (q.shape, q_rope.shape, topk.shape) == ((2, 1, 8), (2, 1, 4), (2, 1, 4))
+        assert (q.shape, q_rope.shape, topk.shape) == ((2, 1, 8), (2, 1, 4), (2, 1, 128))
         assert q_ends.tolist() == [2]
         assert k_lens.tolist() == [20]
         assert pa_bsnd.call_args.kwargs["block_table"].tolist() == [[2, 0]]
@@ -531,4 +532,5 @@ def test_c8_resident_prefill_handles_hma_stride_and_pcp_padding(monkeypatch, blo
         q, q_rope, _, indices = tnd.call_args.args
         assert (q.shape, q_rope.shape) == ((2, 1, 8), (2, 1, 4))
         assert tnd.call_args.kwargs == {"indices_are_mapped": True}
-        assert indices.tolist() == [[384, 1, -1, -1], [0, 389, -1, -1]]
+        assert indices[:, :4].tolist() == [[384, 1, -1, -1], [0, 389, -1, -1]]
+        assert (indices[:, 4:] == -1).all()

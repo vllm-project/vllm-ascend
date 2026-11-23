@@ -700,6 +700,9 @@ class AscendHiSparseImpl(AscendSFAImpl):
             or req_id_per_token is None
             or req_id_per_token.numel() < num_decode_tokens + num_prefill_tokens
             or table.shape[1] <= 0
+            or logical_topk.ndim != 2
+            or logical_topk.shape[1] <= 0
+            or logical_topk.shape[1] % 128
         ):
             return None
 
