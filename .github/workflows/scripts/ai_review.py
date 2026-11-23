@@ -70,7 +70,7 @@ def render_template(template: str, values: dict[str, str]) -> str:
     """
     return re.sub(
         r"\{\{(\w+)\}\}",
-        lambda m: values.get(m.group(1), m.group(0)),
+        lambda m: str(values.get(m.group(1), m.group(0))),
         template,
     )
 
