@@ -55,6 +55,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    compute_layer_kv_cache_shape_bytes,
 )
 from vllm.v1.worker.gpu.attn_utils import get_shared_kv_cache_layers
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
@@ -68,9 +69,11 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
+from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
+    BHNC_VIEW_ORDER,
+    BNHC_VIEW_ORDER,
     AscendCommonAttentionMetadata,
     requires_contiguous_pa_kv_cache,
     supports_strided_mla_cache,
@@ -642,12 +645,6 @@ def _is_dsv4_model(vllm_config: VllmConfig) -> bool:
     return hf_config is not None and hasattr(hf_config, "compress_ratios")
 
 
-def _is_step5_model(vllm_config: VllmConfig) -> bool:
-    model_config = getattr(vllm_config, "model_config", None)
-    text_config = getattr(model_config, "hf_text_config", None)
-    return getattr(text_config, "model_type", None) in _STEP5_MODEL_TYPES
-
-
 def _get_attention_kv_cache_dims(
     layer_name: str,
     kv_cache_spec: AttentionSpec,
@@ -1027,17 +1024,6 @@ def _allocate_kv_cache(
             for name in get_kv_cache_tensor_layers(descriptor):
                 kv_cache_raw_tensors[name] = backing
         return kv_cache_raw_tensors
-    if _is_step5_model(vllm_config) and kv_cache_config.kv_cache_tensors:
-        tensors = kv_cache_config.kv_cache_tensors
-        sizes = {tensor.size for tensor in tensors}
-        if len(sizes) != 1:
-            raise ValueError("Unified KV cache descriptors must share one backing allocation.")
-        backing = _allocate_int8_cache_tensor(sizes.pop(), alignment, device)
-        return {
-            name: _slice_cache_layer(backing, tensor, index, layer_kv_cache_spec[name], kv_cache_config.num_blocks)
-            for tensor in kv_cache_config.kv_cache_tensors
-            for index, name in enumerate(tensor.layers)
-        }
     has_mamba = any(isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values())
     has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
     use_hybrid_layout = has_mamba and has_attention
@@ -1444,6 +1430,8 @@ def create_cache_component_views(
             )
         )
         offset += component_bytes
+    if offset - base > block_stride:
+        raise ValueError("Cache components exceed one physical block stride.")
     return views
 
 
@@ -1454,6 +1442,8 @@ def _slice_cache_layer(
     spec: KVCacheSpec,
     num_blocks: int,
 ) -> torch.Tensor:
+    if num_blocks <= 0:
+        raise ValueError(f"KV cache placement for {descriptor.layers[layer_index]} requires positive num_blocks.")
     start = descriptor.offset + layer_index * descriptor.layer_stride
     span = (num_blocks - 1) * descriptor.block_stride + spec.page_size_bytes
     if start < 0 or descriptor.block_stride < spec.page_size_bytes or start + span > backing.nbytes:
@@ -1468,9 +1458,6 @@ def create_kv_cache_runtime_views(
     kernel_block_sizes: Sequence[int],
     shared_layers: Mapping[str, str],
     layout: Any = None,
-    *,
-    attn_layers: Mapping[str, AttentionLayerBase] | None = None,
-    cache_dtype: str = "auto",
 ) -> dict[str, Any]:
     """Delegate component views to backends using the descriptor block strides."""
     placements = {
@@ -1484,43 +1471,59 @@ def create_kv_cache_runtime_views(
             continue
         kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
         spec = group.kv_cache_spec
+        get_runtime_shapes = getattr(group.backend, "get_runtime_shapes", None)
+        get_view_order = getattr(group.backend, "get_runtime_view_order", None)
+        if callable(get_view_order):
+            view_order = get_view_order(layout)
+        elif callable(get_runtime_shapes):
+            view_order = BNHC_VIEW_ORDER
+        else:
+            view_order = BHNC_VIEW_ORDER
+        returns_list = bool(getattr(group.backend, "returns_kv_cache_list", False))
         for name in group.layer_names:
             descriptor, layer_index = placements[name]
             num_blocks = kv_cache_config.num_blocks_of(descriptor)
             raw_cache = _slice_cache_layer(backing, descriptor, layer_index, spec, num_blocks)
-            layer = attn_layers.get(name) if attn_layers is not None else None
-            get_view_layout = getattr(layer, "get_kv_cache_view_layout", None)
-            if callable(get_view_layout):
-                cache_shapes, dtypes, block_stride = get_view_layout(
-                    spec, num_blocks, descriptor.block_stride, kernel_block_size, cache_dtype
-                )
-            else:
-                shapes = group.backend.get_runtime_shapes(
+            if callable(get_runtime_shapes):
+                shapes = get_runtime_shapes(
                     spec,
                     num_blocks,
                     layout,
                     kernel_block_size=kernel_block_size,
                 )
-                dtypes = (spec.dtype,)
-                if getattr(spec, "scale_dim", 0):
-                    dtypes += (spec.scale_dtype,)
-                # Backend shapes describe bytes in [B,H,N,C]; kernels consume NHD
-                # views with the content dimension expressed in dtype elements.
-                cache_shapes = [
-                    (blocks, tokens, heads, content_bytes // get_dtype_size(dtype))
-                    for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes)
-                ]
-                block_stride = descriptor.block_stride
+            else:
+                shapes = (compute_layer_kv_cache_shape_bytes(spec, num_blocks),)
+            if not shapes:
+                raise ValueError(f"Runtime shapes for {name} must not be empty.")
+            blocks_per_page, blocks_rem = divmod(shapes[0][0], num_blocks)
+            if blocks_rem or blocks_per_page < 1 or any(shape[0] != shapes[0][0] for shape in shapes):
+                raise ValueError(f"Runtime shapes for {name} must share a whole-multiple block count.")
+            block_stride, stride_rem = divmod(descriptor.block_stride, blocks_per_page)
+            if stride_rem:
+                raise ValueError(f"Block stride for {name} must split evenly across {blocks_per_page} kernel blocks.")
+            if getattr(spec, "scale_dim", 0):
+                dtypes: tuple[torch.dtype, ...] = (spec.dtype, spec.scale_dtype)
+            else:
+                dtypes = (spec.dtype,) * len(shapes)
+            if len(dtypes) != len(shapes):
+                raise ValueError(f"Runtime shapes and dtypes mismatch for {name}: {len(shapes)} vs {len(dtypes)}.")
+            cache_shapes = []
+            for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes):
+                itemsize = get_dtype_size(dtype)
+                if content_bytes % itemsize:
+                    raise ValueError(f"Cache component width for {name} is not aligned to {dtype}.")
+                logical_shape = (blocks, heads, tokens, content_bytes // itemsize)
+                cache_shapes.append(tuple(logical_shape[axis] for axis in view_order))
             components = create_cache_component_views(
                 raw_cache,
                 cache_shapes,
                 dtypes,
                 block_stride,
             )
-            if callable(get_view_layout) or issubclass(group.backend, DeepseekV41CacheBackend):
-                caches[name] = components[0] if len(components) == 1 else tuple(components)
-            else:
+            if returns_list:
                 caches[name] = components
+            else:
+                caches[name] = components[0] if len(components) == 1 else tuple(components)
     for name, target in shared_layers.items():
         caches[name] = caches[target]
     return caches
@@ -1558,8 +1561,6 @@ def unified_allocate_kv_cache(
         kernel_block_sizes,
         shared_layers,
         layout,
-        attn_layers=attn_layers,
-        cache_dtype=getattr(vllm_config.cache_config, "cache_dtype", "auto"),
     )
 
 
@@ -1643,15 +1644,6 @@ def _reshape_kv_cache_v2(
     vllm_config = get_current_vllm_config()
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     kv_caches: dict[str, Any] = {}
-    cache_owners = {}
-    declared_block_strides = {}
-    if _is_step5_model(vllm_config):
-        cache_owners = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
-        declared_block_strides = {
-            name: descriptor.block_stride
-            for descriptor in kv_cache_config.kv_cache_tensors
-            for name in descriptor.layers
-        }
     # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
     # view from the same deterministic layout that _allocate_kv_cache used:
     # Shared slabs hold QSA/GDN slots and indexer regions; PLE/hidden banks are private.
@@ -1996,20 +1988,6 @@ def _reshape_kv_cache_v2(
                 )
                 continue
 
-            get_view_layout = getattr(cache_owners.get(layer_name), "get_kv_cache_view_layout", None)
-            if callable(get_view_layout):
-                if not isinstance(raw_cache, torch.Tensor):
-                    raise ValueError("Step5 cache must use one raw tensor.")
-                cache_shapes, dtypes, block_stride = get_view_layout(
-                    kv_cache_spec,
-                    kv_cache_config.num_blocks,
-                    declared_block_strides[layer_name],
-                    kernel_block_size,
-                    cache_dtype,
-                )
-                components = create_cache_component_views(raw_cache, cache_shapes, dtypes, block_stride)
-                kv_caches[layer_name] = components[0] if len(components) == 1 else tuple(components)
-                continue
             if not isinstance(kv_cache_spec, AttentionSpec):
                 raise TypeError(f"Unsupported KV cache spec: {type(kv_cache_spec).__name__}.")
 

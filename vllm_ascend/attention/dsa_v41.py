@@ -1929,6 +1929,7 @@ class DeepseekV41FoldedIndexBackend(_DeepseekV41RoleBackend):
 
 class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
     supports_dcp = False
+    binds_kv_cache: bool = True
 
     def __init__(self, vllm_config, prefix, spec):
         super().__init__()

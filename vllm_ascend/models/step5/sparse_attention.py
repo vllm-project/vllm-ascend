@@ -46,8 +46,8 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.attention.utils import KVCacheRuntimeShapes, get_attention_kv_cache_runtime_shapes
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
-from vllm_ascend.models.step5.cache_views import Step5AuxiliaryCacheView
 from vllm_ascend.models.step5.ops.generic_block_sparse_attention import (
     gbsa_expected_counts,
     gbsa_sparse_attention,
@@ -78,7 +78,7 @@ else:
     )
 
 
-class AscendStep5CSATailRing(Step5AuxiliaryCacheView, Step5CSATailRing):
+class AscendStep5CSATailRing(Step5CSATailRing):
     """Tail ring on the main KV page, sized exactly as upstream sizes it.
 
     The inherited spec keeps the ring's ``CircularBufferSpec`` on the main
@@ -92,8 +92,12 @@ class AscendStep5CSATailRing(Step5AuxiliaryCacheView, Step5CSATailRing):
     per start address, so no per-class stack shift is needed.
     """
 
+    binds_kv_cache: bool = True
 
-class AscendStep5SparseSummaryCacheLayer(Step5AuxiliaryCacheView, Step5SparseSummaryCacheLayer):
+
+class AscendStep5SparseSummaryCacheLayer(Step5SparseSummaryCacheLayer):
+    binds_kv_cache: bool = True
+
     def __init__(
         self,
         *,
@@ -188,6 +192,18 @@ class AscendStep5DSABackend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (2, num_blocks, block_size, num_kv_heads, head_size)
+
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: AttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        """Return Step5 DSA K/V page components as [B, H, N, C] byte shapes."""
+        del layout
+        return get_attention_kv_cache_runtime_shapes(spec, num_blocks, kernel_block_size)
 
 
 @dataclass

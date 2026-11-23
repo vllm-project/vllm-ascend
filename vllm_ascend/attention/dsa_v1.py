@@ -260,6 +260,8 @@ def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig) -> int
 
 class AscendDSABackend(AttentionBackend):
     accept_output_buffer: bool = True
+    # V4 DSA kernels index kv_cache as a component list even for single-tensor pages.
+    returns_kv_cache_list: bool = True
     # What the two Ascend parts can store between them; which one applies is decided
     # per device in ``supports_kv_cache_dtype``. Everything else -- fp8_e4m3,
     # fp8_e5m2, mxfp8, nvfp4 -- has no Ascend build.

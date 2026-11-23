@@ -59,7 +59,6 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
-from vllm_ascend.models.step5.cache_views import Step5AuxiliaryCacheView
 from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2 import model_runner as v2_model_runner
@@ -3334,12 +3333,41 @@ def _step5_single_backing_config(tensors, groups):
     return _step5_kv_cache_config(tensors, groups)
 
 
+def _step5_unified_allocate(config, vllm_config, monkeypatch, kernel_block_sizes=None):
+    from vllm_ascend.models.step5.sparse_attention import (
+        AscendStep5DSABackend,
+        AscendStep5SparseSummaryBackend,
+    )
+
+    class _FakeRingBackend:
+        @staticmethod
+        def full_cls_name() -> str:
+            return "step5-ring-test"
+
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
+    backends = {
+        STEP5_L0: AscendStep5DSABackend,
+        STEP5_L2: AscendStep5DSABackend,
+        STEP5_SUMMARY: AscendStep5SparseSummaryBackend,
+        STEP5_RING: _FakeRingBackend,
+    }
+    layers = {
+        name: SimpleNamespace(get_attn_backend=lambda b=backends[name]: b, num_heads=1)
+        for group in config.kv_cache_groups
+        for name in group.layer_names
+    }
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    block_sizes = kernel_block_sizes or [STEP5_BLOCK] * len(config.kv_cache_groups)
+    return attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), None, block_sizes)
+
+
 def test_allocate_rejects_inconsistent_single_backing_sizes(monkeypatch) -> None:
     tensors, groups = _step5_tensors_and_groups()
     config = _step5_single_backing_config(tensors, groups)
     config.kv_cache_tensors[1] = tensors[1]
     with pytest.raises(ValueError, match="must share one backing allocation"):
-        _step5_allocate(config, _step5_vllm_config("step5"), monkeypatch)
+        _step5_unified_allocate(config, _step5_vllm_config("step5"), monkeypatch)
 
 
 def test_allocate_rejects_declared_view_beyond_backing(monkeypatch) -> None:
@@ -3347,43 +3375,16 @@ def test_allocate_rejects_declared_view_beyond_backing(monkeypatch) -> None:
     tensors[0] = replace(tensors[0], offset=STEP5_SUMMARY_PAGE)
     config = _step5_single_backing_config(tensors, groups)
     with pytest.raises(ValueError, match="exceeds its backing allocation"):
-        _step5_allocate(config, _step5_vllm_config("step5"), monkeypatch)
+        _step5_unified_allocate(config, _step5_vllm_config("step5"), monkeypatch)
 
 
-def _step5_reshape(config, raw, monkeypatch):
-    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: _step5_vllm_config("step5"))
-    cache_owners = {name: Step5AuxiliaryCacheView() for name in (STEP5_RING, STEP5_SUMMARY)}
-    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: cache_owners)
-    backend = SimpleNamespace(
-        get_kv_cache_shape=lambda num_blocks, block_size, heads, head_size, *a, **k: (
-            2,
-            num_blocks,
-            block_size,
-            heads,
-            head_size,
-        )
-    )
-    groups = [
-        SimpleNamespace(
-            kv_cache_group_id=index,
-            kv_cache_spec=group.kv_cache_spec,
-            layer_names=group.layer_names,
-            backend=backend,
-        )
-        for index, group in enumerate(config.kv_cache_groups)
-    ]
-    return attn_utils._reshape_kv_cache_v2(groups, raw, "auto", [STEP5_BLOCK] * len(groups), {}, config)
-
-
-def test_step5_reshape_aux_views_match_compute_layer_shape(monkeypatch) -> None:
+def test_step5_unified_aux_views_match_compute_layer_shape(monkeypatch) -> None:
     tensors, groups = _step5_tensors_and_groups()
     config = _step5_single_backing_config(tensors, groups)
-    raw = _step5_allocate(config, _step5_vllm_config("step5"), monkeypatch)
-    caches = _step5_reshape(config, raw, monkeypatch)
+    caches = _step5_unified_allocate(config, _step5_vllm_config("step5"), monkeypatch)
 
-    # Auxiliary layers get the typed page view straight from
-    # compute_layer_kv_cache_shape_bytes: one page per block id. The shape's
-    # trailing dim is in bytes, so the typed view halves it for bf16.
+    # Auxiliary layers get the canonical [B, H, N, C] view straight from
+    # compute_layer_kv_cache_shape_bytes: one page per block id.
     ring_shape = compute_layer_kv_cache_shape_bytes(_step5_ring_spec(), STEP5_NUM_BLOCKS)
     assert tuple(caches[STEP5_RING].shape) == (*ring_shape[:3], ring_shape[3] // torch.bfloat16.itemsize)
     assert caches[STEP5_RING].dtype is torch.bfloat16
@@ -3401,11 +3402,9 @@ def test_step5_reshape_aux_views_match_compute_layer_shape(monkeypatch) -> None:
         assert caches[aux].stride(0) * caches[aux].element_size() == page_bytes
 
 
-def test_step5_reshape_rejects_non_tensor_step_aux_raw(monkeypatch) -> None:
+def test_step5_unified_rejects_indivisible_kernel_block_size(monkeypatch) -> None:
     tensors, groups = _step5_tensors_and_groups()
     config = _step5_single_backing_config(tensors, groups)
-    raw = _step5_allocate(config, _step5_vllm_config("step5"), monkeypatch)
-    raw[STEP5_RING] = (raw[STEP5_RING], raw[STEP5_RING])
 
-    with pytest.raises(ValueError, match="must use one raw tensor"):
-        _step5_reshape(config, raw, monkeypatch)
+    with pytest.raises(ValueError, match="must divide cache block size"):
+        _step5_unified_allocate(config, _step5_vllm_config("step5"), monkeypatch, kernel_block_sizes=[96, STEP5_BLOCK])

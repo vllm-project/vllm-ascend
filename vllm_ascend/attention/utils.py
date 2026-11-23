@@ -54,6 +54,29 @@ MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
 
 RuntimeComponentShape = tuple[int, int, int, int]
 KVCacheRuntimeShapes = tuple[RuntimeComponentShape, ...]
+BHNC_VIEW_ORDER = (0, 1, 2, 3)  # [B, H, N, C] (HND / upstream canonical)
+BNHC_VIEW_ORDER = (0, 2, 1, 3)  # [B, N, H, C] (NHD)
+
+
+def get_attention_kv_cache_runtime_shapes(
+    spec: AttentionSpec,
+    num_blocks: int,
+    kernel_block_size: int | None = None,
+) -> KVCacheRuntimeShapes:
+    """Return K/V page components as logical [B, H, N, C] byte shapes."""
+    block_size = kernel_block_size or spec.block_size
+    if block_size <= 0:
+        raise ValueError(f"Kernel block size must be positive, got {block_size}.")
+    kernel_blocks_per_page, remainder = divmod(spec.block_size, block_size)
+    if remainder:
+        raise ValueError(f"Kernel block size {block_size} must divide cache block size {spec.block_size}.")
+    itemsize = get_dtype_size(spec.dtype)
+    head_size_v = getattr(spec, "head_size_v", spec.head_size)
+    prefix = (num_blocks * kernel_blocks_per_page, spec.num_kv_heads, block_size)
+    shapes = [(*prefix, spec.head_size * itemsize)]
+    if head_size_v > 0:
+        shapes.append((*prefix, head_size_v * itemsize))
+    return tuple(shapes)
 
 
 def combine_cache_components(data: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:

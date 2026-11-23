@@ -48,8 +48,12 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.utils import (
+    BHNC_VIEW_ORDER,
+    BNHC_VIEW_ORDER,
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeShapes,
     _select_seq_lens,
+    get_attention_kv_cache_runtime_shapes,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -111,6 +115,30 @@ class AscendAttentionBackend(AttentionBackend):
         if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
             return (2, num_blocks, num_kv_heads, block_size, head_size)
         return (2, num_blocks, block_size, num_kv_heads, head_size)
+
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: AttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        """Return K/V page components as logical [B, H, N, C] byte shapes (RFC vLLM#65650)."""
+        del layout
+        return get_attention_kv_cache_runtime_shapes(spec, num_blocks, kernel_block_size)
+
+    @classmethod
+    def get_runtime_view_order(cls, layout: Any) -> tuple[int, int, int, int]:
+        """Map logical [B, H, N, C] components to HND or NHD per KV cache layout."""
+        if layout is not None:
+            order = getattr(layout, "layer_view_order", None)
+            if order in (BHNC_VIEW_ORDER, BNHC_VIEW_ORDER):
+                return order
+            raise ValueError(f"Unsupported Ascend attention KV cache layout: {layout}.")
+        if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
+            return BHNC_VIEW_ORDER
+        return BNHC_VIEW_ORDER
 
     @staticmethod
     def swap_blocks(
