@@ -82,6 +82,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
     """
 
     model_state: "AscendModelState"
+    vllm_config: VllmConfig
 
     if not vllm_version_is("0.33.0"):
 

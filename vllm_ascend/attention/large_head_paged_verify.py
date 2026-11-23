@@ -293,6 +293,10 @@ class AscendLargeHeadPagedMetadataBuilder(AscendAttentionMetadataBuilder):
 class AscendLargeHeadPagedAttentionBackendImpl(AscendAttentionBackendImpl):
     """Ascend attention impl adding BSND FIA-v2 paged verify/decode for 512-dim heads."""
 
+    use_bnsd_kv_cache: bool
+    key_cache: torch.Tensor | None
+    value_cache: torch.Tensor | None
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.full_cudagraph = in_full_cudagraph_mode(getattr(self, "vllm_config", None))

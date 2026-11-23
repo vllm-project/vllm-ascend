@@ -2017,6 +2017,10 @@ def _should_use_large_head_paged_backend(attn_selector_config) -> bool:
         return False
     if attn_selector_config.has_sliding_window or attn_selector_config.attn_type != AttentionType.DECODER:
         return False
+    if attn_selector_config.dtype not in (torch.float16, torch.bfloat16):
+        return False
+    if attn_selector_config.kv_cache_dtype not in (None, "auto", "float16", "bfloat16"):
+        return False
     if (
         attn_selector_config.use_mla
         or attn_selector_config.use_sparse

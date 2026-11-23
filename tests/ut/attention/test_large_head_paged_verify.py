@@ -139,6 +139,11 @@ def test_select_large_head_paged_backend_enabled_on_a2_a3(monkeypatch, device):
         (AscendDeviceType.A2, True, "generate", {"use_adaptive_verification": True}),
         (AscendDeviceType.A2, True, "generate", {"use_rswa": True}),
         (AscendDeviceType.A2, True, "generate", {"use_hisparse": True}),
+        (AscendDeviceType.A2, True, "generate", {"dtype": torch.float32}),
+        (AscendDeviceType.A2, True, "generate", {"kv_cache_dtype": "int8"}),
+        (AscendDeviceType.A2, True, "generate", {"kv_cache_dtype": "fp8"}),
+        (AscendDeviceType.A2, True, "generate", {"kv_cache_dtype": "fp8_e4m3"}),
+        (AscendDeviceType.A2, True, "generate", {"kv_cache_dtype": "mxfp8"}),
     ],
 )
 def test_select_large_head_paged_backend_exclusions(monkeypatch, device, with_spec, runner_type, selector_overrides):
@@ -147,6 +152,33 @@ def test_select_large_head_paged_backend_exclusions(monkeypatch, device, with_sp
     monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: cfg)
     monkeypatch.setattr("vllm_ascend.platform.get_current_hardware_profile", lambda: get_hardware_profile(device))
     assert _should_use_large_head_paged_backend(selector) is False
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("kv_cache_dtype", [None, "auto", "float16", "bfloat16"])
+def test_select_large_head_paged_backend_supported_dtypes(monkeypatch, dtype, kv_cache_dtype):
+    cfg = _mock_vllm_config(with_spec=True)
+    selector = _selector_config(dtype=dtype, kv_cache_dtype=kv_cache_dtype)
+    monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: cfg)
+    monkeypatch.setattr(
+        "vllm_ascend.platform.get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A2),
+    )
+    assert _should_use_large_head_paged_backend(selector) is True
+
+
+def test_select_large_head_paged_backend_quantized_kv_falls_back(monkeypatch):
+    cfg = _mock_vllm_config(with_spec=True)
+    selector = _selector_config(kv_cache_dtype="int8")
+    monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: cfg)
+    monkeypatch.setattr(
+        "vllm_ascend.platform.get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A2),
+    )
+    monkeypatch.setattr("vllm_ascend.platform._validate_fa3_backend", lambda *_: False)
+    monkeypatch.setattr("vllm_ascend.platform._validate_flash_attn_backend", lambda *_: False)
+    monkeypatch.setattr("vllm_ascend.platform._validate_flash_attn_npu_3", lambda *_: False)
+    assert NPUPlatform._select_attn_backend_cls(selector) == "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
 
 
 def test_kv_cache_shape_and_contiguous_cache_contract(monkeypatch):
