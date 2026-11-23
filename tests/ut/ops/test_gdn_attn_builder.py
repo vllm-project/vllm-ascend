@@ -2082,3 +2082,123 @@ def test_checkpoint_rows_match_non_spec_prefill_inputs(speculative):
     assert metadata.num_prefills == len(expected_rows)
     assert metadata.prefill_state_indices.numel() == len(expected_rows)
     assert metadata.prefill_query_start_loc.tolist() == expected_starts
+
+
+@pytest.mark.parametrize("case", ("no-slot", "export", "no-host", "fused-unavailable", "mixed"))
+def test_native_checkpoint_prefill_reuses_fused_metadata_only_without_export(monkeypatch, case):
+    _patch_missing_runtime_cdiv(monkeypatch)
+    device = torch.device("cpu")
+    mixed = case == "mixed"
+    builder = _make_builder(device=device, num_heads=32, num_speculative_tokens=3 if mixed else 0)
+    builder._ascend_gdn_checkpoints = True
+    builder._ascend_native_gdn_checkpoints = True
+    builder.vllm_config.kv_transfer_config = None
+    builder.vllm_config.cache_config.hash_block_size = 64
+    builder.vllm_config.cache_config.cache_hit_alignment_tokens = 64
+    builder.vllm_config.additional_config = dict(
+        gdn_native_prefill_checkpoints=True,
+        gdn_native_checkpoint_max_tokens=8192,
+    )
+    lengths = [4, 130] if mixed else [130]
+    common = create_common_attn_metadata(BatchSpec(seq_lens=lengths, query_lens=lengths), block_size=16, device=device)
+    if case != "no-host":
+        common.gdn_checkpoint_block_rows = tuple([0] for _ in lengths)
+    checkpoint = SimpleNamespace(offsets=[64]) if case == "export" else None
+    plan = Mock(return_value=checkpoint)
+    monkeypatch.setattr(ascend_gdn_attn_builder, "build_gdn_checkpoint_metadata", plan)
+    fused = SimpleNamespace(checkpoint=None)
+    builder._build_fused_metadata = Mock(return_value=None if case == "fused-unavailable" else fused)
+    result = builder.build(
+        0,
+        common,
+        num_accepted_tokens=torch.ones(2, dtype=torch.int32) if mixed else None,
+        num_decode_draft_tokens_cpu=torch.tensor([3, -1], dtype=torch.int32) if mixed else None,
+        num_actual_reqs=len(lengths),
+    )
+
+    assert (result is fused) == (case in ("no-slot", "mixed"))
+    assert result.checkpoint is checkpoint
+    assert builder._build_fused_metadata.call_count == int(case in ("no-slot", "fused-unavailable", "mixed"))
+    plan.assert_called_once()
+    assert plan.call_args.args[2] == ([1] if mixed else [0])
+    assert plan.call_args.kwargs["host_blocks"] == getattr(common, "gdn_checkpoint_block_rows", None)
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ("prefill", "prefill_at_limit", "prefill_above_limit", "prefill_no_host_length", "decode", "mixed", "draft"),
+)
+def test_native_checkpoint_opt_in_keeps_decode_metadata_and_fuses_pure_prefill(monkeypatch, phase):
+    from inspect import signature
+
+    _patch_missing_runtime_cdiv(monkeypatch)
+    device = torch.device("cpu")
+    drafts = torch.tensor([3, -1], dtype=torch.int32) if phase == "draft" else None
+    accepted = torch.ones(2, dtype=torch.int32) if drafts is not None else None
+    settings = dict(
+        device=device,
+        num_heads=32,
+        num_speculative_tokens=3,
+        num_speculative_blocks=3,
+        mamba_cache_mode="align",
+        builder_cls=AscendGDNHostMetadataBuilder,
+    )
+    baseline = _make_builder(**settings)
+    native = _make_builder(**settings)
+    native._ascend_gdn_checkpoints = True
+    native._ascend_native_gdn_checkpoints = True
+    native.vllm_config.kv_transfer_config = None
+    native.vllm_config.cache_config.hash_block_size = 64
+    native.vllm_config.cache_config.cache_hit_alignment_tokens = 64
+    native.vllm_config.additional_config = dict(
+        gdn_native_prefill_checkpoints=True,
+        gdn_native_checkpoint_max_tokens=8192,
+    )
+    queries = {"decode": [1, 1], "mixed": [1, 7], "draft": [4, 7]}.get(phase, [9, 7])
+    common = create_common_attn_metadata(BatchSpec([20, 31], queries), 16, device)
+    common.max_seq_len = 262144
+    if phase == "prefill_no_host_length":
+        common.seq_lens_cpu_upper_bound = None
+    else:
+        context = {"prefill_at_limit": 8192, "prefill_above_limit": 8193}.get(phase, 31)
+        common.seq_lens_cpu_upper_bound = torch.tensor([20, context], dtype=torch.int32)
+    common.block_table_tensor = torch.arange(12, dtype=torch.int32).reshape(2, 6) + 10
+    common.gdn_checkpoint_block_rows = tuple(row.tolist() for row in common.block_table_tensor)
+    monkeypatch.setattr(ascend_gdn_attn_builder, "build_gdn_checkpoint_metadata", Mock(return_value=None))
+    prepare_signature = signature(ascend_gdn_attn_builder.prepare_gdn)
+
+    def emulate_pure_prefill(*args, **kwargs):
+        assert kwargs["num_decodes"] == kwargs["num_spec_decodes"] == 0
+        assert kwargs["has_prefill"]
+        values = prepare_signature.bind(*args, **kwargs).arguments
+        lengths, query = values["seq_lens"], values["query"]
+        cols = (lengths - 1) // kwargs["block_size"]
+        values["non_spec_states"].copy_(values["block_table"][torch.arange(len(lengths)), cols])
+        values["non_spec_query"].copy_(query)
+        values["prefill_query"].copy_(query)
+        values["initial_state"].copy_(lengths > query.diff())
+
+    prepare = Mock(side_effect=emulate_pure_prefill)
+    monkeypatch.setattr(ascend_gdn_attn_builder, "prepare_gdn", prepare)
+    expected = baseline.build(0, common, accepted, drafts, num_actual_reqs=2)
+    actual = native.build(0, common, accepted, drafts, num_actual_reqs=2)
+
+    assert native._checkpoint_fused_prefill_only
+    assert prepare.call_count == int(phase in ("prefill", "prefill_at_limit"))
+    assert (actual.num_prefills, actual.num_decodes, actual.num_spec_decodes) == (
+        expected.num_prefills,
+        expected.num_decodes,
+        expected.num_spec_decodes,
+    )
+    for name in (
+        "prefill_query_start_loc",
+        "prefill_has_initial_state",
+        "prefill_state_indices",
+        "spec_state_indices_tensor",
+        "non_spec_state_indices_tensor",
+    ):
+        old, new = getattr(expected, name), getattr(actual, name)
+        if old is None:
+            assert new is None
+        else:
+            torch.testing.assert_close(new, old)

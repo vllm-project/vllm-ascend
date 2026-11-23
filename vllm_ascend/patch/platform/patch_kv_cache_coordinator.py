@@ -8,6 +8,7 @@ from math import lcm
 
 import vllm
 import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
@@ -22,6 +23,7 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
     MambaManager,
     get_manager_for_kv_cache_spec,
 )
@@ -32,9 +34,14 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
+    get_mamba_prefill_checkpoint_position,
 )
+from vllm.v1.request import Request
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.core.mamba_replay_cohort import MambaReplayCohortPool
+
+logger = init_logger(__name__)
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
@@ -150,7 +157,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 self.scheduler_block_size,
                 kv_cache_config,
             )
-        self.block_pool = BlockPool(
+        local_kv = getattr(kv_cache_config, "kv_transfer_config", None) is None
+        pool_cls = MambaReplayCohortPool if enable_caching and allow_partial_hash_hits and local_kv else BlockPool
+        self.block_pool = pool_cls(
             num_gpu_blocks=kv_cache_config.num_blocks,
             enable_caching=enable_caching,
             hash_block_size=hash_block_size,
@@ -256,12 +265,76 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # of typical ~2K prompts, pinning P-side prefix hits to 0.
         kv_transfer_config = getattr(kv_cache_config, "kv_transfer_config", None)
         self.skips_eagle_block_drop = _skips_eagle_block_drop(kv_transfer_config)
+        if isinstance(self.block_pool, MambaReplayCohortPool) and self.enable_partial_hash_hits and dcp_world_size == 1:
+            mamba_pages = {}
+            attention_groups = []
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+                spec = _manager_spec(group.kv_cache_spec)
+                if isinstance(spec, MambaSpec) and spec.mamba_cache_mode == "align":
+                    mamba_pages[group_id] = spec.block_size
+                elif isinstance(spec, FullAttentionSpec):
+                    attention_groups.append(group_id)
+            if mamba_pages and attention_groups:
+                self.block_pool.enable_mamba_retention(mamba_pages, attention_groups)
+                logger.info("Local PMU replay cohort deferral enabled for Mamba groups %s", sorted(mamba_pages))
         # Keep Mamba checkpoint writes on the same boundary as prefill split
         # and cache lookup. Only roles using EAGLE replay need the block drop.
         if use_eagle and not self.skips_eagle_block_drop:
             for group_id, manager in enumerate(self.single_type_managers):
                 if isinstance(manager, MambaManager) and group_id in self.eagle_group_ids:
                     manager.drop_eagle_checkpoint_block = True
+
+        self._local_replay_tail_managers = ()
+        # Lookahead hashes turn off the scheduler's global EAGLE drop, but
+        # explicit attention groups still register the EAGLE prompt tail.
+        if kv_transfer_config is None and self.enable_partial_hash_hits and dcp_world_size == 1:
+            self._local_replay_tail_managers = tuple(
+                (group_id, manager)
+                for group_id, manager in enumerate(self.single_type_managers)
+                if type(manager) is FullAttentionManager and manager.use_eagle and manager.enable_caching
+            )
+        if self._local_replay_tail_managers:
+            logger.info(
+                "Local PMU replay keys enabled for attention groups %s (global EAGLE drop=%s)",
+                [group_id for group_id, _ in self._local_replay_tail_managers],
+                use_eagle,
+            )
+
+    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+        super().cache_blocks(request, num_computed_tokens)
+        if not self._local_replay_tail_managers:
+            return
+
+        # The standalone coordinator does not drop an EAGLE block. Its match
+        # is capped below the last prompt token, but FullAttentionManager
+        # registers the EAGLE boundary including that token when it is aligned.
+        # Keep the eligible replay boundary as an additional attention hash.
+        hash_size = self.hash_block_size
+        eagle_boundary = min(request.num_prompt_tokens // hash_size, len(request.block_hashes)) * hash_size
+        replay_boundary = get_mamba_prefill_checkpoint_position(
+            request.num_prompt_tokens,
+            hash_size,
+            drop_eagle_block=False,
+            num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+        )
+        if not 0 < replay_boundary < eagle_boundary:
+            return
+
+        for group_id, manager in self._local_replay_tail_managers:
+            if replay_boundary % manager.block_size == 0 or replay_boundary > self.get_num_cacheable_tokens(
+                num_computed_tokens, group_id
+            ):
+                continue
+            blocks = manager.req_to_blocks[request.request_id]
+            column = replay_boundary // manager.block_size
+            if column < len(blocks):
+                self.block_pool.cache_partial_block(
+                    request=request,
+                    block=blocks[column],
+                    num_tokens=replay_boundary,
+                    kv_cache_group_id=group_id,
+                    block_size=manager.block_size,
+                )
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:

@@ -1354,6 +1354,12 @@ class NPUWorker(GPUWorker):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
+        # Match GPUWorker: checkpoint metadata must use the same resolved
+        # cache granularity as the scheduler and Mamba block manager.
+        cache_config = self.vllm_config.cache_config
+        if hasattr(kv_cache_config, "cache_hit_alignment_tokens"):
+            cache_config.hash_block_size = kv_cache_config.hash_block_size
+            cache_config.cache_hit_alignment_tokens = kv_cache_config.cache_hit_alignment_tokens
         speculator = getattr(self.model_runner, "speculator", None)
         speculative = self.vllm_config.speculative_config
         if (

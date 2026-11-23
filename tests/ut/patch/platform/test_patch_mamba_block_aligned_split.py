@@ -19,6 +19,7 @@ import pytest
 import vllm.v1.core.sched.scheduler as scheduler_module
 
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split as mod
+from vllm_ascend.core.gdn_checkpoint_policy import GDNCheckpointPolicy
 from vllm_ascend.patch.platform.patch_mamba_block_aligned_split import (
     _mamba_block_aligned_split,
     _original_mamba_block_aligned_split,
@@ -105,6 +106,32 @@ def test_non_pd_request_retains_upstream_mamba_boundary_split():
     )
 
     assert result == 5
+
+
+@pytest.mark.parametrize(
+    "prompt,hit,first_seen,expected",
+    [
+        (3503, 1152, False, 2304),
+        (7003, 5760, False, 1243),
+        (2003, 1152, True, 851),
+        (2003, 1152, False, 832),
+        (9003, 6912, False, 1152),
+    ],
+)
+def test_native_gdn_policy_applies_to_each_prefill(prompt, hit, first_seen, expected):
+    scheduler = _scheduler(is_kv_consumer=None)
+    scheduler.cache_config.block_size = scheduler.block_size = 1152
+    scheduler.hash_block_size = 64
+    scheduler.mamba_partial_cache_hit = True
+    scheduler.mamba_has_prefill_checkpoint_blocks = True
+    scheduler.mamba_prefill_checkpoint_alignment = 64
+    scheduler._ascend_gdn_checkpoint_policy = GDNCheckpointPolicy(8192, True, True)
+    request = _request(num_computed_tokens=0, num_prompt_tokens=prompt, num_tokens=prompt)
+    request._ascend_first_observed_mamba_tail = first_seen
+
+    assert _mamba_block_aligned_split(scheduler, request, prompt - hit, hit) == expected
+    assert scheduler.mamba_has_prefill_checkpoint_blocks
+    assert scheduler.mamba_partial_cache_hit
 
 
 def test_pd_consumer_preserves_window_after_external_cache_hit():
@@ -332,3 +359,52 @@ def test_producer_handles_missing_drop_attributes(monkeypatch):
     assert result == 42
     assert not hasattr(scheduler, "use_eagle")
     assert not hasattr(scheduler, "use_eagle_block_drop")
+
+
+@pytest.mark.parametrize(
+    ("prompt", "hit", "first_seen", "processed", "expected"),
+    [
+        (2048, 1728, True, 0, 320),
+        (2048, 1728, False, 0, 256),
+        (2032, 1728, True, 0, 256),
+        (7000, 6272, True, 0, 728),
+        (7000, 6272, False, 0, 704),
+        (7000, 6272, True, 64, 640),
+        (8300, 6272, True, 0, 1920),
+    ],
+)
+def test_first_seen_partial_hit_can_finish_in_same_page(prompt, hit, first_seen, processed, expected):
+    scheduler = _scheduler(is_kv_consumer=None)
+    scheduler.cache_config.block_size = scheduler.block_size = 2048
+    scheduler.hash_block_size = 64
+    scheduler.mamba_partial_cache_hit = True
+    scheduler.mamba_has_prefill_checkpoint_blocks = True
+    scheduler.mamba_prefill_checkpoint_alignment = 64
+    scheduler._ascend_gdn_checkpoint_policy = GDNCheckpointPolicy(8192, True, True)
+    request = _request(num_computed_tokens=processed, num_prompt_tokens=prompt, num_tokens=prompt)
+    request._ascend_first_observed_mamba_tail = first_seen
+
+    assert _mamba_block_aligned_split(scheduler, request, prompt - hit - processed, hit) == expected
+    assert scheduler.mamba_has_prefill_checkpoint_blocks and scheduler.mamba_partial_cache_hit
+
+
+def test_exact_first_page_prompt_retains_repeat_history(monkeypatch):
+    from collections import OrderedDict
+
+    scheduler = _scheduler(is_kv_consumer=None)
+    scheduler.cache_config.block_size = 2048
+    scheduler.hash_block_size = 64
+    scheduler.use_eagle_block_drop = False
+    scheduler.num_hash_lookahead_tokens = 1
+    scheduler.requests = {}
+    scheduler._ascend_seen_mamba_tails = OrderedDict()
+    monkeypatch.setattr(mod, "_original_add_request", lambda *_: None)
+    for first_seen, request_id in ((True, "first"), (False, "second")):
+        request = SimpleNamespace(
+            request_id=request_id,
+            resumable=False,
+            num_prompt_tokens=2048,
+            block_hashes=list(range(32)),
+        )
+        mod._add_request(scheduler, request)
+        assert request._ascend_first_observed_mamba_tail is first_seen

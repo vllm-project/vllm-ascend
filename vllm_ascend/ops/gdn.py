@@ -47,6 +47,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
 from vllm_ascend.ops.gdn_checkpoint import ensure_gdn_checkpoint_workspace, run_gdn_checkpoint_prefill
+from vllm_ascend.ops.native_gdn_checkpoint import run_gdn_native_checkpoint_prefill
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -829,6 +830,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             use_checkpoint_prefill = (
                 getattr(self, "_ascend_internal_checkpoint_enabled", False) and self._exports_checkpoints
             )
+            use_native_checkpoint = use_checkpoint_prefill and getattr(self, "_ascend_native_checkpoint_enabled", False)
+            use_checkpoint_prefill = use_checkpoint_prefill and not use_native_checkpoint
             supports_fused_dtype = query_non_spec.dtype == torch.bfloat16 and not use_checkpoint_prefill
             use_fla_gdn_prefill = (
                 supports_fused_dtype
@@ -848,7 +851,30 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             # Keep the same numerical recurrence on cold requests and
             # cache-hit tails, even when the tail creates no new checkpoint.
-            if use_checkpoint_prefill:
+            if use_native_checkpoint and checkpoint is not None:
+                if fla_gdn_prefill_op is None and not use_fused_chunk:
+                    raise RuntimeError("Native GDN checkpoint requires a fused Ascend GDN kernel")
+                output_dtype = torch.bfloat16 if fla_gdn_prefill_op is None else ssm_state.dtype
+                initial_state = gather_ssm_states(
+                    ssm_state, prefill_state_indices, prefill_has_initial_state, output_dtype=output_dtype
+                )
+                core_attn_out_non_spec, last_recurrent_state = run_gdn_native_checkpoint_prefill(
+                    self,
+                    attn_metadata,
+                    raw_prefill_qkv,
+                    query_non_spec,
+                    key_non_spec,
+                    value_non_spec,
+                    g_non_spec,
+                    beta_non_spec,
+                    initial_state,
+                    fused=AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused,
+                    fla_fwd=fla_gdn_prefill_op,
+                )
+                scatter_ssm_states_(
+                    ssm_state, prefill_state_indices, last_recurrent_state.to(ssm_state.dtype).contiguous()
+                )
+            elif use_checkpoint_prefill:
                 initial_state = gather_ssm_states(ssm_state, prefill_state_indices, prefill_has_initial_state)
                 core_attn_out_non_spec, last_recurrent_state = run_gdn_checkpoint_prefill(
                     self,
