@@ -22,6 +22,10 @@
 
         Atlas 200I Pro selects its NPU with `ASCEND_VISIBLE_DEVICES`, so the container needs Ascend Docker Runtime on the host. The runtime mounts the driver libraries, but its default mount list looks for `npu-smi` at `/usr/local/bin/npu-smi`, while this product installs it at `/usr/local/sbin/npu-smi`, so the command below mounts it explicitly. The command also passes the `ascend_manager` and `user_config` devices and the Atlas 300I Duo host libraries. Make sure every host path it mounts exists.
 
+    !!! note "Docker version"
+
+        Docker Engine 20.10 or later is recommended when the host uses cgroup v2. Earlier Docker versions do not support cgroup v2; devices passed with `--device` may therefore be inaccessible inside the container, causing NPU initialization to fail. Check the Docker Engine and cgroup versions on the host if this occurs.
+
     === "Ubuntu"
 
         ```bash
