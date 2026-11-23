@@ -165,3 +165,69 @@ def test_resolve_num_nodes_fails_when_multi_node_yaml_has_no_node_count(tmp_path
 
     with pytest.raises(SystemExit, match="Could not determine --num-nodes"):
         _resolve_num_nodes(args, tmp_path)
+
+
+@pytest.mark.parametrize("value", [0, -1, -2])
+def test_resolve_num_nodes_rejects_non_positive_explicit_value(tmp_path: Path, value: int):
+    """The ready barrier is ``len(readies) >= num_nodes``: at zero or below it passes
+    with no workers at all, so the master starts a distributed run that cannot work."""
+    args = argparse.Namespace(
+        num_nodes=value,
+        scene=SCENE_MULTI,
+        config_base_path=None,
+        config_yaml="missing.yaml",
+    )
+
+    with pytest.raises(SystemExit, match=r"--num-nodes must be >= 1"):
+        _resolve_num_nodes(args, tmp_path)
+
+
+def test_resolve_num_nodes_treats_yaml_zero_as_unset(tmp_path: Path):
+    """``num_nodes: 0`` means "no node count here", so it falls through to the
+    same error as a missing key rather than being used as a node count."""
+    config = tmp_path / "configs" / "case.yaml"
+    config.parent.mkdir()
+    config.write_text("num_nodes: 0\n", encoding="utf-8")
+    args = argparse.Namespace(
+        num_nodes=None,
+        scene=SCENE_MULTI,
+        config_base_path="configs",
+        config_yaml="case.yaml",
+    )
+
+    with pytest.raises(SystemExit, match="Could not determine --num-nodes"):
+        _resolve_num_nodes(args, tmp_path)
+
+
+@pytest.mark.parametrize("value", [-1, -2])
+def test_resolve_num_nodes_rejects_negative_yaml_value(tmp_path: Path, value: int):
+    """A negative count is truthy, so it used to be returned and then made the
+    ``len(readies) >= num_nodes`` barrier pass with no workers."""
+    config = tmp_path / "configs" / "case.yaml"
+    config.parent.mkdir()
+    config.write_text(f"num_nodes: {value}\n", encoding="utf-8")
+    args = argparse.Namespace(
+        num_nodes=None,
+        scene=SCENE_MULTI,
+        config_base_path="configs",
+        config_yaml="case.yaml",
+    )
+
+    with pytest.raises(SystemExit, match=r"must be >= 1"):
+        _resolve_num_nodes(args, tmp_path)
+
+
+def test_resolve_num_nodes_reports_non_integer_yaml_value(tmp_path: Path):
+    """``int("abc")`` used to escape as an uncaught ValueError traceback."""
+    config = tmp_path / "configs" / "case.yaml"
+    config.parent.mkdir()
+    config.write_text("num_nodes: abc\n", encoding="utf-8")
+    args = argparse.Namespace(
+        num_nodes=None,
+        scene=SCENE_MULTI,
+        config_base_path="configs",
+        config_yaml="case.yaml",
+    )
+
+    with pytest.raises(SystemExit, match="is not an integer"):
+        _resolve_num_nodes(args, tmp_path)
