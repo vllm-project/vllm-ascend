@@ -2,19 +2,19 @@
     "linux-aarch64-310p-1": {
         "chip": "310p",
         "npu_num": 1,
-        "image_tag": "9.3.0_20261113161300-310p-ubuntu22.04-py3.12",
+        "image_tag": "9.2.1-310p-ubuntu22.04-py3.12",
         "csrc_cache_target": "310p-arm64-ubuntu"
     },
     "linux-aarch64-310p-2": {
         "chip": "310p",
         "npu_num": 2,
-        "image_tag": "9.3.0_20261113161300-310p-ubuntu22.04-py3.12",
+        "image_tag": "9.2.1-310p-ubuntu22.04-py3.12",
         "csrc_cache_target": "310p-arm64-ubuntu"
     },
     "linux-aarch64-310p-4": {
         "chip": "310p",
         "npu_num": 4,
-        "image_tag": "9.3.0_20261113161300-310p-ubuntu22.04-py3.12",
+        "image_tag": "9.2.1-310p-ubuntu22.04-py3.12",
         "csrc_cache_target": "310p-arm64-ubuntu"
     },
     "linux-aarch64-a3-800t-16": {

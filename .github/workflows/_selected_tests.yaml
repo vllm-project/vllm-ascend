@@ -109,7 +109,11 @@ jobs:
       AWS_REGION: ap-southeast-1
       RUNS_ON_RUNNER_NAME: ""
     container:
-      image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:${{ matrix.group.image_tag }}
+      # Keep 310P on the existing CANN image until its runners can initialize the 9.3.0 AICPU kernels.
+      image: >-
+        ${{ matrix.group.npu_type == '310p'
+            && 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann'
+            || 'swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann' }}:${{ matrix.group.image_tag }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
