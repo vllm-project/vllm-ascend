@@ -59,7 +59,7 @@ State is carried in a machine-readable signature block at the end of every agent
 | Author pushes a commit | `ai-review-passed` revoked, round budget reset, incremental re-review of the new diff |
 | Reviewer comments `/ai-review-waive` on a PR comment | ALL open findings waived (marked on the inline comments), one re-evaluation round runs |
 | Reviewer replies `/ai-review-waive` inside one finding's thread | that single finding is waived |
-| Reviewer removes the label or comments `/ai-review-stop` | agent stops; an in-flight round is discarded before posting |
+| Reviewer removes the label or comments `/ai-review-stop` | agent stops; a newer trigger always cancels the in-flight round (latest wins) |
 | All MUST-FIX resolved | agent emits `AI-REVIEW-VERDICT: PASS`; the orchestrator applies `ai-review-passed` |
 | Round cap reached (5 per push) | closing summary, state `waiting-human`, a human decides |
 | Whole-PR budget exhausted (15 rounds) | agent goes silent until a reviewer re-applies the label |

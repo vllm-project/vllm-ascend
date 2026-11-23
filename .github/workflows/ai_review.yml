@@ -5,11 +5,13 @@ on:
   issue_comment:
     types: [created]
 
-# One agent round per PR at a time; a new trigger while a round is running
-# queues behind it instead of producing two interleaved agent comments.
+# One agent round per PR at a time; a newer trigger (push, reply, waive,
+# stop) cancels the in-flight round and supersedes it — the cancelled
+# round's output would be stale or discarded anyway, so latest-wins is
+# both cheaper and closer to what the human intended.
 concurrency:
   group: ai-review-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   ai-review:
