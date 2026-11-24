@@ -18,7 +18,11 @@ from vllm_ascend.distributed.eplb.tensor_ops import (
     make_allgather_mask,
 )
 from vllm_ascend.ops.fused_moe import routed_experts as routed_module
-from vllm_ascend.ops.fused_moe.eplb import map_to_physical, record_expert_tokens
+from vllm_ascend.ops.fused_moe.eplb import (
+    map_to_physical,
+    record_expert_tokens,
+    record_source_routes,
+)
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
@@ -319,9 +323,9 @@ def test_source_mask_is_not_shared_across_forwards_or_ubatches(monkeypatch, sepa
         (AscendDeviceType.A5, afc.MoECommType.ALLGATHER, 2, [False, False, False, True], 3, 1),
         (AscendDeviceType.A5, afc.MoECommType.ALLGATHER, 1, [True] * 4, 0, 0),
         (AscendDeviceType.A5, afc.MoECommType.ALLGATHER, 2, [True] * 4, 0, 0),
-        (AscendDeviceType.A5, afc.MoECommType.MC2, 1, [False, False, False, True], 4, -1),
-        (AscendDeviceType.A5, afc.MoECommType.ALLTOALL, 1, [False, False, False, True], 4, -1),
-        (AscendDeviceType.A3, afc.MoECommType.ALLGATHER, 1, [False, False, False, True], 4, -1),
+        (AscendDeviceType.A5, afc.MoECommType.MC2, 1, [False, False, False, True], 3, -1),
+        (AscendDeviceType.A5, afc.MoECommType.ALLTOALL, 1, [False, False, False, True], 3, -1),
+        (AscendDeviceType.A3, afc.MoECommType.ALLGATHER, 1, [False, False, False, True], 3, -1),
     ],
 )
 def test_eplb_recording_preserves_order_and_source_eligibility(
@@ -375,6 +379,10 @@ def test_eplb_recording_preserves_order_and_source_eligibility(
         events.append("record_load")
         return record_expert_tokens(*args)
 
+    def record_source_load(*args):
+        events.append("record_load")
+        return record_source_routes(*args)
+
     def finalize(**kwargs):
         events.append("finalize")
         return kwargs["hidden_states"]
@@ -408,10 +416,15 @@ def test_eplb_recording_preserves_order_and_source_eligibility(
     monkeypatch.setattr(state_module, "make_allgather_mask", source_mask)
     monkeypatch.setattr(prepare, "all_gather_eplb_mask", gather_source_mask)
     monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_load)
+    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_source_routes", record_source_load)
+    # The dispatching paths derive their source mask from the TP layout.
+    monkeypatch.setattr(state_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(state_module, "get_tensor_model_parallel_rank", lambda: 0)
     AscendRoutedExperts.forward_impl(layer, hidden_states=torch.ones(4, 2), router_logits=torch.ones(4, 1))
-    expected_events = ["prepare", "route", "ffn"]
+    # Every path derives the source mask locally; only AllGather gathers it.
+    expected_events = ["prepare", "route", "ffn", "source_mask"]
     if expected_record_flag != -1:
-        expected_events += ["source_mask", "gather_mask"]
+        expected_events.append("gather_mask")
     assert events == expected_events + ["record_load", "finalize"]
     assert state.expert_load_view.item() == expected_load
     assert state.allgather_record_tensor.item() == expected_record_flag

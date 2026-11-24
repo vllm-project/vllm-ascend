@@ -221,7 +221,8 @@ class TestAscendEPLBController(unittest.TestCase):
 
         controller.prepare_forward(model_config, 4, ubatch_slices)
 
-        state.prepare_forward.assert_not_called()
+        # Every load statistics flavour needs the unpadded token counts.
+        state.prepare_forward.assert_called_once_with(model_config, 4, ubatch_slices)
         state._should_record_current_step.assert_called_once_with(
             log_stats=True,
         )
