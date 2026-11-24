@@ -1,4 +1,0 @@
-pr: 21891
-entries:
-  - category: bugfix
-    text: Fixed incorrect KV transfers when Mooncake Push and AscendStore prefill offload share device cache buffers.
