@@ -31,7 +31,7 @@ _OP_NAMESPACE = "vllm_ascend_mega_kda"
 
 
 @lru_cache(maxsize=1)
-def load_mega_kda(package_dir: str) -> torch._ops.OpOverload:
+def load_mega_kda(package_dir: str, op_name: str = "npu_mega_kda_projected") -> torch._ops.OpOverload:
     """Register the optional wheel before the worker captures an NPU graph."""
     package = Path(package_dir).resolve() / "fla_npu"
     launcher = package / "libfla_npu_stable.so"
@@ -51,9 +51,9 @@ def load_mega_kda(package_dir: str) -> torch._ops.OpOverload:
     if error:
         raise RuntimeError(f"MegaKDA registration failed: {os.fsdecode(error)}")
     try:
-        return getattr(torch.ops, _OP_NAMESPACE).npu_mega_kda_projected.default
+        return getattr(getattr(torch.ops, _OP_NAMESPACE), op_name).default
     except AttributeError as exc:
-        raise RuntimeError("The A5 fla_npu wheel must export npu_mega_kda_projected") from exc
+        raise RuntimeError(f"The A5 fla_npu wheel must export {op_name}") from exc
 
 
 def _validate_pool_layout(tensor: torch.Tensor, slot_shape: tuple[int, ...], dtype: torch.dtype) -> None:

@@ -51,6 +51,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 from vllm_ascend.distributed.parallel_state import get_gproj_tp_group, get_qkv_iproj_tp_group
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjectionTPLayout
+from vllm_ascend.ops.full_kda import full_kda_verify
 from vllm_ascend.ops.head_parallel import (
     HeadParallelColumnLinear,
     HeadParallelMergedColumnLinear,
@@ -309,6 +310,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     use_contiguous_conv_indices = True
     _mega_kda_op = None
     _mega_kda_mix = False
+    _full_kda_op = None
 
     def __init__(self, config, vllm_config, prefix: str = "") -> None:
         quant_config = getattr(vllm_config, "quant_config", None)
@@ -339,11 +341,12 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         gate_size = int(fine_tp.get("gproj_tensor_parallel_size", 1))
         mega_config = get_ascend_config().kda_backend_config
         self._mega_kda_mix = mega_config.backend == "mega_recurrent_kda_mx"
+        full_kda = mega_config.backend == "mega_recurrent_kda"
         if mega_config.backend != "native":
             if max(qkv_size, gate_size, int(fine_tp.get("oproj_tensor_parallel_size", 1))) > 1:
                 raise ValueError("MegaKDA requires ordinary QKV, gate, and output projections.")
             if (
-                (self.use_recoverssm and not self._mega_kda_mix)
+                (not self._mega_kda_mix and self.use_recoverssm != full_kda)
                 or not uses_mixed_projection
                 or self.pcp_size != 1
                 or self.head_dim != MEGA_KDA_HEAD_DIM
@@ -353,7 +356,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             ):
                 raise ValueError("MegaKDA requires BF16 activations, mixed KDA projection, and unsharded PCP states")
             assert mega_config.operator_package_dir is not None
-            if self._mega_kda_mix:
+            if full_kda:
+                if self.tp_size != 1:
+                    raise ValueError("Full MegaRecurrentKda requires a complete per-rank attention layer")
+                self._full_kda_op = load_mega_kda(mega_config.operator_package_dir, "npu_mega_recurrent_kda_v2")
+            elif self._mega_kda_mix:
                 if self.hidden_size != 7168 or self.o_proj.bias is not None or self.o_norm.bias is not None:
                     raise ValueError("MegaRecurrentKda requires H=7168 and bias-free output norm and projection")
                 if self.o_proj.custom_op is not None and not isinstance(
@@ -434,14 +441,15 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 quant_config=quant_config,
                 prefix=f"{prefix}.in_proj_qkv",
             )
-            if self._mega_kda_mix:
+            if self._mega_kda_mix or full_kda:
                 quant = self.in_proj_qkvgfab.quant_method
                 inner = getattr(quant, "quant_method", quant)
                 if not isinstance(inner, AscendW8A8MXFP8DynamicLinearMethod):
                     raise ValueError("The mixed MegaKDA kernel requires E4M3FN MXFP8 QKV weights")
                 if inner.group_size != 32 or int(inner.dynamic_mx_quant_scale_alg) not in (0, 1):
                     raise ValueError("MegaRecurrentKda requires MXFP8 group size 32 and scale algorithm 0 or 1")
-                self.in_proj_qkvgfab._mega_kda_mx_qkv = True
+                self.in_proj_qkvgfab._mega_kda_mx_qkv = self._mega_kda_mix
+                self.in_proj_qkvgfab._full_kda_prepare = full_kda
                 self._mega_kda_scale_alg = int(inner.dynamic_mx_quant_scale_alg)
             del self.f_b_proj
             self.fused_bfg_proj = _KDAFusedBFGLinear(
@@ -458,11 +466,12 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 self.local_projection_size,
                 self.local_projection_size,
             )
-            if self._mega_kda_mix:
+            if self._mega_kda_mix or full_kda:
                 if self.fused_bfg_proj.weight.dtype != torch.bfloat16 or self.o_proj.weight.dtype != torch.bfloat16:
                     raise ValueError("MegaRecurrentKda requires BF16 decay, beta, gate and output projection weights")
                 self.fused_bfg_proj.skip_weight_nz_conversion = True
                 self.o_proj.skip_weight_nz_conversion = True
+            if self._mega_kda_mix:
                 self.register_buffer(
                     "_mega_output_norm_weight",
                     torch.empty_like(self.o_norm.weight, dtype=torch.float32),
@@ -575,6 +584,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        if self._full_kda_op is not None:
+            return self._forward_full_kda(hidden_states, positions)
         if self.qkv_layout is not None:
             return self._forward_local_tp(hidden_states)
         if self.pcp_size > 1:
@@ -582,6 +593,26 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         output = self._forward_projections(hidden_states, positions)
         if self.pcp_size > 1:
             output = torch.ops.vllm.pcp_scatter_tokens(output, self.pcp_size, self.prefix)
+        return output
+
+    @eager_break_during_capture
+    def _forward_full_kda(self, hidden: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        all_metadata = get_forward_context().attn_metadata
+        meta = all_metadata.get(self.prefix) if isinstance(all_metadata, dict) else None
+        commit = getattr(meta, "recoverssm_context", None)
+        if (
+            meta is None
+            or not meta.num_spec_decodes
+            or meta.num_prefills
+            or meta.num_decodes
+            or getattr(commit, "normalized_key_base_addrs", None) is None
+            or getattr(commit, "decay_base_addrs", None) is None
+        ):
+            return self._forward_projections(hidden, positions)
+        wait_for_kv_layer_from_connector(self.prefix)
+        record_attention_compute_start()
+        output = full_kda_verify(self, self._full_kda_op, hidden, meta, self.get_parameter(_PACKED_CONV_WEIGHT_NAME))
+        maybe_save_kv_layer_to_connector("", [])
         return output
 
     def _forward_local_tp(self, hidden: torch.Tensor) -> torch.Tensor:

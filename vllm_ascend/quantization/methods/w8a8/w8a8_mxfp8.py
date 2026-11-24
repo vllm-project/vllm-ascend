@@ -244,6 +244,15 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         if getattr(layer, "_mxfp8_transformed", False):
             return
 
+        if getattr(layer, "_full_kda_prepare", False):
+            from vllm_ascend.ops.full_kda import unpack_mx_qkv
+
+            expanded = unpack_mx_qkv(layer.weight, layer.weight_scale)
+            if hasattr(layer, "_full_kda_weight"):
+                layer._full_kda_weight.copy_(expanded)
+            else:
+                layer.register_buffer("_full_kda_weight", expanded, persistent=False)
+
         # Store the unpadded shapes expected by the checkpoint loader.
         if not hasattr(layer, "_mxfp8_original_shapes"):
             layer._mxfp8_original_shapes = {
