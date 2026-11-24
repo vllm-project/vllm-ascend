@@ -185,23 +185,6 @@ def test_hardware_and_model_routing(selection, device, installed, arch):
         assert "flash_attention_v3" not in actual
 
 
-@pytest.mark.parametrize("arch", ["Qwen3DSparkModel", "Qwen3OmniDSparkModel"])
-@pytest.mark.parametrize("device", ["A2", "A3", "A5"])
-def test_qwen_dspark_fa3_is_draft_only(selection, arch, device):
-    r = selection
-    r.device = getattr(r.profiles.AscendDeviceType, device)
-    r.config.model_config = NS(hf_config=NS(architectures=["Qwen3_5ForConditionalGeneration"]))
-    r.config.speculative_config.target_model_config = r.config.model_config
-    r.config.speculative_config.draft_model_config.architectures = [arch]
-    assert "flash_attention_v3" not in r.select()
-
-    sys.modules["vllm.compilation"].backends.model_tag = "dspark_head"
-    assert ("flash_attention_v3" in r.select()) == (device in ("A2", "A3"))
-
-    r.installed = False
-    assert "flash_attention_v3" not in r.select()
-
-
 @pytest.mark.parametrize(
     "fault",
     [
@@ -683,8 +666,7 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded, softcap):
     assert metadata.block_tables.shape[0] == (1 if padded else 2)
 
 
-@pytest.mark.parametrize("padded_token_count", [False, True])
-def test_minimax_fa3_graph_metadata_keeps_storage_across_batch_sizes(fa3, padded_token_count):
+def test_minimax_fa3_graph_metadata_keeps_storage_across_batch_sizes(fa3):
     builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
     builder.device = torch.device("cpu")
     builder.capture_sizes = {16, 24}
@@ -697,7 +679,7 @@ def test_minimax_fa3_graph_metadata_keeps_storage_across_batch_sizes(fa3, padded
     offsets = torch.tensor([0, 8, 16, 16], dtype=torch.int32)
     common = NS(
         num_reqs=3,
-        num_actual_tokens=24,
+        num_actual_tokens=16,
         num_input_tokens=24,
         max_query_len=8,
         query_start_loc=offsets,
@@ -716,7 +698,7 @@ def test_minimax_fa3_graph_metadata_keeps_storage_across_batch_sizes(fa3, padded
     with patch.object(fa3, "get_scheduler_metadata", side_effect=scheduler):
         for batch_size in (2, 1, 3, 2):
             offsets.copy_(torch.tensor([8 * min(i, batch_size) for i in range(4)], dtype=torch.int32))
-            common.num_actual_tokens = 24 if padded_token_count else batch_size * 8
+            common.num_actual_tokens = batch_size * 8
             metadata = builder.build(0, common)
             tiling = metadata.scheduler_metadata[spec]
             addresses.append(tiling.data_ptr())

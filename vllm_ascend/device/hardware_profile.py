@@ -250,7 +250,6 @@ class FlashAttentionNpu3Model(Enum):
 
     MINIMAX = auto()
     STEP5 = auto()
-    QWEN_DSPARK = auto()
 
 
 class CPUBindingMode(Enum):
@@ -324,6 +323,7 @@ class HardwareProfile:
 
     # Operator availability alone does not determine which model route to use.
     flash_attn_npu_3_models: frozenset[FlashAttentionNpu3Model] = frozenset()
+    enable_qwen_dspark_fa3: bool = False
 
     # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
     requires_2d_nz_linear_input: bool = False
@@ -415,7 +415,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
     {
         AscendDeviceType.A2: HardwareProfile(
             _device_type=AscendDeviceType.A2,
-            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN_DSPARK}),
+            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX}),
+            enable_qwen_dspark_fa3=True,
             # A2 BF16 native verification produced NaNs with 8 drafts (9 queries).
             # Nine is the first observed failing configuration, not a proven
             # universal kernel bound. Remove after native recurrent parity is
@@ -441,7 +442,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
-            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX, FlashAttentionNpu3Model.QWEN_DSPARK}),
+            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX}),
+            enable_qwen_dspark_fa3=True,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
             default_worker_cls=_DEFAULT_WORKER_CLS,

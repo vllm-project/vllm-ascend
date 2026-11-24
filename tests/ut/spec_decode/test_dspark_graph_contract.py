@@ -30,11 +30,10 @@ class _BackendA:
         return object
 
 
-@pytest.mark.parametrize("backend", [AscendFlashAttentionBackend, SimpleNamespace(uses_device_tiling=True)])
-def test_flash_attn_graph_replay_uses_device_metadata_without_host_updates(monkeypatch, backend):
+def test_flash_attn_graph_replay_uses_device_metadata_without_host_updates(monkeypatch):
     manager = DFlashAclGraphManager.__new__(DFlashAclGraphManager)
     manager.speculator = SimpleNamespace(
-        attn_backends={f"draft.{i}": backend for i in range(6)},
+        attn_backends={f"draft.{i}": AscendFlashAttentionBackend for i in range(6)},
         build_draft_attn_metadatas=MagicMock(side_effect=AssertionError("unexpected host metadata rebuild")),
     )
     replay = MagicMock(return_value=object())

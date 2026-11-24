@@ -1906,9 +1906,9 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
     )
     # The DSpark loader retains the target model_config while loading the draft.
     qwen_dspark_draft = (
-        FlashAttentionNpu3Model.QWEN_DSPARK in profile.flash_attn_npu_3_models
-        and model_tag == "dspark_head"
+        model_tag == "dspark_head"
         and spec.method == "dspark"
+        and getattr(profile, "enable_qwen_dspark_fa3", False)
         and bool({"Qwen3DSparkModel", "Qwen3OmniDSparkModel"}.intersection(spec.draft_model_config.architectures or ()))
     )
     if not (local_glm_dflash or qwen_dspark_draft or _uses_minimax_fa3(config) or _uses_step5_fa3(config)):
