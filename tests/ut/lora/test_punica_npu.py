@@ -20,6 +20,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.lora.ops import torch_ops
 
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -64,6 +65,8 @@ def _make_wrapper(
         (AscendDeviceType._310P, 8, True),
         (AscendDeviceType.A2, 128, True),
         (AscendDeviceType.A2, 16, False),
+        (AscendDeviceType.A3, 8, False),
+        (AscendDeviceType.A5, 8, True),
     ],
 )
 def test_punica_init_selects_kernel_backend(device_type, max_lora_rank, expect_torch_ops) -> None:
@@ -89,12 +92,11 @@ def test_punica_init_selects_kernel_backend(device_type, max_lora_rank, expect_t
             ),
         )
     refresh.assert_called_once()
-    if expect_torch_ops:
-        from vllm.lora.ops.torch_ops import bgmv_shrink
-
-        assert wrapper.bgmv_shrink is bgmv_shrink
-    else:
-        assert wrapper.bgmv_shrink is lora_ops.bgmv_shrink
+    backend = torch_ops if expect_torch_ops else lora_ops
+    assert wrapper.bgmv_shrink is backend.bgmv_shrink
+    assert wrapper.bgmv_expand_slice is backend.bgmv_expand_slice
+    assert wrapper.sgmv_shrink is backend.sgmv_shrink
+    assert wrapper.sgmv_expand_slice is backend.sgmv_expand_slice
 
 
 def test_prefill_calls_sgmv_when_lora_active() -> None:
@@ -187,6 +189,8 @@ def test_decode_always_invokes_bgmv() -> None:
         (True, False, AscendDeviceType._310P, True),
         (True, True, AscendDeviceType.A2, True),
         (True, False, AscendDeviceType.A2, True),
+        (True, True, AscendDeviceType.A5, False),
+        (True, False, AscendDeviceType.A5, True),
     ],
 )
 def test_use_sgmv_selects_kernel_by_phase_device_and_capture(is_prefill, capturing, device_type, expected) -> None:

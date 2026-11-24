@@ -9,6 +9,8 @@ Argument semantics and adapter file layout follow the [vLLM LoRA guide](https://
 ## Supported Hardware
 
 LoRA on vLLM-Ascend is supported on Atlas 300I Duo, Atlas A2, and Atlas A3.
+On Ascend 950, DeepSeek V4's FP8 `wo_a` projection accepts BF16 LoRA adapters
+with the default `--max-lora-rank 16`.
 
 LoRA applies to both dense models and mixture-of-experts (MoE) models. The base model stays frozen. Each request selects an adapter by the `name` registered at startup. The current MoE support status is as follows:
 

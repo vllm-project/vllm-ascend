@@ -217,7 +217,9 @@ class PunicaWrapperNPU(PunicaWrapperBase):
     def _use_sgmv(self) -> bool:
         if not self.is_prefill:
             return False
-        return not (self.ascend_device_type == AscendDeviceType._310P and self._in_graph_mode())
+        # Torch SGMV expands per-request indices with repeat_interleave, which
+        # synchronizes during capture. BGMV can use the existing per-token indices.
+        return not (self.ascend_device_type in (AscendDeviceType._310P, AscendDeviceType.A5) and self._in_graph_mode())
 
     def _apply_expand(
         self,

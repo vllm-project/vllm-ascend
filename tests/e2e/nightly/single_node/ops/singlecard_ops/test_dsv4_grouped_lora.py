@@ -14,9 +14,11 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.utils import from_layer
 
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.lora.deepseek_v4 import AscendDeepseekV4GroupedWoAWithLoRA
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
 from vllm_ascend.models.deepseek_v4.grouped_wo_a import AscendDeepseekV4GroupedWoA
+from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DSDynamicLinearMethod
 from vllm_ascend.utils import enable_custom_op
 
 NUM_GROUPS = 4
@@ -122,12 +124,60 @@ def test_grouped_lora_mixed_adapters_local_tp_shard(tp_size, tp_rank, fully_shar
     torch.testing.assert_close(actual.cpu(), expected, atol=0.02, rtol=0.02)
 
 
-@pytest.mark.parametrize("tp_size,tp_rank", [(1, 0), (2, 0), (2, 1), (4, 3)])
+@pytest.mark.skipif(not is_950(), reason="Requires the Ascend 950 MXFP8 grouped matmul")
+@pytest.mark.parametrize("is_prefill", [False, True])
 @torch.inference_mode()
+def test_grouped_mxfp8_lora_preserves_bf16_adapter_input(is_prefill):
+    impl, punica, x, adapter_a, adapter_b = _make_case(1, 0, fully_sharded=False)
+    base = impl.wo_a.base_layer
+    base.support_fp8_attention = True
+    base.prefix = "model.layers.2.self_attn.wo_a"
+    # Two nonzero columns in each checkpoint row, with one scale per 128x128 tile.
+    weight = torch.zeros(base.output_size, GROUP_INPUT_SIZE)
+    weight[:, :2] = 1
+    block_size = 128
+    scale = 0.25
+    base.weight = nn.Parameter(weight.to(torch.float8_e4m3fn).npu(), requires_grad=False)
+    scale_shape = (base.output_size // block_size, GROUP_INPUT_SIZE // block_size)
+    base.weight_scale = nn.Parameter(torch.full(scale_shape, scale, dtype=torch.float32, device="npu"), False)
+    method = AscendW8A8MXFP8DSDynamicLinearMethod.__new__(AscendW8A8MXFP8DSDynamicLinearMethod)
+    method.block_size, method.group_size, method.o_lora_rank = block_size, 32, GROUP_OUTPUT_SIZE
+    method.process_weights_after_loading(base)
+
+    # Both values round to 1 in E4M3. Their BF16 difference survives only in the adapter.
+    x.fill_(2)
+    x[..., 0], x[..., 1] = 1.03125, 1.0
+    gains = (8, -8)
+    for slot, (a, b, gain) in enumerate(zip(adapter_a, adapter_b, gains)):
+        a.zero_()
+        a[0, 0], a[0, 1] = 1, -1
+        b.zero_()
+        b[:, 0] = gain
+        impl.wo_a.set_lora(slot, a.npu(), b.npu())
+
+    adapter_ids = [1, 0, 2, 1] * (NUM_TOKENS // 4)
+    _set_mapping(punica, adapter_ids, is_prefill=is_prefill)
+    actual = impl._wo_a_bmm(x).cpu()
+    base_only = torch.full((NUM_TOKENS, NUM_GROUPS, GROUP_OUTPUT_SIZE), 2 * scale, dtype=torch.bfloat16)
+    delta = (1.03125 - 1.0) * torch.tensor((0, *gains), dtype=torch.bfloat16)[adapter_ids]
+    torch.testing.assert_close(actual, base_only + delta[:, None, None], atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("tp_size,tp_rank", [(1, 0), (2, 0), (2, 1), (4, 3)])
 def test_grouped_lora_aclgraph_replays_changed_adapter_mapping(tp_size, tp_rank):
+    _check_aclgraph_replay(tp_size, tp_rank, is_prefill=False)
+
+
+@pytest.mark.skipif(not is_950(), reason="Exercises the Ascend 950 prefill LoRA graph fallback")
+def test_grouped_lora_prefill_aclgraph_replays_changed_adapter_mapping():
+    _check_aclgraph_replay(1, 0, is_prefill=True)
+
+
+@torch.inference_mode()
+def _check_aclgraph_replay(tp_size, tp_rank, *, is_prefill):
     impl, punica, x, adapter_a, adapter_b = _make_case(tp_size, tp_rank, fully_sharded=False)
     initial_ids = [1, 0, 2, 1] * (NUM_TOKENS // 4)
-    _set_mapping(punica, initial_ids)
+    _set_mapping(punica, initial_ids, is_prefill=is_prefill)
     for _ in range(3):
         impl._wo_a_bmm(x)
     torch.npu.synchronize()
@@ -139,7 +189,7 @@ def test_grouped_lora_aclgraph_replays_changed_adapter_mapping(tp_size, tp_rank)
         [0] * NUM_TOKENS,
         initial_ids,
     ):
-        _set_mapping(punica, adapter_ids)
+        _set_mapping(punica, adapter_ids, is_prefill=is_prefill)
         graph.replay()
         torch.npu.synchronize()
         expected = _reference(impl, x, adapter_ids, adapter_a, adapter_b)
