@@ -321,11 +321,14 @@ def in_full_cudagraph_mode(vllm_config: VllmConfig | None = None) -> bool:
 
         vllm_config = get_current_vllm_config_or_none()
     compilation_config = getattr(vllm_config, "compilation_config", None)
-    if getattr(compilation_config, "cudagraph_mode", None) is None:
+    if compilation_config is None:
+        return False
+    cudagraph_mode = getattr(compilation_config, "cudagraph_mode", None)
+    if cudagraph_mode is None:
         return False
     from vllm.config.compilation import CUDAGraphMode
 
-    return compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+    return cudagraph_mode == CUDAGraphMode.FULL
 
 
 def expand_pa_per_token_rows(metadata) -> bool:
@@ -388,7 +391,7 @@ def expand_pa_per_token_rows(metadata) -> bool:
         return False
     counts = torch.tensor(query_lens, dtype=torch.long, device=block_tables.device)
     metadata.pa_block_tables = block_tables.repeat_interleave(counts, dim=0)
-    metadata.pa_seq_lens = torch.tensor(context_lens, dtype=torch.int32)
+    metadata.pa_seq_lens = torch.tensor(context_lens, dtype=torch.int32, device=block_tables.device)
     metadata.pa_rows_expanded = True
     return True
 
