@@ -224,8 +224,9 @@ class Qwen4ExpPreparedInputAdapter:
             compressed = metadata.get(layer.indexer.compressed_key_cache.prefix)
             if main is None or raw is None or compressed is None:
                 continue
-            # Only the request-batched BF16 indexer consumes this schedule.
-            if not layer.indexer.c8_enabled and not layer.indexer.use_bf16_indexer_v1:
+            # INT8 QLI and GBSA build their own schedules. The BF16
+            # schedule is reusable only when dispatch does not slice rows.
+            if not layer.indexer.c8_enabled:
                 self._prepare_lightning(
                     layer,
                     compressed,

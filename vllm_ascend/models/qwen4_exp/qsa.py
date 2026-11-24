@@ -45,7 +45,6 @@ from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
 )
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.triton.linearnorm import qsa_rmsnorm_mrope as _qsa_rmsnorm_mrope  # noqa: F401
@@ -63,7 +62,6 @@ from .c8_attention import C8_PROBABILITY_QUANT_SCALE, c8_prefill_kv_length, qsa_
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
 from .lightning_indexer import (
     QSAIndexerMetadataProtocol,
-    qsa_select_paged_tokens_lightning_v1,
     qsa_select_paged_tokens_lightning_v2,
     qsa_select_paged_tokens_quantized,
 )
@@ -229,9 +227,6 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
 
     def __init__(self, *, quant_config: Any = None, prefix: str = "", **kwargs: Any) -> None:
         self.c8_enabled = uses_qsa_c8_quantization(quant_config, prefix, indexer=True)
-        self.use_bf16_indexer_v1 = not self.c8_enabled and get_current_hardware_profile().supports(
-            HardwareCapability.QWEN4EXP_BF16_INDEXER_V1
-        )
         super().__init__(quant_config=quant_config, prefix=prefix, **kwargs)
         if self.c8_enabled:
             if self.index_head_dim != 128 or not 0 < self.index_n_heads <= 64:
@@ -568,16 +563,6 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 metadata.logical_positions,
                 metadata.seq_lens,
                 metadata.query_start_loc,
-                self.token_topk,
-                self.compress_ratio,
-                out,
-            )
-        if self.use_bf16_indexer_v1:
-            logger.info_once("QSA is using the BF16 LightningIndexer V1 compatibility path.")
-            return qsa_select_paged_tokens_lightning_v1(
-                query,
-                self.compressed_key_cache.kv_cache,
-                metadata,
                 self.token_topk,
                 self.compress_ratio,
                 out,

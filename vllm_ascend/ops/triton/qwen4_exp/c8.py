@@ -123,7 +123,7 @@ def prepare_qli_metadata_inputs(
     sequence_lengths: torch.Tensor,
     compress_ratio: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build per-query causal lengths and page tables for TND indexers."""
+    """Build the independent query rows consumed by the C8 QLI v2 TND ABI."""
     rows = query_positions.shape[0]
     if query_positions.device.type != "npu" or not HAS_TRITON or not rows:
         requests = token_to_req.long()

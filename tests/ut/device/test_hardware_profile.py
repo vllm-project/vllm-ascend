@@ -59,7 +59,7 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A2: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.MM_REDUCE_SCATTER_BF16,
-        HardwareCapability.QWEN4EXP_BF16_INDEXER_V1,
+        HardwareCapability.LIGHTNING_INDEXER_V2_PAGED_KEY_OFFSETS,
         HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.NPU_TOP_K_TOP_P,

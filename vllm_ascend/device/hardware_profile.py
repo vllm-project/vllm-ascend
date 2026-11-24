@@ -143,6 +143,8 @@ class HardwareCapability(Enum):
     INDEXER_QUANT_CACHE = auto()
     # Prepare per-token INT8 KDA projection inputs before the BFG stream wait.
     KDA_INT8_QUANT_OVERLAP = auto()
+    # The native TND LightningIndexerV2 kernel requires key offsets for paged K.
+    LIGHTNING_INDEXER_V2_PAGED_KEY_OFFSETS = auto()
     # Native sparse indexer ABI with INT8 Q/K, FP16 scales and FP32 scores.
     NATIVE_INT8_SPARSE = auto()
     # Reserve host CPUs for interrupt handling when constructing worker CPU pools.
@@ -178,8 +180,6 @@ class HardwareCapability(Enum):
     NPU_TOP_K_TOP_P = auto()
     # Allow shared paged-attention decode when graph mode, shape, and model checks pass.
     PAGED_ATTENTION = auto()
-    # Use the per-query BF16 indexer for Qwen4Exp when request-batched V2 is unreliable.
-    QWEN4EXP_BF16_INDEXER_V1 = auto()
     # Use eight-row Qwen4Exp HC gate-mix tiles for large prefill batches.
     # A2, A3, and A5 validated parity and a performance benefit at the
     # family-specific dispatch threshold; other profiles retain one-row dispatch.
@@ -434,9 +434,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             capabilities=_STANDARD_CAPABILITIES
             | {
                 HardwareCapability.FLASH_ATTN_NPU_3,
+                HardwareCapability.LIGHTNING_INDEXER_V2_PAGED_KEY_OFFSETS,
                 HardwareCapability.MM_REDUCE_SCATTER_BF16,
-                # On 910B with CANN 9.3, multi-request TND BF16 V2 can fault on device.
-                HardwareCapability.QWEN4EXP_BF16_INDEXER_V1,
                 HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
                 HardwareCapability.RMS_NORM_CAST,
                 HardwareCapability.NPU_TOP_K_TOP_P,

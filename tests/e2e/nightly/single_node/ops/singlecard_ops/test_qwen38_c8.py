@@ -18,7 +18,7 @@ enable_custom_op()
 
 from vllm_ascend.models.qwen4_exp.c8_attention import qsa_c8_attention  # noqa: E402
 from vllm_ascend.models.qwen4_exp.lightning_indexer import (  # noqa: E402
-    qsa_select_paged_tokens_lightning_v1,
+    qsa_select_paged_tokens_lightning_v2,
     qsa_select_paged_tokens_quantized,
 )
 from vllm_ascend.models.qwen4_exp.quantization import (  # noqa: E402
@@ -41,51 +41,72 @@ def _initialize_triton():
 
 
 @pytest.mark.skipif(
-    not get_current_hardware_profile().supports(HardwareCapability.QWEN4EXP_BF16_INDEXER_V1),
-    reason="Requires the BF16 LightningIndexer V1 compatibility path",
+    not get_current_hardware_profile().supports(HardwareCapability.LIGHTNING_INDEXER_V2_PAGED_KEY_OFFSETS),
+    reason="Requires the A2 paged LightningIndexerV2 kernel",
 )
 @torch.inference_mode()
-def test_bf16_lightning_v1_mixed_requests_graph_replay():
-    torch.manual_seed(3)
-    query = torch.randn(7, 4, 128, dtype=torch.bfloat16, device="npu")
-    key = torch.randn(12, 128, 1, 128, dtype=torch.bfloat16, device="npu")[::2]
-    positions = [3, 4, 510, 511, 876, 877, -1]
-    requests = [0, 0, 1, 1, 2, 2, 3]
-    lengths = [5, 512, 878, 0]
+def test_bf16_lightning_v2_paged_ragged_requests_graph_replay():
+    torch.manual_seed(31)
+    query_lengths = [4, 1, 6, 3, 0, 2]
+    lengths = [4, 5203, 131071, 8202, 0, 2689]
+    rows = sum(query_lengths)
+    heads, head_dim, page_size, page_count = 4, 128, 128, 256
+    query = torch.randn(rows, heads, head_dim, dtype=torch.bfloat16, device="npu")
+    # Offset and page stride both differ from a standalone contiguous cache.
+    key = torch.randn(page_count * 2, page_size, 1, head_dim, dtype=torch.bfloat16, device="npu")[1::2]
+    page_ids = torch.arange(page_count, dtype=torch.int32, device="npu")
+    request_ids = torch.arange(len(lengths), dtype=torch.int64).repeat_interleave(torch.tensor(query_lengths)).npu()
+    query_start_loc = torch.tensor([0, *query_lengths], dtype=torch.int32).cumsum(0, dtype=torch.int32).npu()
+
+    def positions_for(lengths):
+        positions = [pos for length, count in zip(lengths, query_lengths) for pos in range(length - count, length)]
+        return torch.tensor(positions, device="npu", dtype=torch.int64)
+
     metadata = SimpleNamespace(
-        block_table=torch.tensor([[2, 1], [0, 3], [4, 1], [0, 0]], dtype=torch.int32, device="npu"),
-        token_to_req=torch.tensor(requests, dtype=torch.int32, device="npu"),
-        logical_positions=torch.tensor(positions, dtype=torch.int64, device="npu"),
+        num_actual_tokens=rows,
+        block_table=torch.stack([torch.roll(page_ids, request * 37) for request in range(len(lengths))]),
+        token_to_req=request_ids,
+        logical_positions=positions_for(lengths),
         seq_lens=torch.tensor(lengths, dtype=torch.int32, device="npu"),
+        query_start_loc=query_start_loc,
     )
-    output = torch.empty(7, 2051, dtype=torch.int32, device="npu")
 
-    def check(packed, positions, lengths):
-        for row, (position, request) in enumerate(zip(positions, requests)):
-            group_count = min((position + 1) // 4, lengths[request] // 4)
-            groups = packed[row, :512]
-            torch.testing.assert_close(groups[groups >= 0].sort().values, torch.arange(group_count, dtype=torch.int32))
-            tail_start = ((position + 1) // 4) * 4
-            tail = torch.arange(tail_start, position + 1, dtype=torch.int32)
-            torch.testing.assert_close(packed[row, 512 : 512 + len(tail)], tail)
-            assert (packed[row, 512 + len(tail) :] == -1).all()
+    def run(out=None):
+        return qsa_select_paged_tokens_lightning_v2(query, key, metadata, 2048, 4, out)
 
-    def run(out):
-        return qsa_select_paged_tokens_lightning_v1(query, key, metadata, 2048, 4, out)
+    def check(output):
+        # BSND evaluates each row separately using explicit causal visibility.
+        visible = ((metadata.logical_positions + 1) // 4).to(torch.int32)
+        weights = torch.full((rows, 1, heads), 1 / math.sqrt(head_dim), dtype=torch.bfloat16, device="npu").float()
+        groups, _ = torch.ops.cann_ops_transformer.lightning_indexer(
+            query.unsqueeze(1),
+            key,
+            weights,
+            512,
+            seqused_k=visible,
+            block_table=metadata.block_table[request_ids],
+            max_seqlen_q=1,
+            layout_q="BSND",
+            layout_k="PA_BBND",
+        )
+        torch.testing.assert_close(output[:, :512], groups[:, 0, 0], rtol=0, atol=0)
+        assert (output[:, 515:] == -1).all().item()
 
-    check(run(output).cpu(), positions, lengths)
+    output = torch.empty(rows, 2051, dtype=torch.int32, device="npu")
+    check(run(output))
+    torch.npu.synchronize()
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
         run(output)
 
-    positions = [0, 1, 510, 511, 872, 873, -1]
-    lengths = [2, 512, 874, 0]
-    metadata.logical_positions.copy_(torch.tensor(positions, device="npu"))
-    metadata.seq_lens.copy_(torch.tensor(lengths, device="npu"))
+    lengths = [5, 5200, 131072, 8199, 0, 2694]
+    query.mul_(0.5)
+    metadata.logical_positions.copy_(positions_for(lengths))
+    metadata.seq_lens.copy_(torch.tensor(lengths, dtype=torch.int32, device="npu"))
     graph.replay()
     torch.npu.synchronize()
-    check(output.cpu(), positions, lengths)
-    torch.testing.assert_close(output, run(None), rtol=0, atol=0)
+    check(output)
+    torch.testing.assert_close(output, run(), rtol=0, atol=0)
 
 
 @torch.inference_mode()
