@@ -106,6 +106,8 @@ RUN python3 -m pip install attrs cython numpy decorator sympy cffi pyyaml \
     python3 -m pip cache purge
 
 # 3) 下载并安装 CANN 9.1.0（toolkit 必装；nnal、A3-ops 存在则装；驱动由宿主机提供）
+#    注意：NNAL 要求"已安装同版本 Toolkit 并配置环境变量"，否则安装器直接退出（rc=4），
+#    所以 toolkit 装完后先 source set_env.sh 再装 nnal / A3-ops。
 RUN set -e; cd /tmp; \
     if [ -z "${CANN_PKG_ARCH}" ]; then \
         case "$(uname -m)" in \
@@ -150,6 +152,7 @@ RUN set -e; cd /tmp; \
         exit $rc; \
     }; \
     /tmp/${TOOLKIT_PKG} --install --quiet > /tmp/cann_toolkit.log 2>&1 || report $? toolkit /tmp/cann_toolkit.log; \
+    for f in /usr/local/Ascend/cann/set_env.sh /usr/local/Ascend/ascend-toolkit/set_env.sh; do if [ -f "$f" ]; then . "$f"; fi; done; \
     /tmp/${NNAL_PKG} --install --quiet > /tmp/cann_nnal.log 2>&1 || report $? nnal /tmp/cann_nnal.log; \
     if [ -f "/tmp/${OPS_PKG}" ]; then \
         /tmp/${OPS_PKG} --install --quiet > /tmp/cann_ops.log 2>&1 || report $? a3-ops /tmp/cann_ops.log; \
