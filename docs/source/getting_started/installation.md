@@ -77,7 +77,7 @@ The host Linux distribution and kernel must be supported by the selected Ascend 
 
 ### Set up the software environment {: #installation-software-environment }
 
-Choose one complete path based on your requirements. Container-based paths require Docker; see the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) if needed.
+Choose one complete path based on your requirements. Container-based paths require Docker; see the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) if needed. Those paths also need Ascend Docker Runtime on the host. [Use Ascend Docker Runtime](#installation-ascend-docker-runtime) introduces the runtime and gives the installation steps. If the host cannot install it, the other steps stay the same and only the Docker device mapping changes: use the flags in [Manual device mapping without Ascend Docker Runtime](#installation-container-without-runtime).
 
 | Requirement | Recommended method | Intended users |
 | --- | --- | --- |
@@ -101,6 +101,37 @@ Choose one complete path based on your requirements. Container-based paths requi
     **PyTorch and TorchNPU:** Installed as dependencies during the **Install vLLM and vLLM Ascend** step; no separate installation step is required.
 
     **FLA NPU:** Installed explicitly in the common follow-up step for pip, uv, and source installations on A2, A3, and 950DT Products.
+
+#### Use Ascend Docker Runtime {: #installation-ascend-docker-runtime }
+
+Both container-based paths — the prebuilt image and the CANN environment — need Ascend Docker Runtime on the **host**. The runtime mounts the NPU devices and driver paths of the host into the container.
+
+Download the run package from the [MindCluster releases](https://gitcode.com/Ascend/mind-cluster/releases): in `Ascend-docker-runtime_<version>_linux-<arch>.run`, `<version>` is the release you select and `<arch>` is `x86_64` or `aarch64`. Choose a release that supports the Ascend HDK version of the node, then install it as `root` on every node that runs containers:
+
+```bash
+chmod u+x Ascend-docker-runtime_<version>_linux-<arch>.run
+./Ascend-docker-runtime_<version>_linux-<arch>.run --install
+systemctl daemon-reload && systemctl restart docker
+```
+
+Confirm that the runtime is the default:
+
+{% raw %}
+
+```bash
+docker info --format 'default={{.DefaultRuntime}}'
+```
+
+{% endraw %}
+
+The output must be `default=ascend`. If it prints `runc`, check the `Runtimes:` line of `docker info`:
+
+1. If `ascend` is listed, either add `--runtime ascend` to `docker run`, or set `"default-runtime": "ascend"` in `/etc/docker/daemon.json` and restart Docker.
+2. If `ascend` is missing, rerun the installation and restart Docker.
+
+The container commands in this guide assume Ascend Docker Runtime **26.3.0 or later**, whose default mount lists include `/usr/local/Ascend/driver/version.info` and `/etc/ascend_install.info`. The installed version is the `version=` field in `/usr/local/Ascend/Ascend-Docker-Runtime/ascend_docker_runtime_install.info` (for example `version=v26.3.0`). With an earlier release, mount those two paths explicitly with `-v <path>:<path>` or upgrade.
+
+To mount an extra host path, create a lowercase `.list` file in `/etc/ascend-docker-runtime.d/`, one path per line, and name it in `ASCEND_RUNTIME_MOUNTS` for the containers that need it, for example `-e ASCEND_RUNTIME_MOUNTS=mylist,base`: that variable replaces the default list, so include `base`; otherwise the container loses the driver libraries and `npu-smi`. The default lists mount `/usr/local/bin/npu-smi`; on a product that installs `npu-smi` under `/usr/local/sbin`, such as Atlas 200I Pro, mount that path explicitly as the tutorial commands do.
 
 {% include "getting_started/installation/prebuilt_image.inc.md" %}
 
@@ -333,3 +364,7 @@ Repeat for the NPU pairs used by your deployment in both directions. Missing rep
 - Use the official vLLM Ascend containers described in [Quick Start > Installation](quick_start.md#quick-start-installation) to quickly prepare consistent multi-node runtime environments.
 
 - Commands for multi-node model serving are outside the scope of this installation guide. Continue with the relevant [Feature Tutorial](../tutorials/features/index.md) or [Model Tutorial](../tutorials/models/index.md).
+
+### Manual device mapping without Ascend Docker Runtime {: #installation-container-without-runtime }
+
+{% include "getting_started/installation/without_ascend_docker_runtime.inc.md" %}

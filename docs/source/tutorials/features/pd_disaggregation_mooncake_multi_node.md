@@ -203,7 +203,7 @@ For UBG or UBoE network protocols, keep the automatic configuration setting abov
 
 ## Run with Docker
 
-Start a Docker container on each node. The following example maps the 16 device nodes used by the A3 deployment above. For 950PR&950DT Products, use the complete container command below.
+Start a Docker container on each node. The commands need [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the host: it selects the NPUs, so the A3 example below asks for the 16 devices of the deployment above with `ASCEND_VISIBLE_DEVICES=0-15`. For 950PR&950DT Products, use the complete container command below.
 
 ```bash
 # Update the vllm-ascend image
@@ -216,31 +216,8 @@ docker run --rm \
 --name $NAME \
 --net=host \
 --shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci8 \
---device /dev/davinci9 \
---device /dev/davinci10 \
---device /dev/davinci11 \
---device /dev/davinci12 \
---device /dev/davinci13 \
---device /dev/davinci14 \
---device /dev/davinci15 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
+-e ASCEND_VISIBLE_DEVICES=0-15 \
 -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /etc/hccn.conf:/etc/hccn.conf \
 -v /mnt/sfs_turbo/.cache:/root/.cache \
 -it $IMAGE bash
@@ -248,7 +225,7 @@ docker run --rm \
 
 ### 950PR&950DT Products Container Requirements {: #950pr950dt-products-container-requirements}
 
-For an eight-device 950PR/950DT host, use the following command. Choose an image compatible with the host driver; for openEuler, use the `{{ vllm_ascend_version }}-a5-openeuler` tag.
+For an eight-device 950PR/950DT host, use the following command with `ASCEND_VISIBLE_DEVICES=0-7`; the runtime also mounts the UB devices that earlier commands listed as `--device`. Choose an image compatible with the host driver; for openEuler, use the `{{ vllm_ascend_version }}-a5-openeuler` tag.
 
 ```bash
 export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
@@ -259,22 +236,9 @@ docker run --rm \
     --net=host \
     --privileged \
     --shm-size=1g \
+    -e ASCEND_VISIBLE_DEVICES=0-7 \
     --ulimit memlock=-1:-1 \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/hisi_hdc \
-    --device /dev/ummu \
-    --device /dev/uburma \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
-    -v /usr/local/dcmi:/usr/local/dcmi:ro \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
     -v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \
     -it "$IMAGE" bash
 ```
