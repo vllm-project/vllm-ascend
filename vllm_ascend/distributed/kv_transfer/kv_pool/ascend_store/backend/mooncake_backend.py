@@ -492,13 +492,7 @@ class MooncakeBackend(Backend):
                 self.config.metadata_server,
             )
             raise RuntimeError(msg)
-        if self._use_store_independent_te and self._contribute_memory and self.config.preferred_segment:
-            get_hostname = getattr(store, "get_hostname", None)
-            if get_hostname is not None:
-                configured_segment = get_hostname()
-                if configured_segment:
-                    self.local_seg = configured_segment
-                    logger.info("Mooncake preferred segment for store worker: %s", self.local_seg)
+        self._resolve_local_segment(store)
         if ssd_kwargs:
             logger.info(
                 "Mooncake SSD offload enabled (Mode A): path=%s",
@@ -506,6 +500,49 @@ class MooncakeBackend(Backend):
             )
         logger.info("Mooncake tenant_id=%s", self.config.tenant_id)
         return store
+
+    def _resolve_local_segment(self, store: Any) -> None:
+        """Synchronize local_seg with the segment name registered by Mooncake Store.
+
+        Mooncake Store may normalize the ``local_hostname`` passed to ``store.setup()``
+        by appending the bound TransferEngine RPC port (e.g. ``ip`` -> ``ip:port``).
+        Querying ``store.get_hostname()`` after setup ensures ``self.local_seg`` matches
+        the exact segment name registered in Mooncake Master for
+        ``ReplicateConfig.preferred_segment``.
+        """
+        get_hostname = getattr(store, "get_hostname", None)
+        if not callable(get_hostname):
+            if self.config.preferred_segment and ":" not in (self.local_seg or ""):
+                logger.warning(
+                    "Mooncake store does not expose get_hostname(); keeping local_seg=%r without port.",
+                    self.local_seg,
+                )
+            return
+        try:
+            resolved = get_hostname()
+        except Exception as exc:
+            logger.warning(
+                "Failed to query Mooncake store hostname via get_hostname(): %s; keeping local_seg=%r.",
+                exc,
+                self.local_seg,
+            )
+            return
+        if isinstance(resolved, str):
+            resolved = resolved.strip()
+            if resolved and ":" in resolved:
+                if resolved != self.local_seg:
+                    logger.info(
+                        "Updated Mooncake local_seg from %r to registered hostname %r.",
+                        self.local_seg,
+                        resolved,
+                    )
+                    self.local_seg = resolved
+                return
+        logger.warning(
+            "Mooncake store get_hostname() returned invalid value %r (expected 'host:port'); keeping local_seg=%r.",
+            resolved,
+            self.local_seg,
+        )
 
     def _setup_store_config_dict(
         self,

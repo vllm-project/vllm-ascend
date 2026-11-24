@@ -1929,6 +1929,154 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
 
 # =========================================================================
+# MooncakeBackend local_seg resolution via store.get_hostname()
+# =========================================================================
+class TestMooncakeLocalSegResolution(unittest.TestCase):
+    _MODULE_PATH = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend"
+
+    def _make_config(
+        self,
+        *,
+        preferred_segment: bool = True,
+        prefer_alloc_in_same_node: bool = True,
+        enable_ssd_offload: bool = False,
+        ssd_offload_path: str = "",
+        enable_ssd_prefetch: bool = False,
+    ) -> MooncakeStoreConfig:
+        return MooncakeStoreConfig(
+            metadata_server="P2PHANDSHAKE",
+            global_segment_size=1024**3,
+            local_buffer_size=1024**3,
+            protocol="ascend",
+            device_name="",
+            master_server_address="127.0.0.1:50088",
+            preferred_segment=preferred_segment,
+            prefer_alloc_in_same_node=prefer_alloc_in_same_node,
+            enable_ssd_offload=enable_ssd_offload,
+            ssd_offload_path=ssd_offload_path,
+            enable_ssd_prefetch=enable_ssd_prefetch,
+        )
+
+    def _run_setup(
+        self,
+        cfg: MooncakeStoreConfig,
+        fake_store: Any,
+        *,
+        use_fabric_mem: bool = False,
+        use_indep_te: bool = False,
+    ) -> MooncakeBackend:
+        backend = MooncakeBackend.__new__(MooncakeBackend)
+        backend.device_id = 0
+        backend.parallel_config = MagicMock()
+        backend.config = cfg
+        backend.local_seg = None
+        backend._use_fabric_mem = use_fabric_mem
+        backend._use_store_independent_te = use_indep_te
+        backend._contribute_memory = True
+
+        fake_te = MagicMock()
+        fake_te.get_rpc_port.return_value = 16001
+        fake_te.get_engine.return_value = MagicMock()
+        fake_store_mod = sys.modules["mooncake.store"]
+        prefetch_conf = (
+            SsdPrefetchConf(enabled=True, use_dict_setup=True, knobs={}, options=None)
+            if cfg.enable_ssd_prefetch
+            else SsdPrefetchConf.disabled()
+        )
+        with (
+            patch.object(fake_store_mod, "MooncakeDistributedStore", return_value=fake_store, create=True),
+            patch.object(backend, "set_device"),
+            patch(f"{self._MODULE_PATH}.get_ip", return_value="10.0.0.1"),
+            patch(f"{self._MODULE_PATH}.global_te") as mock_global_te,
+            patch(f"{self._MODULE_PATH}.get_global_rank", return_value=0),
+            patch(f"{self._MODULE_PATH}._mooncake_setup_supports_ssd_offload", return_value=True),
+            patch(f"{self._MODULE_PATH}._resolve_ssd_prefetch", return_value=prefetch_conf),
+        ):
+            mock_global_te.get_transfer_engine.return_value = fake_te
+            backend._setup_store()
+        return backend
+
+    def test_shared_te_path_uses_store_get_hostname(self):
+        fake_store = MagicMock()
+        fake_store.setup.return_value = 0
+        fake_store.get_hostname.return_value = "10.0.0.1:12345"
+        backend = self._run_setup(self._make_config(), fake_store)
+        self.assertEqual(backend.local_seg, "10.0.0.1:12345")
+
+    def test_dict_setup_path_uses_store_get_hostname_and_feeds_replicate_config(self):
+        fake_store = MagicMock()
+        fake_store.setup.return_value = 0
+        fake_store.get_hostname.return_value = "10.0.0.1:14567"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = self._make_config(
+                enable_ssd_offload=True,
+                ssd_offload_path=tmpdir,
+                enable_ssd_prefetch=True,
+            )
+            backend = self._run_setup(cfg, fake_store)
+        self.assertEqual(backend.local_seg, "10.0.0.1:14567")
+        rep_cfg = MagicMock()
+        with patch.object(mooncake_module, "ReplicateConfig", return_value=rep_cfg):
+            res = backend._build_replicate_config()
+        self.assertIs(res, rep_cfg)
+        self.assertEqual(rep_cfg.preferred_segment, "10.0.0.1:14567")
+
+    def test_fabric_mem_and_independent_te_paths_use_store_get_hostname(self):
+        for flag_kwargs in ({"use_fabric_mem": True}, {"use_indep_te": True}):
+            with self.subTest(**flag_kwargs):
+                fake_store = MagicMock()
+                fake_store.setup.return_value = 0
+                fake_store.get_hostname.return_value = "10.0.0.1:13579"
+                backend = self._run_setup(self._make_config(), fake_store, **flag_kwargs)
+                self.assertEqual(backend.local_seg, "10.0.0.1:13579")
+
+    def test_legacy_store_without_get_hostname_falls_back(self):
+        class _LegacyStore:
+            def setup(self, *args, **kwargs):
+                return 0
+
+        backend = self._run_setup(self._make_config(), _LegacyStore())
+        self.assertEqual(backend.local_seg, "10.0.0.1:16001")
+
+    def test_legacy_store_bare_ip_warns_when_preferred_segment_enabled(self):
+        class _LegacyStore:
+            def setup(self, *args, **kwargs):
+                return 0
+
+        with patch(f"{self._MODULE_PATH}.logger") as mock_logger:
+            backend = self._run_setup(self._make_config(), _LegacyStore(), use_fabric_mem=True)
+        self.assertEqual(backend.local_seg, "10.0.0.1")
+        mock_logger.warning.assert_called()
+
+    def test_invalid_get_hostname_values_fall_back_with_warning(self):
+        for bad_value in ("", "   ", "10.0.0.1", None, 12345):
+            with self.subTest(bad_value=bad_value):
+                fake_store = MagicMock()
+                fake_store.setup.return_value = 0
+                fake_store.get_hostname.return_value = bad_value
+                with patch(f"{self._MODULE_PATH}.logger") as mock_logger:
+                    backend = self._run_setup(self._make_config(), fake_store)
+                self.assertEqual(backend.local_seg, "10.0.0.1:16001")
+                mock_logger.warning.assert_called()
+
+    def test_get_hostname_exception_falls_back_with_warning(self):
+        fake_store = MagicMock()
+        fake_store.setup.return_value = 0
+        fake_store.get_hostname.side_effect = RuntimeError("rpc error")
+        with patch(f"{self._MODULE_PATH}.logger") as mock_logger:
+            backend = self._run_setup(self._make_config(), fake_store)
+        self.assertEqual(backend.local_seg, "10.0.0.1:16001")
+        mock_logger.warning.assert_called()
+
+    def test_setup_failure_does_not_query_get_hostname(self):
+        fake_store = MagicMock()
+        fake_store.setup.return_value = -1
+        with self.assertRaises(RuntimeError):
+            self._run_setup(self._make_config(), fake_store)
+        fake_store.get_hostname.assert_not_called()
+
+
+# =========================================================================
 # MemcacheBackend QoS validation (MF_DEVICE_UB_QOS)
 # =========================================================================
 class TestMemcacheQosValidation(unittest.TestCase):
