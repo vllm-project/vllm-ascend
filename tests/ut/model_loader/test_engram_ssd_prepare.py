@@ -65,13 +65,13 @@ def test_explicit_legacy_config_unchanged():
     assert cfg.additional_config["engram_ssd"] is raw
 
 
-@pytest.mark.parametrize("change", ["loader", "pcp", "cpu_offload", "manual_manifest", "disabled"])
+@pytest.mark.parametrize("change", ["loader", "pp", "cpu_offload", "manual_manifest", "disabled"])
 def test_conflicts_fail_before_generating(tmp_path, change):
     cfg = config(tmp_path)
     if change == "loader":
         cfg.load_config.load_format = "netloader"
-    elif change == "pcp":
-        cfg.parallel_config.prefill_context_parallel_size = 2
+    elif change == "pp":
+        cfg.parallel_config.pipeline_parallel_size = 2
     elif change == "cpu_offload":
         cfg.engram_config.cpu_offload = False
     elif change == "manual_manifest":
@@ -109,3 +109,53 @@ def test_unsupported_runtime_layout_fails_before_artifact(tmp_path, change):
     with pytest.raises(ValueError):
         prepare_ssd_config(cfg)
     assert not (tmp_path / "ssd").exists()
+
+
+def test_pcp_only_shares_one_cache_and_reuses_artifact(tmp_path):
+    cfg = config(tmp_path)
+    cfg.parallel_config.tensor_parallel_size = 1
+    cfg.parallel_config.data_parallel_size = 1
+    cfg.parallel_config.data_parallel_size_local = 1
+    cfg.parallel_config.prefill_context_parallel_size = 8
+    prepare_ssd_config(cfg)
+    assert cfg.engram_config.dp_shared_memory is True
+    ssd = cfg.additional_config["engram_ssd"]
+    assert ssd["total_host_budget_bytes"] == 32_000_000_000
+    table = Path(ssd["table_paths"][0])
+    before = table.stat().st_mtime_ns
+    cfg.additional_config = {"engram_ssd": {"path": str(tmp_path / "ssd")}}
+    prepare_ssd_config(cfg)
+    assert Path(cfg.additional_config["engram_ssd"]["table_paths"][0]) == table
+    assert table.stat().st_mtime_ns == before
+
+
+def test_pcp_rejects_explicitly_disabled_sharing_before_artifact(tmp_path):
+    cfg = config(tmp_path)
+    cfg.parallel_config.data_parallel_size = 1
+    cfg.parallel_config.prefill_context_parallel_size = 8
+    cfg.engram_config.dp_shared_memory = False
+    with pytest.raises(ValueError, match="dp_shared_memory"):
+        prepare_ssd_config(cfg)
+    assert not (tmp_path / "ssd").exists()
+
+
+def test_pcp_path_only_builds_real_engram_config(tmp_path):
+    cfg = config(tmp_path)
+    cfg.parallel_config.tensor_parallel_size = 1
+    cfg.parallel_config.data_parallel_size = 1
+    cfg.parallel_config.prefill_context_parallel_size = 8
+    cfg.engram_config = None
+    prepare_ssd_config(cfg)
+    assert cfg.engram_config.cpu_offload is True
+    assert cfg.engram_config.dp_shared_memory is True
+
+
+def test_pcp_multinode_rejected_before_artifact(tmp_path):
+    cfg = config(tmp_path)
+    cfg.parallel_config.tensor_parallel_size = 1
+    cfg.parallel_config.data_parallel_size = 1
+    cfg.parallel_config.prefill_context_parallel_size = 8
+    cfg.parallel_config.nnodes = 2
+    with pytest.raises(ValueError, match='node'):
+        prepare_ssd_config(cfg)
+    assert not (tmp_path / 'ssd').exists()

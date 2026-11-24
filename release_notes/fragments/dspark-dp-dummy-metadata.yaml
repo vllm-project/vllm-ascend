@@ -1,0 +1,7 @@
+# Backported from vllm-project/vllm-ascend#20627, commit 760d7ecbb962.
+pr: null
+entries:
+  - category: bugfix
+    text: >-
+      Fixed DSpark decode failures when an idle data-parallel engine runs a
+      dummy batch whose target padding exceeds the selected draft graph capacity.

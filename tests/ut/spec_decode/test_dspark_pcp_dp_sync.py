@@ -87,7 +87,7 @@ def test_dspark_syncs_finished_proposals_only_without_upstream_hook(
     spec.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace())
     spec.draft_logits = torch.arange(24, dtype=torch.float32).reshape(6, 2, 2) if probabilistic else None
     original_logits = spec.draft_logits.clone() if probabilistic else None
-    batch = SimpleNamespace(idx_mapping=torch.tensor([4, 1]), is_prefilling_np=np.zeros(2, dtype=np.bool_))
+    batch = SimpleNamespace(num_reqs=2, idx_mapping=torch.tensor([4, 1]), is_prefilling_np=np.zeros(2, dtype=np.bool_))
     local_tokens = torch.tensor([[9, 8], [7, 6]])
     shared_tokens = torch.tensor([[1, 2], [3, 4]])
     shared_logits = torch.full((2, 2, 2), 0.5)
@@ -125,3 +125,68 @@ def test_dspark_syncs_finished_proposals_only_without_upstream_hook(
             original_logits[batch.idx_mapping] = shared_logits
         # Noncontiguous request slots must be written back; unrelated slots stay intact.
         torch.testing.assert_close(spec.draft_logits, original_logits)
+
+
+@pytest.mark.parametrize(
+    "target_reqs,effective_reqs,graph_reqs,dummy_run",
+    [(6, 5, 5, True), (14, 13, 13, True), (1, 1, 1, True), (16, 16, 16, True), (6, 5, 6, False)],
+)
+def test_dummy_replay_metadata_uses_effective_draft_requests(
+    monkeypatch, target_reqs, effective_reqs, graph_reqs, dummy_run
+):
+    spec = object.__new__(module.AscendDSparkSpeculator)
+    spec.pcp_manager = None
+    spec.enable_adaptive_verification = False
+    spec.use_dcp = False
+    spec.use_flashmla = True
+    spec.attn_architecture = "MLA"
+    spec.num_query_per_req = 5
+    spec.max_num_tokens = 160
+    spec._group_causal = True
+    spec.input_buffers = SimpleNamespace(positions=torch.zeros(160, dtype=torch.int64))
+    spec.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace())
+    monkeypatch.setattr(module.AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
+    monkeypatch.setattr(module, "build_attn_metadata_wrapper", lambda: nullcontext())
+    monkeypatch.setattr(module, "build_attn_metadata_factory", lambda *args, **kwargs: nullcontext())
+    batch = SimpleNamespace(num_reqs=target_reqs, is_prefilling_np=np.zeros(target_reqs, dtype=np.bool_))
+    sync = SimpleNamespace(num_reqs=effective_reqs)
+    seen = []
+
+    def build_uniform(*, num_reqs, batch_desc, **kwargs):
+        # Exercise the CPU boundary copy that failed in upstream metadata
+        # construction when target padding exceeded the selected draft graph.
+        boundaries = torch.zeros(batch_desc.num_reqs + 1, dtype=torch.int32)
+        boundaries[: num_reqs + 1] = torch.arange(num_reqs + 1, dtype=torch.int32) * 5
+        seen.append(num_reqs)
+        return {"boundaries": boundaries}
+
+    spec._build_uniform_attn_metadata = build_uniform
+
+    def parent(self, *args, **kwargs):
+        self.build_draft_attn_metadatas(graph_reqs, None)
+        return torch.empty(effective_reqs, 5, dtype=torch.int64)
+
+    monkeypatch.setattr(DSparkSpeculator, "propose", parent)
+    spec.propose(
+        batch,
+        {},
+        {},
+        torch.empty(0),
+        None,
+        *[torch.empty(0) for _ in range(6)],
+        dp_sync_state=sync,
+        dummy_run=dummy_run,
+    )
+    assert seen == [effective_reqs if dummy_run else target_reqs]
+    assert batch.num_reqs == target_reqs
+    assert getattr(spec, "_draft_metadata_num_reqs", None) is None
+
+
+def test_draft_request_context_restores_outer_count_after_error():
+    spec = object.__new__(module.AscendDSparkSpeculator)
+    spec._draft_metadata_num_reqs = None
+    with spec._draft_metadata_request_count(13):
+        with pytest.raises(RuntimeError, match="draft failed"), spec._draft_metadata_request_count(5):
+            raise RuntimeError("draft failed")
+        assert spec._draft_metadata_num_reqs == 13
+    assert spec._draft_metadata_num_reqs is None

@@ -1,0 +1,3 @@
+entries:
+  - category: performance
+    text: Reused Engram SSD protocol metadata buffers and eliminated redundant host stacking and slot copies. Added owner-group DDR row-cache hit and unique-miss statistics without reporting unknown client values as zero.

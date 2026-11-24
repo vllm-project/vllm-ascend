@@ -38,10 +38,12 @@ def prepare_ssd_config(vllm_config) -> None:
     parallel = vllm_config.parallel_config
     if model.architecture != "DeepseekV41ForCausalLM":
         raise ValueError("Automatic Engram SSD preparation currently supports DeepseekV41ForCausalLM")
-    if parallel.pipeline_parallel_size != 1 or parallel.prefill_context_parallel_size != 1:
-        raise ValueError("Engram SSD requires PP=1 and PCP=1")
+    if parallel.pipeline_parallel_size != 1:
+        raise ValueError("Engram SSD requires PP=1")
     if getattr(parallel, "enable_eplb", False) or getattr(parallel, "enable_elastic_ep", False):
         raise ValueError("Engram SSD does not support EPLB or elastic EP")
+    if getattr(parallel, "nnodes", 1) != 1:
+        raise ValueError("Engram SSD sharing requires all workers on the same node")
     if parallel.data_parallel_size > 1 and parallel.data_parallel_size_local != parallel.data_parallel_size:
         raise ValueError("Engram SSD DP sharing requires all DP replicas on the same node")
     load = vllm_config.load_config
@@ -57,8 +59,9 @@ def prepare_ssd_config(vllm_config) -> None:
         engram = EngramConfig(cpu_offload=True)
     if not engram.cpu_offload or engram.embedding_across_dp or engram.use_thp:
         raise ValueError("Engram SSD requires cpu_offload=True, embedding_across_dp=False and use_thp=False")
-    if parallel.data_parallel_size > 1 and engram.dp_shared_memory is False:
-        raise ValueError("Engram SSD with DP>1 requires dp_shared_memory")
+    shared = parallel.data_parallel_size * parallel.prefill_context_parallel_size > 1
+    if shared and engram.dp_shared_memory is False:
+        raise ValueError("Engram SSD with DP*PCP>1 requires dp_shared_memory")
     hf = model.hf_text_config
     layer_ids = list(hf.engram_layer_ids)
     rows = list(hf.engram_num_embeddings)
@@ -98,7 +101,7 @@ def prepare_ssd_config(vllm_config) -> None:
     # Publish config only after successful preparation, leaving failures retryable.
     vllm_config.additional_config = dict(additional, engram_ssd=resolved)
     load.load_format = "ascend_engram_ssd"
-    engram.dp_shared_memory = parallel.data_parallel_size > 1
+    engram.dp_shared_memory = shared
     vllm_config.engram_config = engram
     logger.info(
         "Engram SSD ready: %s; %d owners, %d payload bytes and %d peak bytes per owner",

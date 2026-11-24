@@ -50,7 +50,8 @@ def test_unshared_or_disabled_engines_need_no_group(monkeypatch, enabled, dp_siz
 
     config = SimpleNamespace(engram_ssd=SimpleNamespace(enabled=enabled))
     monkeypatch.setattr('vllm_ascend.ascend_config.get_ascend_config', lambda: config)
-    engine = SimpleNamespace(vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=dp_size)))
+    engine = SimpleNamespace(vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(
+        data_parallel_size=dp_size, prefill_context_parallel_size=1)))
     # Deliberately no group/executor: these modes must work without either.
     activate_engine_protocol(engine)
 
@@ -78,3 +79,35 @@ def test_startup_hook_finishes_warmup_before_activation_and_propagates_failure(m
     with pytest.raises(RuntimeError, match='peer rejected'):
         EngineCore(SimpleNamespace(tag='config'))
     assert order == ['warmup-complete']
+
+
+@pytest.mark.parametrize('acks', [[1] * 8, [1] * 7, [1] * 7 + [0]])
+def test_pcp_only_activates_all_workers_without_parent_group(monkeypatch, acks):
+    from types import SimpleNamespace
+    from vllm_ascend.models.deepseek_v41.engram.ssd import activation
+
+    workers = [0] * 8
+
+    class Executor:
+        def collective_rpc(self, method, *, timeout, args):
+            assert method == 'activate_engram_ssd_protocol'
+            assert 0 < timeout <= 30
+            workers[:] = [args[0]] * 8
+            return acks
+
+    config = SimpleNamespace(engram_ssd=SimpleNamespace(enabled=True, protocol_activation_timeout_s=30))
+    monkeypatch.setattr('vllm_ascend.ascend_config.get_ascend_config', lambda: config)
+    engine = SimpleNamespace(
+        vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(
+            data_parallel_size=1, prefill_context_parallel_size=8, world_size=8)),
+        model_executor=Executor(),
+    )
+    # None must never be passed to torch.distributed (it means WORLD).
+    with patch.object(activation.dist, 'barrier', side_effect=AssertionError('unexpected parent barrier')), \
+         patch.object(activation.dist, 'all_reduce', side_effect=AssertionError('unexpected parent reduction')):
+        if acks == [1] * 8:
+            activation.activate_engine_protocol(engine)
+            assert workers == [1] * 8
+        else:
+            with pytest.raises(RuntimeError, match='activation'):
+                activation.activate_engine_protocol(engine)

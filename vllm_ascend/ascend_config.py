@@ -98,11 +98,15 @@ class EngramSSDConfig:
     rebuild_threshold: int = 0
     # One total budget for post-warmup rendezvous, worker RPC and global ack.
     protocol_activation_timeout_s: int = 1800
+    layerwise_overlap: bool = False
+    prefill_lookahead: bool = False
     preload_rows_path: str = ""
     preload_max_bytes: int = 0
 
     @model_validator(mode="after")
     def _validate_engram_ssd(self):
+        if self.prefill_lookahead and not (self.enabled and self.layerwise_overlap):
+            raise ValueError("Engram SSD prefill_lookahead requires enabled layerwise_overlap")
         if self.protocol_activation_timeout_s <= 0:
             raise ValueError("protocol_activation_timeout_s must be positive")
         if self.cache_payload_bytes <= 0:
@@ -791,8 +795,9 @@ class AscendConfig:
         pc = vc.parallel_config
         if pc.pipeline_parallel_size != 1:
             problems.append("engram_ssd requires PP=1")
-        if pc.prefill_context_parallel_size > 1:
-            problems.append("engram_ssd requires PCP=1")
+        if (getattr(pc, "nnodes", 1) != 1
+                or getattr(pc, "data_parallel_size_local", pc.data_parallel_size) != pc.data_parallel_size):
+            problems.append("engram_ssd requires all DP/PCP workers on the same node")
         if getattr(pc, "enable_eplb", False):
             problems.append("engram_ssd is incompatible with elastic EPLB")
         if engram_config is None:
@@ -802,9 +807,9 @@ class AscendConfig:
                 problems.append("engram_ssd requires engram cpu_offload=True")
             if getattr(engram_config, "embedding_across_dp", False):
                 problems.append("engram_ssd requires embedding_across_dp=False")
-            dp_size = pc.data_parallel_size
+            dp_size = pc.data_parallel_size * pc.prefill_context_parallel_size
             if dp_size > 1 and not getattr(engram_config, "dp_shared_memory", False):
-                problems.append("engram_ssd with DP>1 currently requires "
+                problems.append("engram_ssd with DP*PCP>1 requires "
                                 "dp_shared_memory=True (leader-owned payload plane)")
             disks = max(len(self.engram_ssd.table_paths), 1)
             if (dp_size > 1 and self.engram_ssd.io_cpu_list

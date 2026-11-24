@@ -221,11 +221,13 @@ def gather_dequantize_host_uva(
     output: torch.Tensor | None = None,
     vocab_start: int = 0,
     vocab_end: int | None = None,
+    skip_invalid: bool = False,
 ) -> torch.Tensor:
     """Gather registered host rows, preserving BF16 when scales are absent.
 
     Returns ``[tokens * pad_heads, width]``; the head path views it as
-    ``[tokens, pad_heads, width]``.
+    ``[tokens, pad_heads, width]``. When ``skip_invalid`` is set, invalid
+    rows are zeroed without reading the table.
     """
 
     from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
@@ -260,6 +262,7 @@ def gather_dequantize_host_uva(
         PAD_HEADS=pad_heads,
         QUANTIZED=scales is not None,
         MXFP8=codes.tensor.dtype == torch.float8_e4m3fn,
+        SKIP_INVALID=skip_invalid,
         num_warps=4,
     )
     return output

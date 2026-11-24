@@ -62,6 +62,7 @@ def runtime(monkeypatch):
 def make_model():
     model = object.__new__(model_mod.DeepseekV41Model)
     torch.nn.Module.__init__(model)
+    model.engram_ssd_runtime = None
     model.has_engram, model.engram_dp_shared_memory = True, True
     model._engram_overlap_enabled = True
     model._engram_input_buffers, model._engram_prepare_stream = None, None
@@ -285,6 +286,7 @@ def make_state(model, monkeypatch):
         state_mod, "triton", SimpleNamespace(next_power_of_2=lambda value: 1 << (value - 1).bit_length())
     )
     state = object.__new__(state_mod.EngramModelState)
+    state._engram_dp_probe = SimpleNamespace(cfg=SimpleNamespace(enabled=False))
     state.vllm_config = SimpleNamespace()
     state.max_num_reqs, state.device = 4, torch.device("cpu")
     state.rope_state = None

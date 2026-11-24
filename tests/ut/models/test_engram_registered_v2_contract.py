@@ -88,6 +88,8 @@ def test_wrapper_forwards_history_and_runtime_mode(registered_wrapper, mode, dum
         token_indices=token_indices,
         force_dummy=dummy,
         cg_mode=mode,
+        prefill_key=None,
+        prefill_next=None,
     )
 
 
@@ -102,3 +104,13 @@ def test_wrapper_primes_the_same_graph_bucket_and_retires(registered_wrapper):
 def test_registered_wrapper_forwards_graph_producer_capability(registered_wrapper, enabled):
     registered_wrapper.language_model.supports_engram_graph_producer = enabled
     assert registered_wrapper.supports_engram_graph_producer is enabled
+
+
+def test_registered_wrapper_forwards_engram_prefill_lookahead(registered_wrapper):
+    registered_wrapper.language_model.engram_prefill_lookahead = True
+    assert registered_wrapper.engram_prefill_lookahead is True
+    key = ("request", 3, 0, 8192)
+    upcoming = object()
+    registered_wrapper.prepare_engram_inputs(None, None, prefill_key=key, prefill_next=upcoming)
+    assert registered_wrapper.language_model.prepare_engram_inputs.call_args.kwargs["prefill_key"] == key
+    assert registered_wrapper.language_model.prepare_engram_inputs.call_args.kwargs["prefill_next"] is upcoming

@@ -32,6 +32,8 @@ from vllm.model_executor.utils import set_weight_attrs
 # Upstream #56741 normalized the V4.1 model package name.
 from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
 
+from vllm_ascend import envs
+
 from .npu import (
     HostUvaBuffer,
     SharedUvaBuffer,
@@ -50,6 +52,8 @@ from .parallel import (
 
 class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
     """TP(+EDP) head shard with BF16, INT8/FP32 or native MXFP8/E8M0."""
+
+    _ddr_bench_row_counts: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -376,6 +380,14 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         gathered = gather_engram_hashes(indices, dp_shared_memory=self._shared_group is not None)
         return self.embed_gathered(gathered, num_tokens)
 
+    def enable_ddr_bench_row_counting(self) -> bool:
+        """Allocate persistent audit counters before capturing lookup graphs."""
+        if self._codes_uva is None:
+            return False
+        if self._ddr_bench_row_counts is None:
+            self._ddr_bench_row_counts = torch.zeros(2, dtype=torch.int64, device=self._codes_uva.ptrs.device)
+        return True
+
     def lookup(self, indices: torch.Tensor, out: torch.Tensor, background: bool = False) -> None:
         """Look up this shard's heads into ``[tokens, padded_heads, dim]`` bf16.
 
@@ -395,11 +407,67 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         if self._codes_uva is not None:
             codes_uva = cast(HostUvaBuffer, self._codes_uva)
             scales_uva = cast(HostUvaBuffer, self._scales_uva) if self._scales_uva is not None else None
-            gather_dequantize_host_uva(codes_uva, scales_uva, indices, **launch)
+            mode = envs.VLLM_ASCEND_ENGRAM_BENCH_READ_MODE
+            if mode == "ddr-dedup":
+                _lookup_deduplicated_host_rows(
+                    codes_uva,
+                    scales_uva,
+                    indices[:, self.head_start : self.head_start + self.part_n_hash_cols],
+                    vocab_start=self.vocab_start_idx,
+                    vocab_end=self.vocab_end_idx,
+                    output=launch["output"],
+                    row_counts=self._ddr_bench_row_counts,
+                )
+            elif mode == "ddr-no-dedup":
+                gather_dequantize_host_uva(codes_uva, scales_uva, indices, skip_invalid=True, **launch)
+                if self._ddr_bench_row_counts is not None:
+                    columns = indices[:, self.head_start : self.head_start + self.part_n_hash_cols]
+                    # Every valid query issues a logical read in this arm.
+                    self._ddr_bench_row_counts.add_(
+                        _count_owned_ids(columns, self.vocab_start_idx, self.vocab_end_idx)
+                    )
+            else:
+                gather_dequantize_host_uva(codes_uva, scales_uva, indices, **launch)
         elif self.weight.device.type != "cpu":
             gather_dequantize_engram_int8(self.weight, self.weight_scale_inv, indices, self.dim, **launch)
         else:
             _torch_lookup(self, indices, out)
+
+
+def _lookup_deduplicated_host_rows(
+    codes: HostUvaBuffer,
+    scales: HostUvaBuffer | None,
+    columns: torch.Tensor,
+    *,
+    vocab_start: int,
+    vocab_end: int,
+    output: torch.Tensor,
+    row_counts: torch.Tensor | None,
+) -> None:
+    # Keep every buffer at the capture shape. Duplicate positions are sent
+    # as invalid IDs, and the UVA kernel writes zero without touching DDR.
+    flat = columns.reshape(-1)
+    sorted_ids = flat.sort().values
+    first = torch.cat((torch.ones_like(sorted_ids[:1], dtype=torch.bool), sorted_ids[1:] != sorted_ids[:-1]))
+    read_ids = sorted_ids.masked_fill(~first, -1)
+    sorted_rows = gather_dequantize_host_uva(
+        codes,
+        scales,
+        read_ids.unsqueeze(1),
+        vocab_start=vocab_start,
+        vocab_end=vocab_end,
+        skip_invalid=True,
+    )
+    restore = torch.searchsorted(sorted_ids, flat)
+    torch.index_select(sorted_rows, 0, restore, out=output)
+    if row_counts is not None:
+        query_rows = _count_owned_ids(flat, vocab_start, vocab_end)
+        read_rows = _count_owned_ids(read_ids, vocab_start, vocab_end)
+        row_counts.add_(torch.stack((query_rows, read_rows)))
+
+
+def _count_owned_ids(ids: torch.Tensor, vocab_start: int, vocab_end: int) -> torch.Tensor:
+    return ((ids >= vocab_start) & (ids < vocab_end)).sum(dtype=torch.int64)
 
 
 def _torch_lookup(embed: AscendParallelEngramEmbedding, indices, out) -> None:

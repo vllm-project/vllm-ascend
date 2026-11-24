@@ -29,6 +29,7 @@ row ids validated against the table's logical row limit.
 from __future__ import annotations
 
 import ctypes
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -269,3 +270,87 @@ class SSDRowCache:
     @property
     def poisoned(self) -> bool:
         return self._poisoned
+
+
+class SSDForcedReadCache:
+    """Reserve per-round slots without consulting or persisting a directory."""
+
+    def __init__(self, capacity: int, row_limit: int, mode: str):
+        if capacity <= 0 or row_limit <= 0:
+            raise SSDInputError(1, "capacity and row_limit must be positive")
+        self.capacity = capacity
+        self.row_limit = row_limit
+        self.forced_read_mode = mode
+        self._active: CacheLease | None = None
+        self._lease_id = 0
+        self._closed = False
+        self.poisoned = False
+
+    @property
+    def is_active(self) -> bool:
+        return self._active is not None
+
+    def acquire(self, rows: np.ndarray) -> CacheLease:
+        if self._closed or self.poisoned or self.is_active:
+            raise SSDCacheError(3, "forced-read cache cannot reserve a new lease")
+        t0 = time.perf_counter()
+        rows = np.asarray(rows)
+        if rows.ndim != 1 or rows.dtype != np.uint64 or not rows.flags.c_contiguous:
+            raise SSDInputError(1, "rows must be 1-D contiguous uint64 packed global ids")
+        if rows.size and rows.max() >= self.row_limit:
+            raise SSDInputError(1, "row id out of logical range")
+
+        rows = rows.copy()
+        if self.forced_read_mode == "ssd-dedup":
+            read_rows, inverse = np.unique(rows, return_inverse=True)
+            slots = inverse.astype(np.int32)
+            read_slots = np.arange(len(read_rows), dtype=np.int32)
+        else:
+            read_rows = rows
+            slots = read_slots = np.arange(len(rows), dtype=np.int32)
+        if len(read_rows) > self.capacity:
+            raise SSDCacheError(2, "forced-read batch exceeds payload capacity")
+        self._lease_id += 1
+        self._active = CacheLease(
+            lease_id=self._lease_id, rows=rows, slots=slots, miss_rows=read_rows,
+            miss_slots=read_slots, stats={
+                "hit_rows": 0,
+                "miss_rows": len(rows),
+                "wall_ms": (time.perf_counter() - t0) * 1e3,
+            })
+        return self._active
+
+    _require = SSDRowCache._require
+
+    def publish(self, lease: CacheLease) -> None:
+        self._require(lease)
+        lease.published = True
+
+    def release(self, lease: CacheLease) -> None:
+        self._require(lease, active=False)
+        if not lease.published:
+            raise SSDCacheError(3, "release before publish is not allowed (use abort)")
+        lease.released = True
+        self._active = None
+
+    def abort(self, lease: CacheLease) -> None:
+        self._require(lease)
+        lease.aborted = True
+        self._active = None
+
+    def poison(self, reason: str) -> None:
+        self.poisoned = True
+
+    def close(self) -> None:
+        if self.is_active:
+            raise SSDCacheError(3, "close with active lease (drain first)")
+        self._closed = True
+
+
+def make_ssd_row_cache(capacity: int, row_limit: int, *, rebuild_threshold: int | None = None):
+    from vllm_ascend import envs
+
+    mode = envs.VLLM_ASCEND_ENGRAM_BENCH_READ_MODE
+    if mode in ("ssd-dedup", "ssd-no-dedup"):
+        return SSDForcedReadCache(capacity, row_limit, mode)
+    return SSDRowCache(capacity, row_limit, rebuild_threshold=rebuild_threshold)

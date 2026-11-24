@@ -59,6 +59,7 @@ def make_model():
     model = object.__new__(model_mod.DeepseekV41Model)
     torch.nn.Module.__init__(model)
     model.decoder_replay_layers = None
+    model.engram_ssd_runtime = None
     model.has_engram, model.engram_dp_shared_memory = True, False
     model._engram_overlap_enabled = True
     model._engram_input_buffers, model._engram_prepare_stream = None, None
@@ -306,3 +307,76 @@ def test_sp_row_copy_waits_for_its_table(runtime, monkeypatch):
         **inputs,
     )
     assert ("sp", 1) in calls and ("sp", 2) in calls
+
+
+def test_v2_layerwise_ssd_uses_the_same_external_events_at_capture_and_replay(runtime):
+    calls, context, aux = runtime
+    context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+    model = make_model()
+    model._engram_overlap_enabled = False
+    model.engram_ssd_runtime = SimpleNamespace(layerwise_overlap=True, layerwise_active=True)
+    captured = model.prime_engram_v2_graph_inputs(4)
+    prepared = {}
+
+    def prepare(*args, **kwargs):
+        prepared.update(kwargs)
+
+    model.prepare_engram = prepare
+    replay = model.prepare_engram_inputs(torch.arange(2), torch.arange(2), padded_tokens=4,
+                                         cg_mode=CUDAGraphMode.FULL)
+    assert replay.get("engram_graph_events") is True
+    assert prepared["ready_events"] is captured["engram_pending"]
+    assert prepared["mask_ready_event"] is captured["engram_mask_ready_event"]
+    assert replay["engram_lookups"] is captured["engram_lookups"]
+    assert ("reuse", "main") in calls
+
+
+def test_v2_layerwise_full_decode_config_keeps_nonfull_steps_synchronous(runtime):
+    calls, context, _ = runtime
+    model = make_model()
+    model._engram_layerwise_decode_graph = True
+    model.engram_ssd_runtime = SimpleNamespace(layerwise_overlap=True, layerwise_active=True)
+    prepared = {}
+
+    def prepare(*args, **kwargs):
+        prepared.update(kwargs)
+
+    model.prepare_engram = prepare
+    result = model.prepare_engram_inputs(torch.arange(2), torch.arange(2), padded_tokens=4,
+                                         cg_mode=CUDAGraphMode.NONE)
+    assert "engram_mask_ready_event" not in result
+    assert "engram_pending" not in result
+    assert prepared["skip_layerwise"]
+    assert not calls
+
+
+def test_v2_layerwise_capture_events_start_unrecorded(runtime):
+    calls, _, _ = runtime
+    model = make_model()
+    model._engram_layerwise_decode_graph = True
+    model._engram_overlap_enabled = False
+    model.engram_ssd_runtime = SimpleNamespace(layerwise_overlap=True, layerwise_active=True)
+    result = model.prime_engram_v2_graph_inputs(4)
+    assert result["engram_graph_events"] and len(result["engram_pending"]) == 2
+    assert not any(call[0] == "record" for call in calls)
+
+
+def test_layerwise_wrapper_passes_actual_npu_capture_state(runtime, monkeypatch):
+    _, context, _ = runtime
+    context.cudagraph_runtime_mode = CUDAGraphMode.NONE
+    observed = []
+
+    class Backbone:
+        _engram_layerwise_decode_graph = True
+
+        def __call__(self, *args, **kwargs):
+            observed.append(("compiled", kwargs["engram_graph_capturing"]))
+
+        def forward(self, *args, **kwargs):
+            observed.append(("capture", kwargs["engram_graph_capturing"]))
+
+    causal = SimpleNamespace(model=Backbone())
+    for capturing in (False, True):
+        monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: capturing)
+        model_mod.AscendDeepseekV41LLMForCausalLM.forward(causal, None, None, engram_graph_events=True)
+    assert observed == [("compiled", False), ("capture", True)]

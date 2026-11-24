@@ -1,0 +1,3 @@
+entries:
+  - category: feature
+    text: Added node-local prefill context parallelism for Engram SSD offload, sharing one cache per TP owner across DP and PCP ranks and coordinating capacity-bounded lookup windows.

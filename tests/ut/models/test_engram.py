@@ -248,7 +248,8 @@ def test_preparation_overlap_supports_dp_tp_and_checks_runtime(monkeypatch, enab
 
     from vllm_ascend.models.deepseek_v41 import model as model_module
 
-    model = SimpleNamespace(has_engram=True, _engram_overlap_enabled=enabled, engram_dp_shared_memory=shared)
+    model = SimpleNamespace(has_engram=True, _engram_overlap_enabled=enabled,
+                            engram_dp_shared_memory=shared, engram_ssd_runtime=None)
     monkeypatch.setattr(model_module, "get_tensor_model_parallel_world_size", lambda: tp)
     monkeypatch.setattr(model_module, "is_forward_context_available", lambda: True)
     monkeypatch.setattr(

@@ -240,6 +240,8 @@ class AscendDeepseekV41ForCausalLM(
         token_indices=None,
         force_dummy=False,
         cg_mode=None,
+        prefill_key=None,
+        prefill_next=None,
     ):
         return self.language_model.prepare_engram_inputs(
             input_ids,
@@ -252,6 +254,8 @@ class AscendDeepseekV41ForCausalLM(
             token_indices=token_indices,
             force_dummy=force_dummy,
             cg_mode=cg_mode,
+            prefill_key=prefill_key,
+            prefill_next=prefill_next,
         )
 
     @property
@@ -262,6 +266,10 @@ class AscendDeepseekV41ForCausalLM(
     def token_lookback_depth(self) -> int:
         """What the runner sizes the prompt lookback buffer from."""
         return self.language_model.token_lookback_depth
+
+    @property
+    def engram_prefill_lookahead(self) -> bool:
+        return self.language_model.engram_prefill_lookahead
 
     @property
     def supports_engram_graph_producer(self) -> bool:

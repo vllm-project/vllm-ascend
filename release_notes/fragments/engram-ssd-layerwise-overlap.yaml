@@ -1,0 +1,5 @@
+entries:
+  - category: performance
+    text: Added opt-in layerwise Engram SSD overlap for eager Model Runner V2. Hash transfer and per-layer gathers run on an auxiliary NPU stream while the model waits only at the layers that consume the results.
+  - category: performance
+    text: Reduced CPU collective calls in layerwise Engram SSD decode under FULL_DECODE_ONLY by combining request headers with row IDs and layer status with cache slots.
