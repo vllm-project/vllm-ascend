@@ -122,7 +122,6 @@ from vllm_ascend.utils import (
     register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
-    vllm_version_is,
 )
 
 if TYPE_CHECKING:
