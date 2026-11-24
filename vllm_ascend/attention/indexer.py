@@ -782,6 +782,11 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         slot_mapping = indexer_metadata.slot_mapping
         if self.use_pcp:
             tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
+            tensor_dtypes = tuple(tensor.dtype for tensor in tensors)
+            if self.enable_sparse_li_c4:
+                # HCCL and the replicated-prefix concatenation do not support
+                # packed FP4 / E8M0. Gather their one-byte storage unchanged.
+                tensors = tuple(tensor.view(torch.uint8) for tensor in tensors)
             num_replicated_tokens = get_pcp_num_replicated_tokens(
                 indexer_metadata.num_decode_tokens, self._is_pcp_decode_sharded
             )
@@ -790,6 +795,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 # means every rank holds the same tokens: write them locally.
                 num_replicated_tokens = indexer_metadata.num_actual_tokens
             gathered_tensors, slot_mapping = _gather_prefill_cache_inputs(tensors, slot_mapping, num_replicated_tokens)
+            if self.enable_sparse_li_c4:
+                gathered_tensors = tuple(tensor.view(dtype) for tensor, dtype in zip(gathered_tensors, tensor_dtypes))
             k_li = gathered_tensors[0]
             assert slot_mapping.numel() == k_li.shape[0], (
                 "PCP indexer cache write requires one slot per gathered token: "
