@@ -21,8 +21,15 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /workspace
 
-# Install clang-15 (for triton-ascend)
+# Install clang-15 (for triton-ascend).
+# The image is built for both amd64 and arm64. On amd64 only, gcc-multilib and
+# libc6-dev-i386 supply gnu/stubs-32.h: mfcli kernel install cross-compiles the
+# AICPU acc_offload kernel with bisheng cce, which reaches the host glibc
+# headers and picks the 32-bit stubs branch when __x86_64__ is not defined.
 RUN apt-get update -y && \
+    if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+        apt-get install -y gcc-multilib libc6-dev-i386; \
+    fi && \
     apt-get install -y git vim wget curl protobuf-compiler libprotobuf-dev net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libhiredis-dev clang-15 && \
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
