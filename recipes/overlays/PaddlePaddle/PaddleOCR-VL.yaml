@@ -43,6 +43,10 @@ guide_sections:
   ascend: |
     ## Ascend A2 support and version scope
 
+    The tested stable configuration uses one 910B4 with 32 GB HBM. The shared
+    ascend_910b selector describes an eight-NPU node with 64 GB per NPU; this
+    recipe selects one device and does not claim that node specification for the test.
+
     The historical PaddleOCR-VL tutorial covers single-NPU A2 deployment. The BF16
     configuration below uses one 910B3 or 910B4 and the pinned v0.30.0 image.
     The current Ascend tutorial discontinues model support from v0.30.0.
@@ -192,13 +196,79 @@ guide_sections:
     modelscope download --model PaddlePaddle/PP-DocLayoutV2 --local_dir PP-DocLayoutV2
     ```
 
-    Use the shared parse_document.py above with the native A2 layout device:
+    Save the following previously verified shared parser as `parse_document.py` in the layout environment. Run it with `--layout-device npu` for A2.
+
+    ```python
+    import argparse
+    import json
+    import time
+    from pathlib import Path
+
+    from paddleocr import PaddleOCRVL
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input', required=True)
+    parser.add_argument('--layout-model', type=Path, required=True)
+    parser.add_argument('--output', type=Path, default=Path('document-output'))
+    parser.add_argument('--server-url', default='http://127.0.0.1:8000/v1')
+    parser.add_argument('--layout-device', choices=['cpu', 'npu'], default='cpu')
+    parser.add_argument('--page-batch-size', type=int, default=16)
+    args = parser.parse_args()
+    if args.layout_device == 'npu':
+        # OpenCV adds its package directory; CANN compiler workers need stdlib first.
+        import sys
+        import sysconfig
+        sys.path.insert(0, sysconfig.get_path('stdlib'))
+    if args.layout_device == 'cpu':
+        # CPU Paddle preprocessing + the ModelZoo-patched ACL InferSession(0).
+        # PP-DocLayoutV2 still runs on NPU; Paddle custom-NPU is not used on 310P.
+        assert (args.layout_model / 'inference_linux_aarch64.om').is_file(), 'Compile the aarch64 OM model first'
+    # Bound queued page images on the tested 32 GiB A2 host.
+    # Preserve every other official pipeline setting, including layout batches.
+    from paddlex.inference import load_pipeline_config
+    assert args.page_batch_size > 0
+    config = load_pipeline_config('PaddleOCR-VL')
+    config['batch_size'] = args.page_batch_size
+    config['use_queues'] = False
+    pipeline = PaddleOCRVL(
+        paddlex_config=config,
+        vl_rec_backend='vllm-server',
+        vl_rec_server_url=args.server_url,
+        layout_detection_model_name='PP-DocLayoutV2',
+        layout_detection_model_dir=str(args.layout_model),
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        device=args.layout_device,
+    )
+    args.output.mkdir(parents=True, exist_ok=True)
+    start = time.perf_counter()
+    count = 0
+    try:
+        for result in pipeline.predict_iter(args.input):
+            result.save_to_json(str(args.output))
+            result.save_to_markdown(str(args.output))
+            count += 1
+        elapsed = time.perf_counter() - start
+    finally:
+        pipeline.close()
+        if args.layout_device == 'cpu':
+            from ais_bench.infer.interface import InferSession
+            pipeline.paddlex_pipeline.layout_det_model.om_sess.free_resource()
+            InferSession.finalize()
+    assert count > 0, 'No pages parsed'
+    assert list(args.output.glob('*.md')), 'No Markdown output'
+    assert list(args.output.glob('*.json')), 'No JSON output'
+    (args.output / 'timing.json').write_text(json.dumps({'pages': count, 'seconds': elapsed, 'seconds_per_page': elapsed / count, 'scope': 'pipeline prediction only; excludes pipeline initialization', 'layout_device': args.layout_device, 'page_batch_size': args.page_batch_size, 'use_queues': config['use_queues']}, indent=2) + '\n')
+    print(f'Parsed {count} page(s) in {elapsed:.3f}s')
+    ```
+
+    Run the parser with the native A2 layout device:
 
     ```bash
     python parse_document.py --input https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/paddleocr_vl_demo.png --layout-model PP-DocLayoutV2 --layout-device npu --page-batch-size 16 --server-url http://127.0.0.1:8000/v1 --output document-output
     ```
 
-    Both layout paths use 16-page batches with preprocessing queues disabled on a 32 GiB host. Earlier queue-enabled A2 attempts hit that quota; their failures remain recorded. This memory setting changes the document-processing configuration and must be included in timing comparisons. It does not change Golden annotations or metric definitions.
+    The A2 layout path uses 16-page batches with preprocessing queues disabled on a 32 GiB host. Earlier queue-enabled A2 attempts hit that quota; their failures remain recorded. This memory setting changes the document-processing configuration and must be included in timing comparisons. It does not change Golden annotations or metric definitions.
 
     ### Accuracy and performance acceptance boundaries
 
