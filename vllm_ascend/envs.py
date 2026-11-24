@@ -72,6 +72,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Directory for Ascend torch-profiler traces when the server cannot pass
+    # ``--profiler-config`` explicitly. Default is empty (profiling stays off);
+    # any non-empty filesystem path is accepted. Not a credential.
+    "VLLM_ASCEND_PROFILER_DIR": lambda: os.getenv("VLLM_ASCEND_PROFILER_DIR", ""),
 }
 
 # end-env-vars-definition
