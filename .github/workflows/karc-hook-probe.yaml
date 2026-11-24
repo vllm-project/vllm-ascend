@@ -1,0 +1,46 @@
+name: karc hook cpFromPod probe
+
+# TEMPORARY (fork-only experiment): grow $RUNNER_TEMP (= /__w/_temp inside the
+# job pod) step by step so every step boundary makes the container hook copy the
+# whole directory back to the runner (execCpFromPod). If the tar stream gets cut
+# above a certain size we will see the same
+# "Error: Unexpected end of data" at Extract._final.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sizes_mb:
+        description: "Space separated MiB sizes, one per step"
+        required: false
+        default: "64 1024 2048 3072"
+
+jobs:
+  probe:
+    runs-on: [linux-aarch64-a3-800i-karc-fed-2]
+    timeout-minutes: 90
+    steps:
+      - name: show runner identity
+        run: |
+          hostname
+          whoami
+          echo "RUNNER_TEMP=$RUNNER_TEMP"
+          df -h "$RUNNER_TEMP"
+
+      - name: grow temp to 64 MiB
+        run: dd if=/dev/urandom of="$RUNNER_TEMP/probe-64m.bin" bs=1M count=64 status=none
+          && du -sh "$RUNNER_TEMP"
+
+      - name: grow temp to 1088 MiB
+        run: dd if=/dev/urandom of="$RUNNER_TEMP/probe-1g.bin" bs=1M count=1024 status=none
+          && du -sh "$RUNNER_TEMP"
+
+      - name: grow temp to 3136 MiB
+        run: dd if=/dev/urandom of="$RUNNER_TEMP/probe-2g.bin" bs=1M count=2048 status=none
+          && du -sh "$RUNNER_TEMP"
+
+      - name: grow temp to 6208 MiB
+        run: dd if=/dev/urandom of="$RUNNER_TEMP/probe-3g.bin" bs=1M count=3072 status=none
+          && du -sh "$RUNNER_TEMP"
+
+      - name: final inventory
+        run: ls -lh "$RUNNER_TEMP" && du -sh "$RUNNER_TEMP"
