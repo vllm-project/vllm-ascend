@@ -810,7 +810,7 @@ class TestNPUWorker(TestBase):
             self.assertIn("Profiling is not enabled", str(cm.exception))
 
     def test_profile_with_prefix_uses_trace_name(self):
-        """[RFC #6954] profile() accepts profile_prefix and passes trace_name to TorchNPUProfilerWrapper"""
+        """The parent supplies the rank-qualified name before starting the NPU wrapper."""
         from vllm_ascend.worker.worker import NPUWorker
 
         profiler_config = ProfilerConfig(
@@ -832,9 +832,9 @@ class TestNPUWorker(TestBase):
         ):
             worker.profile(is_start=True, profile_prefix="warmup")
 
-            mock_profiler_wrapper.assert_called_once_with(
-                profiler_config,
-                "warmup_dp0_pp0_tp0_dcp0_ep0_rank0",
+            mock_profiler_wrapper.assert_called_once_with(profiler_config)
+            mock_profiler_wrapper.return_value.set_output_name.assert_called_once_with(
+                "warmup_dp0_pp0_tp0_dcp0_ep0_rank0"
             )
             mock_profiler_wrapper.return_value.start.assert_called_once()
 
@@ -862,15 +862,13 @@ class TestNPUWorker(TestBase):
             with patch("vllm.distributed.utils.get_worker_rank_suffix", return_value="dp0_pp0_tp0_dcp0_ep0_rank0"):
                 worker.profile(is_start=True)
 
-            mock_profiler_wrapper.assert_called_once_with(
-                profiler_config,
-                "dp0_pp0_tp0_dcp0_ep0_rank0",
-            )
+            mock_profiler_wrapper.assert_called_once_with(profiler_config)
+            mock_profiler_wrapper.return_value.set_output_name.assert_called_once_with("dp0_pp0_tp0_dcp0_ep0_rank0")
             self.assertIs(worker.profiler, mock_profiler_wrapper.return_value)
             mock_profiler_wrapper.return_value.start.assert_called_once()
 
     def test_profile_restart_reuses_existing_profiler(self):
-        """[RFC #6954] Restarting profile reuses existing profiler."""
+        """Reuse the wrapper while forwarding each session's name and overrides."""
         from vllm_ascend.worker.worker import NPUWorker
 
         profiler_config = ProfilerConfig(
@@ -888,21 +886,109 @@ class TestNPUWorker(TestBase):
         with (
             patch("vllm.distributed.utils.get_worker_rank_suffix", return_value="dp0_pp0_tp0_dcp0_ep0_rank0"),
             patch("vllm_ascend.worker.worker.TorchNPUProfilerWrapper", return_value=mock_profiler) as mock_wrapper,
+            patch("vllm.v1.worker.gpu_worker.create_worker_profiler") as mock_upstream_factory,
         ):
-            worker.profile(is_start=True, profile_prefix="session1")
-            mock_wrapper.assert_called_once_with(
-                profiler_config,
-                "session1_dp0_pp0_tp0_dcp0_ep0_rank0",
+            worker.profile(
+                is_start=True,
+                profile_prefix="session1",
+                delay_iterations=2,
+                max_iterations=5,
+                profiler_kwargs={"record_shapes": False},
             )
+            mock_wrapper.assert_called_once_with(profiler_config)
+            mock_profiler.start.assert_called_once_with(delay_iterations=2, max_iterations=5)
 
             worker.profile(is_start=False)
-            worker.profile(is_start=True)  # Restart without new prefix
+            worker.profile(is_start=True, profile_prefix="session2", profiler_kwargs={"record_shapes": True})
             # Should NOT create new profiler, just restart existing
             mock_wrapper.assert_called_once()
             self.assertEqual(mock_profiler.start.call_count, 2)
             mock_profiler.stop.assert_called_once()
+            self.assertEqual(
+                [call.args[0] for call in mock_profiler.set_output_name.call_args_list],
+                ["session1_dp0_pp0_tp0_dcp0_ep0_rank0", "session2_dp0_pp0_tp0_dcp0_ep0_rank0"],
+            )
+            mock_profiler.set_profiler_kwargs.assert_called_with({"record_shapes": True})
+            self.assertEqual(
+                [call.args[0] for call in mock_profiler.set_profiler_kwargs.call_args_list],
+                [{"record_shapes": False}, {"record_shapes": True}],
+            )
+            mock_profiler.start.assert_called_with(delay_iterations=None, max_iterations=None)
+            mock_upstream_factory.assert_not_called()
 
-    @patch("vllm_ascend.worker.worker.logger")
+    def test_profile_invalid_prefix_rejects_collection_and_allows_retry(self):
+        from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+        from vllm_ascend.worker.worker import NPUWorker
+
+        config = ProfilerConfig(profiler="torch", torch_profiler_dir="/path/to/traces")
+        for prefix in ("", "../trace", "trace/name", "trace name", "采集", "a" * 129):
+            with self.subTest(prefix=prefix):
+                worker = NPUWorker.__new__(NPUWorker)
+                worker.profiler_config = config
+                worker.profiler = None
+                worker.rank = 0
+                native = MagicMock()
+                with (
+                    patch("vllm.distributed.utils.get_worker_rank_suffix", return_value="rank0"),
+                    patch("vllm.v1.worker.gpu_worker.create_worker_profiler") as mock_upstream_factory,
+                    patch.object(TorchNPUProfilerWrapper, "_create_profiler", return_value=native) as mock_create,
+                ):
+                    with self.assertRaisesRegex(ValueError, "profile_prefix"):
+                        worker.profile(profile_prefix=prefix)
+                    mock_create.assert_not_called()
+                    native.start.assert_not_called()
+                    self.assertFalse(worker.profiler._active)
+                    self.assertIsNone(worker.profiler.profiler)
+
+                    worker.profile(profile_prefix="valid", profiler_kwargs={"record_shapes": True})
+                    mock_create.assert_called_once()
+                    self.assertTrue(mock_create.call_args.args[1].startswith("valid_rank0_"))
+                    self.assertTrue(mock_create.call_args.args[2]["record_shapes"])
+                    native.start.assert_called_once()
+                    mock_upstream_factory.assert_not_called()
+                    worker.profile(is_start=False)
+
+    def test_profile_initialization_failure_propagates_and_allows_retry(self):
+        from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+        from vllm_ascend.worker.worker import NPUWorker
+
+        config = ProfilerConfig(profiler="torch", torch_profiler_dir="/path/to/traces")
+        for failure_stage in ("create", "start"):
+            with self.subTest(failure_stage=failure_stage):
+                worker = NPUWorker.__new__(NPUWorker)
+                worker.profiler_config = config
+                worker.profiler = None
+                worker.rank = 0
+                failed, succeeding = MagicMock(), MagicMock()
+                failed.start.side_effect = RuntimeError("start failed")
+                first = RuntimeError("create failed") if failure_stage == "create" else failed
+                with (
+                    patch("vllm.distributed.utils.get_worker_rank_suffix", return_value="rank0"),
+                    patch.object(
+                        TorchNPUProfilerWrapper, "_create_profiler", side_effect=[first, succeeding]
+                    ) as mock_create,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, f"{failure_stage} failed"):
+                        worker.profile(is_start=True, profile_prefix="failed", delay_iterations=0)
+                    self.assertFalse(worker.profiler._active)
+                    self.assertFalse(worker.profiler.is_running)
+                    self.assertIsNone(worker.profiler.profiler)
+
+                    # No stop_profile between the failed request and its retry.
+                    worker.profile(
+                        is_start=True,
+                        profile_prefix="retry",
+                        delay_iterations=0,
+                        profiler_kwargs={"record_shapes": True},
+                    )
+                    self.assertTrue(worker.profiler.is_running)
+                    self.assertTrue(mock_create.call_args.args[1].startswith("retry_rank0_"))
+                    self.assertTrue(mock_create.call_args.args[2]["record_shapes"])
+                    succeeding.start.assert_called_once()
+                    worker.profile(is_start=False)
+                    succeeding.stop.assert_called_once()
+
+    @patch("vllm.v1.worker.gpu_worker.logger")
     def test_profile_stop_without_start_logs_warning(self, mock_logger):
         """Test stopping profiling before start logs a warning and returns."""
         from vllm_ascend.worker.worker import NPUWorker

@@ -26,7 +26,7 @@ from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
+from pydantic import ConfigDict, Field, StrictBool, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -520,6 +520,30 @@ class ExpertOffloadConfig:
 
 
 @config
+class NPUProfilerExperimentalConfig:
+    """NPU collection options without equivalents in vLLM ProfilerConfig."""
+
+    profiler_level: Literal["Level0", "Level1", "Level2", "Level_none"] = "Level1"
+    mstx: StrictBool = False
+
+    @model_validator(mode="after")
+    def _validate_mstx_only_level(self):
+        if self.profiler_level == "Level_none" and not self.mstx:
+            raise ValueError("NPU profiler Level_none requires mstx=true")
+        return self
+
+
+@config
+class NPUProfilerConfig:
+    """Startup defaults for native NPU profiling options."""
+
+    with_stack: StrictBool = False
+    experimental_config: NPUProfilerExperimentalConfig = dataclasses.field(
+        default_factory=NPUProfilerExperimentalConfig
+    )
+
+
+@config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
 
@@ -753,6 +777,7 @@ class AscendConfig:
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
     ascend_fusion_config: AscendFusionConfig = dataclasses.field(default_factory=AscendFusionConfig)
     ascend_warmup_config: AscendWarmupConfig = dataclasses.field(default_factory=AscendWarmupConfig)
+    npu_profiler_config: NPUProfilerConfig = dataclasses.field(default_factory=NPUProfilerConfig)
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)

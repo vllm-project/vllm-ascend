@@ -41,6 +41,7 @@ from vllm_ascend.ascend_config import (
     EplbConfig,
     FinegrainedTPConfig,
     KVPPConfig,
+    NPUProfilerConfig,
     QuantizedAllReduceConfig,
     RejectionSamplerConfig,
     RlConfig,
@@ -117,6 +118,36 @@ def test_config_modules_do_not_load_vllm_config():
         "assert 'vllm.config' not in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+class TestNPUProfilerConfig(TestBase):
+    def test_defaults_and_nested_startup_config(self):
+        defaults = NPUProfilerConfig()
+        self.assertFalse(defaults.with_stack)
+        self.assertFalse(defaults.experimental_config.mstx)
+        self.assertEqual(defaults.experimental_config.profiler_level, "Level1")
+        configured = NPUProfilerConfig(with_stack=True, experimental_config={"profiler_level": "Level2", "mstx": True})
+        self.assertTrue(configured.with_stack)
+        self.assertTrue(configured.experimental_config.mstx)
+        self.assertEqual(configured.experimental_config.profiler_level, "Level2")
+        self.assertFalse(NPUProfilerConfig().experimental_config.mstx)
+
+    def test_invalid_startup_options_are_rejected(self):
+        from pydantic import TypeAdapter
+
+        for values in (
+            {"unknown": True},
+            {"with_stack": "true"},
+            {"experimental_config": {"profiler_level": 1}},
+            {"experimental_config": {"profiler_level": "Level3"}},
+            {"experimental_config": {"profiler_level": "Level_none", "mstx": False}},
+            {"experimental_config": {"mstx": 1}},
+            {"experimental_config": {"export_type": "Text"}},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                TypeAdapter(NPUProfilerConfig).validate_python(values)
+        valid = NPUProfilerConfig(experimental_config={"profiler_level": "Level_none", "mstx": True})
+        self.assertEqual(valid.experimental_config.profiler_level, "Level_none")
 
 
 class TestRlConfig(TestBase):
