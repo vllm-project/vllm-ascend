@@ -43,7 +43,7 @@ def _add_rms_norm_quant(
     ), out1
 
 
-def _add_rms_norm_dynamic_quant(
+def _add_gemma_rms_norm_dynamic_quant(
     norm: torch.nn.Module,
     hidden_states: torch.Tensor,
     residual: torch.Tensor,
@@ -51,7 +51,7 @@ def _add_rms_norm_dynamic_quant(
 ):
 
     output = torch.ops.npu.npu_add_rms_norm_dynamic_quant(
-        hidden_states, residual, norm.weight, epsilon=norm.variance_epsilon, output_mask=[True, False]
+        hidden_states, residual, 1+norm.weight, epsilon=norm.variance_epsilon, output_mask=[True, False]
     )
     logger.info_once("norm and quant fused!!!")
     return QuantizedActivation(
@@ -70,7 +70,7 @@ _FUSED_NORM_QUANT: dict[tuple[str, QuantKey], Callable] = {}
 if  get_current_hardware_profile().supports(
     HardwareCapability.GRAPH_NORM_QUANT_FUSION
 ):
-    _FUSED_NORM_QUANT[("AscendRMSNorm", kInt8DynamicTokenSym)] = _add_rms_norm_dynamic_quant
+    _FUSED_NORM_QUANT[("AscendGemmaRMSNorm", kInt8DynamicTokenSym)] = _add_gemma_rms_norm_dynamic_quant
     
     if not envs.VLLM_BATCH_INVARIANT:
         _FUSED_NORM_QUANT[("AscendRMSNorm", kInt8StaticTensorSym)] = _add_rms_norm_quant
