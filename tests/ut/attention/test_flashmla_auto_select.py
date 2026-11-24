@@ -19,7 +19,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability
 
 def _selector_impl(**attrs):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
-    vars(impl).update(attrs)
+    impl.__dict__.update(attrs)
     return impl
 
 
@@ -148,6 +148,12 @@ def test_quant_flashmla_selection_is_k3_dspark_c8(monkeypatch):
     config.speculative_config = SimpleNamespace(method="dspark")
     impl._is_k3_dspark_draft = True
     assert AscendMLAImpl._can_use_quant_flashmla(impl)
+    impl.use_pcp = True
+    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
+    impl.use_pcp = False
+    impl.enable_kv_nz = True
+    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
+    impl.enable_kv_nz = False
     impl.fa_quant_layer = False
     assert not AscendMLAImpl._can_use_quant_flashmla(impl)
     impl.fa_quant_layer = True

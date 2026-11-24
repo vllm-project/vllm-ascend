@@ -134,10 +134,13 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
     )
     for name in (
         "supports_prolog_v3_dtype",
+        "_supports_prolog_v3_ops",
+        "_supports_prolog_v3_input_size",
         "_supports_strided_mla_projection",
         "supports_prolog_v3_writer",
         "_validate_mla_cache_layout",
         "_cache_requires_prolog_v3_writer",
+        "_unpack_prolog_decode_q",
         "mla_preprocess_prolog_v3",
         "_get_dcp_current_kv_workspace",
         "forward",
@@ -377,7 +380,9 @@ def test_flashmla_writer_workspace_preserves_addresses_and_rejects_overflow(page
         impl._prolog_v3_writer_workspace(161, views, torch.arange(161))
 
 
-@pytest.mark.parametrize("unsupported", [None, "dcp_q_replicate_enabled", "use_pcp", "qkv_a_gate_fused", "non_native"])
+@pytest.mark.parametrize(
+    "unsupported", [None, "dcp_q_replicate_enabled", "is_pcp_decode_sharded", "qkv_a_gate_fused", "non_native", "width"]
+)
 def test_quant_flashmla_prolog_workspace_uses_bounded_bf16_staging(unsupported):
     class NoopOffloader:
         pass
@@ -399,21 +404,22 @@ def test_quant_flashmla_prolog_workspace_uses_bounded_bf16_staging(unsupported):
             indices,
         ),
         _quant_flashmla_prolog_workspace=None,
-        use_mla_rope=True,
-        use_dcp=False,
-        use_pcp=False,
+        dcp_q_replicate_enabled=False,
         is_pcp_decode_sharded=False,
-        enable_kv_nz=False,
         qkv_a_gate_fused=False,
         _mlapo_uses_native_weights=unsupported != "non_native",
         supports_prolog_v3_projection=lambda: True,
-        fused_qkv_a_proj=SimpleNamespace(input_size=7168, weight=torch.empty(1, dtype=torch.bfloat16)),
+        fused_qkv_a_proj=SimpleNamespace(
+            input_size=14336 if unsupported == "width" else 7168, weight=torch.empty(1, dtype=torch.bfloat16)
+        ),
         q_proj=SimpleNamespace(weight=torch.empty(1, dtype=torch.bfloat16)),
         speculative_config=SimpleNamespace(num_speculative_tokens=7),
         vllm_config=SimpleNamespace(scheduler_config=SimpleNamespace(max_num_seqs=16)),
         _prepare_prolog_v3_weights=Mock(),
     )
-    if unsupported and unsupported != "non_native":
+    for name in ("_supports_prolog_v3_ops", "_supports_prolog_v3_input_size"):
+        setattr(impl, name, MethodType(load(MLA, name, scope, "AscendMLAImpl"), impl))
+    if unsupported in ("dcp_q_replicate_enabled", "is_pcp_decode_sharded", "qkv_a_gate_fused"):
         setattr(impl, unsupported, True)
     prepare(impl)
     if unsupported is not None:
@@ -536,8 +542,11 @@ def test_quant_flashmla_decode_prolog_writes_c8_cache_and_passes_packed_q(fallba
         _v_up_proj=lambda latent: torch.ones(tokens, heads * 128),
         o_proj=lambda x, **_: (x,),
     )
+    for name in ("_quantize_flashmla_query", "_quantize_flashmla_kv_rows"):
+        load(MLA, name, scope)
     for name in (
         "_forward_external_flashmla",
+        "_unpack_prolog_decode_q",
         "_preprocess_quant_flashmla_with_prolog",
         "_prolog_v3_writer_workspace",
         "_run_prolog_v3",
