@@ -64,6 +64,7 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
     runner.sampler = create_autospec(Sampler, instance=True)
     runner.rejection_sampler = create_autospec(RejectionSampler, instance=True)
     runner.speculator = MagicMock()
+    runner.masked_token_ids = None
     # vLLM #50465 added batch-sharded sampling to GPUModelRunner.sample().
     # The production initializer always defines this field; mirror that
     # contract in this bare CPU-only fixture.
@@ -112,6 +113,8 @@ def test_lmhead_tp_pads_to_capacity_then_trims(at_capacity):
     capacity = runner._lmhead_tp_max_num_logits()
     num_logits = indices.shape[0]
     hidden_dim = 4
+    if not vllm_version_is("0.33.0"):
+        runner.masked_token_ids = torch.tensor([2], dtype=torch.int64)
     hidden_states = torch.randn(10, hidden_dim)
     input_batch = _make_input_batch(indices)
 
