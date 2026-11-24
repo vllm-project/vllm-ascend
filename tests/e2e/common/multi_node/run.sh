@@ -316,7 +316,8 @@ install_vllm_ascend() {
     # this script runs with `set -euo pipefail`.
     grep -vE '^(torch|torch-npu|torchvision|torchaudio|triton-ascend|memfabric_hybrid|memcache_hybrid)[=<>!]' \
         "$WORKSPACE/vllm-ascend/requirements.txt" > /tmp/requirements-runtime.txt || true
-    pip install -r /tmp/requirements-runtime.txt
+    PIP_EXTRA_INDEX_URL="$PIP_EXTRA_INDEX_URL https://repo.huaweicloud.com/ascend/repos/pypi/nightly" \
+        pip install -r /tmp/requirements-runtime.txt
     pip install -e "$WORKSPACE/vllm-ascend" --no-deps
 }
 
