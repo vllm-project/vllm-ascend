@@ -431,6 +431,26 @@ completion is reported. If the entire D process stops running or the control
 network is disconnected, heartbeats stop and the lease expires. Heartbeats
 do not replace transport completion or cancellation synchronization.
 
+### Mooncake V2 Transfer Configuration
+
+Set these options in `kv_connector_extra_config`. Pull uses the decoder's
+transfer pool; Push uses the prefiller's sending pool.
+
+| Option | Default | Behavior |
+| --- | --- | --- |
+| `pull_transfer_mode` | `"request"` | Pull only: submit and complete each request independently. Use `"batch"` to aggregate READs and wait for the whole producer-engine batch. |
+| `transfer_max_workers` | `32` | Positive integer controlling the transfer pool size per worker: D-side READs for Pull, P-side sends for Push. Booleans and strings are rejected. |
+
+```json
+{"kv_connector_extra_config": {"pull_transfer_mode": "request", "transfer_max_workers": 32}}
+```
+
+For Push, set only `transfer_max_workers` on the producer. The peer requires no
+matching setting. Both Pull modes prepare addresses and
+execute READs in the transfer pool, and wait for submitted READs to finish before
+reporting a failed receive. Request mode avoids the batch completion barrier but
+can increase READ call overhead; compare both modes under the same workload.
+
 ### QoS Configuration
 
 Set `qos_priority` in the transfer initiator's `kv_connector_extra_config`.

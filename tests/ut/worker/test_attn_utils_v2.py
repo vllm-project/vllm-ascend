@@ -118,20 +118,6 @@ def _spec_compress_ratio(spec) -> int:
     return spec.tokens_per_state
 
 
-@pytest.mark.parametrize(
-    ("hf_config", "expected"),
-    [
-        (SimpleNamespace(model_type="deepseek_v4"), True),
-        (SimpleNamespace(model_type="deepseek_v41"), True),
-        (SimpleNamespace(model_type="glm5_next_text"), False),
-        (SimpleNamespace(compress_ratios=[1]), False),
-    ],
-)
-def test_is_dsv4_model_uses_explicit_model_type(hf_config, expected):
-    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
-    assert attn_utils._is_dsv4_model(vllm_config) is expected
-
-
 @pytest.fixture(autouse=True)
 def default_pa_disabled(monkeypatch):
     monkeypatch.setattr(attn_utils, "requires_contiguous_pa_kv_cache", lambda *_args, **_kwargs: False)
@@ -583,7 +569,6 @@ def test_v2_mla_single_raw_backing_selects_layout_by_resolved_backend(monkeypatc
     )
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {layer_name: attn_module})
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _config: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *_args, **_kwargs: False)
 
@@ -1058,17 +1043,28 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
         kv_cache_tensors=descriptors,
         kv_cache_groups=groups,
     )
+    layers = {
+        name: SimpleNamespace(get_attn_backend=lambda: AscendDSAC4Backend)
+        for name in (small_name, large_name, aliased_large_name, mtp_name)
+    }
     vllm_config = SimpleNamespace(
         additional_config={},
         kv_transfer_config=None,
+        compilation_config=SimpleNamespace(static_forward_context=layers),
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(model_type="deepseek_v4"),
+            hf_text_config=SimpleNamespace(model_type="deepseek_v4"),
         ),
     )
     monkeypatch.setattr(
         attn_utils,
         "get_current_vllm_config",
         lambda: vllm_config,
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda *_args, **_kwargs: layers,
     )
     allocations = []
 
@@ -1082,28 +1078,37 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
         allocate_once,
     )
 
-    raw_caches = attn_utils._allocate_kv_cache(
+    caches = attn_utils.allocate_kv_cache_main(
         kv_cache_config,
-        shared_layers={},
         device=torch.device("cpu"),
+        layout=None,
+        kernel_block_sizes=[8, 8],
     )
 
     assert allocations == [backing_size]
-    tensor_raw_caches: dict[str, torch.Tensor] = {}
-    for layer_name, raw in raw_caches.items():
-        assert isinstance(raw, torch.Tensor)
-        tensor_raw_caches[layer_name] = raw
-    assert len({raw.untyped_storage().data_ptr() for raw in tensor_raw_caches.values()}) == 1
+    cache_views: dict[str, torch.Tensor] = {}
+    for layer_name, views in caches.items():
+        assert isinstance(views, list) and len(views) == 1
+        assert isinstance(views[0], torch.Tensor)
+        cache_views[layer_name] = views[0]
+    assert len({view.untyped_storage().data_ptr() for view in cache_views.values()}) == 1
     descriptors_by_layer = {layer_name: descriptor for descriptor in descriptors for layer_name in descriptor.layers}
     base_offset = min(
-        raw.storage_offset() - descriptors_by_layer[name].offset for name, raw in tensor_raw_caches.items()
+        view.storage_offset() * view.element_size() - descriptors_by_layer[name].offset
+        for name, view in cache_views.items()
     )
-    for layer_name, raw in tensor_raw_caches.items():
+    for layer_name, view in cache_views.items():
         descriptor = descriptors_by_layer[layer_name]
-        assert raw.storage_offset() == base_offset + descriptor.offset
-    assert tensor_raw_caches[large_name].storage_offset() == tensor_raw_caches[aliased_large_name].storage_offset()
-    assert tensor_raw_caches[small_name].storage_offset() != tensor_raw_caches[large_name].storage_offset()
-    assert tensor_raw_caches[mtp_name].storage_offset() == (
+        assert view.storage_offset() * view.element_size() == base_offset + descriptor.offset
+    assert (
+        cache_views[large_name].storage_offset() * cache_views[large_name].element_size()
+        == cache_views[aliased_large_name].storage_offset() * cache_views[aliased_large_name].element_size()
+    )
+    assert (
+        cache_views[small_name].storage_offset() * cache_views[small_name].element_size()
+        != cache_views[large_name].storage_offset() * cache_views[large_name].element_size()
+    )
+    assert cache_views[mtp_name].storage_offset() * cache_views[mtp_name].element_size() == (
         base_offset + tuple_stride + small_spec.page_size_bytes * num_blocks
     )
 
@@ -2196,7 +2201,6 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
             cache_config=SimpleNamespace(cache_dtype="auto"),
         ),
     )
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _cfg: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: False)
 
     raw = attn_utils._allocate_kv_cache(kv_cache_config, shared_layers={}, device="cpu")
@@ -2994,7 +2998,6 @@ def test_reshape_kv_cache_v2_builds_c8_mxfp_views(monkeypatch, head_size_v):
         kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
     )
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: _c8_mxfp_vllm_config())
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _cfg: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: False)
 
     reshaped = attn_utils._reshape_kv_cache_v2(
@@ -3036,7 +3039,6 @@ def test_reshape_kv_cache_v2_rejects_split_c8_raw(monkeypatch):
         kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
     )
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: _c8_mxfp_vllm_config())
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _cfg: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: False)
 
     with pytest.raises(ValueError, match="one combined raw allocation"):
@@ -3649,7 +3651,6 @@ def test_mla_cache_view_matches_group_kernel_pages(monkeypatch, manager_block_si
     if not combined:
         raw = (raw[: num_blocks * manager_block_size * 8 * 4], raw[num_blocks * manager_block_size * 8 * 4 :])
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: _c8_mxfp_vllm_config("auto"))
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _: False)
     monkeypatch.setattr(attn_utils, "_uses_single_raw_mla_cache", lambda *args: False)
@@ -3705,7 +3706,6 @@ def test_main_allocator_preserves_each_backend_kernel_size(monkeypatch):
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: _c8_mxfp_vllm_config("auto"))
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *args: layers)
     monkeypatch.setattr(attn_utils, "_allocate_kv_cache", lambda *args, **kwargs: raw)
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _: False)
     monkeypatch.setattr(attn_utils, "_uses_single_raw_mla_cache", lambda *args: False)

@@ -672,12 +672,6 @@ def _get_layer_kv_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCac
     return layer_kv_cache_spec
 
 
-def _is_dsv4_model(vllm_config: VllmConfig) -> bool:
-    model_config = getattr(vllm_config, "model_config", None)
-    hf_config = getattr(model_config, "hf_config", None) if model_config else None
-    return getattr(hf_config, "model_type", None) in ("deepseek_v4", "deepseek_v41")
-
-
 def _get_attention_kv_cache_dims(
     layer_name: str,
     kv_cache_spec: AttentionSpec,
@@ -1004,7 +998,6 @@ def _allocate_kv_cache(
             name: parts if isinstance(specs[name], AscendSFAIndexerCacheSpec) or len(parts) > 1 else parts[0]
             for name, parts in caches.items()
         }
-    is_dsv4_model = _is_dsv4_model(vllm_config)
     # init kv cache tensors
     kv_cache_raw_tensors: dict[str, Any] = {}
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
@@ -1100,52 +1093,6 @@ def _allocate_kv_cache(
                 )
             else:
                 kv_cache_raw_tensors[cache_owner.layer_name] = backing
-        return kv_cache_raw_tensors
-
-    # DeepSeek-V4 descriptors describe views into one shared tuple backing.
-    # Validate all descriptors before allocating so an unsupported geometry
-    # cannot partially materialize and then fall back to duplicate buffers.
-    if is_dsv4_model:
-        tensor_sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
-        if len(tensor_sizes) != 1:
-            raise ValueError("DeepSeek-V4 KV cache descriptors must share one backing allocation.")
-        backing_size = tensor_sizes.pop()
-        uses_turboquant = uses_turboquant_groups(kv_cache_config.kv_cache_groups)
-        dsv4_regions: list[tuple[str, int, int]] = []
-        for descriptor in kv_cache_config.kv_cache_tensors:
-            for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):
-                spec = layer_kv_cache_spec[layer_name]
-                if not uses_turboquant and descriptor.block_stride != spec.page_size_bytes:
-                    raise ValueError(
-                        "DeepSeek-V4 requires contiguous per-layer pages, "
-                        f"but {layer_name} has block_stride="
-                        f"{descriptor.block_stride} and page_size="
-                        f"{spec.page_size_bytes}."
-                    )
-                if descriptor.block_stride < spec.page_size_bytes:
-                    raise ValueError(f"DSA physical stride is smaller than the page for {layer_name}")
-                layer_size = (kv_cache_config.num_blocks - 1) * descriptor.block_stride + spec.page_size_bytes
-                start = descriptor.offset + layer_idx * descriptor.layer_stride
-                if start < 0 or start + layer_size > backing_size:
-                    raise ValueError(
-                        f"DeepSeek-V4 KV cache view for {layer_name} exceeds the shared backing allocation."
-                    )
-                dsv4_regions.append((layer_name, start, layer_size))
-
-        if not dsv4_regions:
-            raise ValueError("DeepSeek-V4 KV cache config has no materializable layers.")
-        dsv4_backing = _allocate_int8_cache_tensor(
-            backing_size,
-            alignment,
-            device,
-        )
-        for layer_name, start, layer_size in dsv4_regions:
-            kv_cache_raw_tensors[layer_name] = dsv4_backing[start : start + layer_size]
-
-        layer_names = {name for group in kv_cache_config.kv_cache_groups for name in group.layer_names}
-        assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
-            "Some layers are not correctly initialized"
-        )
         return kv_cache_raw_tensors
 
     # Hybrid groups share one backing; descriptors carry per-layer offsets.
