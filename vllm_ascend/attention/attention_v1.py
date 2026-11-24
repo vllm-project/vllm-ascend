@@ -878,9 +878,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # PrefillNoCache doesn't need key_cache, but other modes do.
         # A KV-sharing consumer layer has no K/V of its own (key is None) and can
         # only read the producer layer's cache, so it always needs it.
-        needs_cache = (
-            attn_metadata.attn_state != AscendAttentionState.PrefillNoCache or key is None
-        )
+        needs_cache = attn_metadata.attn_state != AscendAttentionState.PrefillNoCache or key is None
         if needs_cache:
             # Initialize cache from kv_cache if not already set (for DecodeOnly mode)
             if self.key_cache is None and kv_cache is not None:
@@ -899,10 +897,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     f"mode {attn_metadata.attn_state}. kv_cache={kv_cache}"
                 )
 
-        if (
-            attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
-            and key is not None
-        ):
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache and key is not None:
             block_size = 128
             block_table = None
             actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
@@ -955,11 +950,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
-        if (
-            prefill_no_cache
-            and self.attn_type != AttentionType.ENCODER_DECODER
-            and not reads_shared_kv
-        ):
+        if prefill_no_cache and self.attn_type != AttentionType.ENCODER_DECODER and not reads_shared_kv:
             key = key[:num_tokens]
             value = value[:num_tokens]
         if block_table is None:
@@ -1810,11 +1801,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         num_tokens = int(actual_seq_qlen[-1])  # type: ignore[index]
         query = query[:num_tokens]
 
-        if (
-            prefill_no_cache
-            and self.attn_type != AttentionType.ENCODER_DECODER
-            and not reads_shared_kv
-        ):
+        if prefill_no_cache and self.attn_type != AttentionType.ENCODER_DECODER and not reads_shared_kv:
             key = key[:num_tokens]
             value = value[:num_tokens]
 
