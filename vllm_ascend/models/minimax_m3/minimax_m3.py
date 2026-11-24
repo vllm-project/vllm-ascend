@@ -1293,13 +1293,18 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         self._set_aux_hidden_state_layers(layers)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return fused_moe_make_expert_params_mapping(
+        mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=self.config.num_local_experts,
         )
+        # Checkpoint names remain unwrapped when LoRA adds base_layer modules.
+        return [
+            (param.replace("base_layer.", ""), weight.replace("base_layer.", ""), expert_id, shard_id)
+            for param, weight, expert_id, shard_id in mapping
+        ]
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping: list[tuple[str, str, int | str]] = [
@@ -1320,6 +1325,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         expert_params_mapping = self.get_expert_mapping()
 
         params_dict = dict(self.named_parameters())
+        for name in list(params_dict):
+            if ".base_layer." in name:
+                params_dict.setdefault(name.replace(".base_layer.", "."), params_dict[name])
         loaded_params: set[str] = set()
         loaded_tensors = 0
         skipped_tensors = 0

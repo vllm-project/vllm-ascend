@@ -4,6 +4,8 @@
 `c410543d9ffff03f5f6c4a8c0ae1d3ad082c4a15` 不变。原 Q/K/V/O 的 P0–P9 合同和历史结果保留，
 本页的独立入口补充 indexer、MLP、专家、混批及并行验证。实现和限制见[验证报告](VALIDATION-full-bf16.md)。
 
+基座 checkpoint 重载的独立冷启动对照另见 [重载验证](BASE_WEIGHT_RELOAD.md)。
+
 ## 验收口径
 
 - 真实 NPU 低秩执行对独立 CPU BF16 存储边界参考，`atol=rtol=1/64`；同时报告理想 FP64 差异。

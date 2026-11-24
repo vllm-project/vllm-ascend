@@ -1,0 +1,533 @@
+{
+  "date": "2026-11-25",
+  "status": "PASS",
+  "ascend_parent": "a1cdf0b3217322e50e7674c9a1791f98ed81d83c",
+  "upstream_reference": "4917985161655ab0ca549f8b6e07ead88338d078",
+  "paired_vllm": "c410543d9ffff03f5f6c4a8c0ae1d3ad082c4a15",
+  "hardware": "A3 / Ascend 910_9382",
+  "real_weight_layers": 4,
+  "original_layers": 60,
+  "dtype": "bfloat16",
+  "mode": "eager/checkpoint-format/layerwise",
+  "kv_cache_memory_bytes": 536870912,
+  "modified_checkpoint_tensors": 415,
+  "logical_projection_targets": 414,
+  "comparisons": [
+    {
+      "status": "PASS",
+      "actual_sha256": "973e064929b7422f411cb7a304e9b270c209098cf44a7907bf1e31ccc766d723",
+      "reference_sha256": "f050d26dd717b5caae3e5d43f84aa0e75ce7241ad76fb8eba69de2ec9b5ddc12",
+      "ranks": [
+        {
+          "parameter_count": 41,
+          "expected_changes": 19,
+          "parameters_exact": true,
+          "restored_parameters_exact": true,
+          "adapter_buffers_unchanged": true,
+          "no_meta_parameters": true
+        }
+      ],
+      "probe_valid": true,
+      "outputs_exact": {
+        "0:base": true,
+        "0:a": true,
+        "0:b": true,
+        "1:base": true,
+        "1:a": true,
+        "1:b": true,
+        "2:base": true,
+        "2:a": true,
+        "2:b": true
+      },
+      "tokens_exact": {
+        "0:base": true,
+        "0:a": true,
+        "0:b": true,
+        "1:base": true,
+        "1:a": true,
+        "1:b": true,
+        "2:base": true,
+        "2:a": true,
+        "2:b": true
+      },
+      "restored_outputs_exact": true,
+      "name": "fix-lora",
+      "reference": "fix-lora-cold",
+      "tp": 1,
+      "dp": 1,
+      "ep": false
+    },
+    {
+      "status": "PASS",
+      "actual_sha256": "9d39a681edb96f553f963f6d9e30020adccd003d47d3e9f7ed8d4ec162b939fa",
+      "reference_sha256": "f050d26dd717b5caae3e5d43f84aa0e75ce7241ad76fb8eba69de2ec9b5ddc12",
+      "ranks": [
+        {
+          "parameter_count": 41,
+          "expected_changes": 19,
+          "parameters_exact": true,
+          "restored_parameters_exact": true,
+          "adapter_buffers_unchanged": true,
+          "no_meta_parameters": true
+        }
+      ],
+      "probe_valid": true,
+      "outputs_exact": {
+        "0:base": true,
+        "1:base": true,
+        "2:base": true
+      },
+      "tokens_exact": {
+        "0:base": true,
+        "1:base": true,
+        "2:base": true
+      },
+      "restored_outputs_exact": true,
+      "name": "fix-empty",
+      "reference": "fix-lora-cold",
+      "tp": 1,
+      "dp": 1,
+      "ep": false
+    },
+    {
+      "status": "PASS",
+      "actual_sha256": "ef15c76c98e28f3977493ca2d9a4fc47da8282f27fda945a4af2b212b7bdaf8d",
+      "reference_sha256": "5c63f0add5a7fa07479454c6cf3b893886a16360471229dcf8187415afb17b6f",
+      "ranks": [
+        {
+          "parameter_count": 41,
+          "expected_changes": 19,
+          "parameters_exact": true,
+          "restored_parameters_exact": true,
+          "adapter_buffers_unchanged": true,
+          "no_meta_parameters": true
+        }
+      ],
+      "probe_valid": true,
+      "outputs_exact": {
+        "0:base": true,
+        "1:base": true,
+        "2:base": true
+      },
+      "tokens_exact": {
+        "0:base": true,
+        "1:base": true,
+        "2:base": true
+      },
+      "restored_outputs_exact": true,
+      "name": "fix-plain",
+      "reference": "fix-plain-cold",
+      "tp": 1,
+      "dp": 1,
+      "ep": false
+    },
+    {
+      "status": "PASS",
+      "actual_sha256": "495122d00edd0aba6a2e46bf7b277d2cc4ab81d95b1c37976f004d81a54b4e52",
+      "reference_sha256": "7886eaf702459e2b0efa01960348ae8734a918b73fa3adc005b4d2a6220a5500",
+      "ranks": [
+        {
+          "parameter_count": 41,
+          "expected_changes": 19,
+          "parameters_exact": true,
+          "restored_parameters_exact": true,
+          "adapter_buffers_unchanged": true,
+          "no_meta_parameters": true
+        },
+        {
+          "parameter_count": 41,
+          "expected_changes": 19,
+          "parameters_exact": true,
+          "restored_parameters_exact": true,
+          "adapter_buffers_unchanged": true,
+          "no_meta_parameters": true
+        }
+      ],
+      "probe_valid": true,
+      "outputs_exact": {
+        "0:base": true,
+        "0:a": true,
+        "0:b": true,
+        "1:base": true,
+        "1:a": true,
+        "1:b": true,
+        "2:base": true,
+        "2:a": true,
+        "2:b": true
+      },
+      "tokens_exact": {
+        "0:base": true,
+        "0:a": true,
+        "0:b": true,
+        "1:base": true,
+        "1:a": true,
+        "1:b": true,
+        "2:base": true,
+        "2:a": true,
+        "2:b": true
+      },
+      "restored_outputs_exact": true,
+      "name": "fix-tp2",
+      "reference": "fix-tp2-cold",
+      "tp": 2,
+      "dp": 1,
+      "ep": false
+    },
+    {
+      "status": "PASS",
+      "actual_sha256": "f703302e7d14de6d2a8b2c83921a0ed97424546ad2a097446e7eecea7d1ff48c",
+      "reference_sha256": "95f3bb61d65d724cc87cb8446b7d5c00521785df26b277fc36f044757d54b516",
+      "ranks": [
+        {
+          "parameter_count": 41,
+          "expected_changes": 19,
+          "parameters_exact": true,
+          "restored_parameters_exact": true,
+          "adapter_buffers_unchanged": true,
+          "no_meta_parameters": true
+        },
+        {
+          "parameter_count": 41,
+          "expected_changes": 19,
+          "parameters_exact": true,
+          "restored_parameters_exact": true,
+          "adapter_buffers_unchanged": true,
+          "no_meta_parameters": true
+        }
+      ],
+      "probe_valid": true,
+      "outputs_exact": {
+        "0:base": true,
+        "0:a": true,
+        "0:b": true,
+        "1:base": true,
+        "1:a": true,
+        "1:b": true,
+        "2:base": true,
+        "2:a": true,
+        "2:b": true
+      },
+      "tokens_exact": {
+        "0:base": true,
+        "0:a": true,
+        "0:b": true,
+        "1:base": true,
+        "1:a": true,
+        "1:b": true,
+        "2:base": true,
+        "2:a": true,
+        "2:b": true
+      },
+      "restored_outputs_exact": true,
+      "name": "fix-tp2ep2",
+      "reference": "fix-tp2ep2-cold",
+      "tp": 2,
+      "dp": 1,
+      "ep": true
+    },
+    {
+      "status": "PASS",
+      "actual_sha256": "38a49b5b3da127607ccd112209d93747f4c2193dd5f4ca02698a549fa3d9c3d6",
+      "reference_sha256": "8ec6a6d87cf9de17222359fc4260985ef35b0945ea97559f543c34cb52648785",
+      "ranks": [
+        {
+          "parameter_count": 41,
+          "expected_changes": 19,
+          "parameters_exact": true,
+          "restored_parameters_exact": true,
+          "adapter_buffers_unchanged": true,
+          "no_meta_parameters": true
+        }
+      ],
+      "probe_valid": true,
+      "outputs_exact": {
+        "0:base": true,
+        "0:a": true,
+        "0:b": true,
+        "1:base": true,
+        "1:a": true,
+        "1:b": true,
+        "2:base": true,
+        "2:a": true,
+        "2:b": true
+      },
+      "tokens_exact": {
+        "0:base": true,
+        "0:a": true,
+        "0:b": true,
+        "1:base": true,
+        "1:a": true,
+        "1:b": true,
+        "2:base": true,
+        "2:a": true,
+        "2:b": true
+      },
+      "restored_outputs_exact": true,
+      "name": "fix-text",
+      "reference": "fix-text-cold",
+      "tp": 1,
+      "dp": 1,
+      "ep": false
+    },
+    {
+      "status": "PASS",
+      "actual_sha256": "ce1162e10a6d1cdb0dc014c1229f07b463e0d7b1320b6c93c3fa329b06805eed",
+      "reference_sha256": "7eb266937ed65ba7c0ef5517a3a9cae4f750905f73e631b5c25bc4afc06b437d",
+      "ranks": [
+        {
+          "parameter_count": 41,
+          "expected_changes": 19,
+          "parameters_exact": true,
+          "restored_parameters_exact": true,
+          "adapter_buffers_unchanged": true,
+          "no_meta_parameters": true
+        },
+        {
+          "parameter_count": 41,
+          "expected_changes": 19,
+          "parameters_exact": true,
+          "restored_parameters_exact": true,
+          "adapter_buffers_unchanged": true,
+          "no_meta_parameters": true
+        },
+        {
+          "parameter_count": 41,
+          "expected_changes": 19,
+          "parameters_exact": true,
+          "restored_parameters_exact": true,
+          "adapter_buffers_unchanged": true,
+          "no_meta_parameters": true
+        },
+        {
+          "parameter_count": 41,
+          "expected_changes": 19,
+          "parameters_exact": true,
+          "restored_parameters_exact": true,
+          "adapter_buffers_unchanged": true,
+          "no_meta_parameters": true
+        }
+      ],
+      "probe_valid": true,
+      "outputs_exact": {
+        "0:base": true,
+        "0:a": true,
+        "0:b": true,
+        "1:base": true,
+        "1:a": true,
+        "1:b": true,
+        "2:base": true,
+        "2:a": true,
+        "2:b": true
+      },
+      "tokens_exact": {
+        "0:base": true,
+        "0:a": true,
+        "0:b": true,
+        "1:base": true,
+        "1:a": true,
+        "1:b": true,
+        "2:base": true,
+        "2:a": true,
+        "2:b": true
+      },
+      "restored_outputs_exact": true,
+      "name": "fix-http-reload-v2",
+      "reference": "fix-http-cold",
+      "tp": 2,
+      "dp": 2,
+      "ep": true
+    }
+  ],
+  "unit_tests": {
+    "passed": 1519,
+    "skipped": 1,
+    "warnings": 17,
+    "seconds": 13.32,
+    "log": "ut-final.log",
+    "sha256": "d9ba9dc177ce59e2c6ef74560a5db0002d9ca11a6ca2a77d947b35c0ffc8c773",
+    "before": "2 failed, 1 passed",
+    "after": "3 passed"
+  },
+  "numeric_regression": {
+    "cases": [
+      {
+        "profile": "indexer",
+        "variant": "zero",
+        "status": "SMOKE_PASS",
+        "violations": 0,
+        "loaded_exact": true,
+        "inactive_exact": true
+      },
+      {
+        "profile": "indexer",
+        "variant": "a",
+        "status": "SMOKE_PASS",
+        "violations": 0,
+        "loaded_exact": true,
+        "inactive_exact": true
+      },
+      {
+        "profile": "indexer",
+        "variant": "b",
+        "status": "SMOKE_PASS",
+        "violations": 0,
+        "loaded_exact": true,
+        "inactive_exact": true
+      },
+      {
+        "profile": "mlp",
+        "variant": "zero",
+        "status": "SMOKE_PASS",
+        "violations": 0,
+        "loaded_exact": true,
+        "inactive_exact": true
+      },
+      {
+        "profile": "mlp",
+        "variant": "a",
+        "status": "SMOKE_PASS",
+        "violations": 0,
+        "loaded_exact": true,
+        "inactive_exact": true
+      },
+      {
+        "profile": "mlp",
+        "variant": "b",
+        "status": "SMOKE_PASS",
+        "violations": 0,
+        "loaded_exact": true,
+        "inactive_exact": true
+      },
+      {
+        "profile": "shared",
+        "variant": "zero",
+        "status": "SMOKE_PASS",
+        "violations": 0,
+        "loaded_exact": true,
+        "inactive_exact": true
+      },
+      {
+        "profile": "shared",
+        "variant": "a",
+        "status": "SMOKE_PASS",
+        "violations": 0,
+        "loaded_exact": true,
+        "inactive_exact": true
+      },
+      {
+        "profile": "shared",
+        "variant": "b",
+        "status": "SMOKE_PASS",
+        "violations": 0,
+        "loaded_exact": true,
+        "inactive_exact": true
+      },
+      {
+        "profile": "experts",
+        "variant": "zero",
+        "status": "SMOKE_PASS",
+        "violations": 0,
+        "loaded_exact": true,
+        "inactive_exact": true
+      },
+      {
+        "profile": "experts",
+        "variant": "a",
+        "status": "SMOKE_PASS",
+        "violations": 0,
+        "loaded_exact": true,
+        "inactive_exact": true
+      },
+      {
+        "profile": "experts",
+        "variant": "b",
+        "status": "SMOKE_PASS",
+        "violations": 0,
+        "loaded_exact": true,
+        "inactive_exact": true
+      },
+      {
+        "profile": "all",
+        "variant": "zero",
+        "status": "SMOKE_PASS",
+        "violations": 0,
+        "loaded_exact": true,
+        "inactive_exact": true
+      },
+      {
+        "profile": "all",
+        "variant": "a",
+        "status": "SMOKE_PASS",
+        "violations": 0,
+        "loaded_exact": true,
+        "inactive_exact": true
+      },
+      {
+        "profile": "all",
+        "variant": "b",
+        "status": "SMOKE_PASS",
+        "violations": 0,
+        "loaded_exact": true,
+        "inactive_exact": true
+      }
+    ],
+    "raw": "fix-profiles/report.json",
+    "sha256": "41a31c349ace38896fb9022ec499f5109d1ebd6ce51891457299abde46744d97"
+  },
+  "http_mixed": {
+    "tp": 2,
+    "dp": 2,
+    "ep_group_size": 4,
+    "status": "PASS",
+    "mixed_requests": 36,
+    "c_mixed_requests": 12,
+    "same_batch_witnessed": true,
+    "a_restored": true,
+    "a_reloaded": true,
+    "raw": "fix-http-mixed.json",
+    "sha256": "99e48e24d8c4d539d3664ca4544e17e21ee4e90a7a8c24cc415ca1d7f654cac0"
+  },
+  "public_checkpoint_preparation": {
+    "changed": 415,
+    "shards": 5,
+    "exact_file_hashes": true,
+    "sha256": "cb9910ebd1436ec9f38562b5fdcf313655e47e1422af00de6763e3742b7a80fc"
+  },
+  "source_sha256": {
+    "tests/e2e/models/minimax_m31_lora/prepare_bf16_reload.py": "161cb0ba0fea2c33fee291e4a81a6f6ae93add95ec402f78e1b7346754c37bf5",
+    "tests/e2e/models/minimax_m31_lora/reload_observation.py": "c57eb68190a12adf97c39815b242d7918843a26a1ffa31bd6eed150027c139f1",
+    "tests/e2e/models/minimax_m31_lora/serve_bf16.py": "eedff768b91bcc77c6cebf280244435e71eb2cfd0c045210eb7b5caf4c12803a",
+    "tests/e2e/models/minimax_m31_lora/validate_bf16_reload.py": "d5f266dac8bed5b1b0235ef7f254ec09b1763734bbe62b92856908cb46808f1e",
+    "tests/ut/models/minimax_m3/test_weight_reload.py": "5f0c9846e74fe4b1aa254f98cf780639bec4ca8e11c5948b95c6cf4693ce00fa",
+    "vllm_ascend/lora/fused_moe.py": "2008157b8bc418709d50e68c31b97030cf44b26b5bddf88d3e11a572a73c9bc4",
+    "vllm_ascend/lora/minimax_m3.py": "4b257ca6b897f32778500b3e10b9e7008ff5494f81477cc062f7f7ba196d3bc1",
+    "vllm_ascend/lora/utils.py": "4ff7725ff140396a212c7bbc83f7f768ef5df23a12afbc46991e4c10eeb5d1c4",
+    "vllm_ascend/models/minimax_m3/minimax_m3.py": "a5c94a59d4fca9b4e5b43d5ccce1a94b5667e06ff3fb82d71d6e269ae03791b8",
+    "vllm_ascend/models/minimax_m3/minimax_m3_vl.py": "76f2e1dde2a8c804fc65987df8168946584de97fa93383936ea369d46c39745e",
+    "vllm_ascend/ops/fused_moe/prepare_finalize.py": "76b7aca613c35f9cc61b55b93ef60f1fb0cdb1bdffd2720a8ad7e140c3c05cd9",
+    "vllm_ascend/worker/v2/model_runner.py": "10abf471be5f4cd1d1e8abb7f96c38876f2cee8da8c37aaf43bee5238334df45"
+  },
+  "baseline_failures_retained": "validation-reload-before-summary.json",
+  "preserved_diagnostics": [
+    "plain-reload-v2.json (original OOM)",
+    "fix-http-reload-client.log (initial guard rejected only first-DP result)",
+    "runner v1 spawn guard failure (before production changes)"
+  ],
+  "unverified": [
+    "full 60-layer checkpoint",
+    "A5",
+    "ACLGraph",
+    "kernel-format reload",
+    "direct reload (paired upstream rejects LoRA)",
+    "in-flight concurrent reload",
+    "PP/PCP",
+    "performance"
+  ],
+  "prior_strict_merged": "13 PASS / 2 FAIL; prior results preserved separately, not rerun or relabeled by this fix",
+  "format_check": {
+    "command": "bash format.sh ci",
+    "exit_code": 0,
+    "log": "format-final.log",
+    "sha256": "61551b98eaf391e93b0062acbdcd66300e5cd272ac4f49c356bcbe7fce82ebbf"
+  }
+}

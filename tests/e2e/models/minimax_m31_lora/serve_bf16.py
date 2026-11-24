@@ -17,6 +17,8 @@ def main():
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--model", required=True)
     parser.add_argument("--adapters", type=Path, required=True)
+    parser.add_argument("--kv-cache-memory-bytes", type=int)
+    parser.add_argument("--worker-extension-cls", default="bf16_scope.ScopeWorker")
     options = parser.parse_args()
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from bf16_scope import CORE_TARGETS
@@ -72,12 +74,14 @@ def main():
         "--generation-config",
         "vllm",
         "--worker-extension-cls",
-        "bf16_scope.ScopeWorker",
+        options.worker_extension_cls,
         "--additional-config",
         json.dumps({"enable_fused_mc2": 0}),
     ]
     if options.ep:
         sys.argv.append("--enable-expert-parallel")
+    if options.kv_cache_memory_bytes is not None:
+        sys.argv.extend(["--kv-cache-memory-bytes", str(options.kv_cache_memory_bytes)])
     runpy.run_module("vllm.entrypoints.openai.api_server", run_name="__main__")
 
 

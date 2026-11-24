@@ -4,6 +4,8 @@
 结论限定于 A3、真实权重减层模型、eager 和下表配置，不等同于 60 层完整模型或 A5 已验收。
 旧 [VALIDATION.md](VALIDATION.md) 保留为前一轮 Q/K/V/O 合同结果。
 
+后续基座 checkpoint 重载修复及独立冷启动对照见 [重载验证报告](VALIDATION-reload-bf16.md)。
+
 ## 配套和资产
 
 - vLLM main 固定 `c410543d9ffff03f5f6c4a8c0ae1d3ad082c4a15`，没有修改上游源码；Ascend 基线为 `87f5f67bdda60b5bf6c6785909730d0f9bf9a43f`。
