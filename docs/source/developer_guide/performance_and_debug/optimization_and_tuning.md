@@ -4,25 +4,19 @@ This guide aims to help users improve vLLM Ascend performance at the system leve
 
 ## Preparation
 
-### 1.Run the container
+### 1. Run the container
+
+The container needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the host; it selects the NPUs with `ASCEND_VISIBLE_DEVICES`.
 
 ```bash
-# Update DEVICE according to your device (/dev/davinci[0-7])
-export DEVICE=/dev/davinci0
+# Update ASCEND_VISIBLE_DEVICES according to the NPU you want (/dev/davinci[0-7])
+export ASCEND_VISIBLE_DEVICES=0
 # Update the cann base image
 export IMAGE=m.daocloud.io/quay.io/ascend/cann:{{ cann_image_tag }}
 docker run --rm \
 --name performance-test \
 --shm-size=1g \
---device $DEVICE \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
+-e ASCEND_VISIBLE_DEVICES \
 -v /root/.cache:/root/.cache \
 -it $IMAGE bash
 ```
@@ -87,7 +81,7 @@ export LD_PRELOAD="$LD_PRELOAD:<path>"
 ldd `which python`
 ```
 
-### 2. `torch_npu` Optimization
+### 2. torch_npu Optimization
 
 Some performance tuning features in `torch_npu` are controlled by environment variables. Some features and their related environment variables are shown below.
 
@@ -125,7 +119,7 @@ export CPU_AFFINITY_CONF=1
 
 There are some performance tuning features in HCCL, which are controlled by environment variables.
 
-You can configure HCCL to use "AIV" mode to optimize performance by setting the environment variable shown below. In "AIV" mode, the communication is scheduled by AI vector core directly with RoCE, instead of being scheduled by AI CPU.
+You can configure HCCL to use "AIV" mode to optimize performance by setting the environment variable shown below. In "AIV" mode, the communication is scheduled by AI Vector Core directly with RoCE, instead of being scheduled by AI CPU.
 
 ```bash
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -140,13 +134,13 @@ Plus, there are more features for performance optimization in specific scenarios
 
 ### 4. Kernel Optimization
 
-This section describes operating system–level optimizations applied on the host machine (bare metal or Kubernetes node) to improve performance stability, latency, and throughput for inference workloads.
+This section describes operating system-level optimizations applied on the host machine (bare metal or Kubernetes node) to improve performance stability, latency, and throughput for inference workloads.
 
 !!! note
 
     These settings must be applied on the host OS and with root privileges. Not inside containers.
 
-#### 4.1 Set CPU Frequency Governor to `performance`
+#### 4.1 Set CPU Frequency Governor to performance
 
 ```shell
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor

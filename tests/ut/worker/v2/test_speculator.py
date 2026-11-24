@@ -17,6 +17,7 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
 )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
@@ -576,6 +577,36 @@ def test_build_fia_params_decode():
     assert result[0]["actual_seq_qlen"] == [1, 2, 3]
     assert result[0]["actual_seq_kvlen"] == [11, 30, 0]
     assert result[1]["actual_seq_lengths_kv"] == [12, 30, 0]
+
+
+def test_build_fia_params_mla_dcp_decode_uses_local_lengths():
+    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    speculator.use_dcp = True
+    speculator.attn_architecture = "MLA"
+    speculator.dcp_manager = SimpleNamespace(dcp_world_rank=1)
+    speculator.draft_vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2, cp_kv_cache_interleave_size=1)
+    )
+    speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_np=np.array([10, 20]))
+    speculator.num_speculative_steps = 3
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=32))
+    speculator.draft_attn_layer_names = {"draft"}
+    metadata = SimpleNamespace(decode=object(), external_flashmla=None)
+    with patch(
+        "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.get_dcp_local_seq_lens",
+        side_effect=[torch.tensor([5, 10, 0]), torch.tensor([6, 11, 0])],
+    ) as local_lengths:
+        result = speculator.build_fia_params(3, {"draft": metadata}, False)
+
+    assert result == [
+        {"layer_name": ("draft", CPKVScope.FULL), "actual_seq_kvlen": [5, 10, 0]},
+        {"layer_name": ("draft", CPKVScope.FULL), "actual_seq_kvlen": [6, 11, 0]},
+    ]
+    assert local_lengths.call_count == 2
+    assert local_lengths.call_args_list[0].args[0].tolist() == [11, 21, 0]
+    assert local_lengths.call_args_list[1].args[0].tolist() == [12, 22, 0]
+    for call in local_lengths.call_args_list:
+        assert call.kwargs == {"dcp_size": 2, "dcp_rank": 1, "cp_kv_cache_interleave_size": 1}
 
 
 def test_set_attn_detects_architecture():

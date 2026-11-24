@@ -10,10 +10,10 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_pcp_group, get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
-from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention, MLACommonMetadataBuilder
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -21,7 +21,7 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
     max_decode_query_len,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -431,6 +431,40 @@ class AscendSFABackend(AttentionBackend):
     @staticmethod
     def format_runtime_views(_spec: AscendMLAAttentionSpec, components: list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
         return tuple(components)
+
+    @staticmethod
+    def prepare_layerwise_cache_view(
+        raw_cache: torch.Tensor,
+        spec: KVCacheSpec,
+        layer: MLAAttention,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Expose the native NoPE and RoPE layout from a shared offload slot.
+
+        Without offload, allocation already provides separate NoPE and RoPE
+        tensors. Before the first KV write, slice the shared slot into two
+        contiguous views, each holding all N blocks of one component.
+
+            | NoPE B0 ... NoPE B(N-1) | RoPE B0 ... RoPE B(N-1) |
+            ^                         ^
+            0                         nope_bytes
+
+        Both views share the slot's storage. Packed and compressed MLA keep
+        the raw slot as a single view.
+        """
+        if (
+            not isinstance(spec, AscendMLAAttentionSpec)
+            or spec.uses_packed_sfa_main_cache
+            or spec.tokens_per_state != 1
+        ):
+            return raw_cache
+        num_blocks = raw_cache.numel() // spec.page_size_bytes
+        num_rows = num_blocks * spec.block_size * spec.num_kv_heads
+        elem_size = get_dtype_size(spec.dtype)
+        nope_bytes = num_rows * layer.kv_lora_rank * elem_size
+        rope_bytes = num_rows * layer.qk_rope_head_dim * elem_size
+        # Both parts use the same dtype, so RoPE starts at an aligned offset.
+        nope, rope = raw_cache.split((nope_bytes, rope_bytes))
+        return nope, rope
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
