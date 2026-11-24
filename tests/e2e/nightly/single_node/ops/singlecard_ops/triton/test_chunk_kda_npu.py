@@ -165,3 +165,57 @@ def test_chunk_kda(
     assert not torch.isnan(tri_ht).any(), "Triton output ht contains NaN"
     assert_close("o", ref_o, tri_o, NPU_RMSE_RATIO_O)
     assert_close("ht", ref_ht, tri_ht.transpose(-1, -2).contiguous(), NPU_RMSE_RATIO_HT)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    ("cu_seqlens", "ckpt_offsets_host"),
+    [([0, 1024], [256]), ([0, 300, 700, 1024], [128, 256, 192])],
+)
+@pytest.mark.skip_global_cleanup
+@torch.inference_mode()
+def test_chunk_kda_checkpoint_resume_equivalence(
+    dtype: torch.dtype, cu_seqlens: list[int], ckpt_offsets_host: list[int]
+):
+    torch.manual_seed(42)
+    B, T, H, D, N = 1, cu_seqlens[-1], 32, 128, len(cu_seqlens) - 1
+    q = torch.randn(B, T, H, D, dtype=dtype, device=DEVICE)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=DEVICE)
+    v = torch.randn(B, T, H, D, dtype=dtype, device=DEVICE)
+    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float32, device=DEVICE)).to(dtype)
+    beta = torch.rand(B, T, H, dtype=dtype, device=DEVICE).sigmoid()
+    h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=DEVICE)
+
+    ckpt_state = torch.zeros((N, H, D, D), dtype=dtype, device=DEVICE)
+    cold_o, _ = chunk_kda(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        initial_state=h0.transpose(-1, -2).contiguous().clone(),
+        output_final_state=True,
+        cu_seqlens=torch.tensor(cu_seqlens, dtype=torch.int32, device=DEVICE),
+        use_qk_l2norm_in_kernel=True,
+        checkpoint_state=ckpt_state,
+        checkpoint_offsets=torch.tensor(ckpt_offsets_host, dtype=torch.int32, device=DEVICE),
+    )
+    assert not torch.isnan(ckpt_state).any() and float(ckpt_state.abs().max().item()) > 0.0
+
+    for idx in range(N):
+        s, e = cu_seqlens[idx] + ckpt_offsets_host[idx], cu_seqlens[idx + 1]
+        resume_o, _ = chunk_kda(
+            q=q[:, s:e].contiguous().clone(),
+            k=k[:, s:e].contiguous().clone(),
+            v=v[:, s:e].contiguous().clone(),
+            g=g[:, s:e].contiguous().clone(),
+            beta=beta[:, s:e].contiguous().clone(),
+            initial_state=ckpt_state[idx : idx + 1].float().contiguous(),
+            output_final_state=True,
+            cu_seqlens=torch.tensor([0, e - s], dtype=torch.int32, device=DEVICE),
+            use_qk_l2norm_in_kernel=True,
+        )
+        assert torch.equal(resume_o, cold_o[:, s:e])

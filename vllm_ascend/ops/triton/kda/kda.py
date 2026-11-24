@@ -32,6 +32,8 @@ from .utils import FLA_CHUNK_SIZE, prepare_chunk_indices
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [4, 8, 16, 32]
 RCP_LN2 = 1.4426950408889634
+_SUPPORTED_KDA_INDEX_DTYPES = (torch.int32, torch.int64)
+_SUPPORTED_KDA_CHECKPOINT_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 
 # The multi-row kernel is used only up to this feature width.
 _NORM_MULTIROW_MAX_FEATURES = 512
@@ -1310,10 +1312,12 @@ def chunk_kda_fwd(
     g: torch.Tensor,
     beta: torch.Tensor,
     scale: float,
-    initial_state: torch.Tensor,
+    initial_state: torch.Tensor | None,
     output_final_state: bool,
     cu_seqlens: torch.Tensor | None = None,
     prebuilt_meta=None,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
 ):
     chunk_size = FLA_CHUNK_SIZE
     chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_chunk64
@@ -1364,6 +1368,8 @@ def chunk_kda_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices_chunk64,
         chunk_offsets=chunk_offsets_chunk64,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
     )
     del w, u, kg
     o = chunk_gla_fwd_o_gk(
@@ -1394,10 +1400,27 @@ def chunk_kda(
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.Tensor | None = None,
     prebuilt_meta=None,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
     **kwargs,
 ):
     if scale is None:
         scale = k.shape[-1] ** -0.5
+    if (checkpoint_state is None) != (checkpoint_offsets is None):
+        raise ValueError("checkpoint_state and checkpoint_offsets must be provided together.")
+    if cu_seqlens is not None:
+        if cu_seqlens.dtype not in _SUPPORTED_KDA_INDEX_DTYPES:
+            raise ValueError(f"cu_seqlens must have int32 or int64 dtype, got {cu_seqlens.dtype}.")
+        cu_seqlens = cu_seqlens.contiguous()
+    if checkpoint_state is not None:
+        assert checkpoint_offsets is not None
+        if checkpoint_state.dtype not in _SUPPORTED_KDA_CHECKPOINT_DTYPES:
+            raise ValueError(
+                f"checkpoint_state must have float16, bfloat16, or float32 dtype, got {checkpoint_state.dtype}."
+            )
+        if checkpoint_offsets.dtype not in _SUPPORTED_KDA_INDEX_DTYPES:
+            raise ValueError(f"checkpoint_offsets must have int32 or int64 dtype, got {checkpoint_offsets.dtype}.")
+        checkpoint_offsets = checkpoint_offsets.contiguous()
 
     if use_qk_l2norm_in_kernel:
         q = l2norm_fwd(q.contiguous(), use_tiled_kernel=True)
@@ -1410,10 +1433,12 @@ def chunk_kda(
         g=g.contiguous(),
         beta=beta.contiguous(),
         scale=scale,
-        initial_state=initial_state.contiguous(),
+        initial_state=None if initial_state is None else initial_state.contiguous(),
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         prebuilt_meta=prebuilt_meta,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
     )
     return o, final_state
 
@@ -1540,25 +1565,47 @@ def chunk_kda_with_fused_gate(
     k: torch.Tensor,
     v: torch.Tensor,
     raw_g: torch.Tensor,
-    beta: torch.Tensor,
-    A_log: torch.Tensor,
-    g_bias: torch.Tensor | None,
+    beta: torch.Tensor | None = None,
+    A_log: torch.Tensor | None = None,
+    g_bias: torch.Tensor | None = None,
     scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.Tensor | None = None,
-    safe_gate: bool = False,
-    lower_bound: float = -5.0,
+    safe_gate: bool | None = None,
+    lower_bound: float | None = None,
+    prebuilt_meta=None,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
+    raw_beta: torch.Tensor | None = None,
     **kwargs,
 ):
     """Prefill KDA from a raw gate projection, matching upstream FLA's API.
 
     Upstream fuses gate + chunk-local cumsum in one Triton kernel. On NPU the
     existing ``chunk_kda`` path already does the cumsum, so only the gate is
-    expanded here (safe sigmoid for GLM-5.3-Flash, softplus otherwise).
+    expanded here (safe sigmoid when requested or bounded, softplus otherwise).
+    Supports both pre-sigmoided ``beta`` and upstream ``raw_beta``.
     """
-    g = apply_kda_gate(raw_g, A_log, g_bias, safe_gate=safe_gate, lower_bound=lower_bound)
+    if beta is None:
+        if raw_beta is None:
+            raise ValueError("Either beta or raw_beta must be provided.")
+        beta = raw_beta.float().sigmoid()
+        if safe_gate is None:
+            safe_gate = lower_bound is not None
+    elif safe_gate is None:
+        safe_gate = False
+    if A_log is None:
+        raise ValueError("A_log must be provided.")
+    effective_lower_bound = DEFAULT_KDA_LOWER_BOUND if lower_bound is None else lower_bound
+    g = apply_kda_gate(
+        raw_g,
+        A_log.reshape(-1),
+        g_bias,
+        safe_gate=safe_gate,
+        lower_bound=effective_lower_bound,
+    )
     return chunk_kda(
         q=q,
         k=k,
@@ -1570,4 +1617,7 @@ def chunk_kda_with_fused_gate(
         output_final_state=output_final_state,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         cu_seqlens=cu_seqlens,
+        prebuilt_meta=prebuilt_meta,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
     )

@@ -114,12 +114,12 @@ configuration rather than the runner input or sampling interface.
 | [glm5_next_cann_keypool.py](glm5_next_cann_keypool.py) | Model/attention primitive or shared utility |
 | [glm5_next_kpool_tail_compress.py](glm5_next_kpool_tail_compress.py) | Model/attention primitive or shared utility |
 | [glm5_next_lightning_indexer.py](glm5_next_lightning_indexer.py) | Model/attention primitive or shared utility |
-| [kda/chunk_delta_h.py](kda/chunk_delta_h.py) | KDA computation |
+| [kda/chunk_delta_h.py](kda/chunk_delta_h.py) | KDA recurrence kernel with optional checkpoint export; [operator documentation](docs/chunk_kda_checkpoint.md) |
 | [kda/conv_state.py](kda/conv_state.py) | KDA computation |
 | [kda/cumsum.py](kda/cumsum.py) | KDA computation |
 | [kda/fused_recurrent_kda.py](kda/fused_recurrent_kda.py) | KDA computation |
 | [kda/gate.py](kda/gate.py) | KDA computation |
-| [kda/kda.py](kda/kda.py) | KDA computation |
+| [kda/kda.py](kda/kda.py) | KDA chunkwise prefill with optional checkpoint export; [operator documentation](docs/chunk_kda_checkpoint.md) |
 | [kda/l2norm.py](kda/l2norm.py) | KDA computation |
 | [kda/output_writeback.py](kda/output_writeback.py) | KDA computation |
 | [kimi_pixel_norm.py](kimi_pixel_norm.py) | Kimi image pixel lookup normalization; see [operator documentation](docs/kimi_pixel_norm.md). |
