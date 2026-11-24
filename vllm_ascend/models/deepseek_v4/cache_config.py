@@ -225,7 +225,9 @@ def get_deepseek_v4_cache_layout(
     Precondition: kv_cache_groups[0] is the full-MLA group; its page sizes
     define the canonical bucket set. Non-full-MLA groups must have been
     page_size-padded upstream (see ``_get_kv_cache_groups_uniform_groups``)
-    so every layer's page_size matches one of the full-MLA bucket sizes.
+    so every active layer's page size matches one of the full-MLA bucket
+    sizes. This also applies after worker projection. A worker may have
+    only MTP layers, in which case it has no ordinary tuple slots.
 
     For each group, bucket its layers by page_size_bytes and place each layer
     at tuple_idx = position-within-bucket.
@@ -246,6 +248,8 @@ def get_deepseek_v4_cache_layout(
         for name in group.layer_names:
             padded = getattr(specs[name], "page_size_padded", None)
             page_size = padded if padded is not None else specs[name].page_size_bytes
+            if page_size not in sorted_page_sizes:
+                raise ValueError(f"DeepSeek V4 layer {name!r} has page size {page_size} outside the full-MLA buckets")
             if "mtp" not in name:
                 b[page_size].append(name)
             else:
@@ -258,7 +262,8 @@ def get_deepseek_v4_cache_layout(
     # per-page-size bucket (= get_max_layers_per_page_size()); for SWA
     # sub-groups this equals the sub-group size (each has a single
     # page_size).
-    num_layer_tuples = max(len(layers) for b in bucketed for layers in b.values()) + len(mtp_layer_names)
+    ordinary_slots = max((len(layers) for b in bucketed for layers in b.values()), default=0)
+    num_layer_tuples = ordinary_slots + len(mtp_layer_names)
 
     return DeepseekV4CacheLayout(
         page_sizes=tuple(sorted_page_sizes),

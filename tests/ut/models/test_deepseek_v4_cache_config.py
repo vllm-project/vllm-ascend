@@ -332,6 +332,70 @@ def test_layout_rejects_mtp_layers_with_different_physical_page_sizes():
         get_deepseek_v4_cache_layout(groups)
 
 
+def test_mtp_only_worker_preserves_canonical_buckets():
+    small = _mla_spec(block_size=16, head_size=4)
+    large = _mla_spec(block_size=16, head_size=8)
+    mtp = "model.layers.0.mtp_block.attn"
+    canonical = _uniform_group({"small": small, "large": large}).kv_cache_spec
+    groups = [KVCacheGroupSpec([], canonical), _uniform_group({mtp: large})]
+
+    assert deepseek_v4_pool_bytes_per_block(groups) == 384
+    blocks, tensors = _get_kv_cache_config_deepseek_v4_main(_vllm_config_no_override(), groups, 1920)
+
+    assert blocks == 5
+    (tensor,) = tensors
+    assert tensor.layers == [mtp]
+    assert (tensor.size, tensor.offset, tensor.layer_stride, tensor.block_stride) == (1920, 640, 0, 256)
+
+
+def test_unequal_rank_budgets_share_admission_and_descriptor_geometry():
+    small = _mla_spec(block_size=16, head_size=4)
+    large = _mla_spec(block_size=16, head_size=8)
+    swa = _swa_spec(block_size=16, head_size=3, sliding_window=16)
+    object.__setattr__(swa, "page_size_padded", 128)
+    mtp = "model.layers.0.mtp_block.attn"
+    groups = [
+        _uniform_group({"small": small, "large": large}),
+        _uniform_group({"large_alias": large}),
+        _uniform_group({"swa": swa, mtp: swa}),
+    ]
+    config = _vllm_config_no_override()
+    config.attention_config = SimpleNamespace(hisparse_config=None)
+    config.cache_config.prefix_cache_retention_interval = None
+    config.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v4"))
+    builder = AscendKVCacheConfigBuilder()
+    divisor = builder._get_pool_bytes_per_block(config, groups)
+    assert divisor == 768
+    budgets = [3840, 6143]
+    rank_configs = [get_ascend_kv_cache_config_from_groups(config, groups, budget) for budget in budgets]
+    assert [rank.num_blocks for rank in rank_configs] == [5, 7]
+    assert get_ascend_kv_cache_config_from_groups(config, groups, budgets[0] - 1).num_blocks == 4
+    for rank in rank_configs:
+        assert {tensor.size for tensor in rank.kv_cache_tensors} == {divisor * rank.num_blocks}
+    minimum = min(rank.num_blocks for rank in rank_configs)
+    for rank in rank_configs:
+        normalized = builder.get_kv_cache_config_from_groups(config, rank.kv_cache_groups, minimum)
+        assert normalized.num_blocks == 5
+        assert {
+            tuple(t.layers): (t.size, t.offset, t.layer_stride, t.block_stride) for t in normalized.kv_cache_tensors
+        } == {
+            ("small",): (3840, 0, 1920, 128),
+            ("large",): (3840, 640, 1920, 256),
+            ("large_alias",): (3840, 640, 1920, 256),
+            ("swa",): (3840, 0, 1920, 128),
+            (mtp,): (3840, 1920, 0, 128),
+        }
+
+
+def test_admission_rejects_mtp_page_outside_canonical_buckets():
+    small = _mla_spec(block_size=16, head_size=4)
+    large = _mla_spec(block_size=16, head_size=8)
+    groups = [_uniform_group({"large": large}), _uniform_group({"model.layers.0.mtp_block.attn": small})]
+
+    with pytest.raises(ValueError, match="outside the full-MLA buckets"):
+        deepseek_v4_pool_bytes_per_block(groups)
+
+
 # --- padded physical pages (full group_and_unify -> uniform_groups pipeline) --
 
 
