@@ -44,13 +44,10 @@
      `[0, W)`.
   4. `_commit_kda_state_kernel` traverses the accepted records backwards,
      accumulates decay/products and correction outer products, and writes the
-     reconstructed recurrent checkpoint. `_commit_kda_state_grouped_kernel`
-     performs the same operation for two adjacent heads per program on its A5
-     fast path. All aligned contexts use two disjoint on-device request filters
+     reconstructed recurrent checkpoint. All aligned contexts use two disjoint on-device request filters
      to separate commits with and without a boundary snapshot. Non-crossing
      requests use two matrix buffers; crossing requests retain the existing
-     six-buffer recovery path. A5 uses grouped heads for FP32 `H32/H64`,
-     `K=V=128`; other layouts use the ordinary kernel with UB-bounded value tiles.
+     six-buffer recovery path. A5 distributes single-head value tiles across vector cores.
 - **Supported modes**: Atlas A3 and Ascend 950DT (A5), inference only, eager and
   NPU graph execution. Atlas A2 and 950PR are not validated by these tests.
   Operator validation is separate from model/worker integration. Serving
@@ -123,9 +120,8 @@ Each context uses two cache tensors plus request-indexed `recoverssm_records`.
 
 Internal kernel arguments consist of the tensors above, INT64 base-address and
 per-layer stride tables, element-stride scalars, `NULL_BLOCK_ID` and shape/tile
-attributes. `K`, `V`, `BK`, `BV`, `NUM_HEADS`, `SPEC_QUERY_LEN`, `UNROLL_COMMIT`, gate/align flags,
-`BLOCK_D`, `BLOCK_HISTORY`, `DIM_STRIDE`, `USE_1D_CHANNEL_GATHER` and grouped-head tile
-`BH` specialize their respective kernels. The plan's `HAS_REQUEST_INDICES` and `ALIGN_MODE` are derived
+attributes. `K`, `V`, `BK`, `BV`, `NUM_HEADS`, `SPEC_QUERY_LEN`, gate/align flags,
+`BLOCK_D`, `BLOCK_HISTORY`, `DIM_STRIDE`, `USE_1D_CHANNEL_GATHER` specialize their respective kernels. The plan's `HAS_REQUEST_INDICES` and `ALIGN_MODE` are derived
 from optional pointer presence by `triton.heuristics`. Address tables and context
 buffers are implementation-owned, not user outputs to replace between replays.
 The existing plan kernel also produces two predicated accepted-length arrays:
@@ -160,7 +156,14 @@ for single-layer calls; it does not introduce a layer-count constexpr.
   persistent state/history. Rejected suffix records are not read by commit.
 - The caller prepares convolution state before commit. Commit writes only the
   accepted checkpoint destinations and the first `W` convolution positions;
-  verification writes only `out` and the valid correction/key/gate record spans.
+  verification writes `out` and the valid correction/key/gate record spans.
+  On A5 the Kimi and GLM5Next integration also supplies two contiguous FP32
+  buffers of shape `[capacity, H, Q, K]` per layer. Verify stores the decay
+  and normalized key once per valid record, and commit reuses both. Together
+  the buffers require `8 * capacity * H * Q * K` bytes per layer. Callers
+  that omit these optional buffers can still commit from the raw records.
+  When the A5 model commit context has a complete decay address table, verify leaves the raw gate half of the
+  key/gate record untouched. Its allocation and strides are preserved. The standalone verify default writes both halves.
   Input/output buffers must not alias these write regions unexpectedly.
 - `block_table`, `num_computed_tokens` and `mamba_block_size` must either all be
   absent or all be supplied. Low-level align can additionally write a boundary
@@ -174,19 +177,17 @@ for single-layer calls; it does not introduce a layer-count constexpr.
   retain their storage dtype. This does not change caller tensor dtype/layout.
   Finite, non-overflowing inputs/intermediates are the validated numerical domain.
 - A3 verification/commit use value tiles no larger than 64. A5 can select 128
-  where its occupancy/layout rules permit. Grouped commit requires A5, FP32 state,
-  `K = V = 128` and `H` in `{32, 64}`; an align table is supported through the
-  disjoint request filters.
-  The window is supplied by
-  the caller rather than restricted to six tokens. Other supported cases use
-  ordinary commit. A3 strided convolution compaction uses 256-channel
+  where its occupancy/layout rules permit. The caller supplies the window. A3 strided convolution compaction uses 256-channel
   tiles; A5 and contiguous-channel compaction retain 4096-channel tiles.
-  Ordinary and aligned grouped commit cap their value tiles using the existing
+  State and boundary commit cap their value tiles using the existing
   `triton_utils.get_ub_size_bytes()` result, the key tile and align buffers.
   A3 iterates accepted records at runtime to avoid compiler-expanded matrix
-  lifetimes; A5 retains static unrolling for both ordinary and grouped commit.
+  lifetimes. Ordinary A5 non-boundary launches use one program per reported
+  vector core and one buffer stage. Tiles are ordered by request, layer, head and value tile. Each program
+  starts at its own index and advances by the number of programs. The kernel unrolls the configured
+  window and applies the update only to steps in each request's accepted prefix.
   The estimate covers two matrix buffers without boundary reconstruction and
-  six per head for the ordinary or grouped boundary recovery path.
+  six per head for the boundary recovery path.
   Non-crossing aligned requests do not reserve boundary matrices.
   Two rows' worth of vector temporaries
   are reserved before rounding down to a power of two. Context creation initializes
@@ -252,7 +253,7 @@ multi-step recovery, sampler-row mappings, page/head padding, metadata strides,
 null/empty rows, rejected-all and rejected-suffix records, ragged tiles,
 sigmoid/softplus gates, both convolution layouts and exact untouched regions.
 The same test file also covers full align commit across/exactly at/before a page
-boundary, mixed per-layer convolution layouts, and ordinary/grouped commit with
+boundary, mixed per-layer convolution layouts, and state commit with
 the model's B11/B12 and L11/L12 pool strides. The L34 cases are capacity stress
 tests: actual GLM contexts split the 34 KDA layers into groups of 11/11/12.
 Pool-stride cases retain the recorded strides with B+2 pages and independent
@@ -267,16 +268,15 @@ rejected suffixes filled with NaNs, null pages, and eager/graph execution.
 `test_multilayer_paged_commit_maps_sampler_rows_and_compacts_conv` additionally
 checks sampler-row mapping and convolution compaction across layers.
 
-Window regressions explicitly check the selected ordinary/grouped path for
+Window regressions explicitly check the selected commit path for
 Q1/Q2/Q4/Q6/Q8, both local head counts and eager/graph execution, with additional
-FP16 and unbounded-gate cases. This prevents a fixed-window fallback from masking
-missing grouped-kernel coverage.
+FP16 and unbounded-gate cases.
 
 Aligned-routing tests cover H8/H16/H32/H64, FP32/BF16 states, K=V=128 and
 masked/non-square K/V dimensions, mixed boundary membership, strided metadata,
 in-place/out-of-place destinations and eager/NPU graph execution.
 They check that the disjoint accepted-length arrays sum to the full commit lengths
-and that ordinary/grouped dispatch preserves boundary snapshots and untouched pages.
+and that state commit preserves boundary snapshots and untouched pages.
 
 ```bash
 pytest -sv -o junit_family=xunit1 \
@@ -338,6 +338,27 @@ result for the tested configuration, not a guarantee for arbitrary shapes or
 low-level align serving. Explicit specialization attributes are listed above;
 runtime strides may still trigger Triton type/alignment specialization.
 
+### A5 verify and state commit latency
+
+Measured on one Ascend950DT with main at `7844c21` and the raw-gate store change at `c08a320`. BF16 activations and FP32 state. Each value is the median of 12 paired samples with 16 graph replays per sample. Each graph includes one verify per layer and the first state commit. State reset, plan and convolution are outside the timed interval. Full means every request accepts Q tokens. The mixed ramp cycles through lengths 0 to Q; the alternating and clustered cases contain equal numbers of zero- and full-acceptance requests.
+
+| B / L / H / K / V / Q | Acceptance per request | main (µs) | This PR (µs) |
+|---|---|---:|---:|
+| 30 / 23 / 12 / 128 / 128 / 4 | full | 1395.09 | 1318.14 |
+| 30 / 23 / 12 / 128 / 128 / 4 | mixed ramp | 1299.83 | 1250.26 |
+| 30 / 23 / 12 / 128 / 128 / 4 | 0/full alternating | 1263.42 | 1215.07 |
+| 30 / 23 / 12 / 128 / 128 / 4 | 0/full clustered | 1394.67 | 1316.90 |
+| 12 / 11 / 32 / 128 / 128 / 6 | full | 901.24 | 867.65 |
+| 12 / 11 / 32 / 128 / 128 / 6 | mixed ramp | 834.46 | 818.86 |
+| 12 / 11 / 32 / 128 / 128 / 6 | 0/full alternating | 827.20 | 807.53 |
+| 12 / 11 / 32 / 128 / 128 / 6 | 0/full clustered | 901.42 | 867.74 |
+| 12 / 11 / 64 / 128 / 128 / 6 | full | 1741.84 | 1678.88 |
+| 12 / 11 / 64 / 128 / 128 / 6 | mixed ramp | 1612.64 | 1585.68 |
+| 12 / 11 / 64 / 128 / 128 / 6 | 0/full alternating | 1587.73 | 1547.29 |
+| 12 / 11 / 64 / 128 / 128 / 6 | 0/full clustered | 1741.89 | 1677.84 |
+
+Across all 12 cases, verify outputs matched main elementwise. Raw keys matched their inputs and all tested raw-gate slots retained the NaN sentinel on the optimized path. Direct and context commit state checks and adjacent page guards passed. Maximum absolute checkpoint difference from main was 1.49e-08. The sampled FP64 recurrence had maximum absolute error 1.77e-08.
+
 ### Extracted-source validation
 
 This split preserves the latest operator and tests from PR #19133 at
@@ -355,19 +376,16 @@ evidence; the operator-only split does not enable or revalidate serving.
 
 ### Configured-window regression
 
-Both commit kernels require the caller's `SPEC_QUERY_LEN`; neither supplies a
-six-token default. Grouped dispatch and compilation have no six-token-only
-condition. The configured positive window bounds A3 runtime iteration
-and controls A5 `tl.static_range`.
+The caller supplies the window. A3 iterates over the accepted prefix at runtime.
+A5 ordinary commit unrolls the window and guards each step by the accepted length.
 The 30 path cases check Q1/Q2/Q4/Q6/Q8, H16/H32/H64, eager/graph execution,
 FP16/BF16 activations, bounded/unbounded gates, null/zero-acceptance rows,
 accepted-prefix recovery, and the actual selected kernel.
 
-For the original Q6 configuration, six A5 B11/B12 and accepted-length 1/3/6
+Historically, for the original Q6 configuration, six A5 B11/B12 and accepted-length 1/3/6
 cases were measured against `b7ec33b35` using the same alternating graph
 microbenchmark. Committed checkpoints were identical; grouped commit latency
-changes ranged from -0.52% to +0.21%. The arithmetic bodies and Q6
-dispatch are unchanged; the source comparison is recorded with the tests.
+changes ranged from -0.52% to +0.21%. The tests record that historical comparison.
 
 ### UB compatibility regression
 

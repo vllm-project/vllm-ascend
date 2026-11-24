@@ -42,7 +42,7 @@ from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
 from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
 from vllm_ascend.ops.recurrent_pcp import prepare_recurrent_pcp_config
-from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
+from vllm_ascend.ops.triton.kda.recoverssm import allocate_kda_verify_caches, kda_recoverssm_verify
 
 if TYPE_CHECKING:
     from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords
@@ -501,6 +501,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 self.A_log.device,
             )
 
+            self.recoverssm_decay_cache, self.recoverssm_normalized_key_cache = allocate_kda_verify_caches(
+                self.recoverssm_records.key_gate
+            )
+
         self.g_b_proj = column_linear(
             self.head_dim,
             projection_size,
@@ -835,6 +839,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 assert records is not None
                 # One paged checkpoint per request; verification only records
                 # compact updates. MRV2 commits after rejection sampling.
+                commit_context = getattr(attn_metadata_narrowed, "recoverssm_context", None)
                 spec_output = kda_recoverssm_verify(
                     rearrange(q_spec),
                     rearrange(k_spec),
@@ -850,6 +855,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     spec_query_start_loc,
                     spec_state_indices_tensor[:, 0],
                     self.num_spec + 1,
+                    decay_cache=self.recoverssm_decay_cache,
+                    normalized_key_cache=self.recoverssm_normalized_key_cache,
+                    store_raw_gate=getattr(commit_context, "decay_base_addrs", None) is None,
                 )
             else:
                 spec_output = recurrent_kda(
