@@ -51,10 +51,10 @@
      - the minimum workers needed to keep Sample work within 16 elements per worker.
   3. Launch a 2-D grid `(num_reqs, workers_per_req)`.
   4. Split each request's Context range across request-local workers with quotient/remainder balancing. Each worker processes one contiguous range and writes `context_positions` and `context_slot_mapping`.
-  5. Independently split `num_query_per_req` across the same workers. Worker 0 owns query offset 0 and loads the bonus token; all other query rows use `parallel_drafting_token_id`.
+  5. Independently split `num_query_per_req` across the same workers. Worker 0 owns query offset 0 and loads the bonus token; all other query rows use `parallel_drafting_token_id`. These real query rows also write `is_padding=False` in the same kernel.
   6. Independently split `num_speculative_steps` across the same workers and write `sample_indices`, `sample_pos`, and `sample_idx_mapping`.
   7. Worker 0 writes the per-request scalar outputs `query_start_loc`, `seq_lens`, `temperature`, and `seeds`.
-  8. Flatten the complete launch grid and quotient/remainder-balance graph-safety padding for `query_start_loc`, `seq_lens`, sample buffers, and `query_slot_mapping`.
+  8. Flatten the complete launch grid and quotient/remainder-balance graph-safety padding for `query_start_loc`, `seq_lens`, sample buffers, and `query_slot_mapping`. The query-tail partition also writes `is_padding=True`, replacing two eager fill launches before the draft graph.
 - **Supported modes**: Atlas A2, Atlas A3, and Ascend 950. This change was
   validated on Atlas A3.
 
@@ -62,7 +62,7 @@
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
-| `input_buffers` | Output | Preallocated DFlash query buffers containing `input_ids`, `positions`, `query_start_loc`, and `seq_lens`, written in place | `InputBuffers` | N/A |
+| `input_buffers` | Output | Preallocated DFlash query buffers containing `input_ids`, `positions`, `query_start_loc`, `seq_lens`, and boolean `is_padding`, written in place | `InputBuffers` | N/A |
 | `query_slot_mapping` | Output | Physical KV slot for each DFlash query token; graph padding uses `PAD_SLOT_ID` | int32 | dense tensor |
 | `context_positions` | Output | Absolute target positions used for DFlash context KV precompute | int64 | dense tensor |
 | `context_slot_mapping` | Output | Physical KV slot for each target context token | int32 | dense tensor |
@@ -110,6 +110,7 @@
 - `query_slot_mapping` and `context_slot_mapping` are int32. Query/context positions and `sample_indices`/`sample_pos` are int64. `sample_idx_mapping` is int32.
 - The legacy DFlash path uses `sample_from_anchor=False` and `num_query_per_req == num_speculative_steps + 1`.
 - `num_reqs * num_query_per_req <= max_num_tokens`.
+- Every call refreshes the complete `is_padding[:max_num_tokens]`: the active query prefix is false and the remaining tail is true, including after a smaller batch follows a larger one. MoE layers consume this mask during graph replay.
 - The launcher uses fixed vector widths of 256 for Context and 16 for Query/Sample. `workers_per_req` is increased when necessary so every request-local range fits these widths.
 - After `workers_per_req` is selected, `BLOCK_SIZE = min(256, next_power_of_2(max(2, ceil(max_target_query_len / workers_per_req))))`.
 - The operator writes graph-safety padding for fixed-capacity request, sample, and query-slot buffers and is compatible with graph replay/capture paths that consume those buffers.

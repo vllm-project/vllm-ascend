@@ -137,6 +137,7 @@ from vllm_ascend.worker.v2.dspark_decode_inputs import (
     DSparkDecodeIndexCache,
     DSparkTargetAttention,
     supports_dspark_decode_reuse,
+    update_dspark_cpu_seq_lens,
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -1606,9 +1607,26 @@ class NPUModelRunner(GPUModelRunner):
 
         # Wait for and consume the snapshot only when its producer runs.
         # req_states.num_computed_tokens_cpu also backs the NumPy view used by PCP.
-        if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and not self._can_skip_spec_cpu_length_sync():
+        sync_counts = (
+            self.speculator is not None or self.sync_spec_pp_cpu_counts
+        ) and not self._can_skip_spec_cpu_length_sync()
+        if sync_counts:
             # Blocks CPU submission until D2H completes; may stall the async pipeline.
             self.num_computed_tokens_event.synchronize()
+
+        if self._dspark_decode_indices is not None:
+            update_dspark_cpu_seq_lens(
+                req_ids,
+                self.req_states.req_id_to_index,
+                num_scheduled_tokens,
+                self.req_states.num_computed_tokens_cpu.numpy(),
+                self.input_buffers.seq_lens_cpu.numpy(),
+                scheduler_output.scheduled_cached_reqs.req_ids if sync_counts else (),
+                self.num_computed_tokens_cpu.numpy() if sync_counts else None,
+            )
+            return
+
+        if sync_counts:
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
                 self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]

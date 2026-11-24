@@ -87,6 +87,7 @@ def _prepare_dflash_inputs_kernel(
     # Outputs
     out_input_ids_ptr,
     out_query_positions_ptr,
+    out_is_padding_ptr,
     out_query_start_loc_ptr,
     out_seq_lens_ptr,
     out_query_slot_mapping_ptr,
@@ -220,6 +221,7 @@ def _prepare_dflash_inputs_kernel(
 
     tl.store(out_input_ids_ptr + query_idx, input_id, mask=query_mask)
     tl.store(out_query_positions_ptr + query_idx, tl.minimum(query_pos, max_model_len - 1), mask=query_mask)
+    tl.store(out_is_padding_ptr + query_idx, False, mask=query_mask)
     tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=query_mask)
 
     # Sample
@@ -295,6 +297,7 @@ def _prepare_dflash_inputs_kernel(
     for i in range(qp_begin, qp_end, QUERY_PADDING_BLOCK_SIZE):
         qp_off = i + tl.arange(0, QUERY_PADDING_BLOCK_SIZE)
         tl.store(out_query_slot_mapping_ptr + qp_off, PAD_SLOT_ID, mask=qp_off < qp_end)
+        tl.store(out_is_padding_ptr + qp_off, True, mask=qp_off < qp_end)
 
 
 def prepare_dflash_inputs_triton(
@@ -375,6 +378,7 @@ def prepare_dflash_inputs_triton(
     _prepare_dflash_inputs_kernel[(num_reqs, workers_per_req)](
         input_buffers.input_ids,
         input_buffers.positions,
+        input_buffers.is_padding,
         input_buffers.query_start_loc,
         input_buffers.seq_lens,
         query_slot_mapping,
@@ -416,9 +420,3 @@ def prepare_dflash_inputs_triton(
         SAMPLE_PADDING_BLOCK_SIZE=_SAMPLE_PADDING_BLOCK_SIZE,
         QUERY_PADDING_BLOCK_SIZE=_QUERY_PADDING_BLOCK_SIZE,
     )
-    # Upstream's prepare kernel also writes is_padding: the query rows above are
-    # real and the rest up to max_num_tokens is padding. MoE layers in the draft
-    # read it to skip padding rows, and graph capture leaves it all True.
-    num_query_tokens = num_reqs * num_query_per_req
-    input_buffers.is_padding[:num_query_tokens].fill_(False)
-    input_buffers.is_padding[num_query_tokens:max_num_tokens].fill_(True)

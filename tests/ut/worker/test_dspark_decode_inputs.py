@@ -12,6 +12,7 @@ from vllm_ascend.worker.v2.dspark_decode_inputs import (
     DSparkDecodeIndexCache,
     DSparkTargetAttention,
     supports_dspark_decode_reuse,
+    update_dspark_cpu_seq_lens,
 )
 
 
@@ -48,6 +49,38 @@ def test_reuse_requires_speculation_and_resident_kv():
     assert not supports_dspark_decode_reuse(config, sparse_offload_enabled=True)
     config.speculative_config = None
     assert not supports_dspark_decode_reuse(config, sparse_offload_enabled=False)
+    assert not supports_dspark_decode_reuse(SimpleNamespace(speculative_config=None), sparse_offload_enabled=False)
+
+
+@pytest.mark.parametrize("size", [0, 1, 4, 16])
+@pytest.mark.parametrize("refresh", [False, True])
+def test_cpu_lengths_preserve_request_order_snapshot_and_unused_rows(size, refresh):
+    rng = np.random.default_rng(1024)
+    mapping = {str(i): i for i in range(32)}
+    ids = [str(i) for i in rng.choice(32, size, replace=False)]
+    cached = ["31", "0", "7", "11"]
+    scheduled = {req: int(rng.integers(1, 2049)) for req in ids}
+    computed = torch.arange(32, dtype=torch.int32) + 131000
+    snapshot = torch.arange(32, dtype=torch.int32) + 132000
+    output = torch.full((32,), -19, dtype=torch.int32)
+    expected_counts = computed.clone()
+    expected_output = output.clone()
+    if refresh:
+        for req in cached:
+            expected_counts[mapping[req]] = snapshot[mapping[req]]
+    for i, req in enumerate(ids):
+        expected_output[i] = expected_counts[mapping[req]] + scheduled[req]
+    update_dspark_cpu_seq_lens(
+        ids,
+        mapping,
+        scheduled,
+        computed.numpy(),
+        output.numpy(),
+        cached if refresh else (),
+        snapshot.numpy() if refresh else None,
+    )
+    torch.testing.assert_close(computed, expected_counts)
+    torch.testing.assert_close(output, expected_output)
 
 
 def test_target_groups_preserve_kv_indices_and_capture_ownership():

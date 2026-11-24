@@ -2,11 +2,22 @@ pr: 23100
 entries:
   - category: performance
     text: >-
-      Reduced repeated CPU preparation and unchanged index transfers during
-      uniform MiniMax-M3 DSpark decode with FULL graphs, resident KV caches,
+      Reduced repeated CPU preparation, host length updates, and unchanged
+      index transfers during uniform MiniMax-M3 DSpark decode with FULL graphs,
+      resident KV caches,
       PP/PCP/DCP equal to one, and adaptive verification disabled.
       No new configuration is required.
     model: minimax-m3
+  - category: bugfix
+    text: >-
+      Fixed MiniMax-M3 DSpark startup with Transformers versions that normalize
+      checkpoint activation settings.
+    model: minimax-m3
+  - category: performance
+    text: >-
+      Reduced input-preparation overhead during DFlash and DSpark speculative
+      decoding by preparing padding masks together with draft inputs.
+      No new configuration is required.
   - category: performance
     text: >-
       Reduced repeated CPU preparation before GQA DSpark FULL graph replay

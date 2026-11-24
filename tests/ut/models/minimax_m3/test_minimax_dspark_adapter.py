@@ -20,6 +20,46 @@ def test_hf_parser_sentinel_does_not_require_checkpoint_metadata(adapter_modules
     assert adapter_modules.weights.draft_hf_override(sentinel) is sentinel
 
 
+@pytest.mark.parametrize(
+    "activation,layer_types,gemma,accepted",
+    [
+        ("swigluoai", None, True, True),
+        ("silu", ["dense"] * 5, True, True),
+        ("silu", None, True, False),
+        ("gelu", ["dense"] * 5, True, False),
+        ("swigluoai", None, False, False),
+    ],
+)
+def test_draft_accepts_transformers_normalized_oai_gate(
+    adapter_modules, monkeypatch, activation, layer_types, gemma, accepted
+):
+    module = adapter_modules.model
+    parent = Mock(side_effect=lambda model, **kwargs: torch.nn.Module.__init__(model))
+    monkeypatch.setattr(module, "DFlashQwen3ForCausalLM", SimpleNamespace(__init__=parent))
+    config = SimpleNamespace(
+        hidden_act=activation,
+        mlp_layer_types=layer_types,
+        use_gemma_norm=gemma,
+        dspark_hybrid_context_fusion=False,
+        vocab_size=6,
+        enable_confidence_head=True,
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace(hf_config=config)),
+        model_config=SimpleNamespace(get_vocab_size=lambda: 6),
+    )
+    model = module.MiniMaxFlashDSparkForCausalLM.__new__(module.MiniMaxFlashDSparkForCausalLM)
+    if accepted:
+        model.__init__(vllm_config=vllm_config)
+        parent.assert_called_once_with(model, vllm_config=vllm_config, prefix="")
+        assert model.target_vocab_size == 6
+        assert model.has_own_embed_tokens is False
+    else:
+        with pytest.raises(ValueError, match="Unexpected MiniMax draft decoder semantics"):
+            model.__init__(vllm_config=vllm_config)
+        parent.assert_not_called()
+
+
 class _StubMiniMaxTextConfig:
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)

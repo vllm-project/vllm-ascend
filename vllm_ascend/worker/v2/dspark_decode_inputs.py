@@ -3,7 +3,7 @@
 
 """Read-only target inputs for uniform MiniMax DSpark decode batches."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -16,10 +16,11 @@ if TYPE_CHECKING:
 
 def supports_dspark_decode_reuse(config: "VllmConfig", *, sparse_offload_enabled: bool) -> bool:
     spec = config.speculative_config
+    if spec is None:
+        return False
     parallel = config.parallel_config
     return (
-        spec is not None
-        and spec.method == "dspark"
+        spec.method == "dspark"
         and config.model_config.architecture == "MiniMaxM3SparseForCausalLM"
         and parallel.pipeline_parallel_size == 1
         and parallel.decode_context_parallel_size == 1
@@ -83,3 +84,27 @@ class DSparkDecodeIndexCache:
         result = expander(idx_mapping, total_num_logits, cu_num_logits, decode_query_len)
         self._expanded = (key, result)
         return result
+
+
+def update_dspark_cpu_seq_lens(
+    req_ids: Sequence[str],
+    req_id_to_index: Mapping[str, int],
+    num_scheduled_tokens: Mapping[str, int],
+    num_computed_tokens: np.ndarray,
+    seq_lens: np.ndarray,
+    refreshed_req_ids: Sequence[str] = (),
+    completed_snapshot: np.ndarray | None = None,
+) -> None:
+    """Update CPU mirrors after the caller has waited for the D2H snapshot.
+
+    NumPy views share the existing CPU tensor storage. Keep the producer's
+    fence in the runner; this only replaces per-request CPU tensor dispatch.
+    """
+    if completed_snapshot is not None:
+        refreshed = np.fromiter(map(req_id_to_index.__getitem__, refreshed_req_ids), dtype=np.intp)
+        num_computed_tokens[refreshed] = completed_snapshot[refreshed]
+    indices = np.fromiter(map(req_id_to_index.__getitem__, req_ids), dtype=np.intp, count=len(req_ids))
+    scheduled = np.fromiter(
+        map(num_scheduled_tokens.__getitem__, req_ids), dtype=num_computed_tokens.dtype, count=len(req_ids)
+    )
+    np.add(num_computed_tokens[indices], scheduled, out=seq_lens[: len(req_ids)])

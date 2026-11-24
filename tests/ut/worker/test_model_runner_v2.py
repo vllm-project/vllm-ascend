@@ -1571,6 +1571,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         compilation_config=runner.compilation_config,
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         kv_transfer_config=None,
+        speculative_config=None,
     )
     runner.max_num_reqs = runner.vllm_config.scheduler_config.max_num_seqs
     runner.pcp_manager = MagicMock(spec=AscendPCPManager)
@@ -1636,6 +1637,41 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     assert runner.model_state.pcp_manager is runner.pcp_manager
 
 
+@pytest.mark.parametrize("reuse", [False, True])
+@pytest.mark.parametrize("sync", [False, True])
+def test_dspark_cpu_lengths_preserve_completed_snapshot_fence(reuse, sync):
+    runner = _make_runner()
+    runner._dspark_decode_indices = object() if reuse else None
+    runner.speculator = object()
+    runner.sync_spec_pp_cpu_counts = False
+    runner._can_skip_spec_cpu_length_sync = lambda: not sync
+    runner.req_states = SimpleNamespace(
+        req_id_to_index={"a": 0, "b": 1, "c": 2, "d": 3},
+        num_computed_tokens_cpu=torch.tensor([100, 200, 300, 400], dtype=torch.int32),
+    )
+    runner.input_buffers = SimpleNamespace(seq_lens_cpu=torch.full((4,), -1, dtype=torch.int32))
+    runner.num_computed_tokens_cpu = torch.full((4,), -99, dtype=torch.int32)
+
+    def complete_copy():
+        runner.num_computed_tokens_cpu.copy_(torch.tensor([101, 201, 301, 401], dtype=torch.int32))
+
+    runner.num_computed_tokens_event = SimpleNamespace(synchronize=Mock(side_effect=complete_copy))
+    scheduler = SimpleNamespace(
+        num_scheduled_tokens={"d": 8, "b": 5, "a": 1},
+        scheduled_cached_reqs=SimpleNamespace(req_ids=["a", "d"]),
+    )
+    runner._update_seq_lens_cpu(scheduler, ["d", "b", "a"])
+    runner.num_computed_tokens_event.synchronize.assert_called_once() if sync else (
+        runner.num_computed_tokens_event.synchronize.assert_not_called()
+    )
+    expected = [409, 205, 102, -1] if sync else [408, 205, 101, -1]
+    torch.testing.assert_close(runner.input_buffers.seq_lens_cpu, torch.tensor(expected, dtype=torch.int32))
+    expected_counts = [101, 200, 300, 401] if sync else [100, 200, 300, 400]
+    torch.testing.assert_close(
+        runner.req_states.num_computed_tokens_cpu, torch.tensor(expected_counts, dtype=torch.int32)
+    )
+
+
 def test_initialize_kv_cache_forwards_allocation_context():
     """Forward allocation context before preparing KDA state-copy plans."""
     runner = _make_runner()
@@ -1645,6 +1681,7 @@ def test_initialize_kv_cache_forwards_allocation_context():
         compilation_config=runner.compilation_config,
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         kv_transfer_config=None,
+        speculative_config=None,
     )
     runner.max_num_reqs = runner.vllm_config.scheduler_config.max_num_seqs
     runner.pcp_manager = None
