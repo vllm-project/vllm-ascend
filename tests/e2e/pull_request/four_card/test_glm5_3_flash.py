@@ -107,7 +107,7 @@ class FlashDummyLoader(DummyModelLoader):
 
 
 class FlashWorker:
-    """Read-only model-path checks; no hooks into logits or graph replay."""
+    """Model-path checks and temporary prefix-state diagnostics."""
 
     model_runner: Any  # Supplied by the worker extension host at runtime.
 
@@ -129,6 +129,55 @@ class FlashWorker:
         assert len(draft_layers) == NUM_MTP_LAYERS
         assert all(layer.is_sequence_parallel and not layer.self_attn.o_proj.reduce_results for layer in draft_layers)
         return True
+
+    def trace_prefix_state(self, boundary: int):
+        if torch.distributed.get_rank() != 0:
+            return
+        runner = self.model_runner
+        state = runner.model_state
+        prepare = state.preprocess_state
+        postprocess = runner.postprocess_sampled
+        group_id = state._mamba_ctx.mamba_group_ids[0]
+        layer_name = runner.kv_cache_config.kv_cache_groups[group_id].layer_names[0]
+        layer = runner.compilation_config.static_forward_context[layer_name]
+        position = -1
+
+        def trace_prepare(input_batch, block_tables, kv_cache_config, num_computed_tokens):
+            nonlocal position
+            prepare(input_batch, block_tables, kv_cache_config, num_computed_tokens)
+            slot = int(input_batch.idx_mapping_np[0])
+            position = int(num_computed_tokens[slot].item())
+            if not boundary <= position < boundary + 25:
+                return
+            dst = int(state._mamba_state_idx_gpu[slot].item())
+            src = int(state._mamba_src_col_gpu[0].item())
+            offset = int(state._mamba_src_off_gpu[0].item())
+            blocks = block_tables[group_id][0, : dst + NUM_SPECULATIVE_TOKENS + 1].tolist()
+            digests = [
+                hashlib.sha256(cache[blocks[dst]].cpu().contiguous().view(torch.uint8).numpy().tobytes()).hexdigest()[
+                    :16
+                ]
+                for cache in layer.kv_cache
+            ]
+            print(
+                f"GLM state: pos={position}, scheduled={input_batch.num_tokens}, "
+                f"drafts={input_batch.num_draft_tokens}, src={src}, dst={dst}, "
+                f"conv_offset={offset}, blocks={blocks}, digests={digests}",
+                flush=True,
+            )
+
+        def trace_postprocess(idx_mapping, sampled_tokens, num_sampled, num_rejected, *args, **kwargs):
+            if boundary <= position < boundary + 25:
+                count = int(num_sampled[0].item())
+                print(
+                    f"GLM sampling: pos={position}, rejected={num_rejected[0].item()}, "
+                    f"tokens={sampled_tokens[0, :count].tolist()}",
+                    flush=True,
+                )
+            postprocess(idx_mapping, sampled_tokens, num_sampled, num_rejected, *args, **kwargs)
+
+        state.preprocess_state = trace_prepare
+        runner.postprocess_sampled = trace_postprocess
 
 
 @pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
@@ -208,5 +257,16 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, pre
             prompt = [{"prompt_token_ids": [10 + i % 1000 for i in range(prefix_length)]}]
             cold = runner.model.generate(prompt, params, use_tqdm=False)[0]
             warm = runner.model.generate(prompt, params, use_tqdm=False)[0]
+            if enforce_eager and not use_replayssm and warm.outputs[0].token_ids != cold.outputs[0].token_ids:
+                runner.model.collective_rpc("trace_prefix_state", args=(2 * block_size,))
+                for mode in ("cold", "warm", "cold_after_reset"):
+                    if mode != "warm" and not runner.model.reset_prefix_cache():
+                        break
+                    print(f"GLM probe: {mode}", flush=True)
+                    output = runner.model.generate(prompt, params, use_tqdm=False)[0]
+                    print(
+                        f"GLM probe result: {mode}, hit={output.num_cached_tokens}, ids={output.outputs[0].token_ids}",
+                        flush=True,
+                    )
             assert warm.num_cached_tokens >= block_size
             assert warm.outputs[0].token_ids == cold.outputs[0].token_ids
