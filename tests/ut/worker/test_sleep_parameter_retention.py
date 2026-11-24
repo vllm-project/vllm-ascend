@@ -24,6 +24,7 @@ def worker(monkeypatch):
     )
     from vllm_ascend.device_allocator.sleep_mode_backend import CaMemBackend
 
+    worker._extra_cleanup_pending = False
     worker._sleep_mode_backend = MagicMock(spec=CaMemBackend)
     worker.sleep_wakeup_manager = MagicMock()
     monkeypatch.setattr(worker, "synchronize_device", MagicMock())

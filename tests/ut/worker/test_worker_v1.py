@@ -82,6 +82,7 @@ def _attach_sleep_backend(worker) -> None:
         worker.vllm_config.model_config = worker.model_config
     if not hasattr(worker, "sleep_wakeup_manager"):
         worker.sleep_wakeup_manager = MagicMock()
+    worker._extra_cleanup_pending = False
     worker._sleep_mode_backend = None
 
 
@@ -509,6 +510,7 @@ class TestNPUWorker(TestBase):
         worker.sleep()
 
         worker.sleep_wakeup_manager.sleep.assert_called_once_with()
+        self.assertTrue(worker._extra_cleanup_pending)
         mock_allocator_class.get_instance.return_value.sleep.assert_called_once_with(
             ("weights", "runtime", "cudagraph"), set()
         )
@@ -590,6 +592,8 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = mock_vllm_config
             worker.sleep_wakeup_manager = MagicMock()
             _attach_sleep_backend(worker)
+            # As left by a sleep that ran the RL extra cleanup.
+            worker._extra_cleanup_pending = True
             # Test wake_up method
             worker.wake_up(tags=["test_tag"])
 
