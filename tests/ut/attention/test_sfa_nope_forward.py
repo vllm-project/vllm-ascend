@@ -298,6 +298,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
             pcp_shard_decode_requests=False,
         ),
         kv_transfer_config=None,
+        lora_config=None,
         weight_transfer_config=None,
         model_config=SimpleNamespace(
             dtype=hidden_states.dtype,
