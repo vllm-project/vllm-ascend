@@ -77,8 +77,6 @@ Everything else stays as the tutorial you are adapting writes it: the weight and
         -it $IMAGE bash
     ```
 
-    A PD deployment also mounts `/etc/hccl_rootinfo.json`, `/etc/hixlep/`, and `/lib/route.conf`; keep those mounts from the tutorial page.
-
 === "Atlas 300I Duo"
 
     ```bash
@@ -136,6 +134,6 @@ Everything else stays as the tutorial you are adapting writes it: the weight and
         -it "$IMAGE" bash
     ```
 
-    On an openEuler host, mount `/usr/lib64/libsemanage.so.2` and use the file that libyaml builds as the source of the `libyaml-0.so.2` mount instead.
+    On an openEuler host, use the `-310p-openeuler` image, mount `-v /usr/lib64/libsemanage.so.2:/usr/lib64/libsemanage.so.2`, and replace the `libyaml` source with `-v /usr/lib64/libyaml-0.so.2.0.9:/usr/lib64/libyaml-0.so.2`.
 
 Every `--device` line needs its node to exist on the host: `docker run` fails with `no such file or directory` when a device is missing, so drop that line rather than keeping a node the machine does not have. The same applies to the driver and host-file mounts listed above.
