@@ -28,7 +28,11 @@ def test_global_draft_batch_negotiates_its_own_capacity(monkeypatch, pcp_enabled
     spec.draft_logits = None
     monkeypatch.setattr(pcp_module, "get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor))
     num_reqs = 32 if pcp_enabled else 4
-    batch = SimpleNamespace(num_reqs=num_reqs, idx_mapping=torch.arange(num_reqs))
+    batch = SimpleNamespace(
+        num_reqs=num_reqs,
+        idx_mapping=torch.arange(num_reqs),
+        seq_lens_cpu_upper_bound=torch.ones(num_reqs, dtype=torch.int32),
+    )
     kwargs = {} if vllm_version_is("0.33.0") else {"max_query_len": None}
     sync = DPSyncState(
         num_tokens_across_dp=torch.tensor([8, 8]), uniform_token_count=2, eager=False, num_reqs=4, **kwargs
@@ -203,7 +207,9 @@ def test_completed_drafts_sync_once_across_runner_versions(monkeypatch, pcp_enab
     logits_buffer = torch.arange(24, dtype=torch.float32).reshape(6, 2, 2) if logits_kind != "none" else None
     spec.draft_logits = SimpleNamespace(values=logits_buffer) if logits_kind == "cache" else logits_buffer
     initial_logits = logits_buffer.clone() if logits_buffer is not None else None
-    batch = SimpleNamespace(num_reqs=2, idx_mapping=torch.tensor([4, 1]))
+    batch = SimpleNamespace(
+        num_reqs=2, idx_mapping=torch.tensor([4, 1]), seq_lens_cpu_upper_bound=torch.ones(2, dtype=torch.int32)
+    )
     # Match the real drafter: a full-width row slice of the fixed-step buffer.
     token_buffer = torch.tensor([[9, 8], [7, 6], [5, 4]])
     tokens = token_buffer[:2]

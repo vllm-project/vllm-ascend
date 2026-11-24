@@ -72,7 +72,11 @@ def test_dspark_without_pcp_reuses_target_sync(monkeypatch):
     spec = make_speculator()
     spec.max_num_reqs = 4
     spec.max_num_tokens = 20
-    batch = SimpleNamespace(num_reqs=4, is_prefilling_np=np.zeros(4, dtype=np.bool_))
+    batch = SimpleNamespace(
+        num_reqs=4,
+        is_prefilling_np=np.zeros(4, dtype=np.bool_),
+        seq_lens_cpu_upper_bound=torch.ones(4, dtype=torch.int32),
+    )
     monkeypatch.setattr(shared, "build_attn_metadata_wrapper", nullcontext)
     monkeypatch.setattr(shared, "build_attn_metadata_factory", lambda *a, **kw: nullcontext())
     # Without PCP, both models use the same request layout.
@@ -378,7 +382,11 @@ def test_propose_defers_dcp_host_lengths_until_inputs_are_prepared(monkeypatch, 
     spec.use_dcp = use_dcp
     spec.max_num_reqs = 4
     spec.max_num_tokens = 20
-    input_batch = SimpleNamespace(num_reqs=1, is_prefilling_np=np.array([True, True, True, True]))
+    input_batch = SimpleNamespace(
+        num_reqs=1,
+        is_prefilling_np=np.array([True, True, True, True]),
+        seq_lens_cpu_upper_bound=torch.ones(1, dtype=torch.int32),
+    )
     captured: dict[str, Any] = {}
     prepared_lengths = torch.tensor([12, 0, 0, 0], dtype=torch.int32)
     prepared_flags = torch.zeros(4, dtype=torch.bool)
@@ -396,6 +404,9 @@ def test_propose_defers_dcp_host_lengths_until_inputs_are_prepared(monkeypatch, 
     result = spec.propose(input_batch, None, None, None, None, None, None, None, None, None, None)
 
     assert result == "draft"
+    assert not hasattr(spec, "input_batch")
+    assert spec._draft_graph_replay_inputs is None
+    assert input_batch.is_prefilling_np.tolist() == [True] * 4
     prepare.assert_not_called()
     assert captured["seq_lens_cpu"] is None
     assert captured["is_prefilling"].tolist() == [True] * 4
@@ -406,7 +417,6 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
     spec = make_speculator()
     spec.arange_np = np.arange(3, dtype=np.int32)
     spec.attn_architecture = architecture
-    spec.input_batch = SimpleNamespace(num_reqs=1, is_prefilling_np=np.array([True, True]))
     spec._group_causal = {0: False}
     query_metadata = make_query_metadata([5, 5])
     metadata = {"draft": SimpleNamespace(decode=query_metadata) if architecture == "MLA" else query_metadata}
@@ -428,7 +438,9 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
         yield
 
     monkeypatch.setattr(shared, "build_attn_metadata_factory", factory)
-    result = spec.build_draft_attn_metadatas(2, torch.tensor([128]))
+    result = spec.build_draft_attn_metadatas(
+        num_reqs=1, num_reqs_padded=2, seq_lens_cpu_upper_bound=torch.tensor([128])
+    )
     assert captured["pad"] == 10
     assert result == [metadata]
     assert captured["is_prefilling"].tolist() == [False, False]
@@ -448,7 +460,6 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
     assert kwargs["query_start_loc_np"].tolist() == [0, 5]
     assert kwargs["step"] == 5
     assert kwargs["causal"] == {0: False}
-    assert spec.input_batch.is_prefilling_np.tolist() == [True, True]
 
 
 @pytest.mark.parametrize("missing", [False, True])
@@ -507,7 +518,6 @@ def test_query_builder_overrides_and_restores_target_context(monkeypatch, archit
     def parent(self, **kwargs):
         return module.build_attn_metadata(attn_state=None)
 
-    spec.input_batch = SimpleNamespace(num_reqs=1)
     spec._group_causal = {}
     monkeypatch.setattr(attn_utils, "build_attn_metadata", build)
     monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", parent)
@@ -517,7 +527,9 @@ def test_query_builder_overrides_and_restores_target_context(monkeypatch, archit
     ):
         outer = module.build_attn_metadata
         with pytest.raises(RuntimeError, match="query failed") if fail else nullcontext():
-            result = spec.build_draft_attn_metadatas(2, torch.tensor([5]))
+            result = spec.build_draft_attn_metadatas(
+                num_reqs=1, num_reqs_padded=2, seq_lens_cpu_upper_bound=torch.tensor([5])
+            )
             metadata = result[0]["draft"]
             query = metadata.decode if architecture == "MLA" else metadata
             assert query.actual_seq_lengths_q == [5, 10]

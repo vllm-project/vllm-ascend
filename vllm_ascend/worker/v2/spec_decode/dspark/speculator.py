@@ -49,7 +49,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
-    draft_metadata_request_count,
+    draft_graph_replay_inputs,
     prepare_dflash_inputs_factory,
 )
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
@@ -79,8 +79,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         vllm_config = build_dspark_draft_config(vllm_config)
         super().__init__(vllm_config, device)
         self._lmhead_tp_validate_draft_sampling()
-        self.input_batch: InputBatch | None = None
-        self._draft_metadata_num_reqs: int | None = None
         self.attn_architecture: str | None = None
         self.use_flashmla: bool = False
         self._init_dcp()
@@ -277,8 +275,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             )
 
     @contextmanager
-    def _proposal_metadata(self, num_reqs: int) -> Iterator[None]:
-        with draft_metadata_request_count(self, num_reqs):
+    def _proposal_metadata(self, num_reqs: int, seq_lens_cpu_upper_bound: torch.Tensor) -> Iterator[None]:
+        with draft_graph_replay_inputs(self, num_reqs, seq_lens_cpu_upper_bound):
             previous = self._proposal_host_lengths
             self._proposal_host_lengths = {}
             try:
@@ -306,11 +304,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         return seq_lens_cpu, is_prefilling
 
     # Graph capture builds metadata from the padded request shape.
-    def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
-        assert self.input_batch is not None
-        num_reqs = getattr(self, "_draft_metadata_num_reqs", None)
-        if num_reqs is None:
-            num_reqs = self.input_batch.num_reqs
+    def build_draft_attn_metadatas(
+        self, *, num_reqs: int, num_reqs_padded: int, seq_lens_cpu_upper_bound: torch.Tensor
+    ):
         assert 0 <= num_reqs <= num_reqs_padded, "draft requests exceed graph capacity"
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         # GQA and MLA supply both values inside _build_attn_metadata.
@@ -458,17 +454,15 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             input_batch, last_hidden_states, aux_hidden_states = prepare_replicated_draft_profile_inputs(
                 input_batch, last_hidden_states, aux_hidden_states, self.input_buffers
             )
-        self.input_batch = input_batch
-        assert self.input_batch is not None
         # Upstream trims DP dummy draft requests before selecting its graph,
         # while input_batch still describes the padded target batch. Replay
         # metadata must use the same count without mutating the target batch.
         num_draft_reqs = input_batch.num_reqs
         if dummy_run and sync_state is not None:
             num_draft_reqs = min(num_draft_reqs, sync_state.num_reqs)
-        is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
+        is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
         with (
-            self._proposal_metadata(num_draft_reqs),
+            self._proposal_metadata(num_draft_reqs, input_batch.seq_lens_cpu_upper_bound),
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
                 self.input_buffers.positions,

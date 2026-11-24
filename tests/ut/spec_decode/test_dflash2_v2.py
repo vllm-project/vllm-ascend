@@ -37,7 +37,6 @@ from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode
 from vllm_ascend.worker.v2.spec_decode import init_speculator, pcp_utils
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
     AscendDFlashSpeculator,
-    draft_metadata_request_count,
 )
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
     AscendDFlash2Speculator,
@@ -504,7 +503,6 @@ def test_greedy_walk_contract_reference():
 def test_dflash_metadata_spans_padded_queries(monkeypatch, num_reqs_padded):
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
     speculator.attn_backends = {name: AscendAttentionBackend for name in ("draft.0", "draft.1")}
-    speculator.input_batch = SimpleNamespace(num_reqs=2)
     speculator.num_query_per_req = 3
     speculator._group_causal = {0: False}
     seq_lens = torch.tensor([10, 20])
@@ -521,7 +519,10 @@ def test_dflash_metadata_spans_padded_queries(monkeypatch, num_reqs_padded):
     speculator._build_uniform_attn_metadata = MagicMock(return_value=metadata)
     monkeypatch.setattr(dflash_module, "build_attn_metadata_wrapper", nullcontext)
 
-    assert speculator.build_draft_attn_metadatas(num_reqs_padded, seq_lens) == [metadata]
+    result = speculator.build_draft_attn_metadatas(
+        num_reqs=2, num_reqs_padded=num_reqs_padded, seq_lens_cpu_upper_bound=seq_lens
+    )
+    assert result == [metadata]
 
     kwargs = speculator._build_uniform_attn_metadata.call_args.kwargs
     assert kwargs["num_reqs"] == 2
@@ -546,7 +547,6 @@ def test_dflash_dummy_metadata_fits_draft_graph(monkeypatch, num_reqs_padded):
 
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
     speculator.attn_backends = {"draft": AscendAttentionBackend}
-    speculator.input_batch = SimpleNamespace(num_reqs=8)
     speculator.num_query_per_req = 8
     speculator._group_causal = {0: False}
     speculator.arange_np = torch.arange(9, dtype=torch.int32).numpy()
@@ -578,16 +578,16 @@ def test_dflash_dummy_metadata_fits_draft_graph(monkeypatch, num_reqs_padded):
     monkeypatch.setattr(upstream_speculator, "build_attn_metadata", build)
     monkeypatch.setattr(dflash_module, "build_attn_metadata_wrapper", nullcontext)
 
-    with draft_metadata_request_count(speculator, 1):
-        assert speculator.build_draft_attn_metadatas(num_reqs_padded, torch.full((8,), 10)) == [metadata]
+    result = speculator.build_draft_attn_metadatas(
+        num_reqs=1, num_reqs_padded=num_reqs_padded, seq_lens_cpu_upper_bound=torch.full((8,), 10)
+    )
+    assert result == [metadata]
 
     kwargs = build.call_args.kwargs
     assert kwargs["query_start_loc_cpu"].tolist() == [0] + [8] * num_reqs_padded
     assert kwargs["seq_lens_cpu_upper_bound"].tolist() == [18] + [0] * (num_reqs_padded - 1)
     assert kwargs["num_tokens"] == num_reqs_padded * 8 and kwargs["num_reqs"] == num_reqs_padded
     assert metadata["draft"].actual_seq_lengths_q == list(range(8, num_reqs_padded * 8 + 1, 8))
-    assert speculator.input_batch.num_reqs == 8
-    assert speculator._draft_metadata_num_reqs is None
 
 
 @pytest.mark.parametrize("dummy_run,skip_attn", [(False, False), (False, True), (True, False), (True, True)])
@@ -599,15 +599,20 @@ def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run
     speculator.input_buffers = InputBuffers(8, 8, torch.device("cpu"))
     monkeypatch.setattr(pcp_module, "get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor))
     monkeypatch.setattr(pcp_utils, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
-    batch = SimpleNamespace(num_reqs=8, idx_mapping=torch.arange(8))
+    batch = SimpleNamespace(
+        num_reqs=8, idx_mapping=torch.arange(8), seq_lens_cpu_upper_bound=torch.ones(8, dtype=torch.int32)
+    )
     sync_state = SimpleNamespace(num_reqs=1)
     result = torch.zeros(8, 1, dtype=torch.int64)
     received = []
 
     def propose(self, *args, **kwargs):
-        assert self.input_batch is batch
+        assert args[0] is batch
+        assert not hasattr(self, "input_batch")
         expected_reqs = 1 if dummy_run and not skip_attn and not pcp_enabled else 8
-        assert self._draft_metadata_num_reqs == expected_reqs
+        num_reqs, seq_lens = self._draft_graph_replay_inputs
+        assert num_reqs == expected_reqs
+        assert seq_lens is batch.seq_lens_cpu_upper_bound
         received.append(args[11])
         return result
 
@@ -627,7 +632,7 @@ def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run
         is result
     )
     assert received == [None if pcp_enabled or (dummy_run and skip_attn) else sync_state]
-    assert speculator._draft_metadata_num_reqs is None
+    assert speculator._draft_graph_replay_inputs is None
     assert batch.num_reqs == 8
 
 
