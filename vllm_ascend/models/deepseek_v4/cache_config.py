@@ -107,20 +107,19 @@ def finalize_deepseek_v4_reuse_layout(config, cache_config, layout):
         )
         layout = replace(layout, kv_cache_tensors=tensors)
     cache_config.dsv4_shared_cache_names = tuple(sorted(layout.reused_cache_names))
-    cache_config.dsv4_window_group_ids = tuple(
-        group_id
-        for group_id, group in enumerate(groups)
-        if all(getattr(specs[name], "sliding_window", None) is not None for name in group.layer_names)
-    )
-    cache_config.dsv4_nominal_windows = {
+    # Block-key checkpoints keep the exact keys used by each component group,
+    # including complete pages in an unpublished transfer unit.
+    cache_config.block_key_checkpoint_groups = frozenset(range(len(groups)))
+    cache_config.block_key_prefill_windows = {
         group_id: max(
             specs[name].sliding_window + (getattr(specs[name], "extra_retained_tokens", 0) or 0)
-            for name in groups[group_id].layer_names
+            for name in group.layer_names
         )
-        for group_id in cache_config.dsv4_window_group_ids
+        for group_id, group in enumerate(groups)
+        if all(getattr(specs[name], "sliding_window", None) is not None for name in group.layer_names)
     }
     if getattr(config, "speculative_config", None) is None:
-        cache_config.dsv4_continuation_windows = cache_config.dsv4_nominal_windows
+        cache_config.block_key_continuation_windows = cache_config.block_key_prefill_windows
     cache_config.dsv4_component_identity = component_layout_identity(groups)
     cache_config.kv_cache_allocation_alignment = 2 * 1024 * 1024
     return layout

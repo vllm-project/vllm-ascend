@@ -415,7 +415,7 @@ def test_dsv4_window_continuation_restores_live_pages_only(ns):
         group_uses_align_state=[False],
         grouped_block_size=[128],
         use_eagle=False,
-        kv_cache_config=NS(dsv4_component_identity="dsv4", dsv4_shared_cache_names=("swa",), dsv4_window_group_ids=(0,)),
+        kv_cache_config=NS(block_key_checkpoint_groups={0}, block_key_prefill_windows={0: 256}),
         _group_reuses_buffer=lambda group: True,
         _reused_layers_by_group={0: {0}},
         _snapshot_keys={},
@@ -441,7 +441,7 @@ def test_dsv4_window_continuation_restores_live_pages_only(ns):
 
 def test_mtp_prefill_uses_same_window_for_save_and_continuation(ns):
     window_start = ns["_continuation_window_start"]
-    worker = NS(kv_cache_config=NS(dsv4_nominal_windows={4: 8}))
+    worker = NS(kv_cache_config=NS(block_key_prefill_windows={4: 8}))
     saved = NS(target_token_len=114688, num_prompt_tokens=118046)
     resumed = NS(target_token_len=118046, num_prompt_tokens=118046)
     assert window_start(worker, 4, 114688, 2, saved) == 57340
@@ -466,7 +466,7 @@ def test_window_save_respects_public_mask_at_aligned_endpoint(ns):
         block_ids_by_group=[[1, 2, 3, 4]], store_masks=[[True, False, False, False]],
         layerwise_request_id="incarnation", load_spec=None,
     )
-    entries = ns["_save_entries"](worker, request, NS(), 0, [b"a", b"b", b"c", b"d"], {}, dsv4=True)
+    entries = ns["_save_entries"](worker, request, NS(), 0, [b"a", b"b", b"c", b"d"], {})
     assert entries == [(b"a".hex(), 0)]
 
 
@@ -475,7 +475,7 @@ def test_untrimmed_shared_window_skips_masked_public_page(ns):
         grouped_block_size=[128],
         group_uses_align_state=[False],
         cache_transfer_granularity=128,
-        kv_cache_config=NS(dsv4_component_identity="dsv4", dsv4_window_group_ids=(0,)),
+        kv_cache_config=NS(block_key_checkpoint_groups={0}, block_key_prefill_windows={0: 256}),
         _group_reuses_buffer=lambda group: True,
         _reused_layers_by_group={0: {0}},
         _snapshot_keys={},
@@ -494,7 +494,7 @@ def test_untrimmed_shared_window_skips_masked_public_page(ns):
         ),
     )
     hashes = [b"a", b"b", b"c"]
-    saved = ns["_save_entries"](worker, request, NS(), 0, hashes, {}, dsv4=True)
+    saved = ns["_save_entries"](worker, request, NS(), 0, hashes, {})
     assert saved == [(b"c".hex(), 2)]
     worker._offload_active_pages = {
         ("request", "incarnation", 0): (384, {index: key for key, index in saved})
@@ -795,7 +795,7 @@ def test_transfer_suffix_snapshots_match_next_step_keys(ns, endpoint, size, hash
     worker = NS(
         grouped_block_size=[size], group_uses_align_state=[False],
         cache_transfer_granularity=transfer, use_eagle=False,
-        kv_cache_config=NS(dsv4_shared_cache_names=("main",)),
+        kv_cache_config=NS(block_key_checkpoint_groups={0}),
         _group_reuses_buffer=lambda group: True,
         _reused_layers_by_group={0: {0}},
         _snapshot_keys={},
@@ -817,7 +817,7 @@ def test_transfer_suffix_snapshots_match_next_step_keys(ns, endpoint, size, hash
             kvpool_store_skip_tokens=None, layerwise_snapshot_end_token=endpoint,
         ),
     )
-    saved = ns["_save_entries"](worker, request, NS(), 0, hashes, {}, dsv4=True)
+    saved = ns["_save_entries"](worker, request, NS(), 0, hashes, {})
     saved_keys = {key for key, _ in saved}
     worker._snapshot_keys = {"request": {0: {
         total - 1 if slot is None else slot: key for key, slot in saved if "offload_v1:" in key

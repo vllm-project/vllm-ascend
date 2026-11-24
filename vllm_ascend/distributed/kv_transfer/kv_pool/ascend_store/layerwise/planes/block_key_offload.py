@@ -34,10 +34,10 @@ def snapshot_key(worker: LayerwiseKVPoolWorker, request: ReqMeta, group: int, in
 
 def _continuation_window_start(worker, group, endpoint, page_tokens, request=None):
     config = getattr(worker, "kv_cache_config", None)
-    window = getattr(config, "dsv4_continuation_windows", {}).get(group)
+    window = getattr(config, "block_key_continuation_windows", {}).get(group)
     prefill_end = getattr(request, "num_prompt_tokens", None)
     if window is None and prefill_end is not None and request.target_token_len <= prefill_end:
-        window = getattr(config, "dsv4_nominal_windows", {}).get(group)
+        window = getattr(config, "block_key_prefill_windows", {}).get(group)
     return None if window is None else max(0, endpoint - window + 1) // page_tokens
 
 
@@ -63,16 +63,16 @@ def _load_entries(worker, request, group, hashes, mask):
         return [(expected, index)]
 
     config = getattr(worker, "kv_cache_config", None)
-    dsv4_continuation = running and getattr(config, "dsv4_component_identity", None) is not None
-    live_window = running and group in getattr(config, "dsv4_window_group_ids", ())
+    tracks_pages = running and group in getattr(config, "block_key_checkpoint_groups", ())
+    live_window = running and group in getattr(config, "block_key_prefill_windows", {})
     first = _continuation_window_start(worker, group, tokens, size, request) if live_window else None
     checkpoint = getattr(worker, "_offload_active_pages", {}).get(
         (request.req_id, request.layerwise_request_id, group)
-    ) if dsv4_continuation else None
+    ) if tracks_pages else None
     saved_pages = checkpoint[1] if checkpoint is not None else snapshots
     entries = []
     for index in range(first or 0, end):
-        if dsv4_continuation:
+        if tracks_pages:
             if mask is not None and index < len(mask) and not mask[index] and index not in saved_pages:
                 continue
         elif not live_window and not selected(mask, index):
@@ -96,7 +96,7 @@ def _load_entries(worker, request, group, hashes, mask):
     return entries
 
 
-def _save_entries(worker, request, view, group, hashes, snapshots, *, dsv4=False):
+def _save_entries(worker, request, view, group, hashes, snapshots):
     if not request.can_save:
         return []
     size = worker.grouped_block_size[group]
@@ -133,7 +133,8 @@ def _save_entries(worker, request, view, group, hashes, snapshots, *, dsv4=False
         raise ValueError("Mooncake offload save has no allocated checkpoint or block")
     mask = request.store_masks[group] if request.store_masks is not None else None
     snapshot_start = None
-    if dsv4 and not recurrent:
+    config = getattr(worker, "kv_cache_config", None)
+    if not recurrent and group in getattr(config, "block_key_checkpoint_groups", ()):
         # The public prefix ends at a boundary common to all cache groups.
         transfer_size = worker.cache_transfer_granularity
         public_tokens = min(tokens, len(hashes) * size) // transfer_size * transfer_size
@@ -203,7 +204,8 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
     get_slots = []
     put_slots: list[tuple[ReqMeta, str, int | None, int]] = []
     pending = {}
-    dsv4 = getattr(getattr(worker, "kv_cache_config", None), "dsv4_component_identity", None) is not None
+    config = getattr(worker, "kv_cache_config", None)
+    checkpoint_groups = getattr(config, "block_key_checkpoint_groups", ())
     next_snapshots: dict[str, dict[int, dict[int, str]]] = {}
     for request in requests:
         load_spec = request.load_spec
@@ -215,8 +217,6 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
         # window for its full pages and let private snapshots cover the tail.
         aligned = cached // worker.cache_transfer_granularity * worker.cache_transfer_granularity
         masks = worker._compute_reachable_load_masks(request, aligned)
-        if cached != aligned and running and not dsv4:
-            masks = None
         for group in worker.cacheable_group_ids:
             view = copy(request)
             view.load_block_keys = []
@@ -226,15 +226,18 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
             view.save_last_block_key = view.load_last_block_key = None
             view.load_key_block_offset = 0
             hashes = get_block_hashes(request.block_hashes, worker.grouped_block_size[group], worker.hash_block_size)
-            entries = _load_entries(worker, request, group, hashes, masks[group] if masks is not None else None)
+            mask = masks[group] if masks is not None else None
+            if cached != aligned and running and group not in checkpoint_groups:
+                mask = None
+            entries = _load_entries(worker, request, group, hashes, mask)
             view.load_block_keys = [None] * (max((index for _, index in entries), default=-1) + 1)
             for key, index in entries:
                 view.load_block_keys[index] = key
                 get_slots.append((view, key, request.block_ids_by_group[group][index], index))
             group_snapshots = snapshots.setdefault(group, previous.get(group, {}).copy())
-            saves = _save_entries(worker, request, view, group, hashes, group_snapshots, dsv4=dsv4)
+            saves = _save_entries(worker, request, view, group, hashes, group_snapshots)
             if (
-                dsv4
+                group in checkpoint_groups
                 and not worker.group_uses_align_state[group]
                 and request.can_save
                 and request.layerwise_request_id
