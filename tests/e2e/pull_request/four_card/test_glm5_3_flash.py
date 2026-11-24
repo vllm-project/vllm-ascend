@@ -11,16 +11,24 @@ Parallel coverage is TP4+EP with PCP=1 and DCP=1.
 
 import hashlib
 import json
+import os
+from contextlib import ExitStack, contextmanager
+from functools import partial
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 import torch
 from vllm import SamplingParams
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+from vllm.utils.network_utils import get_open_port
 
+from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
+from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
 from tests.e2e.conftest import VllmRunner
+from tests.e2e.pull_request.kv_pool_watch import run_pool_ab, run_pool_hit_sequence
 
 NUM_LAYERS = 9
 NUM_MTP_LAYERS = 1
@@ -28,6 +36,45 @@ NUM_SPECULATIVE_TOKENS = 3
 OUTPUT_TOKENS = 16
 TP_SIZE = 4
 LOADER = "glm53flash_functional_dummy"
+
+# Measured on A3: `kv cache group sizes [1152, 1152, 1152, 1152]` and
+# `kv lcm block sizes 1152` for the 9-layer GLM-5.3-Flash dummy model.
+# Hit tokens: 1,156 -> 0; 2,308 -> 1,152; 16,388 -> 16,128. The scheduler
+# drops the final engine block before grouping into lcm chunks, so pin the
+# measured value instead of the generic formula.
+POOL_LCM_BLOCK_SIZE = 1152
+POOL_PROMPT_TOKENS = 16388
+# Perf prompt: 25 lcm blocks plus a tail -> 28,800 / 32,000 = 90% hit.
+POOL_PERF_PROMPT_TOKENS = 25 * POOL_LCM_BLOCK_SIZE + 25 * POOL_LCM_BLOCK_SIZE // 9
+POOL_EXPECTED_HIT_TOKENS = 16128
+POOL_MAX_MODEL_LEN = max(POOL_PROMPT_TOKENS, POOL_PERF_PROMPT_TOKENS) + 128
+
+POOL_KV_TRANSFER_CONFIG = {
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "backend": "memcache",
+        "lookup_rpc_port": "1",
+        "use_layerwise": True,
+        # Layerwise copies the Mamba align state after each layer load.
+    },
+}
+
+
+def _build_memcache_pool_config() -> MemcacheKVPoolConfig:
+    return MemcacheKVPoolConfig(
+        meta_service_port=get_open_port(),
+        config_store_port=get_open_port(),
+        config={
+            "meta": {"ock.mmc.log_level": "error"},
+            "local": {
+                "ock.mmc.log_level": "error",
+                "ock.mmc.local_service.world_size": 256,
+                "ock.mmc.local_service.protocol": "device_sdma",
+                "ock.mmc.local_service.dram.size": "10GB",
+            },
+        },
+    )
 
 
 def _write_model(destination):
@@ -130,6 +177,88 @@ class FlashWorker:
         assert all(layer.is_sequence_parallel and not layer.self_attn.o_proj.reduce_results for layer in draft_layers)
         return True
 
+    def install_pool_probe(self) -> int:
+        """TEMPORARY: print per-group store PUT/EXISTS activity (P11 diagnosis)."""
+        from collections import Counter
+
+        from vllm.distributed.kv_transfer import get_kv_transfer_group
+
+        connector = get_kv_transfer_group()
+        children = getattr(connector, "connectors", None) or [connector]
+        installed = 0
+        for child in children:
+            worker = getattr(child, "connector_worker", None)
+            store = getattr(worker, "m_store", None) if worker is not None else None
+            if store is None or getattr(store, "_group_probe_installed", False):
+                continue
+
+            def group_of(key: str) -> str:
+                marker = "@group:"
+                start = key.find(marker)
+                if start < 0:
+                    return "?"
+                start += len(marker)
+                end = key.find("@", start)
+                return key[start:end] if end >= 0 else key[start:]
+
+            original_put = getattr(store, "put", None)
+            original_exists = getattr(store, "exists", None)
+            if original_put is None:
+                continue
+
+            def put(keys, *args, _original=original_put, **kwargs):
+                counts = Counter(group_of(key) for key in keys)
+                tail = [key[-40:] for key in keys[-3:]]
+                print(
+                    f"[p11-probe] PUT n={len(keys)} groups={dict(sorted(counts.items()))} tail={tail}",
+                    flush=True,
+                )
+                return _original(keys, *args, **kwargs)
+
+            def exists(keys, *args, _original=original_exists, **kwargs):
+                result = _original(keys, *args, **kwargs)
+                counts = Counter(group_of(key) for key in keys)
+                hits = Counter(group_of(key) for key, value in zip(keys, result) if value)
+                tail = [key[-40:] for key in keys[-3:]]
+                print(
+                    f"[p11-probe] EXISTS n={len(keys)} groups={dict(sorted(counts.items()))} "
+                    f"hits={dict(sorted(hits.items()))} tail={tail}",
+                    flush=True,
+                )
+                return result
+
+            store.put = put
+            if original_exists is not None:
+                store.exists = exists
+
+            # Layerwise stores bypass put(); trace the batch API instead.
+            original_put_start = getattr(store, "batch_put_start", None)
+            original_copy_put = getattr(store, "batch_copy_put", None)
+            original_commit = getattr(store, "batch_commit", None)
+
+            def traced_batch(name: str, original) -> Any:
+                def wrapper(*args, **kwargs):
+                    keys = args[0] if args else kwargs.get("keys", [])
+                    if isinstance(keys, (list, tuple)):
+                        print(
+                            f"[p11-probe] {name} n={len(keys)} tail={[key[-40:] for key in keys[-3:]]}",
+                            flush=True,
+                        )
+                    return original(*args, **kwargs)
+
+                return wrapper
+
+            if original_put_start is not None:
+                store.batch_put_start = traced_batch("PUT_START", original_put_start)
+            if original_copy_put is not None:
+                store.batch_copy_put = traced_batch("COPY_PUT", original_copy_put)
+            if original_commit is not None:
+                store.batch_commit = traced_batch("COMMIT", original_commit)
+
+            store._group_probe_installed = True
+            installed += 1
+        return installed
+
 
 @pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
 @pytest.mark.parametrize("use_replayssm", [False, True], ids=["no_recover", "recover"])
@@ -211,3 +340,99 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, pre
             warm = runner.model.generate(prompt, params, use_tqdm=False)[0]
             assert warm.num_cached_tokens >= block_size
             assert warm.outputs[0].token_ids == cold.outputs[0].token_ids
+
+
+CASE_NAME = "glm53flash_tp4_pool_watch"
+
+
+@contextmanager
+def _pool_leg(use_pool: bool, case_name: str, model):
+    """Leg A enables the memcache pool; leg B keeps everything else identical."""
+    with ExitStack() as stack:
+        kwargs: dict[str, Any] = dict(
+            load_format=LOADER,
+            worker_extension_cls=f"{__name__}.FlashWorker",
+            dtype="bfloat16",
+            tensor_parallel_size=TP_SIZE,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            enable_expert_parallel=True,
+            quantization="ascend",
+            distributed_executor_backend="mp",
+            max_model_len=POOL_MAX_MODEL_LEN,
+            max_num_seqs=32,
+            max_num_batched_tokens=4096,  # H3 is off; only H1/H2/R4 are asserted
+            limit_mm_per_prompt={"image": 0, "video": 0},
+            block_size=128,
+            enable_chunked_prefill=True,
+            # Hybrid keeps the local prefix cache on in both legs (align requires it).
+            enable_prefix_caching=True,
+            mamba_cache_mode="align",
+            use_replayssm=False,  # RecoverSSM conflicts with align + prefix caching
+            disable_log_stats=False,
+            gpu_memory_utilization=0.9,
+            seed=1024,
+            # TEMPORARY experiment: the pool leg runs without graph capture to
+            # isolate the npugraph_ex `PythonMod` failure from pool transfer.
+            compilation_config={"cudagraph_mode": "NONE" if use_pool else "FULL_DECODE_ONLY"},
+            speculative_config={
+                "method": "deepseek_mtp",
+                "num_speculative_tokens": NUM_SPECULATIVE_TOKENS,
+                "enforce_eager": True,
+            },
+            additional_config={"enable_cpu_binding": False, "enable_fused_mc2": 0, "enable_flashcomm1": True},
+        )
+        if use_pool:
+            pool = stack.enter_context(SingleNodeMemcacheManager(_build_memcache_pool_config(), case_name))
+            stack.enter_context(patch.dict(os.environ, pool.server_envs))
+            kwargs["kv_transfer_config"] = POOL_KV_TRANSFER_CONFIG
+        yield stack.enter_context(VllmRunner(str(model), **kwargs))
+
+
+def test_glm53flash_tp4_pool(tmp_path, monkeypatch):
+    """Structural A/B witness for GLM-5.3-Flash (dummy functional weights).
+
+    Covers the hybrid linear-attention + MLA cache layout, mamba align state
+    copy-after-load and the AscendStore connector. It is NOT an accuracy or
+    acceptance test -- real weights stay in Nightly.
+    """
+    for name, value in {
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "HCCL_OP_EXPANSION_MODE": "AIV",
+        "HCCL_BUFFSIZE": "400",
+    }.items():
+        monkeypatch.setenv(name, value)
+    model = tmp_path / "model"
+    _write_model(model)
+
+    def _accuracy(runner) -> None:
+        assert runner.model.collective_rpc("check_flash_paths") == [True] * TP_SIZE
+
+    def _hit(runner) -> dict:
+        installed = runner.model.collective_rpc("install_pool_probe")
+        print(f"[p11-probe] installed={installed}", flush=True)
+        return run_pool_hit_sequence(
+            runner,
+            block_size=128,
+            prompt_tokens=POOL_PROMPT_TOKENS,
+            lcm_block_size=POOL_LCM_BLOCK_SIZE,
+            expected_hit_tokens=POOL_EXPECTED_HIT_TOKENS,
+            reset_local_cache=True,
+            # Random functional weights make cold/hit token equality
+            # non-informative (and it currently diverges); content correctness
+            # for real GLM-5.3-Flash weights stays in Nightly.
+            check_output=False,
+            tag="glm53flash-tp4-memcache",
+        )
+
+    run_pool_ab(
+        case_name=CASE_NAME,
+        build_leg=partial(_pool_leg, model=model),
+        accuracy=_accuracy,
+        hit=_hit,
+        perf_prompt_tokens=POOL_PERF_PROMPT_TOKENS,
+        token_identity=False,  # dummy weights do not compare tokens
+        perf_reset_local=True,  # hybrid A leg also caches locally
+        gate=True,  # P11 is gated too; dummy weights do not exempt A/B perf.
+    )

@@ -911,6 +911,15 @@ class RequestTracker:
         for group_id, ids in enumerate(normalized):
             self.update_mamba_spec_blocks(ids, group_id, num_computed_tokens)
             self.allocated_block_ids_by_group[group_id].extend(ids)
+            # TEMPORARY P11 diagnosis: tracker growth and positional tail.
+            if group_id in (self.num_speculative_blocks_by_group or {}) and num_computed_tokens >= 13000:
+                tracker = self.allocated_block_ids_by_group[group_id]
+                print(
+                    f"[p11-track] req={self.req_id[-6:]} g={group_id} nct={num_computed_tokens} "
+                    f"delta={list(ids)} len={len(tracker)} "
+                    f"tail={list(tracker[max(0, len(tracker) - 6):])}",
+                    flush=True,
+                )
 
     def update_mamba_spec_blocks(self, block_ids: list[int], kv_cache_group_id: int, num_computed_tokens: int):
         """
@@ -1125,6 +1134,7 @@ class ReqMeta:
         kv_cache_group_families: list[str] | None = None,
         save_partial_block: bool = False,
         hash_block_size: int | None = None,
+        save_unaligned_tail: bool = False,
     ) -> ReqMeta | None:
         """Create the request metadata from a request tracker."""
         if block_hashes is None:
@@ -1161,6 +1171,11 @@ class ReqMeta:
         # committed request hash. Do not mark an unsent page as saved.
         if full_block_count > available_full_block_count:
             num_tokens_to_save = available_full_block_count * cache_transfer_granularity
+        if save_unaligned_tail and is_last_chunk and target_token_len > previous_saved_tokens:
+            # Hybrid align-state checkpoints land on the trailing unaligned
+            # prefill chunk; publish it instead of dropping to the floored
+            # boundary. The store mask uses cdiv to name the written column.
+            num_tokens_to_save = target_token_len
         if tracker.last_block_gva is not None and (
             target_token_len % cache_transfer_granularity != 0 or boundary_without_hash
         ):
