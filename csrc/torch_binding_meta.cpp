@@ -5,7 +5,10 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 #include "acl/acl_base_rt.h"
-#include "gmm/gmm_swiglu_oai_mx_quant/gmm_swiglu_oai_mx_quant_common.h"
+// Meta needs only the shared validation and output shape helpers.
+#define VLLM_ASCEND_GMM_SWIGLU_OAI_MX_QUANT_META_ONLY
+#include "gmm/gmm_swiglu_oai_mx_quant/gmm_swiglu_oai_mx_quant_torch_adpt.h"
+#undef VLLM_ASCEND_GMM_SWIGLU_OAI_MX_QUANT_META_ONLY
 #include "utils.h"
 
 /*

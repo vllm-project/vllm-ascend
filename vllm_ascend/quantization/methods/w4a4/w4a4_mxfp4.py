@@ -232,12 +232,14 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
+        self._swiglu_oai_fusion_enabled = ascend_config.ascend_fusion_config.fusion_ops_gmm_swiglu_oai_mx_quant
         self._swiglu_oai_fusion_weight_ready = False
 
     def _use_swiglu_oai_fusion(self) -> bool:
         config = get_current_vllm_config()
         return (
-            not self.dynamic_eplb
+            self._swiglu_oai_fusion_enabled
+            and not self.dynamic_eplb
             and not config.parallel_config.enable_eplb
             and config.lora_config is None
             and not use_cann_megamoe(config)

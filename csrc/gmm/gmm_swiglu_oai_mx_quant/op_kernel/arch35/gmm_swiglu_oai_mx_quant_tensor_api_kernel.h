@@ -9,14 +9,14 @@
  */
 
 /*!
- * \file grouped_matmul_tensor_api_swiglu_quant_v2_mxfp8_kernel.h
+ * \file gmm_swiglu_oai_mx_quant_tensor_api_kernel.h
  * \brief Shared TensorApi entry point for GroupedMatmulSwigluQuantV2 MXFP8 ND/NZ scenarios.
  *        Assembles Blaze
  * BlockMmad + Blaze Epilogue + Blaze Scheduler + MIX Kernel.
  */
 
-#ifndef GROUPED_MATMUL_SWIGLU_QUANT_V2_MXQUANT_TENSOR_API_H
-#define GROUPED_MATMUL_SWIGLU_QUANT_V2_MXQUANT_TENSOR_API_H
+#ifndef VLLM_ASCEND_GMM_SWIGLU_OAI_MX_QUANT_TENSOR_API_KERNEL_H
+#define VLLM_ASCEND_GMM_SWIGLU_OAI_MX_QUANT_TENSOR_API_KERNEL_H
 
 #include "kernel_tiling/kernel_tiling.h"
 #if ASC_DEVKIT_MAJOR >= 9
@@ -34,7 +34,7 @@
 #include "grouped_matmul_swiglu_quant_v2_tensor_api_tiling_data.h"
 
 template <typename layoutA, typename layoutB, bool EnableSwigluAttrs = false>
-__aicore__ inline void GmmTensorApiSwigluQuantMxFp8Kernel(GM_ADDR x, GM_ADDR weight, GM_ADDR weightScale,
+__aicore__ inline void GmmSwigluOaiMxQuantTensorApiKernel(GM_ADDR x, GM_ADDR weight, GM_ADDR weightScale,
                                                           GM_ADDR xScale, GM_ADDR weightAssistanceMatrix,
                                                           GM_ADDR smoothScale, GM_ADDR groupList, GM_ADDR y,
                                                           GM_ADDR yScale, GM_ADDR workspace, GM_ADDR tiling)
@@ -146,4 +146,4 @@ __aicore__ inline void GmmTensorApiSwigluQuantMxFp8Kernel(GM_ADDR x, GM_ADDR wei
     op(params);
 }
 
-#endif // GROUPED_MATMUL_SWIGLU_QUANT_V2_MXQUANT_TENSOR_API_H
+#endif // VLLM_ASCEND_GMM_SWIGLU_OAI_MX_QUANT_TENSOR_API_KERNEL_H

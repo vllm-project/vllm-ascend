@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Huawei Technologies Co., Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
-#include "arch35/grouped_matmul_tensor_api_swiglu_quant_v2_mxfp8_kernel.h"
+#include "arch35/gmm_swiglu_oai_mx_quant_tensor_api_kernel.h"
 #include "ascendc/host_api/tiling/template_argument.h"
 
 using namespace AscendC;
@@ -35,10 +35,10 @@ __global__ __aicore__ void gmm_swiglu_oai_mx_quant(GM_ADDR x, GM_ADDR xScale, GM
   const auto overflowMode = GetCtrlSpr<kFloatOverflowMode, kFloatOverflowMode>();
   SetCtrlSpr<kFloatOverflowMode, kFloatOverflowMode>(0);
   if constexpr (TRANS_B == 1) {
-    GmmTensorApiSwigluQuantMxFp8Kernel<asc::te::nd_ext_layout_ptn, asc::te::zn_layout_ptn, true>(
+    GmmSwigluOaiMxQuantTensorApiKernel<asc::te::nd_ext_layout_ptn, asc::te::zn_layout_ptn, true>(
         x, weight, weightScale, xScale, nullptr, nullptr, groupList, y, yScale, workspace, tiling);
   } else {
-    GmmTensorApiSwigluQuantMxFp8Kernel<asc::te::nd_ext_layout_ptn, asc::te::nz_layout_ptn, true>(
+    GmmSwigluOaiMxQuantTensorApiKernel<asc::te::nd_ext_layout_ptn, asc::te::nz_layout_ptn, true>(
         x, weight, weightScale, xScale, nullptr, nullptr, groupList, y, yScale, workspace, tiling);
   }
   SetCtrlSpr<kFloatOverflowMode, kFloatOverflowMode>(overflowMode);
