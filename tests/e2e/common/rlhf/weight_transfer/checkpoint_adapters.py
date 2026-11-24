@@ -81,34 +81,6 @@ def deepseek_v4_checkpoint_name(name: str) -> str:
     return name
 
 
-def deepseek_v4_dspark_parameters(config, parameters):
-    """Use the reduced V4 decoder schema in the DSpark mtp checkpoint namespace."""
-    result = []
-    for name, shape, dtype in parameters:
-        name = name.removeprefix("model.")
-        if not name.startswith("layers.0."):
-            continue
-        name = "mtp.0." + name.removeprefix("layers.0.")
-        name = name.replace(".self_attn.", ".attn.").replace(".mlp.", ".ffn.")
-        name = name.replace(".input_layernorm.", ".attn_norm.").replace(".post_attention_layernorm.", ".ffn_norm.")
-        result.append((name, shape, dtype))
-    hidden, hc, rank = config.hidden_size, config.hc_mult, config.dspark_markov_rank
-    result.extend(
-        [
-            ("mtp.0.main_proj.weight", (hidden, hidden * len(config.dspark_target_layer_ids)), torch.bfloat16),
-            ("mtp.0.main_norm.weight", (hidden,), torch.bfloat16),
-            ("mtp.0.norm.weight", (hidden,), torch.bfloat16),
-            ("mtp.0.hc_head_fn", (hc, hc * hidden), torch.float32),
-            ("mtp.0.hc_head_base", (hc,), torch.float32),
-            ("mtp.0.hc_head_scale", (1,), torch.float32),
-            ("mtp.0.markov_head.markov_w1.weight", (config.vocab_size, rank), torch.bfloat16),
-            ("mtp.0.markov_head.markov_w2.weight", (config.vocab_size, rank), torch.bfloat16),
-            ("mtp.0.confidence_head.proj.weight", (1, hidden + rank), torch.float32),
-        ]
-    )
-    return result
-
-
 def qwen3_draft_parameters(config, parameters):
     """Adapt a meta Qwen3 schema to upstream's EAGLE3/DFlash loaders.
 
@@ -140,11 +112,8 @@ def qwen3_draft_parameters(config, parameters):
     return result
 
 
-def deepseek_v4_mtp_parameters(config, parameters):
-    """Use one V4 decoder and the classic MTP projections in ``mtp.0.*``.
-
-    Embedding and output weights are shared with the target and omitted.
-    """
+def deepseek_v4_draft_parameters(config, parameters, *, method: str):
+    """Convert a V4 decoder and append method-specific ``mtp.0.*`` parameters."""
     result = []
     for name, shape, dtype in parameters:
         name = name.removeprefix("model.")
@@ -157,16 +126,34 @@ def deepseek_v4_mtp_parameters(config, parameters):
     hidden, hc = config.hidden_size, config.hc_mult
     result.extend(
         [
-            ("mtp.0.e_proj.weight", (hidden, hidden), torch.bfloat16),
-            ("mtp.0.h_proj.weight", (hidden, hidden), torch.bfloat16),
-            ("mtp.0.enorm.weight", (hidden,), torch.bfloat16),
-            ("mtp.0.hnorm.weight", (hidden,), torch.bfloat16),
             ("mtp.0.norm.weight", (hidden,), torch.bfloat16),
             ("mtp.0.hc_head_fn", (hc, hc * hidden), torch.float32),
             ("mtp.0.hc_head_base", (hc,), torch.float32),
             ("mtp.0.hc_head_scale", (1,), torch.float32),
         ]
     )
+    if method == "mtp":
+        result.extend(
+            [
+                ("mtp.0.e_proj.weight", (hidden, hidden), torch.bfloat16),
+                ("mtp.0.h_proj.weight", (hidden, hidden), torch.bfloat16),
+                ("mtp.0.enorm.weight", (hidden,), torch.bfloat16),
+                ("mtp.0.hnorm.weight", (hidden,), torch.bfloat16),
+            ]
+        )
+    elif method == "dspark":
+        rank = config.dspark_markov_rank
+        result.extend(
+            [
+                ("mtp.0.main_proj.weight", (hidden, hidden * len(config.dspark_target_layer_ids)), torch.bfloat16),
+                ("mtp.0.main_norm.weight", (hidden,), torch.bfloat16),
+                ("mtp.0.markov_head.markov_w1.weight", (config.vocab_size, rank), torch.bfloat16),
+                ("mtp.0.markov_head.markov_w2.weight", (config.vocab_size, rank), torch.bfloat16),
+                ("mtp.0.confidence_head.proj.weight", (1, hidden + rank), torch.float32),
+            ]
+        )
+    else:
+        raise ValueError(f"Unsupported DeepSeek V4 draft method: {method}")
     return result
 
 
