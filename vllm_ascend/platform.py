@@ -104,6 +104,123 @@ _MINIMAX_M3_ARCHITECTURES = frozenset(
 _V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "stair_config"})
 _V2_STAIR_CONFIG_FIELDS = frozenset(StairConfig.__dataclass_fields__)
 
+_DEVICE_VISIBILITY_ENV_VAR = "ASCEND_RT_VISIBLE_DEVICES"
+
+
+def _split_visible_devices(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _is_ray_backend(value: Any) -> bool:
+    if value is None:
+        return False
+    return value == "ray" or getattr(value, "value", None) == "ray"
+
+
+def _is_ray_deployment(engine_args) -> bool:
+    """Whether this launch will resolve to the Ray executor.
+
+    ``--distributed-executor-backend`` is the explicit switch, but vLLM also
+    selects Ray when ``--data-parallel-backend ray`` is set without an explicit
+    executor: ``ParallelConfig.__post_init__`` applies that default *after*
+    ``parse_args``. This parse-time hook must therefore inspect both fields,
+    otherwise it rewrites ``ASCEND_RT_VISIBLE_DEVICES`` for a launch that ends up
+    on Ray even though vLLM ignores ``device_ids`` there.
+    """
+    if _is_ray_backend(getattr(engine_args, "distributed_executor_backend", None)):
+        return True
+    return getattr(engine_args, "data_parallel_backend", None) == "ray"
+
+
+def _narrow_visible_devices_to_device_ids(engine_args) -> None:
+    """Restrict ``ASCEND_RT_VISIBLE_DEVICES`` to the chips named by ``device_ids``.
+
+    ``--device-ids`` only renumbers the device a worker eventually binds; it never
+    restricts what the process can see. vLLM resolves the model architecture while
+    it builds the engine config, and that import path reaches
+    ``vllm.third_party.flash_linear_attention.ops.utils.get_all_max_shared_mem()``,
+    which queries every device in ``device_count()``. torch_npu creates an ACL
+    context per query, so ``ASCEND_RT_VISIBLE_DEVICES=4,5 --device-ids 1``
+    initializes chip 4 as well and npu-smi reports a process on both cards.
+
+    Narrowing the environment before that import keeps every other chip untouched.
+    The ids are renumbered to ``0..N-1`` so the worker-side two-stage mapping
+    (local_rank -> assigned id -> visible ordinal) resolves the same physical
+    chips, and child processes inherit the narrowed set.
+    """
+    device_ids = getattr(engine_args, "device_ids", None)
+    if not device_ids:
+        return
+
+    # Ray selects devices through placement groups; --device-ids is ignored and
+    # vLLM already warns about it. ``--data-parallel-backend ray`` selects Ray
+    # implicitly (ParallelConfig.__post_init__), so check that path too.
+    if _is_ray_deployment(engine_args):
+        return
+
+    # UUIDs need the CANN-side translation, which already resolves them to the
+    # physical chip; rewriting the environment would break that mapping.
+    if any(not isinstance(device_id, int) for device_id in device_ids):
+        return
+
+    current_env = os.environ.get(_DEVICE_VISIBILITY_ENV_VAR, "")
+    visible = _split_visible_devices(current_env)
+    if not visible:
+        # Nothing restricts us today: the ids are already physical chip ids.
+        physical = [str(device_id) for device_id in device_ids]
+    else:
+        # Integer ids are zero-based indices into the visible list. Leave an
+        # out-of-range value alone so vLLM reports it with its own message.
+        if any(device_id < 0 or device_id >= len(visible) for device_id in device_ids):
+            return
+        physical = [visible[device_id] for device_id in device_ids]
+
+    if len(set(physical)) != len(physical):
+        # vLLM rejects duplicate ids later; keep the error path untouched.
+        return
+
+    new_env = ",".join(physical)
+    if new_env == current_env:
+        return
+
+    os.environ[_DEVICE_VISIBILITY_ENV_VAR] = new_env
+    engine_args.device_ids = list(range(len(physical)))
+    logger.info(
+        "Narrowed %s from %s to %s for device ids %s; no other NPU will be initialized.",
+        _DEVICE_VISIBILITY_ENV_VAR,
+        current_env or "<unset>",
+        new_env,
+        engine_args.device_ids,
+    )
+
+
+def _install_device_id_narrowing(parser) -> None:
+    """Narrow the visible NPU set as soon as the CLI arguments are parsed.
+
+    ``pre_register_and_update`` runs while vLLM assembles the argument parser,
+    which is before ``parse_args`` and long before ``EngineArgs`` resolves the
+    model architecture. Wrapping the parser keeps the hook inside the public
+    platform API: no vLLM object is replaced, and the wrapper only affects the
+    parser instance handed to the platform.
+    """
+
+    if getattr(parser, "_ascend_device_id_narrowing_installed", False):
+        return
+    parser._ascend_device_id_narrowing_installed = True
+
+    for name in ("parse_args", "parse_known_args"):
+        original = getattr(parser, name, None)
+        if original is None:
+            continue
+
+        def wrapper(*args, _original=original, **kwargs):
+            result = _original(*args, **kwargs)
+            namespace = result[0] if isinstance(result, tuple) else result
+            _narrow_visible_devices_to_device_ids(namespace)
+            return result
+
+        setattr(parser, name, wrapper)
+
 
 class NPUPlatform(Platform):
     _enum = PlatformEnum.OOT
@@ -413,6 +530,11 @@ class NPUPlatform(Platform):
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".
         if parser is not None:
+            # Resolve ``--device-ids`` before vLLM imports the model: that
+            # import path probes every visible NPU and would initialize the
+            # chips the user did not select.
+            _install_device_id_narrowing(parser)
+
             quant_action = parser._option_string_actions.get("--quantization")
             if quant_action and hasattr(quant_action, "choices") and quant_action.choices:
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
