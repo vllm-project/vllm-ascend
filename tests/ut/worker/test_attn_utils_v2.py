@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
@@ -104,6 +105,20 @@ def _make_dsv4_mla_spec(block_size: int, compress_ratio: int) -> AscendMLAAttent
 def _spec_compress_ratio(spec) -> int:
     """Compression ratio of an MLA spec on either vLLM lane."""
     return spec.tokens_per_state
+
+
+@pytest.mark.parametrize(
+    ("hf_config", "expected"),
+    [
+        (SimpleNamespace(model_type="deepseek_v4"), True),
+        (SimpleNamespace(model_type="deepseek_v41"), True),
+        (SimpleNamespace(model_type="glm5_next_text"), False),
+        (SimpleNamespace(compress_ratios=[1]), False),
+    ],
+)
+def test_is_dsv4_model_uses_explicit_model_type(hf_config, expected):
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
+    assert attn_utils._is_dsv4_model(vllm_config) is expected
 
 
 @pytest.fixture(autouse=True)
@@ -678,6 +693,9 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
 
     attn_module.impl.fa_quant_layer = True
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    attn_module.impl.use_flashmla = True
+    assert attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    attn_module.impl.use_flashmla = False
     attn_module.impl.fa_quant_layer = False
 
     attn_module.impl.use_pcp = True
@@ -1025,7 +1043,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
         additional_config={},
         kv_transfer_config=None,
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(compress_ratios=[1]),
+            hf_config=SimpleNamespace(model_type="deepseek_v4"),
         ),
     )
     monkeypatch.setattr(
@@ -1279,6 +1297,97 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
     else:
         assert spec.store_on_host is True
     assert spec.non_causal_multi_token_decode is non_causal
+
+
+@pytest.mark.parametrize(
+    "is_draft,method,model_type,quantized,expected_dtype",
+    [
+        (True, "dspark", "k3_dspark", False, torch.bfloat16),
+        (True, "dspark", "k3_dspark", True, torch.float8_e4m3fn),
+        (False, "dspark", "k3_dspark", False, torch.float8_e4m3fn),
+        (True, "eagle3", "k3_dspark", False, torch.float8_e4m3fn),
+        (True, "dspark", "other_draft", False, torch.float8_e4m3fn),
+    ],
+)
+def test_k31_dspark_mla_cache_spec_uses_layer_dtype(
+    monkeypatch, is_draft, method, model_type, quantized, expected_dtype
+):
+    source_spec = MLAAttentionSpec(
+        block_size=1536,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16 if quantized else torch.float8_e4m3fn,
+        cache_dtype_str=None if quantized else "fp8",
+        kv_quant_mode=KVQuantMode.NONE if quantized else KVQuantMode.FP8_PER_TENSOR,
+        non_causal_multi_token_decode=True,
+    )
+    layer = AscendMLAAttention.__new__(AscendMLAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.impl = SimpleNamespace(
+        fa_quant_layer=quantized,
+        enable_sparse_sfa_c8=False,
+        enable_sparse_sfa_turboquant=False,
+        dtype=torch.float8_e4m3fn if quantized else torch.bfloat16,
+        head_size=512,
+        store_kv_cache_on_host=False,
+    )
+    layer.num_heads = 96
+    layer.kv_lora_rank = 512
+    layer.attn_backend = AscendMLABackend
+    layer.qk_rope_head_dim = 64
+    layer.model_version = None
+    layer.indexes_kv_by_block_stride = False
+    layer.is_draft_layer = is_draft
+    layer.kv_sharing_target_layer_name = None
+    monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source_spec)
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method=method,
+            draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=model_type)),
+        ),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_text_config=SimpleNamespace(model_type="kimi_linear"),
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
+        attention_config=SimpleNamespace(indexer_kv_dtype="auto", hisparse_config=None),
+        cache_config=SimpleNamespace(block_size=1536, cache_dtype="fp8"),
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda *_args, **_kwargs: {"model.layers.93.self_attn.attn": layer},
+    )
+    # The surrounding VllmConfig still belongs to the K3.1 SFA target. The
+    # layer-local FA quant flag must take precedence for this DSpark draft.
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: True)
+
+    monkeypatch.setattr(
+        attn_utils,
+        "get_ascend_config",
+        lambda: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False)),
+    )
+
+    spec = attn_utils.get_kv_cache_spec(vllm_config)["model.layers.93.self_attn.attn"]
+
+    assert isinstance(spec, AscendMLAAttentionSpec)
+    assert spec.is_draft is is_draft
+    assert spec.num_heads == 1
+    assert spec.head_size == 576
+    assert spec.dtype == expected_dtype
+    if quantized or expected_dtype == torch.bfloat16:
+        assert spec.cache_dtype_str is None
+        assert spec.kv_quant_mode == KVQuantMode.NONE
+    else:
+        assert spec.cache_dtype_str == "fp8"
+        assert spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+    assert not spec.cache_sparse_sfa_c8
+    assert not spec.store_on_host
+    assert spec.page_size_bytes == 1536 * 576 * torch.empty((), dtype=spec.dtype).element_size()
+    assert spec.non_causal_multi_token_decode
 
 
 @pytest.mark.parametrize(

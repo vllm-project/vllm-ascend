@@ -7,6 +7,7 @@ from typing import Any
 import requests
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
+from vllm.outputs import RequestOutput
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.metrics.reader import Counter, Vector
 
@@ -354,6 +355,15 @@ PROMPTS_LONG = [
         "Compute the sum $a + b + c$."
     ),
 ]
+
+
+def assert_valid_generation_outputs(outputs: Sequence[RequestOutput], num_requests: int, vocab_size: int) -> None:
+    assert len(outputs) == num_requests, f"Expected {num_requests} outputs, got {len(outputs)}"
+    for prompt_idx, output in enumerate(outputs):
+        assert output.finished and len(output.outputs) == 1, f"Prompt {prompt_idx}: expected one finished completion"
+        token_ids = output.outputs[0].token_ids
+        assert token_ids, f"Prompt {prompt_idx}: empty completion"
+        assert all(0 <= token_id < vocab_size for token_id in token_ids), f"Prompt {prompt_idx}: invalid token ID"
 
 
 @dataclass(frozen=True)

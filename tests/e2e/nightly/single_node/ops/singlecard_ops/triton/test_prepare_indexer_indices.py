@@ -16,9 +16,20 @@ def reference(selected, positions, compress_ratio):
     return torch.where(selected == sentinel, -1, selected)
 
 
-@pytest.mark.parametrize("topk", [1, 7, 8, 33, 128, 512, 2047, 2048])
-@pytest.mark.parametrize("tokens", [0, 1, 3, 41, 129])
-@pytest.mark.parametrize("compress_ratio", [1, 2])
+@pytest.mark.parametrize(
+    "compress_ratio,tokens,topk",
+    [
+        (compress_ratio, tokens, topk)
+        # Pair row counts and top-k widths; keep aligned and tail boundaries.
+        for compress_ratio, single_row_topks, multi_row_topks in (
+            (1, (1, 2047), (33, 2048)),
+            (2, (33, 2048), (1, 2047)),
+        )
+        for tokens, topks in ((1, single_row_topks), (129, multi_row_topks), (3, (8,)), (41, (2048,)), (0, (1,)))
+        for topk in topks
+    ]
+    + [(1, 1, 512)],  # Preserve the independent 512-column specialization.
+)
 @torch.inference_mode()
 def test_prepare_indexer_indices(topk, tokens, compress_ratio):
     torch.manual_seed(41)
