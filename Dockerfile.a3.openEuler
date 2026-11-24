@@ -34,6 +34,7 @@
 #   --build-arg CANN_BASE_URL=<内网 CANN 包地址>          外网不可达时改为内网镜像
 #   --build-arg CANN_PKG_ARCH=aarch64|x86_64             缺省按构建架构自动选择
 #   --build-arg ETCD_VERSION=v3.5.21                     内置 etcd 版本
+#   --build-arg GCC_VERSION=12.3.0                       软件源无 C++20 工具链时源码编译的 GCC 版本
 #   --build-arg MAX_JOBS=32
 #
 # 本仓库源码必须是 releases/v0.23.0 分支（main 为 vLLM 0.33 世代，无法在此环境运行）。
@@ -77,13 +78,77 @@ RUN set -e; \
         curl -fsSL "${KYLIN_REPO_URL}" -o /etc/yum.repos.d/kylin.repo; \
     fi; \
     $PM makecache || { echo "ERROR: dnf 无可用软件源，请配置 .repo 或传 KYLIN_REPO_URL"; exit 1; }; \
-    $PM install -y git vim wget curl make patch tar gzip gawk sed grep findutils gcc gcc-c++ \
-        openssl-devel bzip2-devel libffi-devel zlib-devel xz-devel \
+    $PM install -y git vim wget curl make patch tar gzip gawk sed grep findutils gcc gcc-c++ m4 \
+        openssl-devel bzip2-devel libffi-devel zlib-devel xz xz-devel \
         sqlite-devel readline-devel ncurses-devel \
         numactl numactl-devel libibverbs-devel hiredis-devel libcurl-devel \
         yaml-cpp-devel gflags-devel boost-devel \
         jemalloc clang && \
     rm -rf /var/cache/yum/* /var/cache/dnf/*
+
+# 1b) C++20 工具链：vllm-ascend 的依赖 arctic-inference 用 nanobind 构建，要求 C++20，
+#     麒麟自带 GCC 7.3 不支持。优先安装软件源里的新版工具链（gcc-toolset-*/gcc-NN），
+#     源里没有则源码编译 GCC 到 /usr/local。最终统一软链到 /usr/local/bin，供后续所有编译使用。
+ARG GCC_VERSION=12.3.0
+RUN set -e; \
+    PM="$(command -v dnf || command -v yum)"; \
+    probe() { \
+        printf 'int main(){return 0;}\n' > /tmp/probe.cpp; \
+        "$1" -std=c++20 /tmp/probe.cpp -o /tmp/probe.out >/dev/null 2>&1; \
+    }; \
+    CXX_BIN=""; \
+    if probe /usr/bin/g++; then \
+        echo "INFO: 系统 g++ 已支持 C++20，无需升级"; \
+        CXX_BIN=/usr/bin/g++; \
+    else \
+        for pkgset in "gcc-toolset-12-gcc gcc-toolset-12-gcc-c++" \
+                      "gcc-toolset-11-gcc gcc-toolset-11-gcc-c++" \
+                      "gcc-toolset-10-gcc gcc-toolset-10-gcc-c++" \
+                      "gcc-10 gcc-c++-10" \
+                      "gcc10 gcc10-c++"; do \
+            echo "INFO: 尝试从软件源安装 ${pkgset}"; \
+            $PM install -y ${pkgset} >/dev/null 2>&1 || continue; \
+            for c in /opt/rh/gcc-toolset-12/root/usr/bin/g++ \
+                     /opt/rh/gcc-toolset-11/root/usr/bin/g++ \
+                     /opt/rh/gcc-toolset-10/root/usr/bin/g++ \
+                     /usr/bin/g++-10 /usr/bin/g++10; do \
+                if [ -x "$c" ] && probe "$c"; then CXX_BIN="$c"; break; fi; \
+            done; \
+            [ -n "$CXX_BIN" ] && break; \
+        done; \
+    fi; \
+    if [ -z "$CXX_BIN" ]; then \
+        echo "INFO: 软件源无可用 C++20 编译器，源码编译 GCC ${GCC_VERSION}"; \
+        curl -fsSL "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.gz" -o /tmp/gcc.tar.gz; \
+        mkdir -p /tmp/gccsrc && tar -xzf /tmp/gcc.tar.gz -C /tmp/gccsrc --strip-components=1; \
+        cd /tmp/gccsrc && ./contrib/download_prerequisites; \
+        mkdir -p /tmp/gccbuild && cd /tmp/gccbuild && \
+        /tmp/gccsrc/configure --prefix=/usr/local --enable-languages=c,c++ \
+            --disable-bootstrap --disable-multilib --with-system-zlib && \
+        make -j"${MAX_JOBS:-$(nproc)}" && make install-strip; \
+        cd / && rm -rf /tmp/gccsrc /tmp/gccbuild /tmp/gcc.tar.gz; \
+        CXX_BIN=/usr/local/bin/g++; \
+    fi; \
+    probe "$CXX_BIN" || { echo "ERROR: $CXX_BIN 仍不支持 C++20"; exit 1; }; \
+    CC_BIN="${CXX_BIN%g++}gcc"; \
+    echo "INFO: 选用编译器 $CXX_BIN (版本 $("$CXX_BIN" -dumpversion))"; \
+    mkdir -p /usr/local/bin /usr/local/lib64; \
+    ln -sf "$CXX_BIN" /usr/local/bin/g++; \
+    ln -sf "$CC_BIN" /usr/local/bin/gcc; \
+    ln -sf "$CXX_BIN" /usr/local/bin/c++; \
+    ln -sf "$CC_BIN" /usr/local/bin/cc; \
+    STDCPP="$("$CXX_BIN" -print-file-name=libstdc++.so)"; \
+    if [ -f "$STDCPP" ]; then \
+        CXX_LIBDIR="$(dirname "$(readlink -f "$STDCPP")")"; \
+        if [ "$CXX_LIBDIR" != "/usr/local/lib64" ]; then \
+            for f in "$CXX_LIBDIR"/libstdc++.so.6*; do ln -sf "$f" /usr/local/lib64/; done; \
+        fi; \
+    fi; \
+    ldconfig; \
+    /usr/local/bin/g++ --version | head -1
+
+ENV CC=/usr/local/bin/gcc \
+    CXX=/usr/local/bin/g++
 
 # 2) 源码编译 Python 3.12（麒麟 V10 自带 3.7，不满足 torch 2.10 / vLLM 0.23 要求）
 RUN curl -fsSL https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz -o /tmp/Python.tgz && \
@@ -91,13 +156,13 @@ RUN curl -fsSL https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTH
     cd /tmp/pybuild && \
     ./configure --prefix=/usr/local --enable-shared --with-ensurepip=install && \
     make -j"${MAX_JOBS:-$(nproc)}" && make install && \
-    mkdir -p /etc/ld.so.conf.d && echo /usr/local/lib > /etc/ld.so.conf.d/usr-local.conf && ldconfig && \
+    mkdir -p /etc/ld.so.conf.d && printf '/usr/local/lib\n/usr/local/lib64\n' > /etc/ld.so.conf.d/usr-local.conf && ldconfig && \
     cd /tmp && rm -rf /tmp/pybuild /tmp/Python.tgz && \
     LD_LIBRARY_PATH=/usr/local/lib python3 -V && \
     LD_LIBRARY_PATH=/usr/local/lib python3 -m pip install -U pip setuptools wheel
 
 ENV PATH=/usr/local/bin:$PATH \
-    LD_LIBRARY_PATH=/usr/local/lib
+    LD_LIBRARY_PATH=/usr/local/lib64:/usr/local/lib
 
 # 2b) CANN 安装前需要的基础 Python 库（CANN 9.1 官方安装依赖清单；
 #     pathlib2 已不兼容 py3.12，故不安装）
@@ -243,7 +308,7 @@ RUN for f in /usr/local/Ascend/cann/set_env.sh /usr/local/Ascend/ascend-toolkit/
     rm -rf /tmp/Mooncake && python3 -m pip cache purge
 
 RUN echo 'export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD' >> ~/.bashrc && \
-    echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib' >> ~/.bashrc
+    echo 'export LD_LIBRARY_PATH=/usr/local/lib64:/usr/local/lib:$LD_LIBRARY_PATH' >> ~/.bashrc
 
 # 10) 内置 etcd（MindIE-Motor 服务发现；离线运行不再依赖外部 etcd）
 ARG ETCD_VERSION=v3.5.21
