@@ -436,6 +436,13 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                 HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
                 HardwareCapability.RMS_NORM_CAST,
                 HardwareCapability.NPU_TOP_K_TOP_P,
+                # Atlas A2 provides the CANN MegaMoe operator for the INT
+                # quant paths (arch22 kernel, e.g.
+                # mega_moe_kernel_a2_bf16_w4a8.hpp). CANN_MEGAMOE_MXFP is
+                # deliberately not granted: that capability also changes
+                # x_active_mask handling to a convention the A2 operator does
+                # not implement.
+                HardwareCapability.CANN_MEGAMOE,
             },
         ),
         AscendDeviceType.A3: HardwareProfile(
