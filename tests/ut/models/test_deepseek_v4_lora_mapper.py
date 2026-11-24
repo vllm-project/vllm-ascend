@@ -14,12 +14,14 @@ import pytest
 import torch
 import vllm.lora.utils as upstream_lora_utils
 from vllm.config import LoRAConfig
+from vllm.lora.lora_model import LoRAModel
 from vllm.lora.model_manager import LRUCacheLoRAModelManager
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 from vllm.lora.utils import parse_fine_tuned_lora_name
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models import SupportsLoRA
+from vllm.model_executor.models.interfaces import supports_lora
 
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
 from vllm_ascend.lora.utils import (
@@ -29,6 +31,7 @@ from vllm_ascend.lora.utils import (
 )
 from vllm_ascend.models.deepseek_v4.compressor import Compressor
 from vllm_ascend.models.deepseek_v4.model import AscendDeepseekV4ForCausalLM
+from vllm_ascend.models.deepseek_v4.vl_model import AscendDeepseekV4ForConditionalGeneration
 
 
 def _rename_mapper():
@@ -90,6 +93,172 @@ def test_hf_ffn_moe_and_shared_expert_keys_reach_mlp_modules():
         module_name, is_lora_a = parse_fine_tuned_lora_name(raw_key, _rename_mapper())
         assert module_name == expected_module
         assert is_lora_a is expected_is_a
+
+
+def _vl_rename_mapper():
+    return AscendDeepseekV4ForConditionalGeneration.build_lora_weights_mapper().get_rename_mapper()
+
+
+def test_vl_wrapper_exposes_lora_contract_with_independent_mapping() -> None:
+    assert supports_lora(AscendDeepseekV4ForConditionalGeneration)
+    assert AscendDeepseekV4ForConditionalGeneration.packed_modules_mapping == {"gate_up_proj": ["gate_proj", "up_proj"]}
+    assert (
+        AscendDeepseekV4ForConditionalGeneration.packed_modules_mapping
+        is not AscendDeepseekV4ForCausalLM.packed_modules_mapping
+    )
+    assert AscendDeepseekV4ForConditionalGeneration.embedding_modules == AscendDeepseekV4ForCausalLM.embedding_modules
+    assert AscendDeepseekV4ForConditionalGeneration.is_3d_moe_weight == AscendDeepseekV4ForCausalLM.is_3d_moe_weight
+    assert AscendDeepseekV4ForConditionalGeneration.is_non_gated_moe == AscendDeepseekV4ForCausalLM.is_non_gated_moe
+    assert "vision." in AscendDeepseekV4ForConditionalGeneration.lora_skip_prefixes
+    assert "aligner." in AscendDeepseekV4ForConditionalGeneration.lora_skip_prefixes
+    assert not hasattr(AscendDeepseekV4ForConditionalGeneration, "hf_to_vllm_mapper")
+
+
+def test_vl_hf_adapter_keys_re_root_onto_language_model() -> None:
+    mapper = _vl_rename_mapper()
+    cases = [
+        (
+            "base_model.model.model.layers.7.attn.wq_a.lora_A.weight",
+            "language_model.model.layers.7.self_attn.wq_a",
+            True,
+        ),
+        (
+            "base_model.model.layers.3.attn.wo_b.lora_B.weight",
+            "language_model.model.layers.3.self_attn.wo_b",
+            False,
+        ),
+        (
+            "base_model.model.model.layers.5.ffn.experts.12.w1.lora_A.weight",
+            "language_model.model.layers.5.mlp.experts.12.gate_proj",
+            True,
+        ),
+        (
+            "base_model.model.model.layers.5.ffn.experts.12.w2.lora_B.weight",
+            "language_model.model.layers.5.mlp.experts.12.down_proj",
+            False,
+        ),
+        (
+            "base_model.model.model.layers.5.ffn.shared_experts.w3.lora_B.weight",
+            "language_model.model.layers.5.mlp.shared_experts.up_proj",
+            False,
+        ),
+        (
+            "base_model.model.lm_head.lora_A.weight",
+            "language_model.lm_head",
+            True,
+        ),
+        (
+            "language_model.model.layers.1.self_attn.wkv.lora_A.weight",
+            "language_model.model.layers.1.self_attn.wkv",
+            True,
+        ),
+    ]
+    for raw_key, expected_module, expected_is_a in cases:
+        module_name, is_lora_a = parse_fine_tuned_lora_name(raw_key, mapper)
+        assert module_name == expected_module
+        assert is_lora_a is expected_is_a
+
+
+def _build_real_vl_compressor_model() -> AscendDeepseekV4ForConditionalGeneration:
+    model = AscendDeepseekV4ForConditionalGeneration.__new__(AscendDeepseekV4ForConditionalGeneration)
+    torch.nn.Module.__init__(model)
+    model.config = None
+    model.hf_to_vllm_mapper = AscendDeepseekV4ForConditionalGeneration.build_lora_weights_mapper()
+    model.vision = torch.nn.Module()
+    model.vision.proj = torch.nn.Linear(8, 8)
+    model.aligner = torch.nn.Module()
+    model.aligner.w1 = torch.nn.Linear(8, 8)
+
+    layer0 = torch.nn.Module()
+    layer0.self_attn = torch.nn.Module()
+    layer0.self_attn.wkv = _make_cpu_replicated_linear(8, 8, prefix="language_model.model.layers.0.self_attn.wkv")
+    layer0.self_attn.compressor = _build_real_dsv4_compressor(
+        prefix="language_model.model.layers.0.self_attn.compressor"
+    )
+    layer0.self_attn.indexer = torch.nn.Module()
+    layer0.self_attn.indexer.compressor = _build_real_dsv4_compressor(
+        prefix="language_model.model.layers.0.self_attn.indexer.compressor"
+    )
+    model.language_model = torch.nn.Module()
+    model.language_model.model = torch.nn.Module()
+    model.language_model.model.layers = torch.nn.ModuleList([layer0])
+    return model
+
+
+def test_vl_compressor_projections_are_unwrapped_and_rejected_on_load() -> None:
+    original_classes = upstream_lora_utils._all_lora_classes
+    try:
+        refresh_all_lora_classes()
+        model = _build_real_vl_compressor_model()
+        lora_config = LoRAConfig(max_loras=1, max_lora_rank=8, lora_dtype=torch.bfloat16, max_cpu_loras=2)
+        vllm_config = SimpleNamespace(
+            lora_config=lora_config,
+            parallel_config=SimpleNamespace(enable_expert_parallel=False),
+            model_config=None,
+        )
+        punica_wrapper = object.__new__(PunicaWrapperNPU)
+        PunicaWrapperBase.__init__(punica_wrapper, 16, 2, "cpu")
+
+        with patch("vllm.lora.model_manager.get_punica_wrapper", return_value=punica_wrapper):
+            manager = LRUCacheLoRAModelManager(
+                model=model,
+                max_num_seqs=2,
+                max_num_batched_tokens=16,
+                vocab_size=32,
+                lora_config=lora_config,
+                device=torch.device("cpu"),
+                vllm_config=vllm_config,
+            )
+
+        assert "language_model.model.layers.0.self_attn.wkv" in manager.modules
+        assert isinstance(
+            manager.modules["language_model.model.layers.0.self_attn.wkv"],
+            AscendReplicatedLinearWithLoRA,
+        )
+        assert "vision.proj" not in manager.modules
+        assert "aligner.w1" not in manager.modules
+        assert LoRAModel._should_skip_module("vision.proj.lora_A.weight", model.lora_skip_prefixes)
+        assert LoRAModel._should_skip_module("aligner.w1.lora_A.weight", model.lora_skip_prefixes)
+        assert not LoRAModel._should_skip_module("model.layers.0.attn.wkv.lora_A.weight", model.lora_skip_prefixes)
+        for excluded in (
+            "language_model.model.layers.0.self_attn.compressor.wkv",
+            "language_model.model.layers.0.self_attn.compressor.wgate",
+            "language_model.model.layers.0.self_attn.indexer.compressor.wkv",
+            "language_model.model.layers.0.self_attn.indexer.compressor.wgate",
+        ):
+            assert excluded not in manager.modules
+
+        worker_manager = SimpleNamespace(
+            _adapter_manager=manager,
+            _load_adapter=lambda req: req.loaded_model,
+        )
+        install_dp_moe_lora_load_guard(worker_manager)
+
+        rename_mapper = model.hf_to_vllm_mapper.get_rename_mapper()
+        mapped_ok, _ = parse_fine_tuned_lora_name(
+            "base_model.model.model.layers.0.attn.wkv.lora_A.weight",
+            rename_mapper,
+        )
+        assert mapped_ok == "language_model.model.layers.0.self_attn.wkv"
+        assert worker_manager._load_adapter(
+            SimpleNamespace(loaded_model=SimpleNamespace(id=1, loras={mapped_ok: object()}))
+        )
+
+        for idx, raw_key in enumerate(
+            (
+                "base_model.model.model.layers.0.attn.compressor.wkv.lora_A.weight",
+                "base_model.model.model.layers.0.attn.compressor.wgate.lora_A.weight",
+                "base_model.model.model.layers.0.attn.indexer.compressor.wkv.lora_A.weight",
+                "base_model.model.model.layers.0.attn.indexer.compressor.wgate.lora_A.weight",
+            ),
+            start=2,
+        ):
+            mapped_bad, _ = parse_fine_tuned_lora_name(raw_key, rename_mapper)
+            bad_adapter = SimpleNamespace(id=idx, loras={mapped_ok: None, mapped_bad: object()})
+            with pytest.raises(NotImplementedError, match="Compressor"):
+                worker_manager._load_adapter(SimpleNamespace(loaded_model=bad_adapter))
+    finally:
+        upstream_lora_utils._all_lora_classes = original_classes
 
 
 def _make_cpu_replicated_linear(in_dim: int, out_dim: int, *, prefix: str = "", **_kwargs) -> torch.nn.Module:

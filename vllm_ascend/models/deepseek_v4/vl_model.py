@@ -15,10 +15,11 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.models.deepseek_v4.common.mm_preprocess import (
     IMAGE_PLACEHOLDER,
     IMAGE_SENTINEL_BASE_ID,
@@ -54,11 +55,21 @@ class AscendDeepseekV4ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
     SupportsPP,
+    SupportsLoRA,
     SupportsEagle3,
 ):
     """DeepSeek-V4 vision entry point using the Ascend text backbone."""
 
     requires_raw_input_tokens = True
+    packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+    language_model_cls = AscendDeepseekV4ForCausalLM
+    # The runner checks ``SupportsLoRA`` on this top-level multimodal wrapper,
+    # so expose the text backbone's LoRA contract here while keeping the
+    # frozen vision tower and aligner skipped during adapter loading.
+    embedding_modules = language_model_cls.embedding_modules
+    is_3d_moe_weight = language_model_cls.is_3d_moe_weight
+    is_non_gated_moe = language_model_cls.is_non_gated_moe
+    lora_skip_prefixes = [*language_model_cls.lora_skip_prefixes, "vision.", "aligner."]
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -66,6 +77,35 @@ class AscendDeepseekV4ForConditionalGeneration(
         if modality == "image":
             return IMAGE_PLACEHOLDER
         raise ValueError(f"Unsupported modality: {modality!r}")
+
+    @classmethod
+    def build_lora_weights_mapper(cls) -> WeightsMapper:
+        """Map HF text adapter keys onto the multimodal-wrapped module tree.
+
+        Applied per-instance on ``self.hf_to_vllm_mapper`` so the base weight
+        loader and quantization continue seeing raw checkpoint tensor names.
+        """
+        return WeightsMapper(
+            orig_to_new_substr={
+                ".attn.": ".self_attn.",
+                ".ffn.": ".mlp.",
+                ".w1.": ".gate_proj.",
+                ".w2.": ".down_proj.",
+                ".w3.": ".up_proj.",
+            },
+            orig_to_new_suffix={
+                ".w1": ".gate_proj",
+                ".w2": ".down_proj",
+                ".w3": ".up_proj",
+            },
+            orig_to_new_prefix={
+                "model.layers.": "language_model.model.layers.",
+                "layers.": "language_model.model.layers.",
+                "model.embed_tokens.": "language_model.model.embed_tokens.",
+                "embed_tokens.": "language_model.model.embed_tokens.",
+                "lm_head.": "language_model.lm_head.",
+            },
+        )
 
     def __init__(self, *, vllm_config, prefix: str = "") -> None:
         super().__init__()
@@ -104,11 +144,12 @@ class AscendDeepseekV4ForConditionalGeneration(
                 self.aligner.to(dtype=model_config.dtype)
 
         with self._mark_language_model(vllm_config):
-            self.language_model = AscendDeepseekV4ForCausalLM(
+            self.language_model = self.language_model_cls(
                 vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+        self.hf_to_vllm_mapper = self.build_lora_weights_mapper()
 
     def _parse_and_validate_image_input(self, **kwargs: object) -> dict | None:
         patches = kwargs.pop("patches", None)

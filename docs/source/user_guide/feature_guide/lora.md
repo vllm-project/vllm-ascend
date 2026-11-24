@@ -73,7 +73,7 @@ To use the fully sharded path, add `--fully-sharded-loras` on the same command.
 
 This path enables language-model LoRA projections (`wq_a`, `wq_b`, `wkv`, `wo_a`, `wo_b`, `gate_up_proj`, `down_proj`, and shared experts) on DeepSeek-V4 and DeepSeek-V4.1:
 
-- HF text-backbone `.attn.`, `.ffn.`, `.w1.`, `.w2.`, and `.w3.` names map onto `self_attn`, `mlp`, `gate_proj`, `down_proj`, and `up_proj` (and re-root under `language_model.` for DeepSeek-V4.1). Vision and aligner modules stay frozen and are excluded.
+- HF text-backbone `.attn.`, `.ffn.`, `.w1.`, `.w2.`, and `.w3.` names map onto `self_attn`, `mlp`, `gate_proj`, `down_proj`, and `up_proj` (and re-root under `language_model.` for DeepSeek-V4 multimodal and DeepSeek-V4.1). Vision and aligner modules stay frozen and are excluded.
 - Unmatched adapter keys emit a `WARNING` when the adapter is loaded so typos or mismatched 2D/3D MoE key layouts are surfaced immediately instead of failing silently.
 - **MoE adapter formats**:
     - **2D per-expert keys (default)**: e.g. `model.layers.<L>.mlp.experts.<E>.{gate_proj,up_proj,down_proj}.lora_{A,B}.weight` or HF-spelled `model.layers.<L>.ffn.experts.<E>.{w1,w2,w3}.lora_{A,B}.weight`.
