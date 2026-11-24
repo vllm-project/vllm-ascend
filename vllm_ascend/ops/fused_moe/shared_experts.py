@@ -142,6 +142,18 @@ class AscendSharedExperts:
         ascend_config = get_ascend_config()
         self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
         self.weights_replicated = ascend_config.enable_shared_expert_dp
+        import os
+
+        self._alignment_kimi_full_k = (
+            os.environ.get("KIMI_ALIGNMENT_MOE") == "1"
+            and ".block_sparse_moe.shared_experts." in getattr(layer.gate_up_proj, "prefix", "")
+            and self.situ_activation is not None
+        )
+        if self._alignment_kimi_full_k:
+            assert self.quant_type == QuantType.NONE
+            assert self.is_sequence_parallel and not self.weights_replicated
+            # Keep newly introduced TP gathers ordered with routed collectives.
+            self.multistream_overlap = False
 
         # Shared-expert fusion into the A5 MegaMoe operator: disabled until the
         # setup below proves the configuration is supported, then armed once
@@ -727,6 +739,14 @@ class AscendSharedExperts:
         return shared_gate_up
 
     def apply_activation(self, shared_gate_up: torch.Tensor):
+        if self._alignment_kimi_full_k:
+            return torch.ops.cann_ops_nn.situ_glu(
+                shared_gate_up,
+                dim=-1,
+                beta=self.situ_activation.beta,
+                linear_beta=self.situ_activation.linear_beta,
+                activate_left=True,
+            )
         return self.layer.act_fn(shared_gate_up)  # type: ignore
 
     def part2(
@@ -734,6 +754,19 @@ class AscendSharedExperts:
         hidden_states: torch.Tensor,
         down_input: LinearInput,
     ):
+        if self._alignment_kimi_full_k:
+            from types import SimpleNamespace
+
+            from vllm.distributed import get_tp_group
+
+            from vllm_ascend.ops.kimi_alignment.linear_alignment import full_k_sequence_projection
+
+            group = get_tp_group()
+            op = SimpleNamespace(
+                layer=self.layer.down_proj, comm_group=group, tp_rank=group.rank_in_group, tp_size=group.world_size
+            )
+            shared_out = full_k_sequence_projection(op, down_input)
+            return self._apply_output_gate(hidden_states, shared_out)
         shared_out, _ = self.layer.down_proj(down_input)  # type: ignore
         return self._apply_output_gate(hidden_states, shared_out)
 
@@ -815,6 +848,9 @@ class AscendSharedExperts:
         (down_proj is built with reduce_results=False), replacing the usual
         TP all-reduce.
         """
+        if self._alignment_kimi_full_k:
+            # full_k_sequence_projection already returned the padded SP shard.
+            return shared_out
         tp_size = self.moe_config.tp_group.world_size
         original_num_tokens = shared_out.shape[0]
         pad_size = (tp_size - original_num_tokens % tp_size) % tp_size

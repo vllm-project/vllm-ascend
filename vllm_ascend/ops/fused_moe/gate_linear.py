@@ -86,6 +86,13 @@ class AscendGateLinear(GateLinear):
         self.out_dtype = out_dtype if out_dtype is not None else torch.float32
 
     def forward(self, x: torch.Tensor):
+        if getattr(self, "_alignment_kimi_training_gate", False):
+            from vllm_ascend.ops.kimi_alignment.moe_alignment import training_gate_logits
+
+            if self.bias is not None:
+                raise ValueError("Kimi alignment requires an unbiased BF16 gate")
+            output = training_gate_logits(x, self.weight)
+            return (output, None) if self.return_bias else output
         # Tier 4: bf16 x bf16 -> fp32 accumulation. Eligibility mirrors
         # upstream: bf16 weight (i.e. no fp32 upcast requested), fp32
         # out_dtype, no bias (torch.mm has no bias term).

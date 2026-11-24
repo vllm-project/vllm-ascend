@@ -1419,6 +1419,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         attn_metadata: M,
     ):
         """Process and write KV whose PCP exchange has already completed."""
+        if getattr(self, "_alignment_kimi_raw_channels", False):
+            from vllm_ascend.ops.kimi_alignment.dsa_alignment import write_raw_nope_cache
+
+            return write_raw_nope_cache(self, kv_no_split, slots, kv_cache)
         if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
             assert self.kv_a_layernorm is not None
             values = self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank))
@@ -2136,6 +2140,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         topk_num_tokens = num_input_tokens or hidden_states.shape[0]
 
         fused_type: PreprocessType = self.preprocess_type
+        if getattr(self, "_alignment_kimi_raw_channels", False):
+            assert fused_type == PreprocessType.NATIVE, "Raw Kimi channels require verified native preprocessing"
         # PROLOG_V3 serves every attention state (decode, spec decoding and
         # prefill); only MLAPO carries a per-call token-count limit.
         if self.preprocess_type == PreprocessType.MLAPO and num_input_tokens > MLAPO_MAX_SUPPORTED_TOKENS:
@@ -2239,7 +2245,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 kv_outputs = kv_outputs()
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
-            if self.qk_rope_head_dim:
+            if self.qk_rope_head_dim and not getattr(self, "_alignment_kimi_raw_channels", False):
                 q_pe = self.rope_single(q_pe, cos, sin)
             self._on_query_ready(ql_nope, q_pe, attn_metadata)
 
@@ -2283,6 +2289,30 @@ class AscendSFAImpl(MLAAttentionImpl):
         else:
             raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
 
+        from vllm_ascend.ops.kimi_alignment.dsa_trace import stage
+
+        stage(
+            "pre_attention",
+            preprocess=str(fused_type),
+            hidden=hidden_states,
+            query_latent=q_c,
+            query_absorbed=ql_nope,
+            query_rope=q_pe,
+            key_plain=locals().get("k_nope"),
+            key_rope=locals().get("k_pe"),
+            indices=topk_indices,
+            seq_query=actual_seq_lengths_query,
+            seq_key=actual_seq_lengths_key,
+            slot_mapping=slot_mapping_sfa,
+            key_projection=self.W_UK_T,
+            value_projection=self.W_UV,
+            scale=self.scale,
+            q_norm_epsilon=self.q_a_layernorm.variance_epsilon,
+            kv_norm_epsilon=self.kv_a_layernorm.variance_epsilon,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            cos=cos,
+            sin=sin,
+        )
         # Notify for every layer that wrote the cache, not just indexer layers:
         # by this point all of the layer's KV (main + indexer) has been
         # scattered - indexer layers persisted it inside indexer.forward
@@ -2305,7 +2335,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                 )
 
         if has_local_query:
+            stage("attention_core", output=attn_output)
             attn_output = self._v_up_proj(attn_output)
+            stage("value_projection", output=attn_output)
         else:
             # The O-proj below still joins its PCP/TP collectives.
             attn_output = hidden_states.new_zeros((ql_nope.shape[0], self.local_num_heads * self.v_head_dim))

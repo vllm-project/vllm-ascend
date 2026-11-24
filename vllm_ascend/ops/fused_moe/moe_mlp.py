@@ -67,15 +67,31 @@ def apply_moe_mlp(
                 quant_method=quant_method,
             )
 
+    from vllm_ascend.ops.kimi_alignment.moe_trace import stage
+
+    stage(
+        "mlp_input",
+        hidden=mlp_compute_input.hidden_states,
+        groups=mlp_compute_input.group_list,
+        group_list_type=mlp_compute_input.group_list_type,
+        topk_ids=mlp_compute_input.topk_ids,
+        beta=mlp_compute_input.activation_situ_beta,
+        linear_beta=mlp_compute_input.activation_situ_linear_beta,
+        weights=mlp_compute_input.weights,
+        method=type(quant_method).__name__,
+    )
     if quant_method.supports_fused_activation(mlp_compute_input.activation):
         hidden_states, act_out_scale = quant_method.apply_gmm1_act_quant(mlp_compute_input)
     else:
         hidden_states = quant_method.apply_gmm1(mlp_compute_input)
+        stage("gmm1", output=hidden_states)
         hidden_states = _unified_apply_activation(mlp_compute_input, hidden_states, quant_method)
+        stage("activation", output=hidden_states)
         hidden_states, act_out_scale = quant_method.apply_act_quant(mlp_compute_input, hidden_states)
 
     before_gmm2_evt = maybe_record_event()
     hidden_states = quant_method.apply_gmm2(mlp_compute_input, hidden_states, act_out_scale)
+    stage("gmm2", output=hidden_states)
     return hidden_states, before_gmm2_evt
 
 
@@ -128,6 +144,13 @@ def _apply_situ(
     linear_beta: float | None,
 ) -> torch.Tensor:
     """Match SituAndMul.forward_native without constructing a CustomOp in forward."""
+    import os
+
+    if os.environ.get("KIMI_ALIGNMENT_MOE") == "1":
+        assert hidden_states.dtype == torch.bfloat16
+        return torch.ops.cann_ops_nn.situ_glu(
+            hidden_states, dim=-1, beta=beta, linear_beta=linear_beta, activate_left=True
+        )
     gate, up = hidden_states.chunk(2, dim=-1)
     gate = gate.float()
     up = up.float()

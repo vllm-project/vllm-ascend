@@ -92,6 +92,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.head_parallel import HeadParallelRowLinear, get_head_sharded_state_shape
+from vllm_ascend.ops.kimi_alignment.residual_alignment import attn_res_forward as aligned_attn_res_fwd
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
 )
@@ -293,6 +294,25 @@ class AscendKimiMLP(KimiMLP):
             # All weight shards must operate on the same tokens. Reducing
             # different sequence shards would mix live and padding rows.
             x = sp_all_gather(x)
+        import os
+
+        if os.environ.get("KIMI_ALIGNMENT_DENSE_MLP") == "1":
+            assert self.use_sequence_parallel, "Aligned dense MLP requires its SP output contract"
+            from types import SimpleNamespace
+
+            from vllm.distributed.parallel_state import get_tp_group
+
+            from vllm_ascend.ops.kimi_alignment.linear_alignment import full_k_sequence_projection
+
+            gate_up, _ = self.gate_up_proj(x)
+            activated = torch.ops.cann_ops_nn.situ_glu(
+                gate_up, dim=-1, beta=self.act_fn.beta, linear_beta=self.act_fn.linear_beta, activate_left=True
+            )
+            group = get_tp_group()
+            op = SimpleNamespace(
+                layer=self.down_proj, comm_group=group, tp_rank=group.rank_in_group, tp_size=group.world_size
+            )
+            return full_k_sequence_projection(op, activated)
         x = super().forward(x)
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
@@ -407,6 +427,10 @@ class AscendKimiMoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
         self.gate.e_score_correction_bias = nn.Parameter(torch.empty(num_experts, dtype=torch.float32))
+        import os
+
+        self._alignment_router_config = config
+        self.gate._alignment_kimi_training_gate = os.environ.get("KIMI_ALIGNMENT_MOE") == "1"
 
         if self.num_shared_experts is not None:
             self.shared_experts = KimiMLP(
@@ -456,6 +480,7 @@ class AscendKimiMoE(nn.Module):
 
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
+            custom_routing_function=(self._alignment_routing if self.gate._alignment_kimi_training_gate else None),
             num_experts=num_experts,
             top_k=num_experts_per_token,
             hidden_size=self.moe_hidden_size,
@@ -487,14 +512,32 @@ class AscendKimiMoE(nn.Module):
         self.n_local_physical_experts = moe_config.num_local_experts
         self.n_redundant_experts = num_redundant_experts
 
+    def _alignment_routing(self, hidden_states, gating_output, topk, renormalize):
+        from vllm_ascend.ops.kimi_alignment.moe_alignment import training_routing
+
+        c = self._alignment_router_config
+        return training_routing(
+            gating_output,
+            self.gate.e_score_correction_bias,
+            topk,
+            renormalize,
+            self.routed_scaling_factor,
+            scoring_func=c.moe_router_activation_func,
+            num_expert_group=c.num_expert_group,
+            topk_group=c.topk_group,
+        )
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
-        router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-        )
+        from vllm_ascend.ops.kimi_alignment.moe_trace import capture_moe
+
+        with capture_moe(self, hidden_states):
+            router_logits, _ = self.gate(hidden_states)
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
@@ -656,6 +699,24 @@ class AscendKimiDSAAttention(AscendKimiMLAAttention):
             prefix=prefix,
             topk_indices_buffer=topk_indices_buffer,
         )
+        import os
+
+        if os.environ.get("KIMI_ALIGNMENT_DSA_NORM") == "1":
+            # DSA calls DeepseekV2MLAAttention directly, bypassing the MLA
+            # constructor. These are the norm objects used by SFA native/prolog.
+            self.impl.q_a_layernorm.variance_epsilon = 1e-6
+            self.impl.kv_a_layernorm.variance_epsilon = 1e-6
+            assert self.q_a_layernorm is self.impl.q_a_layernorm
+            print(
+                f"[KimiDSANormAlignment] {prefix} q_eps={self.impl.q_a_layernorm.variance_epsilon} "
+                f"kv_eps={self.impl.kv_a_layernorm.variance_epsilon}",
+                flush=True,
+            )
+        self.impl._alignment_kimi_raw_channels = os.environ.get("KIMI_ALIGNMENT_DSA_RAW_CHANNELS") == "1"
+        if self.impl._alignment_kimi_raw_channels:
+            assert config.mla_use_nope and config.qk_rope_head_dim == 64
+            assert not self.impl.enable_sparse_sfa_c8 and not self.impl.enable_sparse_sfa_turboquant
+            print(f"[KimiDSARawChannels] {prefix} enabled", flush=True)
         if config.mla_use_output_gate:
             self.g_proj = ColumnParallelLinear(
                 config.hidden_size,
@@ -665,6 +726,12 @@ class AscendKimiDSAAttention(AscendKimiMLAAttention):
                 prefix=f"{prefix}.g_proj",
             )
             self.impl.g_proj = self.g_proj
+
+    def forward(self, positions, hidden_states):
+        from vllm_ascend.ops.kimi_alignment.dsa_trace import capture_dsa
+
+        with capture_dsa(self, positions, hidden_states):
+            return super().forward(positions, hidden_states)
 
 
 class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
@@ -845,7 +912,10 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         # The previous MLP add is rounded to BF16 before it becomes either a
         # DSpark raw prefix or an AttnRes input. A block boundary stores that
         # same prefix, while the mixture reads only the older valid slots.
-        return torch.ops._C_ascend.attn_res_fwd(
+        import os
+
+        split_first_norm = self.prev_valid_blocks == 0 and os.environ.get("KIMI_ALIGNMENT_SPLIT_INPUT_NORM") == "1"
+        result = aligned_attn_res_fwd(
             prefix_sum,
             addend,
             block_residual,
@@ -853,12 +923,23 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             self.self_attention_res_norm.weight,
             self.self_attention_res_norm.variance_epsilon,
             self.prev_valid_blocks,
-            self.input_layernorm.weight,
-            self.input_layernorm.variance_epsilon,
+            None if split_first_norm else self.input_layernorm.weight,
+            0.0 if split_first_norm else self.input_layernorm.variance_epsilon,
             self.block_write_idx if self.is_block_write_layer else -1,
             return_materialized,
             optimize_prefill=optimize_prefill,
         )
+        if split_first_norm:
+            import torch_npu
+
+            normalized = torch_npu.npu_rms_norm(
+                result[0], self.input_layernorm.weight, epsilon=self.input_layernorm.variance_epsilon
+            )[0]
+            result = (normalized, result[1], result[2])
+        from vllm_ascend.ops.kimi_alignment.mm_trace import trace_input_norm
+
+        trace_input_norm(self, prefix_sum, block_residual, result, addend, optimize_prefill)
+        return result
 
     def forward_attn_residual(
         self,
@@ -877,7 +958,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         # The fused op returns the new prefix (`prefix + delta`) as its
         # second result, whereas upstream's `_apply_attn_res` mutates
         # `prefix_sum` in place; capture it explicitly to mirror upstream.
-        hidden_states, prefix_sum, _ = torch.ops._C_ascend.attn_res_fwd(
+        hidden_states, prefix_sum, _ = aligned_attn_res_fwd(
             hidden_states,
             prefix_delta,
             block_residual,
@@ -911,7 +992,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             prefix_delta = hidden_states
 
         mlp_valid_blocks = self.prev_valid_blocks + (1 if self.is_block_write_layer else 0)
-        hidden_states, prefix_sum, _ = torch.ops._C_ascend.attn_res_fwd(
+        hidden_states, prefix_sum, _ = aligned_attn_res_fwd(
             prefix_sum,
             prefix_delta,
             block_residual,
@@ -1218,7 +1299,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 # on the residual state.
                 prefix_input = hidden_states + prefix_delta if prefix_delta is not None else hidden_states
                 aux_hidden_states.append(
-                    torch.ops._C_ascend.attn_res_fwd(
+                    aligned_attn_res_fwd(
                         prefix_input,
                         None,
                         residual,
@@ -1265,7 +1346,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         # The loop above already captured aux for every ``(layer_idx + 1)``
         # in ``aux_hidden_state_layers``, including ``end_layer``; upstream
         # vLLM main does not add a boundary/final aux slot on top of it.
-        hidden_states, _, _ = torch.ops._C_ascend.attn_res_fwd(
+        hidden_states, _, _ = aligned_attn_res_fwd(
             hidden_states,
             prefix_delta,
             residual,
@@ -1445,6 +1526,12 @@ class AscendKimiK3MultiModalProjector(KimiK25MultiModalProjector):
     dummy_inputs=KimiK3DummyInputsBuilder,
 )
 class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneration):
+    def _process_media_input(self, media_input):
+        from vllm_ascend.ops.kimi_alignment.mm_trace import trace_media
+
+        with trace_media(self, media_input):
+            return super()._process_media_input(media_input)
+
     """Upstream Kimi K3 multimodal wrapper with Ascend text/projector layers."""
 
     supports_replayssm: ClassVar[Literal[True]] = True
