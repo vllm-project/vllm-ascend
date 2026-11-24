@@ -108,6 +108,67 @@ def test_get_stage_cache_keys_by_block_shape():
     stage._stage_caches.clear()
 
 
+def test_compressed_stage_counts_cover_cached_prefix():
+    # A prefix-cache hit arrives as a large already-computed prefix: the stage
+    # plan must select blocks for the whole live prefix, not just new tokens.
+    seq_lens_cpu = torch.tensor([40000, 20001])
+    counts = stage.compressed_stage_counts(seq_lens_cpu, ratio=2, block_size=128)
+    assert counts == [157, 79]
+
+
+def test_compressed_stage_counts_ratio_one_is_token_blocks():
+    counts = stage.compressed_stage_counts([0, 1, 128, 129], ratio=1, block_size=128)
+    assert counts == [0, 1, 1, 2]
+
+
+def test_compressed_stage_counts_partial_group_rounds_up():
+    # An unfinished compression group is still one live storage row, so the
+    # count rounds up; padding rows are never referenced by the kernel.
+    counts = stage.compressed_stage_counts([255, 256, 258], ratio=2, block_size=128)
+    assert counts == [1, 1, 2]
+
+
+def test_compressed_stage_counts_accepts_numpy_like_sequences():
+    assert stage.compressed_stage_counts((100, 200), ratio=2, block_size=64) == [1, 2]
+    assert stage.compressed_stage_counts([0], ratio=1, block_size=0) is None
+    assert stage.compressed_stage_counts(None, ratio=2, block_size=128) is None
+
+
+def test_mixed_prefill_decode_rows_select_whole_live_prefix():
+    # Row 0 is a cached-prefix prefill (seq 40000, ratio 2 => 157 blocks); row 1
+    # is a one-token decode whose history must still be staged in full.
+    counts = stage.compressed_stage_counts(torch.tensor([40000, 30000]), ratio=2, block_size=128)
+    table = torch.zeros((2, 157), dtype=torch.int32)
+    table[0] = torch.arange(157, dtype=torch.int32)
+    table[1, :118] = torch.arange(100, 100 + 118, dtype=torch.int32)
+    staged, flat, total = stage.build_stage_tables_fixed(table, counts, num_blocks=512)
+    assert total == 157 + 118
+    assert staged[0, 156].item() == 156
+    assert staged[1, 117].item() == 157 + 117
+    # A decode row's staging table is dense over its whole history.
+    assert torch.equal(staged[1, :118], torch.arange(157, 157 + 118, dtype=torch.int32))
+    assert (staged[1, 118:] < 0).all()
+
+
+def test_stage_cache_serves_mixed_rows_from_local_scratch():
+    # End-to-end CPU check: a long cached-prefix row and a decode row are both
+    # served from the scratch copy, at the slots their staged table names.
+    table = torch.tensor(
+        [
+            [10, 11, 12, 13],
+            [20, 21, -1, -1],
+        ],
+        dtype=torch.int32,
+    )
+    source = torch.arange(32 * 3, dtype=torch.float32).reshape(32, 3)
+    cache = stage.PcpOwnerStageCache(torch.device("cpu"))
+    staged_source, staged_table = cache.stage(source, table)
+    assert staged_table.tolist() == [[0, 1, 2, 3], [4, 5, -1, -1]]
+    for row, column, original in ((0, 3, 13), (1, 1, 21)):
+        slot = int(staged_table[row, column])
+        assert torch.equal(staged_source[slot], source[original])
+
+
 def test_stage_enabled_uses_the_typed_config():
     from vllm_ascend.ascend_config import PcpConfig
 

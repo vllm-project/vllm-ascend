@@ -151,6 +151,37 @@ def plan_swa_chunk_segments(
     return segments
 
 
+def compressed_stage_counts(seq_lens_cpu, ratio: int, block_size: int) -> list[int] | None:
+    """Per-row live compressed-block counts for a long-KV stage table.
+
+    The scheduler's CPU sequence lengths determine the compressed cache length
+    exactly (``seq_len // ratio``), so the fixed, sync-free table builder can
+    be used instead of device boolean indexing.  An over-approximation is safe:
+    the builder clamps and the kernel never references padding rows.
+
+    A prefix-cache hit shows up here as a large already-computed prefix in
+    ``seq_lens_cpu``; the returned counts therefore cover the whole live
+    prefix, cached blocks included.  That is exactly the set the attention
+    kernel and the sparse indexer read through the owner slab, so the stage
+    decision must be made on these counts rather than on newly computed
+    tokens.
+
+    Returns ``None`` when the input cannot be read without touching a device.
+    """
+    if seq_lens_cpu is None or ratio <= 0 or block_size <= 0:
+        return None
+    try:
+        values = seq_lens_cpu.tolist() if hasattr(seq_lens_cpu, "tolist") else seq_lens_cpu
+        seqs = [int(value) for value in list(values)]
+    except (TypeError, ValueError):
+        return None
+    counts: list[int] = []
+    for seq in seqs:
+        cache_len = seq // ratio if ratio > 1 else seq
+        counts.append((max(cache_len, 0) + block_size - 1) // block_size)
+    return counts
+
+
 def build_stage_tables_fixed(
     block_table: torch.Tensor, counts: list[int], num_blocks: int | None = None
 ) -> tuple[torch.Tensor, torch.Tensor, int]:

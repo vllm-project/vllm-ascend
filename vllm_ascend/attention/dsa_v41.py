@@ -658,11 +658,21 @@ def _maybe_stage_owner_cmp_cache(
     # Pure-prefill steps only.  Decode rows address the whole history, so a
     # per-step bulk copy would cost more than the peer reads it replaces; a
     # mixed step keeps direct peer reads for every row.
+    #
+    # Measured on DSV4.1-Flash (250 x 20-40k prompts, PCP4, prefix cache on):
+    # a bypassed step's attention kernel costs 0.05 ms, while a staged prefill
+    # step costs 10-19 ms, so these gates are not where the prefix-cache
+    # benefit is lost.  The skipped-block counters keep the bypassed volume
+    # visible when that assumption is re-checked on another workload.
     if getattr(metadata, "num_prefills", 0) <= 0:
         _pcp_stage_count("long_kv", "skipped_nonprefill")
+        if counts:
+            _pcp_stage_count("long_kv", "skipped_nonprefill_blocks", int(sum(counts)))
         return None
     if getattr(metadata, "num_decodes", 0) > 0:
         _pcp_stage_count("long_kv", "skipped_mixed")
+        if counts:
+            _pcp_stage_count("long_kv", "skipped_mixed_blocks", int(sum(counts)))
         return None
     from vllm_ascend.attention.context_parallel.pcp_owner_stage import get_stage_cache
 
@@ -697,9 +707,7 @@ def _maybe_stage_owner_cmp_cache(
         return None
     metadata._pcp_stage_memo = (source_cache.data_ptr(), result)
     _pcp_stage_count("long_kv", "ok")
-    _PCP_STAGE_STEP["long_kv_max_blocks"] = max(
-        _PCP_STAGE_STEP["long_kv_max_blocks"], int(cache.last_total_blocks)
-    )
+    _PCP_STAGE_STEP["long_kv_max_blocks"] = max(_PCP_STAGE_STEP["long_kv_max_blocks"], int(cache.last_total_blocks))
     _PCP_STAGE_STEP["long_kv_capacity"] = int(cache.capacity_blocks)
     return result
 
@@ -754,6 +762,20 @@ _OWNER_STAGE_ASYNC = False
 def _pcp_stage_count(kind: str, name: str, amount: int = 1) -> None:
     stats = _PCP_STAGE_STATS.setdefault(kind, {})
     stats[name] = stats.get(name, 0) + amount
+
+
+def _kernel_region_name(metadata) -> str:
+    """Timing region that separates prefill, mixed and decode attention calls.
+
+    The owner path treats these classes differently (staging only runs on
+    prefill-shaped batches), so an aggregate kernel number cannot tell whether
+    a regression comes from cached-prefix prefill reads or from decode rows.
+    """
+    if getattr(metadata, "num_prefills", 0) <= 0:
+        return "kernel_decode"
+    if getattr(metadata, "num_decodes", 0) > 0:
+        return "kernel_mixed"
+    return "kernel_prefill"
 
 
 def _pcp_stage_mark_negative(stage_cache, reason: str) -> None:
@@ -1012,20 +1034,16 @@ class AscendDSAV41Impl:
         over-approximation is safe: the builder clamps and the kernel never
         references padding rows.
         """
+        from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
+            compressed_stage_counts,
+        )
+
         cpu = getattr(cmp_metadata, "seq_lens_cpu", None)
         block = int(getattr(cmp_metadata, "storage_block_size", 0) or 0)
         if cpu is None or block <= 0:
             return None
-        try:
-            seqs = cpu[:num_reqs].tolist()
-        except (TypeError, ValueError):  # fall back to the dynamic builder
-            return None
         ratio = int(self.role.compress_ratio) if self.role.compress_ratio in (1, 2) else 1
-        counts = []
-        for seq in seqs:
-            cache_len = int(seq) // ratio if ratio > 1 else int(seq)
-            counts.append((cache_len + block - 1) // block)
-        return counts
+        return compressed_stage_counts(cpu[:num_reqs], ratio, block)
 
     def _start_owner_long_kv_stage_async(self, attn, metadata):
         """Launch the long-KV source copy on a side stream after the writes.
@@ -1097,9 +1115,7 @@ class AscendDSAV41Impl:
             return
         cmp_metadata._pcp_stage_async = (pointer, (staged[0], staged[1]), staged[2])
         _pcp_stage_count("long_kv", "async_ok")
-        _PCP_STAGE_STEP["long_kv_max_blocks"] = max(
-            _PCP_STAGE_STEP["long_kv_max_blocks"], int(cache.last_total_blocks)
-        )
+        _PCP_STAGE_STEP["long_kv_max_blocks"] = max(_PCP_STAGE_STEP["long_kv_max_blocks"], int(cache.last_total_blocks))
         _PCP_STAGE_STEP["long_kv_capacity"] = int(cache.capacity_blocks)
 
     def __init__(self, prefix, role, topology, long_kv_source_prefix, index_k_source_prefix):
@@ -1545,6 +1561,11 @@ class AscendDSAV41Impl:
             # sparse ori indices. Compressed KV retains its causal coordinates.
             timing = _timing_enter("swa_gather", self.pcp_config.enable_timing)
             swa_cache = swa_cache[metadata.swa.replay_cache_blocks, metadata.swa.replay_cache_offsets]
+            # Replay rows bypass the bounded stage cache.  Keeping the gathered
+            # row count next to the other staging counters makes a direct
+            # peer-read regression on this path visible.
+            _pcp_stage_count("swa", "replay_gather_calls")
+            _pcp_stage_count("swa", "replay_gather_rows", int(metadata.swa.replay_cache_blocks.numel()))
             _timing_exit(timing)
             swa_cache = swa_cache.reshape(-1, metadata.swa.storage_block_size, 1, swa_cache.shape[-1])
             ori_block_table = metadata.swa.replay_block_table
@@ -1659,7 +1680,11 @@ class AscendDSAV41Impl:
                 swa_cache, ori_block_table = staged
                 seq_lens = plan.replay_seq_lens
                 op_metadata = rebuilt
-        timing = _timing_enter("kernel", self.pcp_config.enable_timing)
+        # Split the kernel by step class: with owner-shaped staging the
+        # interesting question is whether a cached-prefix prefill step or a
+        # decode step pays the peer reads, and an aggregate "kernel" number
+        # cannot answer it.
+        timing = _timing_enter(_kernel_region_name(metadata.swa), self.pcp_config.enable_timing)
         output, _ = torch.ops._C_ascend.npu_sparse_flash_mla(
             q,
             ori_kv=swa_cache,
@@ -2311,9 +2336,9 @@ class AscendDSAV41StateMetadataBuilder(AscendDSAV41MetadataBuilder):
             ring_meta = self._c2_ring_metadata[: 5 * req.num_reqs].view(5, req.num_reqs)
             input_positions = req.positions
             if self._supports_device_ops:
-                assert (
-                    self._c2_full_source_rope is not None
-                ), "Enable device metadata before building compressor metadata"
+                assert self._c2_full_source_rope is not None, (
+                    "Enable device metadata before building compressor metadata"
+                )
                 full_source_cos, full_source_sin = self._c2_full_source_rope
             else:
                 full_source_cos = full_source_sin = None
