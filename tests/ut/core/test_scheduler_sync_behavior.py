@@ -845,7 +845,10 @@ def test_batch_job_aware_blocks_unadmittable_batch_and_admits_interactive(balanc
     cfg.additional_config = additional_config
     clear_ascend_config()
     try:
-        with patch("vllm_ascend.platform.get_current_hardware_profile") as mock_profile:
+        with (
+            patch.dict("os.environ", {}, clear=False),
+            patch("vllm_ascend.platform.get_current_hardware_profile") as mock_profile,
+        ):
             mock_profile.return_value.supports.return_value = False
             mock_profile.return_value.default_worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
             NPUPlatform.check_and_update_config(cfg)
@@ -952,7 +955,10 @@ def test_short_request_first_aging_under_cache_aware_window(
     # Run platform config validation and ensure AscendConfig is initialized.
     clear_ascend_config()
     try:
-        with patch("vllm_ascend.platform.get_current_hardware_profile") as mock_profile:
+        with (
+            patch.dict("os.environ", {}, clear=False),
+            patch("vllm_ascend.platform.get_current_hardware_profile") as mock_profile,
+        ):
             mock_profile.return_value.supports.return_value = False
             mock_profile.return_value.default_worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
             NPUPlatform.check_and_update_config(cfg)
