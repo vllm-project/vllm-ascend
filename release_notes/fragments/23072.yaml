@@ -1,0 +1,4 @@
+pr: 23072
+entries:
+  - category: bugfix
+    text: Fixed GLM-5 prefill KV offload ignoring the configured layerwise_num_shared_buffers and retaining full-layer device KV buffers.
