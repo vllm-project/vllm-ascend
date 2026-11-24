@@ -24,6 +24,7 @@ from .utils import FLA_CHUNK_SIZE, prepare_chunk_indices, prepare_chunk_offsets
         "USE_GK": lambda args: args["gk"] is not None,
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
+        "STORE_CHECKPOINT": lambda args: args["checkpoint_state"] is not None,
         "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
@@ -45,6 +46,8 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_kda(
     ht,
     cu_seqlens,
     chunk_offsets,
+    checkpoint_state,
+    checkpoint_offsets,
     T,
     H: tl.constexpr,
     Hg: tl.constexpr,
@@ -56,6 +59,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_kda(
     USE_GK: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
+    STORE_CHECKPOINT: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
@@ -98,6 +102,11 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_kda(
         h0 = h0 + i_nh * V * K
     if STORE_FINAL_STATE:
         ht = ht + i_nh * V * K
+    if STORE_CHECKPOINT:
+        checkpoint_offset = tl.load(checkpoint_offsets + i_n).to(tl.int32)
+        valid_checkpoint = (checkpoint_offset > 0) & (checkpoint_offset % BT == 0) & (checkpoint_offset < T)
+        checkpoint_chunk = tl.where(valid_checkpoint, checkpoint_offset // BT, -1)
+        checkpoint_state += i_nh.to(tl.int64) * V * K
 
     # load initial state
     if USE_INITIAL_STATE:
@@ -154,6 +163,21 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_kda(
                 (1, 0),
             )
             tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), boundary_check=(0, 1))
+
+        if STORE_CHECKPOINT:
+            if i_t == checkpoint_chunk:
+                # Export the state entering this chunk directly from the FP32 accumulator.
+                p_checkpoint = tl.make_block_ptr(checkpoint_state, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0))
+                tl.store(p_checkpoint, b_h1.to(p_checkpoint.dtype.element_ty), boundary_check=(0, 1))
+                if K > 64:
+                    p_checkpoint = tl.advance(p_checkpoint, (0, 64))
+                    tl.store(p_checkpoint, b_h2.to(p_checkpoint.dtype.element_ty), boundary_check=(0, 1))
+                if K > 128:
+                    p_checkpoint = tl.advance(p_checkpoint, (0, 64))
+                    tl.store(p_checkpoint, b_h3.to(p_checkpoint.dtype.element_ty), boundary_check=(0, 1))
+                if K > 192:
+                    p_checkpoint = tl.advance(p_checkpoint, (0, 64))
+                    tl.store(p_checkpoint, b_h4.to(p_checkpoint.dtype.element_ty), boundary_check=(0, 1))
 
         m_t = (i_t.to(tl.int64) * BT + tl.arange(0, BT)) < T
 
@@ -280,6 +304,8 @@ def chunk_gated_delta_rule_fwd_h_kda(
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
     # In fla, Q/K always have the same head number, so Hg is always equal to H.
@@ -297,6 +323,10 @@ def chunk_gated_delta_rule_fwd_h_kda(
         if chunk_offsets is None:
             chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
+    if checkpoint_state is not None:
+        assert checkpoint_offsets is not None
+        assert checkpoint_state.shape == (N, H, V, K) and checkpoint_state.is_contiguous()
+        assert checkpoint_offsets.shape == (N,) and checkpoint_offsets.is_contiguous()
 
     h = k.new_empty(B, NT, H, V, K)
     final_state = k.new_empty(N, H, V, K, dtype=torch.float32) if output_final_state else None
@@ -318,6 +348,8 @@ def chunk_gated_delta_rule_fwd_h_kda(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
         T=T,
         H=H,
         Hg=Hg,
