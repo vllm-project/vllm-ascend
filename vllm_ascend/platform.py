@@ -358,6 +358,13 @@ class NPUPlatform(Platform):
                 raise NotImplementedError(f"Ascend MRV2 PCP does not support attention backend {backend_key}.")
             return pcp_backend
 
+        # B1 paged verify: the head_dim=512 MTP verify step cannot be captured
+        # by the default TND/PA paths on Model Runner V2, so give exactly that
+        # geometry a dedicated backend that captures it as a FIA-v2 BNSD paged
+        # op. Everything else keeps the default backend below.
+        if _want_b1_paged_verify(attn_selector_config):
+            return "vllm_ascend.attention.attention_v2_b1.AscendB1AttentionBackend"
+
         return backend_map[backend_key]
 
     @classmethod
@@ -639,6 +646,10 @@ class NPUPlatform(Platform):
         # (fused MC2 exclusivity + scheduler extension policies)
         # ascend_config is only used for verification, this object must NOT be modified here
         ascend_config = init_ascend_config(vllm_config)
+        # The attention-backend memo is keyed by geometry alone, so an opted-in
+        # engine must not inherit B1 from a sibling engine with a different
+        # speculative mode. See _reset_b1_attn_backend_cache.
+        _reset_b1_attn_backend_cache(ascend_config)
         _validate_deepseek_v4_tp_config(vllm_config)
         _check_ascend_config(vllm_config, ascend_config)
 
@@ -1868,6 +1879,106 @@ def _validate_fa3_backend(key, _attn_selector_config):
         "In training-inference consistency scenario, FA3 will be enabled, which may cause performance degradation."
     )
     return True
+
+
+def _uses_dynamic_speculative_decoding(speculative_config) -> bool:
+    """True when the scheduler may pick a verify width narrower than k+1."""
+    if speculative_config is None:
+        return False
+    return bool(getattr(speculative_config, "uses_dynamic_speculative_decoding", lambda: False)())
+
+
+def _reset_b1_attn_backend_cache(ascend_config) -> None:
+    """Drop vLLM's memoized attention-backend selection for an opted-in run.
+
+    ``vllm.v1.attention.selector`` caches the selected backend class by
+    attention geometry, and the speculative mode is not part of that key. A
+    process that configures a static-MTP engine first and a dynamic-MTP engine
+    with the same geometry second would therefore reuse the cached B1 class and
+    bypass the dynamic-SD exclusion in ``_want_b1_paged_verify``. The cache only
+    memoizes a config-derived decision, so dropping it when an engine is
+    configured costs one re-selection and keeps the two modes apart.
+    """
+    from vllm.v1.attention import selector as attn_selector
+
+    if not ascend_config.b1_paged_verify_config.enabled:
+        return
+    cache_clear = getattr(getattr(attn_selector, "_cached_get_attn_backend", None), "cache_clear", None)
+    if cache_clear is not None:
+        cache_clear()
+
+
+def _want_b1_paged_verify(attn_selector_config) -> bool:
+    """Select the B1 paged-verify backend for the exact geometry it serves.
+
+    Model Runner V2 runs every other GQA layer through the shared Ascend
+    backend, but the Gemma4-style head_dim=512 MTP verify step cannot be
+    captured by its TND/PA paths. Keep this narrowly scoped: static MTP,
+    decoder self-attention, head_dim=512, no sliding window, no
+    MLA/sparse/compress/PCP/DCP/KV-connector/sinks, and not A5 (where the stock
+    PagedAttention capture works). Dynamic speculative decoding is excluded
+    because it captures verify widths below k+1. Otherwise keep the default
+    backend.
+    """
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.v1.attention.backend import AttentionType
+
+    from vllm_ascend.ascend_config import get_ascend_config
+    from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+    from vllm_ascend.utils import is_950
+
+    try:
+        ascend_config = get_ascend_config()
+    except RuntimeError:
+        # Backend selection can run without Ascend config init; the switch is
+        # opt-in, so treat that as disabled.
+        return False
+    if not ascend_config.b1_paged_verify_config.enabled:
+        return False
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None or not bool(getattr(vllm_config, "use_v2_model_runner", False)):
+        return False
+    spec_cfg = vllm_config.speculative_config
+    if spec_cfg is None:
+        return False
+    # Dynamic speculative decoding captures uniform verify widths below the
+    # configured maximum (including one query when the schedule picks K=0).
+    # The B1 capture contract only serves the full k+1 width, so keep dynamic
+    # SD on the default backend until those narrower graphs are supported.
+    if _uses_dynamic_speculative_decoding(spec_cfg):
+        logger.warning_once(
+            "b1_paged_verify_config.enabled is ignored with dynamic speculative decoding "
+            "(num_speculative_tokens_per_batch_size): B1 capture only supports the uniform "
+            "k+1 verify width, so the default attention backend is used."
+        )
+        return False
+    if attn_selector_config.head_size != FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
+        return False
+    if attn_selector_config.has_sliding_window:
+        return False
+    if attn_selector_config.attn_type != AttentionType.DECODER:
+        return False
+    # use_mm_prefix is deliberately allowed: Gemma4 sets is_mm_prefix_lm on the
+    # whole model, but clears mm_prefix_range for every non-sliding layer each
+    # forward (plain causal masking), and the B1 op only ever captures uniform
+    # k+1 decode verify steps. Adaptive verification, in contrast, makes the
+    # decode graphs varlen, which the uniform k+1 capture contract cannot serve.
+    if (
+        attn_selector_config.use_mla
+        or attn_selector_config.use_sparse
+        or getattr(attn_selector_config, "use_compress", False)
+        or attn_selector_config.use_pcp
+        or attn_selector_config.use_dcp
+        or attn_selector_config.use_kv_connector
+        or attn_selector_config.has_sink
+        or attn_selector_config.use_non_causal
+        or attn_selector_config.use_per_head_quant_scales
+        or getattr(attn_selector_config, "use_adaptive_verification", False)
+        or getattr(attn_selector_config, "use_rswa", False)
+        or getattr(attn_selector_config, "use_hisparse", False)
+    ):
+        return False
+    return not is_950()
 
 
 def _get_reduced_cg_cap(vllm_config: VllmConfig) -> int | None:
