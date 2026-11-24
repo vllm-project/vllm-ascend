@@ -1424,7 +1424,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             or not self._mlapo_uses_native_weights
             or not self.supports_prolog_v3_projection()
             or getattr(self.fused_qkv_a_proj, "input_size", None) not in PROLOG_V3_SUPPORTED_INPUT_SIZES
-            or getattr(self.q_proj, "_chunk_size", 0)
+            or bool(getattr(self.q_proj, "_chunk_size", 0))
             or not isinstance(get_offloader(), NoopOffloader)
             or not hasattr(torch_npu, "npu_mla_prolog_v3")
             or not hasattr(torch_npu, "npu_quantize")
