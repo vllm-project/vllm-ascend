@@ -17,14 +17,15 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_speculator_module
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLADecodeMetadata, AscendMLAMetadata
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.host_lengths import prepare_draft_host_lengths, proposal_host_lengths
 
@@ -33,7 +34,7 @@ def _spec(lengths, *, mla_draft=True):
     spec = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
     spec.attn_architecture = "MLA" if mla_draft else "GQA"
     spec.use_flashmla = False
-    spec.attn_backends = {"draft.0": AscendAttentionBackend}
+    spec.attn_backends = {"draft.0": AscendMLABackend if mla_draft else AscendAttentionBackend}
     spec.input_buffers = SimpleNamespace(
         seq_lens=torch.tensor(lengths, dtype=torch.int32),
         positions=torch.zeros(64),
@@ -93,10 +94,7 @@ class TestBuildDraftAttnMetadatasFactory:
         _capture_factory(monkeypatch, supplied)
         decode = SimpleNamespace(
             actual_seq_lengths_q=[8],
-            seq_lens_list=[1034, 1040, 0, 0, 0],
-            seq_lens=torch.tensor([1034, 1040, 0, 0, 0], dtype=torch.int32),
-            seq_lens_cpu=torch.tensor([1034, 1040, 0, 0, 0], dtype=torch.int32),
-            block_tables=None,
+            seq_lens_list=[1034, 1040, 0, 0],
         )
         metadata = {"draft.0": SimpleNamespace(decode=decode)}
         monkeypatch.setattr(DFlashSpeculator, "_build_attn_metadata", MagicMock(return_value=metadata))
@@ -115,9 +113,7 @@ class TestBuildDraftAttnMetadatasFactory:
         return result, metadata, supplied, decode
 
     def test_mla_draft_eager_and_acl_get_exact_lengths(self, monkeypatch):
-        monkeypatch.setattr(
-            AscendDFlashSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config)
-        )
+        monkeypatch.setattr(AscendDFlashSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
         for entrypoint in ("eager", "ACL_update"):
             spec = _spec([1034, 1040, 7, 9])
             result, metadata, supplied, decode = self._run_entrypoint(monkeypatch, spec, entrypoint)
@@ -130,14 +126,11 @@ class TestBuildDraftAttnMetadatasFactory:
             assert kwargs["seq_lens_cpu"].tolist() == [1034, 1040, 0, 0]
 
     def test_full_graph_update_pads_query_lengths(self, monkeypatch):
-        monkeypatch.setattr(
-            AscendDFlashSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config)
-        )
+        monkeypatch.setattr(AscendDFlashSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
         spec = _spec([1034, 1040, 7, 9])
         _, _, _, decode = self._run_entrypoint(monkeypatch, spec, "eager")
         assert decode.actual_seq_lengths_q == [8, 16, 24, 32]
         assert decode.seq_lens_list == [1034, 1040, 0, 0]
-        assert decode.seq_lens_cpu.tolist() == [1034, 1040, 0, 0]
 
     def test_non_mla_draft_keeps_upstream_path(self, monkeypatch):
         def forbidden_factory(*args, **kwargs):
@@ -145,7 +138,16 @@ class TestBuildDraftAttnMetadatasFactory:
 
         monkeypatch.setattr(dflash_speculator_module, "build_attn_metadata_factory", forbidden_factory)
         spec = _spec([1034, 1040, 7, 9], mla_draft=False)
-        upstream = MagicMock(return_value={"draft.0": SimpleNamespace()})
+        upstream = MagicMock(
+            return_value={
+                "draft.0": SimpleNamespace(
+                    seq_lens_list=[1034, 1040],
+                    seq_lens=spec.input_buffers.seq_lens,
+                    seq_lens_cpu=spec.input_buffers.seq_lens.cpu(),
+                    block_tables=None,
+                )
+            }
+        )
         monkeypatch.setattr(DFlashSpeculator, "_build_attn_metadata", upstream)
         spec._build_uniform_attn_metadata(
             num_reqs=2,
@@ -156,3 +158,64 @@ class TestBuildDraftAttnMetadatasFactory:
             causal=True,
         )
         assert upstream.call_count == 1
+
+
+@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+def test_window_at_model_limit_preserves_valid_draft_rows(monkeypatch, mode):
+    # Only four queries of request 0 fit. Request 1 has room for all eight.
+    num_rows = 3 if mode == CUDAGraphMode.FULL else 2
+    spec = _spec([4096, 2048, 0][:num_rows])
+    spec._windowed_mla_layers = ("window",)
+    spec.attn_backends = dict.fromkeys(("window", "full"), AscendMLABackend)
+    monkeypatch.setattr(AscendDFlashSpeculator, "max_model_len", 4096, raising=False)
+    spec.draft_max_seq_len = 4096
+    spec.num_speculative_steps = 7
+    spec.sample_pos = torch.tensor([*range(4093, 4100), *range(2041, 2048)])
+    positions = torch.tensor([*range(4092, 4100), *range(2040, 2048)] + [0] * (8 * num_rows - 16)).clamp_max(4095)
+    spec.input_buffers.positions = positions
+    lengths = spec.input_buffers.seq_lens
+    tables = torch.arange(1, num_rows * 32 + 1, dtype=torch.int32).reshape(num_rows, 32)
+    decode = AscendMLADecodeMetadata(positions, tables, lengths, 4096, lengths.tolist(), [8, 16])
+    metadata = AscendMLAMetadata(
+        num_actual_tokens=16,
+        slot_mapping=torch.zeros(8 * num_rows, dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 8, 16]),
+        seq_lens=lengths,
+        seq_lens_cpu=lengths,
+        block_tables=tables,
+        num_decodes=2,
+        num_decode_tokens=16,
+        num_prefills=0,
+        decode=decode,
+    )
+    monkeypatch.setattr(AscendDFlashSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
+    _capture_factory(monkeypatch, [])
+    monkeypatch.setattr(
+        DFlashSpeculator, "_build_attn_metadata", lambda *args, **kwargs: dict.fromkeys(spec.attn_backends, metadata)
+    )
+    built = spec._build_uniform_attn_metadata(
+        num_reqs=2,
+        batch_desc=BatchExecutionDescriptor(cg_mode=mode, num_tokens=8 * num_rows, num_reqs=num_rows),
+        num_query_per_req=8,
+        seq_lens_cpu_upper_bound=lengths,
+        step=8,
+        causal=True,
+    )
+
+    # Reconstruct the newest visible key for each physical query as FIA does.
+    # The first sampled row must see key 4093 (window [3070, 4093]).
+    window = built["window"].decode
+    ends = []
+    start = 0
+    for end, kv_len, table in zip(window.actual_seq_lengths_q, window.seq_lens_list, window.block_table, strict=True):
+        ends.extend((int(table[0]), pos) if kv_len else None for pos in range(kv_len - (end - start), kv_len))
+        start = end
+    assert ends == (
+        [(1, pos) for pos in range(4092, 4096)]
+        + [None] * 4
+        + [(33, pos) for pos in range(2040, 2048)]
+        + [None] * (8 * num_rows - 16)
+    )
+    assert built["full"].decode is decode
+    assert decode.actual_seq_lengths_q == list(range(8, 8 * num_rows + 1, 8))
+    assert decode.block_table is tables

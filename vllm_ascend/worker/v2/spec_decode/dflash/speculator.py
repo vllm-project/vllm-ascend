@@ -4,6 +4,7 @@
 
 from collections.abc import Mapping
 from contextlib import nullcontext
+from dataclasses import replace
 from typing import Any, cast
 
 import numpy as np
@@ -26,14 +27,14 @@ from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory, build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.spec_decode.host_lengths import (
     detect_draft_attn_architecture,
-    draft_metadata_request_count,
     prepare_draft_host_lengths,
     proposal_host_lengths,
 )
+from vllm_ascend.worker.v2.spec_decode.host_lengths import (
+    draft_metadata_request_count as draft_metadata_request_count,
+)
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_draft_profile_inputs
-
-
 
 
 def install_ascend_dflash_input_preparation() -> None:
@@ -93,8 +94,8 @@ def _prepare_dflash_inputs_with_block_stride(
     )
 
 
-def validate_grouped_draft_attn(model: Any, kv_cache_config: Any, attn_layers: Mapping[str, Any]) -> None:
-    """Reject draft layer modes the per-group metadata cannot express.
+def validate_grouped_draft_attn(model: Any, kv_cache_config: Any, attn_layers: Mapping[str, Any]) -> tuple[str, ...]:
+    """Validate per-group attention and return the layers using windowed MLA FIA.
 
     The pinned upstream DFlash speculator stores draft causality per KV cache
     group (``_group_causal``), so the last layer's flag wins for the whole
@@ -109,11 +110,12 @@ def validate_grouped_draft_attn(model: Any, kv_cache_config: Any, attn_layers: M
     get_layer_names = getattr(model, "get_draft_kv_cache_layer_names", None)
     get_causal = getattr(model, "get_draft_attn_causal", None)
     if get_layer_names is None or get_causal is None:
-        return
+        return ()
     name_to_gid = {
         layer_name: gid for gid, group in enumerate(kv_cache_config.kv_cache_groups) for layer_name in group.layer_names
     }
     causal_by_gid: dict[int, bool] = {}
+    windowed_layers = []
     for layer_name, causal in zip(get_layer_names(), get_causal()):
         gid = name_to_gid.get(layer_name)
         if gid is not None:
@@ -148,12 +150,18 @@ def validate_grouped_draft_attn(model: Any, kv_cache_config: Any, attn_layers: M
                 "(or use a non-windowed draft); this matches upstream vLLM "
                 "#68214 refusing DCP for windowed DFlash2 drafts."
             )
+        windowed_layers.append(layer_name)
+    return tuple(windowed_layers)
 
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
-    def supports_batch_sharded_draft_logits(self) -> bool:
-        # NPU draft-logits kernels index the cache by request state.
-        return False
+    _windowed_mla_layers: tuple[str, ...] = ()
+
+    if not vllm_version_is("0.33.0"):
+
+        def supports_batch_sharded_draft_logits(self) -> bool:
+            # NPU draft-logits kernels index the cache by request state.
+            return False
 
     @draft_config_context()
     def load_draft_model(
@@ -175,37 +183,18 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             num_reqs = self.input_batch.num_reqs
         assert 0 <= num_reqs <= num_reqs_padded, "draft requests exceed graph capacity"
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
-        # MLA drafts share DSpark's metadata preparation: the factory feeds
-        # the rejection-adjusted host lengths and pins
-        # attn_state=ChunkedPrefill, so the eager build also takes the
-        # sliding-window FIA branch (sparse_mode=4) instead of defaulting
-        # attn_state to None and silently dropping the window.
-        metadata_context = nullcontext()
-        if self.attn_architecture == "MLA" and not self.use_flashmla:
-            metadata_context = build_attn_metadata_factory(
-                self.input_buffers.positions,
-                num_tokens_padded,
-                is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool, device="cpu"),
-                seq_lens_cpu=prepare_draft_host_lengths(self, num_reqs, num_reqs_padded, self.num_query_per_req),
-                attn_state=AscendAttentionState.ChunkedPrefill,
-                parallel_config=self.attn_vllm_config.parallel_config,
-            )
-        with build_attn_metadata_wrapper(), metadata_context:
-            # vLLM main (#56181) replaced _build_draft_attn_metadata with
-            # _build_uniform_attn_metadata (BatchExecutionDescriptor).
-            batch_desc = BatchExecutionDescriptor(
-                cg_mode=CUDAGraphMode.FULL,
-                num_tokens=num_tokens_padded,
-                num_reqs=num_reqs_padded,
-            )
-            attn_metadata = self._build_uniform_attn_metadata(
-                num_reqs=num_reqs,
-                batch_desc=batch_desc,
-                num_query_per_req=self.num_query_per_req,
-                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                step=self.num_query_per_req,
-                causal=self._group_causal,
-            )
+        # Core delegates the uniform build to the same _build_attn_metadata hook used in eager mode.
+        batch_desc = BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.FULL, num_tokens=num_tokens_padded, num_reqs=num_reqs_padded
+        )
+        attn_metadata = self._build_uniform_attn_metadata(
+            num_reqs=num_reqs,
+            batch_desc=batch_desc,
+            num_query_per_req=self.num_query_per_req,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            step=self.num_query_per_req,
+            causal=self._group_causal,
+        )
         return [attn_metadata]
 
     def _build_attn_metadata(
@@ -231,16 +220,27 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         # The draft forward may process padded inputs outside FULL graphs, but
         # attention only consumes the tokens owned by real requests there.
-        num_tokens = (
-            batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
-        )
+        num_tokens = batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
         metadata_context = nullcontext()
+        valid_queries = None
         if self.attn_architecture == "MLA" and not self.use_flashmla:
+            if self._windowed_mla_layers and self.draft_max_seq_len == self.max_model_len:
+                # The first predicted position is anchor + 1 in both sampling modes.
+                # Mirror it instead of the clipped device length so the same host copy
+                # gives FIA both the accepted KV length and the number of valid queries.
+                seq_lens_cpu = torch.zeros(num_reqs_padded, dtype=torch.int32, device="cpu")
+                live = seq_lens_cpu[:num_reqs]
+                live.copy_(self.sample_pos[: num_reqs * self.num_speculative_steps : self.num_speculative_steps])
+                live.add_(step - 1)
+                valid_queries = [max(0, step - max(0, end - self.max_model_len)) for end in live.tolist()]
+                live.clamp_(max=self.max_model_len)
+            else:
+                seq_lens_cpu = prepare_draft_host_lengths(self, num_reqs, num_reqs_padded, step)
             metadata_context = build_attn_metadata_factory(
                 self.input_buffers.positions,
                 num_tokens,
                 is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool, device="cpu"),
-                seq_lens_cpu=prepare_draft_host_lengths(self, num_reqs, num_reqs_padded, step),
+                seq_lens_cpu=seq_lens_cpu,
                 attn_state=AscendAttentionState.ChunkedPrefill,
                 parallel_config=self.attn_vllm_config.parallel_config,
             )
@@ -259,7 +259,36 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             # query lengths through every padded request slot. This covers
             # FIA-backed GQA and MLA drafts alike, as in DSpark.
             self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
+        if attn_metadata and valid_queries is not None and any(count < step for count in valid_queries):
+            self._split_window_query_padding(attn_metadata, valid_queries)
         return attn_metadata
+
+    def _split_window_query_padding(self, attn_metadata, valid_queries: list[int]) -> None:
+        """Give FIA the valid query prefix and a separate zero-KV sequence for its padding."""
+        width = self.num_query_per_req
+        by_group = {}
+        for name in self._windowed_mla_layers:
+            metadata = attn_metadata[name]
+            group = id(metadata)
+            if group not in by_group:
+                decode = metadata.decode
+                query_ends, kv_lens, rows = [], [], []
+                for req, end in enumerate(decode.actual_seq_lengths_q):
+                    count = valid_queries[req] if req < len(valid_queries) else 0
+                    if 0 < count < width:
+                        query_ends.append(end - width + count)
+                        kv_lens.append(decode.seq_lens_list[req])
+                        rows.append(req)
+                    query_ends.append(end)
+                    kv_lens.append(decode.seq_lens_list[req] if count == width else 0)
+                    rows.append(req if count == width else 0)
+                # Layers in one attention group share metadata. Leave any other
+                # consumer of that metadata on its original request layout.
+                split = replace(
+                    decode, actual_seq_lengths_q=query_ends, seq_lens_list=kv_lens, block_table=decode.block_table[rows]
+                )
+                by_group[group] = replace(metadata, decode=split)
+            attn_metadata[name] = by_group[group]
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
         """Rebuild ``actual_seq_lengths_q`` from the padded request count,
@@ -348,7 +377,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         self.attn_backends = attn_backends
         install_ascend_dflash_input_preparation()
         self.attn_architecture, self.use_flashmla = detect_draft_attn_architecture(self.attn_groups)
-        validate_grouped_draft_attn(self.model, kv_cache_config, resolved_layers)
+        self._windowed_mla_layers = validate_grouped_draft_attn(self.model, kv_cache_config, resolved_layers)
 
     def propose(
         self,
