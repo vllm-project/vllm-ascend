@@ -18,6 +18,8 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm_ascend.device.device_config import is_950
 from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, init_device_properties_triton
 
+# Match the L2 normalization epsilon used by AscendC RecurrentKDA.
+KDA_L2_NORM_EPS = tl.constexpr(1e-6)
 RECOVERSSM_COMMIT_HEAD_TILE = 2
 # Conservative UB budgets in BV x BK FP32 matrix equivalents. Boundary recovery
 # includes final/boundary accumulators and merge temporaries; these estimates
@@ -35,12 +37,10 @@ RECOVERSSM_CONV_STRIDED_TILE = 256
 
 @triton.jit
 def _kda_l2_normalize(vector):
-    # AscendC normalizes nonzero vectors without CUDA's squared-norm bias.
     norm_square = tl.sum(vector * vector)
-    norm_input = tl.where(norm_square > 0.0, norm_square, 1.0)
+    norm_input = norm_square + KDA_L2_NORM_EPS
     tl.static_assert(norm_input.dtype == tl.float32)
-    inverse = tl.rsqrt(norm_input)
-    return tl.where(norm_square > 0.0, vector * inverse, 0.0)
+    return vector * tl.rsqrt(norm_input)
 
 
 @triton.jit
@@ -816,10 +816,10 @@ def _commit_kda_state_kernel(
 @triton.jit
 def _kda_l2_normalize_heads(vector):
     norm_square = tl.sum(vector * vector, axis=1)
-    norm_input = tl.where(norm_square > 0.0, norm_square, 1.0)
+    norm_input = norm_square + KDA_L2_NORM_EPS
     tl.static_assert(norm_input.dtype == tl.float32)
     inverse = tl.rsqrt(norm_input)
-    return tl.where(norm_square[:, None] > 0.0, vector * inverse[:, None], 0.0)
+    return vector * inverse[:, None]
 
 
 @triton.jit(do_not_specialize=["num_layers"])

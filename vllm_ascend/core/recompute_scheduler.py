@@ -966,12 +966,7 @@ class RecomputeScheduler(Scheduler):
                 iteration_details.num_prefill_tokens = total_num_scheduled_tokens - iteration_details.num_decode_tokens
                 iteration_details.num_encoder_inputs = num_scheduled_encoder_inputs
                 iteration_details.num_encoder_output_tokens = self.max_num_encoder_input_tokens - encoder_compute_budget
-            schedule_metadata = {
-                "iteration_details": iteration_details,
-                "encoder_input_updates": self._get_encoder_input_updates(
-                    num_scheduled_tokens, new_reqs_data, scheduled_encoder_inputs
-                ),
-            }
+            schedule_metadata = {"iteration_details": iteration_details}
 
         # Record the request ids that were scheduled in this step (MRV1-only).
         if vllm_version_is("0.33.0") and not self.use_v2_model_runner:
@@ -1027,6 +1022,9 @@ class RecomputeScheduler(Scheduler):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            encoder_input_updates=self._get_encoder_input_updates(
+                num_scheduled_tokens, new_reqs_data, scheduled_encoder_inputs
+            ),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
