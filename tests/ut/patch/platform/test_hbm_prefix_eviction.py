@@ -127,3 +127,88 @@ def test_platform_preserves_scheduler_kind_on_revalidation(asynchronous, recompu
     assert config.scheduler_config.scheduler_cls == selected
     assert ("Async" in selected) == asynchronous
     assert ("Recompute" in selected) == recompute
+
+
+@pytest.mark.parametrize("damaged_index", [0, 1])
+def test_warmed_prompt_recomputed_after_recovery(damaged_index):
+    """Use the native cache index to reject a cleared page on the same prompt."""
+    # Keep native dependencies isolated from the lightweight RPC contract tests.
+    torch = pytest.importorskip("torch")
+    from vllm.sampling_params import SamplingParams
+    from vllm.utils.hashing import sha256
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+    from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
+    from vllm.v1.request import Request
+
+    block_size = 16
+    tokens = list(range(2 * block_size + 1))
+    init_none_hash(sha256)
+
+    def prompt(request_id):
+        return Request(
+            request_id=request_id,
+            prompt_token_ids=tokens.copy(),
+            sampling_params=SamplingParams(max_tokens=1),
+            pooling_params=None,
+            block_hasher=get_request_block_hasher(block_size, sha256),
+        )
+
+    manager = KVCacheManager(
+        KVCacheConfig(
+            num_blocks=16,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                )
+            ],
+        ),
+        max_model_len=64,
+        scheduler_block_size=block_size,
+        hash_block_size=block_size,
+        enable_caching=True,
+    )
+    warm = prompt("warm")
+    assert manager.allocate_slots(warm, num_new_tokens=len(tokens)) is not None
+    ids = manager.get_block_ids(warm.request_id)[0]
+    kv_bytes = torch.ones((16, block_size), dtype=torch.uint8)
+    manager.cache_blocks(warm, len(tokens))
+    manager.free(warm)
+    cached, num_cached, *_ = manager.get_computed_blocks(prompt("before"))
+    assert num_cached == 2 * block_size
+    damaged_id = ids[damaged_index]
+    assert damaged_id in cached.get_block_ids()[0]
+
+    kv_bytes[damaged_id].zero_()
+    assert not kv_bytes[damaged_id].any()
+    # Releasing requests and clearing bytes alone leaves a stale cache hit.
+    assert manager.get_computed_blocks(prompt("stale"))[1] == 2 * block_size
+    executor, scheduler, _ = load_extensions()
+    scheduler.kv_cache_manager = manager
+    executor.plans = [dict(request_id="round", blocks=[damaged_id], hbm_detected=True)] * 2
+    executor.collective_rpc("handle_ft_command", args=(request(),))
+
+    repeated = prompt("after")
+    cached, num_cached, *_ = manager.get_computed_blocks(repeated)
+    assert num_cached == damaged_index * block_size
+    assert damaged_id not in cached.get_block_ids()[0]
+    assert (
+        manager.allocate_slots(
+            repeated,
+            num_new_tokens=len(tokens) - num_cached,
+            num_new_computed_tokens=num_cached,
+            new_computed_blocks=cached,
+        )
+        is not None
+    )
+    # The damaged suffix is scheduled for recomputation, not reused as KV.
+    manager.cache_blocks(repeated, len(tokens))
+    manager.free(repeated)
+    assert manager.get_computed_blocks(prompt("rewarmed"))[1] == 2 * block_size
