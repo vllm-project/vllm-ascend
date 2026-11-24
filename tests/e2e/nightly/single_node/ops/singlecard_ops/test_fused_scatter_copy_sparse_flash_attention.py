@@ -657,28 +657,29 @@ def test_device_lengths_tail_geometry_and_rejection():
     builder = make_builder()
     cm = common([4, 5], [10371, 8321])
     metadata = populate(builder, cm)
-    # [S-Q] are 10367 and 8316. Prefixes are the runner's stable prefixes:
+    # Query ends are cumulative ([4, 5] means widths [4, 1]), so computed
+    # tokens are [10367, 8320]. Prefixes are the runner's stable prefixes:
     # computed tokens rounded down to complete 128-token blocks.
-    assert metadata.copy_sfa_prefix_lens.cpu().tolist() == [10240, 8192]
+    assert metadata.copy_sfa_prefix_lens.cpu().tolist() == [10240, 8320]
     assert metadata.copy_sfa_cache_tokens.cpu().tolist() == [8192, 8192]
-    assert metadata.copy_sfa_logical_lens.cpu().tolist() == [8323, 8321]
+    assert metadata.copy_sfa_logical_lens.cpu().tolist() == [8323, 8193]
     # Current query KV is scattered locally: descriptors still describe prior KV
     # so prefix rollback can eager-restore. PD decode skips the graph H2D.
-    assert metadata.copy_sfa_tail_lengths.cpu().tolist() == [[127, 0], [124, 0]]
+    assert metadata.copy_sfa_tail_lengths.cpu().tolist() == [[127, 0], [0, 0]]
     assert metadata.copy_sfa_copy_count.item() == 8
-    assert metadata.copy_sfa_copy_lengths.cpu().tolist() == [127 * 1024, 0, 124 * 1024, 0, 127 * 128, 0, 124 * 128, 0]
-    assert metadata.copy_sfa_tail_src.cpu().tolist() == [[10240, 10368], [24576, 24704]]
-    assert metadata.copy_sfa_hbm_block_table[:, 64:66].cpu().tolist() == [[130, 131], [64, 65]]
+    assert metadata.copy_sfa_copy_lengths.cpu().tolist() == [127 * 1024, 0, 0, 0, 127 * 128, 0, 0, 0]
+    assert metadata.copy_sfa_tail_src.cpu().tolist() == [[10240, 10368], [24704, 24832]]
+    assert metadata.copy_sfa_hbm_block_table[:, 64:66].cpu().tolist() == [[130, 131], [65, 64]]
     stride = 8192 + 256
     assert metadata.copy_sfa_device_slots.cpu().tolist() == [
         stride + 8192 + pos % 256 for pos in range(10367, 10371)
     ] + [8192 + 8320 % 256]
     address = metadata.copy_sfa_prefix_lens.data_ptr()
     cm.seq_lens.copy_(torch.tensor([10243, 8321], dtype=torch.int32, device="npu"))
-    cm.req_topk_buffer_stable_prefixes.copy_(torch.tensor([10112, 8192], dtype=torch.int32, device="npu"))
+    cm.req_topk_buffer_stable_prefixes.copy_(torch.tensor([10112, 8320], dtype=torch.int32, device="npu"))
     revised = populate(builder, cm)
     assert revised.copy_sfa_prefix_lens.data_ptr() == address
-    assert revised.copy_sfa_prefix_lens.cpu().tolist() == [10112, 8192]
+    assert revised.copy_sfa_prefix_lens.cpu().tolist() == [10112, 8320]
 
 
 def test_slot_invalidation_compaction_and_prefix_rollback_reset():
