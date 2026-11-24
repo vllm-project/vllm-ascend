@@ -1,0 +1,10 @@
+pr: 21678
+entries:
+  - category: performance
+    text: >-
+      Improved GDN prefill performance on A2 and A3. Q/K normalization now runs inside the
+      prefill step instead of in two separate passes, and the QKV inputs and the recurrent
+      state are consumed in their native layout, so each prefill layer avoids two extra
+      normalization passes and several full-size tensor copies. Long-context prefill
+      benefits most.
+    hardware: [A2, A3]

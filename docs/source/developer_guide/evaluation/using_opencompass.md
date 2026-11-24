@@ -4,7 +4,7 @@ This document guides you to conduct accuracy testing using [OpenCompass](https:/
 
 ## 1. Online Server
 
-You can run a docker container to start the vLLM server on a single NPU:
+You can run a Docker container to start the vLLM server on a single NPU:
 
 ```bash
 # Update DEVICE according to your device (/dev/davinci[0-7])
@@ -33,7 +33,7 @@ vllm serve Qwen/Qwen2.5-7B-Instruct --max-model-len 26240
 
 The vLLM server is started successfully, if you see information as below:
 
-```shell
+```output
 INFO:     Started server process [6873]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -52,7 +52,7 @@ curl http://localhost:8000/v1/completions \
     }'
 ```
 
-## 2. Run C-Eval (a Chinese language model evaluation benchmark) using OpenCompass for accuracy testing
+## 2. Run C-Eval Using OpenCompass for Accuracy Testing
 
 Install OpenCompass and configure the environment variables in the container:
 

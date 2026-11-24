@@ -1,0 +1,7 @@
+pr: 22673
+entries:
+  - category: performance
+    text: >-
+      Reduced the per-token hyper-connection pre/post overhead for DeepSeek V4
+      Flash MoE layers on A3.
+    hardware: [A3]

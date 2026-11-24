@@ -11,7 +11,7 @@ from vllm.config.compilation import CUDAGraphMode
 
 import vllm_ascend.attention.sfa_v1 as sparse_mla
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
+from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl, AscendSFADCPMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, PreprocessType
 
 
@@ -299,7 +299,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
         # field; indexer_kv_dtype now only drives the LI C8 indexer cache.
         # "int8" is what this test packs and what
         # _reference_quantized_sparse_attention asserts.
-        cache_config=SimpleNamespace(cache_dtype="int8"),
+        cache_config=SimpleNamespace(cache_dtype="int8" if enable_c8 else "auto"),
         attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
     )
     ascend_config = SimpleNamespace(
@@ -544,6 +544,11 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
         cum_query_lens=torch.tensor([actual_tokens]),
         seq_lens=torch.tensor([actual_tokens]),
     )
+    if dcp_enabled:
+        dcp_metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
+        dcp_metadata.__dict__.update(vars(metadata))
+        dcp_metadata.dcp_context = SimpleNamespace(kv_gather_block_ids=torch.arange(2), gather_context=None)
+        metadata = dcp_metadata
     impl._compose_sfa_kv_cache = MagicMock(return_value=(torch.empty(1),))
     impl._get_sfa_kv_slot_mapping = MagicMock(return_value=metadata.slot_mapping)
     impl._get_indexer_attn_metadata = MagicMock(return_value=object())

@@ -79,7 +79,7 @@ permissions:
 
 jobs:
   setup-matrix:
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-amd64-cpu-1-hk
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       has_matrix: ${{ steps.matrix.outputs.has_matrix }}

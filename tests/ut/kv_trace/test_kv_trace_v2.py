@@ -15,7 +15,8 @@ from .test_kv_trace_runtime import runtime_fixture as runtime_fixture
 def adapter_fixture(runtime):
     runner = NS(
         vllm_config=runtime.config,
-        block_tables=NS(block_sizes=[128], kernel_block_sizes=[128], redirect_writes_to_null_block=False),
+        block_tables=NS(block_sizes=[128], redirect_writes_to_null_block=False),
+        attn_groups=[[NS(kernel_block_size=128, kv_cache_spec=NS(block_size=128))]],
         kv_cache_config=NS(
             num_blocks=8, kv_cache_groups=[NS(layer_names=["layer0"], kv_cache_spec=NS(block_size=128, head_size=64))]
         ),
@@ -33,6 +34,22 @@ def adapter_fixture(runtime):
 def prepare(adapter, ids, slots, tables, lengths, mode="NONE"):
     adapter.runner.next_metadata = {"layer0": metadata(slots, tables, lengths)}
     return adapter.runner.model_state.prepare_attn(NS(req_ids=ids, num_reqs=len(ids)), mode)
+
+
+@pytest.mark.parametrize("kernel_block_size", [None, 128, 64])
+def test_configure_uses_attention_group_block_coordinates(adapter, kernel_block_size):
+    adapter.runner.attn_groups[0][0].kernel_block_size = kernel_block_size
+    if kernel_block_size == 64:
+        with pytest.raises(ValueError, match="allocator/kernel block coordinates"):
+            adapter.configure()
+    else:
+        adapter.configure()
+
+
+def test_configure_rejects_mismatched_manager_blocks(adapter):
+    adapter.runner.block_tables.block_sizes = [64]
+    with pytest.raises(ValueError, match="allocator/kernel block coordinates"):
+        adapter.configure()
 
 
 @pytest.mark.parametrize("mode", ["NONE", "FULL"])
@@ -62,7 +79,8 @@ def test_wrong_request_rows_are_violations(adapter, ids):
 def test_enabled_install_wraps_only_the_existing_mrv2_boundaries(runtime):
     runner = NS(
         vllm_config=runtime.config,
-        block_tables=NS(block_sizes=[128], kernel_block_sizes=[128], redirect_writes_to_null_block=False),
+        block_tables=NS(block_sizes=[128], redirect_writes_to_null_block=False),
+        attn_groups=[[NS(kernel_block_size=128, kv_cache_spec=NS(block_size=128))]],
         kv_cache_config=NS(
             num_blocks=8,
             kv_cache_groups=[NS(layer_names=["layer0"], kv_cache_spec=NS(block_size=128, head_size=64))],

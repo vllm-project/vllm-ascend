@@ -16,6 +16,7 @@ import pytest
 import torch
 import torch.nn as nn
 from vllm.config import ParallelConfig
+from vllm.v1.worker import gpu_worker
 
 from vllm_ascend._310p.worker_310p import NPUWorker310
 from vllm_ascend.worker import worker as npu_worker_module
@@ -35,7 +36,7 @@ class _TinyModel(nn.Module):
 def mock_parallel_groups(monkeypatch):
     group = SimpleNamespace(rank_in_group=0)
     for name in ("get_pp_group", "get_pcp_group", "get_tp_group"):
-        monkeypatch.setattr(npu_worker_module, name, lambda: group)
+        monkeypatch.setattr(gpu_worker, name, lambda: group)
 
 
 @pytest.fixture
