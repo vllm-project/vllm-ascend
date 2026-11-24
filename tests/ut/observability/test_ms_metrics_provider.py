@@ -79,15 +79,21 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert provider.owned_symbol_prefixes == ("vllm_ascend.",)
     assert provider.handler_module_prefixes == ("vllm_ascend.observability.ms_metrics.",)
     assert provider.config_paths == tuple(sorted(provider.config_paths))
-    assert [Path(path).name for path in provider.config_paths] == [
+    packaged_configs = {Path(path).name for path in provider.config_paths}
+    assert {
         "base_metrics.yaml",
         "eplb_metrics.yaml",
         "runtime_guard_metrics.yaml",
         "schedule_execute_metrics.yaml",
-    ]
+    } <= packaged_configs
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
-    assert len(config) == 14
+    # Assert per-file and namespace invariants instead of exact totals: every
+    # packaged yaml declares metrics, and every symbol stays inside the owned
+    # namespace. Exact counts make each provider branch collide with every
+    # other branch on the same line.
+    for config_path in provider.config_paths:
+        assert _load_all_provider_configs([config_path]), f"Empty metric config: {config_path}"
     assert all(item["symbol"].startswith("vllm_ascend.") for item in config)
     assert all("id" not in item for item in config)
     assert all(
@@ -160,10 +166,12 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
     handler_module = __import__(
         _HANDLER_PACKAGE,
         fromlist=[
+            "eplb_sync_load_handler",
             "runtime_guard_handle_alert_handler",
         ],
     )
 
+    assert callable(handler_module.eplb_sync_load_handler)
     assert callable(handler_module.runtime_guard_handle_alert_handler)
 
 
@@ -454,3 +462,300 @@ def test_eplb_sync_load_handler_passes_empty_result_through(monkeypatch):
 
     assert handlers.eplb_sync_load_handler(_sync_load_pass, empty) == []
     metrics.record_metric.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# EPLB V2 weight transfer (AscendHixlEplbCommunicator)
+# ---------------------------------------------------------------------------
+
+
+def test_eplb_transfer_handlers_record_per_layer_totals(monkeypatch):
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_transfer", "eplb")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
+    communicator = type("Communicator", (), {})()
+
+    assert (
+        handlers.eplb_transfer_context_handler(
+            lambda *args, **kwargs: "context",
+            communicator,
+            None,
+            3,
+        )
+        == "context"
+    )
+    send_tensors = [type("Tensor", (), {"nbytes": 8})(), type("Tensor", (), {"nbytes": 4})()]
+    recv_tensors = [type("Tensor", (), {"nbytes": 16})()]
+    for expert_id in (5, 6, 5):
+        assert (
+            handlers.eplb_transfer_send_handler(
+                lambda *args, **kwargs: "sent",
+                communicator,
+                send_tensors,
+                1,
+                expert_id,
+            )
+            == "sent"
+        )
+    assert (
+        handlers.eplb_transfer_recv_handler(
+            lambda *args, **kwargs: "received",
+            communicator,
+            recv_tensors,
+            0,
+            7,
+        )
+        == "received"
+    )
+    assert handlers.eplb_transfer_execute_handler(lambda *args, **kwargs: "done", communicator) == "done"
+
+    assert metrics.record_metric.call_count == 4
+    recorded = {call.args[0]: call.kwargs for call in metrics.record_metric.call_args_list}
+    assert recorded["eplb:transfer:send_experts"]["value"] == 2
+    assert recorded["eplb:transfer:recv_experts"]["value"] == 1
+    # Requests are counted per peer rank, not per descriptor: the three
+    # sends target rank 1 and the receive reads from rank 0, so 2 requests.
+    # Bytes still accumulate per tensor: 3 x (8 + 4) + 16 = 52.
+    assert recorded["eplb:transfer:comm_requests"]["value"] == 2
+    assert recorded["eplb:transfer:est_bytes"]["value"] == 52
+    assert recorded["eplb:transfer:send_experts"]["labels"] == {"rank": "0", "phase": "all", "layer": "3"}
+
+
+def test_eplb_transfer_batches_descriptors_per_peer(monkeypatch):
+    """Two experts from one source rank still issue a single transfer request."""
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_transfer_batch", "eplb")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
+    communicator = type("Communicator", (), {})()
+    tensors = [type("Tensor", (), {"nbytes": 16})()]
+
+    handlers.eplb_transfer_context_handler(lambda *args, **kwargs: "context", communicator, None, 5)
+    for expert_id in (0, 1):
+        handlers.eplb_transfer_recv_handler(
+            lambda *args, **kwargs: "received",
+            communicator,
+            tensors,
+            3,
+            expert_id,
+        )
+    handlers.eplb_transfer_execute_handler(lambda *args, **kwargs: "done", communicator)
+
+    recorded = {call.args[0]: call.kwargs for call in metrics.record_metric.call_args_list}
+    assert recorded["eplb:transfer:recv_experts"]["value"] == 2
+    assert recorded["eplb:transfer:comm_requests"]["value"] == 1
+    assert recorded["eplb:transfer:est_bytes"]["value"] == 32
+
+
+def test_eplb_transfer_execute_without_context_records_nothing(monkeypatch):
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_transfer_no_ctx", "eplb")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
+    communicator = type("Communicator", (), {})()
+
+    assert handlers.eplb_transfer_execute_handler(lambda *args, **kwargs: "done", communicator) == "done"
+
+    metrics.record_metric.assert_not_called()
+
+
+def test_eplb_transfer_execute_failure_clears_pending_accumulator(monkeypatch):
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_transfer_fail", "eplb")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
+    communicator = type("Communicator", (), {})()
+
+    handlers.eplb_transfer_context_handler(
+        lambda *args, **kwargs: "context",
+        communicator,
+        None,
+        3,
+    )
+
+    def failing_execute(*args, **kwargs):
+        raise RuntimeError("execute failed")
+
+    with pytest.raises(RuntimeError):
+        handlers.eplb_transfer_execute_handler(failing_execute, communicator)
+
+    # The accumulator is dropped, so nothing is recorded and a later execute
+    # on the same communicator starts from a clean state.
+    metrics.record_metric.assert_not_called()
+    assert communicator not in handlers._pending
+
+
+def test_eplb_transfer_handler_registers_metrics_once_per_recorder(monkeypatch):
+    """Metric registration is cached per recorder and follows a recorder swap.
+
+    ``register_metrics`` keeps one registration per (spec tuple, recorder)
+    pair: the same recorder never registers twice, while a new recorder
+    instance registers its own metrics and records exactly once.
+    """
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    first_metrics = Mock()
+    current_metrics = [first_metrics]
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: current_metrics[0],
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_transfer_recorder_cache", "eplb")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
+    communicator = type("Communicator", (), {})()
+    tensors = [type("Tensor", (), {"nbytes": 8})()]
+
+    def run_transfer():
+        assert (
+            handlers.eplb_transfer_context_handler(
+                lambda *args, **kwargs: "context",
+                communicator,
+                None,
+                3,
+            )
+            == "context"
+        )
+        assert (
+            handlers.eplb_transfer_send_handler(
+                lambda *args, **kwargs: "sent",
+                communicator,
+                tensors,
+                1,
+                5,
+            )
+            == "sent"
+        )
+        assert handlers.eplb_transfer_execute_handler(lambda *args, **kwargs: "done", communicator) == "done"
+
+    run_transfer()
+    run_transfer()
+
+    # Both executes shared the first recorder's single registration.
+    assert first_metrics.get_or_create_metric.call_count == 4
+    assert first_metrics.record_metric.call_count == 8
+
+    second_metrics = Mock()
+    current_metrics[0] = second_metrics
+    run_transfer()
+
+    # A new recorder instance registers its own metrics and records once.
+    assert second_metrics.get_or_create_metric.call_count == 4
+    assert second_metrics.record_metric.call_count == 4
+
+
+def test_runtime_guard_handler_counts_alerts_by_incident_type(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(
+        monkeypatch,
+        "test_vllm_ascend_metric_handlers_runtime_guard",
+        "runtime_guard",
+    )
+    alert = type("Alert", (), {"incident_type": "token_repeat"})()
+
+    result = handlers.runtime_guard_handle_alert_handler(
+        lambda *_a, **_k: "armed",
+        object(),
+        alert,
+    )
+
+    assert result == "armed"
+    metrics.get_or_create_metric.assert_called_once_with(
+        metric_name="runtime_guard:anomaly:count",
+        metric_type="counter",
+        label_names=["incident_type"],
+    )
+    metrics.record_metric.assert_called_once_with(
+        "runtime_guard:anomaly:count",
+        value=1.0,
+        labels={"incident_type": "token_repeat"},
+    )
+
+
+def test_runtime_guard_handler_skips_noop_early_return(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(
+        monkeypatch,
+        "test_vllm_ascend_metric_handlers_runtime_guard_noop",
+        "runtime_guard",
+    )
+    alert = type("Alert", (), {"incident_type": "logits_finite"})()
+
+    result = handlers.runtime_guard_handle_alert_handler(
+        lambda *_a, **_k: None,
+        object(),
+        alert,
+        write_report=False,
+    )
+
+    assert result is None
+    metrics.record_metric.assert_not_called()
+
+
+def test_runtime_guard_handler_preserves_result_when_recording_fails(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    metrics.get_or_create_metric.side_effect = RuntimeError("registry unavailable")
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(
+        monkeypatch,
+        "test_vllm_ascend_metric_handlers_runtime_guard_fail",
+        "runtime_guard",
+    )
+    alert = type("Alert", (), {"incident_type": "rare_chars"})()
+
+    assert (
+        handlers.runtime_guard_handle_alert_handler(
+            lambda *_a, **_k: "armed",
+            object(),
+            alert,
+        )
+        == "armed"
+    )
