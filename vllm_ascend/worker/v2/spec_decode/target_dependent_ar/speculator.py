@@ -742,6 +742,9 @@ class AscendTargetDependentARSpeculator(DraftSlidingWindowMixin, LmheadTPDraftSa
         if num_reqs is None:
             num_reqs = num_reqs_padded
         next_seq_lens_cpu = self._calc_next_seq_lens_cpu(seq_lens_cpu, num_reqs, num_reqs_padded, step)
+        # Target lengths are the full context. Cap them before DCP and FIA read them,
+        # or a long request exceeds the cropped block table.
+        next_seq_lens_cpu = self._window_cpu_lengths(next_seq_lens_cpu, num_reqs)
 
         dcp_local_seq_lens_cpu = None
         if self.use_dcp:
@@ -798,10 +801,9 @@ class AscendTargetDependentARSpeculator(DraftSlidingWindowMixin, LmheadTPDraftSa
         query_start_loc = list(range(1, num_reqs_padded + 1))
         fia_params: list[dict[str, Any]] = []
         for step in range(1, self.num_speculative_steps):
-            seq_lens = [
-                min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
-            ]
-            seq_lens.extend([0] * (num_reqs_padded - num_reqs))
+            seq_lens = self._windowed_step_lengths(
+                self.input_batch.seq_lens_np, step, num_reqs, num_reqs_padded
+            )
             for layer_name in self.draft_attn_layer_names:
                 fia_params.append(
                     {
@@ -839,10 +841,9 @@ class AscendTargetDependentARSpeculator(DraftSlidingWindowMixin, LmheadTPDraftSa
         query_start_loc = list(range(1, num_reqs_padded + 1))
         fia_params: list[dict[str, Any]] = []
         for step in range(1, self.num_speculative_steps):
-            seq_lens = [
-                min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
-            ]
-            seq_lens.extend([0] * (num_reqs_padded - num_reqs))
+            seq_lens = self._windowed_step_lengths(
+                self.input_batch.seq_lens_np, step, num_reqs, num_reqs_padded
+            )
             kv_lens_cpu = torch.tensor(seq_lens, dtype=torch.int32)
             local_kv_lens = get_dcp_local_seq_lens(
                 kv_lens_cpu,
@@ -861,6 +862,13 @@ class AscendTargetDependentARSpeculator(DraftSlidingWindowMixin, LmheadTPDraftSa
                     }
                 )
         return fia_params
+
+    def _windowed_step_lengths(self, base_lengths, step: int, num_reqs: int, num_reqs_padded: int) -> list[int]:
+        """Full lengths plus ``step``, then capped at the draft window when one is active."""
+        seq_lens = [min(int(seq_len) + step, self.max_model_len) for seq_len in base_lengths[:num_reqs]]
+        seq_lens.extend([0] * (num_reqs_padded - num_reqs))
+        windowed = self._window_cpu_lengths(torch.tensor(seq_lens, dtype=torch.int32), num_reqs)
+        return [int(value) for value in windowed.tolist()]
 
     def _calc_next_seq_lens_cpu(self, seq_lens_cpu, num_reqs, num_reqs_padded, step):
         # NOTE(drslark) to achieve fully alignment with vllm, `num_rejected` should be subtracted from `seq_lens`

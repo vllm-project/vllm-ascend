@@ -102,11 +102,13 @@ applies the same window math to the **builder inputs** around that call:
   groups' kernel block sizes, so one `seq_lens` stays valid for every table;
   each table then drops `offset / kernel_block_size` columns (a 128-token
   offset is 2 columns of 64 and 1 column of 128). Live tables are replaced
-  after those private clones are filled
+  after those private clones are filled, still with `max_num_reqs` rows so a
+  padded full-graph batch can slice past the live request count
 - that same token offset applied to DSpark MLA `seq_lens_cpu` and to
   `seq_lens_cpu_upper_bound` (so the bound stays `>=` the windowed actual
   length). After upstream adds the draft `step`, CPU bounds are clamped to
-  the narrowest cropped table
+  the narrowest cropped table. EAGLE decode steps that rebuild lengths from
+  the full target context are clamped the same way before DCP and FIA read them
 
 Wired into Ascend DSpark, DFlash (and DFlash2), and autoregressive EAGLE
 speculators. Slot mappings remain absolute. `draft_window_size` no longer

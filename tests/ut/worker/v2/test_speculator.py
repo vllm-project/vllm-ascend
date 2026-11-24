@@ -20,6 +20,7 @@ from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.spec_decode.sliding_window import MRV2DraftSlidingWindow
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     AscendTargetDependentARSpeculator,
     gather,
@@ -521,6 +522,33 @@ def test_update_decode_attn_metadata_gqa():
     assert torch.equal(metadata.seq_lens_cpu, torch.tensor([12, 22, 32, 0], dtype=torch.int32))
 
 
+def test_update_decode_attn_metadata_clamps_long_lengths_to_the_draft_window():
+    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    speculator.attn_architecture = "GQA"
+    speculator.max_model_len = 400
+    speculator.use_dcp = False
+    helper = MRV2DraftSlidingWindow(
+        window_size=128,
+        block_sizes=(64,),
+        max_num_reqs=2,
+        future_offset=0,
+        device=torch.device("cpu"),
+    )
+    helper._last_windowed_seq_lens = torch.tensor([172], dtype=torch.int32)
+    speculator._draft_sliding_window = helper
+    metadata = SimpleNamespace(
+        seq_lens_cpu=torch.zeros(2, dtype=torch.int32),
+        seq_lens_list=None,
+        actual_seq_lengths_q=None,
+    )
+    speculator._get_seq_lens_cpu = MagicMock(return_value=torch.tensor([300, 0], dtype=torch.int32))
+
+    speculator._update_decode_attn_metadata({"draft": metadata}, step=2, num_reqs=1)
+
+    assert metadata.seq_lens_list == [helper.max_window_tokens, 0]
+    assert torch.equal(metadata.seq_lens_cpu, torch.tensor([helper.max_window_tokens, 0], dtype=torch.int32))
+
+
 def test_build_fia_params_prefill():
     """Test building FIA parameters for prefill."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
@@ -552,6 +580,30 @@ def test_build_fia_params_decode():
     assert result[0]["actual_seq_lengths"] == [1, 2, 3]
     assert result[0]["actual_seq_lengths_kv"] == [11, 30, 0]
     assert result[1]["actual_seq_lengths_kv"] == [12, 30, 0]
+
+
+def test_build_fia_params_decode_clamps_long_lengths_to_the_draft_window():
+    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    speculator.use_dcp = False
+    metadata = SimpleNamespace(block_tables=torch.arange(12).reshape(4, 3))
+    speculator.model_state = SimpleNamespace(attn_metadata={"draft": metadata})
+    speculator.draft_attn_layer_names = {"draft"}
+    speculator.input_batch = SimpleNamespace(num_reqs=1, seq_lens_np=np.array([300]))
+    speculator.num_speculative_steps = 2
+    speculator.max_model_len = 400
+    helper = MRV2DraftSlidingWindow(
+        window_size=128,
+        block_sizes=(64,),
+        max_num_reqs=2,
+        future_offset=0,
+        device=torch.device("cpu"),
+    )
+    helper._last_windowed_seq_lens = torch.tensor([172], dtype=torch.int32)
+    speculator._draft_sliding_window = helper
+
+    result = speculator.build_fia_params(2, {"draft": metadata}, False)
+
+    assert result[0]["actual_seq_lengths_kv"] == [helper.max_window_tokens, 0]
 
 
 def test_set_attn_detects_architecture():
