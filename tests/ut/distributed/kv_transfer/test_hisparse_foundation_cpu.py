@@ -573,6 +573,8 @@ def test_prefill_mask_is_reused_without_mutating_layer_topk(
         (False, range(2, 3), False),  # One Prefill spilled.
         (False, range(1, 2), False),  # Incomplete query-row mapping.
         (False, None, False),  # Core only provided the batch-wide flag.
+        (False, [1, 2], False),  # Unexpected residency metadata type.
+        (False, range(1, 3, 2), False),  # A strided range skips a Prefill row.
     ],
 )
 def test_mixed_c8_prefill_uses_only_resident_query_rows(monkeypatch, all_resident, resident_rows, direct):

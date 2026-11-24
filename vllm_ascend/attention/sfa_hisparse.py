@@ -664,7 +664,12 @@ class AscendHiSparseImpl(AscendSFAImpl):
         if not cache.all_context_pages_resident:
             # Older Core versions only provide the batch-wide proof.
             resident = getattr(cache, "resident_prefill_rows", None)
-            if resident is None or resident.stop != metadata.num_reqs or num_decodes not in resident:
+            if (
+                not isinstance(resident, range)
+                or resident.step != 1
+                or resident.stop != metadata.num_reqs
+                or num_decodes not in resident
+            ):
                 return None
         if (
             get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE
