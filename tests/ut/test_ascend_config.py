@@ -1018,6 +1018,16 @@ class TestAscendConfig(TestBase):
         with open(ascend_config.dump_config_path, encoding="utf-8") as file:
             persisted = json.load(file)
         self.assertEqual(persisted, dump_config)
+        self.assertFalse(ascend_config.dump_on_profile_run)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dump_on_profile_run_requires_dump_config(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"dump_on_profile_run": True}
+
+        with self.assertRaisesRegex(ValueError, "requires dump_config or dump_config_path"):
+            init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
