@@ -1,0 +1,10 @@
+# Release note fragment. See release_notes/README.md.
+pr: 22052
+entries:
+  - category: feature
+    text: >
+      Added RL lifecycle duration histograms lifecycle:sleep:duration_ms and
+      lifecycle:wake:duration_ms, so suspending and resuming a worker for
+      weight updates can be timed from the metrics endpoint. Both are
+      basic-level metrics: they are recorded once ms-service-metric is
+      enabled, and the default metric level needs no change.
