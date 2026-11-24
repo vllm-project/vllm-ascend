@@ -15,9 +15,11 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# TEMPORARY (fork-only validation): run a few A3 cases on the karc-only
-# scale sets linux-aarch64-a3-800i-karc-fed-{2,4,8,16}. These labels resolve
-# only on the offline karc member; the cloud A3 pools stay untouched.
+# TEMPORARY (fork-only validation): run the full A3 PR E2E selection on the
+# karc-only scale sets linux-aarch64-a3-800i-karc-fed-{2,4}. The card count is
+# still decided by the repository routing tables (runner_mapping/partition in
+# .github/workflows/scripts/test_config.yaml); only the two A3 partition labels
+# are rebound to the karc aliases. The cloud A3 pools stay untouched.
 # Do not merge.
 name: E2E
 
@@ -95,88 +97,36 @@ jobs:
           }
           echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
 
-      - name: Select a few A3 cases for the karc-only 2/4/8/16-card runners
+      - name: Select the full A3 test suite for the karc-only runners
         id: scope
         run: |
           pip install regex pyyaml
           GITHUB_OUTPUT="$RUNNER_TEMP/all-test-groups.txt" \
             python3 .github/workflows/scripts/select_tests.py --all-tests --skip-cpu-ut --skip-a5
           python3 - <<'PY'
-          import copy
           import json
           import os
           from pathlib import Path
 
-          import yaml
-
-          # Smoke settings: one partition per card count, only a few cases.
-          # PT CI only carries A3 cases for 2/4 cards (runner_mapping stops at
-          # four_card; eight_card is empty and sixteen_card does not exist).
-          # The 8/16-card karc runners therefore re-run the 4-card selection,
-          # which validates the label, placement and whole-machine scheduling
-          # rather than 8/16-card coverage.
-          KEEP_TESTS = 3
-          BASE_COUNTS = (2, 4)
-          EXTRA_COUNTS = (8, 16)
-
+          # TEMPORARY (fork-only validation, do not merge): keep every A3 group
+          # exactly as select_tests.py produced it. Card counts, partitions and
+          # per-partition sharding all come from the repository routing tables,
+          # so each case keeps the runner it was written for (2-card or 4-card).
           outputs = dict(
               line.split("=", 1)
               for line in Path(os.environ["RUNNER_TEMP"], "all-test-groups.txt").read_text().splitlines()
           )
           all_groups = json.loads(outputs["test_groups"])
-          a3_groups = [group for group in all_groups if group["npu_type"] == "a3"]
-          candidates = [
-              group for group in a3_groups if int(group["num_npus"]) in BASE_COUNTS
-          ]
-          # Keep the first partition of each card count. "partition" is a range
-          # string such as "1-5", so sort it textually instead of comparing to 1.
-          candidates.sort(
-              key=lambda group: (
-                  int(group["num_npus"]),
-                  str(group.get("partition") or ""),
-              )
-          )
-          picked = {}
-          for group in candidates:
-              picked.setdefault(int(group["num_npus"]), group)
-          if sorted(picked) != sorted(BASE_COUNTS):
-              raise SystemExit(f"Expected A3 partitions for {BASE_COUNTS}, got {sorted(picked)}")
-
-          def trim(group):
-              with open(
-                  ".github/workflows/scripts/test_config.yaml", encoding="utf-8"
-              ) as config:
-                  skip = set(yaml.safe_load(config)["skip_tests"])
-              # select_tests.py emits "tests" as a space-joined string and
-              # _selected_tests.yaml interpolates it directly into the shell
-              # command; a JSON list would render as the literal "Array".
-              tests = [
-                  test
-                  for test in str(group["tests"]).split()
-                  if test.replace("\\", "/") not in skip
-              ]
-              tests = tests[:KEEP_TESTS]
-              if not tests:
-                  raise SystemExit(f"Empty test selection for {group['num_npus']} cards")
-              group["tests"] = " ".join(tests)
-              return group
-
-          prefix = "linux-aarch64-a3-800i-karc-fed-"
-          groups = []
-          for count in BASE_COUNTS:
-              group = trim(copy.deepcopy(picked[count]))
-              group["runner"] = prefix + str(count)
-              groups.append(group)
-          for count in EXTRA_COUNTS:
-              group = trim(copy.deepcopy(picked[4]))
-              group["runner"] = prefix + str(count)
-              group["num_npus"] = count
-              group["partition_name"] = f"a3-{count}"
-              group["partition"] = "1-1"
-              groups.append(group)
+          groups = [group for group in all_groups if group.get("npu_type") == "a3"]
+          if not groups:
+              raise SystemExit("No A3 test groups selected")
 
           for group in groups:
-              print(f"{group['runner']} / part {group.get('partition')}: {group['tests']}")
+              files = str(group["tests"]).split()
+              print(
+                  f"{group['runner']} ({group.get('num_npus')} card)"
+                  f" [part {group.get('partition')}] {len(files)} files"
+              )
 
           target_ids = sorted({group["csrc_cache_target"] for group in groups})
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
