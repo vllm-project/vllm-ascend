@@ -10,18 +10,9 @@ import torch
 from vllm_ascend.ops import mega_kda
 
 
-@pytest.mark.parametrize("mixed", [False, True])
-def test_mega_kda_reads_device_metadata_and_merges_token_order(monkeypatch, mixed):
+def test_mega_kda_reads_device_metadata_and_merges_token_order(monkeypatch):
     dim = mega_kda.MEGA_KDA_HEAD_DIM
-    mx = None
-    if mixed:
-        qkv = torch.arange(4 * dim, dtype=torch.int32).to(torch.uint8).reshape(4, dim)
-        scales = torch.arange(16, dtype=torch.uint8).reshape(4, 2, 2)
-        weight = torch.zeros(3 * dim, dim, dtype=torch.uint8)
-        weight_scale = torch.zeros(3 * dim, dim // 32, dtype=torch.uint8)
-        mx = mega_kda.MxQkvProjection(scales, weight, weight_scale)
-    else:
-        qkv = torch.randn(4, 3 * dim, dtype=torch.bfloat16)
+    qkv = torch.randn(4, 3 * dim, dtype=torch.bfloat16)
     raw_gate = torch.randn(1, 4, 1, dim, dtype=torch.bfloat16)
     gate = torch.randn(4, 1, dim, dtype=torch.bfloat16)
     beta = torch.randn(1, 4, 1, dtype=torch.bfloat16)
@@ -62,7 +53,7 @@ def test_mega_kda_reads_device_metadata_and_merges_token_order(monkeypatch, mixe
         ),
     )
 
-    mega_kda.run_mega_kda(layer, operator, metadata, qkv, raw_gate, gate, beta, result, packed_weights, mx)
+    mega_kda.run_mega_kda(layer, operator, metadata, qkv, raw_gate, gate, beta, result, packed_weights)
 
     spec_args, prefill_args = [call.args for call in launch.call_args_list]
     torch.testing.assert_close(spec_args[2], qkv[spec_indices])
@@ -71,56 +62,9 @@ def test_mega_kda_reads_device_metadata_and_merges_token_order(monkeypatch, mixe
     assert spec_args[7] is spec_slots
     assert spec_args[9] is accepted
     assert prefill_args[10] is no_initial
-    if mixed:
-        spec_call, prefill_call = launch.call_args_list
-        torch.testing.assert_close(spec_call.kwargs["mx_input_scale"], scales[spec_indices])
-        torch.testing.assert_close(prefill_call.kwargs["mx_input_scale"], scales[prefill_indices])
-        assert spec_call.kwargs["mx_weights"][0].data_ptr() == weight.data_ptr()
-        assert spec_call.kwargs["mx_weights"][1].shape == (3 * dim, dim // 64, 2)
     expected = torch.stack([prefill_output[0], spec_output[0], prefill_output[1], spec_output[1]]).reshape_as(result)
     torch.testing.assert_close(norm.call_args.args[0], expected)
     assert norm.call_args.kwargs["out"] is result
-
-
-def test_mixed_decode_uses_existing_state_and_single_token_scale(monkeypatch):
-    dim = mega_kda.MEGA_KDA_HEAD_DIM
-    qkv = torch.zeros(2, dim, dtype=torch.uint8)
-    scales = torch.arange(8, dtype=torch.uint8).reshape(2, 2, 2)
-    weights = torch.empty(3 * dim, dim, dtype=torch.uint8)
-    mx = mega_kda.MxQkvProjection(scales, weights, torch.empty(3 * dim, dim // 32, dtype=torch.uint8))
-    gate = torch.zeros(1, 2, 1, dim, dtype=torch.bfloat16)
-    beta = torch.zeros(1, 2, 1, dtype=torch.bfloat16)
-    slots = torch.tensor([7], dtype=torch.int32)
-    conv_slots = torch.tensor([3], dtype=torch.int32)
-    prefix = torch.tensor([0, 1], dtype=torch.int32)
-    metadata = SimpleNamespace(
-        num_actual_tokens=1,
-        num_spec_decodes=0,
-        num_prefills=0,
-        num_decodes=1,
-        non_spec_state_indices_tensor=slots,
-        non_spec_decode_metadata=SimpleNamespace(
-            causal_conv1d=SimpleNamespace(query_start_loc=prefix, cache_indices=conv_slots)
-        ),
-    )
-    layer = SimpleNamespace(local_num_heads=1, o_norm=MagicMock())
-    launch = MagicMock(return_value=torch.ones(1, dim, dtype=torch.bfloat16))
-    monkeypatch.setattr(mega_kda, "_run_projected", launch)
-    result = torch.empty_like(gate[:, :1])
-    conv_weight = torch.empty(4, 3 * dim, dtype=torch.bfloat16)
-
-    mega_kda.run_mega_kda(layer, MagicMock(), metadata, qkv, gate, gate[0], beta, result, conv_weight, mx)
-
-    launch.assert_called_once()
-    args, kwargs = launch.call_args
-    torch.testing.assert_close(args[2], qkv[:1])
-    torch.testing.assert_close(kwargs["mx_input_scale"], scales[:1])
-    assert args[6] is prefix
-    assert args[7] is slots
-    assert args[8] is conv_slots
-    torch.testing.assert_close(args[9], torch.ones_like(slots))
-    torch.testing.assert_close(args[10], torch.ones_like(slots))
-    assert layer.o_norm.forward_oot.call_args.kwargs["out"] is result
 
 
 def test_mega_kda_clears_idle_graph_output(monkeypatch):
@@ -138,3 +82,76 @@ def test_mega_kda_clears_idle_graph_output(monkeypatch):
 def test_mega_kda_requires_projected_wheel(tmp_path):
     with pytest.raises(RuntimeError, match="projected operator wheel"):
         mega_kda.load_mega_kda(str(tmp_path))
+
+
+def test_upstream_mixed_batch_uses_public_operator_and_shares_spec_plan(monkeypatch):
+    from vllm import forward_context
+
+    context = SimpleNamespace(additional_kwargs={})
+    monkeypatch.setattr(forward_context, "get_forward_context", lambda: context)
+    prefix = torch.tensor([0, 2], dtype=torch.int32)
+    slot = torch.tensor([4], dtype=torch.int32)
+    spec = SimpleNamespace(query_start_loc=prefix, cache_indices=slot, num_accepted_tokens=torch.ones_like(slot))
+    decode = SimpleNamespace(
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        cache_indices=slot - 1,
+        initial_state_mode=torch.zeros_like(slot),
+    )
+    meta = SimpleNamespace(
+        num_actual_tokens=3,
+        num_decodes=0,
+        num_spec_decodes=1,
+        num_prefills=1,
+        num_prefill_tokens=1,
+        spec_token_indx=torch.tensor([0, 2], dtype=torch.int32),
+        non_spec_token_indx=torch.tensor([1], dtype=torch.int32),
+        spec_state_indices_tensor=slot[:, None],
+        spec_decode_metadata=SimpleNamespace(spec_causal_conv1d=spec),
+        non_spec_state_indices_tensor=slot - 1,
+        non_spec_prefill_metadata=SimpleNamespace(causal_conv1d=decode),
+    )
+    hidden = torch.tensor([[2, 4], [3, 5], [7, 9], [12, 13]], dtype=torch.bfloat16)
+
+    def launch(
+        *,
+        hidden_states,
+        conv_state,
+        checkpoint_state,
+        replay_u,
+        replay_k,
+        replay_decay,
+        decay_projection_a_weight,
+        qkv_scale_alg,
+        **kwargs,
+    ):
+        assert qkv_scale_alg == 1 and decay_projection_a_weight.shape == (2, 2)
+        replay_u.fill_(1)
+        replay_k.fill_(0.25)
+        replay_decay.fill_(0.5)
+        return hidden_states + 1, conv_state, replay_u, replay_k, replay_decay
+
+    op = mega_kda.UpstreamMegaKDA(
+        MagicMock(side_effect=launch), MagicMock(return_value=torch.ones(3, dtype=torch.int32))
+    )
+    weights = {"qkv_scale_alg": 1, "decay_projection_a_weight": torch.ones(2, 2)}
+    for _ in range(2):
+        state = torch.full((8, 1, 2, 2), 4.0)
+        records = SimpleNamespace(correction=torch.zeros(1, 1, 2, 2), key_gate=torch.zeros(1, 1, 2, 4))
+        layer = SimpleNamespace(
+            head_dim=2,
+            gate_lower_bound=-5.0,
+            o_norm=SimpleNamespace(eps=1e-6),
+            use_recoverssm=True,
+            num_spec=1,
+            recoverssm_records=records,
+            kv_cache=(torch.zeros(8, 4, 6, dtype=torch.bfloat16), state),
+        )
+        result = mega_kda.run_upstream_mega_kda(layer, op, meta, hidden, weights)
+        torch.testing.assert_close(result[:3], hidden[:3] + 1)
+        assert result[3].count_nonzero() == 0
+        torch.testing.assert_close(state[4], torch.full_like(state[4], 4))
+        torch.testing.assert_close(state[3], torch.full_like(state[3], 0.25))
+        torch.testing.assert_close(records.key_gate[..., :2], torch.full((1, 1, 2, 2), 0.25))
+        torch.testing.assert_close(records.key_gate[..., 2:], torch.full((1, 1, 2, 2), 0.5))
+    assert op.forward.call_count == 4
+    assert len(context.additional_kwargs["mega_kda_state_plans"]) == 2

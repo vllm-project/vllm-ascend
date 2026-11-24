@@ -359,6 +359,7 @@ def _accumulate_kda_commit_step(
     boundary_correction,
     K: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
+    PROCESSED_REPLAY: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
 ):
     correction_ptr = correction_cache_ptr + token_offset * stride_correction_cache_pos
@@ -378,16 +379,21 @@ def _accumulate_kda_commit_step(
         mask=mask_k,
         other=0.0 if mask_k is not None else None,
     ).to(tl.float32)
-    normalized_k = _kda_l2_normalize(k)
-    gate = _kda_gate(
-        raw_g,
-        dt_bias,
-        A,
-        lower_bound,
-        USE_LOWER_BOUND,
-    )
-    tl.static_assert(gate.dtype == tl.float32)
-    decay = tl.exp(gate)
+    # MegaRecurrentKda has already normalized the key and exponentiated the gate.
+    if PROCESSED_REPLAY:
+        normalized_k = k
+        decay = raw_g
+    else:
+        normalized_k = _kda_l2_normalize(k)
+        gate = _kda_gate(
+            raw_g,
+            dt_bias,
+            A,
+            lower_bound,
+            USE_LOWER_BOUND,
+        )
+        tl.static_assert(gate.dtype == tl.float32)
+        decay = tl.exp(gate)
     weighted_k = normalized_k * final_decay
     final_correction = tl.fma(correction[:, None], weighted_k[None, :], final_correction)
     final_decay *= decay
@@ -445,6 +451,7 @@ def _commit_kda_state_kernel(
     BV: tl.constexpr,
     NUM_HEADS: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
+    PROCESSED_REPLAY: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
     SPEC_QUERY_LEN: tl.constexpr,
     UNROLL_COMMIT: tl.constexpr,
@@ -543,6 +550,7 @@ def _commit_kda_state_kernel(
                     boundary_correction,
                     K,
                     USE_LOWER_BOUND,
+                    PROCESSED_REPLAY,
                     ALIGN_MODE,
                 )
     else:
@@ -570,6 +578,7 @@ def _commit_kda_state_kernel(
                     boundary_correction,
                     K,
                     USE_LOWER_BOUND,
+                    PROCESSED_REPLAY,
                     ALIGN_MODE,
                 )
     initial_state = tl.load(state_ptrs, mask=mask_state, other=0.0 if mask_state is not None else None).to(tl.float32)
@@ -969,6 +978,7 @@ class KDARecoverSSMCommitContext:
     spec_query_len: int
     conv_dim_stride: int | None
     cache_bindings: tuple[tuple[torch.Tensor, ...], ...]
+    processed_replay: bool = False
 
     def is_bound_to(self, layers: Sequence[Any]) -> bool:
         """Detect cache or scratch-buffer replacement between worker bindings."""
@@ -1009,6 +1019,10 @@ class KDARecoverSSMCommitContext:
             raise ValueError("KDA RecoverSSM requires convolution and checkpoint caches")
         if any(getattr(layer, "recoverssm_records", None) is None for layer in layers):
             raise ValueError("KDA RecoverSSM layers require request-indexed verify records")
+        processed = {getattr(layer, "_mega_kda_mix", False) is True for layer in layers}
+        if len(processed) != 1:
+            raise ValueError("KDA layers in a single commit must use the same replay format")
+        processed_replay = processed.pop()
         init_device_properties_triton()
 
         conv_states = [layer.kv_cache[0] for layer in layers]
@@ -1055,6 +1069,8 @@ class KDARecoverSSMCommitContext:
                 raise ValueError(f"KDA RecoverSSM correction buffers need float32 shape {expected_correction_shape}")
         expected_kg_shape = (record_capacity, num_heads, spec_query_len, 2 * key_dim)
         kg_ref = kg_caches[0]
+        if processed_replay and kg_ref.dtype != torch.float32:
+            raise ValueError("MegaRecurrentKda requires FP32 storage for the replay decay")
         for kg_cache in kg_caches:
             if (
                 kg_cache.shape != expected_kg_shape
@@ -1138,6 +1154,7 @@ class KDARecoverSSMCommitContext:
                 conv_ref.stride(1) if all(state.stride(1) == conv_ref.stride(1) for state in conv_states) else None
             ),
             cache_bindings=tuple(tuple(layer.kv_cache) for layer in layers),
+            processed_replay=processed_replay,
         )
 
     def commit(
@@ -1230,7 +1247,11 @@ class KDARecoverSSMCommitContext:
         # them without boundary matrices; only crossing requests use the full path.
         # Both kernels select requests on-device, without synchronizing graph replay.
         grouped_commit = (
-            is_a5 and state_ref.dtype == torch.float32 and key_dim == value_dim == 128 and num_heads in (32, 64)
+            not self.processed_replay
+            and is_a5
+            and state_ref.dtype == torch.float32
+            and key_dim == value_dim == 128
+            and num_heads in (32, 64)
         )
         value_tile = RECOVERSSM_VALUE_TILE
         if grouped_commit:
@@ -1247,7 +1268,7 @@ class KDARecoverSSMCommitContext:
             value_tile = min(value_tile, 1 << (max_rows.bit_length() - 1))
             head_groups = num_heads
             commit_kernel = _commit_kda_state_kernel
-            commit_options = {"UNROLL_COMMIT": is_a5}
+            commit_options = {"UNROLL_COMMIT": is_a5, "PROCESSED_REPLAY": self.processed_replay}
         block_v = min(triton.next_power_of_2(value_dim), value_tile)
         # Explicit flat indexing keeps request rows outermost on both 3.2/3.6
         # backends, balancing mixed boundary requests without a new static flag.

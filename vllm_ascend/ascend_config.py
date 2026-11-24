@@ -855,8 +855,10 @@ class AscendConfig:
                 raise ValueError("The MegaKDA backend requires Kimi K3.1 and Model Runner V2")
             if vc.kv_transfer_config is None or vc.kv_transfer_config.kv_role != "kv_consumer":
                 raise ValueError("The MegaKDA backend requires a disaggregated decode worker")
-            if vc.cache_config.use_replayssm or self.gdn_internal_prefill_checkpoints:
-                raise ValueError("The MegaKDA backend requires ReplaySSM and internal GDN checkpoints to be disabled")
+            if self.gdn_internal_prefill_checkpoints:
+                raise ValueError("The MegaKDA backend requires internal GDN checkpoints to be disabled")
+            if self.kda_backend_config.backend == "mega_kda" and vc.cache_config.use_replayssm:
+                raise ValueError("The projected MegaKDA backend requires ReplaySSM to be disabled")
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:
                 raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")

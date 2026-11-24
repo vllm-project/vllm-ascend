@@ -412,29 +412,28 @@ Validate correctness, quality and performance on the deployment hardware before 
 
 ### MegaKDA backend
 
-The Kimi K3.1 disaggregated decode engine can opt into the experimental MegaKDA
-backend on Ascend 950. It requires BF16 activations from the mixed-precision
-projection, Model Runner V2, and prefill context parallel size 1. Use
-`FULL_DECODE_ONLY` for decode graph replay. Keep ReplaySSM and
-`gdn_internal_prefill_checkpoints` disabled on the decode engine.
+Kimi K3.1 decode workers on Ascend 950 can select a KDA backend with
+`kda_backend_config`. Use Model Runner V2, prefill context parallel size 1,
+BF16 hidden states and the model's MXFP8 QKV weights. Set the option on the
+KV consumer. The default is `native`.
 
-Install an Ascend 950 `fla_npu` operator wheel into a separate package directory.
-Select the backend that matches its Stable ABI entry point.
+| Backend | Operator and scope |
+| --- | --- |
+| `mega_recurrent_kda_mx` | The upstream `npu_mega_recurrent_kda` public API consumes BF16 hidden states and returns the local BF16 output projection. |
+| `mega_kda` | The separate `npu_mega_kda_projected` wheel accepts projected QKV and uses the model's external gated norm and output projection. This backend requires ReplaySSM to be disabled. |
 
-| Backend | Required wheel entry point | QKV projection |
-| --- | --- | --- |
-| `mega_kda` | `npu_mega_kda_projected` | vLLM projects QKV and passes BF16 activations to the Vector kernel. |
-| `mega_recurrent_kda_mx` | `npu_mega_recurrent_kda_mx` | Cube projects MXFP8 QKV in the same launch as the Vector convolution, recurrence, and paged state updates. |
+For the full operator, build an Ascend 950 wheel from
+[the upstream integration guide](https://github.com/chen-linxin/flash-linear-attention-npu/blob/0c59c1d363b5debe1b7f76ddc59e44d48351523d/fla/ops/ascendc/kda/mega_recurrent_kda/docs/model_integration.md).
+Install the wheel and expose its OPP before starting workers:
 
-The mixed backend keeps E4M3FN weights and E8M0 scales in checkpoint layout.
-Its operator wheel must synchronize the Cube with **both** Vector subcores on
-Ascend 950. The wheel used for A5 validation uses Mode 2 for the ready, QKV,
-and completion signals. The recurrence derives from the
-[upstream MegaKDA operator](https://github.com/flashserve/flash-linear-attention-npu/pull/1375).
+```bash
+python3 -m pip install --no-deps --target /opt/mega-kda-runtime /path/to/fla_npu.whl
+export ASCEND_CUSTOM_OPP_PATH="/opt/mega-kda-runtime/fla_npu/opp/vendors/fla_npu_transformer${ASCEND_CUSTOM_OPP_PATH:+:$ASCEND_CUSTOM_OPP_PATH}"
+```
 
-Include the wheel's `fla_npu/opp/vendors/fla_npu_transformer` directory in
-`ASCEND_CUSTOM_OPP_PATH` before launching workers. For mixed MXFP8 decode,
-add the following to the engine's existing additional configuration.
+Use the actual wheel filename in the install command. Keep the image's base
+`fla_npu` on the Python path. The adapter loads the two public wrappers and
+their matching launcher from the configured directory in a separate namespace.
 
 ```json
 {
@@ -445,8 +444,15 @@ add the following to the engine's existing additional configuration.
 }
 ```
 
-vLLM handles activation quantization, beta and gate projections, gated norm,
-and the output projection. A device profile of the mixed path records one
-`MegaRecurrentKdaMx` task with core type `MIX_AIC` per executed KDA layer.
-
-The default `native` backend continues to use the existing KDA kernels.
+The full operator consumes the rank's E4M3FN QKV weights in FRACTAL_NZ
+layout, their E8M0 scales, and the original BF16 decay, beta and output gate
+weights. It computes the convolution, recurrence, gated RMSNorm and output
+projection inside the same invocation. vLLM applies the original TP collective.
+Ordinary decode uses BSH. Speculative decode uses TH with one device plan per
+metadata group per forward. Padding is isolated from live cache pages.
+The checkpoint is read-only during the call. vLLM commits the returned
+correction, normalized key and decay to the corresponding pages. With
+ReplaySSM enabled, speculative updates commit after sampling according to the
+accepted token count. Multi-token prefill uses the native prefill path.
+Disable internal GDN prefill checkpoints and use `FULL_DECODE_ONLY` for decode
+graph replay.

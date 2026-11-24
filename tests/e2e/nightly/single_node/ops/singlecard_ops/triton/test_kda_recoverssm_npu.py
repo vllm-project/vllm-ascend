@@ -1287,3 +1287,51 @@ def test_commit_window_uses_device_path(
         )
     record_property("commit_kernel", kernel_name)
     record_property("spec_query_len", span)
+
+
+@pytest.mark.skip_global_cleanup
+@torch.inference_mode()
+def test_commit_mega_kda_processed_replay(record_property):
+    """Commit only accepted upstream factors to physical pages across two steps."""
+    if not torch.npu.is_available():
+        pytest.skip("requires an Ascend NPU")
+    torch.manual_seed(23002)
+    heads, dim, window = 12, 128, 4
+    state = (torch.randn(6, heads, dim, dim) * 0.01).npu()
+    expected = state.cpu().clone()
+    conv = torch.zeros(6, window + 2, 3 * heads * dim, dtype=torch.bfloat16, device="npu")
+    if is_conv_state_dim_first():
+        conv = conv.transpose(1, 2).contiguous()
+    records = SimpleNamespace(
+        correction=torch.zeros(2, heads, window, dim, device="npu"),
+        key_gate=torch.zeros(2, heads, window, 2 * dim, device="npu"),
+    )
+    layer = SimpleNamespace(
+        _mega_kda_mix=True,
+        kv_cache=(conv, state),
+        recoverssm_records=records,
+        A_log=torch.zeros(heads, device="npu"),
+        dt_bias=torch.zeros(heads * dim, device="npu"),
+        gate_lower_bound=-5.0,
+        local_num_heads=heads,
+        head_dim=dim,
+    )
+    context = KDARecoverSSMCommitContext.create([layer], spec_query_len=window, max_num_reqs=2)
+    slots = [4, 2]
+    for accepted in ([1, 3], [4, 2]):
+        u = torch.randn(2, heads, window, dim) * 0.01
+        k = torch.randn_like(u).half().float()
+        decay = torch.rand_like(u)
+        records.correction.copy_(u)
+        records.key_gate.copy_(torch.cat((k, decay), dim=-1))
+        for i, (slot, count) in enumerate(zip(slots, accepted)):
+            for pos in range(count):
+                expected[slot] = (
+                    expected[slot] * decay[i, :, pos, None, :] + u[i, :, pos, :, None] * k[i, :, pos, None, :]
+                )
+        context.commit(
+            torch.tensor(accepted, dtype=torch.int32, device="npu"),
+            torch.tensor(slots, dtype=torch.int32, device="npu"),
+            torch.tensor([0, window, 2 * window], dtype=torch.int32, device="npu"),
+        )
+        assert_accuracy(state, expected, record_property, "upstream_accepted_replay")
