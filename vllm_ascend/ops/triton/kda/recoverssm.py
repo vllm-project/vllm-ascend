@@ -20,7 +20,6 @@ from vllm_ascend.ops.triton.mamba.compact_conv_state import compact_conv_state
 from vllm_ascend.ops.triton.mamba.prepare_commit_plan import prepare_commit_plan
 from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, get_vectorcore_num, init_device_properties_triton
 
-RECOVERSSM_COMMIT_HEAD_TILE = 2
 # Conservative UB budgets in BV x BK FP32 matrix equivalents. Boundary recovery
 # includes final/boundary accumulators and merge temporaries; these estimates
 # are not compiler-reported live-buffer counts.

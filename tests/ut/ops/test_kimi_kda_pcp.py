@@ -364,7 +364,7 @@ def test_explicit_projection_group_preserves_merged_checkpoint_shards(size):
     for rank in range(size):
         group = SimpleNamespace(world_size=size, rank_in_group=rank)
         with parallel_groups(native, native):
-            layer = kda_parallel.KDAMergedColumnParallelLinear(
+            layer = head_parallel.HeadParallelMergedColumnLinear(
                 hidden, [width] * 3, tp_group=group, bias=False, params_dtype=torch.float32
             )
         for shard, weight in enumerate(weights):

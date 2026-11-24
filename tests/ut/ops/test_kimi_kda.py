@@ -12,7 +12,6 @@ from torch import nn
 import vllm_ascend.ops.kimi_kda as projection_module
 from vllm_ascend.ascend_forward_context import override_mrv2_in_profile_run
 from vllm_ascend.models.glm5next import kda_input_projection_tp as common_projection
-from vllm_ascend.ops.kimi_kda import KimiKDAHostMetadataBackend, KimiKDARecoverSSMMetadataBackend
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiK3DeltaAttention,
