@@ -142,6 +142,8 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
         pcp_manager: "PCPManager | None" = None,
+        specialize_spec_tokens: bool = False,
+        slot_mappings_buffer: torch.Tensor | None = None,
     ) -> None:
         """Capture ACL graphs for autoregressive speculative decoding.
 
@@ -152,6 +154,22 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         """
 
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
+            if self.speculator.uses_upstream_swa_graph:
+                capture_kwargs = {}
+                if slot_mappings_buffer is not None:
+                    capture_kwargs["slot_mappings_buffer"] = slot_mappings_buffer
+                super().capture(
+                    forward_fn,
+                    model_state,
+                    input_buffers,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    progress_bar_desc=progress_bar_desc,
+                    specialize_spec_tokens=specialize_spec_tokens,
+                    **capture_kwargs,
+                )
+                return
 
             def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
                 num_tokens = desc.num_tokens
@@ -200,6 +218,8 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             "ACL graph replay is active for the V2 draft model (%s, logged once per phase).",
             "prefill" if self.is_draft_model_prefill else "decode",
         )
+        if not self.is_draft_model_prefill and self.speculator.uses_upstream_swa_graph:
+            return super().run_fullgraph(desc)
         assert self.update_stream is not None
 
         attn_backend = self.speculator.attn_backend

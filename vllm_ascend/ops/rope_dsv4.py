@@ -109,7 +109,14 @@ def get_cos_and_sin_dsa(
     use_cache: bool = False,
     draft_index: int | None = None,
     layer_names: str | Iterable[str] | None = None,
+    *,
+    output_buffers: dict[tuple[str, str], tuple[torch.Tensor, torch.Tensor]] | None = None,
+    capacity: int | None = None,
 ):
+    """Look up RoPE, optionally gathering directly into caller-owned storage."""
+    if output_buffers is not None:
+        assert not use_cache and draft_index is None
+        assert capacity is not None
     if isinstance(positions, torch.Tensor):
         pos_map = {"default": positions}
     else:
@@ -142,7 +149,20 @@ def get_cos_and_sin_dsa(
             if group_name not in registered_groups:
                 continue
 
-            if use_cache:
+            if output_buffers is not None:
+                key = (config_key, group_name)
+                num_tokens = pos_tensor.size(0)
+                assert capacity is not None and num_tokens <= capacity
+                if key not in output_buffers:
+                    output_buffers[key] = tuple(
+                        table.new_empty((capacity, *table.shape[1:])) for table in (full_rope_cos, full_rope_sin)
+                    )
+                buf_cos, buf_sin = output_buffers[key]
+                gather_idx = pos_tensor.to(torch.long).reshape(-1, 1, 1, 1).expand(num_tokens, *full_rope_cos.shape[1:])
+                torch.gather(full_rope_cos, 0, gather_idx, out=buf_cos[:num_tokens])
+                torch.gather(full_rope_sin, 0, gather_idx, out=buf_sin[:num_tokens])
+                batch_result[config_key][group_name] = (buf_cos[:num_tokens], buf_sin[:num_tokens])
+            elif use_cache:
                 group_buffers = (
                     _ROPE_STATE.runtime_buffer.get(config_key, {}).get(group_name)
                     if draft_index is None

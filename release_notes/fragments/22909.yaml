@@ -1,0 +1,9 @@
+pr: 22909
+entries:
+  - category: feature
+    text: >-
+      Enabled fused multi-step ACL graphs for native uncompressed SWA with MTP,
+      Eagle and Eagle3 on Model Runner V2. Existing configurations with FULL
+      draft decode graphs use this path automatically when PCP and DCP are both
+      1 and sparse KV offload is disabled, refreshing position and attention
+      metadata inside each draft substep.

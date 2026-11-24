@@ -158,6 +158,27 @@ class TestEquivalenceWithGatherSemantics:
                 )
 
 
+def test_caller_owned_rope_gathers_in_place_without_touching_shared_cache(monkeypatch):
+    table = torch.arange(64, dtype=torch.float32).view(16, 1, 1, 4)
+    shared = torch.full((8, 1, 1, 4), -100.0)
+    monkeypatch.setattr(_ROPE_STATE, "full_rope_cache", {"config": (table, -table)})
+    monkeypatch.setattr(_ROPE_STATE, "registry_summary", {"config": {"default"}})
+    monkeypatch.setattr(_ROPE_STATE, "layer_info", {"layer": ("config", ["default"])})
+    monkeypatch.setattr(_ROPE_STATE, "runtime_buffer", {"config": {"default": (shared, shared.clone())}})
+    buffers = {}
+    pointers = None
+    for positions in (torch.tensor([1, 3, 5]), torch.tensor([7]), torch.tensor([0, 2, 4, 6])):
+        cos, sin = get_cos_and_sin_dsa(positions, layer_names="layer", output_buffers=buffers, capacity=8)
+        torch.testing.assert_close(cos["layer"], table[positions])
+        torch.testing.assert_close(sin["layer"], -table[positions])
+        current = (cos["layer"].data_ptr(), sin["layer"].data_ptr())
+        if pointers is None:
+            pointers = current
+        assert current == pointers
+        assert torch.all(shared == -100)
+        assert buffers[("config", "default")][0].shape[0] == 8
+
+
 def test_get_cos_and_sin_filters_configs_by_layer():
     old_state = (
         _ROPE_STATE.full_rope_cache,
