@@ -269,6 +269,8 @@ git commit -s -m "<type>: <summary>" -m "<body - explaining what changed and why
 
 **Valid Types**: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `chore`
 
+Follow the [commit message content guidelines](docs/source/developer_guide/contribution/index.md#commit-message-content) for the problem, fix, and validation.
+
 ### Pull Request Title Format
 
 PR titles use bracketed change-type tags such as `[BugFix]`, `[Feature]`, or `[Doc]` (note: this differs from the `type:` prefix used in commit messages). The full accepted set is enforced by the CI check linked in the [PR submission checklist](docs/source/developer_guide/contribution/testing.md#pr-submission-checklist).

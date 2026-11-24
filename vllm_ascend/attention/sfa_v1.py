@@ -22,7 +22,6 @@ from vllm.v1.attention.backend import (
     max_decode_query_len,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -68,6 +67,7 @@ from vllm_ascend.quantization.methods import (
     AscendW8A8LinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQuantLatent
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
@@ -255,7 +255,7 @@ class SparseMLAMetadataState:
     Pool construction and scoring remain outside operator dispatch.
     """
 
-    def __init__(self, kv_cache_spec, vllm_config, device, kernel_block_size=128, num_heads=None):
+    def __init__(self, kv_cache_spec, vllm_config, device, kernel_block_size: int, num_heads=None):
         block_size = kv_cache_spec.block_size
         if block_size <= 0 or block_size % kernel_block_size:
             raise ValueError("Sparse MLA block size must be a positive multiple of the SFA kernel block size.")
@@ -553,8 +553,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             self.metadata_cls = metadata_cls if metadata_cls is not None else AscendSFAMetadata
             self.model_config = vllm_config.model_config
 
-        # Match the logical block size selected for BlockTable.
-        self.kernel_block_size = select_common_block_size(kv_cache_spec.block_size, [AscendSFABackend])
+        # AttentionGroup.create_metadata_builders() passes a copied spec whose
+        # block_size is the final per-group kernel block size.
+        self.kernel_block_size = kv_cache_spec.block_size
 
         layer = vllm_config.compilation_config.static_forward_context[layer_names[0]]
         self.nope = layer.qk_rope_head_dim == 0
@@ -904,9 +905,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         # applies only to layers that own an indexer cache.
         self._update_indexer_cache_enabled()
         self.store_kv_cache_on_host = ascend_config.sparse_kv_offload_config.enabled
+        # The draft cache dtype can differ from the target config.
         self.kv_cache_dtype = self.vllm_config.cache_config.cache_dtype
-        self.enable_sparse_sfa_turboquant = ascend_config.enable_sparse_sfa_turboquant
-        self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
+        self.enable_sparse_sfa_turboquant = self.kv_cache_dtype == TURBOQUANT_CACHE_DTYPE
+        self.enable_sparse_sfa_c8 = self.kv_cache_dtype in ("int8", "fp8")
         if self.enable_sparse_sfa_c8:
             self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
                 self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config

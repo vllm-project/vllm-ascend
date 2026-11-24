@@ -603,15 +603,15 @@ class TestUnifiedApplyActivation(unittest.TestCase):
         up = linear_beta * torch.tanh(up / linear_beta)
         self.assertTrue(torch.allclose(out, gate * up))
 
-    def test_swiglustep_uses_hardcoded_limit(self):
-        with patch(f"{MOE_MLP}.AscendSwigluStepAndMul.swiglustep_forward", return_value="out") as mock_act:
+    def test_swiglustep_uses_its_own_limit(self):
+        with patch("vllm.triton_utils.HAS_TRITON", False):
             out = _unified_apply_activation(
-                _mlp_compute_input(activation=MoEActivation.SWIGLUSTEP, swiglu_limit=5.0),
-                "x",
+                _mlp_compute_input(activation=MoEActivation.SWIGLUSTEP, swiglu_limit=5.0, swiglustep_limit=4.0),
+                torch.tensor([[8.0, 6.0]]),
                 self._quant_method(),
             )
-        self.assertEqual(out, "out")
-        mock_act.assert_called_once_with("x", limit=7.0)
+        # min(SiLU(8), 4) * clamp(6, -4, 4)
+        torch.testing.assert_close(out, torch.tensor([[16.0]]))
 
     def test_swigluoai_uninterleave_uses_clipped_swiglu(self):
         with patch(f"{MOE_MLP}.DeviceOperator.clipped_swiglu", return_value="out") as mock_act:

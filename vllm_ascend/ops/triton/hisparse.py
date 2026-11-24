@@ -21,81 +21,88 @@ _HOST_SLOT_BITS = tl.constexpr(torch.iinfo(torch.int32).bits - 1)
 _MAX_HOST_SLOT = tl.constexpr(torch.iinfo(torch.int32).max)
 # The largest signed int64 sorts after every valid (state, slot) key.
 _INVALID_SORTED_SLOT_KEY = tl.constexpr(torch.iinfo(torch.int64).max)
-
-
 _PREFILL_REPRESENTATIVE_TILE = 256
 _MAX_PREFILL_REPRESENTATIVE_ROWS = torch.iinfo(torch.int32).max - _PREFILL_REPRESENTATIVE_TILE
 
 
 @triton.jit(
     do_not_specialize=["num_rows"],
-    do_not_specialize_on_alignment=["indices", "values", "representatives"],
+    do_not_specialize_on_alignment=["index_ptr", "source_ptr", "representatives_ptr"],
 )
-def _scatter_min_representatives_kernel(indices, values, representatives, num_rows, BLOCK_SIZE: tl.constexpr):
-    rows = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    valid = rows < num_rows
-    destinations = tl.load(indices + rows, mask=valid, other=0)
-    minima = tl.load(values + rows, mask=valid, other=0)
-    tl.atomic_min(representatives + destinations, minima, mask=valid, sem="relaxed")
+def _scatter_min_representatives_kernel(index_ptr, source_ptr, representatives_ptr, num_rows, BLOCK_SIZE: tl.constexpr):
+    row = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    valid = row < num_rows
+    destination = tl.load(index_ptr + row, valid, other=0)
+    position = tl.load(source_ptr + row, valid, other=0)
+    tl.atomic_min(representatives_ptr + destination, position, mask=valid)
 
 
-class ScatterMinRepresentativesKernel(AscendTritonJitKernel["ScatterMinRepresentativesKernel.CompileKey"]):
+class TritonScatterMinRepresentativesKernel(AscendTritonJitKernel["TritonScatterMinRepresentativesKernel.CompileKey"]):
     kernel = _scatter_min_representatives_kernel
+    # The launch spec supplies all arguments explicitly: avoid inspect.signature
+    # binding on each small prefill reduction.
     bind_launch_inputs = False
 
     @dataclass(frozen=True)
     class CompileKey:
         block_size: int
 
-    def dispatch(self, *, block_size: int) -> CompileKey:
-        return self.CompileKey(block_size=block_size)
+    def dispatch(self, *, BLOCK_SIZE: int) -> CompileKey:
+        return self.CompileKey(block_size=BLOCK_SIZE)
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(block_size=_PREFILL_REPRESENTATIVE_TILE)
+        # All pointers are int64; runtime length and pointer alignment do not
+        # specialize. The tile is the only configurable compile-time argument.
+        return self._trace_dispatch(self.dispatch)(BLOCK_SIZE=_PREFILL_REPRESENTATIVE_TILE)
 
     def warmup_inputs(self, key: CompileKey) -> dict[str, Any]:
-        vector = TritonWarmupTensor(torch.int64, shape=(key.block_size,))
         return dict(
-            indices=vector,
-            values=vector,
-            representatives=vector,
+            index=TritonWarmupTensor(torch.int64, shape=(key.block_size,)),
+            source=TritonWarmupTensor(torch.int64, shape=(key.block_size,)),
+            representatives=TritonWarmupTensor(torch.int64, shape=(key.block_size,)),
             num_rows=key.block_size,
             BLOCK_SIZE=key.block_size,
         )
 
     @kernel_launcher
-    def __call__(self, indices, values, representatives, num_rows: int, BLOCK_SIZE: int) -> LaunchSpec:
+    def __call__(self, index, source, representatives, num_rows: int, BLOCK_SIZE: int) -> LaunchSpec:
         return (triton.cdiv(num_rows, BLOCK_SIZE),), dict(
-            indices=indices,
-            values=values,
-            representatives=representatives,
+            index_ptr=index,
+            source_ptr=source,
+            representatives_ptr=representatives,
             num_rows=num_rows,
             BLOCK_SIZE=BLOCK_SIZE,
         )
 
 
-_SCATTER_MIN_REPRESENTATIVES = ScatterMinRepresentativesKernel()
+# One process-local launcher is shared by startup registration and runtime.
+# It retains compilation metadata only, never request tensors or outputs.
+_TRITON_SCATTER_MIN_REPRESENTATIVES = TritonScatterMinRepresentativesKernel()
 
 
 def scatter_min_representatives(
-    representatives: torch.Tensor, indices: torch.Tensor, values: torch.Tensor
+    representatives: torch.Tensor, index: torch.Tensor, source: torch.Tensor
 ) -> torch.Tensor:
-    """Update an INT64 vector in place with the minimum at each selected index.
+    """In-place int64 amin on contiguous, nonoverlapping vectors on one NPU.
 
-    The caller supplies contiguous vectors on the same NPU and indices within
-    the output bounds. The output must not overlap either input.
+    The caller supplies same-NPU vectors and valid compact IDs
+    in ``[0, representatives.numel())``.
+    Existing output values participate in the min (``include_self=True``).
+    No input contents are read on the host; empty input launches no kernel.
     """
-    if any(t.ndim != 1 or t.dtype != torch.int64 or not t.is_contiguous() for t in (representatives, indices, values)):
-        raise ValueError("HiSparse representative selection requires contiguous INT64 vectors")
-    if indices.shape != values.shape:
-        raise ValueError("HiSparse representative indices and values must have matching shapes")
-    num_rows = indices.numel()
+    tensors = (representatives, index, source)
+    if any(t.ndim != 1 or t.dtype != torch.int64 or not t.is_contiguous() for t in tensors):
+        raise ValueError("HiSparse representative selection requires contiguous int64 vectors")
+    if index.shape != source.shape:
+        raise ValueError("HiSparse representative indices and source must have matching shapes")
+    num_rows = index.numel()
+    # Keep both Triton's runtime scalar type and the row offset arithmetic int32.
     if num_rows > _MAX_PREFILL_REPRESENTATIVE_ROWS:
-        raise ValueError("HiSparse representative input exceeds the INT32 indexing range")
+        raise ValueError("HiSparse representative input exceeds the int32 row limit")
     if num_rows:
         if not representatives.numel():
             raise ValueError("HiSparse representative output must be nonempty for nonempty input")
-        _SCATTER_MIN_REPRESENTATIVES(indices, values, representatives, num_rows, _PREFILL_REPRESENTATIVE_TILE)
+        _TRITON_SCATTER_MIN_REPRESENTATIVES(index, source, representatives, num_rows, _PREFILL_REPRESENTATIVE_TILE)
     return representatives
 
 

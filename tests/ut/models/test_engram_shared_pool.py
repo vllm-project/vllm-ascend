@@ -483,6 +483,7 @@ def test_merged_model_initializes_rotation_and_registers_replay():
         has_engram=True,
         device="cpu",
         end_layer=1,
+        _init_routing_input_ids_cache=lambda _: None,
     )
     model_obj.register_buffer = lambda name, value, **kwargs: setattr(model_obj, name, value)
     config = types.SimpleNamespace(

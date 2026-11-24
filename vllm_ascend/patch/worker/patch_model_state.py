@@ -17,11 +17,24 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import torch
 from vllm.v1.worker.gpu import model_runner
+from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states import interface
 
 from vllm_ascend.worker.encoder_acl_graph import EncoderAclGraphManager
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
+
+_original_gather_mm_embeddings = interface.ModelState.gather_mm_embeddings
+
+
+def _gather_mm_embeddings(
+    self: interface.ModelState, input_batch: InputBatch, draft_lookahead: int = 0
+) -> tuple[list[torch.Tensor], torch.Tensor]:
+    if input_batch.num_tokens == 0 and getattr(self, "pcp_manager", None) is not None:
+        return [], torch.empty(0, dtype=torch.bool, device="cpu")
+    return _original_gather_mm_embeddings(self, input_batch, draft_lookahead)
+
 
 # prepare_attn in AscendModelState is different from vllm,
 # we need to override init_model_state.
@@ -29,3 +42,7 @@ model_runner.init_model_state = init_asecnd_model_state
 # ModelState imports the manager class into its own module namespace. Replace
 # that exact binding so MRV2 constructs an NPU-aware encoder graph manager.
 interface.EncoderCudaGraphManager = EncoderAclGraphManager
+
+# DefaultModelState calls ModelState.gather_mm_embeddings through super().
+# TODO: Remove this patch once the paired vLLM includes the fix from vllm-project/vllm#64435.
+interface.ModelState.gather_mm_embeddings = _gather_mm_embeddings

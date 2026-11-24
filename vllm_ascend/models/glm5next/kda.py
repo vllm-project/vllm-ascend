@@ -30,6 +30,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendGDNHostMetadataBuilder
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -40,8 +41,7 @@ from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjecti
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
 from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendGDNHostMetadataBuilder
-from vllm_ascend.ops.kda_pcp import prepare_kda_pcp_config
+from vllm_ascend.ops.recurrent_pcp import prepare_recurrent_pcp_config
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 
 if TYPE_CHECKING:
@@ -54,7 +54,7 @@ def prepare_glm_pcp_config(vllm_config):
         and vllm_config.parallel_config.pcp_shard_decode_requests
         and vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
     ):
-        return prepare_kda_pcp_config(vllm_config)
+        return prepare_recurrent_pcp_config(vllm_config)
     return vllm_config
 
 
@@ -872,7 +872,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 core_attn_out[0].index_copy_(0, spec_token_indx, spec_output[0])
 
         if q_ns is None:
-            maybe_save_kv_layer_to_connector("", [])
+            maybe_save_kv_layer_to_connector(self.prefix, [])
             return
         q_ns, k_ns, v_ns = rearrange(q_ns), rearrange(k_ns), rearrange(v_ns)
         metadata = attn_metadata_narrowed
@@ -911,13 +911,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             output = prefill_output if output is None else torch.cat((output, prefill_output), dim=1)
         assert output is not None
         if direct_output:
-            maybe_save_kv_layer_to_connector("", [])
+            maybe_save_kv_layer_to_connector(self.prefix, [])
             return
         if use_spec:
             core_attn_out[0].index_copy_(0, non_spec_token_indx, output[0])
         else:
             core_attn_out[0, : output.shape[1]].copy_(output[0])
-        maybe_save_kv_layer_to_connector("", [])
+        maybe_save_kv_layer_to_connector(self.prefix, [])
 
 
 @eager_break_during_capture
