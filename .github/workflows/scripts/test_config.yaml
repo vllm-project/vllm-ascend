@@ -52,6 +52,7 @@ curated_tests:
     - tests/e2e/pull_request/one_card/test_hisparse_integration.py
     - tests/e2e/pull_request/one_card/test_hisparse_prefill_staging.py
     - tests/e2e/pull_request/four_card_a5/pool/test_deepseek_v4_1_pool.py
+    - tests/e2e/pull_request/four_card_a5/pool/test_deepseek_v4_1_pool_mooncake.py
     - tests/e2e/pull_request/four_card_a5/pool/test_pool_ssd_hit.py
     - tests/e2e/pull_request/four_card_a5/pool/test_pool_perf.py
 
