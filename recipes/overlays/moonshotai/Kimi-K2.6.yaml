@@ -44,14 +44,11 @@ variants:
       - '--mm-encoder-tp-mode'
       - data
       - '--additional-config'
-      - '{"enable_balance_scheduling": true}'
+      - '{"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true,"enable_flashcomm1":true}'
     extra_env:
       HCCL_OP_EXPANSION_MODE: AIV
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
       HCCL_BUFFSIZE: '600'
-      VLLM_ASCEND_ENABLE_MLAPO: '1'
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: '1'
-      VLLM_ASCEND_BALANCE_SCHEDULING: '0'
     hardware_overrides:
       ascend_910c:
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
