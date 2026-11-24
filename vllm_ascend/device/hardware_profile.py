@@ -208,6 +208,8 @@ class HardwareCapability(Enum):
     TURBOQUANT_4BIT_NC_CACHE = auto()
     # Honor MLAPO enablement on any pipeline role; other profiles limit it to decode consumers.
     UNRESTRICTED_MLAPO = auto()
+    # Reuse pre-expanded vision RoPE coefficients across transformer layers.
+    VIT_PREEXPANDED_ROPE = auto()
 
 
 class WeightFormat(Enum):
@@ -561,6 +563,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.TRITON_BATCH_MEMCPY,
                     HardwareCapability.UNRESTRICTED_MLAPO,
                     HardwareCapability.NPU_TOP_K_TOP_P,
+                    HardwareCapability.VIT_PREEXPANDED_ROPE,
                 }
             ),
         ),
