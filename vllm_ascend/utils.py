@@ -1510,6 +1510,20 @@ def is_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
     return cache_config is not None and cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
 
 
+# HIF8 C8 for sparse-attention MLA models (e.g. GLM-5.3-Flash): both the latent
+# KV cache and the absorbed query are quantized to HIF8 with per-tensor scales (Ascend
+# 950PR/950DT). Enabled with ``--kv-cache-dtype hif8``; the ModelSlim
+# ``QK_HIF8_PER_TENSOR`` recipe (fa_q/fa_k scale) must be present.
+HIF8_C8_KV_CACHE_DTYPE = "hif8"
+
+
+def is_hif8_c8_kv_quant(vllm_config: VllmConfig) -> bool:
+    # Tolerate partially constructed configs (e.g. SimpleNamespace in tests):
+    # a missing cache_config means the hif8 KV cache dtype is not enabled.
+    cache_config = getattr(vllm_config, "cache_config", None)
+    return cache_config is not None and cache_config.cache_dtype == HIF8_C8_KV_CACHE_DTYPE
+
+
 def refresh_block_size(vllm_config):
     """
     Refresh the block size in cache config.
