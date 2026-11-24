@@ -24,6 +24,15 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.triton_utils import HAS_TRITON
 
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    expose_input_quant_key,
+    as_quantized_activation,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kInt8DynamicTokenSym,
+)
+
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -104,18 +113,26 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
     def apply(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor | PreparedLinearInput,
+        x: torch.Tensor | PreparedLinearInput | QuantizedActivation,
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
+        qa = as_quantized_activation(x, self.input_quant_key())
+
         if isinstance(x, PreparedLinearInput):
             quantized_x = x.quantized
             assert x.scale is not None
             pertoken_scale = x.scale
             output_dtype = x.output_dtype
+        elif qa is not None:
+            logger.info_once("quanted has done...")
+            quantized_x = qa.data
+            pertoken_scale = qa.scale
+            output_dtype = qa.orig_dtype
         else:
             quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x, dst_type=self.act_quant_type)
             output_dtype = x.dtype
+        
         need_unsqz = False
         if pertoken_scale.dim() == 2:
             need_unsqz = True
@@ -133,6 +150,9 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
             output = output.unsqueeze(dim=1)
         return output
 
+    def input_quant_key(self):
+        return kInt8DynamicTokenSym
+
     def process_weights_after_loading(self, layer):
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
         # cast quantized weight tensors in NZ format for higher inference speed
@@ -141,6 +161,10 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.flatten()
+
+        # TODO: Once all supported schemes declare input_quant_key(), hoist this
+        # expose call into the shared AscendLinearMethod path.
+        expose_input_quant_key(layer, self)
 
 
 @register_scheme("W8A8_DYNAMIC", "moe")

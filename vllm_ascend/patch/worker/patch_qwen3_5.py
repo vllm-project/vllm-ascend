@@ -225,7 +225,7 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm.forward_fused(hidden_states, residual, in_proj)
+            hidden_states, residual = self.input_layernorm.forward_fused(hidden_states, residual, in_proj, use_sp)
 
         if use_sp:
             # Attention (full and GDN) needs the full token sequence; the

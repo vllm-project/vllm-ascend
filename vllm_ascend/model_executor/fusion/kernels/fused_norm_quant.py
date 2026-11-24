@@ -10,11 +10,10 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kInt8StaticTensorSym,
+    kInt8DynamicTokenSym,
 )
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-
 
 
 def _add_rms_norm_quant(
@@ -23,7 +22,6 @@ def _add_rms_norm_quant(
     residual: torch.Tensor,
     linear: LinearBase,
 ):
-    
     output = torch.ops.npu.npu_add_rms_norm_quant(
         hidden_states,
         residual,
@@ -45,14 +43,38 @@ def _add_rms_norm_quant(
     ), out1
 
 
+def _add_rms_norm_dynamic_quant(
+    norm: torch.nn.Module,
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor,
+    linear: LinearBase,
+):
+
+    output = torch.ops.npu.npu_add_rms_norm_dynamic_quant(
+        hidden_states, residual, norm.weight, epsilon=norm.variance_epsilon, output_mask=[True, False]
+    )
+    logger.info_once("norm and quant fused!!!")
+    return QuantizedActivation(
+        data=output[0],
+        scale=output[3],
+        orig_dtype=hidden_states.dtype,
+        orig_shape=hidden_states.shape,
+        quant_key=kInt8DynamicTokenSym,
+    ), output[2]
+    
+
+
 _FUSED_NORM_QUANT: dict[tuple[str, QuantKey], Callable] = {}
 
 
 if  get_current_hardware_profile().supports(
     HardwareCapability.GRAPH_NORM_QUANT_FUSION
 ):
+    _FUSED_NORM_QUANT[("AscendRMSNorm", kInt8DynamicTokenSym)] = _add_rms_norm_dynamic_quant
+    
     if not envs.VLLM_BATCH_INVARIANT:
         _FUSED_NORM_QUANT[("AscendRMSNorm", kInt8StaticTensorSym)] = _add_rms_norm_quant
+
 
 
 def fused_norm_quant(

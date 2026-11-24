@@ -117,14 +117,12 @@ class AscendRMSNorm(RMSNorm):
         residual: torch.Tensor,
         linear: AscendQKVParallelLinear,
     ) -> tuple[QuantizedActivation, torch.Tensor] | tuple[torch.Tensor, torch.Tensor]:
-        
-        if hidden_states.dtype not in (torch.bfloat16, torch.float16):
-            return self.forward_oot(hidden_states, residual)
-
-        ascend_compilation_config = get_ascend_config().ascend_compilation_config
-
         key = get_input_quant_key(linear)
-        if key is not None and ascend_compilation_config.fuse_norm_quant:
+        if(
+            get_ascend_config().ascend_compilation_config.fuse_norm_quant
+            and hidden_states.dtype in (torch.bfloat16, torch.float16)
+            and key is not None
+        ):
             return fused_norm_quant(key, self, hidden_states, residual, linear)
         return self.forward_oot(hidden_states, residual)
 
@@ -150,7 +148,19 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
         linear: AscendQKVParallelLinear,
-    ):
+        use_sp: bool,
+    ) -> tuple[QuantizedActivation, torch.Tensor] | tuple[torch.Tensor, torch.Tensor]:
+
+
+        key = get_input_quant_key(linear)
+        if(
+            get_ascend_config().ascend_compilation_config.fuse_norm_quant
+            and hidden_states.dtype in (torch.bfloat16, torch.float16)
+            and not use_sp
+            and key is not None
+        ):
+            return fused_norm_quant(key, self, hidden_states, residual, linear)
+        return self.forward_oot(hidden_states, residual)
 
 
 class LayerNormFn(torch.autograd.Function):
