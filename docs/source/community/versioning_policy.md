@@ -21,7 +21,7 @@ For example:
 
 The table below is the release compatibility matrix for vLLM Ascend release.
 
-| vLLM Ascend | vLLM              | Python          | Stable CANN |        PyTorch/torch_npu        |   Triton Ascend   |    Mooncake  | memfabric-hybrid / memcache-hybrid | flash-linear-attention-npu |
+| vLLM Ascend | vLLM              | Python          | Stable CANN |        PyTorch/torch_npu        |   Triton-Ascend   |    Mooncake  | memfabric-hybrid / memcache-hybrid | flash-linear-attention-npu |
 |-------------|-------------------|-----------------|-------------|---------------------------------|-------------------|--------------|------------------------------------|----------------------------|
 | v0.30.0     | v0.30.0           | >= 3.10, < 3.13 | 9.2.1       | 2.10.0 / 2.10.0.post7           | 3.6.0.post2       | v0.3.14-rc1  | 1.3.0 / 1.3.0                      | v26.9.1-release            |
 | v0.30.0rc2  | v0.30.0           | >= 3.10, < 3.13 | 9.2.0       | 2.10.0 / 2.10.0.post7           | 3.2.2             | v0.3.11.post1 | N/A                               | N/A                        |
@@ -168,7 +168,7 @@ Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend v
 
 | Branch     | State        | Note                                                     |
 | ---------- | ------------ | -------------------------------------------------------- |
-| main       | Maintained   | CI commitment for vLLM main branch and vLLM {{main_vllm_tag}}  tag |
+| main       | Maintained   | CI commitment for vLLM main branch and vLLM {{main_vllm_tag}} tag |
 | releases/v0.23.0 | Maintained | CI commitment for vLLM 0.23.0 version                |
 | releases/v0.30.0 | Maintained | CI commitment for vLLM 0.30.0 version                |
 | releases/v0.18.0 | Maintained | CI commitment for vLLM 0.18.0 version                |
@@ -182,7 +182,7 @@ Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend v
 
 | Branch     | State       | RFC Link                             | Scheduled Merge Time | Mentor |
 |------------|--------------|---------------------------------------|------------|--------|
-|rfc/long_seq_optimization|Maintained|[RFC: long sequence optimization #22693](https://github.com/vllm-project/vllm/issues/22693)|930|wangxiyuan|
+|rfc/long_seq_optimization|Maintained|[RFC: long sequence optimization #22693](https://github.com/vllm-project/vllm/issues/22693)|2026.09.30|wangxiyuan|
 
 - Branch: The feature branch should be created with a prefix `rfc/` followed by the feature name, such as `rfc/feature-name`.
 - State: The state of the feature branch is `Maintained` until it is merged into the main branch or deleted.

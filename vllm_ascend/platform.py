@@ -1807,12 +1807,11 @@ def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str | Non
     # loader tag so the target and other auxiliary models retain their backend.
     target = spec.target_model_config
     if spec.method == "dflash":
-        # Keep automatic FA3 selection within the validated eager-draft scope.
-        # The target may still use graph execution.
+        target_text_config = getattr(target, "hf_text_config", None)
         return (
-            bool(spec.enforce_eager)
-            and model_tag == "dflash_head"
-            and target.hf_text_config.model_type == "glm_moe_dsa"
+            model_tag == "dflash_head"
+            and target_text_config is not None
+            and target_text_config.model_type in ("glm_moe_dsa", "glm5_next_text")
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
         )
     if spec.method == "dspark":
@@ -1840,11 +1839,13 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
     spec = config.speculative_config if config is not None else None
     if spec is None or spec.draft_model_config is None:
         return False
-    if backends.model_tag == "dspark_head" and {"MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"}.intersection(
-        spec.draft_model_config.architectures or ()
-    ):
+    model_tag = getattr(backends, "model_tag", None)
+    if model_tag == "dspark_head" and {
+        "MiniMaxM31FlashA3DSparkModel",
+        "DSparkMiniMaxDraftModel",
+    }.intersection(spec.draft_model_config.architectures or ()):
         return _validate_minimax_dspark_flash_attn(config, selector)
-    if not _is_supported_flash_attn_draft(spec, backends.model_tag):
+    if not _is_supported_flash_attn_draft(spec, model_tag):
         return False
 
     from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
@@ -1895,33 +1896,13 @@ def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
     )
 
 
-def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
-    """Select optional FA3 for compatible MiniMax, Step5 and local GLM DFlash2 drafts."""
-    if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
-        HardwareCapability.FLASH_ATTN_NPU_3
-    ):
-        return False
-
-    # Model configuration imports platforms during initialization.
-    from vllm.config import get_current_vllm_config_or_none
-    from vllm.v1.attention.backend import AttentionType
-
-    config = get_current_vllm_config_or_none()
-    spec = config.speculative_config if config is not None else None
-    if spec is None or spec.draft_model_config is None:
-        return False
+def _validate_fa3_common_constraints(config, selector) -> bool:
+    """Validate attention properties shared by every FA3 model family."""
     if config is None or config.model_config is None:
         return False
-    from vllm.compilation import backends
 
-    local_glm_dflash = (
-        spec.method == "dflash"
-        and _is_supported_flash_attn_draft(spec, getattr(backends, "model_tag", None))
-        and not getattr(selector, "use_pcp", False)
-    )
-    if not (local_glm_dflash or _uses_minimax_fa3(config) or _uses_step5_fa3(config)):
-        return False
-    parallel = config.parallel_config
+    from vllm.v1.attention.backend import AttentionType
+
     return (
         selector.attn_type == AttentionType.DECODER
         and selector.dtype in (torch.float16, torch.bfloat16)
@@ -1939,18 +1920,53 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
                 "use_rswa",
             )
         )
-        and (
-            local_glm_dflash
-            or (
-                parallel.pipeline_parallel_size == 1
-                and parallel.prefill_context_parallel_size == 1
-                and parallel.decode_context_parallel_size == 1
-            )
-        )
         and config.cache_config.cache_dtype in ("auto", "float16", "bfloat16")
-        and (local_glm_dflash or not getattr(config.quant_config, "enable_c8_quant", False))
-        and not getattr(spec, "enable_adaptive_verification", False)
+        and not getattr(config.speculative_config, "enable_adaptive_verification", False)
         and util.find_spec("flash_attn_npu_3") is not None
+    )
+
+
+def _validate_fa3_global_constraints(config, *, allow_local_draft: bool) -> bool:
+    """Validate target-global constraints unless a local draft explicitly owns FA3."""
+    if allow_local_draft:
+        return True
+    parallel = config.parallel_config
+    return (
+        parallel.pipeline_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
+        and parallel.decode_context_parallel_size == 1
+        and not getattr(config.quant_config, "enable_c8_quant", False)
+    )
+
+
+def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
+    """Select optional FA3 for compatible MiniMax, Step5, or local GLM DFlash2 attention."""
+    if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
+        HardwareCapability.FLASH_ATTN_NPU_3
+    ):
+        return False
+
+    # Model configuration imports platforms during initialization.
+    from vllm.config import get_current_vllm_config_or_none
+
+    config = get_current_vllm_config_or_none()
+    spec = config.speculative_config if config is not None else None
+    if spec is None or spec.draft_model_config is None:
+        return False
+    from vllm.compilation import backends
+
+    local_glm_dflash = (
+        spec.method == "dflash"
+        and _is_supported_flash_attn_draft(spec, getattr(backends, "model_tag", None))
+        and not getattr(selector, "use_pcp", False)
+    )
+    if config is None or config.model_config is None:
+        return False
+    if not (local_glm_dflash or _uses_minimax_fa3(config) or _uses_step5_fa3(config)):
+        return False
+    return _validate_fa3_common_constraints(config, selector) and _validate_fa3_global_constraints(
+        config,
+        allow_local_draft=local_glm_dflash,
     )
 
 

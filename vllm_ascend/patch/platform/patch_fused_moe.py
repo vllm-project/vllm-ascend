@@ -230,6 +230,11 @@ def _ascend_FusedMoE(
         **kwargs,
     )
     _adapt_eplb_router(runner.router, enable_router_eplb)
+    if enable_router_eplb:
+        from vllm_ascend.ops.triton.eplb import _EPLB_MAP_KERNEL
+
+        # The model runner holds its JIT registry window during construction.
+        _EPLB_MAP_KERNEL.register_warmup(num_experts, top_k)
     return runner
 
 
