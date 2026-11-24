@@ -334,8 +334,8 @@ def _plan_native_dspark_groups(config, layer_specs, target, draft, empty_pp_laye
         {**layer_specs, "draft-only": draft, "target-only": target, "draft-hidden": draft}
     )
     groups = [
-        KVCacheGroup.from_layers({"draft-only": layer_configs["draft-only"]}, is_eagle_group=True),
-        KVCacheGroup.from_layers({name: layer_configs[name] for name in layer_specs}, is_eagle_group=True),
+        KVCacheGroup.from_layers({"draft-only": layer_configs["draft-only"]}),
+        KVCacheGroup.from_layers({name: layer_configs[name] for name in layer_specs}),
         KVCacheGroup.from_layers({"target-only": layer_configs["target-only"]}),
         KVCacheGroup.from_layers({"draft-hidden": layer_configs["draft-hidden"]}),
     ]
@@ -353,6 +353,7 @@ def _plan_native_dspark_groups(config, layer_specs, target, draft, empty_pp_laye
 
 def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config = MagicMock()
+    config.num_hash_lookahead_tokens = 0
     config.additional_config = {}
     config.kv_events_config = None
     config.kv_transfer_config.kv_role = kv_role

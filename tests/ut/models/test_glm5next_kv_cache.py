@@ -222,7 +222,6 @@ def test_tail_manager_prefix_hit_has_no_shared_blocks():
             block_size=spec.block_size,
             manager_config=KpoolTailManager.config(),
             alignment_tokens=16,
-            drop_eagle_block=False,
         )
     assert blocks == ([], []) and hit == 0
     manager.allocate_external_computed_blocks("hit", 1024, 0, record_for_zeroing=False)

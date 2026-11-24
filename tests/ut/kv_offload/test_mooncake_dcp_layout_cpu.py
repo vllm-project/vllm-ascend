@@ -325,7 +325,9 @@ def test_scheduler_prompt_truncation_uses_each_groups_dcp_size(dcp_size):
     )
     scheduler = scope["MooncakeConnectorScheduler"]()
     scheduler.dcp_size = dcp_size
-    scheduler.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="align"))
+    scheduler.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(mamba_cache_mode="align", enable_prefix_caching=True)
+    )
     info_cls = scope["GroupTransferInfo"]
     scheduler.group_transfer_info = [
         info_cls(128, 0, False, True),

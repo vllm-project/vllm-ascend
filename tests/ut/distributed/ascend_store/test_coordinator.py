@@ -404,7 +404,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         calls = []
 
         def fake_reachable_block_mask(*args, **kwargs):
-            calls.append(kwargs["use_eagle"])
+            calls.append((kwargs.get("use_eagle"), tuple(kwargs["reachable_boundaries"])))
             return [True, False, True, False]
 
         shared_spec = _sliding_spec(block_size=128, sliding_window=256)
@@ -425,7 +425,8 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         ):
             masks = coord.store_mask(512)
 
-        self.assertEqual(calls, [True, True])
+        expected_drop = True if vllm_version_is("0.33.0") else None
+        self.assertEqual(calls, [(expected_drop, (512,)), (expected_drop, (512,))])
         self.assertEqual(masks, ([True, False, True, False], [True, False, True, False]))
 
     def test_reachable_mask_cache_preserves_inputs_and_caller_isolation(self):

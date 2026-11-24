@@ -185,7 +185,6 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
         kv_cache_group_ids=[0],
         block_pool=block_pool,
         **full_cache_lookup_kwargs(spec),
-        drop_eagle_block=False,
         alignment_tokens=logical_block_size,
     )
     hit_blocks = hit_result[0][0]
@@ -225,7 +224,6 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
         kv_cache_group_ids=[0],
         block_pool=block_pool,
         **full_cache_lookup_kwargs(spec),
-        drop_eagle_block=False,
         alignment_tokens=logical_block_size,
     )
     hit_blocks = hit_result[0][0]
@@ -235,7 +233,7 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
 
 def full_cache_lookup_kwargs(spec):
     if vllm_version_is("0.34.0"):
-        return {"kv_cache_spec": spec}
+        return {"kv_cache_spec": spec, "drop_eagle_block": False}
     return {"block_size": spec.block_size, "manager_config": FullAttentionManager.config()}
 
 
@@ -273,7 +271,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         ),
         max_model_len=logical_block_size,
         max_in_flight_tokens=logical_block_size,
-        use_eagle=False,
+        **({"use_eagle": False} if vllm_version_is("0.34.0") else {}),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
@@ -351,7 +349,7 @@ def test_hybrid_coordinator_truncates_every_full_attention_group() -> None:
         ),
         max_model_len=8192,
         max_in_flight_tokens=8192,
-        use_eagle=False,
+        **({"use_eagle": False} if vllm_version_is("0.34.0") else {}),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,

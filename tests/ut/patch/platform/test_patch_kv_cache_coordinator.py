@@ -113,10 +113,9 @@ def _hybrid_config(
             KVCacheGroup.from_layers(
                 {
                     "mamba-layer": MambaManager.layer_config(
-                        replace(MAMBA_SPEC, block_size=HASH_BLOCK_SIZE), mamba_cache_mode="align"
+                        replace(MAMBA_SPEC, block_size=HASH_BLOCK_SIZE), enable_prefix_caching=True
                     )
                 },
-                is_eagle_group=mamba_eagle,
             ),
         ]
         if extra_mamba:
@@ -159,14 +158,17 @@ def _make_coordinator(
     return AscendHybridKVCacheCoordinator(
         kv_cache_config=kv_cache_config,
         max_model_len=4096,
-        use_eagle=use_eagle,
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
         pcp_world_size=1,
         hash_block_size=HASH_BLOCK_SIZE,
         scheduler_block_size=HASH_BLOCK_SIZE,
-        **({} if vllm_version_is("0.34.0") else {"max_in_flight_tokens": 4096}),
+        **(
+            {"use_eagle": use_eagle}
+            if vllm_version_is("0.34.0")
+            else {"max_in_flight_tokens": 4096, "num_hash_lookahead_tokens": int(use_eagle)}
+        ),
     )
 
 
@@ -187,24 +189,36 @@ def test_eagle_fallback_flags_only_full_attention_group(monkeypatch):
         use_eagle=True,
         kv_transfer_config=SimpleNamespace(is_kv_producer=False, is_kv_consumer=True),
     )
-    # Only the FA group is flagged; the mamba group stays out.
-    assert coordinator.eagle_group_ids == {0}
-    # Bit propagation after verify_and_split: FA manager eagle, mamba not.
-    assert coordinator.single_type_managers[0].use_eagle is True
-    assert coordinator.single_type_managers[1].use_eagle is False
+    if vllm_version_is("0.34.0"):
+        assert coordinator.eagle_group_ids == {0}
+        assert coordinator.single_type_managers[0].use_eagle is True
+        assert coordinator.single_type_managers[1].use_eagle is False
+    else:
+        assert coordinator.block_pool.num_hash_lookahead_tokens == 1
+        assert [group.group_ids for group in coordinator.attention_groups] == [[0], [1]]
+        assert all(not hasattr(manager, "use_eagle") for manager in coordinator.single_type_managers)
 
 
 def test_no_eagle_group_when_speculative_decoding_disabled(monkeypatch):
     coordinator = _make_coordinator(monkeypatch, use_eagle=False)
-    assert coordinator.eagle_group_ids == set()
-    assert all(not manager.use_eagle for manager in coordinator.single_type_managers)
+    if vllm_version_is("0.34.0"):
+        assert coordinator.eagle_group_ids == set()
+        assert all(not manager.use_eagle for manager in coordinator.single_type_managers)
+    else:
+        assert coordinator.block_pool.num_hash_lookahead_tokens == 0
+        assert all(not hasattr(manager, "use_eagle") for manager in coordinator.single_type_managers)
 
 
 def test_explicit_eagle_group_marker_takes_precedence(monkeypatch):
     # DeepSeek-V4-style annotation path: a flagged group must be respected
     # even when it is the mamba group (fallback must not overwrite it).
     coordinator = _make_coordinator(monkeypatch, use_eagle=True, mamba_eagle=True)
-    assert coordinator.eagle_group_ids == {1}
+    if vllm_version_is("0.34.0"):
+        assert coordinator.eagle_group_ids == {1}
+    else:
+        assert coordinator.block_pool.num_hash_lookahead_tokens == 1
+        assert coordinator.attention_groups[1].group_ids == [1]
+        assert coordinator.attention_groups[1].manager_config.params.enable_prefix_caching
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +240,11 @@ def test_coordinator_reads_producer_tag(monkeypatch):
         use_eagle=True,
         kv_transfer_config=_kv_transfer_config(is_kv_producer=True, is_kv_consumer=False),
     )
-    assert coordinator.skips_eagle_block_drop is True
+    if vllm_version_is("0.34.0"):
+        assert coordinator.skips_eagle_block_drop is True
+    else:
+        assert coordinator.kv_cache_config.kv_transfer_config.is_kv_producer
+        assert coordinator.block_pool.num_hash_lookahead_tokens == 1
 
 
 def test_coordinator_non_producer_tag(monkeypatch):
@@ -235,7 +253,11 @@ def test_coordinator_non_producer_tag(monkeypatch):
         use_eagle=True,
         kv_transfer_config=_kv_transfer_config(is_kv_producer=False, is_kv_consumer=True),
     )
-    assert coordinator.skips_eagle_block_drop is False
+    if vllm_version_is("0.34.0"):
+        assert coordinator.skips_eagle_block_drop is False
+    else:
+        assert coordinator.kv_cache_config.kv_transfer_config.is_kv_consumer
+        assert coordinator.block_pool.num_hash_lookahead_tokens == 1
 
 
 def test_coordinator_reads_standalone_drop_exemption(monkeypatch):
@@ -243,7 +265,11 @@ def test_coordinator_reads_standalone_drop_exemption(monkeypatch):
     # producer, but every content-hash match is a verified local prompt
     # block, so the EAGLE drop is suppressed just like on the producer.
     coordinator = _make_coordinator(monkeypatch, use_eagle=True, kv_transfer_config=None)
-    assert coordinator.skips_eagle_block_drop is True
+    if vllm_version_is("0.34.0"):
+        assert coordinator.skips_eagle_block_drop is True
+    else:
+        assert coordinator.kv_cache_config.kv_transfer_config is None
+        assert coordinator.block_pool.num_hash_lookahead_tokens == 1
 
 
 @pytest.mark.parametrize(
@@ -280,11 +306,19 @@ def test_mamba_checkpoint_drop_follows_lookup_policy(monkeypatch, kv_transfer_co
         mamba_eagle=mamba_eagle,
         extra_mamba=True,
     )
-    # Lookup EAGLE markers do not limit checkpoint writes: even an unmarked
-    # target Mamba group must share the scheduler's replay boundary.
-    for manager in coordinator.single_type_managers[1:]:
-        assert manager.drop_eagle_checkpoint_block is expected
-    assert not hasattr(coordinator.single_type_managers[0], "drop_eagle_checkpoint_block")
+    if vllm_version_is("0.34.0"):
+        # Lookup EAGLE markers do not limit checkpoint writes: even an unmarked
+        # target Mamba group must share the scheduler's replay boundary.
+        for manager in coordinator.single_type_managers[1:]:
+            assert manager.drop_eagle_checkpoint_block is expected
+        assert not hasattr(coordinator.single_type_managers[0], "drop_eagle_checkpoint_block")
+    else:
+        for manager, group in zip(
+            coordinator.single_type_managers[1:], coordinator.kv_cache_config.kv_cache_groups[1:], strict=True
+        ):
+            assert not hasattr(manager, "drop_eagle_checkpoint_block")
+            assert manager.block_pool.num_hash_lookahead_tokens == int(use_eagle)
+            assert group.manager_config.params.enable_prefix_caching
 
 
 @pytest.mark.parametrize(
@@ -385,8 +419,8 @@ class _RecordingManager:
         max_length,
         kv_cache_group_ids,
         block_pool,
-        drop_eagle_block,
         alignment_tokens,
+        drop_eagle_block=None,
         dcp_world_size=1,
         pcp_world_size=1,
         **kwargs,
@@ -435,8 +469,8 @@ def _make_lookup_coordinator(*, producer: bool, standalone: bool = False):
             for spec in (FA_SPEC, MAMBA_SPEC)
         ]
         coordinator.attention_groups = [
-            PrefixLookupGroup(ManagerConfig(_RecordingFA, None), FA_SPEC.block_size, [0], not (producer or standalone)),
-            PrefixLookupGroup(ManagerConfig(_RecordingMamba, None), MAMBA_SPEC.block_size, [1], False),
+            PrefixLookupGroup(ManagerConfig(_RecordingFA, None), FA_SPEC.block_size, [0]),
+            PrefixLookupGroup(ManagerConfig(_RecordingMamba, None), MAMBA_SPEC.block_size, [1]),
         ]
     # Newer PD/partial-hit revisions cap the offered hit length at lookup
     # entry. That behavior is outside this regression's scope; install a
@@ -459,23 +493,23 @@ def test_standard_lookup_drops_last_block_on_consumer():
     coordinator = _make_lookup_coordinator(producer=False)
     block_hashes = [] if vllm_version_is("0.34.0") else [bytes(32)] * (2048 // HASH_BLOCK_SIZE)
     coordinator.find_longest_cache_hit(block_hashes=block_hashes, max_cache_hit_length=2048)
-    assert _RecordingFA.calls[-1]["drop_eagle_block"] is True
+    assert _RecordingFA.calls[-1]["drop_eagle_block"] is (True if vllm_version_is("0.34.0") else None)
     # Mamba group is never eagle.
-    assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
+    assert _RecordingMamba.calls[-1]["drop_eagle_block"] is (False if vllm_version_is("0.34.0") else None)
 
 
 def test_standard_lookup_skips_drop_on_producer():
     coordinator = _make_lookup_coordinator(producer=True)
     coordinator.find_longest_cache_hit(block_hashes=[], max_cache_hit_length=2048)
-    assert _RecordingFA.calls[-1]["drop_eagle_block"] is False
-    assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
+    assert _RecordingFA.calls[-1]["drop_eagle_block"] is (False if vllm_version_is("0.34.0") else None)
+    assert _RecordingMamba.calls[-1]["drop_eagle_block"] is (False if vllm_version_is("0.34.0") else None)
 
 
 def test_standard_lookup_skips_drop_on_standalone():
     coordinator = _make_lookup_coordinator(producer=False, standalone=True)
     coordinator.find_longest_cache_hit(block_hashes=[], max_cache_hit_length=2048)
-    assert _RecordingFA.calls[-1]["drop_eagle_block"] is False
-    assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
+    assert _RecordingFA.calls[-1]["drop_eagle_block"] is (False if vllm_version_is("0.34.0") else None)
+    assert _RecordingMamba.calls[-1]["drop_eagle_block"] is (False if vllm_version_is("0.34.0") else None)
 
 
 # ---------------------------------------------------------------------------
@@ -487,24 +521,24 @@ def test_per_group_lookup_drops_last_block_on_consumer():
     coordinator = _make_lookup_coordinator(producer=False)
     block_hashes = [] if vllm_version_is("0.34.0") else [bytes(32)] * (2048 // HASH_BLOCK_SIZE)
     _, hit_lengths = coordinator.find_longest_cache_hit_per_group(block_hashes, 2048)
-    assert _RecordingFA.calls[-1]["drop_eagle_block"] is True
-    assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
+    assert _RecordingFA.calls[-1]["drop_eagle_block"] is (True if vllm_version_is("0.34.0") else None)
+    assert _RecordingMamba.calls[-1]["drop_eagle_block"] is (False if vllm_version_is("0.34.0") else None)
     assert hit_lengths == (2048, 2048)
 
 
 def test_per_group_lookup_skips_drop_on_producer():
     coordinator = _make_lookup_coordinator(producer=True)
     _, hit_lengths = coordinator.find_longest_cache_hit_per_group([], 2048)
-    assert _RecordingFA.calls[-1]["drop_eagle_block"] is False
-    assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
+    assert _RecordingFA.calls[-1]["drop_eagle_block"] is (False if vllm_version_is("0.34.0") else None)
+    assert _RecordingMamba.calls[-1]["drop_eagle_block"] is (False if vllm_version_is("0.34.0") else None)
     assert hit_lengths == (2048, 2048)
 
 
 def test_per_group_lookup_skips_drop_on_standalone():
     coordinator = _make_lookup_coordinator(producer=False, standalone=True)
     _, hit_lengths = coordinator.find_longest_cache_hit_per_group([], 2048)
-    assert _RecordingFA.calls[-1]["drop_eagle_block"] is False
-    assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
+    assert _RecordingFA.calls[-1]["drop_eagle_block"] is (False if vllm_version_is("0.34.0") else None)
+    assert _RecordingMamba.calls[-1]["drop_eagle_block"] is (False if vllm_version_is("0.34.0") else None)
     assert hit_lengths == (2048, 2048)
 
 
@@ -533,7 +567,7 @@ def test_per_group_lookup_preserves_replicated_draft_positions():
         target_manager.dcp_world_size = coordinator.dcp_world_size
         draft_manager.block_size = draft_spec.block_size
         coordinator.attention_groups[1] = PrefixLookupGroup(
-            ManagerConfig(_RecordingMamba, None), draft_spec.block_size, [1], False
+            ManagerConfig(_RecordingMamba, None), draft_spec.block_size, [1]
         )
     coordinator.find_longest_cache_hit_per_group([], 2048)
     assert _RecordingFA.calls[-1]["dcp_world_size"] == 2

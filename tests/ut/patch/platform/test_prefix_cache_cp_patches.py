@@ -64,12 +64,12 @@ def get_kv_cache_coordinator(config, **kwargs):
     if not vllm_version_is("0.34.0"):
         args = {
             "max_in_flight_tokens": kwargs["max_model_len"],
-            "use_eagle": False,
             "enable_kv_cache_events": False,
             "dcp_world_size": 1,
             "pcp_world_size": 1,
             "scheduler_block_size": math.lcm(*(group.block_size for group in config.kv_cache_groups)),
         }
+        kwargs.pop("use_eagle", None)
         kwargs = args | kwargs
     return _get_kv_cache_coordinator(config, **kwargs)
 
@@ -131,7 +131,7 @@ def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
     coordinator = get_kv_cache_coordinator(
         cfg,
         max_model_len=1024,
-        use_eagle=False,
+        **({"use_eagle": False} if vllm_version_is("0.33.0") else {}),
         enable_caching=False,
         scheduler_block_size=32,
         hash_block_size=32,
@@ -286,7 +286,7 @@ def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrappe
     coordinator = AscendHybridKVCacheCoordinator(
         cfg,
         max_model_len=4096,
-        use_eagle=False,
+        **({"use_eagle": False} if vllm_version_is("0.33.0") else {}),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
@@ -353,7 +353,7 @@ def test_glm_speculative_tail_preserves_main_and_mamba_scheduler_boundaries(dcp)
     coordinator = AscendHybridKVCacheCoordinator(
         cfg,
         max_model_len=131072,
-        use_eagle=False,
+        **({"use_eagle": False} if vllm_version_is("0.33.0") else {}),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=dcp,
@@ -390,7 +390,7 @@ def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
     coordinator = AscendHybridKVCacheCoordinator(
         cfg,
         max_model_len=4096,
-        use_eagle=False,
+        **({"use_eagle": False} if vllm_version_is("0.33.0") else {}),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
@@ -423,7 +423,7 @@ def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
         kv_cache_group_ids=[2],
         block_pool=coordinator.block_pool,
         **cache_lookup_params(specs[2]),
-        drop_eagle_block=False,
+        **({"drop_eagle_block": False} if vllm_version_is("0.33.0") else {}),
         alignment_tokens=16,
         dcp_world_size=1,
         pcp_world_size=1,
@@ -1463,7 +1463,7 @@ def test_get_kv_cache_coordinator_delegates_single_group(monkeypatch) -> None:
         single_group_config,
         max_model_len=1024,
         max_in_flight_tokens=1024,
-        use_eagle=False,
+        **({"use_eagle": False} if vllm_version_is("0.33.0") else {}),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
@@ -1492,7 +1492,7 @@ def test_get_kv_cache_coordinator_delegates_hybrid_without_caching(monkeypatch) 
         kv_cache_config,
         max_model_len=1024,
         max_in_flight_tokens=1024,
-        use_eagle=False,
+        **({"use_eagle": False} if vllm_version_is("0.33.0") else {}),
         enable_caching=False,
         enable_kv_cache_events=False,
         dcp_world_size=2,
@@ -1532,7 +1532,7 @@ def test_get_kv_cache_coordinator_uses_ascend_for_deepseek_v4(monkeypatch) -> No
         kv_cache_config,
         max_model_len=1024,
         max_in_flight_tokens=1024,
-        use_eagle=False,
+        **({"use_eagle": False} if vllm_version_is("0.33.0") else {}),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
@@ -1596,8 +1596,12 @@ def test_verify_and_split_propagates_eagle_to_managers() -> None:
 
     coordinator.verify_and_split_kv_cache_groups()
 
-    assert coordinator.single_type_managers[1].use_eagle is True
-    assert coordinator.single_type_managers[0].use_eagle is False
+    if vllm_version_is("0.33.0"):
+        assert coordinator.single_type_managers[1].use_eagle is True
+        assert coordinator.single_type_managers[0].use_eagle is False
+    else:
+        assert {tuple(group.group_ids) for group in coordinator.attention_groups} == {(0,), (1,)}
+        assert all(not manager.use_eagle for manager in coordinator.single_type_managers)
 
 
 def test_verify_and_split_propagates_eagle_to_merged_spec_siblings() -> None:
@@ -1640,9 +1644,13 @@ def test_verify_and_split_propagates_eagle_to_merged_spec_siblings() -> None:
     coordinator.verify_and_split_kv_cache_groups()
 
     # Both gid 1 and gid 2 share the c128 spec and merge, so both must be eagle.
-    assert coordinator.single_type_managers[1].use_eagle is True
-    assert coordinator.single_type_managers[2].use_eagle is True
-    assert coordinator.single_type_managers[0].use_eagle is False
+    if vllm_version_is("0.33.0"):
+        assert coordinator.single_type_managers[1].use_eagle is True
+        assert coordinator.single_type_managers[2].use_eagle is True
+        assert coordinator.single_type_managers[0].use_eagle is False
+    else:
+        assert {tuple(group.group_ids) for group in coordinator.attention_groups} == {(0,), (1, 2)}
+        assert all(not manager.use_eagle for manager in coordinator.single_type_managers)
 
 
 def test_deepseek_v4_detection_handles_non_mapping_nested_specs() -> None:
@@ -1715,7 +1723,7 @@ def test_ascend_mamba_cache_lookup_ignores_dcp_sharding() -> None:
             alignment_tokens=16,
             dcp_world_size=8,
             pcp_world_size=1,
-            drop_eagle_block=False,
+            **({"drop_eagle_block": False} if vllm_version_is("0.33.0") else {}),
         )
 
     assert find_cache_hit.call_args.kwargs["dcp_world_size"] == 1
@@ -1747,7 +1755,7 @@ def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
         end_block=256,  # 256 × 32 = 8192 tokens (2 × alignment_tokens)
         alignment_tokens=alignment_tokens,
         **cache_lookup_params(spec),
-        use_eagle=False,
+        **({"use_eagle": False} if vllm_version_is("0.33.0") else {}),
         retention_interval=None,
     )
 

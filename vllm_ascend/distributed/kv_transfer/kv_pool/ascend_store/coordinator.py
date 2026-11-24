@@ -292,6 +292,7 @@ class AscendStoreCoordinator:
         # Stores retain the request's replay checkpoint. Lookups must probe
         # every possible checkpoint: a shorter request may have published a
         # boundary that is not the current request's replay/segment boundary.
+        reachable_boundaries: Sequence[int]
         if num_prompt_tokens is None:
             reachable_boundaries = range(self.lcm_block_size, aligned_token_len + 1, self.lcm_block_size)
         elif vllm_version_is("0.34.0"):

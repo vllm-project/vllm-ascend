@@ -39,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def aligned_buffer(size):
@@ -260,7 +261,7 @@ def test_raw_sequence_lifecycle(
     assert isinstance(pool.kv_recv_thread, KVCacheStoreRecvingThread) == load_async
     assert pool.hash_block_size == hash_size == (prefix_unit or 128)
     assert pool.cache_transfer_granularity == 128
-    assert pool.use_eagle == (speculative_method is not None)
+    assert pool.use_eagle == (vllm_version_is("0.33.0") and speculative_method is not None)
     scheduler = Scheduler(
         config,
         plan,
@@ -268,10 +269,17 @@ def test_raw_sequence_lifecycle(
         block_size=block_size,
         hash_block_size=hash_size,
     )
-    # #65448 makes core lookahead hashing opt-out. AscendStore's masks still
-    # use the legacy EAGLE drop, so both hashing and local lookup must agree.
-    assert config.num_hash_lookahead_tokens == scheduler.num_hash_lookahead_tokens == 0
-    assert scheduler.use_eagle_block_drop == (speculative_method == "mtp")
+    assert config.num_hash_lookahead_tokens == scheduler.num_hash_lookahead_tokens
+    if vllm_version_is("0.33.0"):
+        assert config.num_hash_lookahead_tokens == 0
+        assert scheduler.use_eagle_block_drop == (speculative_method == "mtp")
+    else:
+        expected_lookahead = (
+            0 if speculative_method is None else config.speculative_config.speculator_config.num_hash_lookahead_tokens
+        )
+        assert config.num_hash_lookahead_tokens == expected_lookahead
+        if pool.cache_coordinator is not None:
+            assert pool.cache_coordinator.num_hash_lookahead_tokens == expected_lookahead
     producer_tokens = list(range(512))
 
     def run_request(req_id, tokens, expected_hit, expected_local=0):
@@ -280,7 +288,7 @@ def test_raw_sequence_lifecycle(
             prompt_token_ids=tokens,
             sampling_params=SamplingParams(max_tokens=10 if speculative_method else 2),
             pooling_params=None,
-            block_hasher=get_request_block_hasher(hash_size, sha256),
+            block_hasher=get_request_block_hasher(hash_size, sha256, config.num_hash_lookahead_tokens),
         )
         scheduler.add_request(request)
         seen_load = False
