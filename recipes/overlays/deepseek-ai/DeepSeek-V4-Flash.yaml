@@ -286,3 +286,39 @@ features:
             args:
               - '--speculative-config'
               - '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true}'
+
+# Measured A2 lane as an opt-in preset. It is an empty delta on the baseline
+# command: every tunable stays on variants.ascend_w8a8_0731 and
+# strategy_overrides.single_node_tep, so the rendered argv is unchanged. The
+# preset exists to carry the evidence, the pinned image and the tested scope
+# on the page, in `?preset=`, and under /<hf_id>/presets/<key>.json.
+presets:
+  ascend_910b_w8a8_0731:
+    label: "A2 W8A8 0731 (TP8+EP, measured)"
+    hardware: ascend_910b
+    strategy: single_node_tep
+    variants: [ascend_w8a8_0731]
+    default: false
+    description: "Measured single-node lane on 8x Ascend 910B4: 800k context, block 128, int8 indexer KV, DSpark k=7, GMU 0.95."
+    source:
+      label: "vllm-ascend#22746 measured run"
+      href: "https://github.com/vllm-project/vllm-ascend/pull/22746"
+    image:
+      vllm: "quay.io/ascend/vllm-ascend:v0.32.0rc1"
+    runbook: |
+      ## Evidence
+
+      - Hardware: one Atlas 800I A2 node, 8x Ascend 910B4 (64 GB HBM each).
+      - Runtime: vLLM 0.32.0 with vLLM Ascend 0.32.0rc1 (CANN 9.2.1, driver 26.0.rc1).
+      - Checkpoint: `Eco-Tech/DeepSeek-V4-Flash-0731-w8a8` (ModelSlim INT8 W8A8),
+        downloaded through ModelScope.
+      - Weights load at 39.01 GiB per rank, leaving a 16.93 GiB KV pool
+        (887,046 tokens at the 800k context cap); engine init takes about 59 s.
+      - `/v1/models` reports `max_model_len=800000`; `/v1/chat/completions`
+        returns `finish_reason: stop`.
+
+      ## Scope
+
+      This preset records the lane that was actually run for this variant on
+      `ascend_910b`. It is not evidence for FP8 (Preview), NVFP4 (RedHat),
+      single-node DEP, PD, or any multi-node shape.
