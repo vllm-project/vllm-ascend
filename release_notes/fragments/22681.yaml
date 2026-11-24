@@ -1,0 +1,6 @@
+pr: 22681
+entries:
+  - category: performance
+    text: Enabled MegaMhc Post/Pre fusion with fused Sinkhorn for GLM-5.3-Flash on A5, with cached FP32 norm weights and automatic legacy fallback. Added startup logs showing MegaMhc enablement and fallback reasons.
+    model: glm-5.3-flash
+    hardware: [A5]

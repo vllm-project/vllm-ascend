@@ -1720,11 +1720,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mega_mhc_npu(
     constexpr int64_t MEGA_MHC_MAX_HIDDEN_SIZE = 16384;
     constexpr int64_t MEGA_MHC_HIDDEN_ALIGNMENT = 16;
     constexpr int64_t MEGA_MHC_HF32 = 1;
-    constexpr int64_t MEGA_MHC_NO_SINKHORN = 0;
     constexpr int64_t MEGA_MHC_UNQUANTIZED_OUTPUT = 0;
-    constexpr int64_t MHC_SINKHORN_MIN_ITERS = 1;
-    constexpr int64_t MHC_SINKHORN_MAX_ITERS = 100;
-    constexpr double MEGA_MHC_SINKHORN_EPS = 1e-6;
+    constexpr int64_t MEGA_MHC_SINKHORN_ITERS = 20;
     constexpr double MEGA_MHC_RMS_NORM_SCALE = 1.0;
 
     const c10::optional<at::Tensor> no_tensor = c10::nullopt;
@@ -1761,8 +1758,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mega_mhc_npu(
                 "MegaMhc post, comb and norm weight must be FLOAT32.");
     TORCH_CHECK(norm_weight.dim() == 1 && norm_weight.size(0) == x.size(-1),
                 "MegaMhc norm weight must be [hidden_size].");
-    TORCH_CHECK(hc_sinkhorn_iters >= MHC_SINKHORN_MIN_ITERS && hc_sinkhorn_iters <= MHC_SINKHORN_MAX_ITERS,
-                "MhcSinkhorn iterations must be in [1,100].");
+    TORCH_CHECK(hc_sinkhorn_iters == 0 || hc_sinkhorn_iters == MEGA_MHC_SINKHORN_ITERS,
+                "MegaMhc Sinkhorn iterations must be 0 or 20.");
     TORCH_CHECK(std::isfinite(norm_eps) && norm_eps > 0 && std::isfinite(hc_norm_eps) && hc_norm_eps > 0 &&
                     std::isfinite(hc_pre_eps) && hc_pre_eps > 0 && std::isfinite(hc_post_scale),
                 "MegaMhc epsilon values must be positive and hc_post_scale must be finite.");
@@ -1770,27 +1767,21 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mega_mhc_npu(
     const c10_npu::OptionalNPUGuard npu_guard(x.device());
     at::Tensor new_residual = at::empty(residual.sizes(), residual.options());
     at::Tensor new_post = at::empty(post.sizes(), post.options());
-    at::Tensor comb_logits = at::empty(comb.sizes(), comb.options());
     at::Tensor new_comb = at::empty(comb.sizes(), comb.options());
     at::Tensor y = at::empty(x.sizes(), x.options());
     EXEC_NPU_CMD(aclnnMegaMhc, x, residual, post, hc_fn, hc_scale, hc_base, norm_weight, comb, no_tensor, no_tensor,
-                 no_tensor, norm_eps, hc_norm_eps, hc_pre_eps, MEGA_MHC_HF32, hc_mult, hc_post_scale,
-                 MEGA_MHC_SINKHORN_EPS, MEGA_MHC_NO_SINKHORN, MEGA_MHC_RMS_NORM_SCALE,
-                 MEGA_MHC_UNQUANTIZED_OUTPUT,
-                 new_residual, new_post, comb_logits, no_tensor, y, no_tensor, no_tensor);
-    const float sinkhorn_eps = static_cast<float>(hc_pre_eps);
-    EXEC_NPU_CMD(aclnnMhcSinkhorn, comb_logits, sinkhorn_eps, hc_sinkhorn_iters, new_comb, no_tensor, no_tensor);
+                 no_tensor, norm_eps, hc_norm_eps, hc_pre_eps, MEGA_MHC_HF32, hc_mult, hc_post_scale, hc_pre_eps,
+                 hc_sinkhorn_iters, MEGA_MHC_RMS_NORM_SCALE, MEGA_MHC_UNQUANTIZED_OUTPUT, new_residual, new_post,
+                 new_comb, no_tensor, y, no_tensor, no_tensor);
     return {new_residual, new_post, new_comb, y};
 }
 
 bool is_mega_mhc_available()
 {
     static const bool is_available = []() {
-        const std::array<void*, 4> functions = {
+        const std::array<void*, 2> functions = {
             GetOpApiFuncAddr("aclnnMegaMhc"),
             GetOpApiFuncAddr("aclnnMegaMhcGetWorkspaceSize"),
-            GetOpApiFuncAddr("aclnnMhcSinkhorn"),
-            GetOpApiFuncAddr("aclnnMhcSinkhornGetWorkspaceSize"),
         };
         const void* library_base = nullptr;
         for (auto* function : functions) {

@@ -17,6 +17,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.logger import logger
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -99,8 +100,7 @@ _MEGA_MHC_HC_MULT = 4
 _MEGA_MHC_MIN_HIDDEN_SIZE = 16
 _MEGA_MHC_MAX_HIDDEN_SIZE = 16384
 _MEGA_MHC_HIDDEN_ALIGNMENT = 16
-_MEGA_MHC_MIN_SINKHORN_ITERS = 1
-_MEGA_MHC_MAX_SINKHORN_ITERS = 100
+_MEGA_MHC_SUPPORTED_SINKHORN_ITERS = (0, 20)
 _LOGIT_SCALE = 1.0
 
 
@@ -120,6 +120,27 @@ def _is_linear_attn(config: Glm5NextTextConfig) -> bool:
 def _validate_supported_config(config: Glm5NextTextConfig) -> None:
     if config.index_topk is not None and not config.index_kpool_always_select_tail:
         raise NotImplementedError("GLM-5.3 sparse indexer requires index_kpool_always_select_tail=True")
+
+
+def _log_mega_mhc_status(layers) -> None:
+    mhc_layers = [layer for layer in layers if getattr(layer, "mhc", False)]
+    if not mhc_layers:
+        return
+    enabled_count = sum(bool(getattr(layer, "_use_mega_mhc", False)) for layer in mhc_layers)
+    logger.info(
+        "MegaMhc enabled for %d/%d GLM mHC layers (requires ops-transformer PR16270+ with fused Sinkhorn).",
+        enabled_count,
+        len(mhc_layers),
+    )
+    fallback_reasons = sorted(
+        {
+            getattr(layer, "_mega_mhc_fallback_reason", None) or "unsatisfied runtime prerequisites"
+            for layer in mhc_layers
+            if not getattr(layer, "_use_mega_mhc", False)
+        }
+    )
+    if fallback_reasons:
+        logger.info("MegaMhc legacy fallback reasons: %s", "; ".join(fallback_reasons))
 
 
 class Glm5NextMLP(nn.Module):
@@ -406,16 +427,29 @@ class Glm5NextDecoderLayer(nn.Module):
             mix_hc = (2 + n) * n
 
             self.n = n
-            self._use_mega_mhc = (
-                n == _MEGA_MHC_HC_MULT
-                and _MEGA_MHC_MIN_HIDDEN_SIZE <= self.hidden_size <= _MEGA_MHC_MAX_HIDDEN_SIZE
+            self._mega_mhc_fallback_reason = None
+            if n != _MEGA_MHC_HC_MULT:
+                self._mega_mhc_fallback_reason = f"requires hc_mult=4, got {n}"
+            elif not (
+                _MEGA_MHC_MIN_HIDDEN_SIZE <= self.hidden_size <= _MEGA_MHC_MAX_HIDDEN_SIZE
                 and self.hidden_size % _MEGA_MHC_HIDDEN_ALIGNMENT == 0
-                and _MEGA_MHC_MIN_SINKHORN_ITERS <= self.mhc_sinkhorn_iterations <= _MEGA_MHC_MAX_SINKHORN_ITERS
-                and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMHC)
-                and hasattr(torch.ops._C_ascend, "npu_mega_mhc")
-                and hasattr(torch.ops._C_ascend, "is_mega_mhc_available")
-                and torch.ops._C_ascend.is_mega_mhc_available()
-            )
+            ):
+                self._mega_mhc_fallback_reason = f"unsupported hidden_size {self.hidden_size}"
+            elif self.mhc_sinkhorn_iterations not in _MEGA_MHC_SUPPORTED_SINKHORN_ITERS:
+                self._mega_mhc_fallback_reason = (
+                    f"requires Sinkhorn iterations 0 or 20, got {self.mhc_sinkhorn_iterations}"
+                )
+            elif not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMHC):
+                self._mega_mhc_fallback_reason = "requires A5 hardware capability"
+            elif not hasattr(torch.ops._C_ascend, "npu_mega_mhc"):
+                self._mega_mhc_fallback_reason = "npu_mega_mhc binding is missing; rebuild vLLM-Ascend"
+            elif not hasattr(torch.ops._C_ascend, "is_mega_mhc_available"):
+                self._mega_mhc_fallback_reason = "MegaMhc availability query is missing; rebuild vLLM-Ascend"
+            elif not torch.ops._C_ascend.is_mega_mhc_available():
+                self._mega_mhc_fallback_reason = (
+                    "CANN MegaMhc symbols are missing or from different libraries; ops-transformer PR16270+ is required"
+                )
+            self._use_mega_mhc = self._mega_mhc_fallback_reason is None
             self.register_buffer("_input_layernorm_weight_fp32", None, persistent=False)
             self.register_buffer("_post_attention_layernorm_weight_fp32", None, persistent=False)
 
@@ -717,6 +751,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         # The active slice is fixed after construction; cache it so forward
         # doesn't rebuild the slice (a fresh list) every step.
         self._active_layers = self.layers[self.start_layer : self.end_layer]
+        _log_mega_mhc_status(self._active_layers)
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)

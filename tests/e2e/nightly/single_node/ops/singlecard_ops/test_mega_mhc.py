@@ -45,10 +45,10 @@ def _assert_close_with_pass_rate(actual, expected, *, diff_threshold, required_p
 @pytest.mark.skipif(
     not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMHC)
     or not torch.ops._C_ascend.is_mega_mhc_available(),
-    reason="MegaMhc and MhcSinkhorn require an A5 CANN ops-transformer package",
+    reason="MegaMhc with fused Sinkhorn requires an A5 CANN ops-transformer package with PR16270+",
 )
 @pytest.mark.parametrize("shape", [(2, HIDDEN_SIZE), (1, 2, HIDDEN_SIZE)])
-@pytest.mark.parametrize("sinkhorn_iters", [1, 20, 100])
+@pytest.mark.parametrize("sinkhorn_iters", [0, 20])
 @torch.inference_mode()
 def test_npu_mega_mhc_matches_post_pre_rms_norm(shape, sinkhorn_iters):
     torch.manual_seed(1024)

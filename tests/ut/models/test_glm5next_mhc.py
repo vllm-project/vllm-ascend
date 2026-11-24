@@ -10,6 +10,7 @@ from torch import nn
 from vllm.model_executor.kernels.mhc.torch import mhc_post_torch, mhc_pre_torch
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
+from vllm_ascend.models.glm5next import model as glm_model
 from vllm_ascend.models.glm5next.model import Glm5NextDecoderLayer, Glm5NextForCausalLM, Glm5NextModel
 
 
@@ -237,3 +238,23 @@ def test_mega_mhc_fp32_norm_buffers_refresh_in_place():
     process_weights_after_loading(causal, config, torch.device("cpu"))
     assert layer._input_layernorm_weight_fp32 is None
     assert layer._post_attention_layernorm_weight_fp32 is None
+
+
+def test_mega_mhc_startup_log_reports_enablement_and_fallback(monkeypatch):
+    messages = []
+    monkeypatch.setattr(glm_model.logger, "info", lambda message, *args: messages.append(message % args))
+    layers = [
+        SimpleNamespace(mhc=True, _use_mega_mhc=True, _mega_mhc_fallback_reason=None),
+        SimpleNamespace(mhc=True, _use_mega_mhc=False, _mega_mhc_fallback_reason="test fallback"),
+        SimpleNamespace(mhc=False),
+    ]
+
+    glm_model._log_mega_mhc_status(layers)
+
+    assert any("MegaMhc enabled for 1/2 GLM mHC layers" in message for message in messages)
+    assert any("PR16270+" in message for message in messages)
+    assert any("test fallback" in message for message in messages)
+
+    messages.clear()
+    glm_model._log_mega_mhc_status([SimpleNamespace(mhc=False)])
+    assert not messages
