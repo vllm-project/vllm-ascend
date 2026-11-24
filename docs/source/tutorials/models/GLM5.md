@@ -545,8 +545,8 @@ In addition to all single-node parameters described in [Single-Node Online Deplo
 **Network and data parallel configuration:**
 
 - `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`: Network interface configuration for multi-node communication. Set `nic_name` to the network interface name (obtained via `ifconfig`) and `local_ip` to the current node's IP address. These must be correctly configured on each node for successful multi-node communication.
-- `--data-parallel-size`: Total number of data parallel ranks across all nodes. For 2-node deployment, typically set to `2`.
-- `--data-parallel-size-local`: Number of data parallel ranks on the current node. Usually set to `1` (one DP rank per node).
+- `--data-parallel-size`: Total number of data parallel ranks across all nodes. Use `2` for the A2 two-node deployment and `8` for the A3 two-node deployment.
+- `--data-parallel-size-local`: Number of data parallel ranks on the current node. Use `1` for the A2 DP2 deployment and `4` for the A3 DP8 deployment.
 - `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.
 - `--data-parallel-rpc-port`: RPC port for data parallel master communication. Must be the same across all nodes.
 - `--headless`: Indicates this is a non-master node. Do not use on node 0.
@@ -554,7 +554,7 @@ In addition to all single-node parameters described in [Single-Node Online Deplo
 
 **Multi-node performance tuning:**
 
-- For low-latency multi-node scenarios, keep `--data-parallel-size-local 1` to minimize cross-node communication.
+- Keep `--data-parallel-size-local` consistent with the selected topology; changing it also changes the number of engines and device allocation per node.
 - `--max-num-seqs` should be tuned based on available KV cache memory after model loading. For the w8a8c8 198K scenarios on A3, `6` is a starting point for the high-throughput layout and `16` for the low-latency layout. These layouts use different parallelism and have different per-engine KV cache capacity; their sequence counts are not directly comparable. For w4a8 on A2 multi-node with long context, start with `2` and increase if memory permits.
 - All nodes in a multi-node deployment must use identical `--tensor-parallel-size`, `--enable-expert-parallel`, and model weight path configurations.
 
@@ -1450,7 +1450,7 @@ curl http://<node0_ip>:<port>/v1/chat/completions \
 Expected Result:
 
 ```shell
-{"id": "chatcmlib-bc44ad093dec79a2", "object": "chat.completion", "created": "1770903266", "model": "glm-5.1", "choices": [{ "index": 0, "message": {"role": "assistant", "content": "The future of AI is not one thing, but a convergence of several powerful trends.", "annotations": "null", "audio": "null", "function_call": "null", "tool_calls": [], "reasoning": "null"}, "logprobs": "null", "finish_reason": "length", "stop_reason": "null", "token_ids": null}], "service_tier": "null", "system fingerprint": "null", "usage": {"prompt_tokens": 5, "total_tokens": 20, "completion_tokens": 15, "prompt_tokens_details": null}, "prompt_logprobs": "null", "prompt_token_ids": "null", "kv_transfer_params": null}
+{"id": "chatcmpl-bc44ad093dec79a2", "object": "chat.completion", "created": "1770903266", "model": "glm-5.1", "choices": [{ "index": 0, "message": {"role": "assistant", "content": "The future of AI is not one thing, but a convergence of several powerful trends.", "annotations": "null", "audio": "null", "function_call": "null", "tool_calls": [], "reasoning": "null"}, "logprobs": "null", "finish_reason": "length", "stop_reason": "null", "token_ids": null}], "service_tier": "null", "system_fingerprint": "null", "usage": {"prompt_tokens": 5, "total_tokens": 20, "completion_tokens": 15, "prompt_tokens_details": null}, "prompt_logprobs": "null", "prompt_token_ids": "null", "kv_transfer_params": null}
 ```
 
 ## 7 Accuracy Evaluation

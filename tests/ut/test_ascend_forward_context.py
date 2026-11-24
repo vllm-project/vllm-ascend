@@ -22,7 +22,7 @@ def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0),
+        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0, megamoe_shared_expert_fusion=False),
     )
 
 
@@ -794,7 +794,11 @@ def test_prefill_mc2_capacity_reuses_profile_budget(
 @pytest.mark.parametrize("mega_moe", [False, True])
 def test_decode_mc2_capacity_keeps_local_graph_and_request_budget(monkeypatch, pcp, graph, mega_moe):
     monkeypatch.setattr(
-        afc, "get_ascend_config", lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=int(mega_moe))
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_prefill_mc2=False, enable_fused_mc2=int(mega_moe), megamoe_shared_expert_fusion=False
+        ),
     )
     monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: mega_moe)
     monkeypatch.setattr(afc, "_is_decode_only_node", lambda _: True)
@@ -807,6 +811,34 @@ def test_decode_mc2_capacity_keeps_local_graph_and_request_budget(monkeypatch, p
     config.parallel_config.prefill_context_parallel_size = pcp
     afc.set_mc2_tokens_capacity(config, 200, 3)
     assert afc.get_mc2_tokens_capacity() == (264 if graph else 600)
+
+
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("shared_fusion,expected", [(False, 432), (True, 512)])
+def test_shared_expert_megamoe_capacity_covers_decode_profiling(monkeypatch, device_type, shared_fusion, expected):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_prefill_mc2=False,
+            enable_fused_mc2=1,
+            megamoe_shared_expert_fusion=shared_fusion,
+            scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
+        ),
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    monkeypatch.setattr(afc, "is_moe_model", lambda _: True)
+    monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=16))
+    monkeypatch.setattr(afc, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
+    config = _make_vllm_config(
+        tensor_parallel_size=8,
+        max_num_batched_tokens=512,
+        cudagraph_capture_sizes=[432],
+        max_cudagraph_capture_size=432,
+        kv_role="kv_consumer",
+    )
+    afc.set_mc2_tokens_capacity(config, 432, 1)
+    assert afc.get_mc2_tokens_capacity() == expected
 
 
 @pytest.mark.parametrize("fused,mega_moe,expected", [(0, False, 1024), (1, False, 1024), (1, True, 32768)])

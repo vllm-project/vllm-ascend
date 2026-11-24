@@ -241,7 +241,9 @@
 #       No, vllm-ascend-specific MoE runner integration.
 #    Future Plan:
 #       Remove this patch once upstream exposes a backend dispatch / plugin hook
-#       for selecting the MoE runner implementation.
+#       for selecting the MoE runner implementation. Register warmup from the
+#       selected Ascend router initialization when that hook is available.
+#       Until then the factory registers EPLB map variants during model construction.
 #
 #   2. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
 #    Why:
@@ -1492,6 +1494,17 @@
 #       Define AscendModelState and initialize it in init_model_state.
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
+#
+#   2. `vllm.v1.worker.gpu.model_states.interface.ModelState.gather_mm_embeddings`
+#    Why:
+#       An idle PCP rank can retain a zero-token request inside an image span.
+#    How:
+#       Return empty media embeddings and a mask for an idle PCP rank so it
+#       can continue to the shared padded token embedding exchange.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/64435
+#    Future Plan:
+#       Remove the wrapper once the paired vLLM includes the upstream guard.
 #
 # ** 28. File: worker/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
