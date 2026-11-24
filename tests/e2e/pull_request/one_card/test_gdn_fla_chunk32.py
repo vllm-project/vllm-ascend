@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+from dataclasses import replace
+from unittest.mock import patch
+
 import pytest
 import torch
 from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd
@@ -8,6 +11,10 @@ from vllm_ascend.attention.gdn_attn_builder import _build_non_spec_chunked_prefi
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    get_current_hardware_profile,
+)
 
 
 @pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A5, reason="A5 FLA Chunk32 integration")
@@ -30,8 +37,17 @@ def test_chunk32_matches_chunk64(head_first):
     b = randn(1, 129, 24)
     state = randn(4, 24, 128, 128) * 0.05
     args = (state, 128**-0.5, meta, chunk_gated_delta_rule_fwd)
-    ref = DeviceOperator.fla_gdn_prefill(*qkv, g, b.sigmoid(), *args)
-    actual = DeviceOperator.fla_gdn_prefill(*qkv, g, b, *args, chunk_size=32)
+    profile = get_current_hardware_profile()
+    chunk64_profile = replace(
+        profile,
+        capabilities=profile.capabilities - {HardwareCapability.FLA_GDN_PREFILL_CHUNK32},
+    )
+    with patch(
+        "vllm_ascend.device.device_op.get_current_hardware_profile",
+        return_value=chunk64_profile,
+    ):
+        ref = DeviceOperator.fla_gdn_prefill(*qkv, g, b.sigmoid(), *args)
+    actual = DeviceOperator.fla_gdn_prefill(*qkv, g, b, *args)
     torch.testing.assert_close(actual[1][1], state[1], rtol=0, atol=0)
     for got, expected in zip(actual, ref):
         error = (got.float() - expected.float()).norm() / expected.float().norm()

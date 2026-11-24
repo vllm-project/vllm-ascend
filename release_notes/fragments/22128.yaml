@@ -1,0 +1,10 @@
+pr: 22128
+entries:
+  - category: feature
+    text: >-
+      Added experimental A3 DeepSeek V4.1 shared-expert fusion with
+      `enable_fused_mc2=3` for W4A8 routed experts and a dynamic W8A8
+      shared expert. Requires a CANN MegaMoe operator package with independent
+      INT8 shared-expert descriptors.
+    model: deepseek-v4.1
+    hardware: [A3]

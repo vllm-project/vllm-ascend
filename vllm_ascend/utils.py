@@ -1108,7 +1108,7 @@ def enable_sp(vllm_config=None) -> bool:
     # Qwen3.5 patch (vllm_ascend.patch.worker.patch_qwen3_5). The lazy import
     # keeps this module free of the patch module's import-time monkey
     # patches. Mirror the STANDARD_WORKER_PATCHES gate from
-    # patch/worker/__init__.py: patch_qwen3_5 imports vllm_ascend.ops.gdn
+    # patch/worker/__init__.py: patch_qwen3_5 imports vllm_ascend.attention.gdn
     # (fla_npu) at module level, which 310P runners do not install, so
     # devices excluded from the standard worker patch bundle must not
     # import it from here either.
@@ -2011,15 +2011,9 @@ def use_updatable_graph(
 
     if issubclass(attn_backend, AscendAttentionBackend):
         return True
-
-    from vllm.distributed import get_dcp_group
-
     from vllm_ascend.attention.mla_v1 import AscendMLABackend
 
-    # Non-DCP MLA now registers decode FIA tasks during capture. Keep DCP MLA
-    # on its specialized graph-parameter path until its grouped update logic is
-    # migrated separately.
-    return issubclass(attn_backend, AscendMLABackend) and get_dcp_group().world_size == 1
+    return issubclass(attn_backend, AscendMLABackend)
 
 
 def _is_glm_model(model_config) -> bool:

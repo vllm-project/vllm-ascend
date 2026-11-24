@@ -360,13 +360,13 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
     The fixed timeout below applies to `MooncakeConnectorV1`. For
     `MooncakeConnectorV2`, use the renewable KV leases described below.
 
-    For long sequences or high concurrency, the default KV-cache release timeout of 480 seconds may be insufficient. Increase it as needed in the prefiller startup script. For versions that use `VLLM_MOONCAKE_CONNECTOR_TIMEOUT` for this timeout, add:
+    For long sequences or high concurrency, the default KV-cache release timeout of 480 seconds may be insufficient. Increase it as needed by setting `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT` in the prefiller startup script:
 
     ```shell
-    export VLLM_MOONCAKE_CONNECTOR_TIMEOUT=1800
+    export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800
     ```
 
-    The value is in seconds: `1800` allows 30 minutes before timeout. In current versions, this setting is named `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`; use `export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800` instead. Check the variable name supported by your installed version.
+    The value is in seconds: `1800` allows 30 minutes before timeout.
 
     Increasing this timeout generally does not affect inference accuracy or performance during normal operation. If a decoder (D) node fails while requests still have KV caches on the prefiller (P) node that the decoder has not received, a longer timeout delays releasing those caches. They continue to occupy HBM, reducing the memory available for other requests on the P node until they are released.
 
@@ -430,6 +430,26 @@ An aborted request with an in-flight read keeps its lease until worker
 completion is reported. If the entire D process stops running or the control
 network is disconnected, heartbeats stop and the lease expires. Heartbeats
 do not replace transport completion or cancellation synchronization.
+
+### Mooncake V2 Transfer Configuration
+
+Set these options in `kv_connector_extra_config`. Pull uses the decoder's
+transfer pool; Push uses the prefiller's sending pool.
+
+| Option | Default | Behavior |
+| --- | --- | --- |
+| `pull_transfer_mode` | `"request"` | Pull only: submit and complete each request independently. Use `"batch"` to aggregate READs and wait for the whole producer-engine batch. |
+| `transfer_max_workers` | `32` | Positive integer controlling the transfer pool size per worker: D-side READs for Pull, P-side sends for Push. Booleans and strings are rejected. |
+
+```json
+{"kv_connector_extra_config": {"pull_transfer_mode": "request", "transfer_max_workers": 32}}
+```
+
+For Push, set only `transfer_max_workers` on the producer. The peer requires no
+matching setting. Both Pull modes prepare addresses and
+execute READs in the transfer pool, and wait for submitted READs to finish before
+reporting a failed receive. Request mode avoids the batch completion barrier but
+can increase READ call overhead; compare both modes under the same workload.
 
 ### QoS Configuration
 
@@ -1378,7 +1398,7 @@ models = [
         type=VLLMCustomAPIChatStream,
         abbr='vllm-api-stream-chat',
         path="/root/.cache/ds_r1",
-        model="dsr1",
+        model="ds_r1",
         request_rate = 14,
         retry = 2,
         host_ip = "192.0.0.1", # Proxy service host IP
@@ -1414,7 +1434,7 @@ Since the computation of some NPU operators requires several rounds of warm-up t
 Check service health using the proxy server endpoint.
 
 ```shell
-curl http://192.0.0.1:8080/v1/completions \
+curl http://192.0.0.1:1999/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "ds_r1",

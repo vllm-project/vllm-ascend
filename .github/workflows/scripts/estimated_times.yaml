@@ -79,6 +79,8 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_ec_cpu_offload.py: 1200
   tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 360
   tests/e2e/pull_request/one_card/test_decoder_replay.py: 60
+  # Initial estimate for graph capture/replay with two input-ID dtypes.
+  tests/e2e/pull_request/one_card/test_routing_ids_graph_refresh.py: 60
   tests/e2e/pull_request/one_card/test_fla_lazy_imports.py: 60
   tests/e2e/pull_request/one_card/test_gdn_block_packed_states.py: 60
   tests/e2e/pull_request/one_card/test_gdn_checkpoint_states.py: 600
@@ -89,6 +91,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_minimax_qknorm_rope_cache.py: 600
   tests/e2e/pull_request/one_card/test_multi_instance.py: 160
   tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py: 240
+  tests/e2e/pull_request/one_card/test_p2p_offloading_cache_reset.py: 120
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_npu_device_synchronize.py: 60
   tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py: 460
   tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py: 320
@@ -177,6 +180,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_next_w8a8.py: 360
   tests/e2e/pull_request/four_card/test_graph_mode.py: 480
   tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py: 300
+  tests/e2e/pull_request/four_card/test_qwen_gdn_recoverssm.py: 300
   tests/e2e/pull_request/four_card/test_sparse_hccl_checkpoint.py: 250
   # DSA-PCP MTP pool watch: A/B legs with 32K perf prompts.
   tests/e2e/pull_request/four_card/context_parallel/pool/test_deepseek_v4_pool.py: 1500

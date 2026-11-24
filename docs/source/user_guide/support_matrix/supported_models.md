@@ -2,7 +2,8 @@
 
 !!! note
 
-    This list is based on the vLLM main community model list and categorizes the support status of vllm-ascend with labels such as Supported, Experimental, and Unmaintained. Models not listed may be verified independently.
+    - This list is based on the vLLM main community model list and categorizes the support status of vllm-ascend with labels such as Supported, Experimental, and Unmaintained. Models not listed may be verified independently.
+    - **Coming soon**: Step-5-preview -- planned for the next RC version. Actual support is subject to the final release.
 
 **Legend Description**:
 

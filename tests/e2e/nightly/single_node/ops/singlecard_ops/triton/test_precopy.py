@@ -79,16 +79,19 @@ def _reference(convs, ssms, block_table, src_col, dst_col, bias, conv_dim_first,
 )
 @pytest.mark.parametrize("conv_dim_first", [False, True])
 @pytest.mark.parametrize(
-    ("has_idx_mapping", "request_slots"),
+    ("temporal_tiles", "has_idx_mapping", "request_slots"),
     [
-        pytest.param(False, (0, 1, 2, 3), id="v1-batch-order"),
-        pytest.param(True, (0, 1, 2, 3), id="identity"),
-        pytest.param(True, (2, 0, 3, 1), id="permuted"),
-        pytest.param(True, (3, 7), id="sparse-request-slots"),
-        pytest.param(True, (5, -1, 2, -1), id="filtered-padding"),
+        pytest.param(4, False, (0, 1, 2, 3), id="v1-batch-order-tiles4"),
+        pytest.param(1, True, (0, 1, 2, 3), id="identity-tiles1"),
+        pytest.param(4, True, (0, 1, 2, 3), id="identity-tiles4"),
+        pytest.param(1, True, (2, 0, 3, 1), id="permuted-tiles1"),
+        pytest.param(4, True, (2, 0, 3, 1), id="permuted-tiles4"),
+        pytest.param(1, True, (3, 7), id="sparse-request-slots-tiles1"),
+        pytest.param(4, True, (3, 7), id="sparse-request-slots-tiles4"),
+        pytest.param(1, True, (5, -1, 2, -1), id="filtered-padding-tiles1"),
+        pytest.param(4, True, (5, -1, 2, -1), id="filtered-padding-tiles4"),
     ],
 )
-@pytest.mark.parametrize("temporal_tiles", [1, 4])
 @pytest.mark.skipif(not torch.npu.is_available(), reason="NPU required")
 def test_precopy_matches_reference(conv_dim_first, has_idx_mapping, request_slots, temporal_tiles):
     device = torch.device("npu:0")

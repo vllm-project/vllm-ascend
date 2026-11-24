@@ -12,7 +12,7 @@ PLE_GROUP_SIZE = 32
 @triton.jit(do_not_specialize=["shard_start", "shard_end"])
 def _lookup_quantized(
     code_chunk_ptrs,
-    scale_chunk_ptrs,
+    scales,
     embedding_ids,
     output,
     shard_start,
@@ -34,10 +34,9 @@ def _lookup_quantized(
         if owned:
             local = index - shard_start
             base = tl.load(code_chunk_ptrs + local // CHUNK_ROWS).to(tl.pointer_type(tl.int8))
-            scales = tl.load(scale_chunk_ptrs + local // CHUNK_ROWS).to(tl.pointer_type(tl.float32))
             bits = tl.load(base + (local % CHUNK_ROWS) * EMBEDDING_WIDTH + col, mask=col < EMBEDDING_WIDTH, other=0)
             group = tl.arange(0, BLOCK_SIZE // GROUP_SIZE)
-            scale_offsets = (local % CHUNK_ROWS) * (EMBEDDING_WIDTH // GROUP_SIZE) + group
+            scale_offsets = local * (EMBEDDING_WIDTH // GROUP_SIZE) + group
             scale = tl.load(scales + scale_offsets, mask=group < EMBEDDING_WIDTH // GROUP_SIZE, other=0)
             dequantized = (bits.to(tl.float32).reshape(BLOCK_SIZE // GROUP_SIZE, GROUP_SIZE) * scale[:, None]).reshape(
                 BLOCK_SIZE
@@ -49,11 +48,10 @@ def _lookup_quantized(
         if owned:
             local = index - shard_start
             base = tl.load(code_chunk_ptrs + local // CHUNK_ROWS).to(tl.pointer_type(tl.uint8))
-            scales = tl.load(scale_chunk_ptrs + local // CHUNK_ROWS).to(tl.pointer_type(tl.uint8))
             bits = tl.load(base + (local % CHUNK_ROWS) * EMBEDDING_WIDTH + col, mask=col < EMBEDDING_WIDTH, other=0)
-            # Load each host scale once, then broadcast over its 32 code elements.
+            # Load each scale once, then broadcast over its 32 code elements.
             group = tl.arange(0, BLOCK_SIZE // GROUP_SIZE)
-            scale_offsets = (local % CHUNK_ROWS) * (EMBEDDING_WIDTH // GROUP_SIZE) + group
+            scale_offsets = local * (EMBEDDING_WIDTH // GROUP_SIZE) + group
             scale_mask = group < EMBEDDING_WIDTH // GROUP_SIZE
             value = bits.to(tl.float8e4nv, bitcast=True).to(tl.float32)
             E8M0_EXPONENT_BIAS: tl.constexpr = 127
@@ -71,12 +69,10 @@ def _lookup_quantized(
             tl.store(output + row * EMBEDDING_WIDTH + col, 0, mask=col < EMBEDDING_WIDTH)
 
 
-def lookup_quantized(
-    code_chunk_ptrs, scale_chunk_ptrs, embedding_ids, output, shard_start, shard_end, chunk_rows, *, is_mxfp8
-):
+def lookup_quantized(code_chunk_ptrs, scales, embedding_ids, output, shard_start, shard_end, chunk_rows, *, is_mxfp8):
     """Write selected group-32 host rows into a separate contiguous BF16 output.
 
-    Pointer tables address live CANN-registered storage, owned by the caller.
+    Codes use a registered host pointer table. Scales reside in a dense NPU shard.
     Only metadata is checked here: inspecting pointer values or ID contents
     would synchronize the NPU and break graph capture. See docs/ple_lookup_quantized.md.
     """
@@ -100,11 +96,20 @@ def lookup_quantized(
     if shard_start < 0 or shard_end <= shard_start or chunk_rows <= 0:
         raise ValueError("PLE requires 0 <= start < end and a positive chunk")
     chunks = triton.cdiv(shard_end - shard_start, chunk_rows)
-    for pointers in (code_chunk_ptrs, scale_chunk_ptrs):
-        if pointers.dtype != torch.int64 or pointers.ndim != 1 or not pointers.is_contiguous():
-            raise ValueError("PLE pointer tables must be contiguous 1-D int64 tensors")
-        if pointers.device != output.device or pointers.numel() < chunks:
-            raise ValueError("PLE pointer tables must cover the shard and be on the output NPU")
+    expected_dtype = torch.uint8 if is_mxfp8 else torch.float32
+    if (
+        scales.ndim != 2
+        or scales.dtype != expected_dtype
+        or scales.device != output.device
+        or not scales.is_contiguous()
+        or scales.shape[0] < shard_end - shard_start
+        or scales.shape[1] != width // PLE_GROUP_SIZE
+    ):
+        raise ValueError("PLE resident scales must cover the local shard with one scale per group")
+    if code_chunk_ptrs.dtype != torch.int64 or code_chunk_ptrs.ndim != 1 or not code_chunk_ptrs.is_contiguous():
+        raise ValueError("PLE pointer tables must be contiguous 1-D int64 tensors")
+    if code_chunk_ptrs.device != output.device or code_chunk_ptrs.numel() < chunks:
+        raise ValueError("PLE pointer tables must cover the shard and be on the output NPU")
     if embedding_ids.numel() == 0:
         return
     # Preserve the existing host-lookup setup: lazily cache core counts and UB size.
@@ -112,7 +117,7 @@ def lookup_quantized(
     init_device_properties_triton()
     _lookup_quantized[(embedding_ids.numel(),)](
         code_chunk_ptrs,
-        scale_chunk_ptrs,
+        scales,
         embedding_ids.contiguous(),
         output,
         shard_start,

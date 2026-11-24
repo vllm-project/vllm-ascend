@@ -18,12 +18,12 @@ from vllm_ascend.attention.gdn_attn_builder import (
     AscendGDNAttentionBackend,
     AscendGDNAttentionMetadataBuilder,
 )
+from vllm_ascend.attention.recoverssm_gdn import GDNRecoverSSMCommitContext
 from vllm_ascend.attention.recoverssm_metadata import (
     recoverssm_request_indices,
     recoverssm_spec_rows,
 )
 from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
-from vllm_ascend.ops.triton.gdn.recoverssm_gdn import GDNRecoverSSMCommitContext
 
 
 # TODO: Once the pinned vLLM revision includes #61309, might replace this class
@@ -101,7 +101,7 @@ class AscendGDNRecoverSSMMetadataBuilder(AscendGDNAttentionMetadataBuilder):
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self._ones = torch.ones(
-            self.spec_state_indices_tensor.shape[0],
+            max(vllm_config.scheduler_config.max_num_seqs, self.spec_state_indices_tensor.shape[0]),
             dtype=torch.int32,
             device=self.spec_state_indices_tensor.device,
         )
@@ -136,7 +136,7 @@ class AscendGDNRecoverSSMMetadataBuilder(AscendGDNAttentionMetadataBuilder):
                 num_reqs,
             )
 
-        metadata = super().build(
+        meta = super().build(
             common_prefix_len,
             m,
             num_accepted_tokens=num_accepted_tokens,
@@ -144,55 +144,59 @@ class AscendGDNRecoverSSMMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             fast_build=fast_build,
             num_actual_reqs=num_actual_reqs,
         )
-        base = {item.name: getattr(metadata, item.name) for item in fields(metadata)}
+        base = {f.name: getattr(meta, f.name) for f in fields(meta)}
         commit = None
-        if metadata.num_spec_decodes > 0:
+        if meta.num_spec_decodes > 0:
+            n = meta.num_spec_decodes
+            assert meta.spec_state_indices_tensor is not None
+            assert meta.spec_query_start_loc is not None
+            base["spec_state_indices_tensor"] = meta.spec_state_indices_tensor[:, :1]
+            # The checkpoint already holds the accepted state. Size the
+            # one-token counts to the potentially graph-padded indices.
+            base["num_accepted_tokens"] = self._ones[: base["spec_state_indices_tensor"].shape[0]]
             if rows is None:
                 raise ValueError("GDN RecoverSSM: spec rows without draft counts")
-            assert metadata.spec_state_indices_tensor is not None
-            assert metadata.spec_query_start_loc is not None
-            state_indices = metadata.spec_state_indices_tensor[:, :1]
-            accepted_tokens = self._ones[: state_indices.shape[0]]
-            base["spec_state_indices_tensor"] = state_indices
-            base["num_accepted_tokens"] = accepted_tokens
-
-            # The Ascend base builder creates convolution descriptors before
-            # this RecoverSSM specialization. Point them at the checkpoint-only
-            # state column and the one-token accepted-count buffer as well.
-            spec_decode_metadata = getattr(metadata, "spec_decode_metadata", None)
-            if spec_decode_metadata is not None:
-                conv_metadata = spec_decode_metadata.spec_causal_conv1d
-                num_rows = conv_metadata.query_start_loc.shape[0] - 1
-                conv_metadata.cache_indices = state_indices[:num_rows, 0]
-                conv_metadata.num_accepted_tokens = accepted_tokens[:num_rows]
-
-            request_indices = recoverssm_request_indices(
-                rows,
-                metadata.num_spec_decodes,
-                m.query_start_loc.device,
-            )
+            request_indices = recoverssm_request_indices(rows, n, m.query_start_loc.device)
             align = self.vllm_config.cache_config.mamba_cache_mode == "align"
             commit = AscendGDNRecoverSSMCommitMetadata(
-                state_indices=state_indices,
-                query_start_loc=metadata.spec_query_start_loc,
+                state_indices=base["spec_state_indices_tensor"],
+                query_start_loc=meta.spec_query_start_loc,
                 request_indices=request_indices,
                 block_table=m.block_table_tensor if align else None,
                 num_computed_tokens=m.compute_num_computed_tokens() if align else None,
                 block_size=self.kv_cache_spec.block_size if align else None,
             )
 
-        result = AscendGDNRecoverSSMMetadata(
+            # Reuse the checkpoint column and one-token counts in the Ascend
+            # convolution descriptor, which may have a different row count.
+            spec_decode_metadata = getattr(meta, "spec_decode_metadata", None)
+            if spec_decode_metadata is not None:
+                conv_metadata = spec_decode_metadata.spec_causal_conv1d
+                num_rows = conv_metadata.query_start_loc.shape[0] - 1
+                conv_metadata.cache_indices = base["spec_state_indices_tensor"][:num_rows, 0]
+                conv_metadata.num_accepted_tokens = base["num_accepted_tokens"][:num_rows]
+
+        result_meta = AscendGDNRecoverSSMMetadata(
             **base,
             recoverssm_commit=commit,
             recoverssm_context=(self._get_context() if commit is not None else None),
         )
+        self._attach_ascend_metadata(result_meta, meta, base, common_attn_metadata)
+        return result_meta
+
+    @staticmethod
+    def _attach_ascend_metadata(
+        result_meta: AscendGDNRecoverSSMMetadata,
+        meta: GDNAttentionMetadata,
+        base: dict[str, object],
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> None:
         # Ascend GDN attaches device-specific convolution and PCP descriptors
         # dynamically rather than declaring them on the upstream dataclass.
-        for name, value in vars(metadata).items():
+        for name, value in vars(meta).items():
             if name not in base:
-                setattr(result, name, value)
-        result.pcp_context = getattr(common_attn_metadata, "pcp_context", None)
-        return result
+                setattr(result_meta, name, value)
+        result_meta.pcp_context = getattr(common_attn_metadata, "pcp_context", None)
 
     def build_for_cudagraph_capture(
         self,

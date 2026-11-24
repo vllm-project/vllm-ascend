@@ -16,7 +16,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
-"""Compare the short outputs of HF and vLLM when using greedy sampling.
+"""Check Qwen3-Next MTP acceptance and RecoverSSM generation.
 
 Run `pytest tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py`.
 """
@@ -24,10 +24,12 @@ Run `pytest tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py`
 import os
 
 import pytest
+from vllm import SamplingParams
 from vllm.config import CompilationConfig
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
+from tests.e2e.pull_request.utils import assert_valid_generation_outputs
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -67,11 +69,14 @@ def _run_mtp_case(model_name, use_replayssm, example_prompts, max_tokens):
         },
         compilation_config=CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[20]),
     ) as spec_vllm_model:
-        before = _read_mtp_counters(spec_vllm_model.model.get_metrics())
-        outputs = spec_vllm_model.generate_greedy(example_prompts, max_tokens)
-        after = _read_mtp_counters(spec_vllm_model.model.get_metrics())
+        model = spec_vllm_model.model
+        vocab_size = model.llm_engine.model_config.get_vocab_size()
+        before = _read_mtp_counters(model.get_metrics())
+        outputs = model.generate(example_prompts, SamplingParams(temperature=0.0, max_tokens=max_tokens))
+        after = _read_mtp_counters(model.get_metrics())
 
-    token_ids = [output[0] for output in outputs]
+    assert_valid_generation_outputs(outputs, len(example_prompts), vocab_size)
+    token_ids = [list(output.outputs[0].token_ids) for output in outputs]
     num_drafts = after[0] - before[0]
     num_accepted_tokens_per_pos = [after_count - before_count for before_count, after_count in zip(before[1], after[1])]
     return token_ids, num_drafts, num_accepted_tokens_per_pos
@@ -118,5 +123,4 @@ def test_qwen3_next_mtp_acceptance_tp4(model_name, use_replayssm, monkeypatch, b
         )
     else:
         assert token_ids == baseline_token_ids_by_model[model_name]
-
     cleanup_dist_env_and_memory()

@@ -7,10 +7,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import requests
+from vllm import SamplingParams
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemotePDServer, VllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request.utils import assert_valid_generation_outputs
 
 MODEL = "Qwen/Qwen3.6-35B-A3B"
 
@@ -23,7 +25,9 @@ def test_qwen36_recoverssm_matches_mtp_baseline_and_graph(monkeypatch, cache_mod
         prefix = "This is shared background context for the following question. " * 128
         prompts = [prefix + prompt for prompt in prompts]
     baseline = None
-    for recovery, eager in [(False, True), (True, True), (True, False)]:
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=64)
+    reuse_prompts = prompts if cache_mode == "align" else list(reversed(prompts))
+    for use_replayssm, eager in [(False, True), (True, True), (True, False)]:
         with VllmRunner(
             "Qwen/Qwen3.6-35B-A3B",
             tensor_parallel_size=4,
@@ -31,7 +35,7 @@ def test_qwen36_recoverssm_matches_mtp_baseline_and_graph(monkeypatch, cache_mod
             mamba_ssm_cache_dtype="float32",
             mamba_cache_mode=cache_mode,
             enable_prefix_caching=cache_mode == "align",
-            use_replayssm=recovery,
+            use_replayssm=use_replayssm,
             speculative_config={"method": "mtp", "num_speculative_tokens": 4},
             enforce_eager=eager,
             max_model_len=4096,
@@ -39,12 +43,18 @@ def test_qwen36_recoverssm_matches_mtp_baseline_and_graph(monkeypatch, cache_mod
             max_num_batched_tokens=1024,
             gpu_memory_utilization=0.9,
         ) as runner:
-            result = runner.generate_greedy(prompts, 64)
-            # Second call exercises finished-request reuse and align prefix hits.
-            reused = runner.generate_greedy(list(reversed(prompts)), 64)
-        tokens = [item[0] for item in result]
-        assert all(tokens)
-        assert [item[0] for item in reused] == list(reversed(tokens))
+            model = runner.model
+            vocab_size = model.llm_engine.model_config.get_vocab_size()
+            result = model.generate(prompts, sampling_params)
+            # Repeat requests to exercise slot reuse and prefix caching.
+            reused = model.generate(reuse_prompts, sampling_params)
+
+        assert_valid_generation_outputs(result, len(prompts), vocab_size)
+        assert_valid_generation_outputs(reused, len(reuse_prompts), vocab_size)
+        tokens = [list(output.outputs[0].token_ids) for output in result]
+        reused_tokens = [list(output.outputs[0].token_ids) for output in reused]
+        expected_reused = tokens if cache_mode == "align" else list(reversed(tokens))
+        assert reused_tokens == expected_reused
         if baseline is None:
             baseline = tokens
         else:

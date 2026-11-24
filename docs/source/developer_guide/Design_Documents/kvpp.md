@@ -2,7 +2,7 @@
 
 ## 1. Background
 
-MLA/SFA models can replicate historical KV caches across tensor parallel (TP) and prefill context parallel (PCP) ranks, limiting capacity for long contexts and concurrent requests. KVPP distributes persistent caches by layer within each TP×PCP group and broadcasts a layer's cache when computation needs it.
+MLA/SFA models can replicate historical KV caches across tensor parallelism (TP) and prefill context parallel (PCP) ranks, limiting capacity for long contexts and concurrent requests. KVPP distributes persistent caches by layer within each TP×PCP group and broadcasts a layer's cache when computation needs it.
 
 Model execution retains its TP/EP/PP/PCP configuration. The scheduler keeps the complete logical cache specification and block numbering.
 
@@ -22,7 +22,7 @@ TP x PCP group within one DP replica and PP stage
 
 ### 2.1 Layer Ownership
 
-Each pipeline parallel (PP) stage sorts its local target layers by layer index and assigns contiguous, balanced partitions to owner ranks in its TP×PCP group. A layer's main KV, indexer KV, and quantization components form one bundle with a single owner. Draft-model caches, including MTP caches, remain independently allocated on each rank that requires them and are excluded from target-layer partitioning.
+Each pipeline parallelism (PP) stage sorts its local target layers by layer index and assigns contiguous, balanced partitions to owner ranks in its TP×PCP group. A layer's main KV, indexer KV, and quantization components form one bundle with a single owner. Draft-model caches, including MTP caches, remain independently allocated on each rank that requires them and are excluded from target-layer partitioning.
 
 Each rank allocates persistent storage for its owned layers and reuses two scratch buffers for other layers. Target-layer execution ordinals select alternating scratch buffers, allowing the current layer and the next prefetch to use separate storage.
 
@@ -75,6 +75,6 @@ vllm serve <model-path> \
   --additional-config '{"enable_kvpp": true}'
 ```
 
-`enable_kvpp` defaults to `false`. Within each DP replica and PP stage, layer ownership and broadcasts use the TP×PCP group.
+`enable_kvpp` defaults to `false`. Within each DP replica and PP stage, layer ownership and broadcasts use the KVPP group.
 
 Use `--enforce-eager` instead of the compilation setting for eager execution. See the [KVPP user guide](../../user_guide/feature_guide/kvpp.md) for model, connector, and combination-specific restrictions. The support table describes individual combinations; it does not establish that every combination works together.

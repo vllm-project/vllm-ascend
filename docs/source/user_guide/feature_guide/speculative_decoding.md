@@ -1025,6 +1025,65 @@ settings.
     End-to-end P/D output equivalence remains unverified, including when prefix
     caching is enabled.
 
+## Experimental Qwen GDN RecoverSSM
+
+Qwen GDN hybrid models like Qwen3.5/3.6 can use experimental RecoverSSM on
+Ascend A3 and A5. For Qwen3.8, use the Qwen3.5-compatible dense checkpoint
+`Qwen/Qwen3.8-27B`.
+
+Enable this path with `--use-replayssm`, which is off by default. Use Model
+Runner V2 with [MTP](#speculating-using-mtp), [DSpark](#speculating-using-dspark),
+or [DFlash](#speculating-using-dflash) and a speculative window appropriate for
+your checkpoint and draft model.
+
+For example, run Qwen3.6-35B-A3B with DFlash speculative config mode:
+
+```shell
+--use-replayssm \
+--speculative-config '{"method": "DFlash", "model": "/path/to/dflash", "num_speculative_tokens": 3}'
+```
+
+Use BF16 activations and convolution state, and BF16 or FP32 SSM checkpoints.
+Set PP, PCP, and DCP to 1. The TP size must divide both the key-head
+and value-head counts, and the value-head count must be a multiple of the
+key-head count. Disable stochastic rounding. Ascend 310P is unsupported.
+
+Use `--mamba-cache-mode none --no-enable-prefix-caching` with prefix caching
+disabled, or `--mamba-cache-mode align --enable-prefix-caching` to enable it.
+In `align` mode, the Mamba block size must cover at least
+`num_speculative_tokens + 1` tokens.
+
+For direct prefill-to-decode transfer, use `MooncakePullConnector` or
+`MooncakeConnectorV2` with its default pull mode (`use_layerwise=false`).
+Enable `--use-replayssm` on both roles and match the model weights, TP size,
+speculative method, draft checkpoint where applicable, speculative window,
+state dtypes, convolution layout, and prefix-caching configuration.
+
+For example, use these settings for a same-host TP4 + TP4 deployment with
+Qwen3.6-35B-A3B, MTP with four speculative tokens, and prefix caching:
+
+| Setting | Prefill | Decode |
+| --- | --- | --- |
+| Tensor parallel size | 4 | 4 |
+| KV role | `kv_producer` | `kv_consumer` |
+| SSM checkpoint dtype | `float32` | `float32` |
+| Mamba cache mode | `align` | `align` |
+| Prefix caching | Enabled | Enabled |
+
+For Mooncake transport setup and request routing, see
+[Prefill-Decode Disaggregation (DeepSeek)](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md).
+
+The Qwen3.6-35B-A3B MTP generation test checks completion and token validity
+with RecoverSSM off and on in eager and graph-enabled configurations, including
+repeated requests in `none` and `align` modes. The Qwen3.8-27B operator cases
+check verification and state commit using synthetic tensors with the model's
+head geometry and a DFlash-sized window.
+
+!!! warning
+
+    RecoverSSM is experimental. Validate accuracy and performance on your
+    deployment stack, including the selected execution mode and P/D configuration.
+
 ## Synthetic Rejection Sampling
 
 In addition to the default `standard` rejection sampling (which accepts a draft token when `target_prob / draft_prob >= uniform`), vLLM Ascend supports **synthetic** rejection sampling. In this mode each draft token at position `i` is accepted with a configured probability `rates[i]`, compared against a uniform random draw — **independent of the target/draft probability match**. The first rejected position stops the request and emits a recovered token; if every draft token is accepted, the bonus token is appended.

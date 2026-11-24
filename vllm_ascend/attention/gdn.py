@@ -49,13 +49,16 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    get_current_hardware_profile,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_checkpoint import ensure_gdn_checkpoint_workspace, run_gdn_checkpoint_prefill
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
-from vllm_ascend.ops.triton.gdn.recoverssm_gdn import gdn_recoverssm_verify
+from vllm_ascend.ops.triton.gdn.gdn_recoverssm_verify import gdn_recoverssm_verify
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_varlen, extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 
@@ -64,6 +67,7 @@ _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
 @lru_cache(maxsize=1)
 def _get_fla_gdn_prefill_op():
+    # FLA availability is independent of chunk32 hardware support.
     try:
         from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd  # type: ignore[import-not-found]
     except ImportError:
@@ -247,7 +251,7 @@ def _flatten_recurrent_state_indices(
     token_ids = torch.arange(total_tokens, device=state_indices.device, dtype=qsl.dtype)
     seq_ids = torch.searchsorted(bounds, token_ids, right=True).clamp_(max=num_seqs - 1)
     slot_ids = (token_ids - starts[seq_ids]).clamp_(min=0, max=num_slots - 1)
-    return state_indices.reshape(-1)[seq_ids * num_slots + slot_ids]
+    return state_indices[seq_ids, slot_ids].contiguous()
 
 
 def _get_recurrent_state_flat_indices(
@@ -259,7 +263,7 @@ def _get_recurrent_state_flat_indices(
     """Build the layer-independent token-to-state mapping once per step."""
     if state_indices.ndim != 2 or total_tokens == state_indices.numel():
         return None
-    cached = getattr(metadata, "recurrent_state_flat_indices", None)
+    cached = metadata.recurrent_state_flat_indices
     if cached is not None and cached.numel() == total_tokens:
         return cached
     num_seqs, num_slots = state_indices.shape
@@ -1018,33 +1022,27 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     prefill_state_indices,
                     prefill_has_initial_state,
                 )
-                chunk_meta = attn_metadata.non_spec_prefill_metadata.chunk
-                chunk_size = 64
-                if (
-                    chunk_meta.chunk_indices_chunk32_host is not None
-                    and value_non_spec.dtype == torch.bfloat16
-                    and query_non_spec.shape[-1] == value_non_spec.shape[-1] == 128
-                    and initial_state.dtype in (torch.float32, torch.bfloat16)
-                ):
-                    chunk_size = 32
-                    # Chunk32 applies sigmoid internally. Select raw b for the same
-                    # prefill rows as Q/K/V; spec and recurrent decode keep their gates.
-                    beta_non_spec = b.unsqueeze(0)
-                    if is_mixed_batch:
-                        beta_non_spec = beta_non_spec.index_select(1, non_spec_token_indx)
+                # The A5 chunk32 kernel applies sigmoid internally: pass raw b,
+                # while decode and other prefill routes keep the processed beta.
+                # beta = sigmoid(b); dt_bias belongs only to the decay gate
+                # g = -exp(A_log) * softplus(a + dt_bias), computed above.
+                beta_fla = beta_non_spec
+                if get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32):
+                    beta_fla = b.unsqueeze(0)
+                    if has_spec_decode:
+                        beta_fla = beta_fla.index_select(1, non_spec_token_indx)
                     if split_non_spec:
-                        beta_non_spec = beta_non_spec[:, num_decode_tokens:]
+                        beta_fla = beta_fla[:, num_decode_tokens:]
                 (core_attn_out_non_spec, last_recurrent_state) = DeviceOperator.fla_gdn_prefill(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
                     g=g_non_spec,
-                    beta=beta_non_spec,
+                    beta=beta_fla,
                     initial_state=initial_state,
                     scale=key_non_spec.shape[-1] ** -0.5,
-                    prebuilt_meta=chunk_meta,
+                    prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
                     fused_fwd=fla_gdn_prefill_op,
-                    chunk_size=chunk_size,
                 )
                 scatter_ssm_states_(
                     ssm_state,

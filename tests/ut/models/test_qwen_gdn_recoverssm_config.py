@@ -5,6 +5,7 @@
 import runpy
 from pathlib import Path
 from types import SimpleNamespace as NS
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -99,6 +100,30 @@ def test_rejects_unsupported_execution_before_allocation(section, field, value, 
         helpers["validate_qwen_gdn_recoverssm"](config)
 
 
+def test_310p_rejects_recoverssm_and_preserves_native_mtp(monkeypatch):
+    from vllm_ascend.device.hardware import AscendDeviceType
+    from vllm_ascend.device.hardware_profile import get_hardware_profile
+    from vllm_ascend.models import qwen_gdn_recoverssm
+    from vllm_ascend.patch.platform import patch_replayssm_config
+
+    profile = get_hardware_profile(AscendDeviceType._310P)
+    monkeypatch.setattr(qwen_gdn_recoverssm, "get_current_hardware_profile", lambda: profile)
+    config = make_config()
+    config.cache_config.use_kda_recoverssm = False
+    original_validate = Mock(return_value=config)
+    monkeypatch.setattr(patch_replayssm_config, "_original_validate", original_validate)
+
+    with pytest.raises(ValueError, match=r"--use-replayssm.*310P"):
+        patch_replayssm_config.validate_mamba_cached_kernel(config)
+    assert config.cache_config.use_kda_recoverssm is False
+    original_validate.assert_not_called()
+
+    config.cache_config.use_replayssm = False
+    assert patch_replayssm_config.validate_mamba_cached_kernel(config) is config
+    original_validate.assert_called_once_with(config)
+    assert config.cache_config.use_kda_recoverssm is False
+
+
 def test_speculative_methods_share_recoverssm_validation():
     for method in ("mtp", "eagle3", "dspark"):
         config = make_config()
@@ -143,8 +168,11 @@ def test_pipeline_parallel_rejects_non_mooncake_pd_role(transfer):
 @pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector"])
 @pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
 @pytest.mark.parametrize("method", ["mtp", "dspark", "eagle3"])
-def test_pd_configuration_preserves_the_same_state_layout(connector, role, method):
+@pytest.mark.parametrize("prefix_caching", [False, True])
+def test_pd_configuration_preserves_the_same_state_layout(connector, role, method, prefix_caching):
     config = make_config()
+    config.cache_config.enable_prefix_caching = prefix_caching
+    config.cache_config.mamba_cache_mode = "align" if prefix_caching else "none"
     config.speculative_config.method = method
     config.parallel_config.tensor_parallel_size = 4
     config.kv_transfer_config = NS(kv_connector=connector, kv_role=role)
@@ -172,13 +200,14 @@ def test_pd_rejects_connectors_without_the_supported_state_transfer_contract(con
 
 @pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector"])
 @pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
-@pytest.mark.parametrize("cache_mode,prefix_caching", [("none", True), ("align", False), ("align", True)])
-def test_pd_requires_none_without_prefix_caching(connector, role, cache_mode, prefix_caching):
+@pytest.mark.parametrize("cache_mode,prefix_caching", [("none", True), ("align", False)])
+def test_pd_rejects_cache_mode_prefix_caching_mismatch(connector, role, cache_mode, prefix_caching):
     config = make_config()
     config.cache_config.mamba_cache_mode = cache_mode
     config.cache_config.enable_prefix_caching = prefix_caching
     config.kv_transfer_config = NS(kv_connector=connector, kv_role=role)
-    with pytest.raises(ValueError, match="PD requires Mamba cache mode none and prefix caching disabled"):
+    expected_mode = "align" if prefix_caching else "none"
+    with pytest.raises(ValueError, match=f"requires Mamba cache mode {expected_mode}"):
         helpers["validate_qwen_gdn_recoverssm"](config)
 
 

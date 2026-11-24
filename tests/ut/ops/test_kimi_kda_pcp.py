@@ -8,13 +8,13 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm_ascend.models.kimi_k3 import kimi_k3
-from vllm_ascend.ops import head_parallel, recurrent_pcp
 from vllm_ascend.attention.gdn_attn_builder import (
     AscendGDNAttentionMetadataBuilder,
     AscendGDNHostMetadataBuilder,
     AscendGDNPCPMetadataBuilder,
 )
+from vllm_ascend.models.kimi_k3 import kimi_k3
+from vllm_ascend.ops import head_parallel, recurrent_pcp
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention, KimiKDAHostMetadataBuilder, KimiKDAInputParallelLinear
 from vllm_ascend.utils import vllm_version_is
 

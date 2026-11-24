@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
@@ -38,7 +40,7 @@ def is_gdn_model(config: "VllmConfig") -> bool:
     """Return whether the model has a supported Qwen GDN descriptor path.
 
     Keep this capability check local to the GDN path.  KDA's selector and
-    validation remain untouched, so adding another GDN model type cannot
+    validation remain untouched, so adding another GDN model type can not
     change the KDA RecoverSSM path.
     """
     model = config.model_config
@@ -58,6 +60,8 @@ def _uses_gdn_recoverssm(vllm_config: "VllmConfig") -> bool:
 
 
 def validate_qwen_gdn_recoverssm(config: "VllmConfig") -> None:
+    if get_current_hardware_profile().supports(HardwareCapability.GDN_COMPATIBILITY):
+        raise ValueError("Qwen GDN RecoverSSM (--use-replayssm) is not supported on Ascend 310P")
     spec = config.speculative_config
     if spec is None or spec.num_speculative_tokens < 1:
         raise ValueError("Qwen GDN RecoverSSM requires speculative decoding with at least one speculative token")
@@ -84,17 +88,13 @@ def validate_qwen_gdn_recoverssm(config: "VllmConfig") -> None:
         or getattr(transfer, "kv_role", None) not in ("kv_producer", "kv_consumer")
     ):
         raise ValueError("Qwen GDN RecoverSSM pipeline parallelism requires a Mooncake PD role")
-    if transfer is not None:
-        if transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector"):
-            raise ValueError("Qwen GDN RecoverSSM KV transfer requires MooncakeConnectorV2 or MooncakePullConnector")
-        if cache.mamba_cache_mode != "none" or cache.enable_prefix_caching:
-            raise ValueError("Qwen GDN RecoverSSM PD requires Mamba cache mode none and prefix caching disabled")
-    else:
-        expected_cache_mode = "align" if cache.enable_prefix_caching else "none"
-        if cache.mamba_cache_mode != expected_cache_mode:
-            raise ValueError(
-                f"Qwen GDN RecoverSSM requires Mamba cache mode {expected_cache_mode} with this prefix caching setting"
-            )
+    if transfer is not None and transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector"):
+        raise ValueError("Qwen GDN RecoverSSM KV transfer requires MooncakeConnectorV2 or MooncakePullConnector")
+    expected_cache_mode = "align" if cache.enable_prefix_caching else "none"
+    if cache.mamba_cache_mode != expected_cache_mode:
+        raise ValueError(
+            f"Qwen GDN RecoverSSM requires Mamba cache mode {expected_cache_mode} with this prefix caching setting"
+        )
     hf = config.model_config.hf_text_config
     if (
         hf.linear_num_key_heads % parallel.tensor_parallel_size

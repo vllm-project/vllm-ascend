@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
 import torch
 from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadataBuilder
 from vllm.v1.attention.backend import AttentionCGSupport
@@ -38,6 +39,23 @@ def test_gdn_recoverssm_backend_identity():
     assert AscendGDNRecoverSSMMetadataBuilder._cudagraph_support is AttentionCGSupport.UNIFORM_BATCH
     assert AscendGDNRecoverSSMAttentionBackend.get_name() == "GDN_RECOVERSSM"
     assert AscendGDNRecoverSSMAttentionBackend.get_builder_cls() is AscendGDNRecoverSSMMetadataBuilder
+
+
+@pytest.mark.parametrize(
+    ("max_num_seqs", "graph_rows"),
+    [(8, 4), (4, 8)],
+    ids=["eager_batch_exceeds_graph_capacity", "graph_padding_exceeds_scheduler_capacity"],
+)
+def test_ones_buffer_covers_scheduler_and_graph_capacity(monkeypatch, max_num_seqs, graph_rows):
+    def init_parent(builder, kv_cache_spec, layer_names, vllm_config, device):
+        builder.spec_state_indices_tensor = torch.empty((graph_rows, 5), dtype=torch.int32, device=device)
+
+    monkeypatch.setattr(AscendGDNAttentionMetadataBuilder, "__init__", init_parent)
+    config = SimpleNamespace(scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs))
+    builder = AscendGDNRecoverSSMMetadataBuilder(SimpleNamespace(), [], config, torch.device("cpu"))
+
+    torch.testing.assert_close(builder._ones[:max_num_seqs], torch.ones(max_num_seqs, dtype=torch.int32))
+    torch.testing.assert_close(builder._ones[:graph_rows], torch.ones(graph_rows, dtype=torch.int32))
 
 
 def test_build_forces_active_decodes_onto_recoverssm_path(monkeypatch):

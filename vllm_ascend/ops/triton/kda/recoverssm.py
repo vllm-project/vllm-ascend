@@ -16,7 +16,8 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.device.device_config import is_950
-from vllm_ascend.ops.triton.mamba.recoverssm import compact_conv_state, prepare_commit_plan
+from vllm_ascend.ops.triton.mamba.compact_conv_state import compact_conv_state
+from vllm_ascend.ops.triton.mamba.prepare_commit_plan import prepare_commit_plan
 from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, init_device_properties_triton
 
 RECOVERSSM_COMMIT_HEAD_TILE = 2

@@ -54,14 +54,14 @@
 # --------------------------------
 # * platform/patch_replayssm_config.py:
 #   Target: VllmConfig.validate_mamba_cached_kernel and its Pydantic validator.
-#   Why: Ascend's GLM, Kimi and Qwen GDN RecoverSSM paths have
+#   Why: Ascend's GLM, Kimi KDA and Qwen GDN RecoverSSM paths have
 #        platform-specific cache and parallelism restrictions, and upstream
 #        does not recognize every supported architecture alias.
 #   How: Select the model-specific Ascend validation contract, derive
 #        use_kda_recoverssm from use_replayssm, and retain the upstream
 #        validator for other models and disabled configurations.
-#   Related PR: No upstream platform-specific RecoverSSM selector exists yet.
-#   Future plan: Remove when upstream supports backend-specific RecoverSSM selection.
+#   Related PR: No upstream platform-specific ReplaySSM selector exists yet.
+#   Future plan: Remove when upstream supports the Ascend KDA configuration contract.
 # --------------------------------
 # * worker/patch_qwen3_5.py (RecoverSSM):
 #   Target: QwenGatedDeltaNetAttention descriptors/forward and Qwen3.5/Qwen3-Next text model descriptors.
@@ -240,7 +240,9 @@
 #       No, vllm-ascend-specific MoE runner integration.
 #    Future Plan:
 #       Remove this patch once upstream exposes a backend dispatch / plugin hook
-#       for selecting the MoE runner implementation.
+#       for selecting the MoE runner implementation. Register warmup from the
+#       selected Ascend router initialization when that hook is available.
+#       Until then the factory registers EPLB map variants during model construction.
 #
 #   2. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
 #    Why:
@@ -521,7 +523,7 @@
 #       supports local drafter models with PP > 1, or moves the PP validation to a
 #       separate hook that can be overridden per-model-type.
 #
-# ** 19. File: platform/patch_speculative_config.py**
+# ** 18. File: platform/patch_speculative_config.py**
 # Native MiniMax Flash draft extension:
 #   Targets: SpeculativeConfig.__post_init__ and draft HF configuration loading.
 #   Why: native DSpark exports use a standalone architecture and carry their
@@ -591,7 +593,7 @@
 #       parallelism for non-MoE draft models (upstream #56930) or exposes a
 #       backend-safe draft parallel config selection.
 #
-# ** 20. File: platform/patch_structured_output.py**
+# ** 19. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
 #      `vllm.v1.structured_output.StructuredOutputManager.grammar_init`
@@ -1415,6 +1417,16 @@
 #       Remove once upstream exposes a backend hook for KV cache
 #       allocation/binding.
 #
+#   5. `vllm.v1.worker.utils.AttentionGroup._with_kernel_block_table`
+#    Why:
+#       310P V2 already supplies kernel block IDs.
+#    How:
+#       Skip expansion for groups marked as kernel-granular.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/57169
+#    Future Plan:
+#       Remove when 310P target and draft paths supply manager block IDs.
+#
 # ** 23. File: worker/patch_block_table.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.block_table.BlockTables`
@@ -1481,6 +1493,17 @@
 #       Define AscendModelState and initialize it in init_model_state.
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
+#
+#   2. `vllm.v1.worker.gpu.model_states.interface.ModelState.gather_mm_embeddings`
+#    Why:
+#       An idle PCP rank can retain a zero-token request inside an image span.
+#    How:
+#       Return empty media embeddings and a mask for an idle PCP rank so it
+#       can continue to the shared padded token embedding exchange.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/64435
+#    Future Plan:
+#       Remove the wrapper once the paired vLLM includes the upstream guard.
 #
 # ** 28. File: worker/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

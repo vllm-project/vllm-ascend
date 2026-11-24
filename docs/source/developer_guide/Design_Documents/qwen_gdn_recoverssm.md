@@ -172,7 +172,11 @@ enabling graph execution on the deployment stack.
 python -m pytest tests/ut/models/test_qwen_gdn_recoverssm_config.py -v
 python -m pytest tests/ut/models/test_glm5next_recoverssm_config.py -v
 python -m pytest tests/ut/kv_offload/mooncake_v2/test_pull_worker.py -v
-python -m pytest tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_gdn_recoverssm_npu.py -v
+python -m pytest tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_gdn_recoverssm_verify_npu.py -v
+python -m pytest tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_gdn_recoverssm_commit_npu.py -v
+python -m pytest tests/e2e/nightly/single_node/ops/singlecard_ops/test_gdn_recoverssm_context_npu.py -v
+python -m pytest tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_compact_conv_state_npu.py -v
+python -m pytest tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_prepare_commit_plan_npu.py -v
 python -m pytest tests/e2e/pull_request/four_card/test_qwen_gdn_recoverssm.py -v
 ```
 

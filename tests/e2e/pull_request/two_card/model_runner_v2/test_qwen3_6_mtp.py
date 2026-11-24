@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
-"""Qwen3.6 BF16 MTP acceptance on MRV2 with fixed goldens on two NPUs.
+"""Qwen3.6 BF16 MTP acceptance and RecoverSSM functionality on two NPUs.
 
 Use the same 40 MT-Bench prompts, chat formatting and output limit as
 vllm-ascend#13960, with a 10% acceptance-length tolerance. The fixed goldens
 use the supplied MRV2 measurements with greedy decoding (temperature 0).
+Check generation and draft activity independently in each RecoverSSM mode.
 
 Run with:
     pytest -sv tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py
@@ -15,11 +16,12 @@ import os
 from unittest.mock import patch
 
 import pytest
+from vllm import SamplingParams
 from vllm.config import CompilationConfig
 from vllm.v1.metrics.reader import Counter, Metric
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
-from tests.e2e.pull_request.utils import SPEC_DECODE_PROMPTS
+from tests.e2e.pull_request.utils import SPEC_DECODE_PROMPTS, assert_valid_generation_outputs
 
 QWEN36_MOE_MODEL = "Qwen/Qwen3.6-35B-A3B"
 QWEN36_DENSE_MODEL = "Qwen/Qwen3.6-27B"
@@ -72,7 +74,8 @@ def _run_mtp_case(model_name: str, is_moe: bool, use_replayssm: bool) -> tuple[l
             cudagraph_capture_sizes=[4, 8, 16, 32, 64, 128, 160],
         ),
     ) as vllm_model:
-        tokenizer = vllm_model.model.get_tokenizer()
+        model = vllm_model.model
+        tokenizer = model.get_tokenizer()
         prompt_ids = [
             tokenizer.encode(
                 tokenizer.apply_chat_template(
@@ -84,13 +87,19 @@ def _run_mtp_case(model_name: str, is_moe: bool, use_replayssm: bool) -> tuple[l
             )
             for prompt in SPEC_DECODE_PROMPTS
         ]
+        vocab_size = model.llm_engine.model_config.get_vocab_size()
         # Use deltas so other engines in this pytest process cannot
         # contaminate the comparison through old counters.
-        before = _read_mtp_counters(vllm_model.model.get_metrics())
-        outputs = vllm_model.generate_greedy(prompt_ids, MAX_TOKENS)
-        after = _read_mtp_counters(vllm_model.model.get_metrics())
+        before = _read_mtp_counters(model.get_metrics())
+        outputs = model.generate(
+            vllm_model.get_inputs(prompt_ids),
+            sampling_params=SamplingParams(temperature=0.0, max_tokens=MAX_TOKENS),
+        )
+        after = _read_mtp_counters(model.get_metrics())
 
-    return [output[0] for output in outputs], after[0] - before[0], after[1] - before[1]
+    assert_valid_generation_outputs(outputs, len(prompt_ids), vocab_size)
+    token_ids = [list(output.outputs[0].token_ids) for output in outputs]
+    return token_ids, after[0] - before[0], after[1] - before[1]
 
 
 @pytest.fixture(scope="module")

@@ -26,7 +26,11 @@ import torch_npu
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
-from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import (
+    DeviceAdaptorFamily,
+    HardwareCapability,
+    get_current_hardware_profile,
+)
 from vllm_ascend.device.paged_mla_cache_read import try_load_strided_mla_cache
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
@@ -1023,7 +1027,6 @@ class BaseDeviceAdaptor:
         scale: float,
         prebuilt_meta,
         fused_fwd,
-        chunk_size: int = 64,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A2/A3 Phase6 FLA NPU GDN prefill kernel."""
         # l2norm is done inside the kernel (use_qk_l2norm_in_kernel=True),
@@ -1057,7 +1060,7 @@ class BaseDeviceAdaptor:
             beta,
             initial_state=initial_state_kern,
             output_final_state=True,
-            chunk_size=chunk_size,
+            chunk_size=64,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             scale=scale,
@@ -2097,9 +2100,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         scale: float,
         prebuilt_meta,
         fused_fwd,
-        chunk_size: int = 64,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A5 arch35 FLA NPU GDN prefill kernel."""
+        use_chunk32 = get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32)
         # Conv1d head-first output is exposed as BSND views by GDN. Recover
         # its contiguous BNSD storage instead of copying all three tensors.
         # A token slice in a mixed batch may break contiguity; retain BSND
@@ -2116,16 +2119,22 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         initial_state = initial_state.contiguous()
 
         cu_seqlens = prebuilt_meta.cu_seqlens_host
-        use_chunk32 = chunk_size == 32
-        chunk_indices = (
-            prebuilt_meta.chunk_indices_chunk32_host if use_chunk32 else prebuilt_meta.chunk_indices_chunk64_host
-        )
         keep_meta = prebuilt_meta.keep_meta
         initial_state_kern = initial_state
         if keep_meta is not None:
             cu_seqlens = prebuilt_meta.cu_seqlens_kern
             initial_state_kern = initial_state[keep_meta]
 
+        chunk_size = 32 if use_chunk32 else 64
+        # Both descriptors use compacted sequence IDs and are shared by layers.
+        chunk_indices = (
+            prebuilt_meta.chunk_indices_chunk32_host if use_chunk32 else prebuilt_meta.chunk_indices_chunk64_host
+        )
+        if use_chunk32 and chunk_indices is None:
+            raise ValueError("A5 chunk32 prefill requires prebuilt chunk32 metadata")
+        # Preserve the existing chunk64 contract, including preprocessed beta.
+        use_exp2 = not use_chunk32
+        disable_recompute = not use_chunk32
         output, final_state, *_ = fused_fwd(
             q,
             k,
@@ -2139,11 +2148,11 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             chunk_indices=chunk_indices,
             scale=scale,
             layout=layout,
-            use_exp2=not use_chunk32,
+            use_exp2=use_exp2,
             use_qk_l2norm_in_kernel=True,
             use_beta_sigmoid_in_kernel=use_chunk32,
             allow_neg_eigval=False,
-            disable_recompute=not use_chunk32,
+            disable_recompute=disable_recompute,
             state_v_first=True,
         )
         if keep_meta is not None:

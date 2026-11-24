@@ -14,8 +14,6 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from functools import lru_cache
-from importlib.metadata import PackageNotFoundError, version
 
 import torch
 from vllm.config import VllmConfig, get_current_vllm_config_or_none
@@ -29,6 +27,7 @@ from vllm.v1.attention.backends.gdn_attn import (
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     PAD_SLOT_ID,
+    mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
@@ -41,28 +40,16 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_final_chunk_indices,
     prepare_update_chunk_offsets,
 )
-from vllm_ascend.ops.triton.mamba.align_block_table import (
-    mamba_get_block_table_tensor,
-)
 from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
 
 _GDN_CHUNK_SIZE = 64
+_GDN_CHUNK32_SIZE = 32
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
 _GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE = 608 * 2
 _GDN_CUMSUM_WORKING_SET = 2**18
 # Accepted-token counts are one-based. The zero-length query segment makes
 # graph-padding rows no-ops, while 1 keeps their count valid for GDN kernels.
 _GDN_GRAPH_DUMMY_ACCEPTED_TOKEN_COUNT = 1
-
-
-@lru_cache(maxsize=1)
-def _supports_fla_chunk32() -> bool:
-    if not get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32):
-        return False
-    try:
-        return version("flash-linear-attention-npu-a5") in {"26.10.0", "26.10.0+feature"}
-    except PackageNotFoundError:
-        return False
 
 
 def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
@@ -154,6 +141,7 @@ class GDNChunkedPrefillMetadata:
     cu_seqlens_kern: tuple[int, ...] | None = None
     keep_meta: torch.Tensor | None = None
     head_sharded_pcp: bool = False
+    # A5 chunk32 uses the compacted kernel sequence IDs; shared across layers.
     chunk_indices_chunk32_host: tuple[int, ...] | None = None
 
 
@@ -349,6 +337,18 @@ def _build_non_spec_chunked_prefill_metadata(
     else:
         cu_seqlens_kern = tuple(cu_seqlens_kern)
 
+    # Use the same index builder as chunk64, with the compacted sequence IDs
+    # passed to the A5 kernel. Every GDN layer reuses this metadata instance.
+    chunk_indices_chunk32_host = None
+    if get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32):
+        chunk_cu_seqlens_cpu = cu_seqlens_cpu if cu_seqlens_kern is None else cu_seqlens_cpu.new_tensor(cu_seqlens_kern)
+        if chunk_cu_seqlens_cpu.numel() > 1:
+            chunk_indices_chunk32 = prepare_chunk_indices(chunk_cu_seqlens_cpu, _GDN_CHUNK32_SIZE)
+            chunk_indices_chunk32_host = tuple(chunk_indices_chunk32.to(torch.int64).reshape(-1).tolist())
+        else:
+            # With no nonempty sequences, prepare_chunk_indices would call torch.cat([]).
+            chunk_indices_chunk32_host = ()
+
     if build_device_metadata:
         device_chunk_metadata = {
             "chunk_indices_chunk64": chunk_indices_chunk64.to(device=device, non_blocking=True),
@@ -368,15 +368,10 @@ def _build_non_spec_chunked_prefill_metadata(
             "block_indices_cumsum": None,
         }
 
-    # prepare_chunk_indices numbers only nonempty sequences, matching cu_seqlens_kern.
-    chunk32_indices = None
-    if _supports_fla_chunk32():
-        chunk32_indices = tuple(prepare_chunk_indices(cu_seqlens_cpu, 32).flatten().tolist())
-
     return GDNChunkedPrefillMetadata(
-        chunk_indices_chunk32_host=chunk32_indices,
         cu_seqlens_host=cu_seqlens_host,
         chunk_indices_chunk64_host=tuple(chunk_indices_chunk64.to(torch.int64).reshape(-1).tolist()),
+        chunk_indices_chunk32_host=chunk_indices_chunk32_host,
         **device_chunk_metadata,
         cu_seqlens_kern=cu_seqlens_kern,
         keep_meta=keep_meta,
@@ -893,8 +888,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_token_indx = None
             non_spec_token_indx = None
             spec_state_indices_tensor = None
-            non_spec_state_indices_tensor = block_table_tensor[: query_start_loc_cpu.shape[0] - 1, 0]
-            non_spec_conv1d_cache_indices = block_table_tensor[: query_start_loc_cpu.shape[0] - 1]
+            non_spec_state_indices_tensor = block_table_tensor[:, 0]
+            non_spec_conv1d_cache_indices = block_table_tensor
             spec_query_start_loc = None
             non_spec_query_start_loc = query_start_loc
             num_accepted_tokens = None
