@@ -42,9 +42,17 @@ def shared_buffer_factory(monkeypatch):
     monkeypatch.setattr(npu.dist, "all_gather_object", lambda errors, error, **kw: errors.__setitem__(0, error))
     group = SimpleNamespace(cpu_group=None, rank_in_group=0, world_size=2)
 
-    def construct():
+    def construct(buffer_name="shared", checkpoint_layer_id=None):
         try:
-            owner = npu.SharedUvaBuffer((8, 32), torch.bfloat16, "cpu", group, "shared", torch.nn.Module())
+            owner = npu.SharedUvaBuffer(
+                (8, 32),
+                torch.bfloat16,
+                "cpu",
+                group,
+                buffer_name,
+                torch.nn.Module(),
+                checkpoint_layer_id=checkpoint_layer_id,
+            )
         except npu.HostUvaBufferCleanupError as exc:
             owners.append(weakref.ref(exc.host_buffer))
             raise
@@ -63,6 +71,53 @@ def shared_buffer_factory(monkeypatch):
             continue
         shm.unlink()
         shm.close()
+
+
+@pytest.mark.parametrize(("layer", "table", "rc"), [(1, "codes", 0), (14, "scales", 0), (14, "codes", 207001)])
+def test_shared_engram_registration_events(shared_buffer_factory, monkeypatch, layer, table, rc):
+    construct, lib, names, real_shm = shared_buffer_factory
+    events = []
+    clock = Mock(side_effect=[10.0, 11.25])
+    monkeypatch.setattr(npu, "monotonic", clock)
+    monkeypatch.setattr(npu.dist, "get_global_rank", lambda group, rank: 16)
+
+    def log(fmt, *args):
+        events.append(fmt % args)
+        assert clock.call_count == (0 if len(events) == 1 else 2)
+
+    def register(pointer, size, flags):
+        assert len(events) == 1 and "registration start" in events[0]
+        assert clock.call_count == 1
+        return rc
+
+    monkeypatch.setattr(npu.logger, "info", log)
+    lib.aclrtHostRegisterV2.side_effect = register
+    if rc:
+        with pytest.raises(RuntimeError, match=f"aclrtHostRegisterV2 failed: rc={rc}"):
+            construct(f"_{table}_uva", layer)
+        lib.aclrtHostGetDevicePointer.assert_not_called()
+        lib.aclrtHostUnregister.assert_not_called()
+    else:
+        construct(f"_{table}_uva", layer).close()
+        lib.aclrtHostUnregister.assert_called_once()
+    key = f"rank=16 layer={layer} table={table} bytes=512 shm={names[0]}"
+    assert events == [
+        f"Shared Engram registration start {key}",
+        f"Shared Engram registration end {key} elapsed=1.250000s rc={rc}",
+    ]
+    with pytest.raises(FileNotFoundError):
+        real_shm(name=names[0])
+
+
+def test_completion_log_failure_releases_registered_range(shared_buffer_factory, monkeypatch):
+    construct, lib, names, real_shm = shared_buffer_factory
+    monkeypatch.setattr(npu.logger, "info", Mock(side_effect=[None, RuntimeError("log failed")]))
+    with pytest.raises(RuntimeError, match="log failed"):
+        construct("_codes_uva", 14)
+    lib.aclrtHostGetDevicePointer.assert_not_called()
+    lib.aclrtHostUnregister.assert_called_once()
+    with pytest.raises(FileNotFoundError):
+        real_shm(name=names[0])
 
 
 @pytest.mark.parametrize("failure", ["register", "device_pointer", "peer"])

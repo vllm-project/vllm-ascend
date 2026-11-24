@@ -119,6 +119,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         shared_pool_endpoint: str | None = None,
         shared_pool_identity: str | None = None,
         shared_pool_key: str | None = None,
+        checkpoint_layer_id: int | None = None,
     ) -> None:
         if local_vmm and (remote_reader is not None or shared_pool_endpoint):
             raise ValueError("Local Engram VMM cannot be combined with an external shared table")
@@ -144,6 +145,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         if local_vmm and (not cpu_offload or not dp_shared_memory or storage_dtype != torch.int8):
             raise ValueError("Local Engram VMM requires shared CPU offload with INT8/FP32 storage")
         self.layer_hash_index = layer_hash_index
+        self.checkpoint_layer_id = checkpoint_layer_id
         self._shared_group = None
         if not all(in_the_same_node_as(get_tp_group().cpu_group)):
             raise ValueError("Ascend Engram requires the TP ranks of one replica to stay on a single node")
@@ -303,11 +305,23 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             # One physical copy of the mapped range, registered by each
             # rank in the sharing group.
             self._codes_uva = SharedUvaBuffer(
-                codes_shape, self.storage_dtype, device, self._shared_group, "_codes_uva", self
+                codes_shape,
+                self.storage_dtype,
+                device,
+                self._shared_group,
+                "_codes_uva",
+                self,
+                checkpoint_layer_id=self.checkpoint_layer_id,
             )
             if quantized:
                 self._scales_uva = SharedUvaBuffer(
-                    scales_shape, self.scale_dtype, device, self._shared_group, "_scales_uva", self
+                    scales_shape,
+                    self.scale_dtype,
+                    device,
+                    self._shared_group,
+                    "_scales_uva",
+                    self,
+                    checkpoint_layer_id=self.checkpoint_layer_id,
                 )
             return self._codes_uva.tensor, self._scales_uva.tensor if self._scales_uva is not None else None
         self._codes_uva = HostUvaBuffer(codes_shape, self.storage_dtype, device, "_codes_uva", self)

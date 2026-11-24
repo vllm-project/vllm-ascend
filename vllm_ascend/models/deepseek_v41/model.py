@@ -1342,6 +1342,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                             config.engram_head_dim,
                             head_sizes,
                             slot,
+                            checkpoint_layer_id=layer_id,
                             storage_dtype=storage_dtype,
                             cpu_offload=cpu_offload,
                             dp_shared_memory=self.engram_dp_shared_memory,

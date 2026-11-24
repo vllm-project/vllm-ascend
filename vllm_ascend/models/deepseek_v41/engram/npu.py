@@ -13,6 +13,7 @@ import ctypes
 import mmap
 from functools import cache
 from multiprocessing import shared_memory
+from time import monotonic
 from typing import cast
 from unittest.mock import patch
 
@@ -300,7 +301,7 @@ class SharedUvaBuffer:
     mapping with CANN. The leader unlinks it after all ranks have attached.
     """
 
-    def __init__(self, shape, dtype, device, group, buffer_name, module):
+    def __init__(self, shape, dtype, device, group, buffer_name, module, *, checkpoint_layer_id: int | None = None):
         self.lib = _host_library()
         self.group = group
         rows = int(shape[0])
@@ -339,14 +340,23 @@ class SharedUvaBuffer:
             assert self.shm.size >= size
             address_of_mapping = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf)))
             _madvise_hugepage(self.shm, size)
-            rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, DeviceOperator.host_register_flags())
+            flags = DeviceOperator.host_register_flags()
+            if checkpoint_layer_id is not None:
+                rank = dist.get_global_rank(cpu_group, group.rank_in_group)
+                table = buffer_name.removeprefix("_").removesuffix("_uva")
+                registration = f"rank={rank} layer={checkpoint_layer_id} table={table} bytes={size} shm={name}"
+                logger.info("Shared Engram registration start %s", registration)
+            started = monotonic()
+            rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, flags)
+            elapsed = monotonic() - started
+            if not rc:
+                # Claim the registration before logging or looking up the device pointer:
+                # close() must unregister it if either operation raises.
+                self.pointer = address_of_mapping
+            if checkpoint_layer_id is not None:
+                logger.info("Shared Engram registration end %s elapsed=%.6fs rc=%d", registration, elapsed, rc)
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
-            # Registration succeeded: from here on the mapping owes exactly one
-            # aclrtHostUnregister, and close() must keep the owner until it
-            # returns success.  ``pointer`` is therefore set only
-            # after the registration it has to undo exists.
-            self.pointer = address_of_mapping
             address = ctypes.c_void_p()
             rc = self.lib.aclrtHostGetDevicePointer(self.pointer, ctypes.byref(address), 0)
             if rc:
