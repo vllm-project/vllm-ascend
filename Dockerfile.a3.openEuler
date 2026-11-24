@@ -127,10 +127,10 @@ RUN set -e; cd /tmp; \
         fi; \
         exit $rc; \
     }; \
-    /tmp/${CANN_TOOLKIT_PKG} --install > /tmp/cann_install.log 2>&1 || fail $? toolkit; \
-    /tmp/${CANN_NNAL_PKG} --install > /tmp/cann_install.log 2>&1 || fail $? nnal; \
+    /tmp/${CANN_TOOLKIT_PKG} --install --quiet > /tmp/cann_install.log 2>&1 || fail $? toolkit; \
+    /tmp/${CANN_NNAL_PKG} --install --quiet > /tmp/cann_install.log 2>&1 || fail $? nnal; \
     if [ -f "/tmp/${CANN_OPS_PKG}" ]; then \
-        /tmp/${CANN_OPS_PKG} --install > /tmp/cann_install.log 2>&1 || fail $? a3-ops; \
+        /tmp/${CANN_OPS_PKG} --install --quiet > /tmp/cann_install.log 2>&1 || fail $? a3-ops; \
     fi; \
     rm -f /tmp/*.run
 
