@@ -387,7 +387,10 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         self.assertTrue(store.published)
 
     def test_cache_only_gate_survives_repeated_layer_wait(self):
-        worker, _, _ = make_shared_worker(self, bounded=True)
+        # Bounded replay omits SWA transfers; place draft immediately after the cut.
+        worker, _, _ = make_shared_worker(self, bounded=True, draft=True, num_layers=9)
+        cut = max(worker.hf_config.kv_source_layer_ids)
+        tail = cut + 1
         save_prefix(worker)
         conn = AscendStoreConnector.__new__(AscendStoreConnector)
         conn.use_layerwise = conn.can_put = True
@@ -396,19 +399,25 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         conn.bind_connector_metadata(metadata(worker, load=True, save=False))
         for layer in range(worker.num_layers):
             name = f"model.layers.{layer}.v41_attn"
-            conn.wait_for_layer_load(name)
-            if layer == 2:
+            with patch.object(worker.kv_recv_thread, "add_request", wraps=worker.kv_recv_thread.add_request) as enqueue:
+                conn.wait_for_layer_load(name)
+            if layer == cut:
                 gate = get_attention_compute_start_gate()
+                task = enqueue.call_args.args[0]
+                self.assertEqual(task.layer_id, tail)
+                self.assertIs(task.attention_start_gate, gate)
+                self.assertTrue(task.transfer_tasks)
                 self.assertFalse(gate.wait(timeout=0))
-                self.assertFalse(worker.layer_load_finished_events[8].is_set())
+                self.assertFalse(worker.layer_load_finished_events[tail].is_set())
                 # The normal forward reuses the still-closed cache-only gate.
                 conn.wait_for_layer_load(name)
                 self.assertIs(get_attention_compute_start_gate(), gate)
                 self.assertEqual(worker.current_layer, layer)
                 self.assertFalse(gate.wait(timeout=0))
+                self.assertFalse(worker.layer_load_finished_events[tail].is_set())
             record_attention_compute_start()
-            if layer == 2:
-                self.assertTrue(worker.layer_load_finished_events[8].wait(timeout=3))
+            if layer == cut:
+                self.assertTrue(worker.layer_load_finished_events[tail].wait(timeout=3))
             conn.save_kv_layer(name, [], None)
 
     def test_failed_load_reports_request_and_disables_saves(self):
