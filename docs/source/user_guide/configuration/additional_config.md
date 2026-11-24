@@ -72,6 +72,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_pcp_o_proj_weight_sharding` | bool | `True` | Whether PCP shards O-projection weights across the PCP group. This option controls SFA-PCP `o_proj` and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set it to `false` at server startup to disable sharding. Other attention backends do not use this option. |
 | `enable_pcp_embedding_lmhead_weight_sharding` | bool | `True` | Whether PCP shards embedding and LM Head weights across PCP ranks inside each TP shard. This option is enabled by default, takes effect when PCP size is greater than 1, and is incompatible with batch-sharded sampling (`enable_batch_sharded_sampling`) and fine-grained TP for these modules. |
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
+| `pcp_config`                        | dict | `{}`    | DeepSeek V4.1 prefill-context-parallel KV placement. Defaults to the replicated cache path; see <a href="#pcp_config">pcp_config</a> for the owner-sharded fields and the migration from the removed `VLLM_ASCEND_PCP_*` environment variables. |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
@@ -295,6 +296,50 @@ llm = LLM(
 | `--attention-backend FLASH_ATTN` for FA3 consistency mode | `"rl_config": {"enabled": true, "enable_training_consistency": true}` |
 | top-level `"weight_nz_mode": 0` for RL | `"rl_config": {"enabled": true}` |
 | top-level `"enable_sleep_mode_extra_cleanup": true` | `"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}` |
+
+<span id="pcp_config"></span>**pcp_config**
+
+Typed configuration for the DeepSeek V4.1 prefill context parallelism (PCP) KV placement. With the default `kv_sharing="replicated"`, every PCP rank keeps a complete physical copy of the KV cache and every other field is ignored. With `kv_sharing="owner"`, each rank reserves the complete logical address range over a VMM slab but owns only `1 / pcp_size` of its physical 2 MiB chunks, so attention can still address the full cache.
+
+Owner sharing requires `prefill_context_parallel_size > 1`, `decode_context_parallel_size == 1`, `tensor_parallel_size == 1`, and no external KV-transfer connector. If the VMM backend cannot be initialized, the cache falls back to the replicated path unless `owner_capacity` sized the pool for owner sharding, in which case startup fails instead of allocating a cache that no longer fits.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `kv_sharing` | str | `"replicated"` | KV placement. `"replicated"` keeps one physical copy per PCP rank; `"owner"` uses an owner-sharded VMM slab. |
+| `owner_placement` | str | `"contiguous"` | Owner slab placement. `"contiguous"` gives each rank one contiguous span; `"modulo"` interleaves 2 MiB chunks round-robin. |
+| `owner_capacity` | bool | `false` | Convert the HBM freed by owner sharing into extra KV blocks. Requires `kv_sharing="owner"`; a mapped owner slab then becomes mandatory (fail closed). |
+| `local_index` | bool | `false` | Move the indexer K plane into its own replicated tensor instead of the owner-sharded long-KV tuple. Costs one full index copy per rank. |
+| `local_kv_write` | bool | `false` | Write KV rows from rank-local hidden states instead of the gathered view. Applied only when the target tensor is backed by a mapped owner slab. |
+| `local_kv_write_source` | bool | `false` | Also write the compressed source planes from local tokens. Requires `local_kv_write`; ignored while `local_index` keeps the index plane replicated. |
+| `owner_stage` | bool | `false` | Stage a pure-prefill batch's long-KV blocks from the owner slab into local scratch. Overflow falls back to direct peer reads. |
+| `owner_stage_bytes` | int | `1073741824` | Scratch budget in bytes for long-KV staging. Must be positive. |
+| `owner_stage_swa_chunk` | bool | `false` | Stage only each local chunk's visible sliding-window range. |
+| `owner_stage_swa_chunk_bytes` | int | `268435456` | Scratch budget in bytes for per-chunk SWA staging. Must be positive. |
+| `enable_timing` | bool | `false` | Log per-region NPU device time for the DeepSeek V4.1 attention forward. |
+
+**Migration from environment variables**
+
+The previous untyped `VLLM_ASCEND_PCP_*` switches were removed. Configure the same behavior through `additional_config.pcp_config`:
+
+| Before | After |
+| ------ | ----- |
+| `VLLM_ASCEND_PCP_KV_SHARING` | `"pcp_config": {"kv_sharing": ...}` |
+| `VLLM_ASCEND_PCP_OWNER_CAPACITY` | `"pcp_config": {"owner_capacity": true}` |
+| `VLLM_ASCEND_PCP_LOCAL_INDEX` | `"pcp_config": {"local_index": true}` |
+| `VLLM_ASCEND_PCP_LOCAL_KV_WRITE` | `"pcp_config": {"local_kv_write": true}` |
+| `VLLM_ASCEND_PCP_LOCAL_KV_WRITE_SOURCE` | `"pcp_config": {"local_kv_write_source": true}` |
+| `VLLM_ASCEND_PCP_OWNER_STAGE` | `"pcp_config": {"owner_stage": true}` |
+| `VLLM_ASCEND_PCP_OWNER_STAGE_BYTES` | `"pcp_config": {"owner_stage_bytes": ...}` |
+| `VLLM_ASCEND_PCP_OWNER_STAGE_SWA_CHUNK` | `"pcp_config": {"owner_stage_swa_chunk": true}` |
+| `VLLM_ASCEND_PCP_OWNER_STAGE_SWA_CHUNK_BYTES` | `"pcp_config": {"owner_stage_swa_chunk_bytes": ...}` |
+| `VLLM_ASCEND_PCP_TIMING` | `"pcp_config": {"enable_timing": true}` |
+| top-level `"pcp_kv_sharing"` / `"pcp_owner_placement"` | `"pcp_config": {"kv_sharing": ...}` / `{"owner_placement": ...}` |
+
+The diagnostic-only `VLLM_ASCEND_PCP_OWNER_STAGE_SWA`, `VLLM_ASCEND_PCP_OWNER_STAGE_CPUPLAN`, `VLLM_ASCEND_PCP_OWNER_STAGE_SWA_CHUNK_DEBUG`, `VLLM_ASCEND_PCP_OWNER_MAX_SLABS`, and `VLLM_ASCEND_PCP_OWNER_LOCAL_VMM` switches were removed without a replacement.
+
+```bash
+vllm serve DeepSeek-V4.1     --additional-config '{"pcp_config": {"kv_sharing": "owner", "owner_capacity": true, "local_index": true, "owner_stage": true}}'
+```
 
 ### Example
 

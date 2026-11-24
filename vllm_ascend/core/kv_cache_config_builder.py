@@ -112,7 +112,9 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return qwen4_exp_groups
 
         if is_deepseek_v41_cache(kv_cache_spec):
-            return make_cache_groups(group_cache_specs(kv_cache_spec))
+            from vllm_ascend.ascend_config import pcp_config_from_vllm_config
+
+            return make_cache_groups(group_cache_specs(kv_cache_spec, pcp_config_from_vllm_config(vllm_config)))
 
         grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
         if grouped_specs is not None and len(grouped_specs) >= 2:
@@ -179,7 +181,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         if is_step5_groups(kv_cache_groups):
             return get_step5_pool_bytes_per_block(kv_cache_groups)
         if is_deepseek_v41_cache(kv_cache_groups):
-            return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
+            return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups, vllm_config)
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
             return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
         qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
