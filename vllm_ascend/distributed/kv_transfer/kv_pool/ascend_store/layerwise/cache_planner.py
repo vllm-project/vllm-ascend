@@ -3,6 +3,7 @@
 """Plan layerwise cache reuse from native cache groups."""
 
 from collections import defaultdict
+from dataclasses import replace
 from math import lcm
 from types import MappingProxyType
 from typing import Any
@@ -15,9 +16,9 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, KVCacheTensor
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import get_backend_class
 from vllm_ascend.models.deepseek_v4.cache_config import (
-    finalize_deepseek_v4_reuse_layout,
+    component_layout_identity,
     is_deepseek_v4_cache,
-    prepare_deepseek_v4_reuse_config,
+    validate_deepseek_v4_reuse_config,
 )
 
 from .layerwise_cache_layout import (
@@ -133,11 +134,28 @@ class LayerwiseCachePlanner:
         extra_config: dict[str, Any],
         *,
         spec_reuse_rules: SpecReuseRules,
+        separate_slot_backings: bool = False,
     ) -> None:
-        self.config = config
+        self.separate_slot_backings = separate_slot_backings
         self.extra_config = extra_config
         self.spec_reuse_rules = spec_reuse_rules
         self.spec_by_entry = get_layerwise_kv_cache_specs(config)
+        if separate_slot_backings:
+            # Plan from one native descriptor per component before assigning slots.
+            config = replace(
+                config,
+                kv_cache_tensors=[
+                    KVCacheTensor(
+                        size=config.num_blocks * spec.page_size_bytes,
+                        layers=[name],
+                        offset=0,
+                        layer_stride=0,
+                        block_stride=spec.page_size_bytes,
+                    )
+                    for name, spec in self.spec_by_entry.items()
+                ],
+            )
+        self.config = config
         self.group_id_by_entry = {
             entry_name: group_id
             for group_id, group in enumerate(config.kv_cache_groups)
@@ -287,7 +305,11 @@ class LayerwiseCachePlanner:
         if save_dependencies_by_layer:
             kv_cache_tensors = tuple(
                 KVCacheTensor(
-                    size=backing_bytes, layers=entry_names, layer_stride=0, block_stride=block_stride, offset=offset
+                    size=num_blocks * block_stride if self.separate_slot_backings else backing_bytes,
+                    layers=entry_names,
+                    layer_stride=0,
+                    block_stride=block_stride,
+                    offset=0 if self.separate_slot_backings else offset,
                 )
                 for offset, block_stride, entry_names in slot_layouts
             )
@@ -301,6 +323,7 @@ class LayerwiseCachePlanner:
             num_prefetch_layers=settings.num_prefetch_layers,
             reused_cache_names=frozenset(rotated_entry_names),
             draft_entry_names=frozenset(self.draft_names),
+            separate_slot_backings=self.separate_slot_backings,
         )
 
 
@@ -322,17 +345,19 @@ def plan_layerwise_cache_reuse(
         if _is_mooncake(extra_config):
             raise ValueError("Mooncake shared KV buffers require a model with registered reuse rules")
         return None
-    planning_config = prepare_deepseek_v4_reuse_config(vllm_config, kv_cache_config) if dsv4 else kv_cache_config
+    if dsv4:
+        validate_deepseek_v4_reuse_config(vllm_config)
     planner = LayerwiseCachePlanner(
-        planning_config,
+        kv_cache_config,
         vllm_config,
         extra_config,
         spec_reuse_rules=rules,
+        separate_slot_backings=dsv4,
     )
     layout = planner.build()
     if not layout.has_layer_reuse:
         if dsv4:
-            finalize_deepseek_v4_reuse_layout(vllm_config, kv_cache_config, layout)
+            kv_cache_config.dsv4_component_identity = component_layout_identity(kv_cache_config.kv_cache_groups)
         return None
 
     for name in layout.reused_cache_names:
@@ -348,7 +373,7 @@ def plan_layerwise_cache_reuse(
     ):
         raise ValueError("Layerwise offload requires device-resident cache tensors.")
     if dsv4:
-        layout = finalize_deepseek_v4_reuse_layout(vllm_config, kv_cache_config, layout)
+        kv_cache_config.dsv4_component_identity = component_layout_identity(kv_cache_config.kv_cache_groups)
     if _is_mooncake(extra_config):
         windows = {}
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups):

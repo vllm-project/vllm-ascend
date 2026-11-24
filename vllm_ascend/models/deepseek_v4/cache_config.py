@@ -6,10 +6,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from types import MappingProxyType
 
-from vllm.v1.kv_cache_interface import KVCacheTensor, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
 
@@ -60,8 +60,7 @@ def validate_dsv4_transfer_speculation(config) -> None:
         raise ValueError("DSV4 Mooncake transfer supports native MTP and DSpark speculation")
 
 
-def prepare_deepseek_v4_reuse_config(config, cache_config):
-    """Expand native KV tensors into descriptors for individual components."""
+def validate_deepseek_v4_reuse_config(config) -> None:
     parallel = config.parallel_config
     if any(
         getattr(parallel, field, 1) != 1
@@ -73,41 +72,3 @@ def prepare_deepseek_v4_reuse_config(config, cache_config):
         raise ValueError("DSV4 Mooncake temporal offload requires enforce_eager")
     if getattr(config.cache_config, "cache_dtype", None) == "turboquant":
         raise ValueError("DSV4 Mooncake temporal offload does not support TurboQuant")
-
-    tensors = []
-    for group in cache_config.kv_cache_groups:
-        for name in group.layer_names:
-            page_size = group.kv_cache_spec.kv_cache_specs[name].page_size_bytes
-            tensors.append(
-                KVCacheTensor(
-                    size=cache_config.num_blocks * page_size,
-                    layers=[name],
-                    offset=0,
-                    layer_stride=0,
-                    block_stride=page_size,
-                )
-            )
-    return replace(cache_config, kv_cache_tensors=tensors)
-
-
-def finalize_deepseek_v4_reuse_layout(config, cache_config, layout):
-    """Use one backing per slot and attach the window and transfer metadata."""
-    groups = cache_config.kv_cache_groups
-    num_blocks = cache_config.num_blocks
-    if layout.has_layer_reuse:
-        # The DSV4 allocator uses an independent, device-aligned backing per
-        # slot. Preserve the planner's alias relationships and page strides.
-        tensors = tuple(
-            KVCacheTensor(
-                size=num_blocks * slot.block_stride,
-                layers=slot.layers,
-                offset=0,
-                layer_stride=0,
-                block_stride=slot.block_stride,
-            )
-            for slot in layout.kv_cache_tensors
-        )
-        layout = replace(layout, kv_cache_tensors=tensors, separate_slot_backings=True)
-    cache_config.dsv4_component_identity = component_layout_identity(groups)
-    cache_config.kv_cache_allocation_alignment = 2 * 1024 * 1024
-    return layout
