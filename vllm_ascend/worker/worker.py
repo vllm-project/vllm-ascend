@@ -86,7 +86,7 @@ from vllm_ascend.core.kv_cache_placement import (
 from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
 )
-from vllm_ascend.cpu_binding import bind_cpus
+from vllm_ascend.cpu_binding import bind_cpus, bind_rank_cpus
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
@@ -498,6 +498,10 @@ class NPUWorker(WorkerBase):
                 dp_local_rank = parallel_config.data_parallel_index
             tp_pp_world_size = parallel_config.pipeline_parallel_size * parallel_config.tensor_parallel_size
             self.local_rank += dp_local_rank * tp_pp_world_size
+
+        rank_cpu_bindings = get_ascend_config().rank_cpu_bindings
+        if rank_cpu_bindings is not None:
+            bind_rank_cpus(self.local_rank, rank_cpu_bindings)
 
         # Publish the logical-to-physical mapping for topology queries.
         assigned_physical_gpu_ids = parallel_config.assigned_physical_gpu_ids
@@ -1084,7 +1088,8 @@ class NPUWorker(WorkerBase):
         # Keep thread affinity after warmup and capture. Engram HOST_UVA tables
         # are already registered here; process-wide migration must not revisit
         # their pinned backing, which may also be shared across NUMA nodes.
-        if get_ascend_config().enable_cpu_binding:
+        ascend_config = get_ascend_config()
+        if ascend_config.enable_cpu_binding and ascend_config.rank_cpu_bindings is None:
             engram_config = getattr(self.vllm_config, "engram_config", None)
             try:
                 bind_cpus(

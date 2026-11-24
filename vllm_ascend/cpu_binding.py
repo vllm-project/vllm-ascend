@@ -794,6 +794,43 @@ class CpuAlloc:
         self.bind_npu_irq()
 
 
+def bind_rank_cpus(local_rank: int, cpu_lists: list[str]) -> None:
+    """Apply an explicit local worker CPU mask before its runtime threads start."""
+    if not hasattr(os, "sched_setaffinity"):
+        raise RuntimeError("Explicit rank CPU binding requires Linux sched_setaffinity.")
+    if not 0 <= local_rank < len(cpu_lists):
+        raise ValueError(f"Explicit rank CPU binding has no CPU list for local rank {local_rank}.")
+
+    assigned: set[int] = set()
+    masks: list[set[int]] = []
+    for rank, cpu_list in enumerate(cpu_lists):
+        if not DeviceInfo.is_cpu_list(cpu_list) or any(
+            int(first) > int(last) for first, last in re.findall(r"(\d+)-(\d+)", cpu_list)
+        ):
+            raise ValueError(f"Explicit rank CPU binding has an invalid CPU list for local rank {rank}: {cpu_list!r}.")
+        mask = set(DeviceInfo.expand_cpu_list(cpu_list))
+        overlap = mask & assigned
+        if overlap:
+            raise ValueError(f"Explicit rank CPU bindings overlap at local rank {rank}: {sorted(overlap)}.")
+        assigned.update(mask)
+        masks.append(mask)
+
+    mask = masks[local_rank]
+    unavailable = mask - os.sched_getaffinity(0)
+    if unavailable:
+        raise ValueError(f"CPUs outside the allowed mask for local rank {local_rank}: {sorted(unavailable)}.")
+
+    os.sched_setaffinity(0, mask)
+    for thread in psutil.Process().threads():
+        if thread.id != os.getpid():
+            try:
+                os.sched_setaffinity(thread.id, mask)
+            except ProcessLookupError:
+                # The thread exited between enumeration and the syscall.
+                continue
+    logger.info("Explicit CPU binding for local rank %d: %s", local_rank, cpu_lists[local_rank])
+
+
 def bind_cpus(rank_id: int, npu_id: int, *, migrate_memory: bool = True) -> None:
     if not is_arm_cpu():
         logger.info("CPU binding skipped: non-ARM CPU detected.")

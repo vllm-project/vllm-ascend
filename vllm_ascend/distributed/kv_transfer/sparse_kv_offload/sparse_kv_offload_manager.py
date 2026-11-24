@@ -1963,21 +1963,41 @@ class SparseKVOffloadManager:
         )
         self._selective_native_graph_keys.setdefault(graph, []).append(key)
         anchor = self.topk_buffers_k[layer_ids[0]]
-        ops.selective_native_capture(handle, anchor, True)
+        paired_scatter = coordinator is None and len(scatter) <= 3 and all(
+            self.topk_buffers_k[layer_id].dtype == self.topk_buffers_v[layer_id].dtype == torch.bfloat16
+            and self.topk_buffers_k[layer_id].shape[-1] == 512
+            and self.topk_buffers_v[layer_id].shape[-1] == 64
+            and self.token_size_bytes_k == 1024
+            and self.token_size_bytes_v == 128
+            for layer_id in scatter
+        )
+        ops.selective_native_capture(handle, anchor, True, paired_scatter)
         graph_identity = ops.selective_native_graph_identity(handle)
         if len(record) > 1 and ops.selective_native_graph_identity(record[0]) != graph_identity:
             raise RuntimeError("Native selective handles do not belong to the same captured graph")
         for index, layer_id in enumerate(scatter):
             ops.selective_native_wait_layer(handle, index, anchor)
             entry = layer_buffers[index * 14 : (index + 1) * 14]
-            # Reinterpret bytes so the cache-store kernel preserves every KV dtype.
-            for part, (hot, stage) in enumerate(zip(entry[4:6], entry[8:10])):
-                row_bytes = stage.shape[-1]
-                torch.ops._C_ascend.npu_scatter_nd_update_sk(
-                    hot.view(torch.int8).view(-1, row_bytes),
-                    entry[11][part].view(-1, 1),
-                    stage.view(torch.int8).view(-1, row_bytes),
+            if paired_scatter:
+                hot_k, hot_v = entry[4:6]
+                stage_k, stage_v = entry[8:10]
+                torch_npu.npu_scatter_pa_kv_cache(
+                    key=stage_k.view(torch.bfloat16).view(-1, 1, 512),
+                    value=stage_v.view(torch.bfloat16).view(-1, 1, 64),
+                    key_cache=hot_k.view(-1, self.block_size, 1, 512),
+                    value_cache=hot_v.view(-1, self.block_size, 1, 64),
+                    slot_mapping=entry[11][0].view(-1),
+                    cache_mode="Norm",
                 )
+            else:
+                # Reinterpret bytes so the cache-store kernel preserves every KV dtype.
+                for part, (hot, stage) in enumerate(zip(entry[4:6], entry[8:10])):
+                    row_bytes = stage.shape[-1]
+                    torch.ops._C_ascend.npu_scatter_nd_update_sk(
+                        hot.view(torch.int8).view(-1, row_bytes),
+                        entry[11][part].view(-1, 1),
+                        stage.view(torch.int8).view(-1, row_bytes),
+                    )
             self.selective_physical[layer_id, :rows, 0, :].copy_(physical_d)
             if index == len(scatter) - 1:
                 # Wake the worker only after all captured cache stores finish.

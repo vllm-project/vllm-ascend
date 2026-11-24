@@ -2827,6 +2827,39 @@ void selective_parallel_requests(int64_t rows, Function&& function) {
   for (const auto& error : errors) if (error) std::rethrow_exception(error);
 }
 
+template <typename Gather, typename Submit>
+void selective_pipeline_requests(int64_t rows, size_t layers, Gather gather, Submit submit) {
+  std::atomic<bool> failed{false};
+  std::exception_ptr error;
+  const auto record_error = [&] {
+    if (!failed.exchange(true)) error = std::current_exception();
+  };
+#pragma omp parallel if(rows > 4 && layers > 1) num_threads(std::min<int64_t>(rows, 8))
+  {
+    c10::InferenceMode inference_guard(true);
+    for (size_t layer = 0; layer < layers; ++layer) {
+#pragma omp for schedule(static)
+      for (int64_t row = 0; row < rows; ++row) {
+        if (failed.load()) continue;
+        try {
+          gather(layer, row);
+        } catch (...) { record_error(); }
+      }
+      // The gather barrier protects this layer's buffers. Other threads can
+      // start gathering the next layer while the stream owner submits this one.
+#pragma omp master
+      {
+        if (!failed.load()) {
+          try {
+            submit(layer);
+          } catch (...) { record_error(); }
+        }
+      }
+    }
+  }
+  if (error) std::rethrow_exception(error);
+}
+
 std::vector<at::Tensor> selective_group_lru_plan_impl(
     const at::Tensor& topk, const at::Tensor& page_tables, at::Tensor slot_to_token,
     at::Tensor lru_slots, at::Tensor resident_pages, at::Tensor last_identity, at::Tensor token_mark,
@@ -3290,7 +3323,7 @@ void selective_gather_group_rows(
     std::vector<SelectiveGroupLayerTransfer>& layers, const at::Tensor& miss_tokens,
     const at::Tensor& miss_slots, int64_t physical_row, int64_t row_stride,
     int64_t block_size, int64_t capacity, int64_t hot_capacity, size_t k_bytes, size_t v_bytes, bool gather_host,
-    size_t logical_row = 0, size_t batch_rows = 1) {
+    size_t logical_row = 0, size_t batch_rows = 1, size_t packed_offset = SIZE_MAX) {
   TORCH_CHECK(!layers.empty() && miss_tokens.device().is_cpu() && miss_slots.device().is_cpu() &&
               miss_tokens.scalar_type() == at::kInt && miss_slots.scalar_type() == at::kInt &&
               miss_tokens.is_contiguous() && miss_slots.is_contiguous() &&
@@ -3305,6 +3338,9 @@ void selective_gather_group_rows(
               "invalid selective group transfer geometry");
   const size_t count = static_cast<size_t>(miss_tokens.numel());
   const size_t cap = static_cast<size_t>(capacity);
+  const bool packed = packed_offset != SIZE_MAX;
+  TORCH_CHECK(!packed || (packed_offset <= cap * batch_rows && count <= cap * batch_rows - packed_offset),
+              "packed selective scatter descriptors exceed capacity");
   TORCH_CHECK(cap <= SIZE_MAX / 2 && cap <= SIZE_MAX / k_bytes && cap <= SIZE_MAX / v_bytes,
               "selective group staging size overflow");
   const size_t row_base = static_cast<size_t>(physical_row) * static_cast<size_t>(row_stride);
@@ -3351,7 +3387,7 @@ void selective_gather_group_rows(
                   (!gather_host || host[part].device().is_cpu()), "invalid selective Host or NPU tensor");
       const size_t host_size = gather_host ? selective_tensor_bytes(host[part]) : 0;
       const size_t hot_size = selective_tensor_bytes(hot[part]);
-      TORCH_CHECK(selective_tensor_bytes(staging[part]) >= cap * bytes[part] &&
+      TORCH_CHECK(selective_tensor_bytes(staging[part]) >= (packed ? count : cap) * bytes[part] &&
                   row_base + static_cast<size_t>(hot_capacity) <= hot_size / bytes[part], "selective staging or hot buffer too small");
       const auto* pages = gather_host ? item.pages.data_ptr<int32_t>() : nullptr;
       for (size_t i = 0; i < count; ++i) {
@@ -3390,11 +3426,14 @@ void selective_gather_group_rows(
       std::memcpy(static_cast<uint8_t*>(stage.data_ptr()) + row.staged_offset,
                   static_cast<const uint8_t*>(host.data_ptr()) + row.host_offset, row.bytes);
     }
-    const auto base = reinterpret_cast<uintptr_t>(hot.data_ptr());
-    const auto index = (row.part * batch_rows + logical_row) * cap + i;
-    item.destinations_host.data_ptr<int64_t>()[index] =
-        static_cast<int64_t>(base + row.hot_offset);
-    item.lengths_host.data_ptr<int32_t>()[index] = static_cast<int32_t>(row.bytes);
+    auto* destinations = item.destinations_host.data_ptr<int64_t>();
+    if (packed) {
+      destinations[row.part * batch_rows * cap + packed_offset + i] = row.hot_offset / row.bytes;
+    } else {
+      const auto index = (row.part * batch_rows + logical_row) * cap + i;
+      destinations[index] = static_cast<int64_t>(reinterpret_cast<uintptr_t>(hot.data_ptr()) + row.hot_offset);
+      item.lengths_host.data_ptr<int32_t>()[index] = static_cast<int32_t>(row.bytes);
+    }
   }
 }
 
@@ -3658,7 +3697,7 @@ class SelectiveNativeGraph {
       if (!destroy_acl_resources()) fatal_cleanup("selective native destructor cleanup failed");
     }
   }
-  void capture(const at::Tensor& anchor, bool layered) {
+  void capture(const at::Tensor& anchor, bool layered, bool paired_scatter) {
     std::lock_guard<std::mutex> lock(mu_);
     TORCH_CHECK(!released_ && !closing_ && anchor.device() == b_[0].device() && !captured_,
                 "invalid selective native capture");
@@ -3673,6 +3712,8 @@ class SelectiveNativeGraph {
     model_ri_ = model;
     capture_stream_ = stream;
     layered_ = layered;
+    TORCH_CHECK(!paired_scatter || (layered && tp_world_ == 1), "paired scatter requires rank-local layered capture");
+    paired_scatter_ = paired_scatter;
     copy_capture(b_[1], b_[0], stream);
     copy_capture(b_[3], b_[2], stream);
     if (inputs_.empty()) copy_capture(b_[5], b_[4], stream);
@@ -4372,55 +4413,39 @@ class SelectiveNativeGraph {
         }
         const size_t packed_rows = offsets.back();
         const size_t descriptor_rows = std::max(previous_packed_rows, packed_rows);
-        const auto gather_rows = [&](size_t first_layer, size_t last_layer) {
-          for (size_t layer_index = first_layer; layer_index < last_layer; ++layer_index)
-            layer_binding(layer_index).lengths_host.zero_();
-          if (packed_rows == 0) return;
-          selective_parallel_requests(rows_, [&](int64_t row) {
-            if (offsets[row] == offsets[row + 1]) return;
-            const auto& result = plans[static_cast<size_t>(row)];
-            for (size_t layer_index = first_layer; layer_index < last_layer; ++layer_index) {
-              auto layer = layer_binding(layer_index);
-              const auto& meta = metas[static_cast<size_t>(row)];
-              const auto host_rows = static_cast<uint64_t>(meta[8]) * static_cast<uint64_t>(meta[7]);
-              const auto stage_rows = static_cast<uint64_t>(rows_) * static_cast<uint64_t>(copy_width_);
-              TORCH_CHECK(host_rows > 0 && selective_tensor_bytes(layer.stage_host_k) % stage_rows == 0 &&
-                          selective_tensor_bytes(layer.stage_host_v) % stage_rows == 0, "invalid selective Host row sizes");
-              const auto k_bytes = selective_tensor_bytes(layer.stage_host_k) / stage_rows;
-              const auto v_bytes = selective_tensor_bytes(layer.stage_host_v) / stage_rows;
-              if (tp_rank_ == 0)
-                TORCH_CHECK(selective_tensor_bytes(layer.host_k) / host_rows == k_bytes &&
-                            selective_tensor_bytes(layer.host_v) / host_rows == v_bytes &&
-                            selective_tensor_bytes(layer.host_k) % host_rows == 0 &&
-                            selective_tensor_bytes(layer.host_v) % host_rows == 0, "invalid selective Host KV geometry");
-              TORCH_CHECK(k_bytes > 0 && v_bytes > 0 &&
-                          k_bytes <= static_cast<uint64_t>(INT64_MAX) / (rows_ * copy_width_) &&
-                          v_bytes <= static_cast<uint64_t>(INT64_MAX) / (rows_ * copy_width_),
-                          "selective staging row offsets overflow");
-              TORCH_CHECK(layer.stage_host_k.scalar_type() == at::kByte && layer.stage_host_v.scalar_type() == at::kByte &&
-                          layer.stage_device_k.scalar_type() == at::kByte && layer.stage_device_v.scalar_type() == at::kByte,
-                          "selective native staging must be bytes");
-              auto one = layer;
-              one.pages = layer.pages.view({rows_, page_columns_})[row];
-              one.stage_host_k = layer.stage_host_k.view({-1}).narrow(0, offsets[row] * k_bytes, copy_width_ * k_bytes);
-              one.stage_host_v = layer.stage_host_v.view({-1}).narrow(0, offsets[row] * v_bytes, copy_width_ * v_bytes);
-              std::vector<SelectiveGroupLayerTransfer> one_layer{one};
-              selective_gather_group_rows(one_layer, result[1], result[2], meta[10], meta[11], meta[7],
-                                          copy_width_, capacity_, k_bytes, v_bytes, tp_rank_ == 0, row, rows_);
-            }
-          });
+        const auto gather_row = [&](const SelectiveGroupLayerTransfer& layer, int64_t row, bool packed) {
+          const auto count = offsets[row + 1] - offsets[row];
+          if (!count) return;
+          const auto& result = plans[static_cast<size_t>(row)];
+          const auto& meta = metas[static_cast<size_t>(row)];
+          const auto host_rows = static_cast<uint64_t>(meta[8]) * static_cast<uint64_t>(meta[7]);
+          TORCH_CHECK(host_rows > 0 && selective_tensor_bytes(layer.stage_host_k) % copy_capacity == 0 &&
+                      selective_tensor_bytes(layer.stage_host_v) % copy_capacity == 0, "invalid selective Host row sizes");
+          const auto k_bytes = selective_tensor_bytes(layer.stage_host_k) / copy_capacity;
+          const auto v_bytes = selective_tensor_bytes(layer.stage_host_v) / copy_capacity;
+          if (tp_rank_ == 0)
+            TORCH_CHECK(selective_tensor_bytes(layer.host_k) / host_rows == k_bytes &&
+                        selective_tensor_bytes(layer.host_v) / host_rows == v_bytes &&
+                        selective_tensor_bytes(layer.host_k) % host_rows == 0 &&
+                        selective_tensor_bytes(layer.host_v) % host_rows == 0, "invalid selective Host KV geometry");
+          TORCH_CHECK(k_bytes > 0 && v_bytes > 0 && k_bytes <= INT64_MAX / copy_capacity &&
+                      v_bytes <= INT64_MAX / copy_capacity, "selective staging row offsets overflow");
+          TORCH_CHECK(layer.stage_host_k.scalar_type() == at::kByte && layer.stage_host_v.scalar_type() == at::kByte &&
+                      layer.stage_device_k.scalar_type() == at::kByte && layer.stage_device_v.scalar_type() == at::kByte,
+                      "selective native staging must be bytes");
+          auto one = layer;
+          one.pages = layer.pages.view({rows_, page_columns_})[row];
+          const auto staging_rows = packed ? count : static_cast<size_t>(copy_width_);
+          one.stage_host_k = layer.stage_host_k.view({-1}).narrow(0, offsets[row] * k_bytes, staging_rows * k_bytes);
+          one.stage_host_v = layer.stage_host_v.view({-1}).narrow(0, offsets[row] * v_bytes, staging_rows * v_bytes);
+          std::vector<SelectiveGroupLayerTransfer> one_layer{one};
+          selective_gather_group_rows(one_layer, result[1], result[2], meta[10], meta[11], meta[7], copy_width_,
+                                      capacity_, k_bytes, v_bytes, tp_rank_ == 0, row, rows_,
+                                      packed ? offsets[row] : SIZE_MAX);
         };
-        if (tp_world_ == 1) gather_rows(0, layer_count_);
-        for (size_t layer_index = 0; layer_index < layer_count_; ++layer_index) {
-          auto layer = layer_binding(layer_index);
-          int64_t stage = 0;
-          if (tp_world_ > 1) {
-            stage = tp_begin_stage(layer_index, replay_epoch, stage_base + layer_index + 1);
-            gather_rows(layer_index, layer_index + 1);
-          }
-          // Compact metadata after parallel gather so row-local descriptors cannot race.
-          const auto k_bytes = selective_tensor_bytes(layer.stage_host_k) / (rows_ * copy_width_);
-          const auto v_bytes = selective_tensor_bytes(layer.stage_host_v) / (rows_ * copy_width_);
+        const auto compact_descriptors = [&](const SelectiveGroupLayerTransfer& layer) {
+          const auto k_bytes = selective_tensor_bytes(layer.stage_host_k) / copy_capacity;
+          const auto v_bytes = selective_tensor_bytes(layer.stage_host_v) / copy_capacity;
           for (int64_t row = 0; row < rows_; ++row) {
             const auto count = offsets[row + 1] - offsets[row];
             if (count) {
@@ -4448,30 +4473,59 @@ class SelectiveNativeGraph {
               }
             }
           }
-          if (packed_rows) {
-            // Compact all requests before SDMA; one contiguous transfer per K/V plane.
-            check_acl(aclrtMemcpyAsync(layer.stage_device_k.data_ptr(), selective_tensor_bytes(layer.stage_device_k),
-                layer.stage_host_k.data_ptr(), packed_rows * k_bytes,
-                ACL_MEMCPY_HOST_TO_DEVICE, worker_), "group packed K H2D");
-            check_acl(aclrtMemcpyAsync(layer.stage_device_v.data_ptr(), selective_tensor_bytes(layer.stage_device_v),
-                layer.stage_host_v.data_ptr(), packed_rows * v_bytes,
-                ACL_MEMCPY_HOST_TO_DEVICE, worker_), "group packed V H2D");
-          }
-          // Invalidate stale rows when the miss count shrinks, then copy only the changed prefix.
-          if (descriptor_rows) {
-            auto* host = layer.destinations_host.data_ptr<int64_t>();
-            auto* device = layer.destinations_device.data_ptr<int64_t>();
-            for (size_t part = 0; part < 2; ++part) {
-              const auto offset = part * copy_capacity;
-              std::fill(host + offset + packed_rows, host + offset + descriptor_rows, int64_t{-1});
-              check_acl(aclrtMemcpyAsync(device + offset, copy_capacity * sizeof(int64_t), host + offset,
-                  descriptor_rows * sizeof(int64_t), ACL_MEMCPY_HOST_TO_DEVICE, worker_),
-                  "selective scatter descriptors H2D");
+        };
+        const auto submit_layer = [&](size_t layer_index, const SelectiveGroupLayerTransfer& layer) {
+          if (paired_scatter_) {
+            copy_paired_scatter_inputs(layer, packed_rows, descriptor_rows, copy_capacity);
+          } else {
+            if (packed_rows) {
+              // Compact all requests before SDMA; one contiguous transfer per K/V plane.
+              const auto k_bytes = selective_tensor_bytes(layer.stage_host_k) / copy_capacity;
+              const auto v_bytes = selective_tensor_bytes(layer.stage_host_v) / copy_capacity;
+              check_acl(aclrtMemcpyAsync(layer.stage_device_k.data_ptr(), selective_tensor_bytes(layer.stage_device_k),
+                  layer.stage_host_k.data_ptr(), packed_rows * k_bytes,
+                  ACL_MEMCPY_HOST_TO_DEVICE, worker_), "group packed K H2D");
+              check_acl(aclrtMemcpyAsync(layer.stage_device_v.data_ptr(), selective_tensor_bytes(layer.stage_device_v),
+                  layer.stage_host_v.data_ptr(), packed_rows * v_bytes,
+                  ACL_MEMCPY_HOST_TO_DEVICE, worker_), "group packed V H2D");
+            }
+            // Invalidate stale rows when the miss count shrinks, then copy only the changed prefix.
+            if (descriptor_rows) {
+              auto* host = layer.destinations_host.data_ptr<int64_t>();
+              auto* device = layer.destinations_device.data_ptr<int64_t>();
+              for (size_t part = 0; part < 2; ++part) {
+                const auto offset = part * copy_capacity;
+                std::fill(host + offset + packed_rows, host + offset + descriptor_rows, int64_t{-1});
+                check_acl(aclrtMemcpyAsync(device + offset, copy_capacity * sizeof(int64_t), host + offset,
+                    descriptor_rows * sizeof(int64_t), ACL_MEMCPY_HOST_TO_DEVICE, worker_),
+                    "selective scatter descriptors H2D");
+              }
             }
           }
           if (layered_)
             check_acl(aclrtRecordNotify(layer_ready_[layer_index], worker_), "selective layer ready");
-          if (tp_world_ > 1) {
+        };
+        if (tp_world_ == 1) {
+          std::vector<SelectiveGroupLayerTransfer> layers;
+          layers.reserve(layer_count_);
+          for (size_t layer = 0; layer < layer_count_; ++layer) layers.push_back(layer_binding(layer));
+          if (packed_rows) {
+            selective_pipeline_requests(rows_, layer_count_,
+                [&](size_t layer, int64_t row) { gather_row(layers[layer], row, true); },
+                [&](size_t layer) { submit_layer(layer, layers[layer]); });
+          } else {
+            for (size_t layer = 0; layer < layer_count_; ++layer) submit_layer(layer, layers[layer]);
+          }
+        } else {
+          for (size_t layer_index = 0; layer_index < layer_count_; ++layer_index) {
+            auto layer = layer_binding(layer_index);
+            const auto stage = tp_begin_stage(layer_index, replay_epoch, stage_base + layer_index + 1);
+            layer.lengths_host.zero_();
+            if (packed_rows) {
+              selective_parallel_requests(rows_, [&](int64_t row) { gather_row(layer, row, false); });
+              compact_descriptors(layer);
+            }
+            submit_layer(layer_index, layer);
             tp_publish_stage(stage, layer_index);
           }
         }
@@ -4502,6 +4556,46 @@ class SelectiveNativeGraph {
       std::abort();
     } catch (...) { tp_mark_error(); std::abort(); }
   }
+  void copy_paired_scatter_inputs(const SelectiveGroupLayerTransfer& layer, size_t packed_rows,
+                                  size_t descriptor_rows, size_t capacity) {
+    if (!descriptor_rows) return;
+    void* sources[3];
+    void* destinations[3];
+    size_t sizes[3];
+    size_t count = 0;
+    const auto append = [&](const at::Tensor& host, const at::Tensor& device, size_t bytes) {
+      TORCH_CHECK(bytes <= selective_tensor_bytes(host) && bytes <= selective_tensor_bytes(device),
+                  "selective paired scatter staging exceeds capacity");
+      sources[count] = host.data_ptr();
+      destinations[count] = device.data_ptr();
+      sizes[count++] = bytes;
+    };
+    if (packed_rows) {
+      append(layer.stage_host_k, layer.stage_device_k,
+             packed_rows * (selective_tensor_bytes(layer.stage_host_k) / capacity));
+      append(layer.stage_host_v, layer.stage_device_v,
+             packed_rows * (selective_tensor_bytes(layer.stage_host_v) / capacity));
+    }
+    auto* slots = layer.destinations_host.data_ptr<int64_t>();
+    std::fill(slots + packed_rows, slots + descriptor_rows, int64_t{-1});
+    append(layer.destinations_host, layer.destinations_device, descriptor_rows * sizeof(int64_t));
+#if defined(CANN_MEMCPY_BATCH_ASYNC)
+    int32_t device_id = 0;
+    check_acl(aclrtGetDevice(&device_id), "selective paired scatter device");
+    aclrtMemcpyBatchAttr attr{};
+    attr.srcLoc.type = ACL_MEM_LOCATION_TYPE_HOST;
+    attr.dstLoc.type = ACL_MEM_LOCATION_TYPE_DEVICE;
+    attr.dstLoc.id = device_id;
+    size_t attr_index = 0;
+    size_t failed_index = 0;
+    check_acl(aclrtMemcpyBatchAsync(destinations, sizes, sources, sizes, count, &attr, &attr_index,
+                                  1, &failed_index, worker_), "selective paired scatter H2D batch");
+#else
+    for (size_t i = 0; i < count; ++i)
+      check_acl(aclrtMemcpyAsync(destinations[i], sizes[i], sources[i], sizes[i],
+                                ACL_MEMCPY_HOST_TO_DEVICE, worker_), "selective paired scatter H2D");
+#endif
+  }
   void copy_h2d(at::Tensor& device, at::Tensor& host) {
     const auto bytes = selective_tensor_bytes(host);
     TORCH_CHECK(selective_tensor_bytes(device) >= bytes, "selective native output too small");
@@ -4524,6 +4618,7 @@ class SelectiveNativeGraph {
   std::vector<aclrtNotify> layer_ready_;
   size_t captured_layers_ = 0;
   bool layered_ = false;
+  bool paired_scatter_ = false;
   aclmdlRI model_ri_ = nullptr;
   std::shared_ptr<std::atomic<bool>> destroyed_ = std::make_shared<std::atomic<bool>>(false);
   std::thread thread_;
@@ -4595,8 +4690,8 @@ template <typename Fn> void selective_native_call(int64_t handle, Fn fn) {
   auto graph = selective_native_get(handle);
   try { fn(*graph); } catch (...) { graph->notify_peer_error(); throw; }
 }
-void selective_native_capture(int64_t h, const at::Tensor& anchor, bool layered) {
-  selective_native_call(h, [&](auto& graph) { graph.capture(anchor, layered); });
+void selective_native_capture(int64_t h, const at::Tensor& anchor, bool layered, bool paired_scatter) {
+  selective_native_call(h, [&](auto& graph) { graph.capture(anchor, layered, paired_scatter); });
 }
 void selective_native_wait_layer(int64_t h, int64_t layer, const at::Tensor& anchor) {
   selective_native_call(h, [&](auto& graph) { graph.wait_layer(static_cast<size_t>(layer), anchor); });
@@ -5320,7 +5415,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "Tensor[] tp, int rank, int world) -> int");
     ops.impl("selective_group_tp_native_create", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::selective_group_tp_native_create);
-    ops.def("selective_native_capture(int handle, Tensor anchor, bool layered=False) -> ()");
+    ops.def("selective_native_capture(int handle, Tensor anchor, bool layered=False, bool paired_scatter=False) -> ()");
     ops.impl("selective_native_capture", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::selective_native_capture);
     ops.def("selective_native_wait_layer(int handle, int layer, Tensor anchor) -> ()");
