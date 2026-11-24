@@ -3,6 +3,7 @@
 """Transfer statistics and Prometheus metrics for Mooncake."""
 
 import copy
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,12 +23,25 @@ class MooncakeKVConnectorStats(KVConnectorStats):
     """D2D transfer statistics collected by a Mooncake worker."""
 
     def __post_init__(self) -> None:
+        # Create the lock first so any defensive reset() (e.g. from
+        # __setstate__) never observes a partially initialized object.
+        # reset() itself must NOT acquire _lock (non-reentrant; see reset());
+        # construction is single-threaded.
+        self._lock = threading.Lock()
         if not self.data:
             self.reset()
+        # The recording thread (pull execution) and the consuming thread
+        # (worker loop via clone_and_reset) run concurrently; serialize
+        # record/reset to avoid losing samples in the copy-then-reset window
+        # (is_empty() outside the lock may miss the very last sample; that
+        # sampling gap is tolerated for interval metrics).
 
     def reset(self) -> None:
         # Values must remain serializable because worker stats are aggregated
         # outside of the worker process.
+        # Must NOT acquire self._lock: it is a non-reentrant Lock and all
+        # callers either already hold it (record_*/clone_and_reset) or run
+        # during single-threaded initialization (__post_init__ / __setstate__).
         self.data: dict[str, list[float | int]] = {
             "transfer_duration": [],
             "bytes_transferred": [],
@@ -35,22 +49,62 @@ class MooncakeKVConnectorStats(KVConnectorStats):
         }
 
     def record_transfer(self, transfer_duration: float, bytes_transferred: int) -> None:
-        """Record one completed D2D transfer.
+        """Record one completed decoder-side RDMA pull transfer (P -> D).
 
         ``transfer_duration`` is expressed in seconds.
         """
-        self.data["transfer_duration"].append(transfer_duration)
-        self.data["bytes_transferred"].append(bytes_transferred)
+        with self._lock:
+            self.data["transfer_duration"].append(transfer_duration)
+            self.data["bytes_transferred"].append(bytes_transferred)
 
     def record_failed_transfer(self) -> None:
-        self.data["num_failed_transfers"].append(1)
+        """Record one failed decoder-side RDMA pull batch attempt."""
+        with self._lock:
+            self.data["num_failed_transfers"].append(1)
 
     def clone_and_reset(self) -> "MooncakeKVConnectorStats":
-        previous = copy.copy(self)
-        self.reset()
-        return previous
+        """Return a snapshot of current samples and reset self.
+
+        The snapshot shares the *old* data dict (reset() rebinds, never
+        clears), so the caller may safely read it after reset without
+        locking.
+        """
+        with self._lock:
+            previous = copy.copy(self)
+            self.reset()
+            return previous
+
+    def __getstate__(self) -> dict[str, Any]:
+        # threading.Lock cannot be pickled/deep-copied. Worker outputs are
+        # shipped to the engine core over a pickle-based channel
+        # (shm_broadcast.MessageQueue), so the lock must be stripped whenever
+        # the object leaves the worker process or is copied; __setstate__
+        # rebuilds a fresh lock so copies never share one.
+        # copy.copy/deepcopy both route through getstate/setstate (default
+        # reduce protocol), so the lock is stripped on every copy path —
+        # this is what makes clone_and_reset's shallow copy safe. Do NOT
+        # add __copy__: it would bypass this and share the lock.
+        state = self.__dict__.copy()
+        state.pop("_lock", None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        # Lock first, then any defensive reset — same order contract as
+        # __post_init__ (reset must never observe a half-initialized self,
+        # and must not acquire the lock itself; see reset()).
+        self._lock = threading.Lock()
+        self.__dict__.update(state)
+        if not self.__dict__.get("data"):
+            # Defensive: __getstate__ strips only the lock, so normal states
+            # always carry data; tolerate future trimmed states anyway.
+            self.reset()
 
     def is_empty(self) -> bool:
+        # Lock-free on purpose (sampling trigger, see __post_init__). Under
+        # concurrency the two reads may come from different reset generations
+        # (the GIL keeps each reference read atomic, so this cannot crash —
+        # but the fields may straddle a reset and disagree); this only
+        # decides whether to clone, it is not exact accounting.
         return self.num_successful_transfers == 0 and not self.data["num_failed_transfers"]
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
