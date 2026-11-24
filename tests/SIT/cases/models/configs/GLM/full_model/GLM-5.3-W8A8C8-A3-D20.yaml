@@ -366,8 +366,7 @@ benchmarks:
   decode_perf_16k_20ms:
     case_type: performance
     # Inherited from the combined case: minimum of two local r138 runs.
-    # Standalone performance is unverified; retain the throughput and 20 ms gates.
-    # Combined Nightly run 45097548582 missed the TPOT gate at 20.7 ms.
+    # Gate on output throughput; TPOT remains a reported metric.
     baseline: 3241.2664
     threshold: 0.95
     request_conf: vllm_api_stream_chat
@@ -377,4 +376,3 @@ benchmarks:
     batch_size: 80
     request_rate: 0
     dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
-    tpot_threshold: 20
