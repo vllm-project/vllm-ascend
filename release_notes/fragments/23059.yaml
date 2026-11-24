@@ -1,0 +1,7 @@
+pr: 23059
+entries:
+  - category: bugfix
+    text: >-
+      DeepSeek V4.1 now reports a mismatched Engram weight or scale shape before
+      allocating its Engram tables. Previously, a single scale per row could
+      be copied across all groups in an INT8 or MXFP8 table.
