@@ -44,11 +44,11 @@ from tests.e2e.pull_request.kv_pool_watch import (
 
 DSV4_DSPARK_MODEL = os.environ.get(
     "DEEPSEEK_V41_DSPARK_MODEL_PATH",
-    "Eco-Tech/DeepSeek-V4.1-Flash-w8a8",
+    "Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8",
 )
 DSV4_0731_MODEL = os.environ.get(
     "DEEPSEEK_V4_0731_MODEL_PATH",
-    "Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8",
+    "Eco-Tech/DeepSeek-V4-Flash-0731-w8a8",
 )
 QWEN38_MODEL = os.environ.get("QWEN38_DENSE_MODEL", "Eco-Tech/Qwen3.8-27B-w8a8")
 
