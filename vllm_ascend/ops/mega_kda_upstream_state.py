@@ -12,83 +12,27 @@ from vllm_ascend.ops.triton.mamba.state_ops import gather_initial_states
 
 
 @dataclass
-class UpstreamStatePlan:
-    """Device tensors shared by all KDA layers for one metadata group."""
-
-    num_tokens: int
-    window: int
+class UpstreamTokenLayout:
     lengths: torch.Tensor
-    active: torch.Tensor
-    initial: torch.Tensor
-    source: torch.Tensor
-    destinations: torch.Tensor
-    conv_slots: torch.Tensor
-    history_indices: torch.Tensor
-    scratch_slots: torch.Tensor
-    scratch_accepted: torch.Tensor
     token_indices: torch.Tensor
     real_tokens: torch.Tensor
+    requests: torch.Tensor | None
     cu_seqlens: torch.Tensor | None
     metadata: torch.Tensor | None
 
 
-def prepare_upstream_state_plan(
-    prefix: torch.Tensor,
-    state_slots: torch.Tensor,
-    conv_slots: torch.Tensor,
-    accepted: torch.Tensor,
-    has_initial: torch.Tensor,
-    *,
-    num_tokens: int,
-    max_query_len: int,
-    num_state_slots: int,
-    num_conv_slots: int,
-    build_metadata: Callable | None = None,
-) -> UpstreamStatePlan:
-    """Prepare one fixed-shape plan from replay-time device inputs.
-
-    max_query_len is the scheduler's speculative window (one for ordinary
-    decode). Multi-token non-speculative prefill uses the normal prefill path.
-    State columns and conv slots are already physical page IDs from the GDN
-    metadata builder, including its align-mode block-table lookup.
-    """
-    slots = state_slots.unsqueeze(1) if state_slots.ndim == 1 else state_slots
-    conv_slots = conv_slots[:, 0] if conv_slots.ndim == 2 else conv_slots
+def prepare_token_layout(prefix, num_tokens, window, build_metadata=None) -> UpstreamTokenLayout:
     batch = prefix.numel() - 1
-    window = max_query_len
-    if (
-        prefix.ndim != 1
-        or slots.ndim != 2
-        or slots.shape[0] != batch
-        or slots.shape[1] < window
-        or conv_slots.shape != (batch,)
-        or accepted.shape != (batch,)
-        or has_initial.shape != (batch,)
-        or not (window >= 1 and 0 <= num_tokens <= batch * window)
-        or min(num_state_slots, num_conv_slots) < 1
-    ):
-        raise ValueError("Invalid decode window, page table or request metadata for MegaRecurrentKda")
-
+    if prefix.ndim != 1 or batch < 1 or window < 1 or not 0 < num_tokens <= batch * window:
+        raise ValueError("Invalid MegaRecurrentKda token layout")
     device = prefix.device
-    scratch_slots = torch.arange(batch, device=device, dtype=torch.int32)
-    accepted_offset = (accepted.to(torch.int64) - 1).clamp(0, window - 1)
-    source = slots.gather(1, accepted_offset.unsqueeze(1)).squeeze(1)
     prefix = prefix.to(torch.int32)
     lengths = prefix[1:] - prefix[:-1]
-    active = (
-        (lengths > 0)
-        & (accepted >= 1)
-        & (accepted <= window)
-        & (source > 0)
-        & (source < num_state_slots)
-        & (conv_slots > 0)
-        & (conv_slots < num_conv_slots)
-    )
-    history_indices = accepted_offset[:, None] + torch.arange(3, device=device)
     cu_seqlens = metadata = None
     if window == 1:
         token_indices = prefix[:-1].long()
-        real_tokens = active
+        requests = None
+        real_tokens = lengths > 0
     else:
         # TH requires strictly increasing offsets, while vLLM graph padding
         # allows empty requests. Append dummy rows AFTER real tokens so that
@@ -110,38 +54,126 @@ def prepare_upstream_state_plan(
         requests = boundaries.cumsum(0, dtype=torch.int64)
         local = torch.arange(total, device=device) - cu_seqlens.index_select(0, requests)
         token_indices = prefix.index_select(0, requests) + local
-        real_tokens = (local < lengths.index_select(0, requests)) & active.index_select(0, requests)
+        real_tokens = local < lengths.index_select(0, requests)
         if build_metadata is not None:
             metadata = build_metadata(cu_seqlens, tokens=total)
 
+    return UpstreamTokenLayout(
+        lengths, token_indices.clamp(0, num_tokens - 1).long(), real_tokens, requests, cu_seqlens, metadata
+    )
+
+
+@dataclass
+class UpstreamStatePlan:
+    """Device tensors shared by all KDA layers for one metadata group."""
+
+    window: int
+    lengths: torch.Tensor
+    active: torch.Tensor
+    initial: torch.Tensor
+    source: torch.Tensor
+    destinations: torch.Tensor
+    conv_slots: torch.Tensor
+    history_indices: torch.Tensor
+    conv_write_rows: torch.Tensor
+    output_write_rows: torch.Tensor
+    write_starts: torch.Tensor
+    conv_prefix: torch.Tensor
+    scratch_slots: torch.Tensor
+    scratch_accepted: torch.Tensor
+    token_indices: torch.Tensor
+    real_tokens: torch.Tensor
+    cu_seqlens: torch.Tensor | None
+    metadata: torch.Tensor | None
+
+
+def prepare_upstream_state_plan(
+    layout: UpstreamTokenLayout,
+    state_slots: torch.Tensor,
+    conv_slots: torch.Tensor,
+    accepted: torch.Tensor | None,
+    has_initial: torch.Tensor | None,
+    *,
+    group_indices: torch.Tensor | None = None,
+    max_query_len: int,
+    num_state_slots: int,
+    num_conv_slots: int,
+) -> UpstreamStatePlan:
+    """Prepare one fixed-shape plan from replay-time device inputs.
+
+    max_query_len is the scheduler's speculative window (one for ordinary
+    decode). Multi-token non-speculative prefill uses the normal prefill path.
+    State columns and conv slots are already physical page IDs from the GDN
+    metadata builder, including its align-mode block-table lookup.
+    """
+    slots = state_slots.unsqueeze(1) if state_slots.ndim == 1 else state_slots
+    conv_slots = conv_slots[:, 0] if conv_slots.ndim == 2 else conv_slots
+    lengths = layout.lengths
+    batch = lengths.numel()
+    window = max_query_len
+    if (
+        slots.ndim != 2
+        or slots.shape[0] != batch
+        or slots.shape[1] < window
+        or conv_slots.shape != (batch,)
+        or (accepted is not None and accepted.shape != (batch,))
+        or (has_initial is not None and has_initial.shape != (batch,))
+        or min(num_state_slots, num_conv_slots) < 1
+    ):
+        raise ValueError("Invalid decode window, page table or request metadata for MegaRecurrentKda")
+
+    device = lengths.device
+    scratch_slots = torch.arange(batch, device=device, dtype=torch.int32)
+    scratch_accepted = torch.ones_like(scratch_slots)
+    if accepted is None:
+        accepted = scratch_accepted
+    accepted_offset = (accepted.to(torch.int64) - 1).clamp(0, window - 1)
+    source = slots.gather(1, accepted_offset.unsqueeze(1)).squeeze(1)
+    active = (
+        (lengths > 0)
+        & (accepted >= 1)
+        & (accepted <= window)
+        & (source > 0)
+        & (source < num_state_slots)
+        & (conv_slots > 0)
+        & (conv_slots < num_conv_slots)
+    )
+    history_indices = accepted_offset[:, None] + torch.arange(3, device=device)
+    token_indices = layout.token_indices
+    real_tokens = layout.real_tokens & (active if layout.requests is None else active.index_select(0, layout.requests))
+    if group_indices is not None:
+        token_indices = group_indices.index_select(0, token_indices).long()
+
     return UpstreamStatePlan(
-        num_tokens,
         window,
         lengths,
         active,
-        active & has_initial.bool(),
+        active if has_initial is None else active & has_initial.bool(),
         source.clamp(0, num_state_slots - 1).long(),
         slots,
         conv_slots.clamp(0, num_conv_slots - 1).long(),
         history_indices,
+        torch.where(active, conv_slots, -1).to(torch.int32).contiguous(),
+        torch.where(real_tokens, token_indices, -1).to(torch.int32).contiguous(),
+        torch.arange(max(batch, token_indices.numel()) + 1, dtype=torch.int32, device=device),
+        torch.arange(window + 2, device=device)[None, :] < lengths[:, None] + 2,
         scratch_slots,
-        torch.ones_like(scratch_slots),
-        token_indices.clamp(0, max(num_tokens - 1, 0)).long(),
+        scratch_accepted,
+        token_indices,
         real_tokens,
-        cu_seqlens,
-        metadata,
+        layout.cu_seqlens,
+        layout.metadata,
     )
 
 
-def _scatter_rows(cache: torch.Tensor, values: torch.Tensor, slots: torch.Tensor, valid: torch.Tensor) -> None:
+def _scatter_rows(cache: torch.Tensor, values: torch.Tensor, indices: torch.Tensor, starts: torch.Tensor) -> None:
     """Copy active, non-overlapping rows without redirecting invalid writes to page zero."""
     if cache.device.type == "cpu":
-        cache.index_copy_(0, slots[valid].long(), values[valid])
+        valid = indices >= 0
+        cache.index_copy_(0, indices[valid].long(), values[valid])
         return
     from vllm_ascend.ops.triton.kda.conv_state import copy_conv_state
 
-    indices = torch.where(valid, slots, -1).to(torch.int32).contiguous()
-    starts = torch.arange(indices.numel() + 1, device=indices.device, dtype=torch.int32)
     # The packed-to-cache copy only reads packed rows [0, B); the dummy
     # packed row and packed_indices argument are used by the reverse direction.
     if cache.ndim == 2:
@@ -162,44 +194,20 @@ def run_upstream_state_batch(
     hidden_states: torch.Tensor,
     conv_cache: torch.Tensor,
     state_cache: torch.Tensor,
-    prefix: torch.Tensor,
-    state_slots: torch.Tensor,
-    conv_slots: torch.Tensor,
-    accepted: torch.Tensor,
-    has_initial: torch.Tensor,
+    plan: UpstreamStatePlan,
     launch: Callable,
-    *,
-    max_query_len: int,
-    plan: UpstreamStatePlan | None = None,
-    build_metadata: Callable | None = None,
-) -> torch.Tensor:
+    output: torch.Tensor,
+) -> None:
     """Run one ordinary or speculative group. Long prefill dispatches before this call.
 
     The native checkpoint is read-only. Ordinary decode and multi-page verify
     reconstruct the appropriate pages from the returned u/k/decay factors.
     """
-    tokens, hidden = hidden_states.shape
-    if not tokens:
-        return hidden_states.new_zeros((0, hidden))
-    if plan is None:
-        plan = prepare_upstream_state_plan(
-            prefix,
-            state_slots,
-            conv_slots,
-            accepted,
-            has_initial,
-            num_tokens=tokens,
-            max_query_len=max_query_len,
-            num_state_slots=state_cache.size(0),
-            num_conv_slots=conv_cache.size(0),
-            build_metadata=build_metadata,
-        )
+    hidden = hidden_states.shape[1]
     window = plan.window
     batch = plan.lengths.numel()
     if (
-        tokens != plan.num_tokens
-        or window != max_query_len
-        or state_cache.ndim != 4
+        state_cache.ndim != 4
         or state_cache.size(2) != state_cache.size(3)
         or state_cache.dtype != torch.float32
         or conv_cache.ndim != 3
@@ -220,7 +228,10 @@ def run_upstream_state_batch(
     u = state.new_zeros((batch, heads, capacity, dim))
     k = torch.zeros_like(u, dtype=torch.float16)
     decay = torch.zeros_like(u)
-    packed = torch.where(plan.real_tokens[:, None], hidden_states.index_select(0, plan.token_indices), 0)
+    if hidden_states.stride(1) == 1:
+        packed = gather_initial_states(hidden_states, plan.token_indices, plan.real_tokens)
+    else:
+        packed = torch.where(plan.real_tokens[:, None], hidden_states.index_select(0, plan.token_indices), 0)
     kwargs = {}
     if plan.cu_seqlens is None:
         packed = packed.unsqueeze(1)
@@ -235,9 +246,6 @@ def run_upstream_state_batch(
     # conv stores [h1,h2,q0,...]. Commit with c accepted tokens reads the
     # three entries starting at c-1. Retain the old suffix beyond each real
     # query to keep synthetic TH rows out of the scheduler's state pages.
-    rows = torch.arange(window + 2, device=state.device)
-    new_conv = torch.where(rows[None, :, None] < plan.lengths[:, None, None] + 2, conv[:, : window + 2], old_conv)
-    _scatter_rows(cache_window, new_conv, plan.conv_slots, plan.active)
-    output = hidden_states.new_zeros((tokens, hidden))
-    _scatter_rows(output, out.reshape(-1, hidden), plan.token_indices, plan.real_tokens)
-    return output
+    new_conv = torch.where(plan.conv_prefix[:, :, None], conv[:, : window + 2], old_conv)
+    _scatter_rows(cache_window, new_conv, plan.conv_write_rows, plan.write_starts)
+    _scatter_rows(output, out.reshape(-1, hidden), plan.output_write_rows, plan.write_starts)

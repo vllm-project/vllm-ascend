@@ -417,7 +417,17 @@ Kimi K3.1 decode workers on Ascend 950 can select a KDA backend with
 BF16 hidden states and the model's MXFP8 QKV weights. Set the option on the
 KV consumer and leave `--use-replayssm` disabled. The default is `native`.
 
-Build an Ascend 950 wheel using [the upstream integration guide](https://github.com/flashserve/flash-linear-attention-npu/blob/e8646e1d347fef785b92a1bbc13e2764b7b85ae1/fla/ops/ascendc/kda/mega_recurrent_kda/docs/model_integration.md).
+Build the Ascend 950 wheel from the pinned revision of
+[FLA PR #1375](https://github.com/flashserve/flash-linear-attention-npu/pull/1375).
+From a checkout of `flashserve/flash-linear-attention-npu`:
+
+```bash
+git fetch origin refs/pull/1375/head
+git checkout --detach d73d060670de11a3f234e854150373408c01c713
+FLA_NPU_SOC=ascend950 FLA_NPU_BUILD_OFFLINE_BUNDLE=1 python scripts/build_wheel.py
+```
+
+See the [operator integration guide for this revision](https://github.com/flashserve/flash-linear-attention-npu/blob/d73d060670de11a3f234e854150373408c01c713/fla/ops/ascendc/kda/mega_recurrent_kda/docs/model_integration.md).
 Install the wheel and expose its OPP before starting workers:
 
 ```bash

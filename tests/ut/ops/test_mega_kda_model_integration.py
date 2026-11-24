@@ -78,7 +78,9 @@ def test_mega_kda_model_dispatch(monkeypatch, mode):
         "maybe_save_kv_layer_to_connector",
     ):
         monkeypatch.setattr(kimi_kda, hook, MagicMock())
-    upstream = MagicMock(side_effect=lambda layer, op, meta, hidden, weights, *, only_spec: hidden + 1)
+    upstream = MagicMock(
+        side_effect=lambda layer, op, meta, hidden, weights, *, output, only_spec: output.copy_(hidden + 1)
+    )
     monkeypatch.setattr(kimi_kda, "run_upstream_mega_kda", upstream)
     proj = MagicMock(side_effect=lambda hidden: (hidden, None, None, None))
 
@@ -142,6 +144,7 @@ def test_mega_kda_model_dispatch(monkeypatch, mode):
     assert proj.call_count == int(mode in ("long_prefill", "mixed", "decode_prefill"))
     assert upstream.call_count == int(mode in ("decode", "first_token", "mixed", "decode_prefill"))
     if upstream.called:
+        assert upstream.call_args.kwargs["output"].data_ptr() == result.data_ptr()
         assert upstream.call_args.kwargs["only_spec"] == (mode == "mixed")
         weights = upstream.call_args.args[4]
         assert weights["qkv_scale_alg"] == 1
@@ -175,3 +178,16 @@ def test_mega_output_collective(monkeypatch, tp, reduce, rs, offset):
     x = torch.arange(8).view(2, 4)
     result = kimi_kda.AscendKimiK3DeltaAttention._forward_projections(layer, x, None)
     torch.testing.assert_close(result, x + offset)
+
+
+@pytest.mark.parametrize("tokens", [1, 3])
+@pytest.mark.parametrize("grouped", [False, True])
+def test_mega_native_prefill_qkv_keeps_token_axis(tokens, grouped):
+    expected = torch.arange(tokens * 12).reshape(tokens, 12)
+    projected = expected.unsqueeze(0) if grouped else expected
+    qkv = SimpleNamespace(_mega_kda_mx_qkv=True, quant_method=MagicMock())
+    qkv.quant_method.apply.return_value = projected
+    layer = SimpleNamespace(in_proj_qkvgfab=qkv)
+    result = kimi_kda.AscendKimiK3DeltaAttention._matmul_fused_qkv(layer, object())
+    torch.testing.assert_close(result, expected)
+    assert result.data_ptr() == projected.data_ptr()

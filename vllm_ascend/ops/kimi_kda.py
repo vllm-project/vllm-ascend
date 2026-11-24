@@ -587,15 +587,14 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         if not long_prefill or attn_metadata.num_spec_decodes or decode_tokens:
             decode_input = hidden_states[:decode_tokens] if decode_tokens else hidden_states
             decode_out = out[:decode_tokens] if decode_tokens else out
-            decode_out.copy_(
-                run_upstream_mega_kda(
-                    self,
-                    self._mega_kda_op,
-                    decode_meta,
-                    decode_input,
-                    weights,
-                    only_spec=long_prefill and bool(attn_metadata.num_spec_decodes),
-                )
+            run_upstream_mega_kda(
+                self,
+                self._mega_kda_op,
+                decode_meta,
+                decode_input,
+                weights,
+                output=decode_out,
+                only_spec=long_prefill and bool(attn_metadata.num_spec_decodes),
             )
         if long_prefill:
             prefill = (
@@ -724,11 +723,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         quant_method = self.in_proj_qkvgfab.quant_method
         if quant_method is None:
             raise RuntimeError("KDA fused QKV quantization method is not initialized")
-        return quant_method.apply(
-            self.in_proj_qkvgfab,
-            qkv_input,
-            bias=None,
-        )
+        qkv = quant_method.apply(self.in_proj_qkvgfab, qkv_input, bias=None)
+        # The MegaKDA NZ weight carries one group; native prefill expects [T, 3P].
+        if getattr(self.in_proj_qkvgfab, "_mega_kda_mx_qkv", False) and qkv.ndim == 3:
+            return qkv.squeeze(0)
+        return qkv
 
     @staticmethod
     def _run_causal_conv1d(

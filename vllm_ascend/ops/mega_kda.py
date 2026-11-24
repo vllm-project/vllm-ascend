@@ -16,7 +16,11 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm_ascend.ops.mega_kda_upstream_state import prepare_upstream_state_plan, run_upstream_state_batch
+from vllm_ascend.ops.mega_kda_upstream_state import (
+    prepare_token_layout,
+    prepare_upstream_state_plan,
+    run_upstream_state_batch,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -70,6 +74,14 @@ def load_upstream_mega_kda(package_dir: str) -> UpstreamMegaKDA:
     return UpstreamMegaKDA(forward, metadata)
 
 
+def _tensor_view_key(tensor: torch.Tensor | None):
+    if tensor is None:
+        return None
+    # Keep the storage alive for this forward. Inference-mode views may have
+    # no _base; two differently offset slices must never share a state plan.
+    return (tensor.untyped_storage(), tensor.storage_offset(), tensor.shape, tensor.stride(), tensor.dtype)
+
+
 def run_upstream_mega_kda(
     layer: "AscendKimiK3DeltaAttention",
     op: UpstreamMegaKDA,
@@ -77,18 +89,21 @@ def run_upstream_mega_kda(
     hidden_states: torch.Tensor,
     weights: dict,
     *,
+    output: torch.Tensor,
     only_spec: bool = False,
-) -> torch.Tensor:
-    """Return the rank-local output projection. The caller applies the TP collective."""
+) -> None:
+    """Write the rank-local projection into the caller's output. Padding stays zero."""
     from vllm.forward_context import get_forward_context
 
-    output = torch.zeros_like(hidden_states)
+    output.zero_()
     total = metadata.num_actual_tokens
     if not total:
-        return output
+        return
     hidden = hidden_states[:total]
     conv, checkpoint = layer.kv_cache
-    plan_cache = get_forward_context().additional_kwargs.setdefault("mega_kda_state_plans", {})
+    context = get_forward_context().additional_kwargs
+    layouts = context.setdefault("mega_kda_token_layouts", {})
+    plans = context.setdefault("mega_kda_state_plans", {})
 
     def launch(x, conv_state, checkpoint_state, replay_u, replay_k, replay_decay, state_indices, accepted, **packed):
         return op.forward(
@@ -107,42 +122,37 @@ def run_upstream_mega_kda(
             **packed,
         )
 
-    def run_group(indices, conv_meta, slots, accepted, initial, width, group):
-        tokens = hidden if indices is None else hidden.index_select(0, indices)
-        prefix = conv_meta.query_start_loc
-        conv_slots = conv_meta.cache_indices
-        # One plan per batch, shared only by layers with the same metadata and page geometry.
-        key = (id(metadata), group, tokens.shape[0], width, checkpoint.shape[0], conv.shape[0])
-        if key not in plan_cache:
-            plan_cache[key] = prepare_upstream_state_plan(
-                prefix,
+    def run_group(indices, conv_meta, slots, accepted, initial, width):
+        num_tokens = hidden.size(0) if indices is None else indices.numel()
+        if num_tokens == 0:
+            return
+        prefix, conv_slots = conv_meta.query_start_loc, conv_meta.cache_indices
+        layout_key = (_tensor_view_key(prefix), num_tokens, width)
+        if layout_key not in layouts:
+            layouts[layout_key] = prepare_token_layout(prefix, num_tokens, width, op.metadata)
+        key = (
+            layout_key,
+            _tensor_view_key(slots),
+            _tensor_view_key(conv_slots),
+            _tensor_view_key(accepted),
+            _tensor_view_key(initial),
+            _tensor_view_key(indices),
+            checkpoint.size(0),
+            conv.size(0),
+        )
+        if key not in plans:
+            plans[key] = prepare_upstream_state_plan(
+                layouts[layout_key],
                 slots,
                 conv_slots,
                 accepted,
                 initial,
-                num_tokens=tokens.shape[0],
+                group_indices=indices,
                 max_query_len=width,
-                num_state_slots=checkpoint.shape[0],
-                num_conv_slots=conv.shape[0],
-                build_metadata=op.metadata,
+                num_state_slots=checkpoint.size(0),
+                num_conv_slots=conv.size(0),
             )
-        result = run_upstream_state_batch(
-            tokens,
-            conv,
-            checkpoint,
-            prefix,
-            slots,
-            conv_slots,
-            accepted,
-            initial,
-            launch,
-            max_query_len=width,
-            plan=plan_cache[key],
-        )
-        if indices is None:
-            output[: result.shape[0]].copy_(result)
-        else:
-            output.index_copy_(0, indices.long(), result)
+        run_upstream_state_batch(hidden, conv, checkpoint, plans[key], launch, output)
 
     spec = metadata.num_spec_decodes > 0
     non_spec = metadata.num_prefills > 0 or metadata.num_decodes > 0
@@ -156,26 +166,22 @@ def run_upstream_mega_kda(
             spec_conv,
             metadata.spec_state_indices_tensor,
             accepted,
-            torch.ones_like(accepted),
+            None,
             layer.num_spec + 1,
-            "spec",
         )
     if non_spec and not only_spec:
         slots = metadata.non_spec_state_indices_tensor
-        accepted = torch.ones(slots.shape[0], dtype=torch.int32, device=slots.device)
         if metadata.num_prefills:
             conv_meta = metadata.non_spec_prefill_metadata.causal_conv1d
             initial = conv_meta.initial_state_mode
         else:
             conv_meta = metadata.non_spec_decode_metadata.causal_conv1d
-            initial = accepted
+            initial = None
         run_group(
             metadata.non_spec_token_indx if spec else None,
             conv_meta,
             slots,
-            accepted,
+            None,
             initial,
             1,
-            "decode",
         )
-    return output

@@ -1,10 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 import torch
 
-from vllm_ascend.ops.mega_kda_upstream_state import prepare_upstream_state_plan, run_upstream_state_batch
+from vllm_ascend.ops.mega_kda import UpstreamMegaKDA, run_upstream_mega_kda
+from vllm_ascend.ops.mega_kda_upstream_state import (
+    prepare_token_layout,
+    prepare_upstream_state_plan,
+    run_upstream_state_batch,
+)
 
 
 @pytest.mark.parametrize("padded_pages", [False, True])
@@ -47,30 +55,17 @@ def test_upstream_state_writes_only_real_request_rows(padded_pages):
         return x + 10, history, u, k, decay
 
     plan = prepare_upstream_state_plan(
-        prefix,
+        prepare_token_layout(prefix, 5, window, lambda cu, tokens: cu.clone()),
         slots,
         conv_slots,
         accepted,
         initial,
-        num_tokens=5,
         max_query_len=window,
         num_state_slots=10,
         num_conv_slots=10,
-        build_metadata=lambda cu, tokens: cu.clone(),
     )
-    out = run_upstream_state_batch(
-        hidden,
-        conv,
-        state,
-        prefix,
-        slots,
-        conv_slots,
-        accepted,
-        initial,
-        launch,
-        max_query_len=window,
-        plan=plan,
-    )
+    out = torch.zeros_like(hidden)
+    run_upstream_state_batch(hidden, conv, state, plan, launch, out)
     expected_out = torch.zeros_like(hidden)
     expected_out[:3] = hidden[:3] + 10
     assert torch.equal(out, expected_out)
@@ -95,18 +90,99 @@ def test_full_speculative_window_preserves_official_th_plan():
     slots = torch.arange(1, 31, dtype=torch.int32)
     ones = torch.ones_like(slots)
     plan = prepare_upstream_state_plan(
-        prefix,
+        prepare_token_layout(prefix, 120, 4, lambda cu, tokens: torch.tensor(tokens)),
         slots[:, None].expand(-1, 4),
         slots,
         ones,
         ones,
-        num_tokens=120,
         max_query_len=4,
         num_state_slots=31,
         num_conv_slots=31,
-        build_metadata=lambda cu, tokens: torch.tensor(tokens),
     )
     assert plan.metadata.item() == 120
     assert torch.equal(plan.cu_seqlens, prefix)
     assert torch.equal(plan.token_indices, torch.arange(120))
     assert plan.real_tokens.all()
+
+
+@torch.inference_mode()
+def test_forward_reuses_layout_but_keeps_layer_pages_and_output_rows_separate(monkeypatch):
+    import vllm.forward_context as forward_context
+
+    context = SimpleNamespace(additional_kwargs={})
+    monkeypatch.setattr(forward_context, "get_forward_context", lambda: context)
+    build = Mock(side_effect=lambda prefix, tokens: prefix.clone())
+    prefix = torch.tensor([0, 2, 2], dtype=torch.int32)
+    slots = torch.tensor([[1, 2], [0, 0], [3, 4]], dtype=torch.int32)
+    conv_slots = torch.tensor([1, 0], dtype=torch.int32)
+    accepted = torch.ones(2, dtype=torch.int32)
+    spec_rows = torch.tensor([2, 0], dtype=torch.int32)
+    ordinary = torch.tensor([3, 0], dtype=torch.int32)
+    ordinary_rows = torch.tensor([1, 3], dtype=torch.int32)
+    ordinary_prefix = torch.arange(3, dtype=torch.int32)
+    hidden = torch.arange(10, dtype=torch.bfloat16).reshape(5, 2)
+
+    def forward(**kw):
+        x = kw["hidden_states"]
+        return x + 1, kw["conv_state"], kw["replay_u"], kw["replay_k"], kw["replay_decay"]
+
+    def run(table, cu):
+        # A new wrapper and new views, as can happen between attention layers.
+        meta = SimpleNamespace(
+            num_actual_tokens=4,
+            num_spec_decodes=2,
+            num_prefills=0,
+            num_decodes=2,
+            spec_token_indx=spec_rows[:],
+            non_spec_token_indx=ordinary_rows[:],
+            spec_state_indices_tensor=table,
+            non_spec_state_indices_tensor=ordinary[:],
+            spec_decode_metadata=SimpleNamespace(
+                spec_causal_conv1d=SimpleNamespace(
+                    query_start_loc=cu,
+                    cache_indices=conv_slots[:],
+                    num_accepted_tokens=accepted[:],
+                )
+            ),
+            non_spec_decode_metadata=SimpleNamespace(
+                causal_conv1d=SimpleNamespace(
+                    query_start_loc=ordinary_prefix[:],
+                    cache_indices=ordinary[:],
+                )
+            ),
+        )
+        state = torch.ones(5, 1, 2, 2)
+        layer = SimpleNamespace(
+            kv_cache=(torch.zeros(5, 4, 2, dtype=torch.bfloat16), state),
+            num_spec=1,
+            head_dim=2,
+            gate_lower_bound=-1,
+            o_norm=SimpleNamespace(eps=1e-5),
+        )
+        out = torch.full_like(hidden, -99)
+        run_upstream_mega_kda(layer, UpstreamMegaKDA(forward, build), meta, hidden, {}, output=out)
+        return out, state
+
+    expected = torch.zeros_like(hidden)
+    expected[:3] = hidden[:3] + 1
+    for _ in range(2):
+        out, state = run(slots[:2], prefix[:])
+        torch.testing.assert_close(out, expected)
+        assert state[1:4].count_nonzero() == 0
+        assert state[0].min() == 1
+    assert build.call_count == 1
+    assert len(context.additional_kwargs["mega_kda_state_plans"]) == 2
+
+    # Same shape and storage, different offset: spec now targets an inactive page.
+    out, state = run(slots[1:], prefix[:])
+    expected[[0, 2]] = 0
+    torch.testing.assert_close(out, expected)
+    assert state[1:3].min() == 1
+    assert build.call_count == 1
+    assert len(context.additional_kwargs["mega_kda_state_plans"]) == 3
+
+    run(slots[:2], prefix.clone())
+    assert build.call_count == 2
+    context.additional_kwargs.clear()
+    run(slots[:2], prefix[:])
+    assert build.call_count == 3
