@@ -4,7 +4,7 @@ vLLM Ascend supports slash commands in pull request comments to trigger CI workf
 
 ## Available Commands
 
-### `/e2e`
+### /e2e
 
 Run specific E2E tests under `tests/e2e/pull_request/`. Tests are automatically routed to the appropriate NPU runner based on the test path.
 
@@ -38,7 +38,7 @@ For doctests, run the **Doc Test** workflow manually in GitHub Actions, or let a
 
 Tests are run against both the community vLLM version and the latest release.
 
-### `/nightly`
+### /nightly
 
 Trigger specific nightly test cases on A2 and A3. Supports only PR comments. Test case names correspond to the `test_config.name` entries defined in `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.
 
@@ -109,7 +109,7 @@ cannot be selected.
 
 **Common test case names (A3):**
 
-`multi-node-deepseek-v3.2-W8A8-EP`, `mtpx-deepseek-r1-0528-w8a8`, `deepseek-r1-0528-w8a8`, `kimi-k2-thinking`, `qwen3-vl-235b-a22b-instruct-w8a8`, `custom-multi-ops`, ...
+`multi-node-deepseek-v3.2-W8A8-EP`, `mtpx-deepseek-r1-0528-w8a8`, `deepseek-r1-0528-w8a8`, `kimi-k2-thinking`, `qwen3-vl-235b-a22b-instruct-w8a8`, `custom-multi-ops`, etc.
 
 **Examples:**
 
@@ -167,7 +167,7 @@ This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` and `s
 
 > **Note**: These `schedule_*` workflows do not declare a GitHub Actions `schedule:` (cron) trigger; they are dispatched externally via `workflow_dispatch`. See [CI workflow triggers and the schedule_ prefix](../developer_guide/contribution/testing.md#ci-workflow-triggers-and-the-schedule_-prefix).
 
-### `/cherry-pick`
+### /cherry-pick
 
 Cherry-pick a PR's commits onto a specified target branch and create a new PR. This is useful for backporting fixes to release branches.
 
@@ -191,7 +191,7 @@ A new PR will be created with the title format `[Cherry-pick] <original_title> (
 
 If the cherry-pick encounters merge conflicts, the command will report the failure and the cherry-pick must be done manually.
 
-### `/revert`
+### /revert
 
 Revert a merged PR by creating a new PR that reverses its changes. The revert targets the same base branch the original PR was merged into.
 
@@ -209,7 +209,7 @@ Revert a merged PR by creating a new PR that reverses its changes. The revert ta
 
 A new PR will be created with the title format `[Revert] Revert "original_title" (#PR_NUMBER)` and a body linking back to the original PR and its merge commit.
 
-Only merged PRs can be reverted. If the revert encounters merge conflicts (e.g., because the base branch has diverged significantly), the command will report the failure and the revert must be done manually.
+Only merged PRs can be reverted. If the revert encounters merge conflicts (e.g. because the base branch has diverged significantly), the command will report the failure and the revert must be done manually.
 
 ### `/run`
 
@@ -244,7 +244,7 @@ runs; it is evaluated when reviews are submitted instead.
 /run
 ```
 
-### `/rerun`
+### /rerun
 
 Re-run failed CI workflows on the current PR commit. Useful when CI jobs failed or were cancelled due to infrastructure issues.
 
@@ -257,7 +257,7 @@ Only jobs that did not complete successfully are re-run (failed, cancelled, time
 /rerun
 ```
 
-### `/cancel`
+### /cancel
 
 Force-cancel all workflow runs on the current PR commit. This cancels runs directly triggered on the PR head commit, such as the automatic E2E CI workflow (`pr_test.yaml`). Workflows triggered by slash commands (e.g., `/e2e`, `/rerun`, `/nightly`) or downstream nightly/weekly workflows are **not** affected, as those run on the `main` branch.
 
@@ -292,9 +292,9 @@ Trigger and manage the AI review agent on a pull request (requires the `ai-revie
 
 ## Behavior
 
-1. When you comment a slash command, a 👀 reaction is added to your comment to indicate it has been received
-2. The corresponding CI workflow is triggered asynchronously
-3. Upon completion, a 🎉 reaction and a summary comment are added
+1. When you comment a slash command, a 👀 reaction is added to your comment to indicate it has been received.
+2. The corresponding CI workflow is triggered asynchronously.
+3. Upon completion, a 🎉 reaction and a summary comment are added.
 
 ## Scope
 
