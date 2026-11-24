@@ -184,6 +184,49 @@ def test_mixed_kernel_block_sizes_crop_each_group():
     torch.testing.assert_close(block_tables.input_block_tables[1], original_b)
 
 
+def test_cropped_block_table_keeps_padded_rows():
+    helper = MRV2DraftSlidingWindow(
+        window_size=128,
+        block_sizes=(64,),
+        max_num_reqs=2,
+        future_offset=0,
+        device=torch.device("cpu"),
+    )
+    helper._clones[0].fill_(7)
+    table = torch.arange(8, dtype=torch.int32).view(1, 8).expand(2, 8).contiguous()
+    original = table.clone()
+    block_tables = SimpleNamespace(input_block_tables=[table])
+    input_buffers = SimpleNamespace(seq_lens=torch.tensor([300, 0], dtype=torch.int32))
+    upper_bound = torch.tensor([320, 0], dtype=torch.int32)
+
+    with helper.apply_builder_inputs(input_buffers, block_tables, upper_bound, num_reqs=1):
+        published = block_tables.input_block_tables[0]
+        assert published.shape[0] == 2
+        assert published[0, 0].item() == 2
+        assert torch.count_nonzero(published[1]) == 0
+
+    torch.testing.assert_close(block_tables.input_block_tables[0], original)
+
+
+def test_clamp_cpu_lengths_caps_a_long_request():
+    helper = MRV2DraftSlidingWindow(
+        window_size=128,
+        block_sizes=(64,),
+        max_num_reqs=2,
+        future_offset=0,
+        device=torch.device("cpu"),
+    )
+    helper._last_windowed_seq_lens = torch.tensor([172], dtype=torch.int32)
+    lengths = torch.tensor([302, 0], dtype=torch.int32)
+
+    capped = helper.clamp_cpu_lengths(lengths, num_reqs=1)
+
+    assert capped.shape == lengths.shape
+    assert capped[0].item() == helper.max_window_tokens
+    assert capped[1].item() == 0
+    assert lengths[0].item() == 302
+
+
 def test_maybe_create_keeps_each_kernel_block_size():
     block_tables = SimpleNamespace(
         input_block_tables=[

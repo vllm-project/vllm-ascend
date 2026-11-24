@@ -193,8 +193,12 @@ class MRV2DraftSlidingWindow:
             adapter = self.adapters[i]
             adapter.full_block_table = full_table
             adapter.compute_sliding_window_block_table(meta, self._clones[i], start_tokens=crop)
+        for clone in self._clones:
+            # Keep max_num_reqs rows so a padded graph batch can slice past num_reqs.
+            # Rows from an earlier, larger batch must not survive.
+            clone[num_reqs:].zero_()
         for i in range(len(original_tables)):
-            block_tables.input_block_tables[i] = self._clones[i][:num_reqs]
+            block_tables.input_block_tables[i] = self._clones[i]
         self._last_windowed_seq_lens = windowed_seq_lens
 
         # Separate storage: metadata may alias ``input_buffers.seq_lens``.
@@ -213,6 +217,21 @@ class MRV2DraftSlidingWindow:
             input_buffers.seq_lens = original_seq_lens
             for i, table in enumerate(original_tables):
                 block_tables.input_block_tables[i] = table
+
+    def clamp_cpu_lengths(self, seq_lens: torch.Tensor, num_reqs: int) -> torch.Tensor:
+        """Cap host lengths at the cropped table. ``seq_lens`` shape is unchanged."""
+        if num_reqs <= 0:
+            return seq_lens
+        out = seq_lens.clone()
+        limit = min(num_reqs, out.shape[0])
+        active = out[:limit]
+        active.clamp_(max=self.max_window_tokens)
+        min_lens = self._last_windowed_seq_lens
+        if min_lens is not None:
+            n = min(limit, min_lens.shape[0])
+            floor = min_lens[:n].to(device=active.device, dtype=active.dtype)
+            active[:n].clamp_(min=floor)
+        return out
 
     def clamp_metadata_after_step(self, attn_metadata: Any, num_reqs: int) -> None:
         """Keep length fields an upper bound of the cropped block table.
@@ -315,3 +334,10 @@ class DraftSlidingWindowMixin:
         if helper is None:
             return
         helper.clamp_metadata_after_step(attn_metadata, num_reqs)
+
+    def _window_cpu_lengths(self, seq_lens: torch.Tensor, num_reqs: int) -> torch.Tensor:
+        """Return ``seq_lens`` capped at the draft window. Unchanged when the window is off."""
+        helper = getattr(self, "_draft_sliding_window", None)
+        if helper is None:
+            return seq_lens
+        return helper.clamp_cpu_lengths(seq_lens, num_reqs)
