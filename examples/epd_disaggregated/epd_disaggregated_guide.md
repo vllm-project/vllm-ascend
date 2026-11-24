@@ -112,6 +112,7 @@ The parameters are explained as follows:<br>
 `--pd-ports`: The PD node port number. It needs to be consistent with the --port in the PD node's startup script.<br>
 `--host`: Proxy node IP address.<br>
 `--port`: Proxy node port number.<br>
+`--local-image-root`: Root directory that request-supplied local `file://` image URLs must resolve inside. Defaults to the directory the proxy was started from; requests naming files outside it are rejected.<br>
 
 ##### 1.4 run inference
 
