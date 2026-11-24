@@ -1065,15 +1065,13 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         # import failure. A key can still be visible to lookup while GET fails.
         if request.request_id in self._failed_external_load_req_ids:
             return None
-        prompt_token_len = self._max_pool_prefix_tokens(len(request.prompt_token_ids))
-        if self.enable_partial_hash_hits:
-            # Preserve the prompt end so the worker can reserve the final token for recomputation.
-            token_len = prompt_token_len
-        elif len(self.cacheable_group_ids) != len(self.original_block_size):
+        num_prompt_tokens = len(request.prompt_token_ids)
+        prompt_token_len = self._max_pool_prefix_tokens(num_prompt_tokens)
+        if len(self.cacheable_group_ids) != len(self.original_block_size):
             # Private compressor state is rebuilt from a whole token page.
-            token_len = self._floor_to_cache_transfer_granularity(
-                max(prompt_token_len - 1, 0) if vllm_version_is("0.33.0") else prompt_token_len
-            )
+            token_len = self._floor_to_cache_transfer_granularity(min(prompt_token_len, max(num_prompt_tokens - 1, 0)))
+        elif self.enable_partial_hash_hits:
+            token_len = prompt_token_len
         else:
             token_len = (
                 self._floor_to_cache_transfer_granularity(prompt_token_len)

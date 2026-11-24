@@ -24,7 +24,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_sharded_mamba_group_ids,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import BaseKVPoolScheduler
-from vllm_ascend.utils import vllm_version_is
 
 
 class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
@@ -117,15 +116,12 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         )
 
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> StoreLookupResult | None:
-        prompt_token_len = self._max_pool_prefix_tokens(len(request.prompt_token_ids))
+        num_prompt_tokens = len(request.prompt_token_ids)
+        prompt_token_len = self._max_pool_prefix_tokens(num_prompt_tokens)
         if self.use_block_key_layerwise:
+            if not self.use_eagle and len(self.cacheable_group_ids) != len(self.original_block_size):
+                prompt_token_len = min(prompt_token_len, max(num_prompt_tokens - 1, 0))
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
-            if (
-                vllm_version_is("0.33.0")
-                and not self.use_eagle
-                and len(self.cacheable_group_ids) != len(self.original_block_size)
-            ):
-                token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
             if token_len < self.cache_transfer_granularity:
                 return None
             return StoreLookupResult(self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens))

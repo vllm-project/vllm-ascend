@@ -399,7 +399,14 @@ def test_raw_sequence_lifecycle(
 
     try:
         produced = run_request("producer", producer_tokens, 0)
-        matching_long_prompt = produced[:513] if config.num_hash_lookahead_tokens else list(range(513))
+        lookahead = config.num_hash_lookahead_tokens
+        matching_long_prompt = produced[:513] if lookahead else list(range(513))
+        # A hash-dependent page ending at the prompt boundary becomes
+        # available after prefill, when its lookahead token is known.
+        saved_prefix = len(producer_tokens) if save_decode_cache else (len(producer_tokens) - lookahead) // 128 * 128
+        can_reuse_partial_page = not has_private_state and (
+            not speculative_method or (speculative_method == "dspark" and not vllm_version_is("0.33.0"))
+        )
         saved = dict(MemoryBackend.payloads)
         assert saved
         # Clear the real local prefix cache; the next request must use the Store.
@@ -431,11 +438,12 @@ def test_raw_sequence_lifecycle(
                 tokens[fork] += 1000
                 # A divergence in the hash lookahead also invalidates the
                 # preceding block ending at that token boundary.
-                if hit and config.num_hash_lookahead_tokens and fork % 128 < config.num_hash_lookahead_tokens:
+                if hit and lookahead and fork % 128 < lookahead:
                     hit = max(0, hit - 128)
-            if not has_private_state and not speculative_method and fork is None:
-                # Legacy full hits still reserve only the final token.
+            if can_reuse_partial_page and fork is None:
+                # A full stored page can be loaded while reserving the final token.
                 hit = {125: 0, 126: 0, 127: 0, 128: 127, 129: 128, 256: 255, 257: 256, 512: 511, 513: 512}[length]
+            hit = min(hit, saved_prefix)
             generated = run_request(f"consumer-{case}", tokens, hit)
             assert bool(pool.m_store.loads) == bool(hit)
             if speculative_method and length in (125, 126):
@@ -449,15 +457,15 @@ def test_raw_sequence_lifecycle(
         assert scheduler.reset_prefix_cache()
         MemoryBackend.payloads = dict(saved)
         seed_length = 256 if speculative_method else 128
-        seed_hit = 128 if speculative_method else (0 if has_private_state else 127)
+        seed_hit = seed_length - 1 if can_reuse_partial_page else seed_length - 128
         run_request("local-prefix", producer_tokens[:seed_length], seed_hit)
-        # vLLM main caches speculative blocks in the base Scheduler; only the
-        # pure full-attention dspark layout sees the doubled local prefix hit.
+        # vLLM main caches dspark blocks in the base Scheduler for hybrid
+        # layouts as well as the pure full-attention layout.
         only_full_attention = isinstance(plan.kv_cache_groups[0].kv_cache_spec, FullAttentionSpec)
         mixed_local = 128
         if speculative_method == "dspark" and (only_full_attention or not vllm_version_is("0.33.0")):
             mixed_local = 256
-        run_request("mixed-local-remote", matching_long_prompt, 512, expected_local=mixed_local)
+        run_request("mixed-local-remote", matching_long_prompt, saved_prefix, expected_local=mixed_local)
         assert scheduler.reset_prefix_cache()
         missing_group = len(plan.kv_cache_groups) - 1
         MemoryBackend.payloads = {key: value for key, value in saved.items() if f"@group:{missing_group}@" not in key}
