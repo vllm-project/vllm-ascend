@@ -22,6 +22,8 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
+In builds with Step-5 DSA union prefill, Ascend 950 selects it automatically for BF16 query and KV tensors with one KV group and 8-token regions. This requires the `cann_ops_nn_custom_nn` wheel, its matching UnionSparseMeta vendor package, and a GenericBlockSparseAttention vendor build that accepts `block_shape=[1, 8]` in union mode. When the wheel or its UnionSparseMeta registration is absent, prefill uses per-token sparse attention. Decode and MTP verification use per-token sparse attention.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight

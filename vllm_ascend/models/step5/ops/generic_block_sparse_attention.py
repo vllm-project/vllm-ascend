@@ -43,6 +43,8 @@ generate the per-token mask consumed by GenericBlockSparseAttention.
 
 from __future__ import annotations
 
+from importlib import import_module
+
 import torch
 
 from vllm_ascend.ops.triton.step5.summary_update import append_current_region
@@ -56,6 +58,19 @@ _SOFTMAX_PRECISION_FP32 = 1
 _WINDOW_DISABLED = -1
 _RESIDUAL_BLOCK_MODE_DISABLED = 0
 _UNION_REGION_SIZE = 8
+
+
+def supports_gbsa_union_sparse_prefill(num_kv_groups: int, region_size: int) -> bool:
+    """Register the optional UnionSparseMeta operator during worker setup."""
+    if num_kv_groups != 1 or region_size != _UNION_REGION_SIZE:
+        return False
+    try:
+        import_module("cann_ops_nn_custom_nn")
+    except ModuleNotFoundError as exc:
+        if exc.name == "cann_ops_nn_custom_nn":
+            return False
+        raise
+    return hasattr(torch.ops.cann_ops_nn, "union_sparse_meta_launch")
 
 
 def gbsa_expected_counts(
@@ -297,13 +312,6 @@ def gbsa_union_sparse_attention(
     context_lens_host: list[int],
 ) -> torch.Tensor:
     """Compute attention over the per-region union with an exact per-token mask."""
-    try:
-        import cann_ops_nn_custom_nn  # noqa: F401, registers UnionSparseMeta
-    except ImportError as exc:
-        raise RuntimeError(
-            "enable_union_sparse_prefill requires the CANN UnionSparseMeta vendor package "
-            "and the cann_ops_nn_custom_nn wheel."
-        ) from exc
     from cann_ops_transformer.ops.attention.generic_block_sparse_attention import generic_block_sparse_attention
 
     idx, counts = append_current_region(ids, positions, groups=num_kv_groups, region_size=region_size)

@@ -46,7 +46,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.models.step5.ops.generic_block_sparse_attention import (
     gbsa_expected_counts,
@@ -54,6 +54,7 @@ from vllm_ascend.models.step5.ops.generic_block_sparse_attention import (
     gbsa_sparse_attention_metadata,
     gbsa_union_sparse_attention,
     gbsa_union_sparse_metadata,
+    supports_gbsa_union_sparse_prefill,
 )
 from vllm_ascend.models.step5.ops.indexer_region_score import indexer_score_topk
 from vllm_ascend.ops.triton.step5.summary_update import (
@@ -347,7 +348,12 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
         self.gbsa_region_size = impl.region_size
         self.gbsa_topk = impl.topk_regions
         self.gbsa_block_size = kv_cache_spec.block_size
-        self.enable_union_sparse_prefill = get_ascend_config().enable_union_sparse_prefill
+        self.use_union_sparse_prefill = (
+            get_current_hardware_profile().supports(HardwareCapability.GBSA_UNION_SPARSE_PREFILL)
+            and vllm_config.model_config.dtype == torch.bfloat16
+            and kv_cache_spec.dtype == torch.bfloat16
+            and supports_gbsa_union_sparse_prefill(self.gbsa_num_kv_groups, self.gbsa_region_size)
+        )
         self.capture_sizes = set(vllm_config.compilation_config.cudagraph_capture_sizes or [])
         # Graph-replay metadata buffers: on capture-sized steps the AICPU
         # tensor must live at a stable address (baked into the captured
@@ -478,7 +484,7 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
             prefill_positions = prefill_context_lens.to(torch.int64)[reqs] + token_idx - qsl[reqs]
             prefill_metadata.positions = prefill_positions
             prefill_metadata.owners = reqs.to(torch.int64)
-            if self.enable_union_sparse_prefill:
+            if self.use_union_sparse_prefill:
                 prefill_metadata.gbsa_union_metadata = gbsa_union_sparse_metadata(
                     num_heads=self.gbsa_num_heads,
                     num_kv_groups=self.gbsa_num_kv_groups,
