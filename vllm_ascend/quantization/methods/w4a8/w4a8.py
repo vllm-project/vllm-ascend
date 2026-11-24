@@ -155,6 +155,21 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         except AttributeError:
             self.moe_all_to_all_group_name = ""
 
+    def validate_weight_shapes(self, layer: torch.nn.Module, intermediate_size_per_partition: int) -> None:
+        # Routed experts can flatten TP across DP/PCP even when physical TP=1.
+        # Use the same partition count as RoutedExperts._load_w2. Otherwise
+        # the loader narrows an oversized scale_bias allocation, leaving an
+        # uninitialized tail that process_weights_after_loading later sums.
+        effective_tp_size = layer.moe_config.moe_parallel_config.tp_size
+        if self.quant_method == ASCEND_QUANTIZATION_METHOD and (
+            effective_tp_size <= 0 or _MODELSLIM_SCALE_BIAS_PARTITIONS % effective_tp_size != 0
+        ):
+            raise ValueError(
+                "ModelSlim W4A8 scale_bias partitions must be divisible by "
+                f"the routed-expert TP size, got {effective_tp_size}."
+            )
+        self.tp_size = effective_tp_size
+
     def get_weight(
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
     ) -> dict[str, Any]:
