@@ -141,3 +141,7 @@ VLLM_ASCEND_ENABLE_FLASHCOMM1=1 vllm serve <moe-model> \
 ```
 
 The switch does not bypass the SP-MoE topology and backend requirements above.
+
+FlashComm2 was removed in [PR #12117](https://github.com/vllm-project/vllm-ascend/pull/12117).
+Current versions have no separate FlashComm2 configuration or runtime path to
+combine with this switch.

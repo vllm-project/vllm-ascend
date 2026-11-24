@@ -2,6 +2,7 @@
 """Dense sequence parallelism for the Qwen3.5 family (FlashComm SP switch)."""
 
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -48,13 +49,40 @@ class TestEnableDenseSp:
             monkeypatch.setenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", env_value)
         assert not enable_dense_sp(_make_vllm_config(enable_flashcomm1=False))
 
-    @pytest.mark.parametrize("explicit,legacy", [(False, "1"), (True, "0"), ("false", "true")])
-    def test_explicit_switch_overrides_legacy(self, monkeypatch, explicit, legacy):
+    @pytest.mark.parametrize(
+        "explicit,legacy,expected",
+        [
+            (False, "1", False),
+            (True, "0", True),
+            ("false", "true", False),
+            ("yes", "0", True),
+            ("on", "0", True),
+            ("no", "1", False),
+            ("off", "1", False),
+            (1, "0", True),
+            (0, "1", False),
+        ],
+    )
+    def test_explicit_switch_overrides_legacy(self, monkeypatch, explicit, legacy, expected):
         monkeypatch.setenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", legacy)
         config = _make_vllm_config(enable_flashcomm1=explicit)
-        expected = explicit is True
         assert enable_dense_sp(config) is expected
         assert enable_sp(config) is expected
+
+    @pytest.mark.parametrize("explicit", ["invalid", None, 2])
+    def test_explicit_switch_rejects_invalid_values(self, monkeypatch, explicit):
+        monkeypatch.setenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "1")
+        config = _make_vllm_config()
+        config.additional_config = {"enable_flashcomm1": explicit}
+        with pytest.raises(ValueError, match="additional_config.enable_flashcomm1 must be a boolean"):
+            enable_dense_sp(config)
+
+    @pytest.mark.parametrize("explicit", [False, True])
+    def test_boolean_switch_does_not_rebuild_validator(self, monkeypatch, explicit):
+        monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", raising=False)
+        with patch.object(patch_qwen3_5, "validate_additional_config_bool") as validate:
+            assert enable_dense_sp(_make_vllm_config(enable_flashcomm1=explicit)) is explicit
+        validate.assert_not_called()
 
     def test_falsey_string_switch_stays_disabled(self, monkeypatch):
         monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", raising=False)
@@ -168,7 +196,8 @@ class _ForwardLayer(SimpleNamespace):
     """Test double that avoids nn.Module metaclass issues on CI."""
 
     def forward(self, hidden_states, residual, positions=None, **kwargs):
-        return patch_qwen3_5.AscendQwen3_5DecoderLayer.forward(self, hidden_states, residual, positions, **kwargs)
+        layer = cast(patch_qwen3_5.AscendQwen3_5DecoderLayer, self)
+        return patch_qwen3_5.AscendQwen3_5DecoderLayer.forward(layer, hidden_states, residual, positions, **kwargs)
 
 
 def _make_forward_layer(layer_type: str = "full_attention", use_sp: bool = True, mlp=None):

@@ -36,6 +36,7 @@ except ImportError:
     IntermediateTensors = None
 from vllm.model_executor.models.qwen3_next import Qwen3NextForCausalLM
 
+from vllm_ascend.ascend_config import validate_additional_config_bool
 from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_scatter
@@ -62,9 +63,9 @@ def _flashcomm_switch_enabled(vllm_config) -> bool:
     if "enable_flashcomm1" not in additional_config:
         return os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
     switch = additional_config["enable_flashcomm1"]
-    if isinstance(switch, str):
-        return switch.strip().lower() in ("1", "true")
-    return bool(switch)
+    if isinstance(switch, bool):
+        return switch
+    return validate_additional_config_bool(switch, "additional_config.enable_flashcomm1")
 
 
 # Dense (non-MoE) model families that run sequence parallelism through the
