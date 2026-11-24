@@ -1,0 +1,7 @@
+pr: 23002
+entries:
+  - category: feature
+    text: >-
+      Kimi K3.1 disaggregated decode workers on Ascend 950 can opt into the
+      experimental MegaKDA backend using kda_backend_config in --additional-config
+      and an A5 operator wheel with the projected MegaKDA operator.
