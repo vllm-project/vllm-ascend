@@ -77,7 +77,7 @@ The host Linux distribution and kernel must be supported by the selected Ascend 
 
 ### Set up the software environment {: #installation-software-environment }
 
-Choose one complete path based on your requirements. Container-based paths require Docker; see the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) if needed.
+Choose one complete path based on your requirements. Container-based paths require Docker; see the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) if needed. Those paths also need [Ascend Docker Runtime](#installation-ascend-docker-runtime) on the host. If the host cannot install it, use [Manual device mapping without Ascend Docker Runtime](#installation-container-without-runtime).
 
 | Requirement | Recommended method | Intended users |
 | --- | --- | --- |
