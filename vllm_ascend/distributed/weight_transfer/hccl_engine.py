@@ -40,6 +40,7 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     packed_broadcast_consumer,
     packed_broadcast_producer,
 )
+from vllm_ascend.distributed.weight_transfer.update_window import EngramWeightUpdateWindow
 from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
@@ -72,7 +73,7 @@ class HCCLWeightTransferUpdateInfo(NCCLWeightTransferUpdateInfo):
                 raise ValueError(f"unknown torch dtype name {name!r}")
 
 
-class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
+class HCCLWeightTransferEngine(EngramWeightUpdateWindow, NCCLWeightTransferEngine):
     """Inherit the reload lifecycle; adapt the rendezvous and the NPU data plane."""
 
     if TYPE_CHECKING:
