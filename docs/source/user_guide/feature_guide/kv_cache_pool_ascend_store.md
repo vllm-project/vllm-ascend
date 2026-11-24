@@ -1594,7 +1594,7 @@ Refer to the verification operations in Steps 1-5 of Configuration Examples.
 | `lookup_rpc_port` | str | No default | Yes | Distinct service identifier (e.g., "0", "1") | Local IPC identifier between pooling scheduler and worker processes. DP replicas within a service are isolated automatically; independently launched services sharing the RPC base directory need unique values. The legacy name `mooncake_rpc_port` is deprecated; use `lookup_rpc_port`. |
 | `load_async` | bool | false | No | true / false | Whether to enable asynchronous loading. |
 | `backend` | str | mooncake | No | mooncake / memcache / yuanrong | KV Pool storage backend. |
-| `cache_prefix` | str | `""` | No | `""` / `"auto"` / custom string | Mooncake only. Namespace prepended to every Store key. Empty preserves existing keys; `"auto"` derives a deployment fingerprint; other strings are literal prefixes. Memcache and Yuanrong reject nonempty values at startup. See below. |
+| `cache_prefix` | str | `""` | No | `""` / fixed string (except `"auto"`) | Mooncake only. Fixed namespace prepended to every Store key. Empty preserves existing keys. Automatic prefixes are unsupported; `"auto"` is rejected. Memcache and Yuanrong reject nonempty values at startup. See below. |
 | `save_decode_cache` | bool | false | No | true / false | Save complete Decode KV blocks on a consumer. Prefill writes are skipped until Decode saving starts, when missing Prefill ancestors can be filled. Supports blockwise and layerwise transfer. |
 | `enable_lookup` | bool | true on `kv_producer` and `kv_both`; false on `kv_consumer` | No | true / false | Whether this node queries KV Pool for reusable KV. |
 | `use_layerwise` | bool | false | No | true / false | Layer-by-layer KV save/load, supported by both Mooncake and Memcache backends. Decode saving requires `save_decode_cache=true`. |
@@ -1627,39 +1627,16 @@ within the same Mooncake pool. It applies to both bulk and layerwise paths.
 - A custom string: prepend it literally as `<cache_prefix>@<existing-key>`.
   Use the same prefix on compatible instances that should share KV entries;
   use different prefixes for rolling releases or incompatible weights.
-- `"auto"`: generate an `auto-<hash>` prefix from the deployment identity described
-  below. The value is case-sensitive: `"AUTO"` is a literal custom prefix.
-
-##### Automatic cache prefix
-
-Set `"cache_prefix": "auto"` to hash the following identity factors:
-
-- **vLLM build identity:** `VLLM_IMAGE_TAG`, falling back to `VLLM_BUILD_COMMIT`.
-  Surrounding whitespace is removed. The development defaults
-  `local/vllm-openai:dev` and `unknown`, respectively, are ignored. Startup fails
-  when neither provides a usable identity; use an immutable image tag or known
-  build commit.
-- **Model identity:** the upstream model configuration hash (including model
-  path, revision, dtype and quantization) and the resolved Hugging Face
-  configuration commit (`hf_config._commit_hash`, when available).
-- **KV cache identity:** the upstream cache configuration hash (including KV
-  dtype and block size). The connector normalizes the block size from resolved
-  cache groups so scheduler lookup and worker PUT/GET use the same fingerprint.
-
-Current vLLM hashes `compile_factors()` through `hash_factors()` (equivalent to
-`hash_config()`); v0.33.0 uses the configuration's `compute_hash()` method.
-
-Identical identity factors produce the same prefix; a change to a hashed factor
-produces a different namespace. Different model paths or build identities can
-therefore prevent otherwise compatible instances from sharing entries.
+- `"auto"` is unsupported and causes a startup error. Set an explicit release
+  namespace instead. Other strings, including `"AUTO"`, remain literal values.
 
 ##### Usage considerations
 
-- Automatic mode does not hash weight-file contents or every environment flag,
-  and does not independently identify vLLM-Ascend source changes. When these
-  change without changing the hashed identity, select a new custom prefix or
-  update the build identity. A shared prefix does not validate weight, layout
-  or parallel-topology compatibility.
+- The prefix itself is not derived from model, build, block-size or KV
+  configuration hashes. Existing layout/topology namespaces remain part of
+  Store keys. Sharing instances must use the same prefix and compatible weights,
+  layouts and parallel topology. Select a new prefix when those change; a shared
+  prefix does not validate compatibility.
 - Prefixes share the existing Mooncake tenant quota; they do not reserve memory,
   SSD space or bandwidth and are not an access-control boundary. Old and new
   prefixes coexist until eviction or cleanup, so allow capacity for both during

@@ -30,13 +30,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     ReqMeta,
     RequestTracker,
+    get_cache_prefix,
     infer_cache_transfer_granularity,
     infer_cacheable_group_ids,
     infer_group_block_sizes,
     infer_group_cache_families,
     infer_tp_mismatch_info,
     normalize_block_ids_by_group,
-    resolve_cache_prefix,
     uses_hybrid_kv_cache,
 )
 
@@ -59,10 +59,10 @@ class BaseKVPoolScheduler(ABC):
         kv_cache_config: KVCacheConfig | None = None,
     ):
         self.vllm_config = vllm_config
-        self.cache_prefix = resolve_cache_prefix(vllm_config, kv_cache_config)
         self.use_layerwise = use_layerwise
         self.kv_cache_config = kv_cache_config
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        self.cache_prefix = get_cache_prefix(extra_config)
         self.backend_name, backend_class = resolve_backend(extra_config)
         self.layerwise_offload: bool = False
         hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)

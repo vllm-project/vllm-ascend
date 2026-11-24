@@ -2,16 +2,12 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from copy import copy
 from dataclasses import dataclass, field
 from itertools import compress
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
-import vllm.envs as envs
-from vllm.config import VllmConfig
-from vllm.config.utils import hash_factors
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata, KVConnectorWorkerMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -28,53 +24,14 @@ def apply_cache_prefix(key: str, cache_prefix: str) -> str:
     return f"{cache_prefix}@{key}" if cache_prefix else key
 
 
-def resolve_cache_prefix(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig | None = None) -> str:
-    """Resolve once before Store setup; empty namespaces preserve existing keys."""
-    transfer_config = getattr(vllm_config, "kv_transfer_config", None)
-    extra_config = transfer_config.kv_connector_extra_config if transfer_config is not None else {}
-    # Keep upstream MooncakeStore's coercion, including None -> "None".
+def get_cache_prefix(extra_config: Mapping[str, Any]) -> str:
+    """Read a fixed Mooncake namespace, preserving the default key format."""
+    # Keep upstream literal-value conversion, including None -> "None".
     prefix = str(extra_config.get("cache_prefix", ""))
-    if not prefix:
-        return ""
-    if extra_config.get("backend", "mooncake").lower() != "mooncake":
+    if prefix and extra_config.get("backend", "mooncake").lower() != "mooncake":
         raise ValueError("AscendStore cache_prefix is supported only by the Mooncake backend")
-    if prefix != "auto":
-        return prefix
-
-    image_tag = envs.VLLM_IMAGE_TAG.strip()
-    build_commit = envs.VLLM_BUILD_COMMIT.strip()
-    build = (image_tag if image_tag != "local/vllm-openai:dev" else "") or (
-        build_commit if build_commit != "unknown" else ""
-    )
-    if not build:
-        raise ValueError("AscendStore cache_prefix='auto' requires VLLM_IMAGE_TAG or VLLM_BUILD_COMMIT")
-
-    # EngineCore rewrites block_size after worker configs have been copied.
-    # Hash the same resolved group sizes on scheduler and worker, without
-    # modifying either runtime config or including scheduling capacities.
-    cache = copy(vllm_config.cache_config)
-    if kv_cache_config is not None and kv_cache_config.kv_cache_groups:
-        block_sizes: list[int] = []
-        for group in kv_cache_config.kv_cache_groups:
-            spec = group.kv_cache_spec
-            specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
-            block_sizes.extend(inner.block_size for inner in specs)
-        cache.block_size = min(block_sizes)
-
-    model = vllm_config.model_config
-    # Match upstream hash_config on main, retaining v0.33.0's compute_hash.
-    # Do not use identity-cached hashes for normalized config copies.
-    model_hash = hash_factors(model.compile_factors()) if hasattr(model, "compile_factors") else model.compute_hash()
-    cache_hash = hash_factors(cache.compile_factors()) if hasattr(cache, "compile_factors") else cache.compute_hash()
-    prefix = "auto-" + hash_factors(
-        {
-            "build": build,
-            "model": model_hash,
-            "hf_commit": getattr(model.hf_config, "_commit_hash", None),
-            "cache": cache_hash,
-        }
-    )
-    logger.info("AscendStore resolved cache_prefix: %s", prefix)
+    if prefix == "auto":
+        raise ValueError("AscendStore cache_prefix='auto' is not supported; configure a fixed prefix")
     return prefix
 
 

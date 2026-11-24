@@ -28,8 +28,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    get_cache_prefix,
     get_sharded_mamba_group_ids,
-    resolve_cache_prefix,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
@@ -322,7 +322,9 @@ class MooncakeBackend(Backend):
         use_hybrid: bool,
         grouped_block_size: list[int],
     ) -> LayerwiseKeyBuilder:
-        cache_prefix = resolve_cache_prefix(vllm_config, kv_cache_config)
+        transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        extra_config = transfer_config.kv_connector_extra_config if transfer_config is not None else {}
+        cache_prefix = get_cache_prefix(extra_config)
         parallel = vllm_config.parallel_config
         cache_config = getattr(vllm_config, "cache_config", None)
 

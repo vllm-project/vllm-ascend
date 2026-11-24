@@ -1,4 +1,4 @@
 pr: 22391
 entries:
   - category: feature
-    text: Added manual and automatic cache_prefix namespaces to AscendStoreConnector's Mooncake backend for bulk and layerwise KV pooling. External full-reset scope is unchanged; nonempty prefixes on other backends are rejected.
+    text: Added fixed cache_prefix namespaces to AscendStoreConnector's Mooncake backend for bulk and layerwise KV pooling. Automatic prefixes are unsupported and cache_prefix="auto" is rejected. External full-reset scope is unchanged; nonempty prefixes on other backends are rejected.

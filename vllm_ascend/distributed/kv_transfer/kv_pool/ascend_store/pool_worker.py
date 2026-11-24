@@ -55,6 +55,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     KeyMetadata,
     ReqMeta,
     get_block_hashes,
+    get_cache_prefix,
     get_group_cache_family,
     get_sharded_mamba_group_ids,
     infer_cache_transfer_granularity,
@@ -62,7 +63,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_group_block_sizes,
     infer_group_cache_families,
     infer_tp_mismatch_info,
-    resolve_cache_prefix,
     uses_hybrid_kv_cache,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
@@ -89,7 +89,7 @@ class BaseKVPoolWorker(ABC):
         parallel_config = vllm_config.parallel_config
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.vllm_config = vllm_config
-        self.cache_prefix = resolve_cache_prefix(vllm_config, kv_cache_config)
+        self.cache_prefix = get_cache_prefix(extra_config)
         self.use_recoverssm = getattr(vllm_config.cache_config, "use_kda_recoverssm", False) is True
         self.use_kvpp = KVPPConfig.from_vllm_config(vllm_config).size > 1
         self.kv_cache_config = kv_cache_config

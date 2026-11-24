@@ -75,7 +75,6 @@ _MOCK_VLLM_DEPS = importlib.util.find_spec("vllm") is None
 _vllm_mock_modules = [
     "vllm",
     "vllm.config",
-    "vllm.config.utils",
     "vllm.distributed",
     "vllm.distributed.kv_events",
     "vllm.distributed.kv_transfer",

@@ -2,21 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ctypes
-import hashlib
-import json
 import unittest
-from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
 # isort: split
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, UniformTypeKVCacheSpecs
-
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import metadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
@@ -36,143 +31,35 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
 
 
-@dataclass
-class CacheIdentity:
-    block_size: int = 32
-    cache_dtype: str = "bfloat16"
-
-    def compute_hash(self):
-        return f"{self.block_size}:{self.cache_dtype}"
-
-
 def config_for(prefix="", backend="mooncake"):
     return SimpleNamespace(
         kv_transfer_config=SimpleNamespace(kv_connector_extra_config={"cache_prefix": prefix, "backend": backend}),
-        model_config=SimpleNamespace(compute_hash=lambda: "model-v1", hf_config=SimpleNamespace(_commit_hash="hf-v1")),
-        cache_config=CacheIdentity(),
     )
 
 
-class TestCachePrefixResolution(unittest.TestCase):
-    def setUp(self):
-        self.env = SimpleNamespace(VLLM_IMAGE_TAG="image-v1", VLLM_BUILD_COMMIT="commit-v1")
-        env_patch = patch.object(metadata, "envs", self.env)
-        env_patch.start()
-        self.addCleanup(env_patch.stop)
-        # Keep these tests independent of a vLLM installation; also inspect
-        # the exact factors passed to the maintained upstream hash helper.
-        hash_patch = patch.object(
-            metadata,
-            "hash_factors",
-            side_effect=lambda factors: hashlib.sha256(json.dumps(factors, sort_keys=True).encode()).hexdigest(),
-        )
-        self.hash_factors = hash_patch.start()
-        self.addCleanup(hash_patch.stop)
-
-    def test_default_and_literal_values_do_not_require_build_identity(self):
-        self.env.VLLM_IMAGE_TAG = self.env.VLLM_BUILD_COMMIT = ""
-        for prefix in ("", "release-v2", "AUTO"):
+class TestFixedCachePrefix(unittest.TestCase):
+    def test_default_and_literal_values(self):
+        self.assertEqual(metadata.get_cache_prefix({}), "")
+        for prefix in ("", "release-v2", "AUTO", " auto ", "namespace@with:markers"):
             with self.subTest(prefix=prefix):
-                self.assertEqual(metadata.resolve_cache_prefix(config_for(prefix)), prefix)
-        self.hash_factors.assert_not_called()
+                self.assertEqual(metadata.get_cache_prefix({"cache_prefix": prefix}), prefix)
 
-    def test_non_mooncake_rejects_nonempty_prefix_before_accessing_model(self):
-        for backend in ("memcache", "yuanrong"):
-            for prefix in ("release-v2", "auto"):
-                config = config_for(prefix, backend)
-                del config.model_config
-                with self.subTest(backend=backend, prefix=prefix), self.assertRaisesRegex(ValueError, "only.*Mooncake"):
-                    metadata.resolve_cache_prefix(config)
-            self.assertEqual(metadata.resolve_cache_prefix(config_for("", backend)), "")
-        self.hash_factors.assert_not_called()
-
-    def test_upstream_string_coercion_and_omitted_default(self):
+    def test_upstream_literal_string_conversion(self):
         for value, expected in ((None, "None"), (False, "False"), (0, "0"), ([], "[]"), ({}, "{}")):
             with self.subTest(value=value):
-                self.assertEqual(metadata.resolve_cache_prefix(config_for(value)), expected)
-                for backend in ("memcache", "yuanrong"):
-                    with self.assertRaisesRegex(ValueError, "only.*Mooncake"):
-                        metadata.resolve_cache_prefix(config_for(value, backend))
-        config = config_for()
-        del config.kv_transfer_config.kv_connector_extra_config["cache_prefix"]
-        self.assertEqual(metadata.resolve_cache_prefix(config), "")
-        self.hash_factors.assert_not_called()
+                self.assertEqual(metadata.get_cache_prefix({"cache_prefix": value}), expected)
 
-    def test_auto_factors_and_image_precedence(self):
-        config = config_for("auto")
-        original = metadata.resolve_cache_prefix(config)
-        self.assertTrue(original.startswith("auto-"))
-        self.hash_factors.assert_called_with(
-            {"build": "image-v1", "model": "model-v1", "hf_commit": "hf-v1", "cache": "32:bfloat16"}
-        )
-        self.env.VLLM_BUILD_COMMIT = "commit-v2"
-        self.assertEqual(original, metadata.resolve_cache_prefix(config))
-        self.env.VLLM_IMAGE_TAG = "image-v2"
-        self.assertNotEqual(original, metadata.resolve_cache_prefix(config))
+    def test_non_mooncake_rejects_nonempty_prefix(self):
+        for backend in ("memcache", "yuanrong"):
+            for prefix in ("release-v2", "auto", None, False, 0):
+                with self.subTest(backend=backend, prefix=prefix), self.assertRaisesRegex(ValueError, "only.*Mooncake"):
+                    metadata.get_cache_prefix({"cache_prefix": prefix, "backend": backend})
+            for extra in ({"backend": backend}, {"backend": backend, "cache_prefix": ""}):
+                self.assertEqual(metadata.get_cache_prefix(extra), "")
 
-    def test_compile_factors_identity_matches_current_upstream_hashing(self):
-        config = config_for("auto")
-        config.model_config.compile_factors = lambda: {"model": "model-v1"}
-        config.model_config.compute_hash = MagicMock(side_effect=AssertionError("legacy hash must not be used"))
-        config.cache_config = SimpleNamespace(
-            block_size=32,
-            compile_factors=lambda: {"block_size": 32, "cache_dtype": "bfloat16"},
-            compute_hash=MagicMock(side_effect=AssertionError("legacy hash must not be used")),
-        )
-        expected_model = hashlib.sha256(json.dumps({"model": "model-v1"}, sort_keys=True).encode()).hexdigest()
-        expected_cache = hashlib.sha256(
-            json.dumps({"block_size": 32, "cache_dtype": "bfloat16"}, sort_keys=True).encode()
-        ).hexdigest()
-        self.assertTrue(metadata.resolve_cache_prefix(config).startswith("auto-"))
-        self.hash_factors.assert_called_with(
-            {"build": "image-v1", "model": expected_model, "hf_commit": "hf-v1", "cache": expected_cache}
-        )
-        config.model_config.compute_hash.assert_not_called()
-        config.cache_config.compute_hash.assert_not_called()
-
-    def test_commit_fallback_and_missing_build(self):
-        config = config_for("auto")
-        for image in ("", "local/vllm-openai:dev"):
-            self.env.VLLM_IMAGE_TAG = image
-            self.assertTrue(metadata.resolve_cache_prefix(config).startswith("auto-"))
-            self.assertEqual(self.hash_factors.call_args.args[0]["build"], "commit-v1")
-            for commit in ("", "unknown"):
-                self.env.VLLM_BUILD_COMMIT = commit
-                with self.assertRaisesRegex(ValueError, "VLLM_IMAGE_TAG or VLLM_BUILD_COMMIT"):
-                    metadata.resolve_cache_prefix(config)
-            self.env.VLLM_BUILD_COMMIT = "commit-v1"
-
-    def test_model_hf_and_cache_identity_changes_isolate(self):
-        config = config_for("auto")
-        original = metadata.resolve_cache_prefix(config)
-        for field in ("model", "hf", "cache"):
-            other = deepcopy(config)
-            if field == "model":
-                other.model_config.compute_hash = lambda: "model-v2"
-            elif field == "hf":
-                other.model_config.hf_config._commit_hash = "hf-v2"
-            else:
-                other.cache_config.cache_dtype = "int8"
-            with self.subTest(field=field):
-                self.assertNotEqual(original, metadata.resolve_cache_prefix(other))
-        config.scheduler_config = SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=4096)
-        self.assertEqual(original, metadata.resolve_cache_prefix(config))
-
-    def test_resolved_groups_normalize_scheduler_worker_without_mutation(self):
-        spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype="bfloat16")
-        uniform = UniformTypeKVCacheSpecs.from_specs({"layer.1": spec.copy_with_new_block_size(32)})
-        groups = SimpleNamespace(
-            kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec), KVCacheGroupSpec(["layer.1"], uniform)]
-        )
-        worker_config = config_for("auto")
-        scheduler_config = deepcopy(worker_config)
-        scheduler_config.cache_config.block_size = 16
-        self.assertEqual(
-            metadata.resolve_cache_prefix(worker_config, groups),
-            metadata.resolve_cache_prefix(scheduler_config, groups),
-        )
-        self.assertEqual(worker_config.cache_config.block_size, 32)
-        self.assertEqual(scheduler_config.cache_config.block_size, 16)
+    def test_auto_is_rejected_instead_of_becoming_a_literal_namespace(self):
+        with self.assertRaisesRegex(ValueError, "auto.*not supported.*fixed prefix"):
+            metadata.get_cache_prefix({"cache_prefix": "auto"})
 
 
 class TestCachePrefixKeys(unittest.TestCase):
@@ -262,20 +149,15 @@ class TestCachePrefixKeys(unittest.TestCase):
                 if dcp_size > 1:
                     self.assertIn("@dcp_size:2@dcp_rank:0", key)
 
-    def test_auto_prefix_is_used_by_bulk_and_layerwise_workers(self):
-        with (
-            patch.object(metadata, "envs", SimpleNamespace(VLLM_IMAGE_TAG="image-v1", VLLM_BUILD_COMMIT="")),
-            patch.object(metadata, "hash_factors", return_value="fingerprint"),
-        ):
-            for layerwise in (False, True):
-                worker = make_worker(self, use_layerwise=layerwise, extra_config={"cache_prefix": "auto"})
-                self.assertEqual(worker.cache_prefix, "auto-fingerprint")
-                self.assertEqual(worker.metadata[0].cache_prefix, worker.cache_prefix)
-                if layerwise:
-                    self.assertTrue(worker._make_layerwise_full_key(0, "hash").startswith("auto-fingerprint@"))
+    def test_auto_is_rejected_by_scheduler_and_bulk_and_layerwise_workers(self):
+        for layerwise in (False, True):
+            with self.subTest(layerwise=layerwise), self.assertRaisesRegex(ValueError, "auto.*not supported"):
+                make_worker(self, use_layerwise=layerwise, extra_config={"cache_prefix": "auto"})
+        with self.assertRaisesRegex(ValueError, "auto.*not supported"):
+            KVPoolScheduler(config_for("auto"), False)
 
-    def test_reset_is_unfiltered_for_every_prefix_mode(self):
-        for prefix in ("", "release-v1", "auto-0123"):
+    def test_reset_is_unfiltered_for_fixed_namespaces(self):
+        for prefix in ("", "release-v1", "release-v2"):
             backend = MooncakeBackend.__new__(MooncakeBackend)
             backend._store_initialized = True
             backend.store = MagicMock()
