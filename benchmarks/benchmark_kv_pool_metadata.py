@@ -30,6 +30,7 @@ from typing import Any
 
 SCHEDULER_PATH = "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_scheduler.py"
 WORKER_PATH = "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/layerwise/pool_worker.py"
+GVA_PATH = "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/layerwise/planes/gva.py"
 
 
 def load_source(root: Path, relative_path: str, label: str) -> Any:
@@ -88,6 +89,7 @@ class SchedulerCase:
             "_request_trackers": {},
             "_unfinished_requests": {req_id: (None, []) for req_id in unfinished_ids},
             "_preempted_req_ids": set(),
+            "_async_loading_req_ids": set(),
             "_loading_req_ids": set(),
         }.items():
             setattr(self.scheduler, name, value)
@@ -118,7 +120,7 @@ class SchedulerCase:
 
 
 class LeaseCase:
-    def __init__(self, module: Any, count: int) -> None:
+    def __init__(self, module: Any, gva_module: Any, count: int) -> None:
         import numpy as np
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -145,11 +147,12 @@ class LeaseCase:
             "_step_load_keys": set(),
             "m_store": self.store,
             "_compute_reachable_load_masks": lambda *_: None,
-            "_layerwise_load_snapshot_start": lambda *_: None,
-            "_resolve_layerwise_load_partial": lambda *_: (None, None),
+            "group_uses_align_state": [False],
+            "layerwise_max_transfer_blocks": 0,
             "_make_layerwise_full_key": self.make_key,
         }.items():
             setattr(self.worker, name, value)
+        self.data_plane = gva_module.GvaDataPlane(self.worker)
         ids = np.arange(count, dtype=np.int64)
         self.request = ReqMeta(
             req_id="benchmark-load",
@@ -172,7 +175,7 @@ class LeaseCase:
         self.worker._step_load_keys.clear()
 
     def run(self) -> Any:
-        return self.worker._prepare_load_gvas_for_request([self.request])
+        return self.data_plane._prepare_load_gvas([self.request])
 
     def verify(self, result: Any) -> dict[str, Any]:
         import numpy as np
@@ -247,7 +250,7 @@ def main() -> None:
     sys.path.insert(0, str(roots["candidate"]))
     logging.getLogger("vllm").setLevel(logging.WARNING)
     modules = {
-        label: (load_source(root, SCHEDULER_PATH, label), load_source(root, WORKER_PATH, label))
+        label: tuple(load_source(root, relative, label) for relative in (SCHEDULER_PATH, WORKER_PATH, GVA_PATH))
         for label, root in roots.items()
     }
     report: dict[str, Any] = {
@@ -261,16 +264,17 @@ def main() -> None:
         "sources": {},
         "cases": [],
     }
-    for label, (scheduler_module, worker_module) in modules.items():
+    for label, (scheduler_module, worker_module, gva_module) in modules.items():
         report["sources"][label] = {
             "root": str(roots[label]),
             "git_head": git_revision(roots[label]),
             "files": {
                 relative: hashlib.sha256((roots[label] / relative).read_bytes()).hexdigest()
-                for relative in (SCHEDULER_PATH, WORKER_PATH)
+                for relative in (SCHEDULER_PATH, WORKER_PATH, GVA_PATH)
             },
             "loaded_scheduler": inspect.getsourcefile(scheduler_module.KVPoolScheduler),
             "loaded_worker": inspect.getsourcefile(worker_module.LayerwiseKVPoolWorker),
+            "loaded_gva_plane": inspect.getsourcefile(gva_module.GvaDataPlane),
         }
     cases: dict[str, Any]
     for count in (128, 512, 1024, 4096):
@@ -310,7 +314,7 @@ def main() -> None:
                     }
                 )
     for count in (128, 512, 2048, 8192):
-        cases = {label: LeaseCase(pair[1], count) for label, pair in modules.items()}
+        cases = {label: LeaseCase(pair[1], pair[2], count) for label, pair in modules.items()}
         report["cases"].append(
             {
                 "phase": "prepare_layerwise_load_gvas",
