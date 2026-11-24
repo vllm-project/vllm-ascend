@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 import torch
-import torch_npu
 
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
 
