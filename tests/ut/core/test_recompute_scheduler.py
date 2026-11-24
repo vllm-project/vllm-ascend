@@ -413,6 +413,17 @@ def _make_mm_recompute_scheduler():
     return scheduler
 
 
+def _capture_recompute_encoder_refs(scheduler, request, captured):
+    update = scheduler._update_after_schedule
+
+    def record(output):
+        cached = scheduler.encoder_cache_manager.request_cached_ids.get(request.request_id, set())
+        captured.append(set(cached))
+        return update(output)
+
+    return patch.object(scheduler, "_update_after_schedule", side_effect=record)
+
+
 @pytest.mark.skipif(
     not hasattr(Scheduler, "_allocate_encoder_inputs"), reason="Requires the main duplicate-reference API"
 )
@@ -422,11 +433,13 @@ def test_waiting_multimodal_duplicate_cache_tracking():
     request = make_mm_request("mm", [("shared", [True, True]), ("shared", [True, True])])
     scheduler.add_request(request)
 
-    output = scheduler.schedule()
+    refs_before_update: list[set[int]] = []
+    with _capture_recompute_encoder_refs(scheduler, request, refs_before_update):
+        output = scheduler.schedule()
 
     assert output.scheduled_encoder_inputs[request.request_id] == [0]
     manager = scheduler.encoder_cache_manager
-    assert manager.request_cached_ids[request.request_id] == {0, 1}
+    assert refs_before_update == [{0, 1}]
     assert manager.cpu_num_free_slots == 6
     # Diagnostic manager payload, not a field transported by native MRv2.
     output.ec_manager_metadata = manager.get_manager_metadata()
@@ -453,13 +466,17 @@ def test_running_multimodal_duplicate_cache_tracking():
     scheduler.update_from_output(first, runner_output)
     assert request in scheduler.running
     scheduler.max_num_scheduled_tokens = 4
-    with patch.object(scheduler, "_allocate_encoder_inputs", wraps=scheduler._allocate_encoder_inputs) as allocate:
+    refs_before_update: list[set[int]] = []
+    with (
+        patch.object(scheduler, "_allocate_encoder_inputs", wraps=scheduler._allocate_encoder_inputs) as allocate,
+        _capture_recompute_encoder_refs(scheduler, request, refs_before_update),
+    ):
         output = scheduler.schedule()
 
     assert output.scheduled_encoder_inputs[request.request_id] == [1]
     allocate.assert_called_once_with(request, [1], [2])
     manager = scheduler.encoder_cache_manager
-    assert {1, 2} <= manager.request_cached_ids[request.request_id]
+    assert {1, 2} <= refs_before_update[0]
     manager._check_invariant()
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
     assert request.request_id not in manager.request_cached_ids
@@ -507,7 +524,9 @@ def test_release_encoder_contract_in_both_schedule_paths(monkeypatch, running):
     scheduler.max_num_scheduled_tokens = 2 if running else 8
     request = make_mm_request("mm", [("first", [True, True]), ("second", [True, True])])
     scheduler.add_request(request)
-    output = scheduler.schedule()
+    refs_before_update: list[set[int]] = []
+    with _capture_recompute_encoder_refs(scheduler, request, refs_before_update):
+        output = scheduler.schedule()
     if running:
         assert output.scheduled_encoder_inputs[request.request_id] == [0]
         runner_output = create_model_runner_output([request])
@@ -515,10 +534,11 @@ def test_release_encoder_contract_in_both_schedule_paths(monkeypatch, running):
         scheduler.update_from_output(output, runner_output)
         assert request in scheduler.running
         scheduler.max_num_scheduled_tokens = 4
-        output = scheduler.schedule()
+        with _capture_recompute_encoder_refs(scheduler, request, refs_before_update):
+            output = scheduler.schedule()
     assert output.scheduled_encoder_inputs[request.request_id] == ([1] if running else [0, 1])
     manager = scheduler.encoder_cache_manager
-    assert 1 in manager.request_cached_ids[request.request_id]
+    assert 1 in refs_before_update[-1]
     manager._check_invariant()
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
     assert request.request_id not in manager.request_cached_ids
