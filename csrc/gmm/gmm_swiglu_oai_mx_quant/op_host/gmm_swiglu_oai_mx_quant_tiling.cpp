@@ -278,6 +278,9 @@ bool GetAttrs(const gert::TilingContext* context, const Input& input, GMMSwigluQ
   swiglu.gluBias = *bias;
   swiglu.scaleAlg = input.fp4 ? 2 : 1;
   swiglu.dstTypeMax = *dstMax;
+  constexpr size_t scaleInitIndex = 5;
+  const auto* scaleInit = attrs->GetAttrNum() > scaleInitIndex ? attrs->GetAttrPointer<bool>(scaleInitIndex) : nullptr;
+  swiglu.mxScalePreinitialized = scaleInit != nullptr && *scaleInit;
   return true;
 }
 

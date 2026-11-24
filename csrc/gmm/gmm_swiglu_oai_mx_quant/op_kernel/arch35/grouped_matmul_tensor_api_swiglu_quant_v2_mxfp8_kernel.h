@@ -128,9 +128,11 @@ __aicore__ inline void GmmTensorApiSwigluQuantMxFp8Kernel(GM_ADDR x, GM_ADDR wei
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
         if constexpr (AscendC::IsSameType<CType, fp8_e4m3fn_t>::value ||
                       AscendC::IsSameType<CType, fp4x2_e2m1_t>::value) {
-            GroupedMatmulDequantSwigluQuant::ClearUnprocessedMxScaleRows(
-                groupList, yScale, gmmParams.m, gmmParams.n / GroupedMatmulDequantSwigluQuant::SWIGLU_REDUCE_FACTOR,
-                gmmParams.groupNum, gmmParams.groupListType, swigluParams_.swigluMode);
+            if (!swigluParams_.mxScalePreinitialized) {
+                GroupedMatmulDequantSwigluQuant::ClearUnprocessedMxScaleRows(
+                    groupList, yScale, gmmParams.m, gmmParams.n / GroupedMatmulDequantSwigluQuant::SWIGLU_REDUCE_FACTOR,
+                    gmmParams.groupNum, gmmParams.groupListType, swigluParams_.swigluMode);
+            }
         }
 #endif
     }
