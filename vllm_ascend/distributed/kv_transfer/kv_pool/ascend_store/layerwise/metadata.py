@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionLoadGate
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     PoolKey,
     ReqMeta,
@@ -172,4 +172,4 @@ class LayerLoadTask:
     wait_for_save_layers: tuple[int, ...]
     transfer_tasks: list[LayerTransferTask]
     layer_id: int
-    attention_start_gate: AttentionComputeStartGate | None = None
+    load_gate: AttentionLoadGate | None = None

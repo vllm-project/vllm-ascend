@@ -12,7 +12,7 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionLoadGate
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
@@ -113,7 +113,7 @@ class KVTransferThread(threading.Thread):
 
     def _wait_for_event(
         self,
-        event: threading.Event | AttentionComputeStartGate,
+        event: threading.Event | AttentionLoadGate,
         failure_checker: Callable[[], None] | None = None,
     ) -> bool:
         while not self._stopping.is_set():
