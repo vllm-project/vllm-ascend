@@ -2937,6 +2937,46 @@ The msmodeling tool (MindStudio-Modeling) optimizes serving and benchmark parame
 
 For the complete, step-by-step usage guide please refer to **[Optix-for-PD-disaggregation](https://gitcode.com/Ascend/msmodeling/blob/master/docs/en/quick_start/optix_agent_pd_disaggregation.md)**.
 
+#### 9.2.4 Opt-in MXFP4 Index Scoring on 950DT
+
+Add `--attention-config '{"indexer_kv_dtype":"mxfp4"}'` to enable MXFP4
+query/key operands for MSA index scoring on Ascend 950. Omitting this option
+preserves the existing indexer format. Model weights and the main attention
+cache retain their configured formats. Logical index head dimensions 64 and
+128 are supported.
+
+Use a CANN 9.3 operator build whose standard
+`cann_ops_transformer.ops.msa_index_score` binding supports MXFP4 Q/K and
+separate E8M0 `query_scale`/`key_scale` operands. Fusion additionally requires
+`return_choice` and `topk` in that binding. The integration uses the paged
+`BBND` layout; no separately named experimental Python package or namespace
+rewriting is needed. Validate the selected CANN build on the serving runtime
+before deployment; the CANN version alone does not establish operator support.
+
+For 128-wide BF16 heads and supported normalization weights, fused prepare
+retains QK normalization, RoPE, and main KV insertion. It computes the
+normalization scale `1 + weight` in FP32, as in the ordinary fused prepare
+path, and materializes BF16 index Q and new K into one contiguous buffer.
+One native MXFP4 quantization call processes both, inserts only new K bytes
+and E8M0 scales into the managed cache, and forwards packed Q without another
+quantization. Unsupported prepare configurations use the separate prepare
+path. Both paths preserve cached prefixes.
+
+MXFP4 uses the same fused IndexScore/TopK selection as the other A5 indexer
+formats. When supported, `return_choice=1` returns ascending logical block
+IDs with `-1` padding, including the configured initial/local blocks. Decode
+also derives valid-block counts from those indices for GBSA. TopK must be a
+multiple of 8 in the range 1 through 128. Other TopK sizes, an older binding
+without the fusion interface, or a decode consumer that does not request
+sorted indices retain the separate score/TopK path.
+
+Start a new worker process and rebuild the index cache when switching
+formats. See `vllm_ascend/ops/triton/docs/msa_m3_mxfp4_cache.md` in the source
+tree for the packing and insertion contract. BF16-to-MXFP4 quantization can
+change block selection, generated tokens, and speculative acceptance. Run
+model-quality evaluation and clean serving benchmarks for the selected
+weights and runtime before claiming an accuracy or throughput improvement.
+
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, refer to the [Public FAQs](../../faqs.md). This section covers MiniMax-M3.1-Flash-specific deployment issues.

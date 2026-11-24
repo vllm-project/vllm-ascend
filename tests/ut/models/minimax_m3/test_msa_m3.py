@@ -423,6 +423,67 @@ def test_m3_indexer_cache_spec_follows_resolved_fp8_dtype(mock_get_vllm_config: 
     assert spec.cache_dtype_str == "fp8"
 
 
+@pytest.mark.parametrize("head_dim", [64, 128])
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("indexer_dtype", ["bf16", "mxfp4"])
+def test_m3_mxfp4_configuration_and_managed_cache(head_dim, device_type, indexer_dtype) -> None:
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(indexer_kv_dtype=indexer_dtype),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+        cache_config=SimpleNamespace(block_size=128),
+    )
+    kwargs = dict(
+        num_kv_heads=1,
+        scale=1.0,
+        topk_blocks=16,
+        sparse_block_size=128,
+        num_index_heads=1,
+        index_head_dim=head_dim,
+        prefix="layer0.attn",
+    )
+    with (
+        patch.object(msa_m3_module, "get_current_vllm_config", return_value=config),
+        patch.object(msa_m3_module, "get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
+        patch.object(msa_m3_module, "_CANN_INDEX_SCORE_AVAILABLE", True),
+    ):
+        if indexer_dtype == "mxfp4" and device_type != AscendDeviceType.A5:
+            with pytest.raises(ValueError, match="requires Ascend 950"):
+                AscendMiniMaxM3IndexerImpl(**kwargs)
+            return
+        impl = AscendMiniMaxM3IndexerImpl(**kwargs)
+        spec = impl.index_cache.get_kv_cache_spec(config)
+    quantized = indexer_dtype == "mxfp4"
+    assert impl.use_mxfp4 is quantized
+    assert spec.dtype == (torch.uint8 if quantized else torch.bfloat16)
+    assert spec.head_size == (head_dim // 2 if quantized else head_dim)
+    assert spec.scale_dim == (head_dim // 32 if quantized else 0)
+    assert spec.cache_sparse_li_c4 is quantized
+    expected_bytes = 128 * (head_dim // 2 + head_dim // 32) if quantized else 128 * head_dim * 2
+    assert spec.page_size_bytes == expected_bytes
+
+
+@pytest.mark.parametrize("head_dim, cann_available", [(96, True), (128, False)])
+def test_m3_mxfp4_rejects_unsupported_configuration(head_dim, cann_available) -> None:
+    config = SimpleNamespace(attention_config=SimpleNamespace(indexer_kv_dtype="mxfp4"))
+    with (
+        patch.object(msa_m3_module, "get_current_vllm_config", return_value=config),
+        patch.object(
+            msa_m3_module, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A5)
+        ),
+        patch.object(msa_m3_module, "_CANN_INDEX_SCORE_AVAILABLE", cann_available),
+        pytest.raises(ValueError, match="head dimension|metadata path"),
+    ):
+        AscendMiniMaxM3IndexerImpl(
+            num_kv_heads=1,
+            scale=1.0,
+            topk_blocks=16,
+            sparse_block_size=128,
+            num_index_heads=1,
+            index_head_dim=head_dim,
+            prefix="layer0.attn",
+        )
+
+
 def test_a5_decode_topk_keeps_fused_postprocess_fast_path() -> None:
     source_path = Path(msa_m3_index_postprocess.__file__).with_name("msa_m3_index_topk.py")
     source = source_path.read_text(encoding="utf-8")
@@ -1608,6 +1669,36 @@ def test_cann_index_score_forwards_metadata_operands() -> None:
     assert kwargs["topk"] == 8
     assert kwargs["init_blocks"] == 2
     assert kwargs["local_blocks"] == 3
+
+
+@pytest.mark.parametrize("causal", [False, True])
+def test_mxfp4_index_score_forwards_paged_cache_and_metadata(causal) -> None:
+    query = torch.ones(8, 1, 128, dtype=torch.bfloat16)
+    cache = (torch.zeros(4, 128, 64, dtype=torch.uint8), torch.zeros(4, 128, 2, 2, dtype=torch.uint8))
+    table = torch.tensor([[1, 0]], dtype=torch.int32)
+    q_lengths = torch.tensor([0, 8], dtype=torch.int32)
+    k_lengths = torch.tensor([129], dtype=torch.int32)
+    start = torch.tensor([1], dtype=torch.int32)
+    mask = torch.zeros(2048, 2048, dtype=torch.int8) if causal else None
+    expected = torch.empty(1, 8, 16)
+    with patch("vllm_ascend.models.minimax_m3.ops.msa_m3_npu.mxfp4_index_score", return_value=expected) as score:
+        actual = _minimax_m3_index_score(
+            query, cache, table, q_lengths, k_lengths, start, mask, init_blocks=2, local_blocks=3
+        )
+    assert actual is expected
+    score.assert_called_once_with(
+        query,
+        cache,
+        start,
+        block_table=table,
+        atten_mask=mask,
+        actual_seq_qlen=q_lengths,
+        actual_seq_klen=k_lengths,
+        layout_key="BBND",
+        sparse_mode=3 if causal else 0,
+        init_blocks=0,
+        local_blocks=0,
+    )
 
 
 def test_cann_index_score_casts_query_to_fp8_cache_dtype() -> None:
@@ -3654,3 +3745,119 @@ def test_gbsa_reuse_rejects_nonuniform_shape_contract(mock_gbsa_ops):
             gbsa_metadata_cache=cache,
         )
     assert not cache and metadata_op.call_count == 2
+
+
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("prequantized", [False, True])
+def test_mxfp4_fused_topk_forwards_metadata(causal, prequantized) -> None:
+    operands = _fused_index_topk_operands(total_q=8)
+    if prequantized:
+        operands["idx_q"] = (torch.zeros(8, 2, 64, dtype=torch.uint8), torch.zeros(8, 2, 4, dtype=torch.uint8))
+    operands["index_kv_cache"] = (
+        torch.zeros(4, 128, 64, dtype=torch.uint8),
+        torch.zeros(4, 128, 2, 2, dtype=torch.uint8),
+    )
+    if not causal:
+        operands["causal_mask"] = None
+    expected = torch.full((2, 8, 16), -1, dtype=torch.int32)
+    with patch.object(msa_m3_npu_module, "mxfp4_index_score", return_value=expected) as native:
+        actual = _minimax_m3_index_score_topk(**operands, topk=16, init_blocks=2, local_blocks=1)
+    assert actual is expected
+    native.assert_called_once_with(
+        operands["idx_q"],
+        operands["index_kv_cache"],
+        operands["start_loc"],
+        return_choice=1,
+        topk=16,
+        block_table=operands["block_table"],
+        atten_mask=operands["causal_mask"],
+        actual_seq_qlen=operands["cu_seqlens_q"],
+        actual_seq_klen=operands["seq_lens"],
+        layout_key="BBND",
+        sparse_mode=3 if causal else 0,
+        init_blocks=2,
+        local_blocks=1,
+    )
+
+
+@pytest.mark.parametrize("query_len", [1, 8])
+@pytest.mark.parametrize("decode", [False, True])
+def test_mxfp4_cache_preserves_fused_topk_routing(fused_index_ops, query_len, decode) -> None:
+    operands = _index_score_test_operands(total_q=query_len)
+    operands["idx_q"] = (
+        torch.zeros(query_len, 2, 64, dtype=torch.uint8),
+        torch.zeros(query_len, 2, 4, dtype=torch.uint8),
+    )
+    operands["index_kv_cache"] = (
+        torch.zeros(4, 128, 64, dtype=torch.uint8),
+        torch.zeros(4, 128, 2, 2, dtype=torch.uint8),
+    )
+    # The native result contains ascending IDs followed by invalid padding.
+    expected = torch.tensor([0, 1, 3] + [-1] * 13, dtype=torch.int32).expand(2, query_len, 16).contiguous()
+    with (
+        patch.object(msa_m3_npu_module, "mxfp4_index_score", return_value=expected) as native,
+        patch.object(msa_m3_npu_module, "_minimax_m3_index_score") as separate_score,
+        patch.object(msa_m3_npu_module, "_minimax_m3_index_prefill_topk") as separate_prefill,
+        patch.object(msa_m3_npu_module, "index_decode_topk_fused") as separate_decode,
+    ):
+        if decode:
+            actual, counts = minimax_m3_index_decode(
+                **operands,
+                topk=16,
+                init_blocks=2,
+                local_blocks=1,
+                decode_query_len=query_len,
+                sort_indices=True,
+            )
+            torch.testing.assert_close(counts, torch.full((2, query_len), 3, dtype=torch.int32))
+        else:
+            actual = minimax_m3_index_prefill(
+                **operands,
+                topk=16,
+                init_blocks=2,
+                local_blocks=1,
+                max_query_len=query_len,
+                max_seq_len=512,
+            )
+    assert actual is expected
+    assert native.call_args.kwargs["return_choice"] == 1
+    assert native.call_args.kwargs["init_blocks"] == 2
+    assert native.call_args.kwargs["local_blocks"] == 1
+    separate_score.assert_not_called()
+    separate_prefill.assert_not_called()
+    separate_decode.assert_not_called()
+
+
+@pytest.mark.parametrize("topk,sort_indices", [(3, True), (16, False)])
+def test_mxfp4_decode_keeps_separate_topk_fallback(fused_index_ops, topk, sort_indices) -> None:
+    operands = _index_score_test_operands()
+    operands["index_kv_cache"] = (
+        torch.zeros(4, 128, 64, dtype=torch.uint8),
+        torch.zeros(4, 128, 2, 2, dtype=torch.uint8),
+    )
+    score = torch.zeros(2, 2, 16)
+    expected = (torch.zeros(2, 2, topk, dtype=torch.int32), torch.full((2, 2), topk, dtype=torch.int32))
+    with (
+        patch.object(msa_m3_npu_module, "mxfp4_index_score", return_value=score) as native,
+        patch.object(msa_m3_npu_module, "index_decode_topk_fused", return_value=expected) as separate,
+    ):
+        actual = minimax_m3_index_decode(
+            **operands,
+            topk=topk,
+            init_blocks=2,
+            local_blocks=1,
+            decode_query_len=1,
+            sort_indices=sort_indices,
+        )
+    assert actual is expected
+    assert "return_choice" not in native.call_args.kwargs
+    separate.assert_called_once_with(
+        score,
+        operands["context_lens"],
+        1,
+        topk,
+        4,
+        init_blocks=2,
+        local_blocks=1,
+        sort_indices=sort_indices,
+    )

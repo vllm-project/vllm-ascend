@@ -1,0 +1,12 @@
+pr: 22283
+entries:
+  - category: feature
+    text: >-
+      Added opt-in MXFP4 index scoring for MiniMax-M3/M3.1 on Ascend 950 via
+      --attention-config '{"indexer_kv_dtype":"mxfp4"}'. It requires a CANN
+      operator build with MXFP4 support in the standard msa_index_score API
+      and retains fused IndexScore/TopK when supported. Omitting the option
+      preserves the existing indexer format; model weights and the main
+      attention cache keep their configured formats.
+    model: minimax-m3
+    hardware: [A5]
