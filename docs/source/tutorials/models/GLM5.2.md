@@ -2467,6 +2467,47 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
     This GLM-5.3 W8A8C8 MXFP8 example uses one PP2/TP1/PCP8 Prefill instance across P0/P1 and a DP16/TP1 Decode group across D0/D1. Only P0 exposes a Prefill API; P1 is headless. Both roles use a 135,000-token limit, prefix caching and direct layerwise Mooncake transfer. AscendStore uses MemCache; Decode also offloads preempted KV cache to CPU.
 
+    Use the following MemCache configuration for this scenario. Replace
+    `<METADATA_SERVICE_IP>` with the metadata host address in all three files.
+    Point `MMC_LOCAL_CONFIG_PATH` to the role-specific local configuration.
+
+    Prefill local configuration:
+
+    ```ini
+    ock.mmc.meta_service_url = tcp://<METADATA_SERVICE_IP>:39100
+    ock.mmc.local_service.config_store_url = tcp://<METADATA_SERVICE_IP>:39101
+    ock.mmc.log_level = info
+    ock.mmc.local_service.world_size = 256
+    ock.mmc.local_service.protocol = device_urma
+    ock.mmc.local_service.dram.size = 0GB
+    ock.mmc.local_service.max.dram.size = 1024GB
+    ock.mmc.local_service.storage.enabled = false
+    ```
+
+    Decode local configuration:
+
+    ```ini
+    ock.mmc.meta_service_url = tcp://<METADATA_SERVICE_IP>:39100
+    ock.mmc.local_service.config_store_url = tcp://<METADATA_SERVICE_IP>:39101
+    ock.mmc.log_level = info
+    ock.mmc.local_service.world_size = 256
+    ock.mmc.local_service.protocol = device_urma
+    ock.mmc.local_service.dram.size = 16GB
+    ock.mmc.local_service.max.dram.size = 1024GB
+    ock.mmc.local_service.storage.enabled = false
+    ubsio.standalone.device_count = 1
+    ```
+
+    Metadata service configuration:
+
+    ```ini
+    ock.mmc.meta_service_url = tcp://<METADATA_SERVICE_IP>:39100
+    ock.mmc.meta_service.config_store_url = tcp://<METADATA_SERVICE_IP>:39101
+    ock.mmc.meta_service.metrics_url = http://<METADATA_SERVICE_IP>:39102
+    ock.mmc.meta.ha.enable = false
+    ock.mmc.log_level = info
+    ```
+
     ###### Prepare the Scripts
 
     1. prepare the script `launch_online_dp.py` on each Decode node:
@@ -2598,9 +2639,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                         "kv_connector_extra_config": {
                           "backend": "memcache",
                           "lookup_rpc_port": "520",
-                          "use_layerwise": true,
-                          "consumer_is_to_load": false,
-                          "consumer_is_to_put": false
+                          "use_layerwise": true
                         }
                       }
                     ]
@@ -2740,9 +2779,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                         "kv_connector_extra_config": {
                           "backend": "memcache",
                           "lookup_rpc_port": "520",
-                          "use_layerwise": true,
-                          "consumer_is_to_load": false,
-                          "consumer_is_to_put": false
+                          "use_layerwise": true
                         }
                       }
                     ]
@@ -2876,9 +2913,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                         "kv_connector_extra_config": {
                           "backend": "memcache",
                           "lookup_rpc_port": "'"$((600 + $4))"'",
-                          "use_layerwise": false,
-                          "consumer_is_to_load": false,
-                          "consumer_is_to_put": false
+                          "use_layerwise": false
                         }
                       },
                       {
@@ -2977,7 +3012,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     - `MultiConnector` combines direct layerwise `MooncakeConnectorV2`
       transfer with `AscendStoreConnector`. Base KV ports are `29100` on
       Prefill and `29200` on Decode. AscendStore uses layerwise operation
-      on Prefill only; both consumer load/put flags are disabled.
+      on Prefill only.
     - Decode also uses `PreemptOffloadConnector` with 4 GiB of CPU memory
       per rank (32 GiB per eight-rank node). MemCache lookup ports are
       `520` on Prefill and `600 + DP rank` on Decode.
