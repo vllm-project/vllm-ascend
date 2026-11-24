@@ -21,8 +21,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /workspace
 
-# Install clang-15 (for triton-ascend)
+# Install clang-15 (for triton-ascend) and the glibc stubs needed by
+# bisheng when cross-compiling A3 AccOffload on amd64.
 RUN apt-get update -y && \
+    if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+        apt-get install -y gcc-multilib libc6-dev-i386; \
+    fi && \
     apt-get install -y git vim wget curl protobuf-compiler libprotobuf-dev net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libhiredis-dev clang-15 && \
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
