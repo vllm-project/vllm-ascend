@@ -17,6 +17,14 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm_ascend.models import qwen3_dflash2 as dflash2
 
 
+def test_grouped_conv_keeps_nonfinite_taps_inside_each_request():
+    hidden_states = torch.tensor([[1.0, 1.0], [torch.nan, torch.inf], [2.0, 3.0], [5.0, 7.0]])
+    output = dflash2._grouped_conv(
+        hidden_states, torch.zeros(4, 2, 1), torch.ones(2, 2), block_size=2, num_groups=1, group_size=2, taps=2
+    )
+    torch.testing.assert_close(output[2:], torch.tensor([[2.0, 3.0], [7.0, 10.0]]))
+
+
 @pytest.fixture
 def build_mla_layer(monkeypatch):
     vllm_config = SimpleNamespace(

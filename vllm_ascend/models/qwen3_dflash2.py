@@ -21,6 +21,7 @@ from vllm.model_executor.models.qwen3_dflash import (
     _resolve_layer_attention,
     dflash_has_any_non_causal,
 )
+from vllm.model_executor.models.qwen3_dflash2 import DFlashGroupedConv as UpstreamDFlashGroupedConv
 from vllm.model_executor.models.utils import maybe_prefix
 
 from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiMLAAttention, store_mla_draft_context_kv
@@ -57,42 +58,13 @@ def _grouped_conv(
     # also keeps single-request short drafts from padding beyond the input.
     for tap in range(1, min(taps, block_size)):
         shifted = F.pad(blocks[:-tap], (0, 0, 0, 0, tap, 0))
-        output += coefficients[:, tap] * shifted * (position >= tap).view(-1, 1, 1)
+        # Multiplying a cross-request NaN or Inf by zero would retain a NaN.
+        shifted = torch.where((position >= tap).view(-1, 1, 1), shifted, 0)
+        output += coefficients[:, tap] * shifted
     return output.flatten(-2)
 
 
-class DFlashGroupedConv(nn.Module):
-    def __init__(
-        self,
-        hidden_size: int,
-        taps: int,
-        group_size: int,
-        block_size: int,
-        params_dtype: torch.dtype,
-        prefix: str,
-        quant_config: QuantizationConfig | None = None,
-    ) -> None:
-        super().__init__()
-        if hidden_size % group_size:
-            raise ValueError(f"conv_group_size={group_size} must divide hidden_size={hidden_size}.")
-        self.block_size = block_size
-        self.taps = taps
-        self.group_size = group_size
-        self.num_groups = hidden_size // group_size
-        self.base_kernel = nn.Parameter(
-            torch.empty(2, taps, hidden_size, dtype=params_dtype),
-            requires_grad=False,
-        )
-        self.kernel_projection = ReplicatedLinear(
-            hidden_size,
-            2 * taps * self.num_groups,
-            bias=False,
-            params_dtype=params_dtype,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "kernel_projection"),
-            return_bias=False,
-        )
-
+class DFlashGroupedConv(UpstreamDFlashGroupedConv):
     def _convolve(self, hidden_states: torch.Tensor, delta: torch.Tensor, side: int) -> torch.Tensor:
         return _grouped_conv(
             hidden_states,
@@ -103,15 +75,6 @@ class DFlashGroupedConv(nn.Module):
             self.group_size,
             self.taps,
         )
-
-    def prepare(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        coefficients = self.kernel_projection(hidden_states).reshape(
-            hidden_states.shape[0], 2, self.taps, self.num_groups
-        )
-        return self._convolve(hidden_states, coefficients[:, 0], 0), coefficients[:, 1]
-
-    def finish(self, hidden_states: torch.Tensor, coefficients: torch.Tensor) -> torch.Tensor:
-        return self._convolve(hidden_states, coefficients, 1)
 
 
 class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
@@ -133,6 +96,11 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
             quant_config=quant_config,
             prefix=prefix,
         )
+        self._init_convs(vllm_config, config, quant_config, prefix)
+
+    def _init_convs(
+        self, vllm_config: VllmConfig, config, quant_config: QuantizationConfig | None, prefix: str
+    ) -> None:
         draft_config = config.dflash_config
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
@@ -353,7 +321,6 @@ class DFlash2Qwen3MLADecoderLayer(DFlash2Qwen3DecoderLayer):
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
-        dflash_config = config.dflash_config
         if getattr(config, "q_lora_rank", None) is None:
             raise ValueError("DFlash2 MLA draft requires q_lora_rank in the draft config.")
         sliding_window, causal = _resolve_layer_attention(config, layer_idx)
@@ -388,18 +355,7 @@ class DFlash2Qwen3MLADecoderLayer(DFlash2Qwen3DecoderLayer):
             config.hidden_size,
             eps=config.rms_norm_eps,
         )
-        speculative_config = vllm_config.speculative_config
-        assert speculative_config is not None
-        conv_args = dict(
-            hidden_size=config.hidden_size,
-            taps=int(dflash_config["conv_kernel_size"]),
-            group_size=int(dflash_config["conv_group_size"]),
-            block_size=1 + speculative_config.num_speculative_tokens,
-            params_dtype=vllm_config.model_config.dtype,
-            quant_config=quant_config,
-        )
-        self.attention_conv = DFlashGroupedConv(**conv_args, prefix=maybe_prefix(prefix, "attention_conv"))
-        self.mlp_conv = DFlashGroupedConv(**conv_args, prefix=maybe_prefix(prefix, "mlp_conv"))
+        self._init_convs(vllm_config, config, quant_config, prefix)
 
 
 class DFlash2Qwen3MLAModel(DFlash2Qwen3Model):
