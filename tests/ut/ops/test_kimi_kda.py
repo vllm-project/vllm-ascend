@@ -992,16 +992,10 @@ def test_local_tp_projection_stream_order(monkeypatch, groups, mode, comm_mode, 
     qkv_exchange_stream = "aux" if comm_mode == "CCU_SCHED" else "main"
     assert trace.count(("QKV_A2A", qkv_exchange_stream)) == int(q_group is not None)
     assert trace.count(("G_A2A", "aux")) == int(g_group is not None)
-    assert (
-        trace.index(("F_a", "main"))
-        < trace.index(("F_b", "main"))
-        < trace.index(("beta", "aux"))
-        < trace.index(("quant", "main"))
-        < trace.index(("join", "main"))
-        < trace.index(("QKV", "main"))
-        < trace.index(("G", "main"))
-    )
+    quant_index = trace.index(("quant", "main"))
+    assert trace[quant_index : quant_index + 3] == [("quant", "main"), ("QKV", "main"), ("beta", "main")]
     gate_index = trace.index(("G", "main"))
+    assert trace.index(("F_a", "main")) < trace.index(("F_b", "main")) < quant_index < gate_index
     if q_group is not None:
         qkv_exchange_index = trace.index(("QKV_A2A", qkv_exchange_stream))
         assert gate_index < qkv_exchange_index
@@ -1013,7 +1007,7 @@ def test_local_tp_projection_stream_order(monkeypatch, groups, mode, comm_mode, 
                 < trace.index(("F_a", "main"))
                 < trace.index(("F_b", "main"))
                 < trace.index(("AG_wait", "main"))
-                < trace.index(("beta", "aux"))
+                < quant_index
             )
         if comm_mode == "CCU_SCHED":
             assert trace.index(("pack_ready", "main")) < gate_index < trace.index(("wait_pack", "aux"))

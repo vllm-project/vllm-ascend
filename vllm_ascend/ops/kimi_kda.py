@@ -636,14 +636,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         if gather_work is not None:
             gather_work.wait()
 
-        with npu_stream_switch(aux):
-            aux.wait_stream(main)
-            q_hidden.record_stream(aux)
-            beta = self.b_proj(q_hidden)[0]
         quantized = self._quantize_fused_qkv(q_hidden)
-        main.wait_stream(aux)
-        beta.record_stream(main)
         qkv = self._matmul_fused_qkv(quantized)
+        beta = self.b_proj(q_hidden)[0]
         core_out = hidden.new_zeros((1, capacity, self.local_num_heads, self.head_dim))
 
         gate_layout = self.gate_layout
