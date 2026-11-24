@@ -41,8 +41,24 @@ def test_mega_qkv_layout_and_reload(monkeypatch):
     torch.testing.assert_close(layer.weight_scale, scales.bitwise_xor(1).view(rows, -1, 2).transpose(0, 1).unsqueeze(0))
 
 
-@pytest.mark.parametrize("mode", ["dummy", "decode", "first_token", "long_prefill", "mixed", "decode_prefill"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "dummy",
+        "decode",
+        "first_token",
+        "long_prefill",
+        "mixed",
+        "decode_prefill",
+        "ssm",
+        "ssm_mixed",
+        "ssm_long_prefill",
+        "ssm_decode",
+    ],
+)
 def test_mega_kda_model_dispatch(monkeypatch, mode):
+    use_ssm = mode.startswith("ssm")
+    mode = mode.removeprefix("ssm_")
     x = torch.arange(20, dtype=torch.bfloat16).reshape(5, 4)
     indices = torch.tensor([0, 2, 3], dtype=torch.int32)
     metadata = SimpleNamespace(
@@ -50,7 +66,7 @@ def test_mega_kda_model_dispatch(monkeypatch, mode):
         num_prefill_tokens={"first_token": 1, "long_prefill": 5, "mixed": 3, "decode_prefill": 3}.get(mode, 0),
         num_decodes=2 if mode == "decode_prefill" else 0,
         num_decode_tokens=2 if mode == "decode_prefill" else 0,
-        num_spec_decodes=int(mode == "mixed"),
+        num_spec_decodes=int(mode in ("mixed", "ssm")),
         num_spec_decode_tokens=2 if mode == "mixed" else 0,
         num_actual_tokens=5,
         non_spec_token_indx=indices if mode == "mixed" else None,
@@ -85,6 +101,11 @@ def test_mega_kda_model_dispatch(monkeypatch, mode):
     proj = MagicMock(side_effect=lambda hidden: (hidden, None, None, None))
 
     def native(hidden, g1, g2, beta, out, *, beta_is_preprocessed, native_prefill_metadata):
+        if use_ssm:
+            assert not beta_is_preprocessed
+            assert native_prefill_metadata is metadata
+            out.copy_((hidden + 2).reshape_as(out))
+            return
         assert beta_is_preprocessed
         assert native_prefill_metadata.num_spec_decodes == 0
         assert native_prefill_metadata.num_actual_tokens == hidden.size(0)
@@ -102,7 +123,8 @@ def test_mega_kda_model_dispatch(monkeypatch, mode):
 
     layer = SimpleNamespace(
         prefix="layer",
-        _mega_kda_op=object(),
+        use_recoverssm=use_ssm,
+        _mega_kda_op=SimpleNamespace(verify_ssm=lambda layer, meta, hidden, weights, output: output.copy_(hidden + 3)),
         _mega_kda_scale_alg=1,
         _fused_bfg_output_sizes=(1, 4, 4),
         _mega_output_norm_weight=MagicMock(),
@@ -123,6 +145,16 @@ def test_mega_kda_model_dispatch(monkeypatch, mode):
     result = torch.empty_like(x)
     kimi_kda.AscendKimiK3DeltaAttention._forward_upstream_mega_kda(layer, x, result)
     expected = x + 1
+    if mode == "ssm":
+        torch.testing.assert_close(result, x + 3)
+        upstream.assert_not_called()
+        proj.assert_not_called()
+        return
+    if use_ssm:
+        torch.testing.assert_close(result, x + 2)
+        upstream.assert_not_called()
+        proj.assert_called_once_with(x)
+        return
     if mode == "dummy":
         expected.zero_()
     elif mode == "long_prefill":

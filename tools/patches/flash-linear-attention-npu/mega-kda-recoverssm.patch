@@ -1,0 +1,468 @@
+--- a/fla/ops/ascendc/kda/mega_recurrent_kda/op_host/kda_metadata.h
++++ b/fla/ops/ascendc/kda/mega_recurrent_kda/op_host/kda_metadata.h
+@@ -43,6 +43,7 @@
+     DecayStride,
+     WorkspaceBytes,
+     CrossesTile,
++    SsmSlotStride,
+     FieldCount
+ };
+ using Values = std::array<int64_t, FieldCount>;
+--- a/fla/ops/ascendc/kda/mega_recurrent_kda/op_host/mega_recurrent_kda_def.cpp
++++ b/fla/ops/ascendc/kda/mega_recurrent_kda/op_host/mega_recurrent_kda_def.cpp
+@@ -22,9 +22,9 @@
+             .FormatList(nd)
+             .IgnoreContiguous();
+         this->Input("replay_u").ParamType(REQUIRED).DataTypeList({ge::DT_FLOAT}).FormatList(nd).IgnoreContiguous();
+-        this->Input("replay_k").ParamType(REQUIRED).DataTypeList({ge::DT_FLOAT16}).FormatList(nd).IgnoreContiguous();
++        this->Input("replay_k").ParamType(REQUIRED).DataTypeList({ge::DT_FLOAT16, ge::DT_BF16}).FormatList(nd).IgnoreContiguous();
+         this->Input("replay_decay").ParamType(REQUIRED).DataTypeList({ge::DT_FLOAT}).FormatList(nd).IgnoreContiguous();
+-        this->Input("state_indices").ParamType(REQUIRED).DataTypeList({ge::DT_INT32}).FormatList(nd);
++        this->Input("state_indices").ParamType(REQUIRED).DataTypeList({ge::DT_INT32}).FormatList(nd).IgnoreContiguous();
+         this->Input("conv_num_accepted_tokens").ParamType(REQUIRED).DataTypeList({ge::DT_INT32}).FormatList(nd);
+         this->Input("a_log").ParamType(REQUIRED).DataTypeList({ge::DT_FLOAT}).FormatList(nd);
+         this->Input("dt_bias").ParamType(REQUIRED).DataTypeList({ge::DT_FLOAT}).FormatList(nd);
+@@ -40,7 +40,7 @@
+         this->Output("replay_u_out").ParamType(REQUIRED).DataTypeList({ge::DT_FLOAT}).FormatList(nd).IgnoreContiguous();
+         this->Output("replay_k_out")
+             .ParamType(REQUIRED)
+-            .DataTypeList({ge::DT_FLOAT16})
++            .DataTypeList({ge::DT_FLOAT16, ge::DT_BF16})
+             .FormatList(nd)
+             .IgnoreContiguous();
+         this->Output("replay_decay_out")
+--- a/fla/ops/ascendc/kda/mega_recurrent_kda/op_host/op_api/aclnn_mega_recurrent_kda.cpp
++++ b/fla/ops/ascendc/kda/mega_recurrent_kda/op_host/op_api/aclnn_mega_recurrent_kda.cpp
+@@ -176,6 +176,33 @@
+            tensor->Numel() == length && tensor->GetViewStrides()[0] == 1;
+ }
+
++// RecoverSSM owns a physical checkpoint per request and batch-indexed verify records.
++aclnnStatus BuildSsmPlan(const aclTensor *x, const aclTensor *conv, const aclTensor *checkpoint,
++                         const aclTensor *u, const aclTensor *kg, const aclTensor *ids,
++                         const aclTensor *accepted, const aclTensor *prefix, state::Values &g)
++{
++    if (!ids || !prefix || x->GetViewShape().GetDimNum() != 2 || x->GetViewShape().GetDim(1) != 7168 ||
++        conv->GetViewShape().GetDimNum() != 3 || u->GetViewShape().GetDimNum() != 4 ||
++        ids->GetViewShape().GetDimNum() != 1 || ids->GetDataType() != DataType::DT_INT32 ||
++        ids->GetViewStrides().size() != 1 || ids->GetViewStrides()[0] < 1) return ACLNN_ERR_PARAM_INVALID;
++    const int64_t b = ids->Numel(), n = u->GetViewShape().GetDim(1), w = u->GetViewShape().GetDim(2);
++    const int64_t pages = conv->GetViewShape().GetDim(0), length = conv->GetViewShape().GetDim(1);
++    if (b < 1 || b > INT32_MAX / 8 || n < 1 || n > 96 || w != 8 || pages < 2 || pages > UINT32_MAX ||
++        length != w + 2 || x->GetViewShape().GetDim(0) < 1 || x->GetViewShape().GetDim(0) > b*w ||
++        !IsVector(accepted, DataType::DT_INT32, b) || !IsVector(prefix, DataType::DT_INT32, b+1) ||
++        !ReadSlotStride(conv, {pages,length,3*n*128}, g[state::ConvStride]) ||
++        !ReadSlotStride(checkpoint, {pages,n,128,128}, g[state::CheckpointStride]) ||
++        !ReadSlotStride(u, {b,n,w,128}, g[state::UStride]) ||
++        !ReadSlotStride(kg, {b,n,w,256}, g[state::KStride])) return ACLNN_ERR_PARAM_INVALID;
++    g[state::SsmSlotStride] = ids->GetViewStrides()[0];
++    g[state::PoolSlots] = pages;
++    g[state::ConvLength] = length;
++    g[state::Heads] = n;
++    g[state::ReplayCapacity] = w;
++    g[state::WorkspaceBytes] = kda::workspaceFor({b,w,b*w,n,pages,length,w}, false, 3).bytes;
++    return ACLNN_SUCCESS;
++}
++
+ aclnnStatus BuildDevicePlan(const aclTensor *hidden, const aclTensor *ids, const aclTensor *counts,
+                             const aclTensor *prefix, const aclTensor *plan, state::Values &geometry)
+ {
+@@ -232,7 +259,7 @@
+ OP_TYPE_REGISTER(MegaRecurrentKda);
+
+ template <typename IndexInput>
+-aclnnStatus LaunchMegaRecurrentKda(const aclTensor *hidden_states, const aclTensor *qkv_projection_weight,
++aclnnStatus MegaRecurrentKda(const aclTensor *hidden_states, const aclTensor *qkv_projection_weight,
+                                    const aclTensor *decay_projection_a_weight,
+                                    const aclTensor *decay_projection_b_weight, const aclTensor *beta_projection_weight,
+                                    const aclTensor *output_gate_projection_weight, const aclTensor *output_norm_weight,
+@@ -244,8 +271,14 @@
+                                    float scale, float lower_bound, float rms_norm_eps, const aclTensor *out,
+                                    aclOpExecutor *executor, const aclTensor *weightScale, int64_t mxAlg)
+ {
++    L0_DFX(MegaRecurrentKda, hidden_states, qkv_projection_weight, decay_projection_a_weight,
++           decay_projection_b_weight, beta_projection_weight, output_gate_projection_weight,
++           output_norm_weight, output_projection_weight, conv1d_weight, conv_state, checkpoint_state,
++           replay_u, replay_k, replay_decay, state_indices, conv_num_accepted_tokens, a_log, dt_bias,
++           cu_seqlens, plan, scale, lower_bound, rms_norm_eps, out, weightScale, mxAlg);
+     state::Values geometry{};
+-    auto status = ReadStateGeometry(conv_state, checkpoint_state, replay_u, replay_k, replay_decay, geometry);
++    const bool ssm = weightScale && replay_k->GetDataType() == DataType::DT_BF16;
++    auto status = ssm ? ACLNN_SUCCESS : ReadStateGeometry(conv_state, checkpoint_state, replay_u, replay_k, replay_decay, geometry);
+     if (status != ACLNN_SUCCESS) {
+         return status;
+     }
+@@ -267,7 +300,9 @@
+         ids = state_indices;
+         counts = conv_num_accepted_tokens;
+         prefixTensor = cu_seqlens;
+-        status = BuildDevicePlan(hidden_states, ids, counts, prefixTensor, plan, geometry);
++        status = ssm ? BuildSsmPlan(hidden_states, conv_state, checkpoint_state, replay_u, replay_k,
++                                    ids, counts, prefixTensor, geometry)
++                     : BuildDevicePlan(hidden_states, ids, counts, prefixTensor, plan, geometry);
+         if (status != ACLNN_SUCCESS) {
+             return status;
+         }
+@@ -317,7 +352,8 @@
+         {conv_state, op::DataType::DT_BF16, true},
+         {checkpoint_state, op::DataType::DT_FLOAT, true},
+         {replay_u, op::DataType::DT_FLOAT, true},
+-        {replay_k, op::DataType::DT_FLOAT16, true},
++        {replay_k, weightScale && replay_k && replay_k->GetDataType() == op::DataType::DT_BF16
++                       ? op::DataType::DT_BF16 : op::DataType::DT_FLOAT16, true},
+         {replay_decay, op::DataType::DT_FLOAT, true},
+         {a_log, op::DataType::DT_FLOAT},
+         {dt_bias, op::DataType::DT_FLOAT},
+@@ -393,7 +429,7 @@
+     if (!holder.get()) {
+         return ACLNN_ERR_INNER_CREATE_EXECUTOR;
+     }
+-    auto status = l0op::LaunchMegaRecurrentKda(
++    auto status = l0op::MegaRecurrentKda(
+         hidden_states, qkv_projection_weight, decay_projection_a_weight, decay_projection_b_weight,
+         beta_projection_weight, output_gate_projection_weight, output_norm_weight, output_projection_weight,
+         conv1d_weight, conv_state, checkpoint_state, replay_u, replay_k, replay_decay, state_indices,
+@@ -464,6 +500,7 @@
+ extern "C" aclnnStatus aclnnMegaRecurrentKdaV2(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor,
+                                                aclrtStream stream)
+ {
++    L2_DFX_PHASE_2(aclnnMegaRecurrentKdaV2);
+     return CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
+ }
+
+@@ -496,6 +533,7 @@
+ extern "C" aclnnStatus aclnnMegaRecurrentKdaMx(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor,
+                                                aclrtStream stream)
+ {
++    L2_DFX_PHASE_2(aclnnMegaRecurrentKdaMx);
+     return CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
+ }
+ extern "C" aclnnStatus aclnnMegaRecurrentKdaInt8GetWorkspaceSize(
+@@ -526,5 +564,6 @@
+ extern "C" aclnnStatus aclnnMegaRecurrentKdaInt8(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor,
+                                                aclrtStream stream)
+ {
++    L2_DFX_PHASE_2(aclnnMegaRecurrentKdaInt8);
+     return CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
+ }
+--- a/fla/ops/ascendc/kda/mega_recurrent_kda/op_host/mega_recurrent_kda_tiling.cpp
++++ b/fla/ops/ascendc/kda/mega_recurrent_kda/op_host/mega_recurrent_kda_tiling.cpp
+@@ -115,6 +115,10 @@
+         CheckShape(GetDimensions(ctx, Input::CuSeqlens), {batch + 1}, "cu_seqlens shape");
+     }
+     uint32_t rows = CheckedDimension(packed ? x[0] : kda::checkedProduct(batch, seq));
++    if (geometryData[geometry::SsmSlotStride]) {
++        seq = CheckedDimension(capacity);
++        rows = CheckedDimension(kda::checkedProduct(batch, seq));
++    }
+     if (geometryData[geometry::WorkspaceBytes] <= 0 ||
+         (geometryData[geometry::CrossesTile] < 0 || geometryData[geometry::CrossesTile] > 2)) {
+         throw std::invalid_argument("invalid workspace plan");
+@@ -140,6 +144,9 @@
+     common.prefix64 =
+         packed && ctx->GetOptionalInputDesc(static_cast<size_t>(Input::CuSeqlens))->GetDataType() == ge::DT_INT64;
+     common.convLayout = layout;
++    common.ssmSlotStride = geometryData[geometry::SsmSlotStride];
++    common.ssmSlots = common.ssmSlotStride ? CheckedDimension(geometryData[geometry::PoolSlots]) : 0;
++    common.inputRows = packed ? CheckedDimension(x[0]) : rows;
+     common.crosses = geometryData[geometry::CrossesTile];
+     common.scale = *scale;
+     common.lowerBound = *lower;
+@@ -193,7 +200,10 @@
+             if (base > UINT64_MAX - projected) {
+                 return ge::GRAPH_FAILED;
+             }
+-            return PublishTiling(ctx, data, base + projected, systemBytes, cores, 5);
++            data.ssmScratchOffset = base + projected;
++            uint64_t transferBytes = common.ssmSlots ? uint64_t(common.tokens) * 7168 * 4 : 0;
++            if (transferBytes > UINT64_MAX - data.ssmScratchOffset) return ge::GRAPH_FAILED;
++            return PublishTiling(ctx, data, data.ssmScratchOffset + transferBytes, systemBytes, cores, 5);
+         }
+         // Transpose the checkpoint when a frame averages at least one 16-token recurrence slice per sequence.
+         const bool longSequenceBatch = common.tokens >= uint64_t(common.batch) * 16;
+--- a/fla/ops/ascendc/kda/mega_recurrent_kda/op_kernel/arch35/recurrence.h
++++ b/fla/ops/ascendc/kda/mega_recurrent_kda/op_kernel/arch35/recurrence.h
+@@ -7,7 +7,9 @@
+     Address convW, conv, checkpoint, u, key, decay, bias, alphaLog, gamma;
+     Address indices, accepted, prefix, outWeight, output;
+     uint64_t convStride, checkpointStride, uStride, keyStride, decayStride;
+-    GM_ADDR plan;
++    Address plan, ssmPrefix;
++    uint64_t slotStride;
++    uint32_t ssmSlots, inputRows;
+     uint32_t batch, sequence, capacity, prefix64, convLayout, crosses, staged;
+     float scale, lower, eps;
+ };
+@@ -34,7 +36,7 @@
+     Div(out, one, z, m);
+ }
+ __simd_vf__ inline void convolve(__ubuf__ Bf *raw, __ubuf__ Bf *history, __ubuf__ Bf *w, __ubuf__ float *out,
+-                                 uint16_t oldest, bool normalize, float scale)
++                                 uint16_t oldest, bool normalize, float scale, __ubuf__ Bf *verifyKey, bool saveKey, bool ssm)
+ {
+     auto m = CreateMask<float, MaskPattern::ALL>();
+     F result[2];
+@@ -58,6 +60,9 @@
+         Mul(act, acc, act, m);
+         RegTensor<Bf> rounded;
+         Cast<Bf, float, narrow>(rounded, act, m);
++        if (saveKey) {
++            StoreAlign<Bf, StoreDist::DIST_PACK_B32>(verifyKey + i, rounded, m);
++        }
+         Cast<float, Bf, widen>(result[part], rounded, m);
+         RegTensor<Bf> rawBits;
+         LoadAlign<Bf, LoadDist::DIST_UNPACK_B16>(rawBits, raw + i);
+@@ -70,7 +75,15 @@
+         Add(a, a, b, m);
+         ReduceSum(sum, a, m);
+         Duplicate<float, HighLowPart::LOWEST>(b, sum, m);
+-        Adds(b, b, 1.e-6f, m);
++        if (ssm) {
++            MaskReg positive;
++            F one;
++            Duplicate(one, 1.f, m);
++            CompareScalar<float, AscendC::CMPMODE::GT>(positive, b, 0.f, m);
++            Select(b, b, one, positive);
++        } else {
++            Adds(b, b, 1.e-6f, m);
++        }
+         Sqrt(b, b, m);
+         Duplicate(a, scale, m);
+         Div(inv, a, b, m);
+@@ -511,7 +524,7 @@
+         auto chunk = resource.ubBuf.template GetBufferByByte<float>(tmp + 10 * 512);
+         auto chunkDec = chunk[4 * 384], chunkBeta = chunkDec[4 * 128], weighted = chunkBeta[4 * 64];
+         auto coeff = weighted[4 * 256], chunkU = coeff[64], chunkY = chunkU[4 * 128], predicted = chunkY[4 * 128];
+-        bool shortSequence = a.staged >= 2 && valid <= 4 &&
++        bool shortSequence = !a.ssmSlots && a.staged >= 2 && valid <= 4 &&
+             (wholeSeq != UINT32_MAX || (prefix(a, b) == global && prefix(a, b + 1) == global + valid));
+         uint32_t shortIndex = shortSequence ? gm<int32_t>(a.indices).GetValue(b) : 0;
+         constexpr uint32_t shortOut = tmp + 10 * 512 + 5 * 4096;
+@@ -521,7 +534,22 @@
+             uint32_t row = global + r, start = shortSequence ? global : prefix(a, b),
+                      end = shortSequence ? global + valid : prefix(a, b + 1), t = row - start;
+             const bool useColumnMajor = AllowColumnMajor && (end - start) >= 16;
+-            uint32_t idx = shortSequence ? shortIndex : gm<int32_t>(a.indices).GetValue(b);
++            uint32_t idx = shortSequence ? shortIndex : gm<int32_t>(a.indices).GetValue(
++                a.ssmSlots ? uint64_t(b) * a.slotStride : b);
++            if (a.ssmSlots) {
++                const int32_t begin = gm<int32_t>(a.ssmPrefix).GetValue(b);
++                const int32_t finish = gm<int32_t>(a.ssmPrefix).GetValue(b+1);
++                const uint32_t accepted = gm<int32_t>(a.accepted).GetValue(b);
++                if (begin < 0 || finish < begin || uint32_t(finish) > a.inputRows ||
++                    t >= uint32_t(finish-begin) || !idx || idx >= a.ssmSlots || !accepted || accepted > a.capacity) {
++                    AscendC::Duplicate(gatedRow.template ReinterpretCast<uint16_t>(), uint16_t(0), 128);
++                    AscendC::PipeBarrier<PIPE_ALL>();
++                    AscendC::DataCopy(gm<Bf>(gated, uint64_t(ringRow+r)*width + head*128), gatedRow, 128);
++                    AscendC::PipeBarrier<PIPE_ALL>();
++                    if (row+1 == end) ++b;
++                    continue;
++                }
++            }
+             uint64_t convBase = uint64_t(idx) * a.convStride;
+             if (t == 0 || (carry && row % 64 == 0)) {
+                 auto src = t == 0 ? gm<float>(a.checkpoint, uint64_t(idx) * a.checkpointStride + head * 16384) :
+@@ -601,7 +629,8 @@
+                 auto raw = slot[i * 2048 + r * 128];
+                 vec::convolve((__ubuf__ Bf *)raw.GetPhyAddr(), (__ubuf__ Bf *)hist[i * 128].GetPhyAddr(),
+                               (__ubuf__ Bf *)weights[i * 512].GetPhyAddr(), (__ubuf__ float *)qkv[i * 128].GetPhyAddr(),
+-                              t % 3, i < 2, i == 0 ? a.scale : 1.f);
++                              t % 3, i < 2, i == 0 ? a.scale : 1.f,
++                              (__ubuf__ Bf *)keyRow.GetPhyAddr(), a.ssmSlots && i == 1, a.ssmSlots != 0);
+                 AscendC::DataCopy(gm<Bf>(a.conv, convBase + uint64_t(2 + t) * 3 * width + i * width + head * 128), raw,
+                                   128);
+             }
+@@ -625,12 +654,19 @@
+             AscendC::PipeBarrier<PIPE_V>();
+             vec::finish((__ubuf__ float *)y.GetPhyAddr(), (__ubuf__ Bf *)slot[4 * 2048 + r * 128].GetPhyAddr(),
+                         (__ubuf__ float *)gamma.GetPhyAddr(), a.eps, (__ubuf__ Bf *)gatedRow.GetPhyAddr());
+-            AscendC::Cast(keyRow, qkv[128], AscendC::RoundMode::CAST_RINT, 128);
++            if (!a.ssmSlots) AscendC::Cast(keyRow, qkv[128], AscendC::RoundMode::CAST_RINT, 128);
+             AscendC::PipeBarrier<PIPE_ALL>();
+             uint64_t at = (uint64_t(head) * a.capacity + t) * 128;
+-            AscendC::DataCopy(gm<float>(a.u, idx * a.uStride + at), u, 128);
+-            AscendC::DataCopy(gm<float>(a.decay, idx * a.decayStride + at), dec, 128);
+-            AscendC::DataCopy(gm<half>(a.key, idx * a.keyStride + at), keyRow, 128);
++            if (a.ssmSlots) {
++                // The post-sampling commit consumes raw BF16 convolved key and raw decay projection.
++                AscendC::DataCopy(gm<float>(a.u, b * a.uStride + at), u, 128);
++                AscendC::DataCopy(gm<Bf>(a.key, b * a.keyStride + 2*at), keyRow.template ReinterpretCast<Bf>(), 128);
++                AscendC::DataCopy(gm<Bf>(a.key, b * a.keyStride + 2*at + 128), slot[3*2048 + r*128], 128);
++            } else {
++                AscendC::DataCopy(gm<float>(a.u, idx * a.uStride + at), u, 128);
++                AscendC::DataCopy(gm<float>(a.decay, idx * a.decayStride + at), dec, 128);
++                AscendC::DataCopy(gm<half>(a.key, idx * a.keyStride + at), keyRow, 128);
++            }
+             AscendC::DataCopy(gm<Bf>(gated, uint64_t(ringRow + r) * width + head * 128), gatedRow, 128);
+             if (carry && (row + 1) % 64 == 0 && row + 1 < end) {
+                 AscendC::DataCopy(gm<float>(carry, head * 16384), useColumnMajor ? chunk : state, 16384);
+--- /dev/null
++++ b/fla/ops/ascendc/kda/mega_recurrent_kda/op_kernel/arch35/ssm_rows.h
+@@ -0,0 +1,40 @@
++#pragma once
++#include "simt_api/device_functions.h"
++
++namespace kda {
++// Full verification batches use their input and output in place. Only ragged batches
++// map compact model rows to the fixed recurrence window, inside the same launch.
++template <bool Unpack>
++__simt_vf__ __aicore__ LAUNCH_BOUND(1024) inline void SsmRows(
++    __gm__ uint16_t *dst, __gm__ const uint16_t *src, __gm__ const int32_t *starts,
++    uint32_t batch, uint32_t width, uint32_t tokens, uint32_t core, uint32_t cores)
++{
++    uint32_t rows = Unpack ? tokens : batch * width;
++    uint64_t chunks = uint64_t(rows) * 7;
++    for (uint64_t tile = core; tile < chunks; tile += cores) {
++        uint32_t row = tile / 7, col = (tile % 7)*1024 + AscendC::Simt::GetThreadIdx();
++        uint32_t b = row / width;
++        if constexpr (Unpack) {
++            uint32_t lo = 0, hi = batch;
++            while (lo < hi) {
++                uint32_t mid = lo + (hi-lo)/2;
++                if (starts[mid+1] <= int32_t(row)) lo = mid+1;
++                else hi = mid;
++            }
++            b = lo;
++        }
++        uint16_t value = 0;
++        if (b < batch) {
++            int32_t start = starts[b], end = starts[b+1];
++            if (start >= 0 && end >= start && uint32_t(end) <= tokens && uint32_t(end-start) <= width) {
++                int32_t offset = Unpack ? int32_t(row)-start : int32_t(row%width);
++                if (offset >= 0 && offset < end-start) {
++                    uint32_t from = Unpack ? b*width+offset : start+offset;
++                    value = src[uint64_t(from)*7168 + col];
++                }
++            }
++        }
++        dst[uint64_t(row)*7168 + col] = value;
++    }
++}
++} // namespace kda
+--- a/fla/ops/ascendc/kda/mega_recurrent_kda/op_kernel/mega_recurrent_kda_tiling_data.h
++++ b/fla/ops/ascendc/kda/mega_recurrent_kda/op_kernel/mega_recurrent_kda_tiling_data.h
+@@ -5,5 +5,6 @@
+     uint64_t convStride, checkpointStride, uStride, keyStride, decayStride;
+     uint32_t batch, sequence, tokens, heads, capacity, prefix64, convLayout, crosses;
+     float scale, lowerBound, rmsNormEps;
+-    uint32_t mxAlgorithm;
++    uint32_t mxAlgorithm, ssmSlots, inputRows;
++    uint64_t ssmSlotStride, ssmScratchOffset;
+ };
+--- a/fla/ops/ascendc/kda/mega_recurrent_kda/op_kernel/mega_recurrent_kda.cpp
++++ b/fla/ops/ascendc/kda/mega_recurrent_kda/op_kernel/mega_recurrent_kda.cpp
+@@ -3,6 +3,7 @@
+ #define CATLASS_ARCH 3510
+ #include "arch35/mega_kernel.h"
+ #include "arch35/mx_qkv.h"
++#include "arch35/ssm_rows.h"
+ #else
+ #define CATLASS_ARCH 2201
+ #include "lib/matmul_intf.h"
+@@ -97,6 +98,32 @@
+
+     if (TILING_KEY_IS(5)) {
+         // Output storage is private until the QKV projection has finished on every core.
++        GM_ADDR callerOut = out;
++        bool ragged = false;
++        if (tilingData.ssmSlots) {
++            recurrence.ssmSlots = tilingData.ssmSlots;
++            recurrence.slotStride = tilingData.ssmSlotStride;
++            recurrence.ssmPrefix = prefix;
++            recurrence.inputRows = tilingData.inputRows;
++            recurrence.prefix = nullptr;
++            recurrence.plan = nullptr;
++            const auto *starts = reinterpret_cast<__gm__ const int32_t *>(prefix);
++            ragged = tilingData.inputRows != params.rows || starts[recurrence.batch] != int32_t(params.rows);
++            if (ragged) {
++                GM_ADDR padded = params.decayRing + tilingData.ssmScratchOffset;
++                if ASCEND_IS_AIV {
++                    AscendC::Simt::VF_CALL<kda::SsmRows<false>>(AscendC::Simt::Dim3(1024),
++                        reinterpret_cast<__gm__ uint16_t *>(padded), reinterpret_cast<__gm__ const uint16_t *>(x),
++                        starts, recurrence.batch, recurrence.capacity, recurrence.inputRows,
++                        uint32_t(AscendC::GetBlockIdx()), uint32_t(AscendC::GetBlockNum()*AscendC::GetTaskRation()));
++                }
++                AscendC::SyncAll<false>();
++                x = padded;
++                params.hiddenStates = x;
++                out = padded + uint64_t(params.rows)*7168*2;
++                recurrence.output = out;
++            }
++        }
+         GM_ADDR scales = out + uint64_t(params.rows) * 7168;
+         params.projectedQkv = params.decayRing;
+         params.decayRing += uint64_t(params.rows) * params.heads * 3 * 128 * sizeof(kda::Bf);
+@@ -126,6 +153,16 @@
+             kda::MegaKernel<false, false, true> op;
+             op(params);
+         }
++        if (ragged) {
++            AscendC::SyncAll<false>();
++            if ASCEND_IS_AIV {
++                AscendC::Simt::VF_CALL<kda::SsmRows<true>>(AscendC::Simt::Dim3(1024),
++                    reinterpret_cast<__gm__ uint16_t *>(callerOut), reinterpret_cast<__gm__ const uint16_t *>(out),
++                    reinterpret_cast<__gm__ const int32_t *>(prefix), recurrence.batch, recurrence.capacity,
++                    recurrence.inputRows, uint32_t(AscendC::GetBlockIdx()),
++                    uint32_t(AscendC::GetBlockNum()*AscendC::GetTaskRation()));
++            }
++        }
+     } else if (TILING_KEY_IS(4)) {
+         recurrence.crosses = reinterpret_cast<__gm__ const int32_t *>(plan)[0];
+         recurrence.staged = recurrence.crosses ? 0 : 3;
+--- a/torch_custom/fla_npu/csrc/src/stable_ops.cpp
++++ b/torch_custom/fla_npu/csrc/src/stable_ops.cpp
+@@ -105,6 +105,7 @@
+   m.def(kSchema_mega_recurrent_kda);
+   m.def(kSchema_mega_recurrent_kda_v2);
+   m.def(kSchema_mega_recurrent_kda_mx);
++  m.def(kSchema_mega_recurrent_kda_ssm);
+   m.def(kSchema_mega_recurrent_kda_int8);
+   m.def(kSchema_kda_metadata);
+   m.def(kSchema_chunk_kda_bwd_intra);
+@@ -150,6 +151,7 @@
+          &fla_npu_stable::stable::boxed_adapter<run_recurrent_gated_delta_rule>);
+   m.impl("npu_recurrent_kda", &boxed_recurrent_kda);
+   m.impl("npu_mega_recurrent_kda_metadata", &fla_npu_stable::stable::boxed_adapter<run_kda_metadata>);
++  m.impl("npu_mega_recurrent_kda_ssm", &fla_npu_stable::stable::boxed_adapter<run_mega_recurrent_kda_ssm>);
+   m.impl("npu_mega_recurrent_kda_mx", &fla_npu_stable::stable::boxed_adapter<run_mega_recurrent_kda_mx>);
+   m.impl("npu_mega_recurrent_kda_int8", &fla_npu_stable::stable::boxed_adapter<run_mega_recurrent_kda_int8>);
+   m.impl("npu_mega_recurrent_kda_v2", &fla_npu_stable::stable::boxed_adapter<run_mega_recurrent_kda_v2>);
+--- a/torch_custom/fla_npu/csrc/src/stable_mega_recurrent_kda.cpp
++++ b/torch_custom/fla_npu/csrc/src/stable_mega_recurrent_kda.cpp
+@@ -177,6 +177,36 @@
+                       a_log, dt_bias, nd_optional_tensor(cu_seqlens), scale, lower_bound, rms_norm_eps, stream,
+                       "aclnnMegaRecurrentKdaMx", nd_optional_tensor(plan), TensorArg(sw, kAclFormatNd, 37, sw.sizes), scalar(mx_alg));
+ }
++
++// Verify writes request-indexed records. The caller owns the output and the sampling-time commit.
++constexpr const char *kSchema_mega_recurrent_kda_ssm =
++    "npu_mega_recurrent_kda_ssm(Tensor x, Tensor qkv, Tensor wa, Tensor wb, Tensor beta, Tensor gate, "
++    "Tensor norm, Tensor wo, Tensor conv_weights, Tensor(a!) conv, Tensor checkpoint, Tensor(b!) correction, "
++    "Tensor(c!) raw_key_gate, Tensor scratch, Tensor slots, Tensor accepted, Tensor a_log, Tensor bias, "
++    "Tensor prefix, Tensor scales, int algorithm, float scale, float lower, float eps, Tensor(d!) out, "
++    "int stream) -> Tensor(d!)";
++
++Tensor run_mega_recurrent_kda_ssm(Tensor x, Tensor weight, Tensor wa, Tensor wb, Tensor beta, Tensor gate,
++    Tensor norm, Tensor wo, Tensor convW, Tensor conv, Tensor checkpoint, Tensor correction, Tensor kg,
++    Tensor scratch, Tensor slots, Tensor accepted, Tensor aLog, Tensor bias, Tensor prefix, Tensor scales,
++    int64_t algorithm, double scale, double lower, double eps, Tensor out, int64_t stream)
++{
++    const auto h = meta_of(x), w = meta_of(weight), sw = meta_of(scales);
++    if (w.ndim != 3 || w.sizes[0] != 1 || w.sizes[1] != 7168 || w.sizes[2] <= 0 ||
++        w.sizes[2] % 384 || w.scalar_type != 24 || !w.contiguous || w.storage_offset ||
++        (sw.scalar_type != 0 && sw.scalar_type != 44) || !sw.contiguous ||
++        sw.sizes != std::vector<int64_t>{1,112,w.sizes[2],2} || meta_of(kg).scalar_type != 15)
++        throw std::invalid_argument("Invalid MX ReplaySSM weights or key/gate record");
++    TensorArg qkv(w, 29, acl_dtype(w.scalar_type), {1,w.sizes[2]/32,448,16,32});
++    FLA_STABLE_EXEC("aclnnMegaRecurrentKdaMx", h, stream, nd_tensor(h), qkv, nd_tensor(wa), nd_tensor(wb),
++        nd_tensor(beta), nd_tensor(gate), nd_tensor(norm), nd_tensor(wo), nd_tensor(convW),
++        nd_out_tensor(meta_of(conv)), nd_tensor(checkpoint), nd_out_tensor(meta_of(correction)),
++        nd_out_tensor(meta_of(kg)), nd_out_tensor(meta_of(scratch)), nd_tensor(slots), nd_tensor(accepted),
++        nd_tensor(aLog), nd_tensor(bias), nd_tensor(prefix), nd_optional_tensor(std::nullopt),
++        TensorArg(sw,kAclFormatNd,37,sw.sizes), scalar(algorithm), scalar(scale), scalar(lower), scalar(eps),
++        nd_out_tensor(meta_of(out)));
++    return out;
++}
+ std::tuple<Tensor, Tensor, Tensor, Tensor, Tensor> run_mega_recurrent_kda_int8(
+     Tensor hidden_states, Tensor qkv_projection_weight, Tensor decay_projection_a_weight,
+     Tensor decay_projection_b_weight, Tensor beta_projection_weight, Tensor output_gate_projection_weight,

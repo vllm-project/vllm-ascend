@@ -6,3 +6,8 @@ entries:
       experimental MegaKDA backend using kda_backend_config in --additional-config
       and an Ascend 950 wheel for the upstream MegaRecurrentKda operator with
       MXFP8 QKV and a fused output projection.
+  - category: feature
+    text: >-
+      Ascend 950 Kimi K3.1 decode workers using MXFP8 MegaKDA can enable
+      --use-replayssm with a seven-token DSpark draft. Build the RecoverSSM-enabled
+      operator wheel as described in the MegaKDA configuration guide.

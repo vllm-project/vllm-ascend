@@ -858,7 +858,16 @@ class AscendConfig:
             if self.gdn_internal_prefill_checkpoints:
                 raise ValueError("The MegaKDA backend requires internal GDN checkpoints to be disabled")
             if vc.cache_config.use_replayssm:
-                raise ValueError("MegaRecurrentKda requires ReplaySSM to be disabled")
+                from vllm_ascend.models.kimi_k3.recoverssm_config import supports_request_indexed_kda_recoverssm
+
+                spec = vc.speculative_config
+                if (
+                    not supports_request_indexed_kda_recoverssm(vc)
+                    or spec is None
+                    or spec.method != "dspark"
+                    or spec.num_speculative_tokens != 7
+                ):
+                    raise ValueError("MegaKDA ReplaySSM requires Kimi KDA RecoverSSM with a seven-token DSpark draft")
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:
                 raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")

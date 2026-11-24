@@ -35,10 +35,11 @@ MEGA_KDA_CONV_WIDTH = 4
 class UpstreamMegaKDA:
     forward: Callable
     metadata: Callable
+    verify_ssm: Callable | None = None
 
 
 @lru_cache(maxsize=1)
-def load_upstream_mega_kda(package_dir: str) -> UpstreamMegaKDA:
+def load_upstream_mega_kda(package_dir: str, *, require_ssm: bool = False) -> UpstreamMegaKDA:
     """Resolve both public wrappers from the configured upstream operator wheel."""
     package = Path(package_dir).resolve() / "fla_npu"
     vendor = package / "opp/vendors/fla_npu_transformer"
@@ -71,7 +72,56 @@ def load_upstream_mega_kda(package_dir: str) -> UpstreamMegaKDA:
         raise RuntimeError("The imported MegaRecurrentKda wrappers do not belong to operator_package_dir")
     if "qkv_projection_weight_scale" not in inspect.signature(forward).parameters:
         raise RuntimeError("The MegaRecurrentKda wheel does not provide the MXFP8 weight interface")
-    return UpstreamMegaKDA(forward, metadata)
+    if not require_ssm:
+        return UpstreamMegaKDA(forward, metadata)
+    stable = importlib.import_module(f"{alias}.ops.ascendc._stable")
+    try:
+        ssm_op = stable._op("npu_mega_recurrent_kda_ssm")
+    except (AttributeError, RuntimeError) as exc:
+        raise RuntimeError("Install the MegaKDA wheel with request-indexed native RecoverSSM record support") from exc
+
+    def verify_ssm(layer, meta, hidden, weights, output):
+        conv, checkpoint = layer.kv_cache
+        records = layer.recoverssm_records
+        if records is None:
+            raise RuntimeError("MegaKDA requires allocated request-indexed RecoverSSM records")
+        spec = meta.spec_decode_metadata.spec_causal_conv1d
+        slots = spec.cache_indices
+        if slots.ndim == 2:
+            slots = slots[:, 0]
+        batch = slots.numel()
+        # The wheel reads the physical checkpoint and writes raw K/gate and
+        # correction by request. Only the post-sampling commit advances state.
+        ssm_op(
+            hidden,
+            weights["qkv_projection_weight"],
+            weights["decay_projection_a_weight"],
+            weights["decay_projection_b_weight"],
+            weights["beta_projection_weight"],
+            weights["output_gate_projection_weight"],
+            weights["output_norm_weight"],
+            weights["output_projection_weight"],
+            weights["conv1d_weight"],
+            conv,
+            checkpoint,
+            records.correction[:batch],
+            records.key_gate[:batch],
+            layer._mega_ssm_scratch,
+            slots,
+            spec.num_accepted_tokens,
+            weights["a_log"],
+            weights["dt_bias"],
+            spec.query_start_loc,
+            weights["qkv_projection_weight_scale"],
+            weights["qkv_scale_alg"],
+            layer.head_dim**-0.5,
+            layer.gate_lower_bound,
+            layer.o_norm.eps,
+            output,
+            stable._current_stream_ptr(),
+        )
+
+    return UpstreamMegaKDA(forward, metadata, verify_ssm)
 
 
 def _tensor_view_key(tensor: torch.Tensor | None):

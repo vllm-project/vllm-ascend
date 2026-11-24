@@ -338,7 +338,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 raise ValueError("MegaRecurrentKda requires H=7168 and bias-free output norm and projection")
             if self.o_proj.custom_op is not None and not isinstance(self.o_proj.custom_op, KimiOProjMMReduceScatterOp):
                 raise ValueError("MegaRecurrentKda requires the original TP group for the output projection")
-            self._mega_kda_op = load_upstream_mega_kda(mega_config.operator_package_dir)
+            self._mega_kda_op = load_upstream_mega_kda(
+                mega_config.operator_package_dir, require_ssm=self.use_recoverssm
+            )
+            if self.use_recoverssm:
+                self.register_buffer("_mega_ssm_scratch", torch.empty(1, dtype=torch.float32), persistent=False)
         if uses_mixed_projection:
             # vLLM 0.27 packs all KDA input projections into one linear.  A
             # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps B/F/G
@@ -538,6 +542,19 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             out.zero_()
             return
         attn_metadata = metadata[self.prefix]
+        if self.use_recoverssm and (
+            not attn_metadata.num_spec_decodes or attn_metadata.num_prefills or attn_metadata.num_decodes
+        ):
+            wait_for_kv_layer_from_connector(self.prefix)
+            record_attention_compute_start()
+            mixed_qkv, beta, g1, g2 = self._run_overlapped_qkv_bfg(hidden_states)
+            core = hidden_states.new_empty((1, hidden_states.size(0), self.local_num_heads, self.head_dim))
+            self._forward(
+                mixed_qkv, g1, g2, beta, core, beta_is_preprocessed=False, native_prefill_metadata=attn_metadata
+            )
+            out.copy_(self.o_proj.quant_method.apply(self.o_proj, core.reshape(-1, self.local_projection_size), None))
+            maybe_save_kv_layer_to_connector("", [])
+            return
         long_prefill = attn_metadata.num_prefill_tokens > attn_metadata.num_prefills
         decode_meta = attn_metadata
         prefill_meta = attn_metadata
@@ -584,6 +601,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         )
         wait_for_kv_layer_from_connector(self.prefix)
         record_attention_compute_start()
+        if self.use_recoverssm:
+            self._mega_kda_op.verify_ssm(self, attn_metadata, hidden_states, weights, out)
+            maybe_save_kv_layer_to_connector("", [])
+            return
         if not long_prefill or attn_metadata.num_spec_decodes or decode_tokens:
             decode_input = hidden_states[:decode_tokens] if decode_tokens else hidden_states
             decode_out = out[:decode_tokens] if decode_tokens else out

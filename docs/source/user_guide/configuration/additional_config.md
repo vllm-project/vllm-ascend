@@ -415,15 +415,21 @@ Validate correctness, quality and performance on the deployment hardware before 
 Kimi K3.1 decode workers on Ascend 950 can select a KDA backend with
 `kda_backend_config`. Use Model Runner V2, prefill context parallel size 1,
 BF16 hidden states and the model's MXFP8 QKV weights. Set the option on the
-KV consumer and leave `--use-replayssm` disabled. The default is `native`.
+KV consumer. The default backend is `native`.
 
 Build the Ascend 950 wheel from the pinned revision of
 [FLA PR #1375](https://github.com/flashserve/flash-linear-attention-npu/pull/1375).
-From a checkout of `flashserve/flash-linear-attention-npu`:
+For external RecoverSSM on Ascend 950, the wheel must export
+`npu_mega_recurrent_kda_ssm`. To build the verified implementation, set
+`VLLM_ASCEND_SRC` below to the checkout containing this integration. Run the
+following commands from a checkout of `flashserve/flash-linear-attention-npu`.
+For the standard backend without RecoverSSM, omit the `git apply` command.
 
 ```bash
 git fetch origin refs/pull/1375/head
 git checkout --detach d73d060670de11a3f234e854150373408c01c713
+VLLM_ASCEND_SRC=/path/to/vllm-ascend
+git apply "$VLLM_ASCEND_SRC/tools/patches/flash-linear-attention-npu/mega-kda-recoverssm.patch"
 FLA_NPU_SOC=ascend950 FLA_NPU_BUILD_OFFLINE_BUNDLE=1 python scripts/build_wheel.py
 ```
 
@@ -452,7 +458,7 @@ The public `npu_mega_recurrent_kda` operator consumes the rank's E4M3FN QKV weig
 layout, their E8M0 scales, and the original BF16 decay, beta and output gate
 weights. It computes the convolution, recurrence, gated RMSNorm and output
 projection inside the same invocation. vLLM applies the original TP collective.
-Ordinary decode uses BSH. Speculative decode uses TH with one device plan per
+With external RecoverSSM disabled, ordinary decode uses BSH. Speculative decode uses TH with one device plan per
 metadata group per forward. Padding is isolated from live cache pages.
 The checkpoint is read-only during the call. The adapter reads only the
 request's checkpoint and convolution page using their physical stride. It
@@ -462,3 +468,11 @@ as decode use the fused operator, including in mixed batches. Multi-token
 prefill groups use native KDA.
 Disable internal GDN prefill checkpoints and use `FULL_DECODE_ONLY` for decode
 graph replay.
+
+To enable external RecoverSSM, add `--use-replayssm` with DSpark and
+`num_speculative_tokens=7`. In a pure speculative decode batch the fused
+operator writes the rank-local projection, FP32 correction and BF16 raw
+convolved key and gate directly to the caller's buffers. The checkpoint stays
+read-only until vLLM commits the accepted prefix after sampling. Prefill,
+ordinary decode and mixed batches use the native RecoverSSM path. The device
+event appears as `MegaRecurrentKda` in the Ascend profiler.
