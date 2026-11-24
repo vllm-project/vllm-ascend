@@ -35,6 +35,7 @@ Row parallel op follows a similar approach - inherit from RowColumnParallelOp an
 get_row_parallel_op.
 """
 
+import os
 from functools import lru_cache
 
 import regex as re
@@ -209,6 +210,10 @@ class KimiOProjMMReduceScatterOp(CustomRowParallelOp):
     def apply_impl(self, input_: torch.Tensor) -> tuple[torch.Tensor, None]:
         assert self.quant_method is not None
         input_parallel = self.get_input_parallel(input_)
+        if os.environ.get("KIMI_ALIGNMENT_FULL_O_PROJ") == "1":
+            from linear_alignment import full_k_sequence_projection
+
+            return full_k_sequence_projection(self, input_parallel), None
         weight = self.layer.weight
         # Branch only on TP-consistent tensor metadata, before any collective.
         # The decoder skips its RS and MLA already owns a sharded output buffer,
@@ -238,6 +243,15 @@ class KimiOProjMMReduceScatterOp(CustomRowParallelOp):
         """Write the ordinary decode projection directly into its TP shard."""
         assert self.quant_method is not None
         input_parallel = self.get_input_parallel(input_)
+        import os
+
+        if os.environ.get("KIMI_ALIGNMENT_FULL_O_PROJ") == "1":
+            from linear_alignment import full_k_sequence_projection
+
+            aligned = full_k_sequence_projection(self, input_parallel)
+            assert aligned.shape == output.shape, (aligned.shape, output.shape)
+            output.copy_(aligned)
+            return output
         parallel_output = self.quant_method.apply(self.layer, input_parallel, None)
         dist.reduce_scatter_tensor(output, parallel_output, group=self.comm_group.device_group)
         return output

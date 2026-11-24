@@ -1,0 +1,108 @@
+{
+  "captured_at": "2026-11-24T11:44:59.445241+08:00",
+  "source": "423 task workspace, read only",
+  "upstream_base": "bfd0365d97b0ab682f80de251bb460499b9cc95c",
+  "previous_pr_head": "7cd7d79265e698b8f812f8a04337f1ebab032e73",
+  "scope": "恢复服务器BF16数值修复与诊断探针，保留原KIMI_ALIGNMENT_*开关和独立alignment_runtime导入。删除PR包内helper抽取，补回此前漏掉的V2 lm-head采集与KDA norm采集。",
+  "main_context_notes": "主仓Kimi模型已从models/kimi_k3.py迁为models/kimi_k3/kimi_k3.py，且projection/norm/残差API变化；只映射现有入口和输出缓冲区，未加入新算法。当前main的padding、量化及新执行路径未复验。",
+  "model_or_device_runs_started": false,
+  "unit_tests_run": false,
+  "files": [
+    {
+      "repo": "vllm-ascend",
+      "server_path": "source/vllm-ascend/vllm_ascend/ascend_forward_context.py",
+      "target": "vllm_ascend/ascend_forward_context.py",
+      "server_sha256": "4f4e0353b43828bd550928c930109d71df3ef59ed2775a28c641d729f00864f1",
+      "pr_sha256": "b81e4474456fd7ca1d7bebfbd2b884b7303cedb8c1207c8e2ab0cbd5cbe331a9",
+      "byte_identical": false
+    },
+    {
+      "repo": "vllm-ascend",
+      "server_path": "source/vllm-ascend/vllm_ascend/attention/sfa_v1.py",
+      "target": "vllm_ascend/attention/sfa_v1.py",
+      "server_sha256": "f5c0c413dfe87c612c3867361b7550d3cb74ae234ef51d030ef5863d52b914bf",
+      "pr_sha256": "d6cbf9321ac3dc61295828acc37f2e81224bce2b816cce4dc436c711859fbdfe",
+      "byte_identical": false
+    },
+    {
+      "repo": "vllm-ascend",
+      "server_path": "source/vllm-ascend/vllm_ascend/models/kimi_k3.py",
+      "target": "vllm_ascend/models/kimi_k3/kimi_k3.py",
+      "server_sha256": "73fe3f5f7c3d79b1db40cae6ce5e9c6e3141b988422f6d92459370496ee1fa42",
+      "pr_sha256": "e0a0166363f5ab79cb01fbb346151049c87a3ca775460858b31573dcb798c971",
+      "byte_identical": false
+    },
+    {
+      "repo": "vllm-ascend",
+      "server_path": "source/vllm-ascend/vllm_ascend/ops/fused_moe/gate_linear.py",
+      "target": "vllm_ascend/ops/fused_moe/gate_linear.py",
+      "server_sha256": "f908a45ab6c64adf84fbd9b818434f9163915c8eb409b975128f1b6826e917b0",
+      "pr_sha256": "bc173ff824e7c2bba2257008dedd3ebd154cf3b0cefa779ff2fd49d4c1d341f1",
+      "byte_identical": false
+    },
+    {
+      "repo": "vllm-ascend",
+      "server_path": "source/vllm-ascend/vllm_ascend/ops/fused_moe/moe_comm_method.py",
+      "target": "vllm_ascend/ops/fused_moe/moe_comm_method.py",
+      "server_sha256": "0d93faa0710ae59c3ccbdfca3c0bb1228f5bf68f8e7f14f2a4b5a4cf5ee21fbe",
+      "pr_sha256": "d27dcc37b4598c79272a3fe1961dc812e24b71296019ec1754456e460e7d319b",
+      "byte_identical": false
+    },
+    {
+      "repo": "vllm-ascend",
+      "server_path": "source/vllm-ascend/vllm_ascend/ops/fused_moe/moe_mlp.py",
+      "target": "vllm_ascend/ops/fused_moe/moe_mlp.py",
+      "server_sha256": "21207fafacda08c017e045441e461d5aec58277981bc820c1c234a0d75800262",
+      "pr_sha256": "8074669b317c4cb71452b8171b84872e6f23d8ceae0ed528b20cf12a1e3184ac",
+      "byte_identical": false
+    },
+    {
+      "repo": "vllm-ascend",
+      "server_path": "source/vllm-ascend/vllm_ascend/ops/fused_moe/shared_experts.py",
+      "target": "vllm_ascend/ops/fused_moe/shared_experts.py",
+      "server_sha256": "edc5ccd8bdffe85188fd321e08afc4d3ffda78ca936310524a68a79c5d8bb0f2",
+      "pr_sha256": "0111adc5d310815c3d5f530d7e43c7582c7fbc69ecd82e2bd1ac656ef59d9f52",
+      "byte_identical": false
+    },
+    {
+      "repo": "vllm-ascend",
+      "server_path": "source/vllm-ascend/vllm_ascend/ops/kimi_kda.py",
+      "target": "vllm_ascend/ops/kimi_kda.py",
+      "server_sha256": "752878c46910465a407ad0a9f06dac7f9aa405bdee986e4b1606bbbc54b5aa98",
+      "pr_sha256": "eb88090ba83cc9451860eb6bd15f9eff891c451590d7f0414bf4c22128339262",
+      "byte_identical": false
+    },
+    {
+      "repo": "vllm-ascend",
+      "server_path": "source/vllm-ascend/vllm_ascend/ops/linear_op.py",
+      "target": "vllm_ascend/ops/linear_op.py",
+      "server_sha256": "b07472888dae2b54f2a670c50078f3a938bb3d5400c59e2c319fb72ce6a0c60d",
+      "pr_sha256": "6f4b55338ef34d4317398ac81d28a6404d747205472c95d31dec040d93d8e84d",
+      "byte_identical": false
+    },
+    {
+      "repo": "vllm-ascend",
+      "server_path": "source/vllm-ascend/vllm_ascend/ops/mm_encoder_attention.py",
+      "target": "vllm_ascend/ops/mm_encoder_attention.py",
+      "server_sha256": "207e59301df3d67b372e9d89c8a02ac387165b8456c46c278e1a48c46f166be2",
+      "pr_sha256": "580c6fe2ea98e6a19574d227c63b0c8f40ad9fcdeeb33cb534e7587db50779c1",
+      "byte_identical": false
+    },
+    {
+      "repo": "vllm-ascend",
+      "server_path": "source/vllm-ascend/vllm_ascend/worker/v2/model_runner.py",
+      "target": "vllm_ascend/worker/v2/model_runner.py",
+      "server_sha256": "33ec55d99752af1632fd10301fb3ba1a004b3fc59333205026961be111b1323a",
+      "pr_sha256": "857a6f68786cb7795b36a6ac867b686ccd5e13a6f29385e70867595274a4ade8",
+      "byte_identical": false
+    },
+    {
+      "repo": "vllm-ascend",
+      "server_path": "source/vllm-ascend/vllm_ascend/worker/worker.py",
+      "target": "vllm_ascend/worker/worker.py",
+      "server_sha256": "4a89bc5a7eff14120228793a69e5244cdafc845920399669e2ea9fff8468f281",
+      "pr_sha256": "9c828affaad0b6becc116295ff70c5f1d592c3f531ba633184d1a8d492914bac",
+      "byte_identical": false
+    }
+  ]
+}

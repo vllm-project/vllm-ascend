@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ascend Kimi K3 delta attention with TP x PCP head-sharded state."""
 
+import os
 from functools import wraps
 
 import torch
@@ -403,6 +404,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         return output
 
     def _forward_projections(self, hidden_states: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        self._alignment_kda_trace = None
         if self.uses_mixed_projection:
             num_tokens = hidden_states.size(0)
             mixed_qkv, beta, g1, g2 = self._run_overlapped_qkv_bfg(hidden_states)
@@ -421,7 +423,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             )
             core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
             return self.o_proj(core_attn_out)[0]
-        return super().forward(hidden_states, positions)
+        output = super().forward(hidden_states, positions)
+        from kda_trace import trace_output
+
+        trace_output(self, hidden_states, output)
+        return output
 
     def _run_overlapped_qkv_bfg(
         self,
@@ -551,9 +557,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         max_query_len: int = -1,
         num_accepted_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        split_silu = os.environ.get("KIMI_ALIGNMENT_CONV_SPLIT_SILU") == "1"
+        activation = None if split_silu else "silu"
         cache_indices = _normalize_causal_cache_indices(cache_indices)
         if run_mode == 0:
-            return causal_conv1d_fn(
+            output = causal_conv1d_fn(
                 mixed_qkv,
                 conv_weights_t,
                 None,
@@ -561,20 +569,21 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 query_start_loc=query_start_loc,
                 cache_indices=cache_indices,
                 has_initial_state=initial_state_mode,
-                activation="silu",
+                activation=activation,
                 pad_slot_id=PAD_SLOT_ID,
                 null_block_id=0,
             )
+            return torch.nn.functional.silu(output) if split_silu else output
         if run_mode != 1:
             raise ValueError(f"Unsupported causal_conv1d run_mode: {run_mode}")
 
         output = torch.empty_like(mixed_qkv)
-        return causal_conv1d_update(
+        output = causal_conv1d_update(
             mixed_qkv,
             conv_state,
             conv_weights_t,
             bias=None,
-            activation="silu",
+            activation=activation,
             conv_state_indices=cache_indices,
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc=query_start_loc,
@@ -582,6 +591,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             null_block_id=0,
             out=output,
         )
+        return torch.nn.functional.silu(output) if split_silu else output
 
     @torch.no_grad()
     def _pack_conv_weights(self) -> None:
@@ -614,6 +624,23 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         *,
         num_accepted_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        from kda_alignment import enabled, serving_decode
+
+        if enabled():
+            return serving_decode(
+                q,
+                k,
+                v,
+                raw_gate,
+                beta,
+                recurrent_state,
+                cu_seqlens,
+                state_indices,
+                self.A_log,
+                self.dt_bias,
+                lower_bound=self.gate_lower_bound,
+                num_accepted_tokens=num_accepted_tokens,
+            )
         return run_recurrent_kda(
             q,
             k,
@@ -662,6 +689,26 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             raise RuntimeError("KDA state copy requires worker cache initialization before prefill")
         initial_state_vk = state_copy.gather(recurrent_state, state_indices, has_initial_state)
 
+        from kda_alignment import canonical_kda, enabled
+
+        if enabled():
+            output, final_state = canonical_kda(
+                q,
+                k,
+                v,
+                raw_gate,
+                beta,
+                self.A_log,
+                self.dt_bias,
+                cu_seqlens=cu_seqlens,
+                initial_state=initial_state_vk,
+                lower_bound=self.gate_lower_bound,
+            )
+            from kda_trace import trace_prefill
+
+            trace_prefill(self, q, k, v, raw_gate, beta, output, cu_seqlens)
+            state_copy.scatter(recurrent_state, final_state, state_indices)
+            return output
         output, final_state = run_chunk_kda(
             q,
             k,
@@ -710,8 +757,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         mixed_qkv = mixed_qkv[:num_actual_tokens]
+        if os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR") and ".layers.0." in self.prefix:
+            self._alignment_raw_qkv = mixed_qkv.detach().clone()
         g1 = g1[:, :num_actual_tokens]
         g2 = g2[:num_actual_tokens]
+        self._alignment_raw_beta = beta.detach()
         use_recoverssm = self.use_recoverssm
         if use_recoverssm:
             beta = beta[:, :num_actual_tokens]
@@ -938,5 +988,14 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             norm_input = norm_out
 
         # The norm writes valid rows and zeroes graph padding in one launch.
-        self.o_norm.forward_oot(norm_input, g2, out=core_attn_out)
+        if os.environ.get("KIMI_ALIGNMENT_SPLIT_GATED_NORM") == "1":
+            if self.o_norm.activation != "sigmoid" or self.o_norm.bias is not None:
+                raise ValueError("Kimi alignment requires unbiased sigmoid gated RMSNorm")
+            normalized = torch_npu.npu_rms_norm(norm_input, self.o_norm.weight, epsilon=self.o_norm.eps)[0]
+            core_attn_out[:, :num_actual_tokens].copy_(normalized * torch.sigmoid(g2))
+            core_attn_out[:, num_actual_tokens:].zero_()
+        else:
+            self.o_norm.forward_oot(norm_input, g2, out=core_attn_out)
+        from kda_trace import trace_norm
+        trace_norm(self, g2, core_attn_out[:, :num_actual_tokens])
         maybe_save_kv_layer_to_connector("", [])
