@@ -23,7 +23,6 @@ UNVERIFIED_GPU_WORKER_METHODS = (
     "_compile_or_warm_up_model",
     "_maybe_activate_jit_monitor",
     "_get_cudagraph_capture_context",
-    "get_draft_model",
     "_set_draft_weight_update_target",
     "get_compilation_match_table",
     "get_encoder_timing_stats",
@@ -74,6 +73,20 @@ def test_shutdown_weight_transfer_engine_is_inherited():
     assert NPUWorker.shutdown_weight_transfer_engine is GPUWorker.shutdown_weight_transfer_engine
 
 
+@pytest.mark.parametrize(
+    "name",
+    ("reset_mm_cache", "get_draft_model", "compute_weight_checksums", "reset_weights"),
+)
+def test_model_accessors_are_inherited(name):
+    from vllm.v1.worker.gpu_worker import Worker as GPUWorker
+
+    from vllm_ascend.worker.worker import NPUWorker
+
+    # Every supported runner exposes get_model()/get_draft_model()/reset_mm_cache(),
+    # so these worker RPCs need no Ascend override.
+    assert getattr(NPUWorker, name) is getattr(GPUWorker, name)
+
+
 @pytest.mark.parametrize("configured", [False, True])
 def test_shutdown_weight_transfer_engine_releases_trainer_connection(configured):
     from vllm_ascend.worker.worker import NPUWorker
@@ -101,20 +114,6 @@ def test_shutdown_weight_transfer_engine_rejects_active_update():
         worker.shutdown_weight_transfer_engine()
 
     worker.weight_transfer_engine.shutdown.assert_not_called()
-
-
-@pytest.mark.parametrize("reset", [None, "absent", "callable"])
-def test_reset_mm_cache_preserves_optional_runner_method(reset):
-    from vllm_ascend.worker.worker import NPUWorker
-
-    worker = object.__new__(NPUWorker)
-    reset_fn = Mock() if reset == "callable" else reset
-    runner = SimpleNamespace() if reset == "absent" else SimpleNamespace(reset_mm_cache=reset_fn)
-    worker.model_runner = runner
-    worker.reset_mm_cache()
-    if reset == "callable":
-        reset_fn.assert_called_once_with()
-    assert worker.model_runner is runner
 
 
 @pytest.fixture
