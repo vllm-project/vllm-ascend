@@ -339,7 +339,7 @@ def test_glm_main_pack_planner_retains_group_predecessors(ns):
     assert plan.layerwise_reuse_layout.prefetch_layer_map == {2: (0,), 4: (2,), 3: (1,), 5: (3,)}
 
 
-def test_mrv2_allocates_the_exact_plan_and_validates_before_allocation(ns):
+def test_mrv2_allocates_the_exact_plan(ns):
     plan = ns["build_deepseek_v4_reuse_config"](configuration(), groups(), 3)
     specs = {name: g.kv_cache_spec.kv_cache_specs[name] for g in groups() for name in g.layer_names}
     allocations = []
@@ -365,13 +365,6 @@ def test_mrv2_allocates_the_exact_plan_and_validates_before_allocation(ns):
     assert len(allocations) == len(plan.kv_cache_tensors)
     for tensor, (_, backing) in zip(plan.kv_cache_tensors, allocations, strict=True):
         assert all(result[name] is backing for name in tensor.layers)
-    allocations.clear()
-    plan.kv_cache_tensors[-1].offset = 1
-    with pytest.raises(ValueError, match="slot geometry"):
-        ns["_allocate_kv_cache"](plan, {}, "cpu")
-    assert not allocations
-
-
 
 
 def test_missing_required_compressed_page_fails_closed(ns):

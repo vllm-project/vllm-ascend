@@ -25,9 +25,6 @@ if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 
 
-_OBJECT_ALREADY_EXISTS = -705
-
-
 def snapshot_key(worker: LayerwiseKVPoolWorker, request: ReqMeta, group: int, index: int, endpoint: int) -> str:
     incarnation = request.layerwise_request_id
     if not incarnation:
@@ -90,10 +87,6 @@ def _load_entries(worker, request, group, hashes, mask):
             if index >= min(tokens // size, len(hashes)):
                 raise ValueError("Mooncake offload restore has no exact snapshot identity")
             key = worker._make_layerwise_full_key(group, block_hash_to_str(hashes[index]))
-        if running:
-            key = getattr(worker, "_offload_private_aliases", {}).get(
-                (request.req_id, request.layerwise_request_id, key), key
-            )
         entries.append((key, index))
     return entries
 
@@ -237,8 +230,6 @@ def _open_puts(worker, slots):
         sizes[key] = size
     missing = worker._filter_pool_existing_keys(list(sizes))
     started = set()
-    fallback_slots = []
-    aliases = {}
     try:
         for batch in worker._layerwise_key_batches(missing):
             codes = require_aligned_batch_results(
@@ -251,49 +242,15 @@ def _open_puts(worker, slots):
             rejected = [key for key, code in zip(batch, codes, strict=True) if code != 0]
             # A competing writer may have committed since the existence probe.
             # An unfinished competing PUT is not a safe offload destination.
-            unresolved = worker._filter_pool_existing_keys(rejected) if rejected else []
-            codes_by_key = dict(zip(batch, codes, strict=True))
-            conflicts = {
-                key for key in unresolved
-                if codes_by_key[key] == _OBJECT_ALREADY_EXISTS and "offload_v1:" not in key
-            }
-            fatal = [key for key in unresolved if key not in conflicts]
-            if fatal:
-                details = [
-                    dict(result=codes_by_key[key], bytes=sizes[key], private_snapshot="offload_v1:" in key)
-                    for key in fatal[:8]
-                ]
-                raise RuntimeError(
-                    f"Mooncake offload could not open a required PUT session: "
-                    f"failed_keys={len(fatal)} samples={details}"
-                )
-            # Do not overwrite a competing writer or wait for a peer that
-            # may need this rank's EP collectives to finish its own PUT.
-            for view, key, slot, size in slots:
-                if key not in conflicts:
-                    continue
-                incarnation = view.layerwise_request_id
-                if not incarnation:
-                    raise ValueError("Offload PUT conflict requires a request incarnation")
-                private_key = f"{key}@offload_v1:fallback:{incarnation}"
-                fallback_slots.append((view, private_key, slot, size))
-                aliases[(view.req_id, incarnation, key)] = private_key
-        if fallback_slots:
-            with worker._put_started_keys_lock:
-                before_fallback = worker._put_started_keys.copy()
-            try:
-                _open_puts(worker, fallback_slots)
-            finally:
-                with worker._put_started_keys_lock:
-                    started.update(worker._put_started_keys - before_fallback)
-            if not hasattr(worker, "_offload_private_aliases"):
-                worker._offload_private_aliases = {}
-            worker._offload_private_aliases.update(aliases)
+            if rejected and worker._filter_pool_existing_keys(rejected):
+                raise RuntimeError("Mooncake offload could not open a required PUT session")
     except Exception:
         worker._queue_layerwise_revoke_keys(list(started))
         raise
     for view, key, slot, _ in slots:
         if key in started:
+            # Use one request's source pages for a deduplicated public write.
+            started.remove(key)
             if slot is None:
                 view.save_last_block_key = key
             else:
@@ -363,11 +320,7 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
         worker._open_layerwise_get_sessions(get_slots)
         worker._check_hybrid_load_errors()
         _open_puts(worker, put_slots)
-        aliases = getattr(worker, "_offload_private_aliases", {})
-        worker._offload_pending_pages = {
-            identity: (endpoint, {index: aliases.get((*identity[:2], key), key) for index, key in pages.items()})
-            for identity, (endpoint, pages) in pending.items()
-        }
+        worker._offload_pending_pages = pending
         for views in groups.values():
             for view in views:
                 if not any(view.save_block_keys):

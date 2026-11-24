@@ -926,10 +926,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     def _release_layerwise_requests_terminal(self, req_ids: set[str]) -> None:
         with self._load_session_lock:
             self._end_layerwise_load_keys(self._layerwise_session_tracker.release_terminal(req_ids))
-        aliases = getattr(self, "_offload_private_aliases", None)
-        if aliases:
-            for identity in [identity for identity in aliases if identity[0] in req_ids]:
-                del aliases[identity]
         for name in ("_offload_active_pages", "_offload_pending_pages"):
             checkpoints = getattr(self, name, {})
             for identity in [identity for identity in checkpoints if identity[0] in req_ids]:
