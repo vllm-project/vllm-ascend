@@ -47,6 +47,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.utils import embedding_tp_enable, should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
+from vllm_ascend.worker.v2.dspark_decode_inputs import DSparkTargetAttention
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 
@@ -79,6 +80,7 @@ class AscendModelState(DefaultModelState):
     kvpp_runtime: "KVPPRuntime | None" = None
     kvpp_is_dummy_run: bool = False
     device_metadata: "TargetDeviceMetadata | None" = None
+    dspark_target_attention: DSparkTargetAttention | None = None
 
     def runner_plan_launch_d2h(self, **kwargs) -> None:
         """Runner-assigned hook: plan and launch the delayed D2H batch."""
@@ -616,8 +618,20 @@ class AscendModelState(DefaultModelState):
             build_metadata = partial(self.device_metadata.run_build, build_attn_metadata)
         self._decoder_replay_common_metadata = {}
         xlite_cfg: XliteGraphConfig | None = getattr(get_ascend_config(), "xlite_graph_config", None)
+        metadata_groups = attn_groups
+        if (
+            self.dspark_target_attention is not None
+            and not for_capture
+            and not input_batch.is_dummy
+            and not self.kvpp_is_dummy_run
+            and cudagraph_mode == CUDAGraphMode.FULL
+            and not np.any(input_batch.is_prefilling_np)
+        ):
+            # DSpark builds its own query metadata. Target replay only needs
+            # target groups; retain the outer KV group indices for page lookup.
+            metadata_groups = self.dspark_target_attention.select(attn_groups)
         self.attn_metadata = build_metadata(
-            attn_groups=attn_groups,
+            attn_groups=metadata_groups,
             num_reqs=num_reqs,
             num_actual_reqs=num_actual_reqs,
             num_tokens=num_input_tokens,

@@ -22,6 +22,7 @@ import logging
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
+from functools import partial
 from typing import Any
 
 import numpy as np
@@ -132,10 +133,16 @@ from vllm_ascend.worker.v2.attn_utils import (
     initialize_kernel_block_table_buffers,
     skip_ring_state_update,
 )
+from vllm_ascend.worker.v2.dspark_decode_inputs import (
+    DSparkDecodeIndexCache,
+    DSparkTargetAttention,
+    supports_dspark_decode_reuse,
+)
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
+from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
 from vllm_ascend.worker.v2.spec_decode import init_speculator
@@ -162,6 +169,7 @@ class NPUModelRunner(GPUModelRunner):
     kv_connector: KVConnector
     max_num_reqs: int
     max_num_tokens: int
+    _dspark_decode_indices: DSparkDecodeIndexCache | None = None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -595,6 +603,14 @@ class NPUModelRunner(GPUModelRunner):
 
         self.initialize_spec_cpu_length_sync()
 
+        self._dspark_decode_indices = None
+        if isinstance(self.model_state, AscendModelState):
+            self.model_state.dspark_target_attention = None
+        if supports_dspark_decode_reuse(self.vllm_config, sparse_offload_enabled=sparse_cfg.enabled):
+            self._dspark_decode_indices = DSparkDecodeIndexCache()
+            if isinstance(self.model_state, AscendModelState):
+                self.model_state.dspark_target_attention = DSparkTargetAttention(self.attn_groups)
+
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
@@ -916,6 +932,27 @@ class NPUModelRunner(GPUModelRunner):
         mask[num_tokens:].fill_(True)
         return mask
 
+    def _get_dspark_decode_index_cache(
+        self,
+        scheduler_output: SchedulerOutput,
+        batch_req_state: BatchReqState,
+        batch_desc: BatchExecutionDescriptor,
+    ) -> DSparkDecodeIndexCache | None:
+        cache = self._dspark_decode_indices
+        if cache is None:
+            return None
+        drafts = scheduler_output.scheduled_spec_decode_tokens
+        if (
+            not batch_req_state.has_prefill
+            and batch_desc.cg_mode == CUDAGraphMode.FULL
+            and batch_desc.uniform_token_count == self.decode_query_len
+            and drafts
+            and all(len(drafts.get(req_id, ())) == self.decode_query_len - 1 for req_id in batch_req_state.req_ids)
+        ):
+            return cache
+        cache.clear()
+        return None
+
     def _prepare_inputs_impl(
         self,
         scheduler_output: SchedulerOutput,
@@ -945,7 +982,13 @@ class NPUModelRunner(GPUModelRunner):
 
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
-        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+        index_cache = self._get_dspark_decode_index_cache(scheduler_output, batch_req_state, batch_desc)
+        copy_indices = partial(async_copy_to_gpu, device=self.device)
+        idx_mapping = (
+            index_cache.copy("indices", idx_mapping_np, copy_indices)
+            if index_cache is not None
+            else copy_indices(idx_mapping_np)
+        )
         num_reqs = len(req_ids)
 
         num_valid_tokens = num_scheduled_tokens_np
@@ -990,7 +1033,11 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
-            cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
+            cu_num_logits = (
+                index_cache.copy("logits", cu_num_logits_np, copy_indices)
+                if index_cache is not None
+                else copy_indices(cu_num_logits_np)
+            )
 
         adaptive_verification_manager = self.adaptive_verification
         adaptive_verification_active = (
@@ -1072,9 +1119,14 @@ class NPUModelRunner(GPUModelRunner):
             async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
         if draft_tokens:
-            expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
-                idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
-            )
+            if index_cache is not None:
+                expanded_idx_mapping, expanded_local_pos = index_cache.expand(
+                    idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len, expand_idx_mapping
+                )
+            else:
+                expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
+                    idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
+                )
 
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = query_start_loc[: num_reqs_padded + 1]
