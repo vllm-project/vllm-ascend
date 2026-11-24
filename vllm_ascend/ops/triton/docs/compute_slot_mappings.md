@@ -1,109 +1,91 @@
 # `_compute_slot_mappings_kernel`
 
-## Overview
+## Description
 
-`_compute_slot_mappings_kernel` converts every scheduled token's logical
-position into the physical KV-cache slot consumed by the attention and
-cache-write paths. It is launched by
-`AscendBlockTables.compute_slot_mappings` from
-`vllm_ascend/worker/v2/block_table.py`.
+- **Function**: Maps scheduled token positions to flat KV-cache slots for the
+  V2 Model Runner. The shared `AscendBlockTables.compute_slot_mappings`
+  wrapper launches the kernel. Public block tables contain manager block IDs.
+  Each `AttentionGroup` constructs its kernel-granularity table when building
+  attention metadata.
+- **Formula**: For manager block size `B` and rank-local position `p`,
+  `block_index = p // B`, `offset = p - block_index * B`, and
+  `slot = block_table[request, block_index] * B + offset`.
+- **Algorithm flow**:
+  1. For a context-parallel sharded group, find the virtual block of size
+     `B * CP_SIZE`, assign interleaved positions to ranks, and compact each
+     rank's positions before looking up the manager block. Replicated groups
+     use the original token position.
+  2. For each token tile, stage a bounded window of the request's block-table
+     row and gather its manager block IDs. The wrapper selects the window as
+     `next_power_of_2(ceil(TRITON_BLOCK_SIZE / min(block_sizes)) + 1)`.
+     The extra entry covers tiles starting near a block boundary, and the
+     load mask bounds the window to the row stride.
+  3. Emit `PAD_ID` for tokens owned by another rank, dummy requests, disabled
+     groups, and unused output capacity. The last program on the request axis
+     pads the output tail for graph capture.
+- **Supported modes**: The single-card test targets Atlas A2, Atlas A3, and
+  Ascend A5. The recorded hardware validation for this change is on Atlas A3.
 
-The grid is `(num_kv_cache_groups, num_reqs + 1)`. The final program on the
-request axis fills the unused output tail with `PAD_ID` for graph-capture
-compatibility.
+## Parameters
 
-## Block-table layout
+| Parameter | Input/Output/Attribute | Description | Data type | Data format |
+| --- | --- | --- | --- | --- |
+| `idx_mapping` | Input | Persistent block-table row per scheduled request. `-1` marks a dummy request. | `int32` or `int64` | 1-D tensor |
+| `query_start_loc` | Input | Cumulative token offsets, with one extra entry for the total token count. | int32 | 1-D tensor |
+| `pos` | Input | Logical positions of scheduled tokens, converted to int32 in the kernel. | int64 | 1-D tensor |
+| `block_table_ptrs`, `block_table_strides` | Input | Base addresses of the int32 manager block tables and their row strides in entries, one per KV-cache group. | uint64 addresses, int64 strides | 1-D tensors |
+| `block_sizes` | Input | Manager block size for each KV-cache group. | int32 | 1-D tensor |
+| `dcp_sharded` | Input | Per-group flag selecting rank-local positions for sharded KV. Replicated groups keep global positions. | bool | 1-D tensor |
+| `slot_mapping_enabled` | Input | Per-group flag enabling token-position slot mapping, used when `HAS_SLOT_MAPPING_ENABLED` is true. | bool | 1-D tensor or None |
+| `slot_mappings_ptr` | Output | Preallocated flat slot IDs. The wrapper writes its persistent buffer or the caller's `out` in place, and returns the requested output prefix. | int32 | 2-D tensor with contiguous columns |
+| `max_num_tokens`, `slot_mappings_stride` | Attribute | Output capacity per group and output row stride in entries. | int | Scalar |
+| `cp_rank`, `CP_SIZE`, `CP_INTERLEAVE` | Attribute | Local context-parallel rank, number of ranks, and positions assigned per rank in each interleave round. | int | Scalar |
+| `PAD_ID` | Attribute | Sentinel for slots that do not correspond to local live tokens. | int | Scalar |
+| `TRITON_BLOCK_SIZE`, `BLOCK_TABLE_WINDOW_SIZE` | Attribute | Token tile size (1024 in production) and power-of-two staging window. | int | Scalar |
+| `HAS_SLOT_MAPPING_ENABLED` | Attribute | Enables the per-group slot-mapping flag. | bool | Scalar |
 
-`BlockTables` distinguishes two block sizes:
+## Constraints
 
-- `block_sizes`: the KV-cache manager's allocation block size.
-- `kernel_block_sizes`: the size used to index slot mappings and the attention
-  kernel's expanded block table.
+- Positions and resulting slot IDs must fit int32. The staged gather converts
+  manager block IDs through float32, so block IDs must be exactly
+  representable in float32.
+- `query_start_loc` must be non-decreasing, and its final value must be within
+  the output capacity. The wrapper's `num_tokens_padded` selects the return
+  view without changing the allocated capacity. An empty request has no
+  token iterations.
+- Each active token must resolve to a valid entry in its manager block-table
+  row. A dummy request emits padding with its block-table loads masked.
+- The staged window must cover the maximum span of block indices in a tile.
+  Positive manager block sizes, rank counts, and interleave sizes are required.
+- Graph capture and replay consume the preallocated slot buffer. Only the
+  output buffer is written. For state-only groups, disabling token slot
+  mapping fills the corresponding output with `PAD_ID`.
 
-The upstream `BlockTables` implementation passes both sizes to this kernel:
-`block_sizes_tensor` contains allocation block sizes and
-`kernel_block_sizes_tensor` contains kernel block sizes. If a KV block is split
-into several kernel blocks, the block-table row has a corresponding entry for
-each kernel block.
+## Origin and Differences
 
-For a non-CP launch, with `kernel_block_size = B` and position `p`:
+- **Origin**: vLLM V2's GPU block-table slot-mapping implementation. Ascend
+  uses an int32 output and stages a bounded window for NPU gather.
+- **Differences in this refactor**: The slot kernel reads the manager block
+  size for both table lookup and slot arithmetic. Kernel-sized block table
+  expansion happens in `AttentionGroup` instead of the shared block table.
 
-```text
-block_index = p // B
-block_offset = p - block_index * B
-slot_id = block_table[request, block_index] * B + block_offset
-```
+## Test Cases
 
-The multiply/subtract form is equivalent to `p % B`; it avoids the scalar
-remainder lowering that is slow on Ascend.
+On Atlas A3, the DeepSeek-V4-Flash-0731 W8A8 V2 runner (DP2 × PCP4,
+TP1, 7-step DSpark) called this operator for a 79-token prefill with
+`idx_mapping.shape=(1,)`, `query_start_loc.shape=(2,)`, and
+`pos.shape=(79,)`. The captured slot-mapping launch used `CP_SIZE=1`,
+a token tile of 1024, a gather window of 1024, and per-group manager
+block sizes `[128, 4096, 32, 32, 2, 8]`. The baseline passed the same
+values as its per-group kernel block sizes for this configuration
+(vLLM-Ascend main `de6351f5`, PR `98d8a92c`, vLLM `c410543d9`).
 
-## Context parallelism
-
-With `CP_SIZE > 1`, a virtual block has size
-`kv_block_size * CP_SIZE`. The kernel first finds the virtual block and its
-in-block offset. Interleaved chunks are assigned to ranks using
-`CP_INTERLEAVE`; a position not owned by `cp_rank` receives `PAD_ID`. The
-rank-local position is then converted to a `kernel_block_size` block-table
-index and offset. This distinction is required when one allocation block is
-split into multiple kernel blocks.
-
-For a local position, the interleaved offset is compacted into a rank-local
-offset before forming the final slot ID. This follows the V0.28.0 upstream
-`_compute_slot_mappings_kernel` mapping rule.
-
-## Bounded window gather
-
-For each `TRITON_BLOCK_SIZE` token tile, block indices are close together. The
-kernel therefore:
-
-1. Finds the tile's smallest valid block index.
-2. Loads a contiguous window from that request's block-table row.
-3. Uses `tl.gather` with relative block indices to obtain physical block IDs.
-
-`BLOCK_TABLE_WINDOW_SIZE` is a power-of-two constexpr selected by the worker:
-
-```text
-next_power_of_2(ceil(TRITON_BLOCK_SIZE / min(kernel_block_sizes)) + 1)
-```
-
-It is derived from kernel block sizes, not allocation block sizes. The extra
-entry safely handles a tile beginning near a block boundary. The runtime load
-mask uses the row stride, so the load never crosses the allocated block-table
-row. This bounds UB use independently of request length; unlike full-row
-staging, a long block-table row does not require a long UB allocation.
-
-An empty request has `start_idx == end_idx`. Its token loop has zero
-iterations, so its `idx_mapping` sentinel is never used to form a block-table
-address.
-
-## Main inputs and attributes
-
-| Name | Meaning |
-| --- | --- |
-| `idx_mapping` | Maps each scheduled request to its persistent block-table row. |
-| `query_start_loc` | Prefix offsets that delimit each request's token range. |
-| `pos` | INT64 logical token positions; converted to INT32 for kernel arithmetic. |
-| `block_table_ptrs` | One INT32 block-table base pointer per KV-cache group. |
-| `block_table_strides` | Row stride of each group block table, in entries. |
-| `block_sizes` | KV-cache allocation block sizes from upstream `block_sizes_tensor`. |
-| `kernel_block_sizes` | Kernel block sizes from upstream `kernel_block_sizes_tensor`. |
-| `CP_SIZE`, `CP_INTERLEAVE`, `cp_rank` | Context-parallel ownership configuration. |
-| `TRITON_BLOCK_SIZE` | Token tile size; production launch uses 1024. |
-| `BLOCK_TABLE_WINDOW_SIZE` | Power-of-two upper bound for the staged tile window. |
-
-## Constraints and tests
-
-- Positions must fit in INT32 after conversion.
-- `query_start_loc` must be non-decreasing and its final value must not exceed
-  the slot-mapping output capacity.
-- Valid positions must map to block indices within the associated request's
-  block-table row.
-- `BLOCK_TABLE_WINDOW_SIZE` must cover the maximum span of block indices in a
-  token tile for every group.
-
-The NPU test compares this kernel against V0.28.0 upstream for CP=1, CP=2, and
-CP=4. It covers empty requests, cross-block and cross-tile ranges, multiple
-kernel block sizes, padding, and the `out` interface:
+The single-card NPU suite replays this input shape and the six manager
+block sizes with synthetic block IDs. It compares every slot ID against
+an independent host reference. The other cases cover block sizes 128 and 256,
+CP sizes 1, 2, and 4, sharded and replicated groups, requests crossing block
+and tile boundaries, empty requests, and padding. It also checks the
+caller's preallocated `out` buffer and its padded tail.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_compute_slot_mapping.py

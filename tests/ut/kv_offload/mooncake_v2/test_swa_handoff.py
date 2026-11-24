@@ -17,7 +17,10 @@ def test_swa_handoff_retains_history_for_last_prompt_token() -> None:
     spec = replace(make_sliding_spec(block_size), sliding_window=window_size)
     assert spec.extra_retained_tokens == 0
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
-    scheduler.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace()))
+    scheduler.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()), num_hash_lookahead_tokens=0
+    )
+    scheduler.kv_cache_config = SimpleNamespace(hash_block_size=block_size)
     scheduler.group_unique_specs = [[spec]]
     scheduler.need_truncate = scheduler._needs_prefill_token_truncation()
     tokens = list(range(prompt_len))

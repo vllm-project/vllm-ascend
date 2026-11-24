@@ -143,6 +143,10 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         self.invalid_block_ids_lock = threading.Lock()
         assert self.local_metadata is not None
 
+    def add_not_transfer_request(self, request_id: str) -> None:
+        """Complete a health probe without reading producer KV cache."""
+        self.finished_requests.put((request_id, False))
+
     def add_requests(
         self,
         remote_engine_id: str,
@@ -1378,6 +1382,10 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
             assert self._recving_thread is not None
             request_groups: dict[str, dict[str, ReqMeta]] = {}
             for request_id, request_metadata in metadata.requests.items():
+                if request_metadata.do_virtual:
+                    logger.debug("Mooncake virtual receive completed without transfer: %s", request_id)
+                    self._recving_thread.add_not_transfer_request(request_id)
+                    continue
                 requests = request_groups.setdefault(request_metadata.remote_engine_id, {})
                 requests[request_id] = request_metadata
 

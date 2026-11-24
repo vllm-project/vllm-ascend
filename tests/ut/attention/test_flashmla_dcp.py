@@ -11,6 +11,7 @@ import ast
 import runpy
 import sys
 from contextlib import contextmanager
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
@@ -143,7 +144,7 @@ def runtime(monkeypatch):
         return install(name, **runpy.run_path(str(ROOT / relative)))
 
     install("vllm_ascend")
-    utils = install("vllm_ascend.attention.utils", get_flashmla_ops=lambda: None)
+    utils = install("vllm_ascend.attention.utils", get_flashmla_ops=lambda: None, get_quant_flashmla_ops=lambda: None)
     tree = ast.parse((ROOT / "vllm_ascend/attention/utils.py").read_text(encoding="utf-8"))
     constant = next(
         node
@@ -181,21 +182,56 @@ def runtime(monkeypatch):
         classmethod(lambda cls, config: cls(config, attention_op, metadata_op)),
     )
 
-    def builder(*, size=8, rank=0, interleave=1, heads=8, dtype=torch.float16, use_rope=False, speculative=True):
+    def builder(
+        *,
+        size=8,
+        rank=0,
+        interleave=1,
+        heads=8,
+        dtype=torch.float16,
+        use_rope=False,
+        speculative=True,
+        quantized=False,
+        query_capacity=None,
+        max_requests=8,
+        pcp_size=1,
+    ):
         impl = SimpleNamespace(
             num_heads=heads,
             scale=0.125,
             dtype=dtype,
             use_mla_rope=use_rope,
+            use_quant_flashmla=quantized,
             dcp_size=size,
             dcp_rank=rank,
+            pcp_group=SimpleNamespace(world_size=pcp_size),
             vllm_config=SimpleNamespace(
                 parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave),
+                model_config=SimpleNamespace(max_model_len=140000),
                 speculative_config=SimpleNamespace(method="dspark") if speculative else None,
             ),
         )
+        adapter = None
+        if quantized:
+
+            @dataclass(frozen=True)
+            class MetadataAdapter:
+                config: object
+
+                def build_metadata(self, lengths, cu, used, **bounds):
+                    # Model the delivered metadata ABI, not the attention kernel.
+                    max_native_query_length = 16
+                    assert 1 <= bounds["max_seqlen_q"] <= max_native_query_length
+                    return metadata_op(lengths, cu_seqlens_q=cu, seqused_q=used, **bounds)
+
+            adapter = MetadataAdapter(api.FlashMLAConfig(heads, 0.125, return_softmax_lse=True))
         return api.FlashMLAMetadataBuilder(
-            impl, torch.device("cpu"), 8, torch.triu(torch.ones(2048, 2048, dtype=torch.int8), diagonal=1)
+            impl,
+            torch.device("cpu"),
+            max_requests,
+            torch.triu(torch.ones(2048, 2048, dtype=torch.int8), diagonal=1),
+            adapter=adapter,
+            max_query_len=query_capacity,
         )
 
     class AttentionKind(Enum):
@@ -266,6 +302,7 @@ def common(lengths, queries, *, tokens=None, causal=True):
     return SimpleNamespace(
         seq_lens=torch.tensor(lengths, dtype=torch.int32),
         query_start_loc=torch.tensor(boundaries, dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor(boundaries, dtype=torch.int32),
         block_table_tensor=torch.tensor([[0, 1, 2]] * len(lengths), dtype=torch.int32),
         slot_mapping=torch.full((actual,), -1, dtype=torch.int64),
         positions=torch.arange(actual),
@@ -273,6 +310,20 @@ def common(lengths, queries, *, tokens=None, causal=True):
         num_input_tokens=tokens or actual,
         causal=causal,
     )
+
+
+@pytest.mark.parametrize("pcp_size,dcp_size,heads", [(1, 8, 12), (8, 8, 96), (8, 1, 96)])
+def test_replicated_pcp_queries_keep_distinct_history_heads(runtime, pcp_size, dcp_size, heads):
+    builder = runtime.builder(size=dcp_size, pcp_size=pcp_size, heads=heads, interleave=1536)
+    flash = builder.build(common([3080], [3], tokens=4), 1, 3, False)
+    assert flash.query.shape == (4, 96, 576)
+    assert flash.adapter.config.num_heads == 96
+    assert builder.dcp_size == dcp_size
+    expected_history = 1536 if dcp_size > 1 else 3080
+    if dcp_size > 1:
+        assert flash.current is not None
+        assert flash.current.query.shape == (4, heads, 576)
+    assert flash.cache_lens[0].item() == expected_history
 
 
 @pytest.mark.parametrize(
@@ -433,18 +484,18 @@ def test_noncausal_draft_metadata_ignores_rejected_cpu_upper_bound(runtime):
 
 
 @pytest.mark.parametrize(
-    "causal,speculative,interleave,dtype,capturing",
+    "causal,speculative,interleave,dtype,capturing,placeholder_descale",
     [
-        (True, False, 1, torch.float16, False),
-        (True, False, 128, torch.bfloat16, True),
-        (True, True, 4, torch.float16, False),
-        (True, True, 128, torch.bfloat16, True),
-        (False, True, 1, torch.bfloat16, False),
-        (False, True, 4, torch.float16, True),
+        (True, False, 1, torch.float16, False, False),
+        (True, False, 128, torch.bfloat16, True, False),
+        (True, True, 4, torch.float16, False, False),
+        (True, True, 128, torch.bfloat16, True, False),
+        (False, True, 1, torch.bfloat16, False, False),
+        (False, True, 4, torch.float16, True, True),
     ],
 )
 def test_forward_matches_dense_with_strided_history_and_empty_ranks(
-    runtime, monkeypatch, causal, speculative, interleave, dtype, capturing
+    runtime, monkeypatch, causal, speculative, interleave, dtype, capturing, placeholder_descale
 ):
     runtime.context.capturing = capturing
     torch.manual_seed(41)
@@ -541,6 +592,7 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
                 qk_rope_head_dim=64,
                 num_kv_heads=1,
                 num_heads=local_heads,
+                use_quant_flashmla=False,
                 dcp_size=size,
                 dcp_rank=rank,
                 dcp_group=SimpleNamespace(unique_name="cpu-dcp"),
@@ -550,6 +602,7 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         preprocessed = SimpleNamespace(
             ql_nope=query[..., :512],
             q_pe=query[..., 512:],
+            dequant_scale_q_nope=torch.zeros(1) if placeholder_descale else None,
             current_k_nope=current_kv[..., :512] if split else None,
             current_k_pe=current_kv[..., 512:] if split else None,
         )
@@ -615,19 +668,12 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
     runtime.scope["torch_npu"]._npu_fused_infer_attention_score_get_max_workspace.assert_not_called()
 
 
-@pytest.mark.parametrize("draft", [False, True])
-def test_external_dcp_graph_skips_fia_parameter_updates(draft):
-    metadata = {"flash": SimpleNamespace(decode=object(), external_flashmla=object())}
-    scope = {
-        "_EXTRA_CTX": SimpleNamespace(is_draft_model=draft, is_draft_model_prefill=False),
-        "get_graph_params": lambda: object(),
-        "get_draft_graph_params": lambda: object(),
-    }
+def test_dcp_rejects_legacy_graph_parameter_updates():
     update = load_method(
-        "vllm_ascend/attention/context_parallel/mla_cp.py", "AscendMlaDCPImpl", "update_graph_params", scope
+        "vllm_ascend/attention/context_parallel/mla_cp.py", "AscendMlaDCPImpl", "update_graph_params", {}
     )
-    # No torch.npu stream or FIA graph registry access is possible in this scope.
-    update(None, SimpleNamespace(attn_metadata=metadata), 4, draft_attn_metadatas=[metadata])
+    with pytest.raises(NotImplementedError, match="UpdatableGraph"):
+        update(None, None, 4)
 
 
 @pytest.mark.parametrize("bad_lse", ["layout", "dtype"])
@@ -649,6 +695,81 @@ def test_dcp_rejects_incompatible_lse_contract(runtime, bad_lse):
         )
 
 
+def test_quant_dcp_split_uses_matching_query_heads_and_descales_on_rank_one(runtime):
+    tokens, local_heads, rank = 3, 4, 1
+    heads, latent, rope = local_heads * 2, 512, 64
+    query = (
+        torch.arange(heads, dtype=torch.float32)
+        .view(1, heads, 1)
+        .expand(tokens, heads, latent + rope)
+        .to(torch.float8_e4m3fn)
+    )
+    scales = torch.arange(1, tokens * heads + 1, dtype=torch.float32).reshape(tokens, heads)
+    kv_scale = torch.tensor([0.125])
+    current_kv = torch.ones(tokens, 1, latent + rope, dtype=query.dtype)
+    cache = torch.zeros(1, 128, 1, latent + rope, dtype=query.dtype)
+    output = torch.zeros(heads, tokens, latent, dtype=torch.bfloat16)
+    lse = torch.zeros(heads, tokens, dtype=torch.float32)
+    history = Mock(return_value=(output, lse))
+    current = Mock(return_value=(output[:local_heads], lse[:local_heads]))
+    flash = SimpleNamespace(
+        query=torch.empty_like(query),
+        adapter=SimpleNamespace(attention=history),
+        schedule=torch.zeros(1),
+        block_table=torch.zeros(1, 1, dtype=torch.int32),
+        cache_lens=torch.tensor([tokens], dtype=torch.int32),
+        cu=torch.tensor([0, tokens], dtype=torch.int32),
+        used_q=torch.tensor([tokens], dtype=torch.int32),
+        token_live=torch.ones(tokens, dtype=torch.bool),
+        current=SimpleNamespace(
+            query=torch.empty_like(query[:, :local_heads, :]),
+            cache=torch.zeros_like(cache),
+            adapter=SimpleNamespace(attention=current),
+            schedule=torch.zeros(1),
+            block_table=torch.zeros(1, 1, dtype=torch.int32),
+            slots=torch.arange(tokens),
+            attn_mask=None,
+        ),
+    )
+    impl = runtime.bind(
+        SimpleNamespace(
+            num_heads=local_heads,
+            num_kv_heads=1,
+            kv_lora_rank=latent,
+            qk_rope_head_dim=rope,
+            dcp_rank=rank,
+            use_quant_flashmla=True,
+            fak_descale_float=kv_scale,
+            _v_up_proj_batch_major=lambda value: value,
+        )
+    )
+    impl._merge_dcp_attention_output = Mock()
+    runtime.scope["fused_dcp_lse_combine"] = Mock()
+
+    impl._forward_decode_split_attention(
+        query[..., :latent],
+        query[..., latent:],
+        cache,
+        None,
+        current_kv[..., :latent],
+        current_kv[..., latent:],
+        128,
+        SimpleNamespace(external_flashmla=flash, decode=None),
+        q_descale=scales,
+    )
+
+    history.assert_called_once()
+    current.assert_called_once()
+    local = slice(rank * local_heads, (rank + 1) * local_heads)
+    torch.testing.assert_close(history.call_args.args[0].float(), query.float())
+    torch.testing.assert_close(history.call_args.kwargs["q_descale"], scales)
+    torch.testing.assert_close(current.call_args.args[0].float(), query[:, local].float())
+    torch.testing.assert_close(current.call_args.kwargs["q_descale"], scales[:, local])
+    assert history.call_args.kwargs["k_descale"].data_ptr() == kv_scale.data_ptr()
+    assert current.call_args.kwargs["k_descale"].data_ptr() == kv_scale.data_ptr()
+    assert current.call_args.kwargs["q_descale"].is_contiguous()
+
+
 def test_causal_target_and_noncausal_draft_do_not_share_schedules(runtime):
     builder = runtime.builder()
     target = builder.build(common([9], [2], tokens=4), 1, 2, False, retain_for_graph=True)
@@ -657,3 +778,92 @@ def test_causal_target_and_noncausal_draft_do_not_share_schedules(runtime):
     assert target.schedule.data_ptr() != draft.schedule.data_ptr()
     assert target.current is not None and draft.current is None
     assert target.cache_lens[0] == 1 and draft.cache_lens[0] == 2
+
+
+@pytest.mark.parametrize("causal", [False, True])
+def test_quant_metadata_uses_request_capacity_not_padded_batch(runtime, causal):
+    builder = runtime.builder(quantized=True, query_capacity=4, max_requests=64)
+    inputs = common([4] * 64, [4] * 64, tokens=256, causal=causal)
+    cu_before = inputs.query_start_loc_cpu.clone()
+    flash = builder.build(inputs, 64, 256, False, retain_for_graph=True)
+    original_addresses = addresses(flash)
+    torch.testing.assert_close(inputs.query_start_loc_cpu, cu_before)
+    assert flash.used_q.tolist() == [4] * 64 + [0]
+    for call in runtime.metadata_op.call_args_list:
+        assert call.kwargs["max_seqlen_q"] == 4
+        assert call.kwargs["max_seqlen_kv"] in (4, 140000)
+
+    # Same captured storage, fewer live tokens, and empty sharded history.
+    shorter = common([3] * 64, [3] * 64, tokens=256, causal=causal)
+    replay = builder.build(shorter, 64, 192, False)
+    assert replay is flash and addresses(replay) == original_addresses
+    assert replay.used_q.tolist() == [3] * 64 + [0]
+    if causal:
+        assert not replay.cache_lens.any()
+        assert replay.current is not None
+    empty = builder.build(common([0] * 64, [0] * 64, tokens=256, causal=causal), 64, 0, False)
+    assert empty is flash and not empty.used_q.any() and not empty.cache_lens.any()
+
+
+def test_quant_metadata_excludes_mixed_prefill_and_padding(runtime):
+    builder = runtime.builder(quantized=True, query_capacity=4, max_requests=64)
+    inputs = common([4, 128], [4, 128], causal=False)
+    inputs.max_query_len = 128  # Prefill is handled by FIA, not this decode adapter.
+    flash = builder.build(inputs, 1, 4, True)
+    assert flash.used_q.tolist() == [4, 0]
+    assert all(c.kwargs["max_seqlen_q"] == 4 for c in runtime.metadata_op.call_args_list)
+
+
+@pytest.mark.parametrize("length", [5, 17])
+def test_quant_metadata_rejects_actual_query_above_capacity(runtime, length):
+    builder = runtime.builder(quantized=True, query_capacity=4)
+    with pytest.raises(ValueError, match="per-request capacity"):
+        builder.build(common([length], [length]), 1, length, False)
+    runtime.metadata_op.assert_not_called()
+
+
+@pytest.mark.parametrize("capacity", [None, 0, -1, True])
+def test_quant_metadata_requires_positive_request_capacity(runtime, capacity):
+    with pytest.raises(ValueError, match="positive per-request"):
+        runtime.builder(quantized=True, query_capacity=capacity)
+
+
+@pytest.mark.parametrize("heads", [12, 48, 96])
+def test_quant_adapter_class_constraints_and_native_abi(runtime, heads):
+    config_type, impl_type = runtime.api.QuantFlashMLAConfig, runtime.api.QuantFlashMLAImpl
+    config = config_type(heads, 0.125, mask_mode=config_type.NON_CAUSAL_MASK_MODE, return_softmax_lse=True)
+    assert config.quant_mode == 1
+    assert config_type.NUM_KV_HEADS == 1 and config_type.METADATA_PLANES == 2
+    for kwargs in (dict(num_heads=3), dict(quant_mode=2), dict(mask_mode=1)):
+        with pytest.raises(ValueError):
+            config_type(**dict(dict(num_heads=heads, softmax_scale=0.125), **kwargs))
+    meta = torch.zeros((2, 64), dtype=torch.int32)
+    operation = Mock(
+        return_value=(torch.zeros(heads, 2, 512, dtype=torch.bfloat16), torch.zeros(heads, 2, dtype=torch.float32))
+    )
+    metadata = Mock(return_value=meta)
+    adapter = impl_type(config, operation, metadata)
+    lengths = torch.tensor([0, 4], dtype=torch.int32)
+    cu = torch.tensor([0, 1, 2], dtype=torch.int32)
+    used = torch.ones(2, dtype=torch.int32)
+    adapter.build_metadata(lengths, cu, used, max_seqlen_q=4, max_seqlen_kv=140000)
+    assert metadata.call_args.args[1:] == (heads, 1, 1)
+    assert metadata.call_args.kwargs["max_seqlen_q"] == 4
+    q = torch.zeros(2, heads, 576, dtype=torch.float8_e4m3fn)
+    cache = torch.zeros(1, 128, 1, 576, dtype=torch.float8_e4m3fn)
+    q_scale = torch.ones(2, heads, dtype=torch.float32)
+    k_scale = torch.ones(1, dtype=torch.float32)
+    output, lse = adapter.attention(
+        q,
+        cache,
+        q_descale=q_scale,
+        k_descale=k_scale,
+        block_table=torch.zeros(2, 1, dtype=torch.int32),
+        cache_seqlens=lengths,
+        cu_seqlens_q=cu,
+        seqused_q=used,
+        metadata=meta,
+    )
+    assert output.shape == (heads, 2, 512) and lse.shape == (heads, 2)
+    assert operation.call_args.args[6] == 1
+    assert operation.call_args.kwargs["return_softmax_lse"]

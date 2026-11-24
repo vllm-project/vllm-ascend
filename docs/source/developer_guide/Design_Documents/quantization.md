@@ -16,7 +16,7 @@ Currently supported quantization methods include `AscendLinearMethod`, `AscendFu
 
 ![quant_methods_overview](../../assets/quantization/quant_methods_overview.png)
 
-The quantization method base class defined by vLLM  and the overall call flow of quantization methods are as follows:
+The quantization method base class defined by vLLM and the overall call flow of quantization methods are as follows:
 
 ![quant_method_call_flow](../../assets/quantization/quant_method_call_flow.png)
 
@@ -24,7 +24,7 @@ The `embedding` method is generally not implemented for quantization, focusing o
 
 The `create_weights` method is used for weight initialization; the `process_weights_after_loading` method is used for weight post-processing, such as transposition, format conversion, data type conversion, etc.; the `apply` method is used to perform activation quantization and quantized matrix multiplication calculations during the forward process.
 
-We need to implement the `create_weights`, `process_weights_after_loading`, and `apply` methods for different **layers** (**attention**, **mlp**, **MoE (Mixture of Experts)**).
+We need to implement the `create_weights`, `process_weights_after_loading`, and `apply` methods for different **layers** (**attention**, **MLP**, **MoE (Mixture of Experts)**).
 
 **Supplement**: When loading the model, the quantized model's description file **quant_model_description.json** needs to be read. This file describes the quantization configuration and parameters for each part of the model weights, for example:
 
@@ -50,7 +50,7 @@ Based on the above content, we present a brief description of the adaptation pro
 
 ### Quantization Algorithm Adaptation
 
-- **Step 1: Algorithm Design**. Define the algorithm ID (e.g., `W4A8_DYNAMIC`), determine supported layers (linear, moe, attention), and design the quantization scheme (static/dynamic, Per-Tensor/Per-Channel/Per-Group).
+- **Step 1: Algorithm Design**. Define the algorithm ID (e.g., `W4A8_DYNAMIC`), determine supported layers (linear, MoE, attention), and design the quantization scheme (static/dynamic, Per-Tensor/Per-Channel/Per-Group).
 - **Step 2: Registration**. Use the `@register_scheme` decorator in `vllm_ascend/quantization/methods/registry.py` to register your quantization scheme class.
 
 ```python
@@ -84,7 +84,7 @@ vLLM Ascend supports multiple quantization algorithms. The following table provi
 | `W8A8_DYNAMIC`           | INT8   | INT8       | Per-Channel        | Per-Token              | Dynamic | Dynamic activation quantization with per-token scaling factor calculation                                                                                          |
 | `W4A8_DYNAMIC`           | INT4   | INT8       | Per-Channel        | Per-Token              | Dynamic | 4-bit per-channel weight quantization with 8-bit dynamic per-token activation, supporting msModelSlim and LLM-Compressor weight formats for MoE layers           |
 | `W4A4_FLATQUANT_DYNAMIC` | INT4   | INT4       | Per-Channel        | Per-Token              | Dynamic | Uses FlatQuant for activation distribution smoothing before 4-bit dynamic quantization, with additional matrix multiplications for precision preservation          |
-| `W8A8_MIX`               | INT8   | INT8       | Per-Channel        | Per-Tensor/Token       | Mixed   | We support two deployment modes: PD Colocation (dynamic quantization for both P and D) and PD Disaggregation (dynamic-quant P and static-quant D) |
+| `W8A8_MIX`               | INT8   | INT8       | Per-Channel        | Per-Tensor/Token       | Mixed   | Supports two deployment modes: PD Colocation (dynamic quantization for both prefill and decode) and PD Disaggregation (dynamic quantization for prefill and static quantization for decode). |
 
 **Static vs Dynamic:** Static quantization uses pre-computed scaling factors with better performance, while dynamic quantization computes scaling factors on-the-fly for each token/activation tensor with higher precision.
 
