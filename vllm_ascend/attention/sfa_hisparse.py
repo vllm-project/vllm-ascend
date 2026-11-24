@@ -681,7 +681,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 key_lengths,
                 block_table=table,
             )
-            logger.info_once("[hisparse] Resident paged Prefill active: mixed=%s", bool(num_decodes), scope="process")
+            logger.info_once(
+                "[hisparse] Resident paged Prefill active (PA_BSND): mixed=%s",
+                bool(num_decodes),
+                scope="process",
+            )
             return output
 
         # HMA shares one pool across heterogeneous specs, so block_stride is
@@ -728,7 +732,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
             compact_c8_indices(mapped),
             indices_are_mapped=True,
         )
-        logger.info_once("[hisparse] Resident paged Prefill active: mixed=%s", bool(num_decodes), scope="process")
+        logger.info_once(
+            "[hisparse] Resident paged Prefill fallback active (TND): mixed=%s",
+            bool(num_decodes),
+            scope="process",
+        )
         return output
 
     def _execute_sparse_flash_attention_process(
