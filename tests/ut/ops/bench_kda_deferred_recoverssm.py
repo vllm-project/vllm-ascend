@@ -278,8 +278,10 @@ def _accuracy_check(
         worst_rel = 0.0
         finite = True
         for la, lb in zip(layers_a, layers_b):
-            a = la.kv_cache[1].double()
-            b = lb.kv_cache[1].double()
+            # 先搬到 CPU 再转 float64：NPU 不支持 double，在设备上 .double()
+            # 会被降级成 float（见 ToKernelNpu 的 warning），比较失去精度。
+            a = la.kv_cache[1].cpu().double()
+            b = lb.kv_cache[1].cpu().double()
             diff = (a - b).abs()
             worst_abs = max(worst_abs, diff.max().item())
             worst_rel = max(worst_rel, (diff / (a.abs() + 1e-6)).max().item())
