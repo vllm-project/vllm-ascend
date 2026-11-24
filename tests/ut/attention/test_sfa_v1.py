@@ -958,7 +958,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
             kv_cache_spec=kv_cache_spec, layer_names=layer_names, vllm_config=vllm_config, device=device
         )
 
-        common_attn_metadata = MagicMock()
+        common_attn_metadata = MagicMock(pcp_context=None)
         common_attn_metadata.decode_token_per_req = 1
         common_attn_metadata.max_query_len = 10
         common_attn_metadata.num_reqs = 10
@@ -1021,7 +1021,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
             kv_cache_spec=kv_cache_spec, layer_names=layer_names, vllm_config=vllm_config, device=device
         )
 
-        common_attn_metadata = MagicMock()
+        common_attn_metadata = MagicMock(pcp_context=None)
         common_attn_metadata.decode_token_per_req = 1
         common_attn_metadata.max_query_len = 10
         common_attn_metadata.num_reqs = 10

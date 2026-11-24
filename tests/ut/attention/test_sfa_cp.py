@@ -1707,6 +1707,7 @@ def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, 
 
 def test_sfa_pcp_dcp_view_preserves_global_prefill_gather_boundary():
     builder = _make_builder()
+    builder.vllm_config = SimpleNamespace(kv_transfer_config=None)
     builder.use_dcp = True
     builder.decode_threshold = 6
     builder.dcp_local_seq_lens_buf = torch.empty(1, dtype=torch.int32)
