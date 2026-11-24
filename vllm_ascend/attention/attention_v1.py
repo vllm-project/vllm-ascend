@@ -946,16 +946,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
         passed_value = value
-        kv_sharing_consumer = key is None
+        prefill_no_cache = attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+        # `key is None` also holds for every layer in decode; a layer without its
+        # own K/V only reads the shared cache when it runs prefill.
+        reads_shared_kv = prefill_no_cache and key is None
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
         )
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
         if (
-            attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+            prefill_no_cache
             and self.attn_type != AttentionType.ENCODER_DECODER
-            and not kv_sharing_consumer
+            and not reads_shared_kv
         ):
             key = key[:num_tokens]
             value = value[:num_tokens]
@@ -1093,10 +1096,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     current_key=key,
                     current_value=passed_value,
                     attn_metadata=attn_metadata,
-                    is_prefill_no_cache=(
-                        attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
-                        and not kv_sharing_consumer
-                    ),
+                    is_prefill_no_cache=prefill_no_cache and not reads_shared_kv,
                     sparse_mode=0 if is_decode else 3,
                 )
 
@@ -1802,7 +1802,8 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         """C8 FIA V1 TND for prefill states (PrefillNoCache uses float KV directly,
         PrefillCacheHit gathers + dequants paged INT8 KV).
         """
-        kv_sharing_consumer = key is None
+        prefill_no_cache = attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+        reads_shared_kv = prefill_no_cache and key is None
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
 
         actual_seq_qlen = attn_metadata.actual_seq_lengths_q
@@ -1810,9 +1811,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         query = query[:num_tokens]
 
         if (
-            attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+            prefill_no_cache
             and self.attn_type != AttentionType.ENCODER_DECODER
-            and not kv_sharing_consumer
+            and not reads_shared_kv
         ):
             key = key[:num_tokens]
             value = value[:num_tokens]
