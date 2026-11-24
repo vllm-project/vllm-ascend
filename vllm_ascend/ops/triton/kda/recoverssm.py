@@ -280,37 +280,15 @@ def _kda_recoverssm_verify_kernel(
                 # UNROLL_COMMIT; A3 keeps the runtime bound to bound UB use.
                 if UNROLL_REPLAY:
                     for reverse_offset in tl.static_range(SPEC_QUERY_LEN):
-                        if reverse_offset < commit_len:
-                            final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
-                                replay_correction_ptr,
-                                replay_kg_ptr,
-                                commit_len - reverse_offset - 1,
-                                offs_k,
-                                offs_v,
-                                mask_k,
-                                mask_v,
-                                stride_correction_pos,
-                                stride_correction_dim,
-                                stride_kg_pos,
-                                stride_kg_dim,
-                                A,
-                                dt_bias,
-                                lower_bound,
-                                boundary_recovery_len,
-                                final_decay,
-                                final_correction,
-                                boundary_decay,
-                                boundary_correction,
-                                K,
-                                USE_LOWER_BOUND,
-                                ALIGN_MODE,
-                            )
-                else:
-                    for reverse_offset in tl.range(0, tl.minimum(commit_len, SPEC_QUERY_LEN), num_stages=PIPELINE_STAGES):
-                        final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
+                        # Constant record addresses keep the window's loads
+                        # off the commit_len scalar dependency and outside the
+                        # guard, so MTE can issue them all without waiting;
+                        # rejected tokens skip only the rank-1 compute.
+                        record_pos = SPEC_QUERY_LEN - 1 - reverse_offset
+                        record_k, record_g, record_corr = _load_kda_commit_record(
                             replay_correction_ptr,
                             replay_kg_ptr,
-                            commit_len - reverse_offset - 1,
+                            record_pos,
                             offs_k,
                             offs_v,
                             mask_k,
@@ -319,6 +297,47 @@ def _kda_recoverssm_verify_kernel(
                             stride_correction_dim,
                             stride_kg_pos,
                             stride_kg_dim,
+                            K,
+                        )
+                        if record_pos < commit_len:
+                            final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
+                                record_k,
+                                record_g,
+                                record_corr,
+                                record_pos,
+                                A,
+                                dt_bias,
+                                lower_bound,
+                                boundary_recovery_len,
+                                final_decay,
+                                final_correction,
+                                boundary_decay,
+                                boundary_correction,
+                                USE_LOWER_BOUND,
+                                ALIGN_MODE,
+                            )
+                else:
+                    for reverse_offset in tl.range(0, tl.minimum(commit_len, SPEC_QUERY_LEN), num_stages=PIPELINE_STAGES):
+                        record_pos = commit_len - reverse_offset - 1
+                        record_k, record_g, record_corr = _load_kda_commit_record(
+                            replay_correction_ptr,
+                            replay_kg_ptr,
+                            record_pos,
+                            offs_k,
+                            offs_v,
+                            mask_k,
+                            mask_v,
+                            stride_correction_pos,
+                            stride_correction_dim,
+                            stride_kg_pos,
+                            stride_kg_dim,
+                            K,
+                        )
+                        final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
+                            record_k,
+                            record_g,
+                            record_corr,
+                            record_pos,
                             A,
                             dt_bias,
                             lower_bound,
@@ -327,7 +346,6 @@ def _kda_recoverssm_verify_kernel(
                             final_correction,
                             boundary_decay,
                             boundary_correction,
-                            K,
                             USE_LOWER_BOUND,
                             ALIGN_MODE,
                         )
@@ -640,7 +658,7 @@ def _compact_conv_state_kernel(
 
 
 @triton.jit
-def _accumulate_kda_commit_step(
+def _load_kda_commit_record(
     correction_cache_ptr,
     kg_cache_ptr,
     token_offset,
@@ -652,18 +670,9 @@ def _accumulate_kda_commit_step(
     stride_correction_cache_dim,
     stride_kg_cache_pos,
     stride_kg_cache_dim,
-    A,
-    dt_bias,
-    lower_bound,
-    boundary_recovery_len,
-    final_decay,
-    final_correction,
-    boundary_decay,
-    boundary_correction,
     K: tl.constexpr,
-    USE_LOWER_BOUND: tl.constexpr,
-    ALIGN_MODE: tl.constexpr,
 ):
+    """Load one committed token's record: key, gate, correction."""
     correction_ptr = correction_cache_ptr + token_offset * stride_correction_cache_pos
     kg_ptr = kg_cache_ptr + token_offset * stride_kg_cache_pos
     k = tl.load(
@@ -681,6 +690,26 @@ def _accumulate_kda_commit_step(
         mask=mask_k,
         other=0.0 if mask_k is not None else None,
     ).to(tl.float32)
+    return k, raw_g, correction
+
+
+@triton.jit
+def _accumulate_kda_commit_step(
+    k,
+    raw_g,
+    correction,
+    token_offset,
+    A,
+    dt_bias,
+    lower_bound,
+    boundary_recovery_len,
+    final_decay,
+    final_correction,
+    boundary_decay,
+    boundary_correction,
+    USE_LOWER_BOUND: tl.constexpr,
+    ALIGN_MODE: tl.constexpr,
+):
     normalized_k = _kda_l2_normalize(k)
     gate = _kda_gate(
         raw_g,
@@ -839,19 +868,29 @@ def _commit_kda_state_kernel(
     # A3 runtime iteration bounds UB use; A5 retains its faster static expansion.
     if UNROLL_COMMIT:
         for reverse_offset in tl.static_range(SPEC_QUERY_LEN):
-            if reverse_offset < commit_len:
+            # Constant record addresses keep the loads off the commit_len
+            # scalar dependency; rejected tokens skip only the compute.
+            record_pos = SPEC_QUERY_LEN - 1 - reverse_offset
+            record_k, record_g, record_corr = _load_kda_commit_record(
+                correction_cache_ptr,
+                kg_cache_ptr,
+                record_pos,
+                offs_k,
+                offs_v,
+                mask_k,
+                mask_v,
+                stride_correction_cache_pos,
+                stride_correction_cache_dim,
+                stride_kg_cache_pos,
+                stride_kg_cache_dim,
+                K,
+            )
+            if record_pos < commit_len:
                 final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
-                    correction_cache_ptr,
-                    kg_cache_ptr,
-                    commit_len - reverse_offset - 1,
-                    offs_k,
-                    offs_v,
-                    mask_k,
-                    mask_v,
-                    stride_correction_cache_pos,
-                    stride_correction_cache_dim,
-                    stride_kg_cache_pos,
-                    stride_kg_cache_dim,
+                    record_k,
+                    record_g,
+                    record_corr,
+                    record_pos,
                     A,
                     dt_bias,
                     lower_bound,
@@ -860,37 +899,42 @@ def _commit_kda_state_kernel(
                     final_correction,
                     boundary_decay,
                     boundary_correction,
-                    K,
                     USE_LOWER_BOUND,
                     ALIGN_MODE,
                 )
     else:
         for reverse_offset in range(tl.minimum(commit_len, SPEC_QUERY_LEN)):
-            if reverse_offset < commit_len:
-                final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
-                    correction_cache_ptr,
-                    kg_cache_ptr,
-                    commit_len - reverse_offset - 1,
-                    offs_k,
-                    offs_v,
-                    mask_k,
-                    mask_v,
-                    stride_correction_cache_pos,
-                    stride_correction_cache_dim,
-                    stride_kg_cache_pos,
-                    stride_kg_cache_dim,
-                    A,
-                    dt_bias,
-                    lower_bound,
-                    boundary_recovery_len,
-                    final_decay,
-                    final_correction,
-                    boundary_decay,
-                    boundary_correction,
-                    K,
-                    USE_LOWER_BOUND,
-                    ALIGN_MODE,
-                )
+            record_pos = commit_len - reverse_offset - 1
+            record_k, record_g, record_corr = _load_kda_commit_record(
+                correction_cache_ptr,
+                kg_cache_ptr,
+                record_pos,
+                offs_k,
+                offs_v,
+                mask_k,
+                mask_v,
+                stride_correction_cache_pos,
+                stride_correction_cache_dim,
+                stride_kg_cache_pos,
+                stride_kg_cache_dim,
+                K,
+            )
+            final_decay, final_correction, boundary_decay, boundary_correction = _accumulate_kda_commit_step(
+                record_k,
+                record_g,
+                record_corr,
+                record_pos,
+                A,
+                dt_bias,
+                lower_bound,
+                boundary_recovery_len,
+                final_decay,
+                final_correction,
+                boundary_decay,
+                boundary_correction,
+                USE_LOWER_BOUND,
+                ALIGN_MODE,
+            )
     initial_state = tl.load(state_ptrs, mask=mask_state, other=0.0 if mask_state is not None else None).to(tl.float32)
     state = initial_state * final_decay[None, :] + final_correction
     if ALIGN_MODE:
