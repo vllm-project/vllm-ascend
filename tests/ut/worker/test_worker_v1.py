@@ -2201,7 +2201,7 @@ class TestNPUWorkerWeightUpdate(TestBase):
         # The inherited finish hook refreshes the model runner after the base
         # weights land: the release install resets LoRA state, vLLM main
         # notifies the runner that the target weights were replaced.
-        if vllm_version_is("0.33.0"):
+        if vllm_version_is("0.34.0"):
             return worker.model_runner.reset_lora_state
         return worker.model_runner.on_target_weights_replaced
 

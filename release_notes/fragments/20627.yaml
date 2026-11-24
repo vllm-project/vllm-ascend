@@ -1,4 +1,6 @@
 pr: 20627
 entries:
   - category: dependency
-    text: Updated vLLM release compatibility and Dockerfile defaults to v0.33.0 while retaining support for the verified vLLM main baseline.
+    text: Updated vLLM release compatibility and Dockerfile defaults to v0.34.0 while retaining support for the verified vLLM main baseline.
+  - category: breaking
+    text: Removed the `disable_padded_drafter_batch` speculative-decoding option, which vLLM 0.34.0 no longer accepts. Delete it from existing configurations; drafter batches are always padded now.

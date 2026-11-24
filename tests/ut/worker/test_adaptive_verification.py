@@ -1,4 +1,3 @@
-import importlib
 from contextlib import nullcontext
 from functools import partial
 from inspect import signature
@@ -101,18 +100,6 @@ def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, con
     assert get_mrv2_in_profile_run() is False
 
 
-def test_adaptive_verification_patch_uses_uncompiled_budget_assignment(monkeypatch):
-    import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
-
-    allocator = Mock()
-    monkeypatch.setattr(adaptive, "_assign_draft_token_budget", allocator, raising=False)
-    monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object(), raising=False)
-    module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
-    importlib.reload(module)
-
-    assert adaptive._assign_draft_token_budget_compiled is allocator
-
-
 @pytest.mark.parametrize(
     "local_reqs,dp_reqs,target_capacity,expected_reqs",
     [(1, 3, 16, 1), (0, 3, 16, 3), (0, 1, 8, 1)],
@@ -157,7 +144,7 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
     prepare_inputs = Mock()
     monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", prepare_inputs)
     prepare_entry = (
-        prepare_inputs if vllm_version_is("0.33.0") else dflash_module._prepare_dflash_inputs_with_block_stride
+        prepare_inputs if vllm_version_is("0.34.0") else dflash_module._prepare_dflash_inputs_with_block_stride
     )
     monkeypatch.setattr(upstream_dflash, "prepare_dflash_inputs", prepare_entry)
 
@@ -168,13 +155,12 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
     # agreement, before dispatch can enter graph/device/collective execution.
     dispatch = Mock(side_effect=InputsPrepared)
     monkeypatch.setattr(upstream_dflash, "dispatch_cg_and_sync_dp", dispatch)
-    sync_kwargs = {} if vllm_version_is("0.33.0") else {"max_query_len": None}
     target_sync = DPSyncState(
         num_tokens_across_dp=torch.full((3,), target_capacity),
         uniform_token_count=None,
         eager=False,
         num_reqs=dp_reqs,
-        **sync_kwargs,
+        max_query_len=None,
     )
     with pytest.raises(InputsPrepared):
         spec.propose(

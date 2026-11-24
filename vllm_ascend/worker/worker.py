@@ -122,7 +122,6 @@ from vllm_ascend.utils import (
     register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
-    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -1404,11 +1403,7 @@ class NPUWorker(GPUWorker):
     @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
-        num_tokens = (
-            getattr(self.model_runner, "uniform_decode_query_len", 1)
-            if vllm_version_is("0.33.0")
-            else self.model_runner.decode_query_len
-        )
+        num_tokens = self.model_runner.decode_query_len
         # Idle DP worker RPCs also need the current config for replay metadata.
         with set_current_vllm_config(self.vllm_config):
             self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)
