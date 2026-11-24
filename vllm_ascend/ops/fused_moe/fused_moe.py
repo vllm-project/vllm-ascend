@@ -312,11 +312,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             shared_output, fused_output = self._maybe_apply_routed_scale_to_output(shared_output, fused_output)
 
         # A native transform may accumulate the shared output in its epilogue.
-        if (
-            not vllm_version_is("0.33.0")
-            and shared_output is not None
-            and getattr(self.routed_output_transform, "accumulates_residual", False)
-        ):
+        if shared_output is not None and getattr(self.routed_output_transform, "accumulates_residual", False):
             result = self.apply_routed_output_transform(fused_output, residual=shared_output)
         else:
             fused_output = self.apply_routed_output_transform(fused_output)
