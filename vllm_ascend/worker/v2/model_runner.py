@@ -1438,13 +1438,23 @@ class NPUModelRunner(GPUModelRunner):
 
         draft_architectures = spec.draft_model_config.architectures or ()
         use_flashmla = getattr(self.speculator, "use_flashmla", False)
-        # K3.1 SFA/KDA and the FlashMLA draft consume corrected device lengths.
-        # The initialized target producer also covers sharded SFA DCP metadata.
+        # Sharded SFA needs its device metadata producer. Unsharded FP8 SFA/LI
+        # and KDA in local-TP decode read corrected lengths directly on device.
         kimi_k31_device_lengths = (
             self.model_config.architecture == "KimiK31ForConditionalGeneration"
             and "K3DSparkModel" in draft_architectures
             and use_flashmla
-            and getattr(self.model_state, "device_metadata", None) is not None
+            and (
+                getattr(self.model_state, "device_metadata", None) is not None
+                or (
+                    self.parallel_config.decode_context_parallel_size == 1
+                    and self._finegrained_tp_requires_graph
+                    and self.cache_config.cache_dtype == "fp8"
+                    and self.ascend_config.enable_sparse_li_c8
+                    and self.vllm_config.attention_config.indexer_kv_dtype == "fp8"
+                    and self.vllm_config.attention_config.hisparse_config is None
+                )
+            )
         )
         if not kimi_k31_device_lengths and (
             self.model_config.architecture

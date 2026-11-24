@@ -2615,19 +2615,24 @@ def test_glm_mla_dspark_requires_cpu_length_sync(unsupported):
     assert runner._can_skip_spec_cpu_length_sync() is False
 
 
-def _kimi_k31_device_length_runner():
+def _kimi_k31_device_length_runner(*, local_tp=False):
     runner, output, batch = _glm_mla_device_length_runner()
     runner.model_config.architecture = "KimiK31ForConditionalGeneration"
     runner.speculative_config.draft_model_config.architectures = ["K3DSparkModel"]
-    runner.parallel_config.decode_context_parallel_size = 8
-    runner.model_state.device_metadata = object()
+    runner.parallel_config.decode_context_parallel_size = 1 if local_tp else 8
+    runner.model_state.device_metadata = None if local_tp else object()
+    runner._finegrained_tp_requires_graph = local_tp
+    runner.cache_config.cache_dtype = "fp8"
+    runner.ascend_config.enable_sparse_li_c8 = True
+    runner.vllm_config.attention_config = SimpleNamespace(indexer_kv_dtype="fp8", hisparse_config=None)
     return runner, output, batch
 
 
 @pytest.mark.parametrize("eager", [False, True])
 @pytest.mark.parametrize("kv_role", [None, "kv_producer", "kv_consumer"])
-def test_kimi_k31_dspark_flashmla_dcp_device_lengths(eager, kv_role):
-    runner, _, _ = _kimi_k31_device_length_runner()
+@pytest.mark.parametrize("local_tp", [False, True])
+def test_kimi_k31_dspark_flashmla_device_lengths(eager, kv_role, local_tp):
+    runner, _, _ = _kimi_k31_device_length_runner(local_tp=local_tp)
     runner.speculative_config.enforce_eager = eager
     runner.vllm_config.kv_transfer_config = None if kv_role is None else SimpleNamespace(kv_role=kv_role)
     assert runner._can_skip_spec_cpu_length_sync() is True
@@ -2647,8 +2652,9 @@ def test_kimi_k31_dspark_flashmla_dcp_device_lengths(eager, kv_role):
         "pp_exact_counts",
     ],
 )
-def test_kimi_k31_dspark_keeps_exact_cpu_lengths_for_unsupported_consumers(unsupported):
-    runner, _, _ = _kimi_k31_device_length_runner()
+@pytest.mark.parametrize("local_tp", [False, True])
+def test_kimi_k31_dspark_keeps_exact_cpu_lengths_for_unsupported_consumers(unsupported, local_tp):
+    runner, _, _ = _kimi_k31_device_length_runner(local_tp=local_tp)
     runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
     if unsupported == "draft_arch":
         runner.speculative_config.draft_model_config.architectures = ["Qwen3DSparkModel"]
@@ -2656,6 +2662,7 @@ def test_kimi_k31_dspark_keeps_exact_cpu_lengths_for_unsupported_consumers(unsup
         runner.speculator.use_flashmla = False
     elif unsupported == "no_device_metadata":
         runner.model_state.device_metadata = None
+        runner._finegrained_tp_requires_graph = False
     elif unsupported == "no_backends":
         runner.speculator.attn_backends = {}
     elif unsupported.endswith("parallel_size"):
@@ -2666,6 +2673,22 @@ def test_kimi_k31_dspark_keeps_exact_cpu_lengths_for_unsupported_consumers(unsup
         runner.speculative_config.enable_adaptive_verification = True
     elif unsupported == "pp_exact_counts":
         runner.sync_spec_pp_cpu_counts = True
+    assert runner._can_skip_spec_cpu_length_sync() is False
+
+
+@pytest.mark.parametrize("unsupported", ["sharded", "kv_dtype", "indexer_backend", "indexer_dtype", "hisparse"])
+def test_kimi_local_tp_keeps_cpu_lengths_for_other_target_paths(unsupported):
+    runner, _, _ = _kimi_k31_device_length_runner(local_tp=True)
+    if unsupported == "sharded":
+        runner.parallel_config.decode_context_parallel_size = 2
+    elif unsupported == "kv_dtype":
+        runner.cache_config.cache_dtype = "auto"
+    elif unsupported == "indexer_backend":
+        runner.ascend_config.enable_sparse_li_c8 = False
+    elif unsupported == "indexer_dtype":
+        runner.vllm_config.attention_config.indexer_kv_dtype = "int8"
+    else:
+        runner.vllm_config.attention_config.hisparse_config = object()
     assert runner._can_skip_spec_cpu_length_sync() is False
 
 
@@ -2690,7 +2713,9 @@ def test_mla_dspark_fallback_copies_and_waits(target):
 
 
 @pytest.mark.parametrize("rejected", [0, 1, 5])
-@pytest.mark.parametrize("draft", ["dflash", "m3_dspark", "glm_dspark", "glm_mla_dspark", "kimi_k31_dspark"])
+@pytest.mark.parametrize(
+    "draft", ["dflash", "m3_dspark", "glm_dspark", "glm_mla_dspark", "kimi_k31_dspark", "kimi_k31_local_tp"]
+)
 @pytest.mark.parametrize("kv_role", [None, "kv_producer", "kv_consumer"])
 def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected, draft, kv_role):
     runner, output, _ = _device_length_runner() if draft == "dflash" else _m3_device_length_runner()
@@ -2698,8 +2723,8 @@ def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected,
         runner.model_config.architecture = "GlmMoeDsaForCausalLM"
     elif draft == "glm_mla_dspark":
         runner, output, _ = _glm_mla_device_length_runner()
-    elif draft == "kimi_k31_dspark":
-        runner, output, _ = _kimi_k31_device_length_runner()
+    elif draft in ("kimi_k31_dspark", "kimi_k31_local_tp"):
+        runner, output, _ = _kimi_k31_device_length_runner(local_tp=draft == "kimi_k31_local_tp")
     runner.vllm_config.kv_transfer_config = None if kv_role is None else SimpleNamespace(kv_role=kv_role)
     runner.num_computed_tokens_cpu.fill_(-99)  # An old staging snapshot must never be read.
     runner.input_buffers.seq_lens_cpu.fill_(777)
