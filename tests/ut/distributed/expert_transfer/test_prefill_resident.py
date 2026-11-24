@@ -98,7 +98,10 @@ def test_full_pool_copies_physical_bytes_only_for_missing_experts(
         torch.testing.assert_close(result[name].float(), expected[name].float())
 
 
-def test_graph_residency_is_fenced_once_across_layer_loads(expert_factory, manager_factory, native_runtime):
+@pytest.mark.parametrize("has_prefill", [False, True])
+def test_graph_residency_is_fenced_once_across_layer_loads(
+    expert_factory, manager_factory, native_runtime, has_prefill
+):
     first, _ = expert_factory()
     second, _ = expert_factory(layer_name="model.layers.1.mlp.experts")
     for parameter in second.parameters():
@@ -120,7 +123,8 @@ def test_graph_residency_is_fenced_once_across_layer_loads(expert_factory, manag
             binding.slot_to_expert = (4, 5)
 
     native_runtime.npu.synchronize = Mock(side_effect=finish_graph)
-    manager.has_prefill = False
+    manager.has_prefill = has_prefill
+    manager.run_fullgraph(lambda: None)
     manager.has_prefill = True
     for binding, weights in zip(bindings, expected):
         actual = manager.full_pool.load_layer(binding)
@@ -128,7 +132,8 @@ def test_graph_residency_is_fenced_once_across_layer_loads(expert_factory, manag
             torch.testing.assert_close(actual[name].float(), weights[name].float())
     native_runtime.npu.synchronize.assert_called_once_with(bindings[0].device)
 
-    manager.has_prefill = False
+    manager.has_prefill = has_prefill
+    manager.run_fullgraph(lambda: None)
     manager.has_prefill = True
     manager.full_pool.load_layer(bindings[0])
     assert native_runtime.npu.synchronize.call_count == 2

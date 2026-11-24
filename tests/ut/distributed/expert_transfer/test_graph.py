@@ -71,7 +71,9 @@ def test_graph_replay_refreshes_experts_and_reuses_storage(expert_factory, manag
     )
     desc = SimpleNamespace(num_tokens=1, uniform_token_count=1)
     capture = Mock(side_effect=lambda *a, **k: not manager.has_prefill)
-    graph = SimpleNamespace(device=binding.device, _capture_descs={"full": [desc]}, _candidates={}, capture=capture)
+    graph = SimpleNamespace(
+        device=binding.device, _capture_descs={"full": [desc]}, _candidates={}, capture=capture, run_fullgraph=Mock()
+    )
     manager.prepare_graph_capture(graph, lambda: True)
     assert graph.capture("model", progress_bar_desc="test") is True
     capture.assert_called_once_with("model", progress_bar_desc="test")

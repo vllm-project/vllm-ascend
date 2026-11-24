@@ -249,7 +249,7 @@ class FullExpertPool:
         self.compute_stream = None
         self.inflight = False
         self.has_prefill = True
-        self.graph_residency_pending = True
+        self.graph_residency_pending = False
 
     def allocate(self, bindings) -> None:
         self.bindings = list(bindings)
@@ -296,11 +296,13 @@ class FullExpertPool:
     def set_batch_phase(self, has_prefill):
         if not has_prefill:
             # Decode can replace resident bytes that a look-ahead copy still reads.
-            if self.inflight:
-                self.load_stream.synchronize()
-                self.inflight = False
-            self.graph_residency_pending = True
+            self.drain()
         self.has_prefill = has_prefill
+
+    def drain(self):
+        if self.inflight:
+            self.load_stream.synchronize()
+            self.inflight = False
 
     def load_layer(self, binding):
         if binding.device.type == "npu":
@@ -414,9 +416,17 @@ class ExpertOffloadManager:
             self.graph_load_stream = torch.npu.Stream(device=graph_manager.device)
             graph_manager._capture_stream = self.capture_stream
             graph_manager.capture = partial(self.capture, graph_manager.capture)
+            graph_manager.run_fullgraph = partial(self.run_fullgraph, graph_manager.run_fullgraph)
+
+    def run_fullgraph(self, replay_fn, *args, **kwargs):
+        # A prompt tail can replay a decode graph even when has_prefill is True.
+        self.full_pool.drain()
+        self.full_pool.graph_residency_pending = True
+        return replay_fn(*args, **kwargs)
 
     def capture(self, capture_fn, *args, **kwargs):
         self.has_prefill = False
+        self.full_pool.graph_residency_pending = True
         return capture_fn(*args, **kwargs)
 
     def initialize(self, model) -> None:

@@ -87,6 +87,7 @@ def make_pool(monkeypatch, layers=4):
         SimpleNamespace(
             current_stream=lambda _: state.compute,
             synchronize=synchronize,
+            Stream=lambda **kwargs: load,
         ),
         raising=False,
     )
@@ -134,29 +135,69 @@ def test_interrupted_order_and_partial_compute_are_fenced(monkeypatch, switch_st
     state.compute.synchronize()
 
 
-def test_decode_drains_once_before_resident_updates(monkeypatch):
+@pytest.mark.parametrize("captured_graph", [False, True])
+def test_decode_drains_once_before_resident_updates(monkeypatch, captured_graph):
     manager, pool, bindings, state, load, calls = make_pool(monkeypatch)
+    if captured_graph:
+        manager.graph_streams.add(object())
+        manager.capture(lambda: None)
+        pool.load_layer(bindings[0])  # Resolve capture callbacks before measuring eager steps.
+        calls.clear()
+        manager.has_prefill = True
     submit_compute(pool, bindings[0], state)
     assert not state.copies[1].done
     runner = SimpleNamespace(model=SimpleNamespace(_expert_offload_manager=manager))
     for _ in range(3):
         prepare_batch(runner, SimpleNamespace(has_prefill=False))
+        for binding in bindings:
+            submit_compute(pool, binding, state)
     assert state.copies[1].done
     assert not pool.inflight
     assert calls.count(("load", "sync")) == 1
     assert ("graph", "sync") not in calls
-    # Capacity fallback must not start a new prefetch or synchronize the load stream.
-    for binding in bindings:
-        submit_compute(pool, binding, state)
-    assert calls.count(("load", "sync")) == 1
     state.compute.synchronize()
+
+
+def test_prompt_tail_full_replay_drains_and_fences_before_pool_miss(monkeypatch):
+    manager, pool, bindings, state, load, calls = make_pool(monkeypatch)
+    manager.graph_streams.add(object())
+    runner = SimpleNamespace(model=SimpleNamespace(_expert_offload_manager=manager))
+    prepare_batch(runner, SimpleNamespace(has_prefill=True, decode_graph_eligible=True))
+    submit_compute(pool, bindings[0], state)
+    assert not state.copies[1].done
+
+    def replay(desc):
+        assert manager.has_prefill and not pool.inflight and state.copies[1].done
+        assert pool.graph_residency_pending
+        state.compute.submit(lambda: setattr(bindings[2], "slot_to_expert", (2,)))
+        return desc
+
+    graph = SimpleNamespace(
+        device=bindings[0].device, _capture_descs={}, _candidates={}, capture=lambda: None, run_fullgraph=replay
+    )
+    manager.prepare_graph_capture(graph, lambda: True)
+    assert graph.run_fullgraph("prompt-tail") == "prompt-tail"
+    assert bindings[2].slot_to_expert == (0,)  # Replay callback is still pending.
+    copy = mod.TorchExpertTransfer.copy_experts
+
+    def checked_copy(*args, **kwargs):
+        if args[0] == 2:
+            assert kwargs["resident_loads"] == ((0, 2),), "planned from stale graph residency"
+        return copy(*args, **kwargs)
+
+    monkeypatch.setattr(mod.TorchExpertTransfer, "copy_experts", checked_copy)
+    submit_compute(pool, bindings[2], state)  # Evict layer 0 from the first buffer.
+    load.synchronize()
+    state.compute.synchronize()
+    assert calls.count(("graph", "sync")) == 1
 
 
 def test_graph_decode_returns_to_prefetch_with_one_fence(monkeypatch):
     manager, pool, bindings, state, load, calls = make_pool(monkeypatch)
     manager.graph_streams.add(object())
     for _ in range(2):
-        manager.capture(lambda: None)
+        manager.has_prefill = False
+        manager.run_fullgraph(lambda: None)
         manager.has_prefill = True
         for binding in bindings:
             submit_compute(pool, binding, state)
@@ -171,6 +212,7 @@ def test_failed_graph_fence_retries_before_reusing_cached_weights(monkeypatch):
     submit_compute(pool, bindings[0], state)
     manager.graph_streams.add(object())
     manager.has_prefill = False
+    manager.run_fullgraph(lambda: None)
     manager.has_prefill = True
     synchronize = mod.torch.npu.synchronize
 
