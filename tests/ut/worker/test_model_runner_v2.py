@@ -1091,6 +1091,7 @@ def test_replicated_draft_profile_keeps_target_sampling_local(
     runner.device = torch.device("cpu")
     runner.is_first_pp_rank = runner.is_last_pp_rank = True
     runner.max_num_tokens, runner.max_num_reqs = 8, 2
+    runner.max_model_len = runner.max_num_tokens
     runner.vllm_config.parallel_config.prefill_context_parallel_size = pcp
     runner.speculative_config = SimpleNamespace(max_num_new_slots_for_drafting=0)
     runner.input_buffers = InputBuffers(2, 32, runner.device)
