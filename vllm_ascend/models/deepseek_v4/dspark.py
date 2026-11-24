@@ -205,6 +205,9 @@ class DeepseekV4DSparkModel(nn.Module):
         last_layer.norm = self.norm
         last_layer.markov_head = self.markov_head
 
+        # Keep HC head parameters only on the model, where checkpoint names map.
+        # Decoder aliases would register them twice, but layerwise reload only
+        # records the model owner; forward also reads these model parameters.
         hc_dim = self.hc_mult * config.hidden_size
         self.hc_head_fn = nn.Parameter(
             torch.empty(self.hc_mult, hc_dim, dtype=torch.float32),
