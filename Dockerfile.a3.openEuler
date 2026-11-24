@@ -90,7 +90,7 @@ RUN curl -fsSL https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTH
     ./configure --prefix=/usr/local --enable-shared --with-ensurepip=install && \
     make -j"${MAX_JOBS:-$(nproc)}" && make install && \
     mkdir -p /etc/ld.so.conf.d && echo /usr/local/lib > /etc/ld.so.conf.d/usr-local.conf && ldconfig && \
-    rm -rf /tmp/pybuild /tmp/Python.tgz && \
+    cd /tmp && rm -rf /tmp/pybuild /tmp/Python.tgz && \
     LD_LIBRARY_PATH=/usr/local/lib python3 -V && \
     LD_LIBRARY_PATH=/usr/local/lib python3 -m pip install -U pip setuptools wheel
 
