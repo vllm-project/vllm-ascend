@@ -39,9 +39,9 @@
 #include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
-#include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
+#include "attention/sparse_flash_attention_vllm/sparse_flash_attention_vllm_torch_adpt.h"
 #include "aclnn_torch_adapter/gbsa_torch_adpt.h"
-#include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
+#include "attention/sparse_flash_mla_vllm/sparse_flash_mla_vllm_torch_adpt.h"
 #include "attention/kv_compress_epilog_v2/kv_compress_epilog_v2_torch_adpt.h"
 #include "attention/quant_lightning_indexer_v2/quant_lightning_indexer_v2_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention_vllm/kv_quant_sparse_flash_attention_vllm_torch_adpt.h"
@@ -57,8 +57,8 @@
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/hisparse_resolve_residency/hisparse_resolve_residency_torch_adpt.h"
-#include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
-#include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
+#include "moe/dequant_situ_quant_vllm/dequant_situ_quant_vllm_torch_adpt.h"
+#include "moe/situ_mx_quant_vllm/situ_mx_quant_vllm_torch_adpt.h"
 #include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
