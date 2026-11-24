@@ -3,7 +3,7 @@
 
 import ast
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
 from typing import Any
@@ -121,6 +121,7 @@ def test_push_retains_source_blocks_and_prefix_origin(chosen, num_external_token
         {
             "__name__": __name__,
             "dataclass": dataclass,
+            "field": field,
             "KVConnectorHandshakeMetadata": type("Handshake", (), {}),
             "KVConnectorMetadata": type("Metadata", (), {}),
         },
