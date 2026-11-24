@@ -2181,7 +2181,15 @@ class AscendSFAImpl(MLAAttentionImpl):
                 o_capacity = max(o_capacity, dp_tokens)
         begin_gate = getattr(self, "begin_gate", None)
         # Gather before NoPE trims live rows so idle and active ranks send the same shape.
-        project_gate = begin_gate(hidden_states) if begin_gate is not None else None
+        # MegaDSA issues its own G all-gather. Keep the original padded input
+        # for native ranks, including dummy and unsupported graph buckets.
+        defer_gate = (
+            begin_gate is not None
+            and getattr(self, "_mega_dsa", None) is not None
+            and attn_metadata is not None
+            and self.qk_rope_head_dim != 0
+        )
+        project_gate = begin_gate(hidden_states) if begin_gate is not None and not defer_gate else None
         if attn_metadata is None:
             return self._forward_dummy(hidden_states, output, project_gate, o_capacity)
 
@@ -2224,6 +2232,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             notify_kv_cache_written(self.layer_name or "")
             maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
             return output
+
+        if defer_gate:
+            project_gate = begin_gate(hidden_states)
 
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = hidden_states.shape[0] if self.qk_rope_head_dim == 0 else attn_metadata.num_input_tokens
