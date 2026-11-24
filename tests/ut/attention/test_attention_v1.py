@@ -157,7 +157,7 @@ class TestAscendAttentionBackend(TestBase):
         self.assertEqual(result, (2, 10, 20, 30, 40))
 
     def test_get_kv_cache_shape_uses_bnsd_for_hnd_layouts(self):
-        for layout in ("LBHNC", "HND"):
+        for layout in ("LBHNC", "BLHNC", "HND"):
             with self.subTest(layout=layout), patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", layout):
                 result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
             self.assertEqual(result, (2, 10, 30, 20, 40))
@@ -583,6 +583,24 @@ class TestAscendAttentionBackendImpl(TestBase):
             )
 
         self.assertEqual(impl.kv_cache_layout, "HND")
+        self.assertTrue(impl.use_bnsd_kv_cache)
+
+    def test_block_outer_hnd_layout_is_recorded_during_initialization(self):
+        with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", "BLHNC"):
+            impl = AscendAttentionBackendImpl(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                num_kv_heads=8,
+                alibi_slopes=None,
+                sliding_window=None,
+                kv_cache_dtype="float16",
+                logits_soft_cap=None,
+                attn_type=self.attention_type.DECODER,
+                kv_sharing_target_layer_name=None,
+            )
+
+        self.assertEqual(impl.kv_cache_layout, "BLHNC")
         self.assertTrue(impl.use_bnsd_kv_cache)
 
     def test_hnd_reshape_and_cache_passes_bnsd_to_device_operator(self):

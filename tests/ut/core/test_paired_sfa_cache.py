@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, SlidingWindowSpec
 
 from vllm_ascend.core import kv_cache_config_builder
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
@@ -320,3 +320,50 @@ def test_dspark_c8_draft_uses_dense_fp8_regions_without_changing_target_groups()
     assert all(tensor.block_stride == draft_page_bytes for tensor in draft_tensors)
     assert [tensor.offset for tensor in draft_tensors] == sorted(tensor.offset for tensor in draft_tensors)
     assert draft_tensors[-1].offset + draft_tensors[-1].layer_stride == plan.kv_cache_tensors[0].size
+
+
+@pytest.mark.parametrize("dcp_size,draft_dcp_sharded", [(1, True), (8, False)])
+@pytest.mark.parametrize("draft_block_size", [128, 1536])
+def test_sliding_draft_keeps_window_ownership_and_native_pages(dcp_size, draft_dcp_sharded, draft_block_size):
+    config = make_config()
+    config.model_config.max_model_len = 143360
+    config.parallel_config = SimpleNamespace(decode_context_parallel_size=dcp_size)
+    target = make_specs()
+    target_groups = paired_sfa_cache_groups(config, target)
+    draft = {
+        f"draft_model.layers.{layer}.attn": SlidingWindowSpec(
+            block_size=draft_block_size,
+            num_kv_heads=2,
+            head_size=64,
+            dtype=torch.bfloat16,
+            sliding_window=2048,
+            is_draft=True,
+            dcp_sharded=draft_dcp_sharded,
+        )
+        for layer in range(5)
+    }
+    groups = paired_sfa_cache_groups(config, {**target, **draft})
+    assert groups[: len(target_groups)] == target_groups
+    assert len(groups) == len(target_groups) + 1
+    draft_group = groups[-1]
+    assert draft_group.layer_names == list(draft)
+    assert draft_group.kv_cache_spec.kv_cache_specs == draft
+    assert draft_group.kv_cache_spec.dcp_sharded == draft_dcp_sharded
+    draft_bytes = sum(spec.page_size_bytes for spec in draft.values())
+    assert paired_sfa_pool_bytes(groups) == paired_sfa_pool_bytes(target_groups) + draft_bytes
+    plan = paired_sfa_cache_config(config, groups, 2**30)
+    tensors = [tensor for tensor in plan.kv_cache_tensors if tensor.layers[0] in draft]
+    assert len(tensors) == 5
+    target_end = max(
+        tensor.offset + len(tensor.layers) * tensor.layer_stride
+        for tensor in plan.kv_cache_tensors
+        if tensor.layers[0] not in draft
+    )
+    cursor = target_end
+    for tensor in tensors:
+        spec = draft[tensor.layers[0]]
+        assert tensor.offset == cursor
+        assert tensor.block_stride == spec.page_size_bytes
+        assert tensor.layer_stride == spec.page_size_bytes * plan.num_blocks
+        cursor += tensor.layer_stride
+    assert cursor == plan.kv_cache_tensors[0].size

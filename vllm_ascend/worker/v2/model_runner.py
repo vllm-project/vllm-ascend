@@ -1440,12 +1440,25 @@ class NPUModelRunner(GPUModelRunner):
 
         draft_architectures = spec.draft_model_config.architectures or ()
         use_flashmla = getattr(self.speculator, "use_flashmla", False)
-        # K3.1 SFA/KDA and the FlashMLA draft consume corrected device lengths.
+        # Inspect initialized backends, including hardware and dtype fallback.
+        # Before set_attn, keep both the CPU copy and its consumer enabled.
+        draft_backends = getattr(self.speculator, "attn_backends", {})
+        uses_flash_attn = bool(draft_backends) and all(
+            backend is AscendFlashAttentionBackend for backend in draft_backends.values()
+        )
+        # K3.1 SFA/KDA and supported drafts consume corrected device lengths.
         # The initialized target producer also covers sharded SFA DCP metadata.
         kimi_k31_device_lengths = (
             self.model_config.architecture == "KimiK31ForConditionalGeneration"
-            and "K3DSparkModel" in draft_architectures
-            and use_flashmla
+            and (
+                ("K3DSparkModel" in draft_architectures and use_flashmla)
+                or (
+                    "Qwen3DSparkModel" in draft_architectures
+                    and uses_flash_attn
+                    # The GQA draft must be replicated even with target DCP.
+                    and not getattr(self.speculator, "use_dcp", True)
+                )
+            )
             and getattr(self.model_state, "device_metadata", None) is not None
         )
         if not kimi_k31_device_lengths and (
@@ -1462,17 +1475,11 @@ class NPUModelRunner(GPUModelRunner):
         ):
             return False
 
-        # Inspect the initialized draft backends instead of repeating selection
-        # rules for hardware, Q dtype and KV dtype. Before set_attn, keep syncing.
-        draft_backends = getattr(self.speculator, "attn_backends", {})
         parallel_config = self.parallel_config
         # Keep unverified parallel, offload and adaptive paths on host counts.
         return (
             bool(draft_backends)
-            and (
-                all(backend is AscendFlashAttentionBackend for backend in draft_backends.values())
-                or getattr(self.speculator, "use_flashmla", False)
-            )
+            and (uses_flash_attn or use_flashmla)
             and parallel_config.pipeline_parallel_size == 1
             and parallel_config.prefill_context_parallel_size == 1
             and (parallel_config.decode_context_parallel_size == 1 or kimi_k31_device_lengths)

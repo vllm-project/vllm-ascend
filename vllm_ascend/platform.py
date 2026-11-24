@@ -1937,7 +1937,10 @@ def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str | Non
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
         )
     if spec.method == "dspark":
-        supported_target_architectures = _MINIMAX_M3_ARCHITECTURES | {"GlmMoeDsaForCausalLM"}
+        supported_target_architectures = _MINIMAX_M3_ARCHITECTURES | {
+            "GlmMoeDsaForCausalLM",
+            "KimiK31ForConditionalGeneration",
+        }
         return (
             model_tag == "dspark_head"
             and not supported_target_architectures.isdisjoint(target.hf_config.architectures or ())
@@ -1947,7 +1950,7 @@ def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str | Non
 
 
 def _validate_flash_attn_backend(backend_key, selector) -> bool:
-    """Select CANN FlashAttn for A5 GLM DFlash2 and GLM/MiniMax DSpark drafts."""
+    """Select CANN FlashAttn for supported A5 DFlash2 and GQA DSpark drafts."""
     # backend_key is (use_mla, use_sparse, use_compress).
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.DEVICE_LENGTH_FLASH_ATTN

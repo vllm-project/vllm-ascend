@@ -5,8 +5,9 @@
 Each full-history block owns both components. Recurrent groups use disjoint
 IDs from the same pool and may alias main-page physical slots. Token ownership
 never depends on the relative byte sizes of the two attention components.
-DSpark shares full-history block IDs when its sharding matches the target,
-with a separate region in the backing for every draft layer.
+Full-attention DSpark shares block IDs when its sharding matches the target.
+Sliding-window drafts retain separate ownership; every draft layer has a
+separate region in the backing.
 """
 
 from dataclasses import replace
@@ -14,6 +15,7 @@ from dataclasses import replace
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
@@ -75,15 +77,19 @@ def paired_sfa_cache_groups(config, specs):
     # AscendMLAAttentionSpec.merge must not merge these different MLA specs.
     full = groups[0]
     assert isinstance(full.kv_cache_spec, UniformTypeKVCacheSpecs)
-    # Replicated and DCP-sharded attention have different logical coverage.
-    # Preserve their own block tables while retaining independent physical
-    # regions in the paired backing allocation.
-    separate = {name: spec for name, spec in ordered.items() if spec.dcp_sharded != full.kv_cache_spec.dcp_sharded}
+    # Replicated attention and sliding windows cannot share the target's
+    # full-history block table. Retain separate logical ownership and physical
+    # regions even when the draft and target have the same DCP sharding.
+    separate = {
+        name: spec
+        for name, spec in ordered.items()
+        if not isinstance(spec, FullAttentionSpec) or spec.dcp_sharded != full.kv_cache_spec.dcp_sharded
+    }
     ordered = {name: spec for name, spec in ordered.items() if name not in separate}
     if separate:
         uniform_draft = UniformTypeKVCacheSpecs.from_specs(separate)
         if uniform_draft is None:
-            raise ValueError("Draft layers must share full-attention semantics and logical block size.")
+            raise ValueError("Separate draft layers must share attention semantics and logical block size.")
         groups.append(
             KVCacheGroupSpec(
                 list(separate),
