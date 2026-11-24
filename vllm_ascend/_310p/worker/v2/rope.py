@@ -52,10 +52,15 @@ class Ascend310PRopeState:
         model: nn.Module,
         prefill_token_ids: list[int],
         mm_features: list,
+        position_delta: int | None = None,
     ) -> None:
         mrope_model = cast(SupportsMRoPE, model)
         # Qwen3-VL / Qwen3.5 return ``(Tensor[num_dims, seq], delta)``.
         prefill_positions, delta = mrope_model.get_mrope_input_positions(prefill_token_ids, mm_features)
+        if position_delta is not None and not mm_features:
+            # The P/D consumer only has text positions and the producer's delta.
+            prefill_positions = (prefill_positions + position_delta).clamp_(min=0)
+            delta = position_delta
         self.prefill_delta.np[req_idx] = delta
 
         for dim in range(self.num_dims):
@@ -68,6 +73,9 @@ class Ascend310PRopeState:
     def apply_staged_writes(self) -> None:
         self.prefill_positions.apply_write()
         self.prefill_delta.copy_to_uva()
+
+    def get_prefill_delta(self, req_idx: int) -> int:
+        return int(self.prefill_delta.np[req_idx])
 
     def prepare_positions_cpu(
         self,
@@ -91,7 +99,7 @@ class Ascend310PRopeState:
                 ]
                 self.positions_cpu[:, query_start:query_end].copy_(positions)
             else:
-                delta = int(self.prefill_delta.np[req_idx])
+                delta = self.get_prefill_delta(req_idx)
                 # Write directly into persistent host storage.
                 # Writes directly into persistent output; no per-request
                 # torch.arange allocation or intermediate CPU copy.
