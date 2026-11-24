@@ -258,7 +258,9 @@ class BaseKVPoolScheduler(ABC):
     def _max_pool_prefix_tokens(self, num_prompt_tokens: int) -> int:
         if vllm_version_is("0.33.0"):
             return num_prompt_tokens
-        return get_reusable_prefix_length(num_prompt_tokens, self.vllm_config.num_hash_lookahead_tokens)
+        # The lookup may read the final complete stored page and reuse a
+        # partial prefix. Reserve the final logit token after the page is found.
+        return max(0, num_prompt_tokens - self.vllm_config.num_hash_lookahead_tokens)
 
     def get_num_new_matched_tokens(
         self,

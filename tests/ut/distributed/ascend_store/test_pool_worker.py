@@ -162,6 +162,7 @@ def make_worker(
     importlib.import_module.return_value = MagicMock()
 
     config = MagicMock()
+    config.num_hash_lookahead_tokens = 0
     config.model_config.model = "org/llama-7b"
     config.model_config.max_model_len = 1024
     config.model_config.use_mla = use_mla

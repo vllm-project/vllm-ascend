@@ -398,7 +398,8 @@ def test_raw_sequence_lifecycle(
         return list(request.all_token_ids)
 
     try:
-        run_request("producer", producer_tokens, 0)
+        produced = run_request("producer", producer_tokens, 0)
+        matching_long_prompt = produced[:513] if config.num_hash_lookahead_tokens else list(range(513))
         saved = dict(MemoryBackend.payloads)
         assert saved
         # Clear the real local prefix cache; the next request must use the Store.
@@ -425,9 +426,13 @@ def test_raw_sequence_lifecycle(
             pool.m_store.loads.clear()
             for _, _, _, tensor in cache_entries(plan, caches):
                 tensor.fill_(-3)
-            tokens = list(range(length))
+            tokens = matching_long_prompt.copy() if length == 513 else list(range(length))
             if fork is not None:
                 tokens[fork] += 1000
+                # A divergence in the hash lookahead also invalidates the
+                # preceding block ending at that token boundary.
+                if hit and config.num_hash_lookahead_tokens and fork % 128 < config.num_hash_lookahead_tokens:
+                    hit = max(0, hit - 128)
             if not has_private_state and not speculative_method and fork is None:
                 # Legacy full hits still reserve only the final token.
                 hit = {125: 0, 126: 0, 127: 0, 128: 127, 129: 128, 256: 255, 257: 256, 512: 511, 513: 512}[length]
@@ -450,9 +455,9 @@ def test_raw_sequence_lifecycle(
         # pure full-attention dspark layout sees the doubled local prefix hit.
         only_full_attention = isinstance(plan.kv_cache_groups[0].kv_cache_spec, FullAttentionSpec)
         mixed_local = 128
-        if speculative_method == "dspark" and only_full_attention:
+        if speculative_method == "dspark" and (only_full_attention or not vllm_version_is("0.33.0")):
             mixed_local = 256
-        run_request("mixed-local-remote", list(range(513)), 512, expected_local=mixed_local)
+        run_request("mixed-local-remote", matching_long_prompt, 512, expected_local=mixed_local)
         assert scheduler.reset_prefix_cache()
         missing_group = len(plan.kv_cache_groups) - 1
         MemoryBackend.payloads = {key: value for key, value in saved.items() if f"@group:{missing_group}@" not in key}
