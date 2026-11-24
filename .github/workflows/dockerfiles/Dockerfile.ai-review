@@ -35,6 +35,16 @@ RUN apt-get update -y && \
     rm -rf /var/lib/apt/lists/* && \
     python3 -m pip install pyyaml regex
 
+# gh CLI: the orchestrator drives every GitHub API call through it.
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update -y && \
+    apt-get install -y gh && \
+    rm -rf /var/cache/apt/* && \
+    rm -rf /var/lib/apt/lists/*
+
 # Node.js 22 LTS (dsh is a Node application; keep the major pinned so a
 # upstream Node release cannot silently break the agent image)
 ARG NODE_MAJOR=22
@@ -49,7 +59,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - && \
 RUN npm install -g "@deepseek-ai/dsh@next" && \
     npm cache clean --force
 
-# Smoke check: fail the build early if the CLI cannot start in this image.
-RUN dsh --version
+# Smoke check: fail the build early if the CLIs cannot start in this image.
+RUN dsh --version && gh --version
 
 CMD ["/bin/bash"]

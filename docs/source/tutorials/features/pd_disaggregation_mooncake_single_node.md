@@ -258,6 +258,40 @@ python load_balance_proxy_server_example.py \
 
 ## Verification
 
+### Decode health probes without a prefill service
+
+With `MooncakeConnectorV2`, send a request directly to D with
+`do_virtual: true` and `do_remote_prefill: true` in `kv_transfer_params` to
+exercise D-side scheduling and inference without transferring KV cache from P.
+This works in both default pull mode and layerwise push mode
+(`kv_connector_extra_config.use_layerwise=true`). The flag defaults to false.
+
+For pull mode, retain the required remote metadata fields as placeholders, for example:
+
+```json
+{
+  "do_remote_prefill": true,
+  "do_virtual": true,
+  "remote_block_ids": [[0]],
+  "remote_host": "127.0.0.1",
+  "remote_port": 1,
+  "remote_engine_id": "health-probe",
+  "remote_request_id": "unique-probe-id",
+  "remote_num_prompt_tokens": 32
+}
+```
+
+Set `remote_num_prompt_tokens` to the actual prompt token count and use the
+appropriate number of KV cache groups. For layerwise push probes, only
+`do_remote_prefill` and `do_virtual` are needed in `kv_transfer_params`; D does
+not dispatch the request to P through the metaserver. Use a short nonempty prompt,
+disable prefix caching for this check, and request only a small number of output tokens.
+
+A successful probe confirms request completion on D. Generated text is not an
+accuracy result because historical KV cache was not transferred.
+
+### Normal PD inference
+
 Check service health using the proxy server endpoint.
 
 ```shell

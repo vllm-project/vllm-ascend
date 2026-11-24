@@ -58,6 +58,7 @@ _STANDARD_CAPABILITIES = frozenset(
 _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A2: _STANDARD_CAPABILITIES
     | {
+        HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MM_REDUCE_SCATTER_BF16,
         HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
         HardwareCapability.RMS_NORM_CAST,
@@ -66,8 +67,8 @@ _EXPECTED_CAPABILITIES = {
     },
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
-        HardwareCapability.ENGRAM_ROTATED_GATE,
         HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
+        HardwareCapability.ENGRAM_ROTATED_GATE,
         HardwareCapability.KDA_INT8_QUANT_OVERLAP,
         HardwareCapability.NATIVE_INT8_SPARSE,
         HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
@@ -114,6 +115,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
             HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
             HardwareCapability.FLA_GDN_PREFILL,
+            HardwareCapability.FLA_GDN_PREFILL_CHUNK32,
             HardwareCapability.FP8_ATTENTION,
             HardwareCapability.INDEXER_QUANT_CACHE,
             HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,

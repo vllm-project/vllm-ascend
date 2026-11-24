@@ -13,15 +13,22 @@ def worker(monkeypatch):
     from vllm_ascend.worker import worker as worker_module
 
     worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
-    worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=["weight"])
+    worker.model_config = SimpleNamespace(
+        sleep_preserve_parameter_names=["weight"],
+        sleep_mode_backend="camem",
+    )
+    worker.vllm_config = SimpleNamespace(model_config=worker.model_config)
     worker.model_runner = SimpleNamespace(model=torch.nn.Linear(2, 2))
     worker.model_runner.model.register_buffer("scale", torch.tensor([2.0]))
     worker._sleep_saved_parameters = {}
     worker._sleep_saved_buffers = {}
-    worker.sleep_wakeup_manager = MagicMock()
+    worker._sleep_mode_backend = None
     worker.allocator = MagicMock()
+    worker.sleep_wakeup_manager = MagicMock()
     monkeypatch.setattr(worker, "synchronize_device", MagicMock())
-    monkeypatch.setattr(worker_module.CaMemAllocator, "get_instance", lambda: worker.allocator)
+    from vllm_ascend.device_allocator import sleep_mode_backend as backend_module
+
+    monkeypatch.setattr(backend_module.CaMemAllocator, "get_instance", lambda: worker.allocator)
     monkeypatch.setattr(
         worker_module.torch.npu,
         "mem_get_info",
@@ -132,7 +139,7 @@ def test_level_one_keeps_allocator_offload_and_clears_old_backups(worker, monkey
     worker.sleep(level=1)
 
     save.assert_not_called()
-    worker.allocator.sleep.assert_called_once_with(offload_tags=("weights",))
+    worker.allocator.sleep.assert_called_once_with(("weights",))
     assert worker._sleep_saved_parameters == {}
     assert worker._sleep_saved_buffers == {}
 
@@ -154,7 +161,7 @@ def test_weight_wake_restores_in_place_after_mapping(worker, tags):
     assert torch.equal(model.scale, torch.tensor([4.0]))
     assert worker._sleep_saved_parameters == {}
     assert worker._sleep_saved_buffers == {}
-    worker.allocator.wake_up.assert_called_once_with(tags=tags)
+    worker.allocator.wake_up.assert_called_once_with(tags)
     worker.synchronize_device.assert_called_once_with()
 
 

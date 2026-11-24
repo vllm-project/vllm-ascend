@@ -10,7 +10,10 @@ on:
 # round's output would be stale or discarded anyway, so latest-wins is
 # both cheaper and closer to what the human intended.
 concurrency:
-  group: ai-review-${{ github.event.pull_request.number }}
+  # issue_comment events carry the PR number at issue.number; without the
+  # fallback every PR's comment round would share one empty-key group and
+  # cancel each other
+  group: ai-review-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:
@@ -20,10 +23,31 @@ jobs:
     # keeps unrelated PR comments from even starting a job on the CPU pool —
     # comment-triggered workflows otherwise spin up one container per repo
     # comment. issue_comment also fires on plain issues, so require a PR.
+    # PR events fire on every push and every label of every PR in the repo;
+    # gate them on the ai-review label so unlabeled PRs never start a job
+    # (and their fork code is never checked out). synchronize requires the
+    # label on the PR; labeled/unlabeled require the event's own label to be
+    # ai-review (adding any other label must not re-trigger a round; the
+    # unlabeled arm is what lets the stop handler run). Comment events keep
+    # the command-body filter: only comments containing the command family
+    # start a job.
     if: >-
-      github.event_name != 'issue_comment' ||
       (
+        github.event_name == 'pull_request_target' &&
+        (
+          (github.event.action == 'synchronize' &&
+            contains(github.event.pull_request.labels.*.name, 'ai-review')) ||
+          ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
+            github.event.label.name == 'ai-review')
+        )
+      ) ||
+      (
+        github.event_name == 'issue_comment' &&
         github.event.issue.pull_request != null &&
+        contains(github.event.comment.body, '/ai-review')
+      ) ||
+      (
+        github.event_name == 'pull_request_review_comment' &&
         contains(github.event.comment.body, '/ai-review')
       )
     runs-on: linux-amd64-cpu-2-hk
@@ -63,6 +87,8 @@ jobs:
       - name: Orchestrate ai-review round
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          # pin the repo so gh never depends on cwd-based inference
+          GH_REPO: ${{ github.repository }}
           # Dedicated credentials for the ai-review agent (same DeepSeek
           # channel as the doc-translate job, separate key so usage is
           # attributable and revocable independently).

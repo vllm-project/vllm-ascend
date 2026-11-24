@@ -21,6 +21,7 @@ import unittest
 from itertools import product
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import numpy as np
 import pytest
@@ -940,16 +941,19 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
 
         return KVPoolWorker
 
-    def test_global_group_alloc_size_rounds_up(self):
+    def test_global_group_alloc_size_uses_group_payload_under_pp(self):
         cls = self._make_worker_class()
         worker = cls.__new__(cls)
         worker.group_block_len = {0: [2, 1]}
         worker.group_num_layers = {0: 2}
         worker.total_layers = 2
         worker.num_layers = 2
+        worker.pp_size = 2
+        worker.layerwise_key_layer_offset = 23
+        worker.dcp_size = 1
         worker.put_step = 1
 
-        self.assertEqual(worker._global_group_alloc_size(0), 4)
+        self.assertEqual(worker._global_group_alloc_size(0), 3)
 
     def test_check_all_layers_exists(self):
         cls = self._make_worker_class()
@@ -1854,7 +1858,8 @@ class TestKVPoolWorkerBuildConnectorWorkerMeta(unittest.TestCase):
     def test_build_connector_worker_meta(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
 
-        cases = [(False, None, None), (True, None, None), (True, {}, None), (True, {1: 2}, {1: 2})]
+        completed_events = {uuid4().int: 2}
+        cases = [(False, None, None), (True, None, None), (True, {}, None), (True, completed_events, completed_events)]
         for use_mamba, events, expected in cases:
             with self.subTest(use_mamba=use_mamba, events=events):
                 worker = self._make_worker()
