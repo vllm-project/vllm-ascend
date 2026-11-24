@@ -428,12 +428,12 @@ async def send_request_to_service(
                 result_future.set_result(response.json()["kv_transfer_params"])
             return
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, e)
+            logger.warning("Attempt %s failed for %s (request_id=%s): %s", attempt, endpoint, request_id, e)
             last_exc = e
             if attempt < max_retries:
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error("All %s attempts failed for %s.", max_retries, endpoint)
+                logger.error("All %s attempts failed for %s (request_id=%s).", max_retries, endpoint, request_id)
                 raise last_exc
 
 
@@ -590,6 +590,7 @@ async def _handle_completions(api: str, request: Request):
                             if stop_reason == "recomputed":
                                 retry = True
                                 retry_count += 1
+                                previous_max_tokens = req_data.get("max_tokens")
                                 if chat_flag:
                                     messages[0]["content"] = (
                                         origin_prompt
@@ -597,9 +598,22 @@ async def _handle_completions(api: str, request: Request):
                                         if isinstance(origin_prompt, list)
                                         else (origin_prompt or "") + generated_token
                                     )
+                                    prompt_len_after = len(messages[0]["content"])
                                 else:
                                     req_data["prompt"] = origin_prompt + generated_token
+                                    prompt_len_after = len(req_data["prompt"])
                                 req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                                logger.info(
+                                    "[PD-RECOMPUTE] kv insufficient, request goes back to P: request_id=%s, "
+                                    "retry_count=%d, generated_tokens=%d, max_tokens=%s->%s, prompt_len=%d->%d",
+                                    request_id,
+                                    retry_count,
+                                    completion_tokens,
+                                    previous_max_tokens,
+                                    req_data["max_tokens"],
+                                    len(origin_prompt or ""),
+                                    prompt_len_after,
+                                )
                                 break
                             if retry_count > 0 and not stream_flag:
                                 if chat_flag:
@@ -613,13 +627,23 @@ async def _handle_completions(api: str, request: Request):
             except Exception as e:
                 logger.error(
                     "Error during streaming from decoder %s: %s the aborted request %s "
-                    "will be routing to the target prefiller when new request is ready to dispatch to it",
+                    "will be routing to the target prefiller when new request is ready to dispatch to it "
+                    "(retry_count=%d, completion_tokens=%d, recomputed=%s)",
                     decoder.url,
                     e,
                     request_id,
+                    retry_count,
+                    completion_tokens,
+                    retry_count > 0,
                 )
             finally:
                 # After streaming done, release tokens
+                logger.debug(
+                    "Release decoder=%s request_id=%s retry_count=%d",
+                    decoder.url,
+                    request_id,
+                    retry_count,
+                )
                 proxy_state.release_decoder(decoder_idx, decoder_score)
                 await proxy_state.cleanup_request_batch(request_id)
 
