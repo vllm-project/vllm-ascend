@@ -66,6 +66,7 @@ class AscendIpcModelLoader(IpcModelLoader):
 
     preload_daemon_process: psutil.Process | None = None
     _capture_daemon_process = False
+    _defer_copy_release = False
 
     def _connect(self, timeout: float) -> socket.socket:
         conn = super()._connect(timeout)
@@ -121,6 +122,8 @@ class AscendIpcModelLoader(IpcModelLoader):
         return model
 
     def _send_release(self) -> None:
+        if self._defer_copy_release:
+            return
         if self.mode == "copy":
             # Finish asynchronous reads from imported NPU allocations before
             # asking their owner to release them. This runs once at startup.
@@ -136,8 +139,20 @@ class AscendIpcModelLoader(IpcModelLoader):
         from vllm_ascend.ops.rotary_embedding import rebind_rope_caches
 
         with _model_construction_state(vllm_config):
-            model = super()._build_model(vllm_config, model_config, prefix, state)
-            rebind_rope_caches(model)
+            # Core releases copy-mode weights inside _build_model. Platform
+            # rebinding can still allocate and fail, so commit the handoff only
+            # after it succeeds. Clear the deferral before Core handles failure
+            # so its disk-fallback cleanup can still release the daemon.
+            # TODO: Remove this release deferral along with copy-mode support
+            # once the baseline includes vllm-project/vllm#68388.
+            self._defer_copy_release = self.mode == "copy"
+            try:
+                model = super()._build_model(vllm_config, model_config, prefix, state)
+                rebind_rope_caches(model)
+            finally:
+                self._defer_copy_release = False
+            if self.mode == "copy":
+                self._send_release()
             return model
 
     def _apply_entries(self, model: torch.nn.Module, state: WeightCacheState, device_index: int) -> None:

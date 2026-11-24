@@ -748,6 +748,61 @@ def test_spawn_entry_bootstraps_plugins_before_upstream_daemon(monkeypatch, plug
         run.assert_called_once_with(0, 0, "config", "rendezvous", "socket", "queue")
 
 
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize("rebind_fails", [False, True])
+def test_copy_release_waits_for_rope_rebind(valid_config, monkeypatch, fallback, rebind_fails):
+    from vllm.model_executor.model_loader.weight_cache import ipc_loader
+
+    from vllm_ascend.ops import rotary_embedding as rope
+
+    loader = _loader("copy")
+    loader.fallback = fallback
+    valid_config.device_config = SimpleNamespace(device="cpu:0")
+    valid_config.compilation_config = SimpleNamespace(static_forward_context={})
+    model = torch.nn.Module()
+    disk_model = torch.nn.Module()
+    order = []
+    monkeypatch.setattr(ipc_loader, "check_ipc_platform_support", lambda: None)
+    monkeypatch.setattr(loader, "_fetch_entries", Mock(return_value=WeightCacheState({}, {}, {})))
+    monkeypatch.setattr(ipc_loader, "initialize_model", Mock(return_value=model))
+    monkeypatch.setattr(ipc_loader, "check_ipc_quant_support", lambda _: None)
+    monkeypatch.setattr(ipc_loader, "process_weights_after_loading", lambda *_: None)
+    monkeypatch.setattr(ipc_loader, "_materialize_remaining_meta_tensors", lambda *_: None)
+    release = Mock(side_effect=lambda: order.append("release"))
+    monkeypatch.setattr(ipc_loader.IpcModelLoader, "_send_release", release)
+    monkeypatch.setattr(torch.npu, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.npu, "mem_get_info", Mock(side_effect=[(100, 1000), (300, 1000)]))
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+
+    def rebind(built_model):
+        assert built_model is model
+        release.assert_not_called()
+        order.append("rebind")
+        if rebind_fails:
+            raise RuntimeError("injected RoPE rebind failure")
+
+    def fallback_load(*_):
+        order.append("disk fallback")
+        return disk_model
+
+    monkeypatch.setattr(rope, "rebind_rope_caches", rebind)
+    monkeypatch.setattr(loader, "_fallback_load", fallback_load)
+    # Exercise Core's actual build and failure routing, including its release
+    # before disk fallback. Replacing _build_model would hide the regression.
+    if rebind_fails and not fallback:
+        with pytest.raises(RuntimeError, match="injected RoPE rebind failure"):
+            loader.load_model(valid_config, valid_config.model_config)
+        assert order == ["rebind"]
+        release.assert_not_called()
+    else:
+        result = loader.load_model(valid_config, valid_config.model_config)
+        assert result is (disk_model if rebind_fails else model)
+        assert order == (["rebind", "release", "disk fallback"] if rebind_fails else ["rebind", "release"])
+        release.assert_called_once_with()
+        assert result._ascend_preload_released_cache_bytes == 200
+    assert not loader._defer_copy_release
+
+
 def test_copy_finishes_imported_storage_reads_before_release(monkeypatch):
     from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
 
