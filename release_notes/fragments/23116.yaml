@@ -1,0 +1,5 @@
+pr: 23116
+entries:
+  - category: feature
+    text: "On Atlas A2, additional_config.enable_fused_mc2=1 now runs dispatch_ffn_combine instead of failing: the engine creates the KFC symmetric buffer on first use (2 GiB CCL buffer per rank) and passes it to the operator. A draft MTP MoE layer whose weight layout has no A2 kernel stays on the non-fused path."
+    hardware: [A2]
