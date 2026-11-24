@@ -147,7 +147,6 @@ def test_pcp_query_overlap_honors_config(overlap_enabled):
         patch.object(dsa_cp, "WeightSwitchConfig"),
         patch.object(dsa_cp, "get_pcp_group"),
         patch.object(dsa_cp, "get_tp_group"),
-        patch.object(dsa_cp, "is_pcp_decode_sharding_enabled", return_value=False),
     ):
         impl = AscendDSAPCPImpl()
 
