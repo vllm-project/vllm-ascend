@@ -984,6 +984,12 @@ vLLM Ascend revision.
     network interface, and local checkpoint path. Start both containers with
     `--ulimit memlock=-1` so the scripts can set unlimited locked memory.
 
+    The `--eplb-config` settings below use `window_size: 64` and
+    `step_interval: 128` for short benchmark runs. These smaller values provide
+    faster load feedback and more frequent expert rearrangements. For production
+    deployments, use `window_size: 1000` and `step_interval: 3000` for more stable
+    behavior, as recommended in the [EPLB guide](../../user_guide/feature_guide/expert_parallelism_load_balancer.md).
+
     ```shell
     #!/usr/bin/env bash
 
@@ -1023,8 +1029,8 @@ vLLM Ascend revision.
         --enable-expert-parallel \
         --enable-eplb \
         --eplb-config '{
-            "window_size":1000,
-            "step_interval":3000,
+            "window_size":64,
+            "step_interval":128,
             "policy":"stair",
             "num_redundant_experts":16
         }' \
@@ -2112,6 +2118,12 @@ Select the tab for the target hardware.
     `LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, `MEMCACHE_INSTALL_PATH`, and
     `MEMCACHE_CONFIG_DIR` for the local environment.
 
+    The `--eplb-config` settings below use `window_size: 64` and
+    `step_interval: 128` for short benchmark runs. These smaller values provide
+    faster load feedback and more frequent expert rearrangements. For production
+    deployments, use `window_size: 1000` and `step_interval: 3000` for more stable
+    behavior, as recommended in the [EPLB guide](../../user_guide/feature_guide/expert_parallelism_load_balancer.md).
+
     ```shell
     #!/usr/bin/env bash
 
@@ -2156,8 +2168,8 @@ Select the tab for the target hardware.
         --enable-expert-parallel \
         --enable-eplb \
         --eplb-config '{
-            "window_size":1000,
-            "step_interval":3000,
+            "window_size":64,
+            "step_interval":128,
             "policy":"stair",
             "num_redundant_experts":16
         }' \
@@ -2496,6 +2508,12 @@ for the required software and networking versions.
 
     Reuse `launch_online_dp.py` from [Section 5.2.1.1](#5211-prepare-the-dp-launcher).
 
+    The `--eplb-config` settings below use `window_size: 64` and
+    `step_interval: 128` for short benchmark runs. These smaller values provide
+    faster load feedback and more frequent expert rearrangements. For production
+    deployments, use `window_size: 1000` and `step_interval: 3000` for more stable
+    behavior, as recommended in the [EPLB guide](../../user_guide/feature_guide/expert_parallelism_load_balancer.md).
+
     ```shell
     #!/usr/bin/env bash
 
@@ -2558,8 +2576,8 @@ for the required software and networking versions.
         --enable-expert-parallel \
         --enable-eplb \
         --eplb-config '{
-            "window_size":1000,
-            "step_interval":3000,
+            "window_size":64,
+            "step_interval":128,
             "policy":"stair",
             "num_redundant_experts":16
         }' \
@@ -3311,22 +3329,6 @@ to determine a better parameter set in one run and push performance toward the
 hardware limit.
 For the complete, step-by-step usage guide please refer to
 **[Optix-for-PD-disaggregation](https://gitcode.com/Ascend/msmodeling/blob/master/docs/en/quick_start/optix_agent_pd_disaggregation.md)**.
-
-### 9.2 EPLB Tuning for Short Benchmarks
-
-The A3 Prefill examples in Sections 5.2–5.4 set `window_size` to `1000` and
-`step_interval` to `3000` in `--eplb-config`. When benchmarking Expert Parallel
-Load Balancing (EPLB) with a small dataset or a short test run, consider reducing
-these values, for example to `64` and `128`, respectively.
-
-A smaller statistics window lets EPLB respond to recent expert load, while a
-shorter rebalancing interval allows more rounds of expert redistribution within
-the available inference steps. With larger values, a short benchmark may finish
-before enough rebalancing rounds have occurred, leaving substantial expert load
-imbalance and making the results less representative of balanced execution.
-Choose the window and interval according to the benchmark duration and workload,
-and allow enough inference steps for repeated rebalancing before assessing EPLB's
-performance impact.
 
 ## 10 FAQ
 
