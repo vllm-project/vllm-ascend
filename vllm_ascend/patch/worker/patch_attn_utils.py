@@ -135,7 +135,7 @@ if hasattr(v1_worker_utils.AttentionGroup, "_with_kernel_block_table"):
         ubatch_idx: int = 0,
     ) -> CommonAttentionMetadata:
         # 310P supplies kernel block IDs to the metadata builder already.
-        if getattr(self, "block_table_is_kernel_granular", False):
+        if getattr(self.get_metadata_builder(ubatch_idx), "block_table_is_kernel_granular", False) is True:
             return common_attn_metadata
         return _original_with_kernel_block_table(self, common_attn_metadata, ubatch_idx)
 

@@ -1244,7 +1244,7 @@ def test_attention_metadata_uses_preexpanded_310p_block_table(_pin_memory, for_c
         kernel_block_size=64,
         metadata_builders=[builder],
     )
-    group.block_table_is_kernel_granular = True  # type: ignore[attr-defined]
+    builder.block_table_is_kernel_granular = True
 
     if for_capture:
         group.build_metadata_for_cudagraph_capture(common_metadata)
@@ -1258,26 +1258,26 @@ def test_attention_metadata_uses_preexpanded_310p_block_table(_pin_memory, for_c
 
 
 def test_initialize_kv_cache_marks_310p_target_and_draft_groups(monkeypatch) -> None:
-    target_group = SimpleNamespace()
-    draft_group = SimpleNamespace()
+    target_group = SimpleNamespace(metadata_builders=[SimpleNamespace()])
+    draft_group = SimpleNamespace(metadata_builders=[SimpleNamespace()])
     target_groups = [[target_group]]
     runner = MagicMock()
     runner.device = torch.device("cpu")
     runner.max_model_len = 512
     runner.speculator = MagicMock(spec=model_runner_module.DraftModelSpeculator)
     kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=256))],
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=256), uses_slot_mapping=True)],
         needs_kv_cache_zeroing=False,
     )
 
-    def set_draft_attn(model_state, config, block_tables, input_buffers, attn_groups):
+    def set_draft_attn(model_state, config, block_tables, input_buffers, attn_groups, *, kernel_block_sizes=None):
         assert block_tables is runner.block_tables
         assert attn_groups is target_groups
         runner.speculator.attn_groups = [[draft_group]]
 
     def init_draft_graph(cudagraph_mode):
-        assert target_group.block_table_is_kernel_granular
-        assert draft_group.block_table_is_kernel_granular
+        assert target_group.metadata_builders[0].block_table_is_kernel_granular
+        assert draft_group.metadata_builders[0].block_table_is_kernel_granular
 
     runner.speculator.set_attn.side_effect = set_draft_attn
     runner.speculator.init_cudagraph_manager.side_effect = init_draft_graph

@@ -869,7 +869,8 @@ class NPUModelRunner310V2(NPUModelRunner):
         # Skip remapping to preserve 310P's existing block table expansion.
         for groups in metadata_groups:
             for attn_group in groups:
-                attn_group.block_table_is_kernel_granular = True  # type: ignore[attr-defined]
+                for builder in attn_group.metadata_builders:
+                    builder.block_table_is_kernel_granular = True
         if self.speculator is not None:
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
