@@ -1,3 +1,5 @@
+import sys
+from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -35,6 +37,12 @@ class FIAMockMixin(TestBase):
         self.addCleanup(patcher.stop)
         get_cached_compilation_config.cache_clear()
         self.addCleanup(get_cached_compilation_config.cache_clear)
+        ascend_patcher = patch(
+            "vllm_ascend.ops.mm_encoder_attention.get_ascend_config",
+            return_value=SimpleNamespace(mm_encoder_quant_flash_attn=False),
+        )
+        ascend_patcher.start()
+        self.addCleanup(ascend_patcher.stop)
 
     def _make_layer(self, num_heads=4, num_kv_heads=4, head_size=72, scale=None):
         return AscendMMEncoderAttention(
@@ -293,3 +301,65 @@ class TestAscendMMEncoderAttentionCapture(FIAMockMixin):
             layer.forward_oot(query, key, value, cu_seqlens=cu_seqlens)
 
         self.assertEqual(captured_lengths[-1], [7, 14, 21])
+
+
+class TestAscendMMEncoderAttentionQFA(FIAMockMixin):
+    def setUp(self):
+        self._install_vllm_config_mock()
+
+    def test_varlen_v_scales_and_noncausal_qfa(self):
+        layer = self._make_layer(num_heads=4, num_kv_heads=2, head_size=128)
+        layer.use_quant_flash_attn = True
+        query = torch.randn(1, 128, 4 * 128, dtype=torch.bfloat16)
+        key = torch.randn(1, 128, 2 * 128, dtype=torch.bfloat16)
+        value = torch.randn_like(key)
+        cu_seqlens = torch.tensor([0, 67, 128], dtype=torch.int32)
+        seen = {}
+
+        def fake_quant(x, *, dst_type):
+            seen.setdefault("quant_input_shapes", []).append(tuple(x.shape))
+            groups = x.shape[-1] // 64
+            scale = torch.full((*x.shape[:-1], groups, 2), 127, dtype=torch.uint8)
+            return torch.zeros_like(x, dtype=dst_type), scale
+
+        def fake_metadata(num_heads, num_kv_heads, head_dim, quant_mode, **kwargs):
+            seen["metadata"] = (num_heads, num_kv_heads, head_dim, quant_mode, kwargs)
+            return torch.zeros(64, dtype=torch.int32)
+
+        def fake_qfa(q, k, v, q_scale, k_scale, v_scale, quant_mode, **kwargs):
+            seen["qfa"] = (q.shape, k.shape, v.shape, q_scale.shape, k_scale.shape, v_scale.shape, kwargs)
+            return torch.zeros(q.shape, dtype=torch.bfloat16), torch.empty(0)
+
+        ops = ModuleType("cann_ops_transformer.ops")
+        ops.quant_flash_attn = fake_qfa
+        ops.quant_flash_attn_metadata = fake_metadata
+        package = ModuleType("cann_ops_transformer")
+        package.ops = ops
+        with (
+            patch.dict(sys.modules, {"cann_ops_transformer": package, "cann_ops_transformer.ops": ops}),
+            patch("vllm_ascend.ops.mm_encoder_attention.torch_npu.npu_dynamic_mx_quant", side_effect=fake_quant),
+        ):
+            output = layer.forward_oot(query, key, value, cu_seqlens=cu_seqlens)
+
+        self.assertEqual(output.shape, query.shape)
+        self.assertEqual(seen["quant_input_shapes"], [(128, 4, 128), (128, 2, 128), (2, 128, 128), (2, 128, 64)])
+        self.assertEqual(seen["qfa"][5], (3, 2, 128, 2))
+        self.assertEqual(seen["metadata"][:4], (4, 2, 128, 1))
+        self.assertEqual(seen["qfa"][6]["mask_mode"], 0)
+        self.assertEqual(seen["qfa"][6]["layout_kv"], "TND")
+        self.assertEqual(seen["qfa"][6]["max_seqlen_q"], 67)
+        torch.testing.assert_close(seen["qfa"][6]["cu_seqlens_q"], cu_seqlens)
+
+    def test_capture_is_skipped_when_qfa_enabled(self):
+        manager = encoder_acl_graph.EncoderAclGraphManager.__new__(encoder_acl_graph.EncoderAclGraphManager)
+        pool = object()
+        with (
+            patch(
+                "vllm_ascend.worker.encoder_acl_graph.get_ascend_config",
+                return_value=SimpleNamespace(mm_encoder_quant_flash_attn=True),
+            ),
+            patch("vllm_ascend.worker.encoder_acl_graph.set_encoder_graph_params") as set_params,
+        ):
+            manager.capture(graph_pool=pool)
+        self.assertIs(manager.graph_pool, pool)
+        set_params.assert_not_called()

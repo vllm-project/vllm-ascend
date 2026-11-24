@@ -116,6 +116,8 @@ class HardwareCapability(Enum):
     # Enable the FP8/C8 attention KV-cache ABI and matching attention preprocess paths.
     # This is not a general statement that every FP8 operation is supported.
     FP8_ATTENTION = auto()
+    # A5 MXFP8 QuantFlashAttn for non-paged multimodal encoder attention.
+    MM_ENCODER_MXFP8_QFA = auto()
     # Prepare and reuse the fixed CANN GBSA schedule across supported M3 decode layers.
     # Callers must also check block size, dtype, and uniform query length.
     MINIMAX_M3_GBSA_METADATA_REUSE = auto()
@@ -536,6 +538,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.FLA_GDN_PREFILL,
                     HardwareCapability.FLA_GDN_PREFILL_CHUNK32,
                     HardwareCapability.FP8_ATTENTION,
+                    HardwareCapability.MM_ENCODER_MXFP8_QFA,
                     HardwareCapability.INDEXER_QUANT_CACHE,
                     HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
                     HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION,
