@@ -1027,3 +1027,49 @@ def test_kimi_mla_attention_kv_cache_is_assignable():
     attn.kv_cache = replacement
 
     assert inner.kv_cache is replacement
+
+
+@pytest.mark.parametrize(
+    "linear_attn_config,expected",
+    [
+        ({"kda_layers": [1], "use_full_rank_gate": True}, "kda"),
+        ({"kda_layers": [1]}, "gdn"),
+        ({"kda_layers": [1], "use_full_rank_gate": False}, "gdn"),
+    ],
+)
+def test_kda_layer_dispatch_follows_full_rank_gate(monkeypatch, linear_attn_config, expected):
+    # Kimi-Linear checkpoints omit use_full_rank_gate; KimiK3DeltaAttention asserts
+    # on it, so the decoder must fall back to the shared GDN layer.
+    built = []
+
+    def fake_kda(*args, **kwargs):
+        built.append("kda")
+        return nn.Identity()
+
+    def fake_gdn(*args, **kwargs):
+        built.append("gdn")
+        return nn.Identity()
+
+    monkeypatch.setattr(kimi_k3, "AscendKimiK3DeltaAttention", fake_kda)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn.KimiGatedDeltaNetAttention", fake_gdn
+    )
+
+    config = SimpleNamespace(is_kda_layer=lambda _idx: True, linear_attn_config=linear_attn_config)
+    kimi_k3._build_kda_attention(config, None, "model.layers.0.self_attn")
+
+    assert built == [expected]
+
+
+def test_kda_layer_dispatch_rejects_missing_linear_attn_config(monkeypatch):
+    built = []
+    monkeypatch.setattr(kimi_k3, "AscendKimiK3DeltaAttention", lambda *a, **k: built.append("kda"))
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn.KimiGatedDeltaNetAttention",
+        lambda *a, **k: built.append("gdn"),
+    )
+
+    config = SimpleNamespace(is_kda_layer=lambda _idx: True, linear_attn_config=None)
+    kimi_k3._build_kda_attention(config, None, "model.layers.0.self_attn")
+
+    assert built == ["gdn"]
