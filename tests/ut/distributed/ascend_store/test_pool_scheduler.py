@@ -32,6 +32,7 @@ from vllm.v1.core.sched.output import KVConnectorBlockState
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -959,6 +960,20 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             num_prompt_tokens=64,
         )
 
+    @staticmethod
+    def _make_offload_scheduler(config):
+        spec = FullAttentionSpec(
+            block_size=config.cache_config.block_size, num_kv_heads=1, head_size=4, dtype=torch.int8
+        )
+        group = KVCacheGroupSpec(["model.layers.0.attn"], spec)
+        cache_config = KVCacheConfig(num_blocks=4, kv_cache_tensors=[], kv_cache_groups=[group])
+        cache_config.kv_transfer_config = SimpleNamespace(
+            kv_connector_extra_config={LAYERWISE_REUSE_BACKING_BYTES: 4096}
+        )
+        return create_kv_pool_scheduler(
+            config, use_layerwise=True, kv_cache_config=make_resolved_cache_config(config, cache_config)
+        )
+
     def _make_running_chunk_output(self, new_block_ids, num_computed_tokens=16):
         sched_output = MagicMock()
         sched_output.finished_req_ids = set()
@@ -1206,18 +1221,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             },
             num_layers=4,
         )
-        cache = SimpleNamespace(
-            kv_cache_groups=[
-                KVCacheGroupSpec(
-                    ["model.layers.1.attn"],
-                    FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=4, dtype=torch.int8),
-                ),
-            ],
-            kv_transfer_config=SimpleNamespace(kv_connector_extra_config={LAYERWISE_REUSE_BACKING_BYTES: 128}),
-        )
-        scheduler = create_kv_pool_scheduler(
-            config, use_layerwise=True, kv_cache_config=make_resolved_cache_config(config, cache)
-        )
+        scheduler = self._make_offload_scheduler(config)
         self._set_running_chunk(scheduler)
 
         meta = self._build_connector_meta(scheduler, self._make_running_chunk_output([]))
@@ -1229,6 +1233,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         self.assertEqual(load_spec.vllm_cached_tokens, 16)
         self.assertEqual(load_spec.kvpool_cached_tokens, 16)
         self.assertTrue(load_spec.can_load)
+        self.assertTrue(load_spec.layerwise_previous_step)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_running_prefill_preserves_partial_block_with_layer_reuse(self, mock_client_cls):
@@ -1239,18 +1244,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             },
             num_layers=4,
         )
-        cache = SimpleNamespace(
-            kv_cache_groups=[
-                KVCacheGroupSpec(
-                    ["model.layers.1.attn"],
-                    FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=4, dtype=torch.int8),
-                ),
-            ],
-            kv_transfer_config=SimpleNamespace(kv_connector_extra_config={LAYERWISE_REUSE_BACKING_BYTES: 128}),
-        )
-        scheduler = create_kv_pool_scheduler(
-            config, use_layerwise=True, kv_cache_config=make_resolved_cache_config(config, cache)
-        )
+        scheduler = self._make_offload_scheduler(config)
         request = MagicMock()
         request.num_computed_tokens = 32
         request.num_prompt_tokens = 48

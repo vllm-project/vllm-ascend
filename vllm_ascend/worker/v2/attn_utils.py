@@ -1662,6 +1662,11 @@ def _reshape_kv_cache_v2(
                 if not isinstance(raw_slab, torch.Tensor):
                     raise ValueError(f"Qwen4 hybrid cache for {layer_name} must use one raw tensor.")
                 slot_offset = owner.slot * qwen4_cache_layout.slot_backing_size
+                if get_layerwise_reuse_layout(kv_cache_config) is not None and owner.role not in (PLE, HIDDEN):
+                    # Reuse allocation already returns this owner's byte window.
+                    # Keep component offsets relative to that window.
+                    region_name = qwen4_cache_layout.region_name_for_owner(layer_name)
+                    slot_offset = -qwen4_cache_layout.region(region_name).offset
                 if owner.role == QSA_MAIN:
                     assert isinstance(kv_cache_spec, FullAttentionSpec)
                     region = qwen4_cache_layout.region("r0")
