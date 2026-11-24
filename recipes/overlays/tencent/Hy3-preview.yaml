@@ -59,8 +59,7 @@ hardware_notes:
     title: Tested A3 deployment
     body: >-
       Use the Guide to serve the pinned checkpoint from /models.
-      The generated Docker command uses the Hugging Face cache mount
-      and awaits an A3 smoke test.
+      The generated Docker command uses the Hugging Face cache mount.
     link:
       href: '#single-node-a3-release-retest'
       label: Open tested A3 Guide
