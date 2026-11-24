@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-"""Temporary probe: why the memcache LocalService init does not return on A5.
+"""Temporary probe: capture the memcache MetaService log while init blocks.
 
-Every protocol reaches the SMEM initialize step and then blocks, so the next
-variable is the pool rank layout: ``world_size`` may have to equal the number
-of LocalServices that actually join. Each case runs in a time-bounded
-subprocess; delete this file once the working layout is known.
+Protocol and world_size are already ruled out: every case reaches
+``initialize store ... OK`` and then ``DistributedObjectStore.init`` never
+returns. This run starts one LocalService, dumps the MetaService log on
+timeout, and uses an explicit metrics port so a busy 8000 cannot hide the
+failure. Delete this file once the cause is known.
 """
 
 import os
@@ -20,21 +21,15 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
 from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
 
-CASES = [
-    ("urma_ws1", 1, "device_urma"),
-    ("urma_ws8", 8, "device_urma"),
-    ("sdma_ws1", 1, "device_sdma"),
-]
 PROBE_TIMEOUT_SECONDS = 180
 PROBE_DRAM_SIZE = "1GB"
 PROBE_ENVS = {
-    # Fail a stuck group join or QP handshake inside the probe window instead
-    # of waiting for the memfabric defaults.
     "MF_GROUP_JOIN_MAX_TIMEOUT": "60",
     "MF_QP_READY_CHECK_TIMEOUT_BASE": "30",
     "ASCEND_CONNECT_TIMEOUT": "60000",
     "ASCEND_TRANSFER_TIMEOUT": "60000",
 }
+META_LOG_TAIL_CHARS = 6000
 
 PROBE_SCRIPT = """
 import torch
@@ -46,36 +41,42 @@ store = DistributedObjectStore()
 print("probe: init start", flush=True)
 rc = store.init(0, init_bm=True)
 print(f"probe: init rc={rc}", flush=True)
-buffer = torch.empty(1024 * 1024 * 1024, dtype=torch.uint8, device="npu")
-print("probe: register start", flush=True)
-rc = store.register_buffer(buffer.data_ptr(), buffer.numel())
-print(f"probe: register rc={rc}", flush=True)
-print(f"probe: unregister rc={store.unregister_buffer(buffer.data_ptr(), buffer.numel())}", flush=True)
 store.close()
 print("probe: done", flush=True)
 """
 
 
-def _build_config(world_size: int, protocol: str) -> MemcacheKVPoolConfig:
+def _build_config() -> MemcacheKVPoolConfig:
+    metrics_port = get_open_port()
     return MemcacheKVPoolConfig(
         meta_service_port=get_open_port(),
         config_store_port=get_open_port(),
         config={
-            "meta": {"ock.mmc.log_level": "error"},
+            "meta": {
+                "ock.mmc.log_level": "info",
+                "ock.mmc.meta_service.metrics_url": f"http://127.0.0.1:{metrics_port}",
+            },
             "local": {
-                "ock.mmc.log_level": "error",
-                "ock.mmc.local_service.world_size": world_size,
-                "ock.mmc.local_service.protocol": protocol,
+                "ock.mmc.log_level": "info",
+                "ock.mmc.local_service.world_size": 1,
+                "ock.mmc.local_service.protocol": "device_urma",
                 "ock.mmc.local_service.dram.size": PROBE_DRAM_SIZE,
             },
         },
     )
 
 
-@pytest.mark.parametrize("name,world_size,protocol", CASES)
-def test_memcache_protocol_probe(name: str, world_size: int, protocol: str) -> None:
+def _read_tail(path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")[-META_LOG_TAIL_CHARS:]
+    except OSError as exc:
+        return f"<cannot read {path}: {exc}>"
+
+
+@pytest.mark.parametrize("round_index", [0])
+def test_memcache_init_probe(round_index: int) -> None:
     started = time.perf_counter()
-    with SingleNodeMemcacheManager(_build_config(world_size, protocol), f"probe_{name}") as pool:
+    with SingleNodeMemcacheManager(_build_config(), f"probe_init_{round_index}") as pool:
         with patch.dict(os.environ, {**pool.server_envs, **PROBE_ENVS}):
             try:
                 completed = subprocess.run(
@@ -84,20 +85,12 @@ def test_memcache_protocol_probe(name: str, world_size: int, protocol: str) -> N
                     text=True,
                     timeout=PROBE_TIMEOUT_SECONDS,
                 )
-                elapsed = time.perf_counter() - started
-                print(
-                    f"[pool_probe] case={name} rc={completed.returncode} "
-                    f"elapsed={elapsed:.1f}s stdout={completed.stdout.strip()!r} "
-                    f"stderr={completed.stderr.strip()[-2000:]!r}",
-                    flush=True,
-                )
+                outcome = f"rc={completed.returncode} stdout={completed.stdout.strip()!r}"
             except subprocess.TimeoutExpired as exc:
-                elapsed = time.perf_counter() - started
                 partial = exc.stdout or exc.stderr or ""
                 if isinstance(partial, bytes):
                     partial = partial.decode(errors="replace")
-                print(
-                    f"[pool_probe] case={name} TIMEOUT after {elapsed:.1f}s "
-                    f"stdout={partial.strip()!r}",
-                    flush=True,
-                )
+                outcome = f"TIMEOUT stdout={partial.strip()!r}"
+            elapsed = time.perf_counter() - started
+            print(f"[pool_probe] case=init elapsed={elapsed:.1f}s {outcome}", flush=True)
+            print(f"[pool_meta_log] path={pool.log_path} tail={_read_tail(pool.log_path)!r}", flush=True)
