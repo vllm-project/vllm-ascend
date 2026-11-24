@@ -842,6 +842,12 @@ class AscendConfig:
                 raise ValueError("Shared host Engram does not support dummy loading or sleep mode")
         if (
             engram_config is not None
+            # FlashEngram supports both private and DP-shared TP-local tables.
+            and getattr(vc.model_config, "architecture", None)
+            not in (
+                "HYV4FlashForCausalLM",
+                "HYV4FlashVLForConditionalGeneration",
+            )
             and getattr(engram_config, "cpu_offload", False)
             and not engram_config.dp_shared_memory
             and vc.use_v2_model_runner
@@ -2038,6 +2044,16 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # Consumed in derive_and_validate as the SP MoE switch. Not an
         # AscendConfig field, so strip it before extra="forbid" validation.
         "enable_flashcomm1",
+        # Consumed by the HYV4 Flash model and its attention metadata builder.
+        "hy4flash_cannbot_mla_prolog",
+        "hy4flash_fused_ihc_pre_tail",
+        "hy4flash_cann_engram_rms",
+        "hy4flash_fused_ihc_post",
+        "hy4flash_bulk_c8_decode_reads",
+        "hy4flash_dfly_dp_graph",
+        "hy4flash_gpu_c8_scale",
+        "hy4flash_precise_decode",
+        "hy4flash_triton_mla_logits",
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "scheduler_config",
         "sparse_kv_offload_config",

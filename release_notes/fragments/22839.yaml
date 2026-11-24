@@ -1,0 +1,7 @@
+pr: 22839
+entries:
+  - category: feature
+    text: Added HY4 Flash (HY4 Next) serving on Ascend 950DT with Model Runner V2, FP8 KV cache, and DFly speculative decoding. Apply the companion vLLM patch and follow the HY4 Flash launch example to deploy the model.
+    highlight: true
+    model: hy4-flash
+    hardware: [950DT]

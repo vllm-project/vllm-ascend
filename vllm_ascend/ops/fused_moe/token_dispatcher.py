@@ -25,7 +25,7 @@ from typing import Generic
 
 import torch
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -358,6 +358,17 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.max_num_tokens = kwargs.get("max_num_tokens")
+        config = get_current_vllm_config_or_none()
+        self._hy4_prefill_mask = False
+        if config is not None and config.model_config is not None:
+            model = getattr(config.model_config.hf_text_config, "model_type", None)
+            if model == "hy_v4_flash":
+                from vllm.triton_utils import HAS_TRITON
+
+                from vllm_ascend.device.device_config import is_950
+                from vllm_ascend.models.hy_v4_flash.pd_role import uses_prefill_ops
+
+                self._hy4_prefill_mask = HAS_TRITON and is_950() and uses_prefill_ops(config)
         num_experts_local = kwargs.get("num_local_experts", 0)
         self.num_experts_local = (
             num_experts_local.item() if torch.is_tensor(num_experts_local) else int(num_experts_local)
@@ -422,8 +433,26 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
 
         if expert_map is not None:
             global_num_experts = len(expert_map) + global_redundant_expert_num
-            mask = expert_map[topk_ids] != -1
-            topk_weights = topk_weights * mask
+            if (
+                self._hy4_prefill_mask
+                and topk_ids.device.type == "npu"
+                and topk_ids.dtype == expert_map.dtype == torch.int32
+                and topk_weights.dtype == torch.float32
+                and topk_ids.ndim == 2
+                and topk_ids.shape == topk_weights.shape
+                and topk_ids.shape[0] >= 512
+                and topk_ids.shape[1] == 16
+                and expert_map.ndim == 1
+                and expert_map.numel() == 512
+                and topk_ids.is_contiguous()
+                and topk_weights.is_contiguous()
+                and expert_map.is_contiguous()
+            ):
+                from vllm_ascend.models.hy_v4_flash.prefill_ops.small_aiv import mask_local_experts
+
+                topk_weights = mask_local_experts(expert_map, topk_ids, topk_weights)
+            else:
+                topk_weights = topk_weights * (expert_map[topk_ids] != -1)
             first_expert_idx = get_ep_group().rank_in_group * self.num_experts_local
             last_expert_idx = first_expert_idx + self.num_experts_local
         else:

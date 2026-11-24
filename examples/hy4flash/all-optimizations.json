@@ -1,0 +1,8 @@
+{
+  "enable_mlapo": false,
+  "enable_fused_mc2": 0,
+  "multistream_overlap_shared_expert": true,
+  "ascend_compilation_config": {
+    "enable_npugraph_ex": false
+  }
+}

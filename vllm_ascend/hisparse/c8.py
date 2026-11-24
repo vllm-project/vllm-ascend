@@ -34,6 +34,15 @@ def pack_c8_components(nope: torch.Tensor, rope: torch.Tensor, scales: torch.Ten
     )
 
 
+def dequantize_c8_rows(packed: torch.Tensor) -> torch.Tensor:
+    """Restore selected packed MLA rows to FP32 for eager attention."""
+    nope, rope, scales = packed.split((_LATENT, _ROPE_BYTES, _SCALE_BYTES), dim=-1)
+    scales = scales.view(torch.float32)
+    nope = nope.view(torch.float8_e4m3fn).float().unflatten(-1, (scales.shape[-1], -1))
+    latent = (nope * scales.unsqueeze(-1)).flatten(-2)
+    return torch.cat((latent, rope.view(torch.bfloat16).float()), dim=-1)
+
+
 def c8_storage_view(cache: torch.Tensor) -> tuple[torch.Tensor, int, int, int]:
     """Alias all addressable pages, retaining HMA gaps and the layer offset.
 

@@ -210,6 +210,19 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         self.assertFalse(hasattr(layer, "weight_scale_inv"))
         scheme.mxfp8_method.process_weights_after_loading.assert_called_once_with(layer)
 
+    def test_model_marked_linear_keeps_dequantized_weights_for_mx_aligned_shape(self):
+        scheme = self.build_scheme(block_size=(4, 32))
+        layer, weight, scale_inv = self._make_layer()
+        layer.keep_block_fp8_weight_dense = True
+        with patch(f"{MODULE}.maybe_trans_nz", side_effect=lambda tensor: tensor):
+            scheme.process_weights_after_loading(layer)
+
+        self.assertFalse(scheme.use_mxfp8)
+        self.assertFalse(hasattr(layer, "weight_scale_inv"))
+        self.assertFalse(hasattr(layer, "weight_scale"))
+        expected = reference_resolve(weight, scale_inv, 4, 32, torch.bfloat16)
+        torch.testing.assert_close(layer.weight, expected, rtol=0, atol=0)
+
     def test_kv_b_proj_is_left_dense_for_the_attention_backend(self):
         # SFA splits kv_b_proj into W_UK/W_UV and disposes of the layer, so it
         # never runs a matmul. Requantizing it would only destroy the dense
