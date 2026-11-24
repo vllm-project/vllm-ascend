@@ -41,6 +41,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.utils.math_utils import round_up as _align_up
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
@@ -69,7 +70,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
-from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     requires_contiguous_pa_kv_cache,
@@ -741,10 +743,6 @@ def _align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
     aligned_addr = (data_ptr + alignment - 1) // alignment * alignment
     offset = (aligned_addr - data_ptr) // tensor.element_size()
     return tensor[int(offset) :]
-
-
-def _align_up(value: int, alignment: int) -> int:
-    return (value + alignment - 1) // alignment * alignment
 
 
 def _allocate_int8_cache_tensor(
@@ -1798,23 +1796,12 @@ def _reshape_kv_cache_v2(
 
                     # Without offload, the Indexer allocator already returns (K, scale).
                     # Offload provides one byte tensor. Both shapes are known here,
-                    # so we can calculate where to split it.
+                    # so the backend can split it into the same component views.
                     if use_contiguous_components and isinstance(raw_cache, torch.Tensor):
-                        # With one cache group, use [all K blocks][all scale blocks]
-                        k_bytes = math.prod(kv_cache_shape) * get_dtype_size(group_spec.dtype)
-                        scale_elem_size = get_dtype_size(group_spec.scale_dtype)
-                        scale_offset = _align_up(k_bytes, scale_elem_size)
-                        scale_bytes = math.prod(indexer_scale_cache_shape) * scale_elem_size
-                        required_bytes = scale_offset + scale_bytes
-                        if required_bytes > sum_page_size_bytes:
-                            raise ValueError(
-                                f"Indexer KV cache for {layer_name} requires {required_bytes} bytes "
-                                f"for aligned K/scale views, got {sum_page_size_bytes} bytes."
-                            )
-                        raw_k_tensor = raw_cache[:k_bytes]
-                        raw_scale_tensor = raw_cache[scale_offset:required_bytes]
-                        # The else branch below sets the dtype and shape of both slices.
-                        raw_cache = (raw_k_tensor, raw_scale_tensor)
+                        raw_cache = AscendSFAIndexerBackend.split_contiguous_kv_cache(
+                            raw_cache, kv_cache_shape, indexer_scale_cache_shape, group_spec, layer_name
+                        )
+                        raw_k_tensor, raw_scale_tensor = raw_cache
 
                 if isinstance(raw_cache, torch.Tensor):
                     if group_spec.scale_dim:
@@ -2083,13 +2070,8 @@ def _reshape_kv_cache_v2(
                 and not packed_sfa_main_cache
             ):
                 # Without offload, each layer gets separate NoPE and RoPE tensors.
-                # With offload, split one shared slot into [all NoPE blocks][all RoPE blocks]
-                # so the same (NoPE, RoPE) reshape path can be used.
-                nope_bytes = math.prod(k_shape) * get_dtype_size(k_dtype)
-                rope_bytes = math.prod(v_shape) * get_dtype_size(v_dtype)
-                # NoPE and RoPE use the same dtype. Adding nope_bytes to the aligned
-                # slot start keeps the RoPE offset aligned for v_dtype.
-                raw_cache = raw_cache.split((nope_bytes, rope_bytes))
+                # Split the shared slot so both paths use the same (NoPE, RoPE) layout.
+                raw_cache = AscendSFABackend.split_contiguous_kv_cache(raw_cache, k_shape, v_shape, k_dtype)
 
             if packed_sfa_main_cache:
                 raw_k_tensor = raw_cache

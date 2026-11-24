@@ -1,3 +1,4 @@
+import math
 from collections.abc import Callable, Hashable
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
@@ -15,8 +16,9 @@ from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.math_utils import round_up
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -330,6 +332,26 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_SFA_INDEXER"
+
+    @staticmethod
+    def split_contiguous_kv_cache(
+        raw_cache: torch.Tensor,
+        key_shape: tuple[int, ...],
+        scale_shape: tuple[int, ...],
+        spec: AscendSFAIndexerCacheSpec,
+        layer_name: str,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Expose all K blocks and all scale blocks as two byte views."""
+        k_bytes = math.prod(key_shape) * get_dtype_size(spec.dtype)
+        scale_elem_size = get_dtype_size(spec.scale_dtype)
+        scale_offset = round_up(k_bytes, scale_elem_size)
+        required_bytes = scale_offset + math.prod(scale_shape) * scale_elem_size
+        if required_bytes > raw_cache.numel():
+            raise ValueError(
+                f"Indexer KV cache for {layer_name} requires {required_bytes} bytes "
+                f"for aligned K/scale views, got {raw_cache.numel()} bytes."
+            )
+        return raw_cache[:k_bytes], raw_cache[scale_offset:required_bytes]
 
     @staticmethod
     def get_builder_cls():

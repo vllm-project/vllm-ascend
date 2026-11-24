@@ -1,3 +1,4 @@
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, ClassVar, TypeVar
@@ -13,7 +14,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -404,6 +405,21 @@ class AscendSFABackend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, num_kv_heads, head_size)
+
+    @staticmethod
+    def split_contiguous_kv_cache(
+        raw_cache: torch.Tensor,
+        nope_shape: tuple[int, ...],
+        rope_shape: tuple[int, ...],
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Expose all NoPE blocks followed by all RoPE blocks as two byte views."""
+        elem_size = get_dtype_size(dtype)
+        nope_bytes = math.prod(nope_shape) * elem_size
+        rope_bytes = math.prod(rope_shape) * elem_size
+        # Both parts use the same dtype, so RoPE starts at an aligned offset.
+        nope, rope = raw_cache.split((nope_bytes, rope_bytes))
+        return nope, rope
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
