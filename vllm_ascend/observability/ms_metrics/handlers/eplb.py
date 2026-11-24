@@ -11,12 +11,17 @@ buffer and reducing again: on EP rank 0 it computes the per-rank token load and
 records what upstream logs on the same call. All-idle or dummy logging steps
 reduce to zero and are dropped.
 
-The series needs EPLB to be enabled and ``--eplb-config.log_balancedness true``,
-which upstream defaults to false because balancedness logging adds
-communication; ``log_balancedness_interval`` sets how often a sample is logged.
+Weight transfer tracks the HIXL communicator: one accumulator per layer that
+``set_transfer_context`` resets, ``add_send`` / ``add_recv`` fill, and
+``execute`` records and drops, so a failed execute cannot leave a stale
+accumulator behind.
+
+Both series need EPLB to be enabled. Load balance additionally needs
+``--eplb-config.log_balancedness true``, which upstream defaults to false
+because balancedness logging adds communication; ``log_balancedness_interval``
+sets how often a sample is logged. Weight transfer needs no extra switch.
 """
 
-import logging
 import weakref
 from typing import Any
 
@@ -28,82 +33,6 @@ from vllm_ascend.observability.ms_metrics.handlers.common import (
     register_metrics,
     safe_recording,
 )
-
-logger = logging.getLogger(__name__)
-
-_eplb_metrics_recorders: dict[str, Any] = {}
-
-_HOTNESS_SUMMARY_METRICS = (
-    "eplb:expert_hotness:current_mean",
-    "eplb:expert_hotness:current_max",
-    "eplb:expert_hotness:update_mean",
-    "eplb:expert_hotness:update_max",
-)
-_IMBALANCE_METRIC = "eplb:expert_hotness:imbalance"
-
-_SUMMARY_SPECS = tuple(MetricSpec(name, MetricType.GAUGE, ("rank", "phase")) for name in _HOTNESS_SUMMARY_METRICS)
-_SUMMARY_HOTNESS_KEYS = ("current_mean", "current_max", "update_mean", "update_max")
-_IMBALANCE_SPEC = MetricSpec(_IMBALANCE_METRIC, MetricType.GAUGE, ("rank", "phase", "layer"))
-_EPLB_METRIC_SPECS = (*_SUMMARY_SPECS, _IMBALANCE_SPEC)
-
-_eplb_hotness_key = "eplb_hotness"
-
-
-def _register_eplb_metrics():
-    return register_metrics(
-        _EPLB_METRIC_SPECS,
-        _eplb_metrics_recorders,
-        _eplb_hotness_key,
-    )
-
-
-def eplb_do_update_hotness_handler(original_func, worker, *args, **kwargs):
-    """Record the aggregated expert hotness exposed by the EPLB rank-0 worker."""
-    result = original_func(worker, *args, **kwargs)
-
-    with safe_recording("expert_hotness"):
-        rank_id = getattr(worker, "rank_id", -1)
-        if rank_id != 0:
-            return result
-
-        hotness = getattr(worker, "latest_expert_hotness", None)
-        if not hotness:
-            logger.debug("Skip EPLB hotness metrics because latest_expert_hotness is missing")
-            return result
-
-        metrics = _register_eplb_metrics()
-        if metrics is None:
-            logger.debug("Skip EPLB hotness metrics because the metric recorder is unavailable")
-            return result
-        rank_labels = {"rank": str(rank_id), "phase": "all"}
-        for spec, hotness_key in zip(_SUMMARY_SPECS, _SUMMARY_HOTNESS_KEYS):
-            if not metric_enabled(spec):
-                continue
-            value = hotness.get(hotness_key)
-            if value is not None:
-                record_metric(metrics, spec, value, rank_labels)
-
-        if metric_enabled(_IMBALANCE_SPEC):
-            for phase, key in (
-                ("current", "current_imbalance_list"),
-                ("update", "update_imbalance_list"),
-            ):
-                imbalance_values: Any = hotness.get(key)
-                if imbalance_values is None:
-                    continue
-                for layer_index, value in enumerate(imbalance_values):
-                    record_metric(
-                        metrics,
-                        _IMBALANCE_SPEC,
-                        value,
-                        {
-                            "rank": str(rank_id),
-                            "phase": phase,
-                            "layer": str(layer_index),
-                        },
-                    )
-    return result
-
 
 # ---------------------------------------------------------------------------
 # Expert load balance (AscendEplbState._sync_load_pass)
