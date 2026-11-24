@@ -600,7 +600,7 @@ if "vllm_ascend.utils" not in sys.modules or not hasattr(sys.modules["vllm_ascen
     sys.modules["vllm_ascend.utils"] = _ascend_utils
 
 # NOTE: vllm_ascend.{ascend_config, attention_fence} and their helpers
-# (get_ascend_config, AttentionComputeStartGate, ...) are intentionally NOT
+# (get_ascend_config, AttentionLoadGate, ...) are intentionally NOT
 # mocked here. Doing so by mutating these real modules leaks into every other
 # UT in the same pytest session (breaking test_ascend_config / test_platform,
 # which collect after ascend_store and bind the polluted symbols at import).
