@@ -84,6 +84,7 @@ from vllm_ascend.utils import (
     enable_custom_op,
     enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
+    get_mamba_cache_mode,
     model_uses_sfa_sparse,
     vllm_version_is,
 )
@@ -531,7 +532,7 @@ class KVCacheRecvingThread(threading.Thread):
         assert vllm_config is not None
         self.vllm_config: VllmConfig = vllm_config
         self.model_config = self.vllm_config.model_config
-        self.mamba_cache_mode = getattr(self.vllm_config.cache_config, "mamba_cache_mode", None)
+        self.mamba_cache_mode = get_mamba_cache_mode(self.vllm_config.cache_config)
         self.num_speculative_tokens = (
             self.vllm_config.speculative_config.num_speculative_tokens
             if self.vllm_config.speculative_config is not None
@@ -1863,7 +1864,7 @@ class MooncakeConnectorScheduler:
         transfer_block_ids = []
         for blocks, group_info in zip(block_ids, self.group_transfer_info):
             is_aligned_state_group = group_info.is_state_group and (
-                getattr(self.vllm_config.cache_config, "mamba_cache_mode", None) == "align"
+                get_mamba_cache_mode(self.vllm_config.cache_config) == "align"
             )
             if group_info.is_state_group and not is_aligned_state_group:
                 transfer_block_ids.append(blocks)

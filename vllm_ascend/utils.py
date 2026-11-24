@@ -48,7 +48,7 @@ from vllm_ascend.device.device_config import (  # noqa: F401
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import CacheConfig, VllmConfig
 else:
     VllmConfig = None
 
@@ -815,6 +815,13 @@ def vllm_version_is(target_vllm_version: str):
             "to control it by hand. And please make sure the value follows the "
             "format of x.y.z."
         )
+
+
+def get_mamba_cache_mode(cache_config: CacheConfig) -> str:
+    """Expose the legacy mode to Ascend layout consumers."""
+    if vllm_version_is("0.33.0"):
+        return cache_config.mamba_cache_mode
+    return "align" if cache_config.enable_prefix_caching else "none"
 
 
 def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:

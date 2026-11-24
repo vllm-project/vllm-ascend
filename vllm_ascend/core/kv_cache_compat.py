@@ -324,7 +324,7 @@ if not vllm_version_is("0.34.0"):
             return CrossAttentionManager.config()
         if isinstance(spec, LegacyMambaSpec):
             return MambaManager.config(
-                mamba_cache_mode=spec.mamba_cache_mode,
+                enable_prefix_caching=spec.mamba_cache_mode == "align",
                 num_speculative_blocks=spec.num_speculative_blocks,
                 num_prefill_checkpoint_blocks=spec.num_prefill_checkpoint_blocks,
                 prefill_checkpoint_alignment=spec.prefill_checkpoint_alignment,
@@ -357,7 +357,7 @@ if not vllm_version_is("0.34.0"):
         layout = {field.name: getattr(spec, field.name) for field in fields(kvi.MambaSpec) if field.init}
         return LegacyMambaSpec(
             **layout,
-            mamba_cache_mode=params.mamba_cache_mode,
+            mamba_cache_mode="align" if params.enable_prefix_caching else "none",
             num_speculative_blocks=params.num_speculative_blocks,
             num_prefill_checkpoint_blocks=params.num_prefill_checkpoint_blocks,
             prefill_checkpoint_alignment=params.prefill_checkpoint_alignment,

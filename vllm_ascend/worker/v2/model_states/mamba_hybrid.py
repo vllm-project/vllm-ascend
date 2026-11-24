@@ -121,6 +121,12 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     _mamba_ctx: MambaSpecDecodeGPUContext | None
     _mamba_state_copy_funcs: Any
 
+    @property
+    def mamba_prefix_caching(self) -> bool:
+        if vllm_version_is("0.33.0"):
+            return self._align_mode
+        return self.prefix_caching
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         if not vllm_version_is("0.34.0"):
@@ -316,7 +322,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         loads and read half-loaded state. Non-layerwise connectors can opt in
         to a bulk copy after the runner connector completes pre_forward.
         """
-        if not self._align_mode:
+        if not self.mamba_prefix_caching:
             return
         pcp_manager = getattr(self, "pcp_manager", None)
         if pcp_manager is not None and self._uses_global_mamba_pcp():

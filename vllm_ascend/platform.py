@@ -686,7 +686,8 @@ class NPUPlatform(Platform):
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and vllm_config.kv_transfer_config
         )
         if (
-            not cache_config.enable_prefix_caching
+            vllm_version_is("0.33.0")
+            and not cache_config.enable_prefix_caching
             and using_kv_transfer_with_hybrid
             and cache_config.mamba_cache_mode == "align"
         ):

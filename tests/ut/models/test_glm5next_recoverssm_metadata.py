@@ -19,7 +19,7 @@ from vllm_ascend.ops.triton.kda.recoverssm import KDARecoverSSMCommitContext
 def test_align_indices_follow_sequence_position_and_refresh_each_step(monkeypatch, graph_mode, use_pcp):
     builder = AscendKDARecoverSSMMetadataBuilder.__new__(AscendKDARecoverSSMMetadataBuilder)
     builder.vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(mamba_cache_mode="align", use_replayssm=False),
+        cache_config=SimpleNamespace(enable_prefix_caching=True, mamba_cache_mode="align", use_replayssm=False),
         num_speculative_tokens=1,
     )
     builder.use_full_cuda_graph = graph_mode
@@ -121,7 +121,9 @@ def test_context_patch_is_limited_to_enabled_glm(monkeypatch, model_type, enable
 
 def test_graph_padding_is_excluded_from_sampler_commit_rows(monkeypatch):
     builder = AscendKDARecoverSSMMetadataBuilder.__new__(AscendKDARecoverSSMMetadataBuilder)
-    builder.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="none"))
+    builder.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(enable_prefix_caching=False, mamba_cache_mode="none")
+    )
     builder.use_full_cuda_graph = True
     starts = torch.tensor([0, 6, 12, 18, 24], dtype=torch.int32)
     drafts = torch.full((4,), 5, dtype=torch.int32)
@@ -224,7 +226,9 @@ def test_eager_fallback_keeps_metadata_when_graph_staging_does_not_fit(batch, co
 @pytest.mark.parametrize("actual_reqs", [0, 1, 2, 3])
 def test_padding_offsets_stay_on_device_without_host_copy(monkeypatch, actual_reqs):
     builder = AscendKDARecoverSSMMetadataBuilder.__new__(AscendKDARecoverSSMMetadataBuilder)
-    builder.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="none"))
+    builder.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(enable_prefix_caching=False, mamba_cache_mode="none")
+    )
     builder.use_full_cuda_graph = True
     cpu_starts = torch.tensor([0, 1, 5, 11, 17], dtype=torch.int32)
     device_starts = cpu_starts.clone()

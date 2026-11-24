@@ -121,6 +121,7 @@ from vllm_ascend.platform import QWEN_FA3_TARGETS
 from vllm_ascend.utils import (
     create_hccl_pg_options,
     enable_sfa_dcp_sharded_indexer,
+    get_mamba_cache_mode,
     get_pcp_profile_num_tokens,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
@@ -1556,7 +1557,7 @@ class NPUModelRunner(GPUModelRunner):
             self.use_pp
             and not self.is_last_pp_rank
             and isinstance(self.model_state, MambaHybridModelState)
-            and self.cache_config.mamba_cache_mode == "align"
+            and get_mamba_cache_mode(self.cache_config) == "align"
         ):
             # Deferred PP results belong to an older batch than input_block_tables.
             # Restore its rows before Mamba aligns the accepted recurrent state.

@@ -150,6 +150,7 @@ def _make_defer_state(kv_cache_config):
     state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
     state.model = SimpleNamespace(get_mamba_state_copy_func=lambda: (MagicMock(), MagicMock()))
     state._align_mode = True
+    state.prefix_caching = True
     state._mamba_group_ids = [0]
     state._mamba_spec = _mamba_spec()
     state._mamba_state_idx_gpu = torch.zeros(4, dtype=torch.int32)
@@ -792,6 +793,7 @@ def test_glm_kpool_pcp_advances_mamba_align_state_once_per_global_request(mock_k
     state = object.__new__(AscendMambaHybridModelState)
     vars(state).update(
         _align_mode=True,
+        prefix_caching=True,
         pcp_manager=pcp_manager,
         vllm_config=SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=4))),
         _finish_previous_layerwise_mamba_copy=MagicMock(),

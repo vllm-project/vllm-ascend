@@ -78,6 +78,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_rank
 from vllm_ascend.utils import (
     get_kv_cache_tensor_layers,
+    get_mamba_cache_mode,
     npu_stream_switch,
     trans_nd_to_nz,
 )
@@ -245,7 +246,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.kv_cache_config = kv_cache_config
         self.kv_cache_specs = kv_cache_specs
         self.attn_resharding_group_idx = attn_resharding_group_idx
-        self.mamba_cache_mode = self.vllm_config.cache_config.mamba_cache_mode
+        self.mamba_cache_mode = get_mamba_cache_mode(self.vllm_config.cache_config)
         self.num_speculative_tokens = (
             self.vllm_config.speculative_config.num_speculative_tokens
             if self.vllm_config.speculative_config is not None

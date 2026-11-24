@@ -7,7 +7,7 @@ from dataclasses import replace
 
 import torch
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import get_mamba_cache_mode, vllm_version_is
 
 if not vllm_version_is("0.34.0"):
     from vllm.model_executor.layers.mamba.abstract import get_mamba_num_speculative_blocks
@@ -58,7 +58,7 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
         m, num_decode_draft_tokens_cpu = self._normalize_graph_padding(
             common_attn_metadata, num_actual_reqs, num_decode_draft_tokens_cpu
         )
-        if self.vllm_config.cache_config.mamba_cache_mode == "align":
+        if get_mamba_cache_mode(self.vllm_config.cache_config) == "align":
             self.mamba_aligned_state_indices = (
                 mamba_get_block_table_tensor(
                     m.block_table_tensor[: m.num_reqs], m.seq_lens[: m.num_reqs], self.kv_cache_spec, "align"
@@ -68,7 +68,7 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
                     m.block_table_tensor[: m.num_reqs],
                     m.seq_lens[: m.num_reqs],
                     self.kv_cache_spec,
-                    "align",
+                    True,
                     get_mamba_num_speculative_blocks(self.vllm_config),
                 )
             )

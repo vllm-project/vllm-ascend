@@ -676,7 +676,9 @@ def _make_vllm_config(
     model_config.get_num_attention_heads = lambda parallel_config: num_heads
 
     return SimpleNamespace(
-        cache_config=SimpleNamespace(mamba_cache_mode=mamba_cache_mode, use_replayssm=False),
+        cache_config=SimpleNamespace(
+            enable_prefix_caching=mamba_cache_mode == "align", mamba_cache_mode=mamba_cache_mode, use_replayssm=False
+        ),
         compilation_config=SimpleNamespace(
             cudagraph_mode=cudagraph_mode,
             max_cudagraph_capture_size=None,
@@ -1703,7 +1705,9 @@ def test_varlen_graph_capability_requires_adaptive_recurrent_path(builder_cls, a
 def test_adaptive_mixed_batch_rejects_cpu_fused_layout():
     builder = AscendGDNHostMetadataBuilder.__new__(AscendGDNHostMetadataBuilder)
     builder._spec_conv_indices = torch.empty(3, dtype=torch.int32)
-    builder.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="align"))
+    builder.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(enable_prefix_caching=True, mamba_cache_mode="align")
+    )
     builder.kv_cache_spec = SimpleNamespace(num_speculative_blocks=3)
     builder.num_speculative_blocks = 3
     builder.num_spec = 3

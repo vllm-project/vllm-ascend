@@ -177,6 +177,7 @@ def test_310p_hybrid_postprocess_filters_padding_indices() -> None:
     state.num_accepted_tokens_gpu = torch.zeros(4, dtype=torch.int32)
     state._num_accepted_tokens_cpu = np.zeros(4, dtype=np.int32)
     state._align_mode = False
+    state.prefix_caching = False
     state.recoverssm = None
     idx_mapping = torch.tensor([0, -1, 2], dtype=torch.int32)
 
@@ -192,6 +193,7 @@ def test_310p_hybrid_model_state_initializes_full_upstream_contract() -> None:
     state = object.__new__(Ascend310PMambaHybridModelState)
     state.max_num_reqs = 4
     state._align_mode = False
+    state.prefix_caching = False
     recover_state = object()
     config = object()
     model = object()

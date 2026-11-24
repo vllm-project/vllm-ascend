@@ -7,6 +7,7 @@ from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule_checkpoint
+from vllm_ascend.utils import get_mamba_cache_mode
 
 GDN_CHECKPOINT_ALIGNMENT = 64
 
@@ -28,7 +29,7 @@ def initialize_gdn_checkpoints(layer) -> None:
     # check keeps the scheduler's split fallback when any layer cannot export.
     config = layer.vllm_config
     if (
-        config.cache_config.mamba_cache_mode != "align"
+        get_mamba_cache_mode(config.cache_config) != "align"
         or config.parallel_config.prefill_context_parallel_size != 1
         or config.model_config.dtype != torch.bfloat16
         or config.parallel_config.use_ubatching

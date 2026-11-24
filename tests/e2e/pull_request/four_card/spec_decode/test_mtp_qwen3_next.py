@@ -30,6 +30,7 @@ from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
 from tests.e2e.pull_request.utils import assert_valid_generation_outputs
+from vllm_ascend.utils import vllm_version_is
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -60,7 +61,7 @@ def _run_mtp_case(model_name, use_replayssm, example_prompts, max_tokens):
         distributed_executor_backend="mp",
         disable_log_stats=False,
         enable_prefix_caching=False,
-        mamba_cache_mode="none",
+        **({"mamba_cache_mode": "none"} if vllm_version_is("0.33.0") else {}),
         mamba_ssm_cache_dtype="float32",
         use_replayssm=use_replayssm,
         speculative_config={

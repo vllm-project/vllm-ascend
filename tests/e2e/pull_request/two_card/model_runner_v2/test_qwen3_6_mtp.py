@@ -22,6 +22,7 @@ from vllm.v1.metrics.reader import Counter, Metric
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.utils import SPEC_DECODE_PROMPTS, assert_valid_generation_outputs
+from vllm_ascend.utils import vllm_version_is
 
 QWEN36_MOE_MODEL = "Qwen/Qwen3.6-35B-A3B"
 QWEN36_DENSE_MODEL = "Qwen/Qwen3.6-27B"
@@ -59,7 +60,7 @@ def _run_mtp_case(model_name: str, is_moe: bool, use_replayssm: bool) -> tuple[i
         gpu_memory_utilization=0.9,
         disable_log_stats=False,
         enable_prefix_caching=False,
-        mamba_cache_mode="none",
+        **({"mamba_cache_mode": "none"} if vllm_version_is("0.33.0") else {}),
         mamba_ssm_cache_dtype="float32",
         use_replayssm=use_replayssm,
         async_scheduling=True,
