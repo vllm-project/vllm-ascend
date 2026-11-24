@@ -1,0 +1,4 @@
+pr: 23003
+entries:
+  - category: feature
+    text: Added opt-in Kimi BF16 alignment reference paths for dedicated diagnostics. These paths use independent training-side comparisons, retain the default serving kernels when disabled, and require validation before production use.
