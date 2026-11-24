@@ -23,17 +23,19 @@ from vllm.config import KVTransferConfig
 from vllm.v1.core import kv_cache_config_builder as upstream_builder_module
 from vllm.v1.core import kv_cache_planning
 from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from tests.ut.kvpp_utils import make_layer_cache_configs
 from vllm_ascend.core import kv_cache_config_builder as builder_module
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    LegacyMLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
+    get_group_layer_layouts,
+    register_all_kvcache_specs,
+)
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
@@ -49,6 +51,7 @@ from vllm_ascend.quantization.methods.kv_cache.turboquant import (
     TURBOQUANT_CACHE_DTYPE,
 )
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
@@ -70,6 +73,10 @@ def generic_specs():
     return {"layer.a": spec, "layer.b": spec}
 
 
+def builder_inputs(specs):
+    return specs if vllm_version_is("0.34.0") else make_layer_cache_configs(specs)
+
+
 def test_kimi_k31_grouping_precedes_generic_hybrid_promotion(monkeypatch):
     runtime = make_runtime()
     runtime.model_config.hf_config.model_type = "kimi_k31"
@@ -79,24 +86,33 @@ def test_kimi_k31_grouping_precedes_generic_hybrid_promotion(monkeypatch):
     promote = Mock()
     monkeypatch.setattr(builder_module, "paired_sfa_cache_groups", paired)
     monkeypatch.setattr(builder_module, "unify_hybrid_kv_cache_specs", promote)
+    inputs = builder_inputs(specs)
     with pytest.raises(ValueError, match="requires the hybrid KV cache manager"):
-        AscendKVCacheConfigBuilder().get_kv_cache_groups(runtime, specs)
-    paired.assert_called_once_with(runtime, specs)
+        AscendKVCacheConfigBuilder().get_kv_cache_groups(runtime, inputs)
+    expected_kwargs = {} if vllm_version_is("0.34.0") else {"layer_configs": inputs}
+    paired.assert_called_once_with(runtime, specs, **expected_kwargs)
     promote.assert_not_called()
 
 
 def test_kimi_k31_builder_uses_paired_grouping_and_pool_accounting(monkeypatch):
     runtime = make_runtime()
     runtime.model_config.hf_config.model_type = "kimi_k31"
-    specs, groups = generic_specs(), [Mock()]
+    specs = generic_specs()
+    groups = [KVCacheGroupSpec(["layer.a"], specs["layer.a"])]
     paired = Mock(return_value=groups)
     pool = Mock(return_value=14487552)
     monkeypatch.setattr(builder_module, "paired_sfa_cache_groups", paired)
     monkeypatch.setattr(builder_module, "paired_sfa_pool_bytes", pool)
     builder = AscendKVCacheConfigBuilder()
-    assert builder.get_kv_cache_groups(runtime, specs) is groups
-    assert builder._get_pool_bytes_per_block(runtime, groups) == 14487552
-    paired.assert_called_once_with(runtime, specs)
+    inputs = builder_inputs(specs)
+    resolved = builder.get_kv_cache_groups(runtime, inputs)
+    expected_kwargs = {} if vllm_version_is("0.34.0") else {"layer_configs": inputs}
+    paired.assert_called_once_with(runtime, specs, **expected_kwargs)
+    if vllm_version_is("0.34.0"):
+        assert resolved is groups
+    else:
+        assert [get_group_layer_layouts(group) for group in resolved] == [{"layer.a": specs["layer.a"]}]
+    assert builder._get_pool_bytes_per_block(runtime, resolved) == 14487552
     pool.assert_called_once_with(groups)
 
 
@@ -123,7 +139,7 @@ def test_kimi_grouping_requires_matching_dcp_layout(draft_sharded):
 
 def test_generic_uniform_spec_falls_back_to_default_grouping():
     runtime = make_runtime()
-    specs = generic_specs()
+    specs = builder_inputs(generic_specs())
     result = AscendKVCacheConfigBuilder().get_kv_cache_groups(runtime, specs)
     expected = DefaultKVCacheConfigBuilder().get_kv_cache_groups(runtime, specs)
     assert result == expected
@@ -146,7 +162,13 @@ def test_layerwise_offload_budget_uses_one_block_backing(monkeypatch):
     )
     builder = AscendKVCacheConfigBuilder()
     spec = generic_specs()["layer.a"]
-    groups = [KVCacheGroupSpec([f"model.layers.{layer}.attn" for layer in range(4)], spec)]
+    layers = {f"model.layers.{layer}.attn": spec for layer in range(4)}
+    if vllm_version_is("0.34.0"):
+        groups = [KVCacheGroupSpec(list(layers), spec)]
+    else:
+        from vllm.v1.kv_cache_interface import KVCacheGroup
+
+        groups = [KVCacheGroup.from_layers(make_layer_cache_configs(layers))]
     rules = {FullAttentionSpec: True}
     monkeypatch.setattr(builder_module, "get_spec_reuse_rules", lambda _: rules)
     monkeypatch.setattr(cache_planner, "get_spec_reuse_rules", lambda _: rules)
@@ -160,13 +182,18 @@ def test_layerwise_offload_budget_uses_one_block_backing(monkeypatch):
 
 
 def test_glm_next_layout_takes_precedence_over_ascend_grouping(monkeypatch):
-    sentinel = [KVCacheGroupSpec(["glm"], generic_specs()["layer.a"])]
+    specs = generic_specs()
+    sentinel = [KVCacheGroupSpec(["layer.a"], specs["layer.a"])]
     glm_mock = Mock(return_value=sentinel)
     ascend_mock = Mock()
     monkeypatch.setattr(builder_module, "is_glm5_next_cache_spec", lambda spec: True)
     monkeypatch.setattr(builder_module, "get_glm5_next_kv_cache_groups", glm_mock)
     monkeypatch.setattr(builder_module, "group_and_unify_kv_cache_specs", ascend_mock)
-    assert AscendKVCacheConfigBuilder().get_kv_cache_groups(make_runtime(), generic_specs()) is sentinel
+    result = AscendKVCacheConfigBuilder().get_kv_cache_groups(make_runtime(), builder_inputs(specs))
+    if vllm_version_is("0.34.0"):
+        assert result is sentinel
+    else:
+        assert [get_group_layer_layouts(group) for group in result] == [{"layer.a": specs["layer.a"]}]
     ascend_mock.assert_not_called()
 
 
@@ -178,8 +205,9 @@ def test_ascend_layout_takes_precedence_over_kimi_dspark(monkeypatch):
     monkeypatch.setattr(builder_module, "is_deepseek_v41_cache", lambda spec: True)
     monkeypatch.setattr(builder_module, "group_cache_specs", Mock(return_value=[]))
     monkeypatch.setattr(builder_module, "make_cache_groups", ascend_mock)
+    monkeypatch.setattr(builder_module, "group_layer_configs", ascend_mock)
     monkeypatch.setattr(builder_module, "_get_kimi_k3_dspark_mixed_kv_cache_groups", kimi_mock)
-    assert AscendKVCacheConfigBuilder().get_kv_cache_groups(make_runtime(), generic_specs()) is sentinel
+    assert AscendKVCacheConfigBuilder().get_kv_cache_groups(make_runtime(), builder_inputs(generic_specs())) is sentinel
     kimi_mock.assert_not_called()
 
 
@@ -216,12 +244,18 @@ def test_core_applies_capacity_and_converges_worker_layouts(monkeypatch, overrid
     )
     config.model_config.original_max_model_len = config.model_config.max_model_len = 16
     config.parallel_config = SimpleNamespace(tensor_parallel_size=1, decode_context_parallel_size=1)
-    spec = MLAAttentionSpec(
+    spec = LegacyMLAAttentionSpec(
         block_size=16, num_kv_heads=1, head_size=16, dtype=torch.bfloat16, model_version="deepseek_v4"
     )
-    uniform = UniformTypeKVCacheSpecs.from_specs({"target": spec})
-    groups = [KVCacheGroupSpec(["target"], uniform)]
-    specs = {"target": uniform}
+    if vllm_version_is("0.34.0"):
+        uniform = UniformTypeKVCacheSpecs.from_specs({"target": spec})
+        groups = [KVCacheGroupSpec(["target"], uniform)]
+        specs = {"target": uniform}
+    else:
+        from vllm.v1.kv_cache_interface import KVCacheGroup
+
+        specs = make_layer_cache_configs({"target": spec})
+        groups = [KVCacheGroup.from_layers(specs)]
     monkeypatch.setattr(upstream_builder_module, "get_kv_cache_config_builder", lambda _: builder)
     if hasattr(kv_cache_planning, "get_kv_cache_config_builder"):
         monkeypatch.setattr(kv_cache_planning, "get_kv_cache_config_builder", lambda _: builder)

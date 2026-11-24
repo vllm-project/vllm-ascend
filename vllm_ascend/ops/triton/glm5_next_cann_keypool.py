@@ -245,16 +245,20 @@ def _build_keypool_metadata_kernel(
                 safe.to(tl.int64),
                 (row[:, None] < n) & (cols[None, :] < WIDTH),
             )
-            slot = tl.load(
-                raw_slots + safe * SLOT_STRIDE, (row[:, None] < n) & (cols[None, :] < WIDTH) & (safe < actual), other=-1
-            ).to(tl.int64)
+            valid_row = (
+                (row[:, None] < n) & (cols[None, :] < WIDTH) & (source_row >= q0[:, None]) & (source_row < q1[:, None])
+            )
+            # The circular manager provides no token slot mapping.
+            if raw_slots is not None:
+                slot = tl.load(raw_slots + safe * SLOT_STRIDE, valid_row, other=-1)
+                valid_row = valid_row & (slot >= 0)
             pos = tl.load(
                 raw_positions + safe * POS_STRIDE,
-                (row[:, None] < n) & (cols[None, :] < WIDTH) & (safe < actual),
+                valid_row,
                 other=0,
             ).to(tl.int64)
             address = page[:, None] * PAGE_ROWS + pos % CAPACITY
-            address = tl.where((source_row >= q0[:, None]) & (slot >= 0) & (page[:, None] >= 0), address, -1)
+            address = tl.where(valid_row & (page[:, None] >= 0), address, -1)
         else:
             end = start % POOL + length
             state_row = (row + 1 + tl.where(end >= POOL, n, 0))[:, None] * POOL + cols[None, :]
@@ -376,18 +380,19 @@ def build_keypool_metadata(common, buffers, tokens, source, logical, ratio):
     )
 
 
-def build_tail_inputs(common, pool, capacity, page_rows, retained_width, buffers):
+def build_tail_inputs(common, pool, capacity, page_rows, retained_width, buffers, *, use_slot_mapping=True):
     n = common.num_reqs
     width = retained_width or pool
     history = buffers["history"][:n]
     writes = buffers["writes"].view(-1)[: n * width].view(n, width)
     state = buffers["state"].view(-1)[: n * width].view(n, width)
     retained = buffers["retained"].view(-1)[: n * width].view(n, width) if retained_width else None
+    slot_mapping = common.slot_mapping if use_slot_mapping else None
     _build_keypool_metadata_kernel[(triton.cdiv(n + 1, METADATA_MIN_BLOCK),)](
         common.query_start_loc,
         common.seq_lens,
         common.positions,
-        common.slot_mapping,
+        slot_mapping,
         common.block_table_tensor,
         None,
         None,
@@ -411,7 +416,7 @@ def build_tail_inputs(common, pool, capacity, page_rows, retained_width, buffers
         common.query_start_loc.stride(0),
         common.seq_lens.stride(0),
         common.positions.stride(0),
-        common.slot_mapping.stride(0),
+        slot_mapping.stride(0) if slot_mapping is not None else 0,
         common.block_table_tensor.stride(0),
         0,
         pool,

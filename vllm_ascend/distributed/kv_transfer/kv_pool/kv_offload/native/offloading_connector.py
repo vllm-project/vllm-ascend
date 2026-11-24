@@ -28,7 +28,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupRole,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
@@ -37,6 +36,10 @@ from vllm.v1.kv_offload.base import (
     CanonicalPageMapping,
 )
 
+from vllm_ascend.core.kv_cache_compat import (
+    UniformTypeKVCacheSpecs,
+    get_group_layout,
+)
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
@@ -176,7 +179,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
 
         requires_layout_adaptation = False
         for group in selected_groups:
-            group_spec = group.kv_cache_spec
+            group_spec = get_group_layout(group)
             per_layer_specs = group_spec.kv_cache_specs if isinstance(group_spec, UniformTypeKVCacheSpecs) else {}
             for layer_name in group.layer_names:
                 layer_spec = per_layer_specs.get(layer_name, group_spec)
@@ -237,7 +240,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
             )
 
         for group in selected_groups:
-            group_spec = group.kv_cache_spec
+            group_spec = get_group_layout(group)
             per_layer_specs = group_spec.kv_cache_specs if isinstance(group_spec, UniformTypeKVCacheSpecs) else {}
             for layer_name in group.layer_names:
                 if layer_name in refs_by_layer:

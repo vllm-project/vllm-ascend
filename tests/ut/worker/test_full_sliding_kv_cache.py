@@ -9,16 +9,15 @@ from unittest.mock import Mock
 import pytest
 import torch
 from vllm.config import AttentionConfig
-from vllm.v1.kv_cache_interface import (
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, KVQuantMode
+
+from tests.ut.kvpp_utils import make_layer_cache_configs
+from vllm_ascend.core.kv_cache_compat import (
     FullAttentionSpec,
-    KVCacheConfig,
     KVCacheGroupSpec,
-    KVCacheTensor,
-    KVQuantMode,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
-
 from vllm_ascend.worker import worker as worker_module
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
@@ -91,6 +90,7 @@ def test_budget_tracks_physical_shared_allocation(monkeypatch, sliding_groups, s
     worker.vllm_config = config
     worker.model_config = config.model_config
     worker.get_kv_cache_spec = lambda: _specs(cache)
+    worker.get_kv_cache_layer_configs = lambda: make_layer_cache_configs(_specs(cache))
     worker.model_runner = SimpleNamespace(
         supports_standardized_shared_kv_backing=supports_shared, use_sparse=False, use_compress=False
     )
@@ -122,6 +122,7 @@ def test_memory_budget_sources_preserve_physical_capacity(monkeypatch, budget_so
     worker.init_snapshot = SimpleNamespace(free_memory=2 * available)
     worker.requested_memory = available + 3
     worker.get_kv_cache_spec = lambda: _specs(cache)
+    worker.get_kv_cache_layer_configs = lambda: make_layer_cache_configs(_specs(cache))
     worker.model_runner = SimpleNamespace(
         profile_run=Mock(),
         model_memory_usage=1,

@@ -10,11 +10,12 @@ from unittest.mock import Mock
 import httpx
 import msgspec
 import pytest
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.request import RequestStatus
 from zmq.constants import SocketOption, SocketType
 from zmq.sugar.context import Context
 
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import utils
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (

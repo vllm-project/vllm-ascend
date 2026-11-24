@@ -18,6 +18,7 @@ from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher
 from vllm.v1.request import Request, RequestStatus
 
+from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import heartbeat as heartbeat_module
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import pull_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
@@ -885,17 +886,22 @@ class _StopLoop(BaseException):
 def test_base_scheduler_detects_state_and_compressed_prefill_truncation() -> None:
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace()))
-    scheduler.group_unique_specs = [[make_full_spec()]]
+
+    def set_layouts(*specs):
+        scheduler.kv_cache_groups = [KVCacheGroupSpec([f"layer.{i}"], spec) for i, spec in enumerate(specs)]
+        scheduler.group_unique_specs = [scheduler._get_group_unique_specs(group) for group in scheduler.kv_cache_groups]
+
+    set_layouts(make_full_spec())
     assert scheduler._needs_prefill_token_truncation() is False
 
     scheduler.vllm_config.model_config.hf_config.compress_ratios = [2]
     assert scheduler._needs_prefill_token_truncation() is True
 
     scheduler.vllm_config.model_config.hf_config.compress_ratios = None
-    scheduler.group_unique_specs = [[make_full_spec()], [make_mamba_spec()]]
+    set_layouts(make_full_spec(), make_mamba_spec())
     assert scheduler._needs_prefill_token_truncation() is True
 
-    scheduler.group_unique_specs = [[make_full_spec()], [make_circular_spec()]]
+    set_layouts(make_full_spec(), make_circular_spec())
     assert scheduler._needs_prefill_token_truncation() is False
 
 

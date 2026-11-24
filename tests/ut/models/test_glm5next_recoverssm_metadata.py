@@ -8,8 +8,8 @@ from unittest.mock import Mock
 import pytest
 import torch
 from vllm.models.kimi_k3.nvidia.kda_metadata import KDARecoverSSMCommitMetadata, KimiK3KDAMetadataBuilder
-from vllm.v1.kv_cache_interface import MambaSpec
 
+from vllm_ascend.core.kv_cache_compat import LegacyMambaSpec
 from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
 from vllm_ascend.ops.triton.kda.recoverssm import KDARecoverSSMCommitContext
 
@@ -18,9 +18,12 @@ from vllm_ascend.ops.triton.kda.recoverssm import KDARecoverSSMCommitContext
 @pytest.mark.parametrize("use_pcp", [False, True])
 def test_align_indices_follow_sequence_position_and_refresh_each_step(monkeypatch, graph_mode, use_pcp):
     builder = AscendKDARecoverSSMMetadataBuilder.__new__(AscendKDARecoverSSMMetadataBuilder)
-    builder.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="align"))
+    builder.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(mamba_cache_mode="align", use_replayssm=False),
+        num_speculative_tokens=1,
+    )
     builder.use_full_cuda_graph = graph_mode
-    builder.kv_cache_spec = MambaSpec(
+    builder.kv_cache_spec = LegacyMambaSpec(
         block_size=8,
         shapes=((3, 4), (2, 2)),
         dtypes=(torch.bfloat16, torch.float32),

@@ -5,8 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
 
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import plan_layerwise_cache_reuse
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     get_layerwise_kv_cache_specs,

@@ -314,10 +314,20 @@ def test_adaptive_verification_manager_initialization(cpu_manager_resources, mon
     # Stop after the real manager call, before device cache allocation or graph setup.
     monkeypatch.setattr(upstream, "BlockTables", Mock(side_effect=BeforeCacheAllocation))
     cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=cache_spec, layer_names=["target", "draft"])]
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=cache_spec,
+                layer_names=["target", "draft"],
+                block_size=128,
+                block_table_width=lambda *args: 128,
+                uses_slot_mapping=True,
+                dcp_sharded=False,
+                sliding_window_reach=0,
+            )
+        ]
     )
     with pytest.raises(BeforeCacheAllocation):
-        patch_model_runner.initialize_kv_cache(runner, cache_config)
+        GPUModelRunner.initialize_kv_cache(runner, cache_config)
     manager_call.assert_called_once()
     assert manager_call.call_args.kwargs["enable_adaptive_verification"] is enabled
     assert manager_call.call_args.kwargs["copy_admitted_drafts_to_host"] is False

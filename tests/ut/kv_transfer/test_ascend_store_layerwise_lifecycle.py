@@ -25,21 +25,21 @@ from vllm.utils.hashing import sha256
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash, resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.distributed.ascend_store.cache_config_helpers import make_resolved_cache_config
 from tests.ut.kv_offload.utils import create_model_runner_output, create_vllm_config
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    LegacyMambaSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+    register_all_kvcache_specs,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     attention_transfer_window,
@@ -184,7 +184,7 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
 
     full = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
     recurrent = (
-        MambaSpec(
+        LegacyMambaSpec(
             block_size=32,
             shapes=((8,), (8,)),
             dtypes=(torch.float32, torch.float32),

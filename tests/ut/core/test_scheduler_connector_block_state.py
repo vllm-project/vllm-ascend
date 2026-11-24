@@ -9,13 +9,14 @@ import pytest
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.core.test_dyntra_lb_scheduler import create_dyntra_lb_scheduler, make_dyntra_test_config
 from tests.ut.kv_offload.utils import create_request
 from vllm_ascend.core.dyntra_lb_scheduler import AsyncDyntraLBScheduler, DyntraLBScheduler
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
 from vllm_ascend.core.recompute_scheduler import (
     AsyncDyntraLBRecomputeScheduler,
     AsyncRecomputeScheduler,

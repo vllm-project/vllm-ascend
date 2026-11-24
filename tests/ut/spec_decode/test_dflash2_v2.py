@@ -183,7 +183,7 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
 def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeypatch, causal):
     import sys
 
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
     from vllm_ascend.attention.fa_v1 import (
@@ -191,6 +191,7 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
         AscendFlashAttentionImpl,
         AscendFlashAttentionMetadataBuilder,
     )
+    from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
 
     num_query = 6
     layer_names = [f"draft.layers.{i}" for i in range(6)]

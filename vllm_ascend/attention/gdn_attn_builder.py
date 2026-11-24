@@ -42,6 +42,7 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets,
 )
 from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
+from vllm_ascend.utils import vllm_version_is
 
 _GDN_CHUNK_SIZE = 64
 _GDN_CHUNK32_SIZE = 32
@@ -1043,13 +1044,17 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             block_table_tensor = aligned_indices[: m.num_reqs]
         elif m.num_reqs == 0 and mamba_cache_mode == "align":
             # Match the helper's (0, state_slots) shape without device work.
-            block_table_tensor = mamba_block_table[:0, : 1 + self.kv_cache_spec.num_speculative_blocks]
+            speculative_blocks = (
+                self.kv_cache_spec.num_speculative_blocks if vllm_version_is("0.34.0") else self.num_speculative_blocks
+            )
+            block_table_tensor = mamba_block_table[:0, : 1 + speculative_blocks]
         else:
-            block_table_tensor = mamba_get_block_table_tensor(
-                mamba_block_table,
-                m.seq_lens,
-                self.kv_cache_spec,
-                mamba_cache_mode,
+            block_table_tensor = (
+                mamba_get_block_table_tensor(mamba_block_table, m.seq_lens, self.kv_cache_spec, mamba_cache_mode)
+                if vllm_version_is("0.34.0")
+                else mamba_get_block_table_tensor(
+                    mamba_block_table, m.seq_lens, self.kv_cache_spec, mamba_cache_mode, self.num_speculative_blocks
+                )
             )
 
         non_spec_conv1d_cache_indices: torch.Tensor | None = None
@@ -1664,6 +1669,10 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             self._spec_conv_indices is None
             or self.vllm_config.cache_config.mamba_cache_mode != "align"
             or (num_spec_decodes > 0 and self.kv_cache_spec.num_speculative_blocks < self.num_spec)
+            if vllm_version_is("0.34.0")
+            else self._spec_conv_indices is None
+            or self.vllm_config.cache_config.mamba_cache_mode != "align"
+            or (num_spec_decodes > 0 and self.num_speculative_blocks < self.num_spec)
         ):
             return None
 

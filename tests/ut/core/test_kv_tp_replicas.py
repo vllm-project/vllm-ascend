@@ -6,12 +6,8 @@ from dataclasses import replace
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    UniformTypeKVCacheSpecs,
-)
 
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec, UniformTypeKVCacheSpecs
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,

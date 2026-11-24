@@ -15,14 +15,20 @@ from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_compat import (
+    KVCacheGroupSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.models.kimi_k3.cache_config import make_kimi_cache_groups
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.34.0"):
+    from vllm.v1.kv_cache_interface import KVCacheGroup
 
 
 def _draft_layer_specs(groups):
@@ -32,14 +38,14 @@ def _draft_layer_specs(groups):
         group_spec = group.kv_cache_spec
         for name in group.layer_names:
             spec = group_spec.kv_cache_specs[name] if isinstance(group_spec, UniformTypeKVCacheSpecs) else group_spec
-            if spec.is_draft:
+            if getattr(spec, "is_draft", False):
                 result[name] = spec
     return result
 
 
 def _validate_paired_sfa_pages(specs) -> None:
     """Check the page geometry settled by NPUPlatform before spec creation."""
-    main = [s for s in specs.values() if isinstance(s, AscendMLAAttentionSpec) and not s.is_draft]
+    main = [s for s in specs.values() if isinstance(s, AscendMLAAttentionSpec) and not getattr(s, "is_draft", False)]
     recurrent = [s for s in specs.values() if isinstance(s, MambaSpec)]
     if not main:
         raise ValueError("A paired SFA cache requires main MLA specs.")
@@ -52,11 +58,14 @@ def _validate_paired_sfa_pages(specs) -> None:
         raise ValueError("Paired SFA recurrent pages must match the main MLA page size.")
 
 
-def paired_sfa_cache_groups(config, specs):
-    draft = {name: spec for name, spec in specs.items() if spec.is_draft}
+def paired_sfa_cache_groups(config, specs, *, layer_configs=None):
+    if layer_configs is None:
+        draft = {name: spec for name, spec in specs.items() if getattr(spec, "is_draft", False)}
+    else:
+        draft = {name: spec for name, spec in specs.items() if layer_configs[name].is_draft}
     if not draft:
         return _paired_sfa_target_cache_groups(config, specs)
-    target = {name: spec for name, spec in specs.items() if not spec.is_draft}
+    target = {name: spec for name, spec in specs.items() if name not in draft}
     groups = _paired_sfa_target_cache_groups(config, target)
     specs.update(target)
     if any(isinstance(spec, AscendMLAAttentionSpec) and spec.uses_packed_sfa_main_cache for spec in draft.values()):
@@ -91,7 +100,15 @@ def paired_sfa_cache_groups(config, specs):
     if uniform is None:
         raise ValueError("Target and DSpark must share full-attention semantics and logical block size.")
     max_len = config.model_config.max_model_len
-    widths = {spec.max_num_blocks_per_req(config, max_len) for spec in shared.values()}
+    if layer_configs is None:
+        widths = {spec.max_num_blocks_per_req(config, max_len) for spec in shared.values()}
+    else:
+        widths = {
+            KVCacheGroup.from_layers({name: replace(layer_configs[name], spec=spec)}).max_num_blocks_per_req(
+                config, max_len
+            )
+            for name, spec in shared.items()
+        }
     if len(widths) != 1:
         raise ValueError("Target and DSpark must have identical block-table coverage, including DCP sharding.")
     # Keep target first for scheduler conversion and keep recurrent group IDs.
@@ -148,7 +165,9 @@ def _layout(groups):
     # overlay or inherit the target's packed page geometry. Retain global
     # specs here: a PP-local group can have no local target MLA layer.
     target_main = {
-        n: spec for n, spec in specs.items() if isinstance(spec, AscendMLAAttentionSpec) and not spec.is_draft
+        n: spec
+        for n, spec in specs.items()
+        if isinstance(spec, AscendMLAAttentionSpec) and not getattr(spec, "is_draft", False)
     }
     main = [n for n in full.layer_names if n in target_main]
     indexer = [n for n in full.layer_names if isinstance(specs[n], AscendSFAIndexerCacheSpec)]

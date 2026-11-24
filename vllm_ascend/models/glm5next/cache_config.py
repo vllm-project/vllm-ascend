@@ -16,19 +16,21 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
 
 # Both supported versions expose planning helpers in kv_cache_planning.
-from vllm.v1.core.kv_cache_planning import (
-    create_kv_cache_group_specs,
-)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_compat import (
+    KVCacheGroupSpec,
+    UniformTypeKVCacheSpecs,
+)
+from vllm_ascend.core.kv_cache_compat import (
+    create_legacy_cache_groups as create_kv_cache_group_specs,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
@@ -229,7 +231,10 @@ def _get_glm5_next_cache_layout(
             mamba_groups.append(group)
             continue
         if not isinstance(group_spec, UniformTypeKVCacheSpecs):
-            if not _is_glm5_next_spec(group_spec):
+            # The native group view can represent identical tail layers with one spec.
+            if _is_glm5_next_tail_spec(group_spec):
+                tail_groups.append(group)
+            elif not _is_glm5_next_spec(group_spec):
                 draft_groups.append(group)
             continue
 
@@ -259,9 +264,9 @@ def _get_glm5_next_cache_layout(
     full_group = full_groups[0]
     tail_group = tail_groups[0]
     assert isinstance(full_group.kv_cache_spec, UniformTypeKVCacheSpecs)
-    assert isinstance(tail_group.kv_cache_spec, UniformTypeKVCacheSpecs)
     full_specs = full_group.kv_cache_spec.kv_cache_specs
-    tail_specs = tail_group.kv_cache_spec.kv_cache_specs
+    tail_spec = tail_group.kv_cache_spec
+    tail_layouts = tail_spec.kv_cache_specs.values() if isinstance(tail_spec, UniformTypeKVCacheSpecs) else (tail_spec,)
     mla_names = _sorted_layer_names(
         [name for name in full_group.layer_names if _is_glm5_next_main_spec(full_specs[name])]
     )
@@ -284,7 +289,7 @@ def _get_glm5_next_cache_layout(
         group.kv_cache_spec.page_size_bytes for group in mamba_groups
     }
     small_page_sizes = {spec.page_size_bytes for spec in full_specs.values() if _is_glm5_next_indexer_spec(spec)} | {
-        spec.page_size_bytes for spec in tail_specs.values()
+        spec.page_size_bytes for spec in tail_layouts
     }
     if len(main_page_sizes) != 1 or len(small_page_sizes) != 1:
         raise ValueError("GLM-Next cache specs were not aligned to two physical page sizes.")

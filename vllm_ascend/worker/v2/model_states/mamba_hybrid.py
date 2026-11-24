@@ -37,6 +37,12 @@ from vllm.v1.worker.mamba_utils import (
     preprocess_mamba_align_fused_kernel,
     validate_mamba_state_copy_funcs,
 )
+
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.34.0"):
+    from vllm.v1.worker.mamba_utils import get_mamba_group_ids, get_mamba_group_params
+
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
@@ -117,6 +123,10 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        if not vllm_version_is("0.34.0"):
+            self._mamba_spec: MambaSpec | None = None
+            self._mamba_group_ids: list[int] = []
+
         self._layerwise_mamba_copy: _LayerwiseMambaCopyState | None = None
         self._layer_state_ranges: dict[str, tuple[int, int]] | None = None
         self._pending_bulk_copy: tuple[MambaSpecDecodeGPUContext, int, torch.Tensor] | None = None
@@ -130,6 +140,18 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             cached = (key, indices.unbind(0))
             self._aligned_state_index_views = cached
         return cached[1]
+
+    if not vllm_version_is("0.34.0"):
+
+        def _get_mamba_group_info(self, kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSpec]:
+            if self._mamba_spec is None:
+                groups = get_mamba_groups(kv_cache_config)
+                group_ids = get_mamba_group_ids(groups)
+                # Native manager params carry scheduling policy after #61452.
+                get_mamba_group_params(kv_cache_config, group_ids)
+                self._mamba_group_ids = group_ids
+                self._mamba_spec = next(iter(groups))
+            return self._mamba_group_ids, self._mamba_spec
 
     def _get_layer_state_ranges(self, kv_cache_config: KVCacheConfig) -> dict[str, tuple[int, int]]:
         """Map every mamba layer name to its (start, end) range in the

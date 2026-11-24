@@ -19,6 +19,10 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
 )
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.34.0"):
+    from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
 
 
 def is_glm5_next_cache_spec(spec: KVCacheSpec) -> bool:
@@ -104,6 +108,12 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         static_context[prefix] = self
 
+    if not vllm_version_is("0.34.0"):
+
+        def get_kv_cache_config(self, vllm_config: VllmConfig):
+            spec = self.get_kv_cache_spec(vllm_config)
+            return FullAttentionManager.layer_config(spec)
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         del vllm_config
         return AscendMLAAttentionSpec(
@@ -162,6 +172,12 @@ class Glm5NextTailCache(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         static_context[prefix] = self
 
+    if not vllm_version_is("0.34.0"):
+
+        def get_kv_cache_config(self, vllm_config: VllmConfig):
+            spec = self.get_kv_cache_spec(vllm_config)
+            return KpoolTailManager.layer_config(spec)
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         del vllm_config
         return AscendIndexerKPoolTailSpec(
@@ -184,7 +200,7 @@ class Glm5NextTailCache(nn.Module, AttentionLayerBase):
     def forward(self): ...
 
 
-class KpoolTailManager(FullAttentionManager):
+class _LegacyKpoolTailManager(FullAttentionManager):
     """Own one unshared ring block until request completion or preemption.
 
     Prefix hits never initialize this transient cache. Logical pool-aligned
@@ -290,3 +306,13 @@ class KpoolTailManager(FullAttentionManager):
         # An asynchronous connector load initializes the ring; zeroing it after
         # the transfer starts would race with and overwrite the received state.
         self._claim_ring_block(request_id, record_for_zeroing)
+
+
+if vllm_version_is("0.34.0"):
+    KpoolTailManager = _LegacyKpoolTailManager
+else:
+
+    class KpoolTailManager(CircularBufferManager):  # type: ignore[no-redef]
+        """Reserve one zeroed ring block per request."""
+
+        zeroes_new_blocks = True

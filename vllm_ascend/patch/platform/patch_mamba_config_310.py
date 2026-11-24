@@ -9,7 +9,13 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    MambaSpec,
+)
+
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+)
 
 
 @classmethod

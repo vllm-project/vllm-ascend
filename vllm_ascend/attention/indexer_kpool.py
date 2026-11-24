@@ -39,6 +39,7 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.utils import vllm_version_is
 
 # Below this many query rows per rank, keep every rank scoring the whole
 # batch: short batches spend more on the extra TP gather than the removed
@@ -725,6 +726,7 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
             self._page_rows,
             max(1, retained_width) if self._lookahead else 0,
             self._tail_inputs[key],
+            use_slot_mapping=vllm_version_is("0.34.0"),
         )
         return AscendIndexerKPoolTailMetadata(
             block_table=block_table,

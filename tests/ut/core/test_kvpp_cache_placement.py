@@ -6,11 +6,11 @@ from unittest.mock import Mock
 import pytest
 import torch
 from vllm.model_executor.layers.attention import MLAAttention
-from vllm.v1.kv_cache_interface import SlidingWindowSpec
 
 from tests.ut.kvpp_utils import indexer_name, layer_name, make_dspark_kvpp_case, make_kvpp_config, make_kvpp_specs
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core import kv_cache_placement as placement
+from vllm_ascend.core.kv_cache_compat import SlidingWindowSpec
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 
 

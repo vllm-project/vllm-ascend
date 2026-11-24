@@ -8,8 +8,9 @@ import pytest
 import torch
 from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import build_offloading_config
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
 from vllm_ascend.utils import refresh_block_size
 
 UPSTREAM_BLOCK_SIZE = 16

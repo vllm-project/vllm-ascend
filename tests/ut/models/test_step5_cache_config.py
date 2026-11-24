@@ -15,15 +15,16 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import (
+from vllm.v1.kv_cache_interface import KVCacheSpec
+
+from vllm_ascend.core.kv_cache_compat import (
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheGroupSpec,
-    KVCacheSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    get_group_layer_layouts,
 )
-
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.models.step5.cache_config import (
     _padded_page,
@@ -34,6 +35,33 @@ from vllm_ascend.models.step5.cache_config import (
     is_step5_groups,
     is_step5_kv_cache_spec,
 )
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.34.0"):
+    from vllm.v1.core.single_type_kv_cache_manager import (
+        CircularBufferManager,
+        FullAttentionManager,
+        SlidingWindowManager,
+    )
+    from vllm.v1.kv_cache_interface import KVCacheGroup
+
+
+def _manager_groups(groups):
+    if vllm_version_is("0.34.0"):
+        return groups
+    converted = []
+    for group in groups:
+        configs = {}
+        for name, spec in get_group_layer_layouts(group).items():
+            if isinstance(spec, SlidingWindowSpec):
+                configs[name] = SlidingWindowManager.layer_config(spec, sliding_window=spec.sliding_window)
+            elif isinstance(spec, CircularBufferSpec):
+                configs[name] = CircularBufferManager.layer_config(spec)
+            else:
+                configs[name] = FullAttentionManager.layer_config(spec)
+        converted.append(KVCacheGroup.from_layers(configs, host_resident=group.host_resident))
+    return converted
+
 
 BLOCK = 128
 # 96 KiB main DSA page: 2 (k+v) x 4 kv heads x 48 head_size x bf16 x 128 tok.
@@ -259,7 +287,7 @@ def test_max_memory_usage_sums_group_demands_times_envelope() -> None:
     # DSA/summary group: 64 ids at 8192 tokens; SW saturates at its admission
     # cap cdiv(min(4095 + 8192, 8192), 128) + 1 = 65; ring holds 1 bucket.
     expected = (64 + 65 + 1) * (2 * MAIN_PAGE + 2 * SUMMARY_PAGE)
-    assert get_step5_max_memory_usage(vllm_config, _planned_groups()) == expected
+    assert get_step5_max_memory_usage(vllm_config, _manager_groups(_planned_groups())) == expected
 
 
 def test_max_memory_usage_skips_host_resident_groups() -> None:
@@ -268,7 +296,7 @@ def test_max_memory_usage_skips_host_resident_groups() -> None:
     sw_name, sw_spec = groups[1].layer_names, groups[1].kv_cache_spec
     groups[1] = KVCacheGroupSpec(sw_name, sw_spec, host_resident=True)
     expected = (64 + 1) * (2 * MAIN_PAGE + 2 * SUMMARY_PAGE)
-    assert get_step5_max_memory_usage(vllm_config, groups) == expected
+    assert get_step5_max_memory_usage(vllm_config, _manager_groups(groups)) == expected
 
 
 def test_config_from_groups_aliases_one_envelope_backing() -> None:
@@ -329,7 +357,7 @@ def test_builder_and_generic_planner_dispatch_step5_groups_to_step5_planner() ->
     planned = builder.get_kv_cache_config_from_groups(vllm_config, groups, num_blocks=7)
     assert planned.num_blocks == 7
     expected_usage = (64 + 65 + 1) * envelope
-    assert planning._max_memory_usage_bytes_from_groups(builder, vllm_config, groups) == expected_usage
+    assert planning._max_memory_usage_bytes_from_groups(builder, vllm_config, _manager_groups(groups)) == expected_usage
 
 
 def test_builder_pool_bytes_keeps_default_layout_without_step5_aux_layers() -> None:

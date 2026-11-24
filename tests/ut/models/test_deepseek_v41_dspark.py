@@ -15,8 +15,8 @@ pytest.importorskip(
 
 import torch
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+from vllm_ascend.core.kv_cache_compat import KVCacheSpecRegistry
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec, register_ascend_kv_cache_specs
 from vllm_ascend.models.deepseek_v41 import dspark as deepseek_v41_dspark_module
 from vllm_ascend.models.deepseek_v41 import model as deepseek_v41_module

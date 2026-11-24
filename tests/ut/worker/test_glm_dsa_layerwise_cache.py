@@ -10,11 +10,12 @@ import msgspec
 import pytest
 import torch
 from vllm.config import KVTransferConfig
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from tests.ut.kvpp_utils import make_layer_cache_configs
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.core.kv_cache_compat import get_group_layout, register_all_kvcache_specs
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
@@ -29,6 +30,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     apply_layerwise_kv_cache_plan,
     get_layerwise_reuse_backing_bytes,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 
 
@@ -93,7 +95,8 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
         specs[name] = replace(specs[name], is_draft=True)
 
     builder = AscendKVCacheConfigBuilder()
-    groups = builder.get_kv_cache_groups(runtime, specs)
+    builder_inputs = specs if vllm_version_is("0.34.0") else make_layer_cache_configs(specs)
+    groups = builder.get_kv_cache_groups(runtime, builder_inputs)
     assert len(groups) == 1 and len(groups[0].layer_names) == 101
     bytes_per_block = builder._get_pool_bytes_per_block(runtime, groups)
     assert bytes_per_block == 5 * (main.page_size_bytes + indexer.page_size_bytes)
@@ -209,7 +212,7 @@ def _register_push_worker(runtime, config, caches, engine_id):
     worker.vllm_config = runtime
     worker.kv_cache_config = config
     worker.ascend_config = SimpleNamespace(kvpp_config=attn_utils.KVPPConfig.from_vllm_config(runtime))
-    worker.block_size = config.kv_cache_groups[0].kv_cache_spec.block_size
+    worker.block_size = get_group_layout(config.kv_cache_groups[0]).block_size
     worker.tp_size = worker.pcp_size = worker.dcp_size = 1
     worker.tp_rank = worker.pcp_rank = 0
     worker.engine_id = engine_id

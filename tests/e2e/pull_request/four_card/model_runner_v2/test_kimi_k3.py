@@ -68,8 +68,12 @@ class KimiRecoverSSMWorker:
     model_runner: Any
 
     def kimi_cache_block_size(self):
+        from vllm_ascend.utils import vllm_version_is
+
         groups = self.model_runner.kv_cache_config.kv_cache_groups
-        return math.lcm(*(group.kv_cache_spec.block_size for group in groups))
+        if vllm_version_is("0.34.0"):
+            return math.lcm(*(group.kv_cache_spec.block_size for group in groups))
+        return math.lcm(*(group.block_size for group in groups))
 
     def _kimi_recoverssm_builders(self):
         from vllm_ascend.models.kimi_k3.recoverssm_metadata import AscendKimiKDARecoverSSMMetadataBuilder

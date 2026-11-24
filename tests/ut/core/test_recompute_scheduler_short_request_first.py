@@ -21,14 +21,11 @@ import torch
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import init_none_hash
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.base import TestBase
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
 from vllm_ascend.core.short_request_first_scheduler import (
     ShortRequestFirstRequestQueue,
 )

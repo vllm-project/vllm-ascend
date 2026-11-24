@@ -21,11 +21,11 @@ import pytest
 import torch
 import vllm.distributed as vllm_distributed
 from vllm.config import CUDAGraphMode
-from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.attention import dsa_v41
 from vllm_ascend.attention.context_parallel import dsa_cp, dsa_v41_cp
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.core.kv_cache_compat import CircularBufferSpec
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor

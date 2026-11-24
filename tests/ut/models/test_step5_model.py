@@ -13,9 +13,9 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from vllm.model_executor.models.utils import PPMissingLayer
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 import vllm_ascend.models.step5.model as step5_model
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec
 from vllm_ascend.models.step5.model import (
     AscendStep5Attention,
     AscendStep5DSAAttention,
