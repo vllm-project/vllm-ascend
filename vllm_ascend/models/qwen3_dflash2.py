@@ -18,10 +18,12 @@ from vllm.model_executor.models.qwen3_dflash import (
     DFlashQwen3DecoderLayer,
     DFlashQwen3ForCausalLM,
     DFlashQwen3Model,
+    _resolve_layer_attention,
+    dflash_has_any_non_causal,
 )
 from vllm.model_executor.models.utils import maybe_prefix
 
-from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiMLAAttention
+from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiMLAAttention, store_mla_draft_context_kv
 from vllm_ascend.models.quarot_utils import align_draft_weights
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.vocab_parallel_embedding import (
@@ -32,74 +34,6 @@ from vllm_ascend.ops.vocab_parallel_embedding import (
 from vllm_ascend.utils import get_rotation_path
 
 _MAX_EXACT_FP32_TOKEN_ID = 1 << 24
-
-_SLIDING_ATTENTION = "sliding_attention"
-
-
-def _resolve_draft_layer_causal(config, layer_idx: int) -> bool:
-    """Resolve draft attention causality from the checkpoint config.
-
-    Mirrors upstream vLLM's ``_dflash_layer_causal`` exactly: the
-    checkpoint-level ``is_causal`` flag wins when set, then
-    ``dflash_config["causal"]`` overrides all layers, else only
-    sliding-attention layers are causal. Keeping the upstream order
-    matters because the upstream speculator folds
-    ``get_draft_attn_causal`` into its per-group causal while the
-    per-layer attention flags are resolved from the same config:
-    any deviation would let the group metadata disagree with the
-    attention modules for checkpoints that set ``is_causal``.
-    """
-    is_causal = getattr(config, "is_causal", None)
-    if is_causal is not None:
-        return bool(is_causal)
-    override = (getattr(config, "dflash_config", None) or {}).get("causal")
-    if override is not None:
-        return bool(override)
-    layer_types = getattr(config, "layer_types", None)
-    return bool(layer_types) and layer_types[layer_idx] == _SLIDING_ATTENTION
-
-
-def _draft_uses_causal_attention(config) -> bool:
-    """Whether every draft layer attends causally."""
-    return all(_resolve_draft_layer_causal(config, i) for i in range(config.num_hidden_layers))
-
-
-def _resolve_draft_layer_sliding_window(config, layer_idx: int) -> int | None:
-    """Resolve the draft attention sliding window from the checkpoint config.
-
-    Mirrors upstream vLLM's ``_resolve_layer_attention`` exactly:
-    ``dflash_config.use_swa`` forces SWA on every layer (even an
-    all-full ``layer_types``); otherwise only ``sliding_attention``
-    layers are windowed, with the size taken from
-    ``dflash_config.swa_window_size`` or the top-level
-    ``sliding_window``. The top-level ``use_sliding_window`` /
-    ``max_window_layers`` pair is intentionally not consulted: upstream
-    ignores it, and this hook must agree with the attention layers
-    upstream builds from the same config. Like upstream, a sliding
-    layer without any configured window size raises ValueError instead
-    of silently running window-free; a zero window passes through as
-    configured (no checkpoint ships one, and upstream has no zero
-    guard to mirror).
-    """
-    dflash_config = getattr(config, "dflash_config", None) or {}
-    layer_types = getattr(config, "layer_types", None)
-    use_swa = dflash_config.get("use_swa", False)
-
-    any_sliding = bool(layer_types) and any(lt == _SLIDING_ATTENTION for lt in layer_types)
-    if not layer_types or (use_swa and not any_sliding):
-        is_sliding = use_swa
-    else:
-        is_sliding = layer_types[layer_idx] == _SLIDING_ATTENTION
-
-    if not is_sliding:
-        return None
-    window = dflash_config.get("swa_window_size", getattr(config, "sliding_window", None))
-    if window is None:
-        raise ValueError(
-            "DFlash sliding attention requires a window size configured in "
-            "dflash_config.swa_window_size or the top-level sliding_window."
-        )
-    return int(window)
 
 
 def _grouped_conv(
@@ -397,19 +331,6 @@ def _gather_lm_head_candidates(
     return values, ids
 
 
-def _normalize_mla_cache(
-    kv_cache: object,
-    kv_lora_rank: int,
-) -> tuple[torch.Tensor, ...] | object:
-    """Expose the NoPE/RoPE logical views consumed by MLA cache writers."""
-    if isinstance(kv_cache, torch.Tensor):
-        return (
-            kv_cache[..., :kv_lora_rank],
-            kv_cache[..., kv_lora_rank:],
-        )
-    return kv_cache
-
-
 class DFlash2Qwen3MLADecoderLayer(DFlash2Qwen3DecoderLayer):
     """DFlash2 decoder layer with a DeepSeek-style MLA draft attention.
 
@@ -435,6 +356,7 @@ class DFlash2Qwen3MLADecoderLayer(DFlash2Qwen3DecoderLayer):
         dflash_config = config.dflash_config
         if getattr(config, "q_lora_rank", None) is None:
             raise ValueError("DFlash2 MLA draft requires q_lora_rank in the draft config.")
+        sliding_window, causal = _resolve_layer_attention(config, layer_idx)
         self.self_attn = AscendKimiMLAAttention(
             config=config,
             hidden_size=config.hidden_size,
@@ -449,10 +371,11 @@ class DFlash2Qwen3MLADecoderLayer(DFlash2Qwen3DecoderLayer):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            non_causal_multi_token_decode=not _draft_uses_causal_attention(config),
+            non_causal_multi_token_decode=dflash_has_any_non_causal(config),
             disable_mlapo=True,
-            sliding_window=_resolve_draft_layer_sliding_window(config, layer_idx),
+            sliding_window=sliding_window,
         )
+        self.self_attn.causal = causal
         self.mlp = Qwen2MLP(
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
@@ -494,12 +417,17 @@ class DFlash2Qwen3MLAModel(DFlash2Qwen3Model):
     )
 
     def _build_fused_kv_buffers(self) -> None:
-        self._attn_layers = [layer.self_attn._attention_layer for layer in self.layers]
-        self._num_attn_layers = len(self.layers)
+        """The MLA writer uses the loaded per-layer projections directly."""
 
     def context_kv_modules(self) -> list[nn.Module]:
         modules: list[nn.Module] = [self.hidden_norm]
-        modules.extend(layer.self_attn._attention_layer for layer in self.layers)
+        for layer in self.layers:
+            attn = layer.self_attn
+            modules.extend((attn._attention_layer, attn.fused_qkv_a_proj, attn.kv_a_layernorm))
+            # A strided cache can select PROLOG_V3 after pruning. The fused op
+            # consumes both Q and KV, even when only the cache writes are used.
+            if attn.impl.supports_prolog_v3_writer():
+                modules.extend((attn.q_a_layernorm, attn.q_b_proj))
         if self.use_aux_hidden_state:
             modules.append(self.fc)
         return modules
@@ -511,39 +439,10 @@ class DFlash2Qwen3MLAModel(DFlash2Qwen3Model):
         context_positions: torch.Tensor,
         context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
     ) -> None:
-        if context_slot_mapping is None or context_states.numel() == 0:
+        if context_states.numel() == 0:
             return
-        if not hasattr(self, "_num_attn_layers"):
-            self._build_fused_kv_buffers()
-        per_layer = isinstance(context_slot_mapping, (list, tuple))
         cos, sin = get_cos_and_sin_mla(context_positions)
-        normed_states = self.hidden_norm(context_states)
-        for layer_idx, layer in enumerate(self.layers):
-            slots = context_slot_mapping[layer_idx] if per_layer else context_slot_mapping
-            if slots is None:
-                continue
-            attn = layer.self_attn
-            kv_cache = attn.kv_cache
-            assert attn.impl.kv_lora_rank is not None
-            normalized_cache = _normalize_mla_cache(kv_cache, attn.impl.kv_lora_rank)
-            if attn.impl._cache_requires_prolog_v3_writer(normalized_cache):
-                attn.impl.exec_context_kv_prolog_v3(
-                    normed_states,
-                    cos,
-                    sin,
-                    normalized_cache,
-                    slots,
-                )
-                continue
-            qkv_lora = attn.fused_qkv_a_proj(normed_states)[0]
-            kv_no_split = qkv_lora[..., attn.q_lora_rank :].contiguous()
-            attn.impl.exec_kv_prefill(
-                kv_no_split,
-                cos,
-                sin,
-                normalized_cache,
-                slots,
-            )
+        store_mla_draft_context_kv(self.layers, self.hidden_norm(context_states), cos, sin, context_slot_mapping)
 
 
 class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
@@ -577,9 +476,6 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
             inner = getattr(attn, "attn", None)
             names.append(inner.layer_name if inner is not None else attn.layer_name)
         return names
-
-    def get_draft_attn_causal(self) -> list[bool]:
-        return [_resolve_draft_layer_causal(self.config, i) for i in range(len(self.model.layers))]
 
     def post_process(self, vllm_config: VllmConfig) -> None:
         if get_rotation_path(vllm_config) is None:

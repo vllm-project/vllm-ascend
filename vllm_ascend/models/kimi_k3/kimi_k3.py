@@ -498,6 +498,37 @@ class AscendKimiMoE(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
+def store_mla_draft_context_kv(
+    layers: nn.ModuleList,
+    context_states: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    slot_mapping: torch.Tensor | list[torch.Tensor | None] | tuple[torch.Tensor | None, ...] | None,
+) -> None:
+    """Project draft context during profiling and write the selected layers once KV cache is bound."""
+    per_layer = isinstance(slot_mapping, (list, tuple))
+    for layer_idx, layer in enumerate(layers):
+        slots = slot_mapping[layer_idx] if per_layer else slot_mapping
+        if per_layer and slots is None:
+            continue
+        attn = layer.self_attn
+        if slots is not None:
+            cache = attn.kv_cache
+            if isinstance(cache, torch.Tensor):
+                rank = attn.impl.kv_lora_rank
+                assert rank is not None
+                cache = (cache[..., :rank], cache[..., rank:])
+            if attn.impl._cache_requires_prolog_v3_writer(cache):
+                attn.impl.exec_context_kv_prolog_v3(context_states, cos, sin, cache, slots)
+                continue
+
+        assert attn.fused_qkv_a_proj is not None and attn.q_lora_rank is not None
+        qkv_lora = attn.fused_qkv_a_proj(context_states)[0]
+        kv_no_split = qkv_lora[..., attn.q_lora_rank :].contiguous()
+        if slots is not None:
+            attn.impl.exec_kv_prefill(kv_no_split, cos, sin, cache, slots, return_bf16_kv=False)
+
+
 class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
     """Extend vLLM's generic Kimi MLA only for DSpark RoPE metadata."""
 
@@ -1012,9 +1043,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
 
 def _needs_target_embedding(vllm_config: VllmConfig) -> bool:
     """Whether this PP stage must own the target input embedding."""
-    return get_pp_group().is_first_rank or spec_decode_needs_target_embed(
-        vllm_config
-    )
+    return get_pp_group().is_first_rank or spec_decode_needs_target_embed(vllm_config)
 
 
 class AscendKimiLinearModel(UpstreamKimiLinearModel):
@@ -1246,11 +1275,9 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                             # .self_attn.indexer.* weight to its native
                             # .dsa_indexer.* layout. Consume the mapped
                             # weight here, like the standalone gates above.
-                            weight_loader = getattr(
-                                params_dict[mapped_name], "weight_loader", default_weight_loader
-                            )
+                            weight_loader = getattr(params_dict[mapped_name], "weight_loader", default_weight_loader)
                             weight_loader(params_dict[mapped_name], loaded_weight, **kwargs)
-                            standalone_gate_params.add(name)
+                            standalone_gate_params.add(mapped_name)
                         else:
                             yield mapped_name, loaded_weight, kwargs
                         break

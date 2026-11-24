@@ -156,6 +156,7 @@ def test_fused_mla_gate_keeps_upstream_shard_two_loading():
     assert torch.all(fused[6:] == 5)
     assert loaded == {"layers.0.self_attn.fused_qkv_a_proj.weight"}
 
+
 def make_dsa_model():
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)
@@ -163,6 +164,7 @@ def make_dsa_model():
         is_moe=False,
         dsa_config=SimpleNamespace(dsa_layers=[1], index_topk=8),
         is_linear_attn=False,
+        linear_attn_config=None,
         num_hidden_layers=1,
         num_nextn_predict_layers=0,
     )
@@ -204,7 +206,7 @@ def test_dsa_indexer_weights_load_into_ascend_indexer_params():
         ("layers.0.self_attn.indexer.k_norm.bias", torch.full((4,), 5.0)),
     ]
     loaded = model.load_weights(iter(weights))
-    assert loaded == {name for name, _ in weights}
+    assert loaded == {name for name, _ in model.named_parameters()}
     torch.testing.assert_close(indexer.wk_weights_proj.weight[:2].float(), torch.full((2, 4), 1.0))
     torch.testing.assert_close(indexer.wk_weights_proj.weight[2:].float(), torch.full((3, 4), 2.0))
     torch.testing.assert_close(indexer.wq_b.weight.float(), torch.full((4, 4), 3.0))
