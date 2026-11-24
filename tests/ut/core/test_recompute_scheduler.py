@@ -383,6 +383,89 @@ def test_first_request_preserves_ascend_speculative_padding_without_cached_token
     assert output.scheduled_spec_decode_tokens[request.request_id] == [-1, -1]
 
 
+@pytest.mark.parametrize("scheduler_cls", [RecomputeScheduler, AsyncRecomputeScheduler])
+@pytest.mark.parametrize("running", [False, True])
+@pytest.mark.parametrize("upstream_draft_slots", [0, 6])
+@pytest.mark.parametrize("token_budget", [256, 400])
+def test_dspark_does_not_reserve_target_input_slots(scheduler_cls, running, upstream_draft_slots, token_budget):
+    config = make_dyntra_test_config(max_num_seqs=32, max_num_batched_tokens=token_budget)
+    config.kv_transfer_config = None
+    scheduler = create_dyntra_lb_scheduler(config, scheduler_cls=scheduler_cls)
+    requests = [create_request(request_id=i, num_tokens=1) for i in range(32)]
+    for request in requests:
+        scheduler.add_request(request)
+    if running:
+        output = scheduler.schedule()
+        scheduler.update_from_output(output, create_model_runner_output(requests))
+        for request in requests:
+            request.spec_token_ids = [1] * 7
+
+    # Simulate both current vLLM (0) and releases that reserve K - 1 (6).
+    config.speculative_config = SimpleNamespace(method="dspark", max_num_new_slots_for_drafting=upstream_draft_slots)
+    scheduler.num_spec_tokens = 7
+    scheduler.num_lookahead_tokens = 7
+    scheduler.dynamic_sd_lookup = None
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {request.request_id: 8 for request in requests}
+    assert output.total_num_scheduled_tokens == 256
+    assert len(scheduler.running) == 32
+    assert not scheduler.waiting
+
+
+def test_dspark_mixed_prefill_uses_remaining_target_budget():
+    config = make_dyntra_test_config(max_num_seqs=32, max_num_batched_tokens=400)
+    config.kv_transfer_config = None
+    scheduler = create_dyntra_lb_scheduler(config, scheduler_cls=RecomputeScheduler)
+    requests = [create_request(request_id=i, num_tokens=1) for i in range(26)]
+    for request in requests:
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, create_model_runner_output(requests))
+    for request in requests:
+        request.spec_token_ids = [1] * 7
+
+    config.speculative_config = SimpleNamespace(method="dspark", max_num_new_slots_for_drafting=6)
+    scheduler.num_spec_tokens = 7
+    scheduler.num_lookahead_tokens = 7
+    scheduler.dynamic_sd_lookup = None
+    prefill_request = create_request(request_id=26, num_tokens=84)
+    scheduler.add_request(prefill_request)
+
+    output = scheduler.schedule()
+
+    expected_tokens = {request.request_id: 8 for request in requests}
+    expected_tokens[prefill_request.request_id] = 84
+    assert output.num_scheduled_tokens == expected_tokens
+    assert output.total_num_scheduled_tokens == 292
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_other_drafters_keep_target_input_reservation(running):
+    config = make_dyntra_test_config(max_num_seqs=2, max_num_batched_tokens=14)
+    config.kv_transfer_config = None
+    scheduler = create_dyntra_lb_scheduler(config, scheduler_cls=RecomputeScheduler)
+    requests = [create_request(request_id=i, num_tokens=1) for i in range(2)]
+    for request in requests:
+        scheduler.add_request(request)
+    if running:
+        output = scheduler.schedule()
+        scheduler.update_from_output(output, create_model_runner_output(requests))
+        for request in requests:
+            request.spec_token_ids = [1] * 7
+
+    config.speculative_config = SimpleNamespace(method="eagle3", max_num_new_slots_for_drafting=6)
+    scheduler.num_spec_tokens = 7
+    scheduler.num_lookahead_tokens = 7
+    scheduler.dynamic_sd_lookup = None
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {requests[0].request_id: 8}
+    assert output.total_num_scheduled_tokens == 8
+
+
 def _make_mm_recompute_scheduler():
     config = make_dyntra_test_config(block_size=16)
     config.kv_transfer_config = None
