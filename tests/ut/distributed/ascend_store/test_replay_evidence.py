@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 from copy import deepcopy
+from typing import Any
 
 import pytest
 
@@ -41,7 +42,7 @@ def test_external_replay_requires_each_request_to_load_its_warm_prefix(
 
 @pytest.mark.parametrize("draft_tokens", [3, 4])
 def test_reference_replay_checks_mtp_tokens_with_different_server_ports(draft_tokens):
-    config = {
+    config: dict[str, dict[str, Any]] = {
         "model_config": {},
         "attention_config": {},
         "cache_config": {},
