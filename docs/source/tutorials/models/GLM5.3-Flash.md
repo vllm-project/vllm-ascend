@@ -1606,7 +1606,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
       and set `--limit-mm-per-prompt` to `'{"image":1}'`.
     - On Prefill, set EPLB `window_size` and `step_interval` to `3000`,
       and `num_redundant_experts` to `0`; remove `--api-server-count 1`.
-    - On Decode, keep `HCCL_BUFFSIZE=1024`; set `multistream_overlap_shared_expert` and `enable_flashcomm1`
+    - On Decode, set `HCCL_BUFFSIZE=1024`; set `multistream_overlap_shared_expert` and `enable_flashcomm1`
       to `true`. Remove `enable_fused_mc2`, `finegrained_tp_config`, and
       `ascend_compilation_config` from `--additional-config`.
 
