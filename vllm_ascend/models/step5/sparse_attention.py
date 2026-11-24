@@ -46,7 +46,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.models.step5.ops.generic_block_sparse_attention import (
     gbsa_expected_counts,
@@ -349,7 +349,7 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
         self.gbsa_topk = impl.topk_regions
         self.gbsa_block_size = kv_cache_spec.block_size
         self.use_union_sparse_prefill = (
-            get_current_hardware_profile().supports(HardwareCapability.GBSA_UNION_SPARSE_PREFILL)
+            is_950()
             and vllm_config.model_config.dtype == torch.bfloat16
             and kv_cache_spec.dtype == torch.bfloat16
             and supports_gbsa_union_sparse_prefill(self.gbsa_num_kv_groups, self.gbsa_region_size)
