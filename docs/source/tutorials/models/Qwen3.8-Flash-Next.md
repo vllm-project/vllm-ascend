@@ -553,6 +553,18 @@ curl --fail "http://127.0.0.1:8088/v1/models"
 
 The response should list the configured model name. After startup, use [Section 6](#6-functional-verification) to verify generation.
 
+#### HiSparse for colocated text generation on 950DT
+
+With a vLLM Core revision that supports QSA HiSparse, the W4A8-MXFP checkpoint can keep QSA token K/V in a pinned host pool. The raw and compressed indexer caches stay on the NPU. For eager TP4 decoding with BF16 KV, PCP1 and no speculative decoding, add the following flags to the colocated server command:
+
+```bash
+--enforce-eager \
+--attention-config '{"hisparse_config":{"eager_host_mirror":true}}' \
+--kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":8}}'
+```
+
+The startup log reports the host pool capacity and the steady-state concurrency at the configured maximum model length. The `vllm:hisparse_host_to_device_bytes_total` metric counts transfers into the hot cache.
+
 ### 5.2 Basic PD Separation Deployment
 
 Prepare the runtime from Section 4 and follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake). Run P/D commands in separate terminals, then start the proxy after their APIs are ready.

@@ -1,0 +1,4 @@
+pr: 23105
+entries:
+  - category: feature
+    text: Added opt-in HiSparse KV offloading for colocated Qwen3.8-Flash-Next W4A8-MXFP text generation on Ascend 950DT with eager decoding and BF16 KV.

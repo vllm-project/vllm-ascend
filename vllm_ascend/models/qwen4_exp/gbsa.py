@@ -12,6 +12,45 @@ from vllm_ascend.ops.triton.qwen4_exp.gbsa import prepare_qsa_gbsa_inputs
 GBSA_COMPRESS_RATIO = 4
 GBSA_RESIDUAL_TOKENS = GBSA_COMPRESS_RATIO - 1
 GBSA_PAGE_SIZE = 128
+GBSA_MAX_GROUPS = 512
+
+
+def expand_qsa_selected_tokens(
+    compact_indices: torch.Tensor, visible_lens: torch.Tensor, *, out: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Expand compact LI-v2 groups to request-local token IDs under the GBSA tail policy.
+
+    Invalid lanes are -1 and may occur between valid groups. A caller can supply
+    an INT32 resolver buffer to retain its address across decode steps.
+    """
+    if compact_indices.ndim != 2 or compact_indices.shape[1] <= GBSA_RESIDUAL_TOKENS:
+        raise ValueError("Expected compact QSA group indices followed by three residual slots")
+    groups = compact_indices[:, :-GBSA_RESIDUAL_TOKENS]
+    rows, num_groups = groups.shape
+    if visible_lens.shape != (rows,):
+        raise ValueError("Expected one visible length per QSA query row")
+    if out is not None:
+        shape = (rows, num_groups * GBSA_COMPRESS_RATIO + GBSA_RESIDUAL_TOKENS)
+        if out.shape != shape or out.dtype != torch.int32 or out.device != groups.device or out.stride(1) != 1:
+            raise ValueError(
+                "QSA resolver output requires INT32 token rows with contiguous columns on the input device"
+            )
+
+    # Graph padding has no visible tokens. Every unused lane must carry the
+    # resolver sentinel, including tail lanes of a padded row.
+    visible_lens = visible_lens.clamp_min(0)
+    full_groups = visible_lens.floor_divide(GBSA_COMPRESS_RATIO)
+    valid = (groups >= 0) & (groups < full_groups.unsqueeze(-1))
+    if num_groups >= GBSA_MAX_GROUPS:
+        capacity = num_groups - visible_lens.remainder(GBSA_COMPRESS_RATIO).ne(0).to(torch.int32)
+        valid &= valid.to(torch.int32).cumsum(-1) <= capacity.unsqueeze(-1)
+    offsets = torch.arange(GBSA_COMPRESS_RATIO, device=groups.device, dtype=groups.dtype)
+    tokens = groups.unsqueeze(-1) * GBSA_COMPRESS_RATIO + offsets
+    tokens = torch.where(valid.unsqueeze(-1), tokens, -1).flatten(1)
+    tail_offsets = torch.arange(GBSA_RESIDUAL_TOKENS, device=groups.device, dtype=groups.dtype)
+    tail = full_groups.unsqueeze(-1) * GBSA_COMPRESS_RATIO + tail_offsets
+    tail = torch.where(tail < visible_lens.unsqueeze(-1), tail, -1)
+    return torch.cat((tokens, tail), dim=-1, out=out)
 
 
 def qsa_gbsa_attention(

@@ -9,7 +9,7 @@ import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.models.qwen4_exp.gbsa import qsa_gbsa_attention
-from vllm_ascend.utils import bootstrap_custom_op_env
+from vllm_ascend.utils import bootstrap_custom_op_env, vllm_version_is
 
 bootstrap_custom_op_env(include_vendor_lib=True)
 import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: E402,F401
@@ -30,6 +30,41 @@ GbsaCase = tuple[
     torch.Tensor,
     torch.Tensor,
 ]
+
+
+@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="Requires Core QSA HiSparse")
+def test_resolved_rows_match_paged_gbsa():
+    from vllm_ascend.models.qwen4_exp.hisparse import attend_physical, prepare_resolver_indices
+
+    torch.manual_seed(127)
+    lengths = torch.tensor([2081, 2050], dtype=torch.int32, device="npu")
+    positions = (lengths - 1).long()
+    query = torch.randn(2, 8, HEAD_DIM, dtype=torch.bfloat16, device="npu")
+    cache = torch.randn(34, PAGE_SIZE, 1, 2 * HEAD_DIM, dtype=query.dtype, device="npu")
+    table = torch.randperm(34, dtype=torch.int32).view(2, 17).npu()
+    compact = torch.full((2, 515), -1, dtype=torch.int32)
+    for row, groups in enumerate((520, 512)):
+        compact[row, :512] = torch.randperm(groups, dtype=torch.int32)[:512]
+    compact[1, 1] = -1
+    compact = compact.npu()
+    key, value = cache.split(HEAD_DIM, dim=-1)
+    reference = qsa_gbsa_attention(
+        query,
+        key.contiguous(),
+        value.contiguous(),
+        compact,
+        table,
+        torch.arange(2, dtype=torch.int32, device="npu"),
+        positions,
+        lengths,
+        torch.empty_like(query),
+    )
+    logical = torch.empty((2, 2048), dtype=torch.int32, device="npu")
+    prepare_resolver_indices(compact, positions + 1, logical)
+    pages = table.gather(1, (logical.clamp_min(0) // PAGE_SIZE).long())
+    physical = (pages * PAGE_SIZE + logical.remainder(PAGE_SIZE)).masked_fill(logical < 0, -1)
+    actual = attend_physical(query, cache.flatten(2), physical, 1, torch.empty_like(query))
+    torch.testing.assert_close(actual, reference, rtol=RTOL, atol=1e-3)
 
 
 def _compact_indices() -> torch.Tensor:

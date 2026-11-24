@@ -3,6 +3,7 @@ from collections.abc import Sequence
 import torch
 import vllm.v1.worker.utils as utils
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
@@ -79,7 +80,19 @@ def bind_kv_cache_to_layers(
     unpacking_layers = (DeepseekV41CacheLayer, AscendStep5CSATailRing, AscendStep5SparseSummaryCacheLayer)
     for layer_name, kv_cache in kv_caches.items():
         layer = forward_context[layer_name]
-        if isinstance(layer, unpacking_layers):
+        # HiSparse allocates Core's byte pages for recurrent state. The
+        # ordinary Ascend allocator already returns the unpacked state tuple.
+        raw_mamba_page = (
+            isinstance(layer, MambaBase)
+            and isinstance(kv_cache, torch.Tensor)
+            and kv_cache.ndim == 4
+            and kv_cache.shape[1:3] == (1, 1)
+        )
+        if (
+            raw_mamba_page
+            or isinstance(layer, unpacking_layers)
+            or getattr(layer, "uses_core_qsa_indexer_view", False) is True
+        ):
             layer.bind_kv_cache(kv_cache)
         else:
             layer.kv_cache = kv_cache

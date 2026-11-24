@@ -80,6 +80,13 @@ from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cac
 from vllm_ascend.utils import vllm_version_is
 
 
+def _use_qsa_hisparse_layout(vllm_config):
+    return (
+        getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None
+        and vllm_config.model_config.hf_config.model_type == "qwen4_exp"
+    )
+
+
 class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
     """Build Ascend cache layouts with vLLM's cross-worker planning flow."""
 
@@ -94,6 +101,8 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         mixed-page-size shared slots, then the Kimi-K3 DSpark mixed grouping,
         then vLLM's generic grouping.
         """
+        if _use_qsa_hisparse_layout(vllm_config):
+            return super().get_kv_cache_groups(vllm_config, kv_cache_spec)
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
         step5_groups = get_step5_kv_cache_groups(vllm_config, kv_cache_spec, super().get_kv_cache_groups)
@@ -139,6 +148,8 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         pool cost so the model planners materialize exactly the requested block
         count before layerwise reuse is planned.
         """
+        if _use_qsa_hisparse_layout(vllm_config):
+            return super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
         bytes_per_block = self._get_native_pool_bytes_per_block(vllm_config, kv_cache_groups)
         if bytes_per_block is None:
             return _attach_transfer_and_speculation_metadata(
@@ -157,6 +168,8 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> int | None:
         """Return the device memory cost per global block ID."""
+        if _use_qsa_hisparse_layout(vllm_config):
+            return None
         extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
         if extra_config is not None and kv_cache_groups and get_spec_reuse_rules(vllm_config) is not None:
             probe = self.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)

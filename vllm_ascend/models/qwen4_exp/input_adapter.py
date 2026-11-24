@@ -229,7 +229,9 @@ class Qwen4ExpPreparedInputAdapter:
             # Mixed Prefill/Decode dispatch slices GBSA rows dynamically.  Keep
             # its existing per-span fallback; the hot decode-only path has no
             # host request plan and can safely reuse one prepared schedule.
-            if getattr(main, "qsa_request_plan", None) is None:
+            # HiSparse decodes use resolver rows; its prefills build a schedule
+            # for the staged pages after the host gather.
+            if getattr(main, "qsa_request_plan", None) is None and getattr(layer, "hisparse_cache", None) is None:
                 self._prepare_gbsa(
                     layer,
                     main,

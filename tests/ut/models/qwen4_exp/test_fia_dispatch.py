@@ -69,6 +69,41 @@ def test_compact_groups_and_implicit_tail_respect_each_query_position(implementa
     torch.testing.assert_close(allowed[0, 0, 0], expected)
 
 
+@pytest.mark.parametrize("tail", range(4))
+def test_resolver_rows_keep_gbsa_budget_and_reuse_output(implementation, tail):
+    expand = implementation["expand_qsa_selected_tokens"]
+    compact = torch.full((2, 515), -1, dtype=torch.int32)
+    compact[0, :512] = torch.arange(512)
+    compact[1, :4] = torch.tensor([2, -1, 0, 500])
+    # Use an output view with a nonzero offset and a gap between query rows.
+    storage = torch.full((2, 2053), -77, dtype=torch.int32)
+    out = storage[:, 1:-1]
+    result = expand(compact, torch.tensor([2048 + tail, 15]), out=out)
+    assert result is out
+    expected = torch.full_like(out, -1)
+    full_tokens = (512 - bool(tail)) * 4
+    expected[0, :full_tokens] = torch.arange(full_tokens)
+    expected[0, 2048 : 2048 + tail] = torch.arange(2048, 2048 + tail)
+    expected[1, :4] = torch.arange(8, 12)
+    expected[1, 8:12] = torch.arange(4)
+    expected[1, -3:] = torch.arange(12, 15)
+    torch.testing.assert_close(result, expected)
+
+    # The next step reuses the same storage for padding. Old selections must
+    # disappear before the resolver reads the new batch.
+    assert expand(compact, torch.tensor([0, -1]), out=out) is out
+    assert (out == -1).all()
+    assert (storage[:, [0, -1]] == -77).all()
+
+
+def test_resolver_rows_reject_wrong_output_width(implementation):
+    compact = torch.zeros((1, 515), dtype=torch.int32)
+    with pytest.raises(ValueError, match="resolver output"):
+        implementation["expand_qsa_selected_tokens"](
+            compact, torch.tensor([2049]), out=torch.empty((1, 515), dtype=torch.int32)
+        )
+
+
 def test_fia_passes_gqa_heads_causal_mask_and_zeroes_empty_rows(implementation):
     calls = []
 

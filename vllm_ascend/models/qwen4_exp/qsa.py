@@ -910,6 +910,17 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     """Qwen4Exp QSA owner bound to the Ascend implementation."""
 
     def __init__(self, *, vllm_config: VllmConfig, **kwargs) -> None:
+        hisparse = getattr(vllm_config.attention_config, "hisparse_config", None)
+        if hisparse is not None:
+            if not hasattr(upstream_qsa.Qwen4ExpQSAAttention, "get_kv_cache_config"):
+                raise NotImplementedError("QSA HiSparse requires vLLM Core with GQA HiSparse cache planning")
+            from .hisparse import init_qsa_hisparse
+
+            if vllm_config.parallel_config.prefill_context_parallel_size != 1:
+                raise NotImplementedError("QSA HiSparse requires PCP=1")
+            super().__init__(vllm_config=vllm_config, **kwargs)
+            init_qsa_hisparse(self, vllm_config)
+            return
         if vllm_config.parallel_config.prefill_context_parallel_size == 1:
             super().__init__(vllm_config=vllm_config, **kwargs)
             return
@@ -924,6 +935,14 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
 
     def bind_kv_cache(self, kv_cache: QSAKVCache) -> None:
         self.kv_cache = kv_cache
+
+    def get_kv_cache_config(self, vllm_config):
+        config = super().get_kv_cache_config(vllm_config)
+        if getattr(self, "hisparse_cache", None) is not None:
+            from .hisparse import sparse_layer_config
+
+            return sparse_layer_config(config, self.indexer.token_topk)
+        return config
 
     def _run_qsa(
         self,
@@ -945,11 +964,13 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
                 gate.zero_()
             return
         main_metadata = metadata[self.layer_name]
-        if not _qsa_cache_is_bound(self.kv_cache):
+        hisparse_cache = getattr(self, "hisparse_cache", None)
+        if hisparse_cache is None and not _qsa_cache_is_bound(self.kv_cache):
             raise RuntimeError("QSA main K/V cache is not bound")
         num_tokens = main_metadata.num_actual_tokens
         # Restore main KV and indexer groups before either cache is updated.
-        wait_for_kv_layer_from_connector(self.layer_name)
+        if hisparse_cache is None:
+            wait_for_kv_layer_from_connector(self.layer_name)
         side_metadata = metadata[self.indexer.raw_key_cache.prefix]
         if side_metadata.num_actual_tokens != num_tokens:
             raise RuntimeError("QSA main and side metadata token counts disagree")
@@ -990,6 +1011,11 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
         if query is None or key is None or value is None:
             raise RuntimeError("QSA preparation did not produce Q/K/V tensors")
+        if hisparse_cache is not None:
+            from .hisparse import run_qsa_hisparse
+
+            run_qsa_hisparse(self, main_metadata, side_metadata, selected, query, key, value, output)
+            return
         pcp_context = getattr(side_metadata, "pcp_context", None)
         write_key, write_value = key, value
         if pcp_context is not None:
