@@ -15,8 +15,17 @@ critical path onto the next verify.  The useful numbers are:
   * ``defer``  (deferred)   = critical path per step with deferral
   * ``flush``  (deferred)   = work moved to the next verify
 
-``--verify`` additionally times the production verify section: per group one
-``flush``, then one verify kernel per layer.
+``--verify`` additionally times the stock deferred path (per group one
+``flush``, then one verify kernel per layer) against the fused deferred path
+(``compact_conv`` + verify with the commit folded into the kernel as an
+in-kernel replay): the saving is fused vs stock, both against the same
+deferred commit.
+
+``--sweep`` runs that comparison over a range of batch sizes and reports
+where the fused path wins — with ``--heads`` set to the model's *local* heads
+(``num_heads / tp``), the ``heads*batch`` crossover is exactly the
+``VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS`` threshold the deferred orchestration
+uses.
 
 ``--blocks`` sizes the paged checkpoint pool, and ``--records`` gives the
 correction/key-gate records their own pool instead of packing them into the
@@ -40,7 +49,7 @@ import time
 import torch
 
 from test_kda_deferred_recoverssm import DEVICE, DTYPE, _make_context
-from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
+from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify, recoverssm_replays
 
 PRESETS = {
     # Tiny: launch-overhead dominated, useful as a sanity check.
@@ -107,14 +116,14 @@ def _verify_section(
     records_override: int | None = None,
     pipeline_stages: int = 2,
     layer_groups: tuple[int, ...] | None = None,
-) -> float:
-    """Time the production verify section: per cache group one ``flush``,
-    then one verify kernel per layer.
+) -> tuple[float, float]:
+    """Time the stock deferred path (``flush + verify``) against the fused
+    deferred path (``compact_conv`` + verify with in-kernel replay).
 
     ``layer_groups`` models the scheduler's mamba cache groups: serving splits
     GLM-5.3-Flash's 34 KDA layers into 12/11/11 groups, each with its own
-    commit context that flushes once per step (``commit_step`` loops over the
-    group metadata). None keeps one context over all layers.
+    commit context that flushes/compacts once per step (``commit_step`` loops
+    over the group metadata). None keeps one context over all layers.
     """
     group_sizes = layer_groups or (layers_count,)
     blocks = batch + 1 if blocks_override is None else blocks_override
@@ -149,11 +158,27 @@ def _verify_section(
         return contexts, all_layers
 
     ctxs_stock, layers_stock = make_ctxs()
+    ctxs_fused, layers_fused = make_ctxs()
+    layer_group_index = [gi for gi, size in enumerate(group_sizes) for _ in range(size)]
 
-    def run() -> None:
-        for ctx in ctxs_stock:
-            ctx.flush(state_indices, record_rows, pending)
-        for layer in layers_stock:
+    def run(contexts, layers, fused: bool) -> None:
+        plans = []
+        for ctx in contexts:
+            if fused:
+                ctx.compact_conv(state_indices, record_rows, pending)
+                plans.append(
+                    (
+                        ctx.commit_lens,
+                        ctx.final_state_indices,
+                        ctx.boundary_state_indices,
+                        ctx.boundary_recovery_lens,
+                    )
+                )
+            else:
+                ctx.flush(state_indices, record_rows, pending)
+                plans.append(None)
+        for gi, layer in zip(layer_group_index, layers):
+            replay = plans[gi] or (None, None, None, None)
             kda_recoverssm_verify(
                 q, k, v, raw_g, raw_beta,
                 layer.A_log.reshape(-1),
@@ -166,27 +191,37 @@ def _verify_section(
                 state_indices,
                 spec_q,
                 record_indices=record_rows,
+                replay_commit_lens=replay[0],
+                replay_final_state_indices=replay[1],
+                replay_boundary_state_indices=replay[2],
+                replay_boundary_recovery_lens=replay[3],
                 records_pool_size=records_override,
                 pipeline_stages=pipeline_stages,
             )
 
-    t_stock = _time(run, steps, warmup)
+    t_stock = _time(lambda: run(ctxs_stock, layers_stock, False), steps, warmup)
+    t_fused = _time(lambda: run(ctxs_fused, layers_fused, True), steps, warmup)
     if accept_len is not None:
         accept = f"accept_len={accept_len}"
     elif accept_rate is not None:
         accept = f"accept_rate={accept_rate}"
     else:
         accept = "all accepted"
-    groups_str = f", groups={'+'.join(str(s) for s in group_sizes)}" if len(group_sizes) > 1 else ""
+    groups_str = ""
+    if len(group_sizes) > 1:
+        groups_str = f", groups={'+'.join(str(s) for s in group_sizes)}"
     print(f"verify section ({layers_count} layers{groups_str}, "
           f"batch={batch}, spec_q={spec_q}, {accept}):")
     print(f"  flush + verify        : {t_stock:8.3f} ms/step")
+    print(f"  compact + fused verify: {t_fused:8.3f} ms/step")
+    print(f"  saving                : {t_stock - t_fused:8.3f} ms/step "
+          f"({(1 - t_fused / t_stock) * 100:5.1f}%)")
     print()
-    # Free the checkpoint set before the next section; a large --blocks run
-    # over-commits the device otherwise.
-    del ctxs_stock, layers_stock
+    # Free both contexts before the next sweep point; large batches allocate
+    # two full checkpoint sets per call.
+    del ctxs_stock, ctxs_fused, layers_stock, layers_fused
     torch.npu.empty_cache()
-    return t_stock
+    return t_stock, t_fused
 
 
 def main() -> None:
@@ -208,8 +243,12 @@ def main() -> None:
                              "vLLM's max_num_reqs-sized records like [64,H,4,128]")
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--verify", action="store_true",
-                        help="also time the production verify section "
-                             "(per-group flush, then one verify per layer)")
+                        help="also time stock flush+verify vs fused verify "
+                             "(deferred commit folded in-kernel)")
+    parser.add_argument("--sweep", type=str, default=None,
+                        help="comma-separated batch sizes: time stock vs fused for each "
+                             "and report where fused starts to win (the critical point; "
+                             "set --heads to the model's local heads = num_heads / tp)")
     parser.add_argument("--accept-rate", type=float, default=None,
                         help="per-token acceptance rate: sample each request's replay "
                              "length from a truncated geometric (default: all accepted)")
@@ -280,6 +319,34 @@ def main() -> None:
         accept = "all accepted (worst case)"
     print(f"steps={steps} warmup={args.warmup} acceptance={accept}  "
           f"checkpoint~{ckpt_mb:.0f} MB/layer (~{ckpt_mb * layers / 1024:.2f} GB total)\n")
+
+    if args.sweep:
+        batches = [int(x) for x in args.sweep.split(",")]
+        rows = []
+        for b in batches:
+            t_stock, t_fused = _verify_section(
+                layers, heads, key_dim, value_dim, spec_q, b, steps, args.warmup,
+                args.accept_rate, args.accept_len, args.blocks, records,
+                args.pipeline_stages, layer_groups=group_sizes,
+            )
+            rows.append((b, heads * b, t_stock, t_fused))
+        print("sweep summary (fused wins when saving > 0)")
+        print(f"{'batch':>6} {'heads*batch':>12} {'flush+verify':>14} "
+              f"{'fused':>10} {'saving':>10} {'saving%':>8} {'code picks':>12}")
+        for b, hb, t_stock, t_fused in rows:
+            choice = "fused" if recoverssm_replays(heads, b) else "flush"
+            print(f"{b:6d} {hb:12d} {t_stock:14.3f} {t_fused:10.3f} "
+                  f"{t_stock - t_fused:10.3f} {(1 - t_fused / t_stock) * 100:7.1f}% "
+                  f"{choice:>12}")
+        wins = [b for b, _, t_stock, t_fused in rows if t_fused < t_stock]
+        if wins:
+            print(f"\nfused wins from batch={min(wins)} "
+                  f"(heads*batch={heads * min(wins)})")
+            print(f"set VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS={heads * min(wins)} "
+                  "to fuse at and above this point")
+        else:
+            print("\nfused never wins in this sweep: raise batch or lower layers")
+        return
 
     def make_ctxs(seed: int):
         return [
@@ -354,8 +421,8 @@ def main() -> None:
 
     # The immediate/deferred section above held three full checkpoint sets
     # (blocks x layers, e.g. ~12 GB each at 492 blocks x 34 layers). Free them
-    # before the verify section allocates its own contexts, or a large
-    # --blocks run over-commits the device.
+    # before the verify section allocates its two contexts (stock + fused), or
+    # a large --blocks run over-commits the device.
     del ctxs_imm, ctxs_def, ctxs_def2
     torch.npu.empty_cache()
 
