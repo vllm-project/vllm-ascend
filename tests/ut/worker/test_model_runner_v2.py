@@ -36,7 +36,6 @@ from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.model_executor.offloader import AscendPrefetchOffloader
 from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.worker.v2.dspark_decode_inputs import DSparkDecodeIndexCache, DSparkTargetAttention
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -44,6 +43,9 @@ from vllm_ascend.worker.v2.spec_decode import pcp_utils as draft_pcp_utils
 from vllm_ascend.worker.v2.spec_decode.dflash import speculator as ascend_dflash
 from vllm_ascend.worker.v2.spec_decode.dspark import speculator as ascend_dspark
 from vllm_ascend.worker.v2.utils import C8KVBlockZeroer
+
+# isort: split
+from vllm_ascend.worker.v2.dspark_decode_inputs import DSparkDecodeIndexCache, DSparkTargetAttention
 
 
 def _make_runner(*args, **kwargs):
