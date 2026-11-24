@@ -3,6 +3,8 @@
 
 #include "aclnn_gmm_swiglu_oai_mx_quant.h"
 #include "aclnn_kernels/common/op_error_check.h"
+#include "aclnn_kernels/contiguous.h"
+#include "level0/fill.h"
 #include "opdev/make_op_executor.h"
 #include "opdev/op_def.h"
 #include "opdev/op_dfx.h"
@@ -37,6 +39,31 @@ bool MatchesDense(const aclTensor& tensor, DataType dtype, std::initializer_list
     }
   }
   return true;
+}
+
+aclTensor* AllocZeroedScale(const op::Shape& shape, aclOpExecutor* executor) {
+  const auto dims = op::ToShapeVector(shape);
+  const auto* shapeArray = executor->AllocIntArray(dims.data(), dims.size());
+  const auto* zero = executor->AllocScalar(0);
+  if (shapeArray == nullptr || zero == nullptr) {
+    return nullptr;
+  }
+  const auto* dimsTensor = executor->ConvertToTensor(shapeArray, DataType::DT_INT64);
+  const auto* zeroByte = executor->ConvertToTensor(zero, DataType::DT_UINT8);
+  if (dimsTensor == nullptr || zeroByte == nullptr) {
+    return nullptr;
+  }
+  // E8M0's zero sentinel is a raw byte, so fill the backing buffer as UINT8.
+  const auto* filled = l0op::Fill(dimsTensor, zeroByte, shapeArray, executor);
+  if (filled == nullptr) {
+    return nullptr;
+  }
+  auto* scale = executor->CreateView(filled, filled->GetViewShape(), filled->GetViewOffset());
+  if (scale != nullptr) {
+    scale->SetDataType(DataType::DT_FLOAT8_E8M0);
+    scale->SetOriginalShape(shape);
+  }
+  return scale;
 }
 
 bool CheckBuffers(const aclTensor& x, const aclTensor& xScale, const aclTensor& groups, const aclTensor& weight,
@@ -76,7 +103,7 @@ aclnnStatus LaunchGmmSwigluOaiMxQuant(const aclTensor* x, const aclTensor* xScal
                                          float dstTypeMax, aclTensor* y, aclTensor* yScale, aclOpExecutor* executor) {
   return ADD_TO_LAUNCHER_LIST_AICORE(GmmSwigluOaiMxQuant, OP_INPUT(x, xScale, groupList, weight, weightScale),
                                      OP_OUTPUT(y, yScale),
-                                     OP_ATTR(groupListType, clampLimit, gluAlpha, gluBias, dstTypeMax));
+                                     OP_ATTR(groupListType, clampLimit, gluAlpha, gluBias, dstTypeMax, true));
 }
 }  // namespace l0op
 
@@ -109,12 +136,19 @@ aclnnStatus aclnnGmmSwigluOaiMxQuantGetWorkspaceSize(const aclTensor* x, const a
   if (!handle.get()) {
     return ACLNN_ERR_INNER_CREATE_EXECUTOR;
   }
+  auto* scale = AllocZeroedScale(yScale->GetViewShape(), handle.get());
+  if (scale == nullptr) {
+    return ACLNN_ERR_INNER_NULLPTR;
+  }
   const auto status = l0op::LaunchGmmSwigluOaiMxQuant(x, xScale, groupList, weight, weightScale, groupListType,
                                                          static_cast<float>(clampLimit), static_cast<float>(gluAlpha),
                                                          static_cast<float>(gluBias), static_cast<float>(dstTypeMax), y,
-                                                         yScale, handle.get());
+                                                         scale, handle.get());
   if (status != ACLNN_SUCCESS) {
     return status;
+  }
+  if (l0op::ViewCopy(scale, yScale, handle.get()) == nullptr) {
+    return ACLNN_ERR_INNER_NULLPTR;
   }
   *workspaceSize = handle->GetWorkspaceSize();
   handle.ReleaseTo(executor);

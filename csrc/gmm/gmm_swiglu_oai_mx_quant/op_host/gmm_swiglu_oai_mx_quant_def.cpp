@@ -25,6 +25,7 @@ class GmmSwigluOaiMxQuant : public OpDef {
     Attr("glu_alpha").AttrType(OPTIONAL).Float(1.702F);
     Attr("glu_bias").AttrType(OPTIONAL).Float(1.0F);
     Attr("dst_type_max").AttrType(OPTIONAL).Float(0.0F);
+    Attr("mx_scale_preinitialized").AttrType(OPTIONAL).Bool(false);
 
     OpAICoreConfig config;
     config.DynamicCompileStaticFlag(true).DynamicShapeSupportFlag(true).ExtendCfgInfo(

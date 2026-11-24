@@ -34,7 +34,7 @@ struct GMMSwigluQuantSwigluParams {
     float dstTypeMax = 0.0F;
     uint8_t scaleAlg = 0;
     uint8_t roundMode = 0;
-    uint16_t reserved0 = 0;
+    uint16_t mxScalePreinitialized = 0;
     uint32_t reserved1 = 0;
 };
 #pragma pack(pop)
