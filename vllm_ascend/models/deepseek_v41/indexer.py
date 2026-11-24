@@ -8,6 +8,7 @@ from torch import nn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
     scatter_cache_sk,
@@ -282,6 +283,13 @@ class DeepseekV41Indexer(nn.Module):
         op_metadata = source_metadata.qli_metadata
         wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(op_metadata))
         mode = 1 if is_candidate_source else 2 if uses_candidate_filter else 3
+        # QLI candidate skip: 开启 (VLLM_ASCEND_QLI_CANDIDATE_SKIP=1) 时 consumer 层
+        # candidate_mode 2(mask) -> 4(skip)。mode4 在 kernel 侧把 "全量计算+排序前 mask"
+        # 升级为 "候选块内紧凑收集+排序", 排序对象从 tile 全长 2048 降为候选命中长度,
+        # topk 输出集合与 mode2 等价 (见 csrc BuildCandidateCompact 头注释);
+        # 默认关闭, 关闭即回退 mode2。
+        if mode == 2 and envs_ascend.VLLM_ASCEND_QLI_CANDIDATE_SKIP:
+            mode = 4
         selected, _, candidate_out = torch.ops._C_ascend.npu_quant_lightning_indexer_v3(
             quantized_query,
             key,

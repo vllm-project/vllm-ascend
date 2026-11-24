@@ -1,0 +1,11 @@
+pr: 19911
+entries:
+  - category: performance
+    text: Added an opt-in candidate skip fast path for QuantLightningIndexerV2
+      consumer layers that sorts only candidate blocks instead of masked full
+      tiles, cutting QLI decode-step time by about 15% on DeepSeek-V4.1-Flash
+      long-context workloads.
+  - category: config
+    text: Added the VLLM_ASCEND_QLI_CANDIDATE_SKIP environment variable (default
+      disabled) to switch QLI consumer layers to the output-equivalent
+      candidate-skip fast path.
