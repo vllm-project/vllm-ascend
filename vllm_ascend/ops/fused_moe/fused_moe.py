@@ -60,7 +60,8 @@ def _ascend_moe_forward_shared_sp_fake(
     which is only correct before the early all-gather optimization.
     """
     del router_logits, input_ids, layer_name
-    assert shared_experts_input is not None
+    if shared_experts_input is None:
+        shared_experts_input = hidden_states
     shared_out = shared_experts_input.new_empty(
         (*hidden_states.shape[:-1], shared_experts_input.shape[-1]),
     )
@@ -150,7 +151,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             # layer is the only module the quant methods
             # (``get_fused_mc2_weights``) and the MegaMoe communicator see.
             self.routed_experts.ascend_megamoe_shared_fusion = self.ascend_shared_experts.megamoe_shared_fusion()
-            if self._can_overlap_sp_shared_with(self.routed_input_transform):
+            if (
+                self._can_overlap_sp_shared_with(self.routed_input_transform)
+                or self.ascend_shared_experts.parallel_mode() is SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL
+            ):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
         setup_moe_comm_method(self.moe_config)
@@ -181,15 +185,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
         Upstream inlines the shared+routed output combine, which is not
         exposed as an overridable hook. On NPU the combine goes through the
-        fused multi-tensor add kernel (``torch._foreach_add``), whose kernel
-        launch count is independent of the tensor-list length and which is
-        the NPU-validated fast path for the MoE combine. Every other step,
+        ordinary add kernel: there is only one shared/routed tensor pair,
+        so no multi-tensor list handling is needed. Every other step,
         including the runtime-aware reduction hooks (#16550), is inherited
         unchanged.
-
-        Future plan: once the aclnnAdd_AddAiCore_Add kernel is available via
-        the superkernel integration, upstream's plain add becomes the fast
-        path and this override can be dropped.
         """
         # Apply transform for routed experts (e.g., latent projection for
         # latent MoE). When the caller pre-applies the routed input transform
@@ -279,7 +278,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         fused_output = self.apply_routed_output_transform(fused_output)
 
         if shared_output is not None:
-            result = torch._foreach_add([shared_output], [fused_output])[0]
+            result = shared_output + fused_output
         else:
             result = fused_output
 
@@ -312,7 +311,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             routed_transform is not None
             and shared_experts is not None
             and shared_experts.multistream_overlap
-            and shared_experts.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
+            and shared_experts.parallel_mode()
+            in (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL)
         )
 
     @property

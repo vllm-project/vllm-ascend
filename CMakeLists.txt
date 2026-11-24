@@ -210,6 +210,10 @@ set(VLLM_ASCEND_C_COMMON_LIBS
   opapi
 )
 
+if(SOC_VERSION MATCHES "ascend950")
+  include(csrc/attention/quant_flash_mla_nz/kernels.cmake)
+endif()
+
 if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
   target_link_libraries(
     vllm_ascend_C

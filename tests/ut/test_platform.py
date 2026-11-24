@@ -529,8 +529,14 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         mock_ascend_config.ascend_fusion_config = None
         mock_ascend_config.scheduler_config.recompute_scheduler_enable = False
+        from vllm_ascend.ascend_config import FinegrainedTPConfig
+
+        mock_ascend_config.finegrained_tp_config = FinegrainedTPConfig()
         mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 0
         mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 0
+        mock_ascend_config.finegrained_tp_config.shared_expert_tensor_parallel_size = 1
+        mock_ascend_config.finegrained_tp_config.qkv_iproj_tensor_parallel_size = 1
+        mock_ascend_config.finegrained_tp_config.gproj_tensor_parallel_size = 1
         mock_ascend_config.scheduler_config.enable_balance_scheduling = False
         mock_ascend_config.scheduler_config.batch_job_sched_config.enabled = False
         mock_ascend_config.mc2_comm_alg = ""
@@ -1199,20 +1205,41 @@ class TestNPUPlatform(TestBase):
         ascend_config.sparse_kv_offload_config.enabled = True
         _check_ascend_config(vllm_config, ascend_config)
 
-    def test_check_ascend_config_oproj_tp_requires_offload_connector(self):
+    def test_check_ascend_config_finegrained_tp_requires_offload_connector(self):
         from vllm_ascend.platform import _check_ascend_config
 
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
-        ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 2
+        for field in (
+            "oproj_tensor_parallel_size",
+            "mlp_tensor_parallel_size",
+            "shared_expert_tensor_parallel_size",
+            "qkv_iproj_tensor_parallel_size",
+            "gproj_tensor_parallel_size",
+        ):
+            with self.subTest(field=field):
+                vllm_config = TestNPUPlatform.mock_vllm_config()
+                ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+                if field == "qkv_iproj_tensor_parallel_size":
+                    vllm_config.model_config.hf_text_config = SimpleNamespace(
+                        model_type="kimi_linear", linear_attn_config={"num_heads": 4}
+                    )
+                setattr(ascend_config.finegrained_tp_config, field, 2)
 
-        # The base mock carries no kv_transfer_config: a real split must fail closed.
-        with pytest.raises(AssertionError, match="PreemptOffloadConnector"):
-            _check_ascend_config(vllm_config, ascend_config)
+                # No connector: every real DP-axis split must fail closed.
+                with pytest.raises(AssertionError, match="PreemptOffloadConnector"):
+                    _check_ascend_config(vllm_config, ascend_config)
 
-        # Size 1 exchanges nothing across ranks and stays exempt.
-        ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 1
-        _check_ascend_config(vllm_config, ascend_config)
+                # Size 1 exchanges nothing across ranks and stays exempt.
+                setattr(ascend_config.finegrained_tp_config, field, 1)
+                _check_ascend_config(vllm_config, ascend_config)
+
+    def test_glm_qkv_tp_does_not_require_graph_offload(self):
+        from vllm_ascend.platform import _check_ascend_config
+
+        vc = self.mock_vllm_config()
+        vc.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next")
+        ascend = self.mock_vllm_ascend_config()
+        ascend.finegrained_tp_config.qkv_iproj_tensor_parallel_size = 2
+        _check_ascend_config(vc, ascend)
 
     def test_apply_config_platform_defaults_skips_when_scheduler_max_num_seqs_is_missing(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()

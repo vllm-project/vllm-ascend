@@ -1,0 +1,8 @@
+pr: 23015
+entries:
+  - category: performance
+    text: >-
+      Reduced decode preprocessing for native BF16 projection weights in Kimi DSpark C8 on Ascend A5,
+      including sharded-query DCP decode. Fixed-width draft graph buckets can reuse their original metadata row capacity.
+    model: kimi-dspark
+    hardware: [A5]

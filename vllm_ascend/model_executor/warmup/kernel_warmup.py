@@ -148,11 +148,17 @@ def _register_dcp_warmup(worker: NPUWorker) -> None:
                 max(scheduler.max_num_batched_tokens, scheduler.max_num_seqs * query_len),
                 False if mla else not impl.enable_sparse_sfa_turboquant,
                 mla,
+                (
+                    not mla
+                    and impl.qk_rope_head_dim == 0
+                    and impl.enable_sparse_sfa_c8
+                    and not impl.enable_sparse_sfa_turboquant
+                ),
             )
             if layout in seen:
                 continue
             seen.add(layout)
-            dtype, local_heads, head_dim, scatter_size, pcp_size, max_tokens, from_stats, mla = layout
+            dtype, local_heads, head_dim, scatter_size, pcp_size, max_tokens, from_stats, mla, row_mask = layout
             register_dcp_warmup(
                 dtype=dtype,
                 local_heads=local_heads,
@@ -164,6 +170,7 @@ def _register_dcp_warmup(worker: NPUWorker) -> None:
                 mla=mla,
                 # Graph padding makes these the token counts the combine sees.
                 decode_buckets=getattr(config.compilation_config, "cudagraph_capture_sizes", None),
+                row_mask=row_mask,
             )
 
 

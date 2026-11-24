@@ -347,6 +347,23 @@ class EplbConfig:
 
 
 @config
+class KDABackendConfig:
+    """Select an optional kernel backend for KDA layers."""
+
+    backend: Literal["native", "mega_kda", "mega_recurrent_kda_mx", "mega_recurrent_kda"] = "native"
+    operator_package_dir: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_package_dir(self):
+        if self.backend != "native":
+            if not self.operator_package_dir or not os.path.isabs(self.operator_package_dir):
+                raise ValueError("kda_backend_config.operator_package_dir must be absolute for MegaKDA")
+        elif self.operator_package_dir is not None:
+            raise ValueError("kda_backend_config.operator_package_dir requires a MegaKDA backend")
+        return self
+
+
+@config
 class RejectionSamplerConfig:
     """Configuration for Block Verify and Entropy Verify in Rejection Sampler.
 
@@ -602,6 +619,7 @@ class AscendConfig:
                 "load_collection_phase": "all",
                 "stair_config": {}
             },
+            "kda_backend_config": {"backend": "native", "operator_package_dir": null},
             "rejection_sampler_config": {
                 "enable_entropy_verify": false,
                 "posterior_threshold": 0.95,
@@ -754,6 +772,7 @@ class AscendConfig:
     ascend_fusion_config: AscendFusionConfig = dataclasses.field(default_factory=AscendFusionConfig)
     ascend_warmup_config: AscendWarmupConfig = dataclasses.field(default_factory=AscendWarmupConfig)
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
+    kda_backend_config: KDABackendConfig = dataclasses.field(default_factory=KDABackendConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
     quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
@@ -828,6 +847,20 @@ class AscendConfig:
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
         validate_expert_offload_config(self.expert_offload_config, vc, self)
+        if self.kda_backend_config.backend != "native":
+            if not is_950():
+                raise ValueError("The MegaKDA backend requires Ascend 950")
+            hf_config = getattr(vc.model_config, "hf_config", None)
+            if getattr(hf_config, "model_type", None) != "kimi_k31" or not vc.use_v2_model_runner:
+                raise ValueError("The MegaKDA backend requires Kimi K3.1 and Model Runner V2")
+            if vc.kv_transfer_config is None or vc.kv_transfer_config.kv_role != "kv_consumer":
+                raise ValueError("The MegaKDA backend requires a disaggregated decode worker")
+            if self.gdn_internal_prefill_checkpoints:
+                raise ValueError("The MegaKDA backend requires internal GDN checkpoints to be disabled")
+            if self.kda_backend_config.backend == "mega_kda" and vc.cache_config.use_replayssm:
+                raise ValueError("The projected MegaKDA backend requires ReplaySSM to be disabled")
+            if self.kda_backend_config.backend == "mega_recurrent_kda" and not vc.cache_config.use_replayssm:
+                raise ValueError("Full MegaRecurrentKda requires ReplaySSM")
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:
                 raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")
@@ -930,10 +963,7 @@ class AscendConfig:
                     str(vc.scheduler_config.max_num_batched_tokens),
                 )
 
-        finegrained_tp_enabled = (
-            self.finegrained_tp_config.oproj_tensor_parallel_size > 1
-            or self.finegrained_tp_config.mlp_tensor_parallel_size > 1
-        )
+        finegrained_tp_enabled = self.finegrained_tp_config.requires_graph(vc)
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
             raise AssertionError(
                 "oproj_tensor_parallel_size / mlp_tensor_parallel_size require "
@@ -1491,17 +1521,29 @@ class FinegrainedTPConfig:
     a plain method invoked explicitly by ``init_ascend_config`` (Plan B:
     business validation stays out of pydantic). ``vllm_config`` is no longer a
     member field.
-
-    Size semantics follow vLLM ``ParallelConfig``: ``1`` (the default) means no
-    sharding and only sizes > 1 enable a knob. ``0`` is tolerated as a disabled
-    alias for older configs but is not part of the documented range.
     """
 
     oproj_tensor_parallel_size: int = 1
     lmhead_tensor_parallel_size: int = 1
     embedding_tensor_parallel_size: int = 1
     mlp_tensor_parallel_size: int = 1
+    shared_expert_tensor_parallel_size: int = 1
+    # DP-axis projection TP, adapted from upstream PR20574. 0/1 both disable.
     qkv_iproj_tensor_parallel_size: int = 1
+    gproj_tensor_parallel_size: int = 1
+
+    def requires_graph(self, vllm_config: Any) -> bool:
+        # Kimi's projection pipeline uses graph-aligned owner capacities.
+        # GLM QKV TP pads explicitly and also supports eager execution.
+        from vllm_ascend.utils import model_uses_kimi_kda
+
+        return (
+            self.oproj_tensor_parallel_size > 1
+            or self.mlp_tensor_parallel_size > 1
+            or self.shared_expert_tensor_parallel_size > 1
+            or self.gproj_tensor_parallel_size > 1
+            or (self.qkv_iproj_tensor_parallel_size > 1 and model_uses_kimi_kda(vllm_config.model_config))
+        )
 
     @model_validator(mode="after")
     def _validate_sizes(self):
@@ -1510,7 +1552,9 @@ class FinegrainedTPConfig:
             "lmhead_tensor_parallel_size",
             "embedding_tensor_parallel_size",
             "mlp_tensor_parallel_size",
+            "shared_expert_tensor_parallel_size",
             "qkv_iproj_tensor_parallel_size",
+            "gproj_tensor_parallel_size",
         )
         for field_name in size_fields:
             value = getattr(self, field_name)
@@ -1524,6 +1568,15 @@ class FinegrainedTPConfig:
 
         vc = vllm_config
         enabled_configs = []
+        from vllm_ascend.utils import model_uses_kimi_kda
+
+        if self.gproj_tensor_parallel_size > 1 and getattr(vc.model_config.hf_config, "model_type", None) != "kimi_k31":
+            raise ValueError("gproj_tensor_parallel_size > 1 is supported only on Kimi K3.1 Pro.")
+
+        projection_tp = self.gproj_tensor_parallel_size > 1 or (
+            self.qkv_iproj_tensor_parallel_size > 1 and model_uses_kimi_kda(vc.model_config)
+        )
+        shared_tp = self.shared_expert_tensor_parallel_size > 1
         if self.qkv_iproj_tensor_parallel_size > 1:
             parallel = vc.parallel_config
             if (
@@ -1535,14 +1588,40 @@ class FinegrainedTPConfig:
             if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
                 raise ValueError("QKV input projection TP is supported only on a PD decode node.")
             text_config = vc.model_config.hf_text_config
-            if getattr(text_config, "model_type", None) not in ("glm5_next", "glm5_next_text"):
-                raise ValueError("QKV input projection TP currently supports GLM-5.3-Flash only.")
-            if text_config.linear_num_heads % self.qkv_iproj_tensor_parallel_size:
-                raise ValueError("qkv_iproj_tensor_parallel_size must divide the KDA head count.")
+            if getattr(text_config, "model_type", None) in ("glm5_next", "glm5_next_text"):
+                if text_config.linear_num_heads % self.qkv_iproj_tensor_parallel_size:
+                    raise ValueError("qkv_iproj_tensor_parallel_size must divide the KDA head count.")
+            elif vc.model_config.hf_config.model_type != "kimi_k31":
+                raise ValueError("QKV input projection TP currently supports GLM-5.3-Flash and Kimi-K3.1 only.")
             enabled_configs.append(f"qkv_iproj_tensor_parallel_size={self.qkv_iproj_tensor_parallel_size}")
-        if self.oproj_tensor_parallel_size > 1 or self.mlp_tensor_parallel_size > 1:
+        if projection_tp or shared_tp:
+            parallel = vc.parallel_config
+            if (
+                parallel.tensor_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+                or parallel.decode_context_parallel_size != 1
+                or parallel.pipeline_parallel_size != 1
+            ):
+                raise ValueError("Projection/shared-expert fine-grained TP requires TP=PCP=DCP=PP=1.")
+        if shared_tp:
+            text_config = getattr(vc.model_config, "hf_text_config", None)
+            if (
+                getattr(text_config, "model_type", None) == "qwen3_moe"
+                and getattr(text_config, "shared_expert_intermediate_size", 0) <= 0
+            ):
+                raise ValueError("shared_expert_tensor_parallel_size > 1 requires a model with shared experts.")
+            if (vc.additional_config or {}).get("enable_shared_expert_dp", False):
+                raise ValueError(
+                    "Shared-expert fine-grained TP cannot replicate shared weights with enable_shared_expert_dp."
+                )
+            if vc.lora_config is not None:
+                raise ValueError("Shared-expert fine-grained TP does not support LoRA.")
+            enabled_configs.append(f"shared_expert_tensor_parallel_size={self.shared_expert_tensor_parallel_size}")
+        if self.gproj_tensor_parallel_size > 1:
+            enabled_configs.append(f"gproj_tensor_parallel_size={self.gproj_tensor_parallel_size}")
+        if self.oproj_tensor_parallel_size > 1 or self.mlp_tensor_parallel_size > 1 or projection_tp or shared_tp:
             # o_proj's _forward_o_proj reshape misaligns under tp > 1; mlp is untested there.
-            if vc.parallel_config.tensor_parallel_size > 1:
+            if not (projection_tp or shared_tp) and vc.parallel_config.tensor_parallel_size > 1:
                 raise AssertionError(
                     "oproj_tensor_parallel_size / mlp_tensor_parallel_size currently "
                     "require tensor_parallel_size == 1, got "
@@ -1550,16 +1629,11 @@ class FinegrainedTPConfig:
                 )
             # Graph dispatch is the only lane that aligns DP token counts (eager keeps per-rank counts).
             if vc.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-                raise AssertionError(
-                    "oproj_tensor_parallel_size / mlp_tensor_parallel_size are only supported in graph mode"
-                )
+                raise AssertionError("Fine-grained projection / MLP TP are only supported in graph mode")
             if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
-                raise AssertionError(
-                    "oproj_tensor_parallel_size / mlp_tensor_parallel_size are only supported "
-                    "in pd scenario and can only be used in D node."
-                )
+                raise AssertionError("Fine-grained projection / MLP TP require a PD decode node.")
             # PCP's dispatch recomputes num_tokens per rank, breaking the group-uniform step size.
-            if vc.parallel_config.prefill_context_parallel_size > 1:
+            if not (projection_tp or shared_tp) and vc.parallel_config.prefill_context_parallel_size > 1:
                 raise AssertionError(
                     "oproj_tensor_parallel_size / mlp_tensor_parallel_size are not supported "
                     "with prefill_context_parallel_size > 1."
@@ -1579,6 +1653,8 @@ class FinegrainedTPConfig:
                 capture_bound = max(capture_sizes) if capture_sizes else None
             # A step beyond the capture bound dispatches to eager and desyncs the cross-DP collectives.
             if capture_bound is None or capture_bound < max_step:
+                if projection_tp or shared_tp:
+                    raise ValueError("Fine-grained TP requires graph capture capacity covering every decode step.")
                 logger.warning(
                     "Disabling oproj_tensor_parallel_size=%d and mlp_tensor_parallel_size=%d: "
                     "the largest cudagraph capture size (%s) does not cover the largest "
@@ -1606,7 +1682,9 @@ class FinegrainedTPConfig:
             self.lmhead_tensor_parallel_size,
             self.embedding_tensor_parallel_size,
             self.mlp_tensor_parallel_size,
+            self.shared_expert_tensor_parallel_size,
             self.qkv_iproj_tensor_parallel_size,
+            self.gproj_tensor_parallel_size,
         ]
         for module_tp_size in module_tp_sizes:
             # If it is a dense model, then expert parallel is not needed,

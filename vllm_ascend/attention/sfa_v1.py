@@ -24,12 +24,14 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
 )
 from vllm_ascend.attention.indexer import AscendSFAIndexerCache
+from vllm_ascend.attention.mega_dsa import prepare_mega_dsa
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -59,6 +61,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_V_CACHE_NPU_INDEX,
 )
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.ops.linear_op import OProjRowParallelOp
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
 from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
@@ -76,6 +79,7 @@ from vllm_ascend.utils import (
     enable_pcp_o_proj_weight_sharding,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
+    is_internal_npu_format,
     is_mtp_layer,
     is_rl_weight_update_enabled,
     maybe_trans_nz,
@@ -792,6 +796,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     # value. With DCP disabled it does not change the draft KV-cache layout.
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
 
+    _decode_o_proj_out: bool = False
     supports_pcp: ClassVar[bool] = True
     o_proj_full_pools: ClassVar[dict[Any, torch.Tensor]] = {}
     o_proj_weight_switch_pool_key = "sfa_pcp_o_proj"
@@ -870,6 +875,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         hf_config = self.vllm_config.model_config.hf_config
         hf_text_config = getattr(self.vllm_config.model_config, "hf_text_config", None)
         self.is_kimi_k31 = hf_config.model_type == "kimi_k31" or getattr(type(hf_config), "is_kimi_k31", False)
+        self._decode_o_proj_out = (
+            self.is_kimi_k31
+            and not self.pcp_enabled
+            and self.vllm_config.lora_config is None
+            and get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
+        )
         self.use_rope = not (self.is_kimi_k31 and getattr(hf_text_config, "mla_use_nope", False))
         config_candidates = (hf_config, hf_text_config)
         index_cache_enabled = _get_config_bool(
@@ -1049,6 +1060,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self.has_indexer:
             self.indexer.process_weights_after_loading()
+        self._mega_dsa = prepare_mega_dsa(self) if type(self) is AscendSFAImpl else None
 
         if self._parallel_o_proj is not None:
             self._parallel_o_proj.enable()
@@ -1950,9 +1962,70 @@ class AscendSFAImpl(MLAAttentionImpl):
             return self._parallel_o_proj.forward(attn_output, output)
         return self._project_o_proj_full(attn_output, output)
 
+    def _can_project_decode_into(self, x: torch.Tensor, out: torch.Tensor) -> bool:
+        from vllm_ascend.ops.linear import AscendRowParallelLinear, AscendUnquantizedLinearMethod
+
+        layer = self.o_proj
+        if (
+            type(layer) is not AscendRowParallelLinear
+            or type(layer.quant_method) is not AscendUnquantizedLinearMethod
+            or layer.custom_op is not None
+            or not layer.input_is_parallel
+            or (layer.reduce_results and layer.tp_size > 1)
+            or layer.bias is not None
+            or not layer.return_bias
+            or layer.out_dtype is not None
+        ):
+            return False
+        # Calling matmul directly would bypass hooks and per-instance overrides.
+        module = torch.nn.modules.module
+        if (
+            layer._forward_hooks
+            or layer._forward_pre_hooks
+            or module._global_forward_hooks
+            or module._global_forward_pre_hooks
+            or "forward" in vars(layer)
+            or "apply" in vars(layer.quant_method)
+            or layer._compiled_call_impl is not None
+            or torch.is_grad_enabled()
+            or torch.is_autocast_enabled("npu")
+        ):
+            return False
+        weight = layer.weight
+        return (
+            x.device.type == "npu"
+            and x.device == weight.device == out.device
+            and x.dtype == weight.dtype == out.dtype == torch.bfloat16
+            and x.ndim == weight.ndim == out.ndim == 2
+            and x.shape[1] == weight.shape[1]
+            and out.shape == (x.shape[0], weight.shape[0])
+            and x.is_contiguous()
+            and weight.is_contiguous()
+            and out.is_contiguous()
+            and not is_internal_npu_format(out)
+        )
+
     def _project_o_proj_full(self, attn_output: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         output[...] = self.o_proj(attn_output)[0]
         return output
+
+    def _project_finegrained_o(self, attn_output: torch.Tensor, output: torch.Tensor, capacity: int) -> None:
+        # Preserve the pre-trim graph capacity: idle and live owners may have
+        # different actual rows, and the graph bucket can exceed DP live rows.
+        if attn_output.shape[0] < capacity:
+            attn_output = nn.functional.pad(attn_output, (0, 0, 0, capacity - attn_output.shape[0]))
+        output.copy_(self.o_proj(attn_output)[0][: output.shape[0]])
+
+    def _forward_dummy(
+        self, hidden_states: torch.Tensor, output: torch.Tensor, project_gate, o_capacity: int | None
+    ) -> torch.Tensor:
+        if project_gate is not None:
+            finish_gate = project_gate()
+            finish_gate()
+        if o_capacity is not None:
+            attn_output = hidden_states.new_zeros((o_capacity, self.local_num_heads * self.v_head_dim))
+            self.o_proj(attn_output)
+        return output.zero_()
 
     def _get_sfa_kv_slot_mapping(
         self,
@@ -2100,9 +2173,25 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.turboquant is not None
             # Build the transform tensors outside graph capture.
             self.turboquant._initialize(hidden_states.device)
+        o_capacity = None
+        if isinstance(getattr(self.o_proj, "custom_op", None), OProjRowParallelOp):
+            o_capacity = hidden_states.shape[0]
+            dp_tokens = _EXTRA_CTX.max_tokens_across_dp
+            if dp_tokens is not None:
+                o_capacity = max(o_capacity, dp_tokens)
+        begin_gate = getattr(self, "begin_gate", None)
+        # Gather before NoPE trims live rows so idle and active ranks send the same shape.
+        # MegaDSA issues its own G all-gather. Keep the original padded input
+        # for native ranks, including dummy and unsupported graph buckets.
+        defer_gate = (
+            begin_gate is not None
+            and getattr(self, "_mega_dsa", None) is not None
+            and attn_metadata is not None
+            and self.qk_rope_head_dim != 0
+        )
+        project_gate = begin_gate(hidden_states) if begin_gate is not None and not defer_gate else None
         if attn_metadata is None:
-            # Profiling run.
-            return output.fill_(0)
+            return self._forward_dummy(hidden_states, output, project_gate, o_capacity)
 
         if self.qk_rope_head_dim == 0:
             num_tokens = min(hidden_states.shape[0], attn_metadata.slot_mapping.shape[0])
@@ -2116,7 +2205,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 else:
                     num_tokens = min(num_tokens, attn_metadata.num_actual_tokens)
             if num_tokens == 0:
-                return output.zero_()
+                return self._forward_dummy(hidden_states, output, project_gate, o_capacity)
+
             hidden_states = hidden_states[:num_tokens]
         gate_hidden_states = hidden_states if self.g_proj is not None else None
 
@@ -2128,6 +2218,23 @@ class AscendSFAImpl(MLAAttentionImpl):
         sin = attn_metadata.sin
         slot_mapping_sfa = self._get_sfa_kv_slot_mapping(attn_metadata)
         indexer_attn_metadata = self._get_indexer_attn_metadata()
+        mega_dsa = getattr(self, "_mega_dsa", None)
+        if (
+            mega_dsa is not None
+            and attn_metadata.attn_state in (AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding)
+            and mega_dsa.supports(hidden_states, output, kv_cache, attn_metadata, indexer_attn_metadata)
+        ):
+            wait_for_kv_layer_from_connector(layer_name)
+            if self.layerwise_kv_cache_hook is not None:
+                self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
+            with attention_transfer_window():
+                mega_dsa(hidden_states, output, kv_cache, attn_metadata, indexer_attn_metadata)
+            notify_kv_cache_written(self.layer_name or "")
+            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+            return output
+
+        if defer_gate:
+            project_gate = begin_gate(hidden_states)
 
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = hidden_states.shape[0] if self.qk_rope_head_dim == 0 else attn_metadata.num_input_tokens
@@ -2247,6 +2354,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self._store_packed_kv_cache(k_pe, k_nope, knope_scale, kv_cache, slot_mapping_sfa, attn_metadata)
             self._on_kv_cache_written(kv_cache, attn_metadata)
 
+        # Return G to its token owners while the indexer and attention run.
+        finish_gate = project_gate() if project_gate is not None else None
+
         # A sharded-decode PCP rank can own no request but must still write
         # and gather KV with the other ranks.
         has_local_query = attn_metadata.num_actual_tokens > 0
@@ -2311,9 +2421,23 @@ class AscendSFAImpl(MLAAttentionImpl):
             attn_output = hidden_states.new_zeros((ql_nope.shape[0], self.local_num_heads * self.v_head_dim))
         if gate_hidden_states is not None:
             assert self.g_proj is not None
-            gate = self.g_proj(gate_hidden_states.contiguous())[0]
+            if finish_gate is not None:
+                gate = finish_gate().flatten(1)[: attn_output.shape[0]]
+            else:
+                gate = self.g_proj(gate_hidden_states.contiguous())[0]
             flash_attention_gate(attn_output, gate)
-        self._finalize_o_proj(attn_output, output[:num_input_tokens])
+        dst = output[:num_input_tokens]
+        if o_capacity is not None:
+            self._project_finegrained_o(attn_output, dst, o_capacity)
+        elif (
+            self._decode_o_proj_out
+            and attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            and self._can_project_decode_into(attn_output, dst)
+        ):
+            # The plain bias-free row projection is linear(x, W) = x @ W.T.
+            torch.matmul(attn_output, self.o_proj.weight.t(), out=dst)
+        else:
+            self._finalize_o_proj(attn_output, dst)
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 

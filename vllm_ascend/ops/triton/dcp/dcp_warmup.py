@@ -119,7 +119,7 @@ def _output_and_lse(dtype, tokens, heads, head_dim, layout):
     )
 
 
-def _record_exchange(output, lse, softmax_sum, ranks, vector_cores, launch):
+def _record_exchange(output, lse, softmax_sum, ranks, vector_cores, launch, valid_rows=None):
     tokens, heads, head_dim = output.shape
     local_heads = heads // ranks
     head_words = head_dim // 2
@@ -128,7 +128,7 @@ def _record_exchange(output, lse, softmax_sum, ranks, vector_cores, launch):
     send = _Tensor(torch.int32, shape=(ranks, peer_words))
     if tokens == 1:
         words = _Tensor(torch.int32, shape=(heads * head_words,))
-        _launch_exchange_t1_pack(words, lse, softmax_sum, send, local_heads, head_words, ranks, launch)
+        _launch_exchange_t1_pack(words, lse, softmax_sum, send, local_heads, head_words, ranks, launch, valid_rows)
         parts = _Tensor(
             output.dtype,
             shape=(ranks, local_heads, 1, head_dim),
@@ -148,7 +148,17 @@ def _record_exchange(output, lse, softmax_sum, ranks, vector_cores, launch):
             strides=(output.stride(0) // 2, output.stride(1) // 2, 1),
         )
         _launch_exchange_tokens_pack(
-            words, lse, softmax_sum, send, tokens, local_heads, head_words, ranks, lambda: vector_cores, launch
+            words,
+            lse,
+            softmax_sum,
+            send,
+            tokens,
+            local_heads,
+            head_words,
+            ranks,
+            lambda: vector_cores,
+            launch,
+            valid_rows,
         )
         parts = _Tensor(
             output.dtype,
@@ -167,21 +177,32 @@ def _record_exchange(output, lse, softmax_sum, ranks, vector_cores, launch):
 
 
 def _record_dcp_layout(
-    dtype, tokens, local_heads, head_dim, scatter_size, pcp_size, from_stats, mla, layout, vector_cores, record
+    dtype,
+    tokens,
+    local_heads,
+    head_dim,
+    scatter_size,
+    pcp_size,
+    from_stats,
+    mla,
+    layout,
+    vector_cores,
+    record,
+    valid_rows=None,
 ):
     """One owner layout, routed through the production launch constructors."""
     heads = local_heads * scatter_size
     partial, lse = _output_and_lse(dtype, tokens, heads, head_dim, layout)
     softmax_sum = lse if from_stats else None
     if _use_fast_exchange(partial, lse, scatter_size, 1, None if pcp_size == 1 else True, False, False):
-        _record_exchange(partial, lse, softmax_sum, scatter_size, vector_cores, record)
+        _record_exchange(partial, lse, softmax_sum, scatter_size, vector_cores, record, valid_rows)
         if not mla:
             return
     # SFA uses this path when fast exchange is ineligible. MLA's split
     # history always packs, including shapes eligible for fast exchange.
     packed_dim = head_dim + _lse_pack_dim(dtype)
     send = _Tensor(dtype, shape=(scatter_size, local_heads, tokens, packed_dim))
-    _launch_pack_dcp_output_lse(partial, lse, softmax_sum, send, 1, vector_cores, record)
+    _launch_pack_dcp_output_lse(partial, lse, softmax_sum, send, 1, vector_cores, record, valid_rows)
     recv = _Tensor(dtype, shape=(scatter_size * pcp_size, local_heads, tokens, packed_dim))
     output = _Tensor(dtype, shape=(tokens, local_heads, head_dim))
     _launch_fused_dcp_lse_combine(recv, output, head_dim, 1, False, None, None, vector_cores, record)
@@ -191,7 +212,17 @@ def _record_dcp_layout(
 
 
 def register_dcp_warmup(
-    *, dtype, local_heads, head_dim, scatter_size, pcp_size, max_tokens, from_stats, mla=False, decode_buckets=None
+    *,
+    dtype,
+    local_heads,
+    head_dim,
+    scatter_size,
+    pcp_size,
+    max_tokens,
+    from_stats,
+    mla=False,
+    decode_buckets=None,
+    row_mask=False,
 ):
     """Register SFA and MLA owners' reachable output-merge layouts.
 
@@ -202,6 +233,7 @@ def register_dcp_warmup(
     ``decode_buckets`` should be the engine's ACLGraph capture sizes; graph
     padding makes those the token counts the combine sees. The fixed DCP budget
     list is only a fallback when the caller cannot provide them.
+    ``row_mask`` also records pack variants for the QSFA query endpoint.
     """
     init_device_properties_triton()
     vector_cores = get_vectorcore_num()
@@ -212,6 +244,11 @@ def register_dcp_warmup(
     def record(kernel, grid, *args, **kwargs):
         owner = owners[kernel]
         keys[owner][owner.key_from_launch(*args, **kwargs)] = None
+
+    row_variants = [None]
+    if row_mask:
+        # The query_start_loc[-1:] address can be aligned or unaligned.
+        row_variants.extend(_Tensor(torch.int32, aligned=aligned, shape=(1,)) for aligned in (False, True))
 
     # A3 decode buckets: pre-register the candidate shapes so the dispatcher
     # selects the static rank-tiled kernel while recording, then install only
@@ -231,19 +268,21 @@ def register_dcp_warmup(
     try:
         for tokens in token_list:
             for layout in layouts:
-                _record_dcp_layout(
-                    dtype,
-                    tokens,
-                    local_heads,
-                    head_dim,
-                    scatter_size,
-                    pcp_size,
-                    from_stats,
-                    mla,
-                    layout,
-                    vector_cores,
-                    record,
-                )
+                for valid_rows in row_variants:
+                    _record_dcp_layout(
+                        dtype,
+                        tokens,
+                        local_heads,
+                        head_dim,
+                        scatter_size,
+                        pcp_size,
+                        from_stats,
+                        mla,
+                        layout,
+                        vector_cores,
+                        record,
+                        valid_rows,
+                    )
     finally:
         end_a3_static_warmup()
     for owner, owner_keys in keys.items():

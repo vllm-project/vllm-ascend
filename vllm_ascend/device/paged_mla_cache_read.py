@@ -27,7 +27,10 @@ def load_mla_cache_rows_by_slots(cache_k, cache_v, slots):
 def load_mla_cache_context_rows(cache_k, cache_v, block_table, seq_lens, seq_offset, num_tokens):
     """Read the requested history rows in request order, preserving source strides."""
     if num_tokens == 0:
-        return cache_k.new_empty((0, cache_k.shape[-1] + cache_v.shape[-1]))
+        width = cache_k.shape[-1] + cache_v.shape[-1]
+        if cache_k.ndim == 5:
+            width = (cache_k.size(2) + cache_v.size(2)) * cache_k.size(-1)
+        return cache_k.new_empty((0, width))
     # Device lengths describe local rows for both base and DCP paths.
     # Do not use global cumulative lengths from the CPU.
     lengths = seq_lens.to(torch.int64)
@@ -41,8 +44,13 @@ def load_mla_cache_context_rows(cache_k, cache_v, block_table, seq_lens, seq_off
     positions = positions - prefix_starts.index_select(0, requests)
     if seq_offset is not None:
         positions = positions + seq_offset.to(torch.int64).index_select(0, requests)
-    block_size = cache_k.shape[1]
+    block_size = cache_k.shape[3] if cache_k.ndim == 5 else cache_k.shape[1]
     physical_blocks = block_table[requests, positions // block_size].to(torch.int64)
+    if cache_k.ndim == 5:
+        offsets = positions % block_size
+        k = cache_k[physical_blocks, 0, :, offsets, :].reshape(num_tokens, -1)
+        v = cache_v[physical_blocks, 0, :, offsets, :].reshape(num_tokens, -1)
+        return torch.cat((k, v), dim=-1)
     slots = physical_blocks * block_size + positions % block_size
 
     return load_mla_cache_rows_by_slots(cache_k, cache_v, slots)
