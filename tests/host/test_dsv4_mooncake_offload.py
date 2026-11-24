@@ -225,11 +225,11 @@ def test_component_slots_and_physical_capacity(ns, buffers):
             assert key not in seen
             seen.add(key)
     probe = ns["make_plan"](configuration(buffers), gs, 1)
-    assert sum(t.size for t in plan.kv_cache_tensors) == 7 * sum(t.size for t in probe.kv_cache_tensors)
+    assert {t.size for t in plan.kv_cache_tensors} == {7 * probe.kv_cache_tensors[0].size}
     resident_config = configuration()
     resident_config.kv_transfer_config.kv_connector_extra_config["layerwise_independent_layers"] = "all"
     resident = ns["make_plan"](resident_config, gs, 1)
-    assert sum(t.size for t in probe.kv_cache_tensors) < sum(t.size for t in resident.kv_cache_tensors)
+    assert probe.kv_cache_tensors[0].size < sum(t.size for t in resident.kv_cache_tensors)
 
 
 def test_dspark_draft_is_excluded_from_rotation(ns):
@@ -366,7 +366,8 @@ def test_mrv2_allocates_the_exact_plan(ns):
     allocations = []
 
     def allocate(size, alignment, device):
-        backing = NS(data_ptr=lambda: len(allocations) * alignment)
+        backing = MagicMock()
+        backing.__getitem__.side_effect = lambda view: NS(byte_range=(view.start, view.stop))
         allocations.append((size, backing))
         return backing
 
@@ -381,12 +382,19 @@ def test_mrv2_allocates_the_exact_plan(ns):
         _allocate_int8_cache_tensor=allocate,
         get_kv_cache_tensor_layers=lambda t: t.layers,
     )
+    ns["cache_view_alignment"] = lambda spec: 1
+    definitions(
+        STORE + "layerwise/layerwise_cache_layout.py", ns, {"allocate_cache_backing", "get_cache_views"}
+    )
     definitions("vllm_ascend/worker/v2/attn_utils.py", ns, {"_allocate_kv_cache"})
     result = ns["_allocate_kv_cache"](plan, {}, "cpu")
-    assert sum(size for size, _ in allocations) == sum(t.size for t in plan.kv_cache_tensors)
-    assert len(allocations) == len(plan.kv_cache_tensors)
-    for tensor, (_, backing) in zip(plan.kv_cache_tensors, allocations, strict=True):
-        assert all(result[name] is backing for name in tensor.layers)
+    assert len(allocations) == 1
+    assert allocations[0][0] == plan.kv_cache_tensors[0].size
+    assert len({tensor.offset for tensor in plan.kv_cache_tensors}) == len(plan.kv_cache_tensors)
+    for tensor in plan.kv_cache_tensors:
+        view = result[tensor.layers[0]]
+        assert view.byte_range == (tensor.offset, tensor.offset + plan.num_blocks * tensor.block_stride)
+        assert all(result[name] is view for name in tensor.layers)
 
 
 def test_missing_required_compressed_page_fails_closed(ns):

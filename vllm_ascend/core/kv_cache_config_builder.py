@@ -591,11 +591,7 @@ def _attach_transfer_and_speculation_metadata(
             kv_transfer_config,
             kv_connector_extra_config={
                 **kv_transfer_config.kv_connector_extra_config,
-                LAYERWISE_REUSE_BACKING_BYTES: (
-                    sum(tensor.size for tensor in reuse_layout.kv_cache_tensors)
-                    if reuse_layout.separate_slot_backings
-                    else reuse_layout.kv_cache_tensors[0].size
-                ),
+                LAYERWISE_REUSE_BACKING_BYTES: reuse_layout.kv_cache_tensors[0].size,
             },
         )
     return kv_cache_config

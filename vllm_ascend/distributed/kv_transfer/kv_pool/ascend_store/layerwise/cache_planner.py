@@ -134,13 +134,12 @@ class LayerwiseCachePlanner:
         extra_config: dict[str, Any],
         *,
         spec_reuse_rules: SpecReuseRules,
-        separate_slot_backings: bool = False,
+        expand_component_descriptors: bool = False,
     ) -> None:
-        self.separate_slot_backings = separate_slot_backings
         self.extra_config = extra_config
         self.spec_reuse_rules = spec_reuse_rules
         self.spec_by_entry = get_layerwise_kv_cache_specs(config)
-        if separate_slot_backings:
+        if expand_component_descriptors:
             # Plan from one native descriptor per component before assigning slots.
             config = replace(
                 config,
@@ -305,11 +304,11 @@ class LayerwiseCachePlanner:
         if save_dependencies_by_layer:
             kv_cache_tensors = tuple(
                 KVCacheTensor(
-                    size=num_blocks * block_stride if self.separate_slot_backings else backing_bytes,
+                    size=backing_bytes,
                     layers=entry_names,
                     layer_stride=0,
                     block_stride=block_stride,
-                    offset=0 if self.separate_slot_backings else offset,
+                    offset=offset,
                 )
                 for offset, block_stride, entry_names in slot_layouts
             )
@@ -323,7 +322,6 @@ class LayerwiseCachePlanner:
             num_prefetch_layers=settings.num_prefetch_layers,
             reused_cache_names=frozenset(rotated_entry_names),
             draft_entry_names=frozenset(self.draft_names),
-            separate_slot_backings=self.separate_slot_backings,
         )
 
 
@@ -352,7 +350,7 @@ def plan_layerwise_cache_reuse(
         vllm_config,
         extra_config,
         spec_reuse_rules=rules,
-        separate_slot_backings=dsv4,
+        expand_component_descriptors=dsv4,
     )
     layout = planner.build()
     if not layout.has_layer_reuse:

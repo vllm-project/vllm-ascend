@@ -973,12 +973,6 @@ def _allocate_kv_cache(
     alignment = KV_CACHE_BUFFER_ALIGNMENT
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     reuse_layout = get_layerwise_reuse_layout(kv_cache_config)
-    if reuse_layout is not None and reuse_layout.separate_slot_backings:
-        for descriptor in kv_cache_config.kv_cache_tensors:
-            backing = _allocate_int8_cache_tensor(descriptor.size, alignment, device)
-            for name in get_kv_cache_tensor_layers(descriptor):
-                kv_cache_raw_tensors[name] = backing
-        return kv_cache_raw_tensors
     if reuse_layout is not None:
         return allocate_cache_backing(
             kv_cache_config,
