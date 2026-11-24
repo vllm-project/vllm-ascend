@@ -108,7 +108,6 @@ def reference_serve_args(
     return [
         "--tokenizer",
         case.model,
-        *case.extra_server_args,
         "--served-model-name",
         case.model,
         *_common_serve_args(
