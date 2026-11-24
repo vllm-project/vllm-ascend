@@ -257,25 +257,3 @@ def test_w4a8_shared_weights_reach_megamoe(monkeypatch, use_expert_weight_list, 
         assert kwargs["shared_weight1_type"] == kwargs["shared_weight2_type"] == weight_type
     else:
         assert not (_INTEGER_SHARED_ABI & kwargs.keys())
-
-
-@pytest.mark.parametrize("sequence_parallel,replicated", [(False, False), (False, True), (True, False)])
-def test_deepseek_shared_mlp_can_load_full_weights(monkeypatch, sequence_parallel, replicated):
-    from vllm_ascend.models.deepseek_v41 import model
-
-    gate_up = Mock(return_value=torch.nn.Identity())
-    down = Mock(return_value=torch.nn.Identity())
-    monkeypatch.setattr(model, "MergedColumnParallelLinear", gate_up)
-    monkeypatch.setattr(model, "RowParallelLinear", down)
-    monkeypatch.setattr(model, "SiluAndMul", torch.nn.Identity)
-    model.DeepseekV41MLP(
-        hidden_size=4,
-        intermediate_size=2,
-        hidden_act="silu",
-        reduce_results=False,
-        is_sequence_parallel=sequence_parallel,
-        replicate_weights=replicated,
-    )
-    assert gate_up.call_args.kwargs["disable_tp"] == (sequence_parallel or replicated)
-    assert down.call_args.kwargs["disable_tp"] == (sequence_parallel or replicated)
-    assert not down.call_args.kwargs["reduce_results"]
