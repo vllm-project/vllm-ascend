@@ -71,6 +71,37 @@ _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
 _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
 
 
+def _resolved_kv_layout() -> str | None:
+    """The init-resolved KV cache layout: CacheConfig wins, env is the fallback.
+
+    The engine core resolves the layout once (resolve_kv_cache_layout,
+    engine/core.py:303) and pushes it to every worker through the
+    set_kv_cache_layout RPC (engine/core.py:311), which adopts it on
+    CacheConfig BEFORE any layout-dependent operation runs: memory
+    profiling (:327), allocation (initialize_from_config :391 ->
+    get_kv_cache_shape), and graph capture (:394). Executor construction
+    (engine/core.py:164: model load + attention impl __init__) happens
+    BEFORE that resolution, so an impl constructed in that window sees
+    only the pre-resolution fallback (explicit config, env, or the
+    default) -- the worker rebinds it to the final resolution right
+    after adoption (NPUWorker.set_kv_cache_layout ->
+    rebind_kv_cache_layout). Reading the raw env here would miss the
+    resolved value when the layout was set via config without the env
+    -- and allocation followed the resolved value, so a mismatch between
+    this reading and the allocation is a shape/data corruption, not a
+    display issue. The env remains the fallback for pre-config contexts
+    (unit tests that stub the config layer) and for the documented
+    VLLM_KV_CACHE_LAYOUT override path.
+    """
+    try:
+        cache_config = get_current_vllm_config().cache_config
+        if cache_config.kv_cache_layout is not None:
+            return cache_config.kv_cache_layout
+    except Exception:  # noqa: BLE001
+        pass
+    return envs_vllm.VLLM_KV_CACHE_LAYOUT
+
+
 def full_graph_fia_uses_gathered_kv_read() -> bool:
     """Whether captured full-graph FIA tasks read a gathered (HND) KV cache.
 
@@ -80,7 +111,7 @@ def full_graph_fia_uses_gathered_kv_read() -> bool:
     block table is the constant sequential remapped table over the compact
     gather buffers, and replay must not rebind it to the raw physical table.
     """
-    return envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND")
+    return _resolved_kv_layout() in ("LBHNC", "HND")
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -120,7 +151,12 @@ class AscendAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
-        if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
+        # The shape MUST follow the init-resolved layout (CacheConfig first,
+        # env fallback): the allocation and every downstream consumer
+        # (attention read, graph capture, repair fence) must see one
+        # physical order. Reading only the env missed the config-resolved
+        # value (see _resolved_kv_layout).
+        if _resolved_kv_layout() in ("LBHNC", "HND"):
             return (2, num_blocks, num_kv_heads, block_size, head_size)
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
@@ -620,7 +656,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.alibi_slopes = alibi_slopes
         self.attn_type = attn_type
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
-        self.kv_cache_layout = envs_vllm.VLLM_KV_CACHE_LAYOUT
+        # The impl is constructed during executor construction, BEFORE
+        # resolve_kv_cache_layout runs in the engine core, so the binding
+        # cached here is the PRE-RESOLUTION fallback (explicit config, env,
+        # or the default). The worker's set_kv_cache_layout RPC rebinds
+        # these fields to the final resolution before the first
+        # layout-dependent operation (see rebind_kv_cache_layout); the
+        # bound views follow the same resolved CacheConfig at allocation,
+        # so use_bnsd_kv_cache must track it, never the raw env alone.
+        self.kv_cache_layout = _resolved_kv_layout()
         self.use_bnsd_kv_cache = self.kv_cache_layout in ("LBHNC", "HND")
 
         assert self.num_heads % self.num_kv_heads == 0
@@ -663,6 +707,27 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # back to the graph pool and the replay-side rebind would pass a
         # dead weak tensor into the FIA op (see the PR #22649 review).
         self._gathered_pa_read_strong_refs: list[torch.Tensor] = []
+
+    def rebind_kv_cache_layout(self, kv_cache_layout: str | None) -> bool:
+        """Adopt the engine core's final layout resolution.
+
+        This impl is constructed during executor construction, BEFORE
+        resolve_kv_cache_layout runs in the engine core, so the fields
+        cached at construction reflect the pre-resolution fallback.
+        The worker calls this from the set_kv_cache_layout RPC -- after
+        adoption, before the first layout-dependent operation (memory
+        profiling, allocation, KV writes, graph capture/update/replay)
+        -- so every consumer of use_bnsd_kv_cache follows the SAME
+        resolved layout the allocation followed. Returns whether the
+        binding changed.
+        """
+        if kv_cache_layout is None:
+            return False
+        if self.kv_cache_layout == kv_cache_layout:
+            return False
+        self.kv_cache_layout = kv_cache_layout
+        self.use_bnsd_kv_cache = kv_cache_layout in ("LBHNC", "HND")
+        return True
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name

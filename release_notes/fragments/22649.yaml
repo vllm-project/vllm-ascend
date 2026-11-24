@@ -1,4 +1,14 @@
 pr: 22649
 entries:
   - category: bugfix
-    text: Fixed runs with VLLM_KV_CACHE_LAYOUT=HND (LBHNC) crashing at the first paged-attention read (EZ0037) - the head-major cache is now fed to the attention kernel as gathered token-major blocks; default-layout users see no change.
+    text: When the KV cache layout was set through the engine config without
+      the VLLM_KV_CACHE_LAYOUT environment variable, attention could read the
+      cache through the wrong layout convention (wrong outputs or a crash)
+      while allocation followed the resolved layout; attention now adopts the
+      resolved layout at engine startup.
+  - category: bugfix
+    text: cudagraph_mode=FULL with a head-major KV cache layout
+      (VLLM_KV_CACHE_LAYOUT=HND/LBHNC) now fails immediately at startup when
+      the layout is adopted after platform validation (worker vote or
+      connector preference), instead of crashing the first replayed prefill
+      graph with device error 507011.

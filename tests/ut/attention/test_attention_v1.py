@@ -569,7 +569,16 @@ class TestAscendAttentionBackendImpl(TestBase):
             )
 
     def test_hnd_layout_is_recorded_during_initialization(self):
-        with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", "HND"):
+        """The pre-resolution window: the impl is constructed before the
+        engine core resolves the layout, so it records the env-supplied
+        fallback; the worker rebinds it to the final resolution at
+        adoption (see tests/ut/worker/test_kv_layout_adoption.py). The
+        config context must carry an UNRESOLVED cache config for that
+        window -- a resolved config wins over the env."""
+        with (
+            patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", "HND"),
+            patch.object(self.mock_vllm_config.cache_config, "kv_cache_layout", None),
+        ):
             impl = AscendAttentionBackendImpl(
                 num_heads=8,
                 head_size=64,
