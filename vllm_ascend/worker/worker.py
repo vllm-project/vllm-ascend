@@ -1284,6 +1284,8 @@ class NPUWorker(GPUWorker):
         return f"dp{dp_rank}:pp{pp_rank}:pcp{pcp_rank}:tp{tp_rank}:"
 
     def compute_weight_checksums(self) -> dict[str, str]:
+        if get_ascend_config().input_embedding_host_vmm:
+            raise RuntimeError("Weight checksums are unavailable with Host VMM input embeddings")
         prefix = self._weight_checksum_prefix()
         digests = compute_tensor_digests(self._weight_checksum_model())
         return {prefix + name: digest for name, digest in digests.items()}
