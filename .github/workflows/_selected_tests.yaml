@@ -500,6 +500,13 @@ jobs:
       if: ${{ !cancelled() && inputs.enable-coverage }}
       needs: selected-tests
       runs-on: linux-amd64-cpu-2-hk
+      # Host python on linux-amd64-cpu-2-hk has no pip. Install packages in
+      # this image instead of get-pip.py on the shared runner (L2-ci#container-contract).
+      container:
+        image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+      defaults:
+        run:
+          shell: bash
       continue-on-error: true
       env:
         OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
@@ -638,10 +645,7 @@ jobs:
 
             echo "=== building test_case_map.json ==="
             if ! python3 -c "import regex" >/dev/null 2>&1; then
-              echo "regex not found for $(python3 -V); bootstrapping pip and installing regex"
-              curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
-              python3 get-pip.py --break-system-packages
-              python3 -m pip install --break-system-packages regex
+              python3 -m pip install regex
             fi
             python3 .github/workflows/scripts/test_selector.py \
               --build-map \
@@ -693,10 +697,7 @@ jobs:
           run: |
             set -euo pipefail
             if ! python3 -c "from obs import ObsClient" >/dev/null 2>&1; then
-              echo "esdk-obs-python not found for $(python3 -V); bootstrapping pip and installing esdk-obs-python"
-              curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
-              python3 get-pip.py --break-system-packages
-              python3 -m pip install --break-system-packages esdk-obs-python --quiet
+              python3 -m pip install esdk-obs-python --quiet
             fi
             python3 - <<'EOF'
             import os
@@ -735,10 +736,7 @@ jobs:
             echo "pruned=false" >> "$GITHUB_OUTPUT"
             OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/${COVERAGE_OBJECT_EXTRA}"
             if ! python3 -c "import yaml" >/dev/null 2>&1; then
-              echo "yaml not found for $(python3 -V); bootstrapping pip and installing pyyaml"
-              curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
-              python3 get-pip.py --break-system-packages
-              if ! python3 -m pip install --break-system-packages pyyaml --quiet; then
+              if ! python3 -m pip install pyyaml --quiet; then
                 echo "::warning::Failed to install pyyaml; skip prune"
                 exit 0
               fi
@@ -781,10 +779,7 @@ jobs:
               exit 0
             fi
             if ! python3 -c "from obs import ObsClient" >/dev/null 2>&1; then
-              echo "esdk-obs-python not found for $(python3 -V); bootstrapping pip and installing esdk-obs-python"
-              curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
-              python3 get-pip.py --break-system-packages
-              python3 -m pip install --break-system-packages esdk-obs-python --quiet
+              python3 -m pip install esdk-obs-python --quiet
             fi
             python3 - <<'EOF'
             import os

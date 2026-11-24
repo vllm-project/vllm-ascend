@@ -18,6 +18,18 @@
 name: Schedule Test Coverage
 
 on:
+  pull_request:
+    # Temporary: include synchronize so a PR push re-runs this smoke coverage
+    # upload without occupying the NPU pool.
+    types:
+      - opened
+      - reopened
+      - labeled
+      - synchronize
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
   workflow_dispatch:
     inputs:
       vllm_ascend_ref:
@@ -35,8 +47,9 @@ defaults:
 
 # Extra coverage branch collected with the main run.
 # latest = newest releases/v* branch. none = skip. Or a releases/v* branch name.
+# none: smoke-verify coverage upload with one test, not the full suite.
 env:
-  COVERAGE_BRANCH: latest
+  COVERAGE_BRANCH: none
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.vllm_ascend_ref || 'main' }}
@@ -44,7 +57,7 @@ concurrency:
 
 jobs:
   select-full-tests:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'pull_request'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -55,7 +68,7 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.vllm_ascend_ref || 'main' }}
+          ref: ${{ github.event_name == 'pull_request' && github.sha || inputs.vllm_ascend_ref || 'main' }}
           fetch-depth: 0
 
       - name: Checkout coverage helper from main
@@ -131,7 +144,41 @@ jobs:
                       continue
                   key, value = line.split("=", 1)
                   parsed[key.strip()] = value.rstrip("\n")
-              return parsed
+              return shrink_to_smoke_test(parsed)
+
+          def shrink_to_smoke_test(selected):
+              # Temporary: keep one CPU UT so upload-coverage-to-obs can be
+              # verified without the full NPU matrix.
+              groups = json.loads(selected.get("test_groups") or "[]")
+              smoke = "tests/ut/test_utils.py"
+              chosen = None
+              for group in groups:
+                  tests = group.get("tests", "").split()
+                  if smoke in tests:
+                      chosen = dict(group)
+                      chosen["tests"] = smoke
+                      chosen["partition"] = "1-1"
+                      break
+              if chosen is None:
+                  for group in groups:
+                      tests = group.get("tests", "").split()
+                      if tests:
+                          chosen = dict(group)
+                          chosen["tests"] = tests[0]
+                          chosen["partition"] = "1-1"
+                          break
+              if chosen is None:
+                  return selected
+              cache_ids = []
+              if chosen.get("csrc_cache_target"):
+                  cache_ids.append(chosen["csrc_cache_target"])
+              print(f"Smoke verification: keeping one test {chosen['tests']}", file=sys.stderr)
+              return {
+                  **selected,
+                  "has_tests": "true",
+                  "test_groups": json.dumps([chosen], separators=(",", ":")),
+                  "csrc_cache_target_ids": json.dumps(cache_ids, separators=(",", ":")),
+              }
 
           def plan_for(root, branch_name):
               git(root, "config", "--global", "--add", "safe.directory", root)
