@@ -2367,7 +2367,7 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
 
     config, specs, layers = make_attention_cache_case(packed)
     # The KVPP fixture uses two-token pages to check byte placement only.
-    monkeypatch.setattr(attn_utils, "select_common_block_size", lambda size, backends, specs: size)
+    monkeypatch.setattr(attn_utils, "select_common_block_size", lambda size, backends, specs, **kwargs: size)
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: layers)
     monkeypatch.setattr(kv_cache_placement, "get_layers_from_vllm_config", lambda *_args: layers)

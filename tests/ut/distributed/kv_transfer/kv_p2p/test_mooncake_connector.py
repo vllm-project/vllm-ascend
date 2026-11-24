@@ -3020,6 +3020,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_transfer_block_ids_keeps_non_aligned_state_group(self):
         self.scheduler.vllm_config.cache_config.mamba_cache_mode = "none"
+        self.scheduler.vllm_config.cache_config.enable_prefix_caching = False
         self.scheduler.group_transfer_info = [
             GroupTransferInfo(
                 tokens_per_block=16,
