@@ -337,6 +337,7 @@ def _allocate_mrv2_kv_cache(
     backend = SimpleNamespace(
         full_cls_name=lambda: "qwen-cache-test",
         get_supported_kernel_block_sizes=lambda _spec: block_sizes,
+        get_supported_kernel_block_sizes_for_layers=lambda _spec, _names: block_sizes,
     )
     layers = {
         name: SimpleNamespace(get_attn_backend=lambda: backend, num_heads=1)
@@ -724,6 +725,7 @@ def test_qsa_block_alignment_reuses_vllm_for_whole_gdn_page(monkeypatch, cache_m
         cache_dtype="auto",
         block_size=128,
         mamba_cache_mode=cache_mode,
+        enable_prefix_caching=True,
         mamba_block_size=None,
         user_specified_mamba_block_size=False,
         mamba_page_size_padded=None,

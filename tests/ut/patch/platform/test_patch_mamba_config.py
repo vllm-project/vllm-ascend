@@ -200,8 +200,9 @@ def test_backend_alignment_preserves_kpool_c8_page_geometry(cache_dtype, prefix_
         get_supported_kernel_block_sizes=lambda: [128],
     )
 
+    native_verify = None if vllm_version_is("0.33.0") else MambaModelConfig.verify_and_update_config
     with (
-        patch.object(MambaModelConfig, "verify_and_update_config"),
+        patch.object(MambaModelConfig, "verify_and_update_config", wraps=native_verify),
         patch("vllm.model_executor.models.ModelRegistry.resolve_model_cls", return_value=(model_cls, None)),
         patch("vllm.config.vllm.set_current_vllm_config", return_value=nullcontext()),
     ):
@@ -297,7 +298,7 @@ def test_kimi_k31_platform_alignment_preserves_native_pages(tp_size, mamba_cache
             assert config.cache_config.block_size == expected_block_size
             assert config.cache_config.mamba_page_size_padded == expected_block_size * token_bytes
             assert config.cache_config.mamba_block_size == (
-                expected_block_size if vllm_version_is("0.33.0") and mamba_cache_mode == "align" else 131072
+                expected_block_size if mamba_cache_mode == "align" else 131072
             )
 
 

@@ -285,6 +285,7 @@ def test_cache_spec_allocates_one_checkpoint_and_compact_records(recover):
         mamba_block_size=16,
         mamba_page_size_padded=None,
         mamba_cache_mode="none",
+        enable_prefix_caching=False,
     )
     layer.cache_config = cache
     config = SimpleNamespace(cache_config=cache, num_speculative_tokens=5)

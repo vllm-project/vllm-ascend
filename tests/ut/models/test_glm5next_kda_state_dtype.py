@@ -17,7 +17,8 @@ def make_layer_and_config(ssm_dtype, conv_dtype="auto"):
         mamba_cache_dtype=conv_dtype,
         mamba_ssm_cache_dtype=ssm_dtype,
         mamba_block_size=512,
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
+        **({"mamba_cache_mode": "align"} if vllm_version_is("0.33.0") else {}),
     )
     config = SimpleNamespace(
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(model_type="glm5_next")),

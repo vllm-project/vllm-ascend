@@ -76,7 +76,7 @@ def test_initialization_requires_speculative_decoding():
     ],
 )
 def test_initialization_rejects_unsupported_execution(section, field, value, message, monkeypatch):
-    if field == "mamba_cache_mode":
+    if field in ("mamba_cache_mode", "enable_prefix_caching"):
         monkeypatch.setattr("vllm_ascend.models.glm5next.recoverssm_config.vllm_version_is", lambda _: True)
     config = make_config()
     setattr(getattr(config, section), field, value)
