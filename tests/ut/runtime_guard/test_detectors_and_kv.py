@@ -878,6 +878,33 @@ def test_queue_kv_dump_dedupes_req_id_same_step():
     ]
 
 
+def test_mrv1_host_mirror_table_is_not_used():
+    """Alex #2: do not return manager-granularity ids from MRV1 host-mirror tables."""
+    import numpy as np
+
+    from vllm_ascend.observability.runtime_guard.dump import block_ids_for_request
+
+    # Tempting MRV1-style batch table with manager ids — must be ignored.
+    host_table = SimpleNamespace(
+        num_blocks_per_row=[2],
+        block_table=SimpleNamespace(np=np.array([[1, 2, 0]], dtype=np.int32)),
+    )
+    input_batch = SimpleNamespace(
+        req_id_to_index={"r1": 0},
+        req_ids=["r1"],
+        block_table=SimpleNamespace(block_tables=[host_table]),
+        idx_mapping_np=None,  # no V2 state mapping → cannot resolve via block_tables
+    )
+    runner = SimpleNamespace(
+        requests=None,
+        input_batch=input_batch,
+        execute_model_state=None,
+        block_tables=None,
+        req_states=None,
+    )
+    assert block_ids_for_request(runner, "r1") == []
+
+
 def test_bug4_block_ids_v2_without_input_batch():
     """BUG-4: after sample_tokens clears execute_model_state, still resolve via req_states."""
     import numpy as np

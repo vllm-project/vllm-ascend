@@ -230,7 +230,17 @@ def block_ids_for_request(
     kv_cache_group: int = 0,
     input_batch: Any = None,
 ) -> list[int]:
-    """Return logical GPU block ids for ``req_id`` (group 0 by default).
+    """Return kernel-page block ids for ``req_id`` (group 0 by default).
+
+    Id space contract (Ascend / Runtime Guard is MRV2-only):
+
+    - ``requests[].block_ids`` are scheduler/manager ids and are expanded by
+      ``blocks_per_kv_block`` before return.
+    - ``runner.block_tables`` rows are already kernel-expanded by
+      ``AscendBlockTables``; those paths are returned as-is.
+
+    The MRV1 ``input_batch`` host-mirror table path is intentionally omitted so
+    callers never silently receive manager-granularity ids.
 
     MRV2 clears ``execute_model_state`` at the start of ``sample_tokens``, so
     end-of-wave dump often has no live ``input_batch``. Fall back to persistent
@@ -271,27 +281,15 @@ def block_ids_for_request(
                 except ValueError:
                     idx = None
         if idx is not None:
-            idx = int(idx)
-            table = _block_table_for_group(input_batch, kv_cache_group)
-            if table is not None:
-                try:
-                    num_blocks = int(table.num_blocks_per_row[idx])
-                    if num_blocks <= 0:
-                        return []
-                    row = table.block_table.np[idx, :num_blocks]
-                    return [int(x) for x in row.tolist()]
-                except Exception:
-                    # Not a host-mirrored v1 table (e.g. wrong idx); try v2 paths.
-                    pass
-            else:
-                # ModelRunner V2: batch row → persistent state index → block_tables.
-                got = _block_ids_from_v2_block_tables(
-                    runner,
-                    state_idx=_state_idx_from_batch(input_batch, idx),
-                    kv_cache_group=kv_cache_group,
-                )
-                if got:
-                    return got
+            # ModelRunner V2: batch row → persistent state index → block_tables
+            # (already kernel-addressed). No MRV1 host-mirror table read.
+            got = _block_ids_from_v2_block_tables(
+                runner,
+                state_idx=_state_idx_from_batch(input_batch, int(idx)),
+                kv_cache_group=kv_cache_group,
+            )
+            if got:
+                return got
 
     # Post-sample MRV2: no input_batch; resolve via req_states slot.
     return _block_ids_from_v2_block_tables(
@@ -375,21 +373,6 @@ def _normalize_block_ids(raw: Any, *, kv_cache_group: int) -> list[int]:
             return [int(x) for x in raw[kv_cache_group]]
         return [int(x) for x in raw]
     return []
-
-
-def _block_table_for_group(input_batch: Any, kv_cache_group: int) -> Any | None:
-    multi = getattr(input_batch, "block_table", None)
-    if multi is None:
-        return None
-    tables = getattr(multi, "block_tables", None)
-    if tables is not None:
-        if kv_cache_group >= len(tables):
-            return None
-        return tables[kv_cache_group]
-    try:
-        return multi[kv_cache_group]
-    except Exception:
-        return multi if kv_cache_group == 0 else None
 
 
 # ---- KV cache reader ----
