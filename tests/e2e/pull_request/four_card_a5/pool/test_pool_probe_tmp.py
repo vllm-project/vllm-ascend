@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-"""Temporary probe: which memcache local_service protocol can init and register.
+"""Temporary probe: why the memcache LocalService init does not return on A5.
 
-Not part of the curated suite. Run explicitly with /e2e while bringing up the
-A5 pool cases; delete once the working protocol is known.
+Every protocol reaches the SMEM initialize step and then blocks, so the next
+variable is the pool rank layout: ``world_size`` may have to equal the number
+of LocalServices that actually join. Each case runs in a time-bounded
+subprocess; delete this file once the working layout is known.
 """
 
 import os
@@ -18,9 +20,21 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
 from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
 
-PROTOCOLS = ["device_uboe", "device_urma", "host_shm", "host_tcp"]
+CASES = [
+    ("urma_ws1", 1, "device_urma"),
+    ("urma_ws8", 8, "device_urma"),
+    ("sdma_ws1", 1, "device_sdma"),
+]
 PROBE_TIMEOUT_SECONDS = 180
 PROBE_DRAM_SIZE = "1GB"
+PROBE_ENVS = {
+    # Fail a stuck group join or QP handshake inside the probe window instead
+    # of waiting for the memfabric defaults.
+    "MF_GROUP_JOIN_MAX_TIMEOUT": "60",
+    "MF_QP_READY_CHECK_TIMEOUT_BASE": "30",
+    "ASCEND_CONNECT_TIMEOUT": "60000",
+    "ASCEND_TRANSFER_TIMEOUT": "60000",
+}
 
 PROBE_SCRIPT = """
 import torch
@@ -42,7 +56,7 @@ print("probe: done", flush=True)
 """
 
 
-def _build_config(protocol: str) -> MemcacheKVPoolConfig:
+def _build_config(world_size: int, protocol: str) -> MemcacheKVPoolConfig:
     return MemcacheKVPoolConfig(
         meta_service_port=get_open_port(),
         config_store_port=get_open_port(),
@@ -50,7 +64,7 @@ def _build_config(protocol: str) -> MemcacheKVPoolConfig:
             "meta": {"ock.mmc.log_level": "error"},
             "local": {
                 "ock.mmc.log_level": "error",
-                "ock.mmc.local_service.world_size": 256,
+                "ock.mmc.local_service.world_size": world_size,
                 "ock.mmc.local_service.protocol": protocol,
                 "ock.mmc.local_service.dram.size": PROBE_DRAM_SIZE,
             },
@@ -58,11 +72,11 @@ def _build_config(protocol: str) -> MemcacheKVPoolConfig:
     )
 
 
-@pytest.mark.parametrize("protocol", PROTOCOLS)
-def test_memcache_protocol_probe(protocol: str) -> None:
+@pytest.mark.parametrize("name,world_size,protocol", CASES)
+def test_memcache_protocol_probe(name: str, world_size: int, protocol: str) -> None:
     started = time.perf_counter()
-    with SingleNodeMemcacheManager(_build_config(protocol), f"probe_{protocol}") as pool:
-        with patch.dict(os.environ, pool.server_envs):
+    with SingleNodeMemcacheManager(_build_config(world_size, protocol), f"probe_{name}") as pool:
+        with patch.dict(os.environ, {**pool.server_envs, **PROBE_ENVS}):
             try:
                 completed = subprocess.run(
                     [sys.executable, "-c", PROBE_SCRIPT],
@@ -72,7 +86,7 @@ def test_memcache_protocol_probe(protocol: str) -> None:
                 )
                 elapsed = time.perf_counter() - started
                 print(
-                    f"[pool_probe] protocol={protocol} rc={completed.returncode} "
+                    f"[pool_probe] case={name} rc={completed.returncode} "
                     f"elapsed={elapsed:.1f}s stdout={completed.stdout.strip()!r} "
                     f"stderr={completed.stderr.strip()[-2000:]!r}",
                     flush=True,
@@ -83,7 +97,7 @@ def test_memcache_protocol_probe(protocol: str) -> None:
                 if isinstance(partial, bytes):
                     partial = partial.decode(errors="replace")
                 print(
-                    f"[pool_probe] protocol={protocol} TIMEOUT after {elapsed:.1f}s "
+                    f"[pool_probe] case={name} TIMEOUT after {elapsed:.1f}s "
                     f"stdout={partial.strip()!r}",
                     flush=True,
                 )
