@@ -13,6 +13,7 @@ Run with:
 """
 
 import os
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -49,6 +50,7 @@ def _read_mtp_counters(metrics: list[Metric]) -> tuple[int, int]:
 
 
 def _run_mtp_case(model_name: str, is_moe: bool, use_replayssm: bool) -> tuple[int, int]:
+    mamba_options: dict[str, Any] = {"mamba_cache_mode": "none"} if vllm_version_is("0.33.0") else {}
     with VllmRunner(
         model_name,
         dtype="bfloat16",
@@ -60,7 +62,7 @@ def _run_mtp_case(model_name: str, is_moe: bool, use_replayssm: bool) -> tuple[i
         gpu_memory_utilization=0.9,
         disable_log_stats=False,
         enable_prefix_caching=False,
-        **({"mamba_cache_mode": "none"} if vllm_version_is("0.33.0") else {}),
+        **mamba_options,
         mamba_ssm_cache_dtype="float32",
         use_replayssm=use_replayssm,
         async_scheduling=True,

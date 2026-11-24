@@ -35,6 +35,7 @@ scheduler wrapper is exercised against one-off scheduler double classes.
 
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -155,6 +156,11 @@ def _make_coordinator(
     # The kv-transfer config is attached by the
     # get_kv_cache_config_from_groups builder in real engine startup.
     kv_cache_config.kv_transfer_config = kv_transfer_config
+    coordinator_options: dict[str, Any] = (
+        {"use_eagle": use_eagle}
+        if vllm_version_is("0.34.0")
+        else {"max_in_flight_tokens": 4096, "num_hash_lookahead_tokens": int(use_eagle)}
+    )
     return AscendHybridKVCacheCoordinator(
         kv_cache_config=kv_cache_config,
         max_model_len=4096,
@@ -164,11 +170,7 @@ def _make_coordinator(
         pcp_world_size=1,
         hash_block_size=HASH_BLOCK_SIZE,
         scheduler_block_size=HASH_BLOCK_SIZE,
-        **(
-            {"use_eagle": use_eagle}
-            if vllm_version_is("0.34.0")
-            else {"max_in_flight_tokens": 4096, "num_hash_lookahead_tokens": int(use_eagle)}
-        ),
+        **coordinator_options,
     )
 
 
