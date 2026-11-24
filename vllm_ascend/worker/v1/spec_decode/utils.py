@@ -126,21 +126,28 @@ class SlidingWindowAdapter:
         common_attn_metadata,
         out: torch.Tensor,
         start_tokens: torch.Tensor | None = None,
+        start_block_indices: torch.Tensor | None = None,
+        needed_blocks: torch.Tensor | None = None,
     ) -> None:
         b = self.block_size
         num_reqs = common_attn_metadata.seq_lens.shape[0]
         full_cols = self.full_block_table.shape[1]
+        table_device = self.full_block_table.device
 
         # Window math stays on the seq_lens device. ``start_tokens`` is that crop;
-        # MRV2 computes it once and each group divides by its own block size.
+        # MRV2 computes it once. The default column is start_tokens / block_size.
+        # A sharded DCP group passes the rank-local column of the same token.
         if start_tokens is None:
             start_tokens = self.token_crop(common_attn_metadata.seq_lens)
         self.start_tokens_in_window_rounding = start_tokens
         self._windowed_seq_lens = common_attn_metadata.seq_lens - start_tokens
-        start_block_indices = start_tokens // b
+        if start_block_indices is None:
+            start_block_indices = start_tokens // b
+        else:
+            start_block_indices = start_block_indices.to(device=table_device)
 
         # column offset grid [1, max_window_blocks]
-        cols = torch.arange(self.max_window_blocks, device=self.full_block_table.device).unsqueeze(0)
+        cols = torch.arange(self.max_window_blocks, device=table_device).unsqueeze(0)
         # source column per (row, col): start_block_indices[:, None] + cols
         src_cols = start_block_indices.unsqueeze(1) + cols
         # clamp to the valid full-block-table column range so gather never goes OOB
@@ -148,8 +155,11 @@ class SlidingWindowAdapter:
 
         gathered = torch.gather(self.full_block_table, 1, src_cols_clamped)
 
-        needed = torch.clamp((self._windowed_seq_lens + b - 1) // b, max=self.max_window_blocks).unsqueeze(1)
-        valid_mask = (cols < needed) & (src_cols < full_cols)
+        if needed_blocks is None:
+            needed = torch.clamp((self._windowed_seq_lens + b - 1) // b, max=self.max_window_blocks)
+        else:
+            needed = torch.clamp(needed_blocks.to(device=table_device), max=self.max_window_blocks)
+        valid_mask = (cols < needed.unsqueeze(1)) & (src_cols < full_cols)
         out[:num_reqs].copy_(gathered * valid_mask.to(gathered.dtype))
 
     def apply(

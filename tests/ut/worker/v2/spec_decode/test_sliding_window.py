@@ -183,6 +183,92 @@ def test_mixed_kernel_block_sizes_crop_each_group():
     torch.testing.assert_close(block_tables.input_block_tables[0], original_a)
     torch.testing.assert_close(block_tables.input_block_tables[1], original_b)
 
+    # Sequence 384 with W=128 shares a 256-token crop. On DCP2 each rank's
+    # sharded table stores local columns, so the crop starts at column 2 of
+    # the 64-token group and column 1 of the 128-token group. The windowed
+    # length stays the global 128 tokens, and that span is one local column.
+    helper_dcp = MRV2DraftSlidingWindow(
+        window_size=128,
+        block_sizes=(64, 128),
+        max_num_reqs=max_num_reqs,
+        future_offset=0,
+        device=torch.device("cpu"),
+        cp_size=2,
+        dcp_sharded=(True, True),
+    )
+    input_buffers.seq_lens = torch.tensor([384, 0], dtype=torch.int32)
+    upper_bound = torch.tensor([512, 0], dtype=torch.int32)
+    with helper_dcp.apply_builder_inputs(input_buffers, block_tables, upper_bound, num_reqs) as windowed_ub:
+        assert input_buffers.seq_lens[0].item() == 128
+        assert windowed_ub[0].item() == 256
+        assert block_tables.input_block_tables[0][0, 0].item() == 2
+        assert block_tables.input_block_tables[0][0, 1].item() == 0
+        assert block_tables.input_block_tables[1][0, 0].item() == 101
+        assert block_tables.input_block_tables[1][0, 1].item() == 0
+        shared_crop = helper_dcp.adapters[0].start_tokens_in_window_rounding
+        assert helper_dcp.adapters[1].start_tokens_in_window_rounding is shared_crop
+        assert shared_crop[0].item() == 256
+
+    torch.testing.assert_close(block_tables.input_block_tables[0], original_a)
+    torch.testing.assert_close(block_tables.input_block_tables[1], original_b)
+
+    # The same 256-token crop on replicated groups keeps the global columns:
+    # 4 of 64 and 2 of 128.
+    helper_replicated = MRV2DraftSlidingWindow(
+        window_size=128,
+        block_sizes=(64, 128),
+        max_num_reqs=max_num_reqs,
+        future_offset=0,
+        device=torch.device("cpu"),
+        cp_size=2,
+        dcp_sharded=(False, False),
+    )
+    input_buffers.seq_lens = torch.tensor([384, 0], dtype=torch.int32)
+    upper_bound = torch.tensor([512, 0], dtype=torch.int32)
+    with helper_replicated.apply_builder_inputs(input_buffers, block_tables, upper_bound, num_reqs) as windowed_ub:
+        assert input_buffers.seq_lens[0].item() == 128
+        assert windowed_ub[0].item() == 256
+        assert block_tables.input_block_tables[0][0, 0].item() == 4
+        assert block_tables.input_block_tables[0][0, 1].item() == 5
+        assert block_tables.input_block_tables[1][0, 0].item() == 102
+        shared_crop = helper_replicated.adapters[0].start_tokens_in_window_rounding
+        assert helper_replicated.adapters[1].start_tokens_in_window_rounding is shared_crop
+
+    torch.testing.assert_close(block_tables.input_block_tables[0], original_a)
+    torch.testing.assert_close(block_tables.input_block_tables[1], original_b)
+
+
+def test_maybe_create_reads_physical_dcp_layout():
+    block_tables = SimpleNamespace(
+        input_block_tables=[
+            torch.zeros(1, 4, dtype=torch.int32),
+            torch.zeros(1, 4, dtype=torch.int32),
+        ],
+        kernel_block_sizes=[64, 128],
+        block_sizes=[128, 128],
+        cp_size=2,
+        cp_interleave=1,
+        dcp_sharded=torch.tensor([True, False]),
+    )
+    with patch(
+        "vllm_ascend.worker.v2.spec_decode.sliding_window.get_ascend_config",
+        return_value=SimpleNamespace(draft_window_size=128),
+    ):
+        helper = MRV2DraftSlidingWindow.maybe_create(
+            method="dspark",
+            vllm_config=SimpleNamespace(),
+            block_tables=block_tables,
+            max_num_reqs=1,
+            device=torch.device("cpu"),
+            future_offset=0,
+        )
+    assert helper is not None
+    assert helper.cp_size == 2
+    assert helper.cp_interleave == 1
+    assert helper.dcp_sharded == (True, False)
+    assert helper.block_sizes == (64, 128)
+    assert helper.kv_block_sizes == (128, 128)
+
 
 def test_cropped_block_table_keeps_padded_rows():
     helper = MRV2DraftSlidingWindow(

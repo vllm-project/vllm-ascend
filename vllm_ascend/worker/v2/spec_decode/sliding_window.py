@@ -67,6 +67,66 @@ def _checked_block_sizes(block_sizes: Sequence[int], num_groups: int) -> list[in
     return resolved
 
 
+def _sharded_block_column(
+    positions: torch.Tensor,
+    kv_block_size: int,
+    kernel_block_size: int,
+    cp_size: int,
+    cp_interleave: int,
+) -> torch.Tensor:
+    """Block-table column of a global token on one DCP rank.
+
+    Same split as the slot mapper. The position is packed into the rank-local
+    offset inside a ``kv_block_size * cp_size`` virtual block, then divided by
+    the kernel block size. The column is the same on every rank.
+    """
+    virtual_block_size = kv_block_size * cp_size
+    virtual_block_indices = positions // virtual_block_size
+    virtual_block_offsets = positions % virtual_block_size
+    rounds = virtual_block_offsets // (cp_interleave * cp_size)
+    remainder = virtual_block_offsets % cp_interleave
+    local_positions = virtual_block_indices * kv_block_size + rounds * cp_interleave + remainder
+    return local_positions // kernel_block_size
+
+
+def _bool_flags(flags: Any, num_groups: int, name: str) -> tuple[bool, ...]:
+    if isinstance(flags, torch.Tensor):
+        values = flags.detach().to(device="cpu").reshape(-1).tolist()
+    else:
+        values = list(flags)
+    if len(values) != num_groups:
+        raise RuntimeError(
+            f"draft sliding window {name} does not match KV groups: {len(values)} flags for {num_groups} tables"
+        )
+    return tuple(bool(value) for value in values)
+
+
+def _cp_layout(block_tables: Any, num_groups: int) -> tuple[int, int, tuple[bool, ...]]:
+    """Return ``(cp_size, cp_interleave, per-group sharded)``.
+
+    ``cp_size <= 1`` keeps every group on the global column. A missing
+    ``dcp_sharded`` matches BlockTables and treats every group as sharded.
+    """
+    cp_size = int(getattr(block_tables, "cp_size", 1) or 1)
+    cp_interleave = int(getattr(block_tables, "cp_interleave", 1) or 1)
+    if cp_size <= 1:
+        return 1, 1, (False,) * num_groups
+    if cp_interleave <= 0:
+        raise RuntimeError(f"draft sliding window cp_interleave must be positive, got {cp_interleave}")
+    sharded = getattr(block_tables, "dcp_sharded", None)
+    if sharded is None:
+        return cp_size, cp_interleave, (True,) * num_groups
+    return cp_size, cp_interleave, _bool_flags(sharded, num_groups, "dcp_sharded")
+
+
+def _kv_block_sizes(block_tables: Any, kernel_block_sizes: Sequence[int]) -> tuple[int, ...]:
+    """Physical block size used to split a DCP position. Falls back to the kernel size."""
+    physical = getattr(block_tables, "block_sizes", None)
+    if physical is None or len(physical) == 0:
+        return tuple(kernel_block_sizes)
+    return tuple(_checked_block_sizes(physical, len(kernel_block_sizes)))
+
+
 def _kernel_block_sizes(block_tables: Any, num_groups: int) -> list[int]:
     """Prefer one Ascend kernel block size per KV table; fall back to the physical block size.
 
@@ -92,13 +152,40 @@ class MRV2DraftSlidingWindow:
         max_num_reqs: int,
         future_offset: int,
         device: torch.device,
+        kv_block_sizes: Sequence[int] | None = None,
+        cp_size: int = 1,
+        cp_interleave: int = 1,
+        dcp_sharded: Sequence[bool] | None = None,
     ) -> None:
         if not block_sizes:
             raise ValueError("draft sliding window requires at least one KV cache group")
         self.block_sizes = tuple(int(size) for size in block_sizes)
+        if kv_block_sizes is None:
+            self.kv_block_sizes = self.block_sizes
+        else:
+            self.kv_block_sizes = tuple(_checked_block_sizes(kv_block_sizes, len(self.block_sizes)))
+        self.cp_size = int(cp_size)
+        self.cp_interleave = int(cp_interleave)
+        # cp_size 1 has no local columns. A missing flag matches BlockTables:
+        # every group is sharded once context parallelism is on.
+        if self.cp_size <= 1:
+            self.dcp_sharded = (False,) * len(self.block_sizes)
+        elif dcp_sharded is None:
+            self.dcp_sharded = (True,) * len(self.block_sizes)
+        else:
+            self.dcp_sharded = _bool_flags(dcp_sharded, len(self.block_sizes), "dcp_sharded")
+        if self.cp_size > 1 and self.cp_interleave <= 0:
+            raise RuntimeError(f"draft sliding window cp_interleave must be positive, got {self.cp_interleave}")
+        for kernel_block_size, kv_block_size, sharded in zip(self.block_sizes, self.kv_block_sizes, self.dcp_sharded):
+            if sharded and kv_block_size % kernel_block_size != 0:
+                raise RuntimeError(
+                    "draft sliding window sharded block size must be a multiple of the kernel block size, "
+                    f"got {kv_block_size} and {kernel_block_size}"
+                )
         # One seq_lens tensor is shared by every group, so the token crop has to be a
-        # multiple of every kernel block size. Each table then drops start_tokens / block_size
-        # columns: a 128-token offset is 2 columns of 64 and 1 column of 128.
+        # multiple of every kernel block size. A replicated table drops
+        # start_tokens / block_size columns. A sharded DCP table drops the
+        # rank-local column of that same token.
         self.align = math.lcm(*self.block_sizes)
         self.adapters = [
             SlidingWindowAdapter(
@@ -142,13 +229,45 @@ class MRV2DraftSlidingWindow:
         input_block_tables = getattr(block_tables, "input_block_tables", None)
         if input_block_tables is None or len(input_block_tables) == 0:
             return None
+        num_groups = len(input_block_tables)
+        kernel_block_sizes = _kernel_block_sizes(block_tables, num_groups)
+        cp_size, cp_interleave, dcp_sharded = _cp_layout(block_tables, num_groups)
         return cls(
             window_size,
-            _kernel_block_sizes(block_tables, len(input_block_tables)),
+            kernel_block_sizes,
             max_num_reqs,
             future_offset,
             device,
+            kv_block_sizes=_kv_block_sizes(block_tables, kernel_block_sizes),
+            cp_size=cp_size,
+            cp_interleave=cp_interleave,
+            dcp_sharded=dcp_sharded,
         )
+
+    def _group_columns(
+        self,
+        crop: torch.Tensor,
+        seq_lens: torch.Tensor,
+        group_index: int,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Return the local start column and column count for one sharded group.
+
+        Replicated groups return ``(None, None)`` and keep ``crop / kernel_block_size``.
+        """
+        if not self.dcp_sharded[group_index]:
+            return None, None
+        kv_block_size = self.kv_block_sizes[group_index]
+        kernel_block_size = self.block_sizes[group_index]
+        start_blocks = _sharded_block_column(
+            crop, kv_block_size, kernel_block_size, self.cp_size, self.cp_interleave
+        )
+        last_token = (seq_lens - 1).clamp(min=0)
+        end_blocks = _sharded_block_column(
+            last_token, kv_block_size, kernel_block_size, self.cp_size, self.cp_interleave
+        )
+        span = (end_blocks - start_blocks + 1).clamp(min=0)
+        needed_blocks = torch.where(seq_lens > 0, span, torch.zeros_like(span))
+        return start_blocks, needed_blocks
 
     def _subtract_crop(self, tensor: torch.Tensor, crop: torch.Tensor, num_reqs: int) -> None:
         """Subtract the block-table crop offset from a length tensor in-place."""
@@ -183,8 +302,9 @@ class MRV2DraftSlidingWindow:
 
         extras = [extra for extra in extra_seq_lens if extra is not None]
 
-        # One token crop for every group. Each table divides it by its own block size.
-        # Private clones are filled before any live table is replaced.
+        # One global token crop for every group. Private clones are filled
+        # before any live table is replaced. A replicated group divides that
+        # crop by its kernel block size. A sharded group uses the rank-local column.
         seq_lens = original_seq_lens[:num_reqs]
         crop = self.adapters[0].token_crop(seq_lens)
         windowed_seq_lens = seq_lens - crop
@@ -192,7 +312,14 @@ class MRV2DraftSlidingWindow:
             meta = SimpleNamespace(seq_lens=seq_lens, block_table_tensor=full_table)
             adapter = self.adapters[i]
             adapter.full_block_table = full_table
-            adapter.compute_sliding_window_block_table(meta, self._clones[i], start_tokens=crop)
+            start_blocks, needed_blocks = self._group_columns(crop, seq_lens, i)
+            adapter.compute_sliding_window_block_table(
+                meta,
+                self._clones[i],
+                start_tokens=crop,
+                start_block_indices=start_blocks,
+                needed_blocks=needed_blocks,
+            )
         for clone in self._clones:
             # Keep max_num_reqs rows so a padded graph batch can slice past num_reqs.
             # Rows from an earlier, larger batch must not survive.

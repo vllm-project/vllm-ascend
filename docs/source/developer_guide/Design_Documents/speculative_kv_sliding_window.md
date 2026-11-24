@@ -99,9 +99,11 @@ applies the same window math to the **builder inputs** around that call:
   restored
 - cropped per-group `block_tables.input_block_tables` clones. The token
   offset is computed once and rounded to the least common multiple of the
-  groups' kernel block sizes, so one `seq_lens` stays valid for every table;
-  each table then drops `offset / kernel_block_size` columns (a 128-token
-  offset is 2 columns of 64 and 1 column of 128). Live tables are replaced
+  groups' kernel block sizes, so one `seq_lens` stays valid for every table.
+  A replicated group drops `offset / kernel_block_size` columns (a 128-token
+  offset is 2 columns of 64 and 1 column of 128). A physically sharded DCP
+  group drops the rank-local column of that same token: under DCP2 a
+  256-token offset is 2 local columns of 64 and 1 of 128. Live tables are replaced
   after those private clones are filled, still with `max_num_reqs` rows so a
   padded full-graph batch can slice past the live request count
 - that same token offset applied to DSpark MLA `seq_lens_cpu` and to
