@@ -134,7 +134,7 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from multiprocessing.managers import BaseManager
@@ -890,44 +890,6 @@ def build_prefill_request(req_data: dict, api: str = "/chat/completions") -> dic
     return payload
 
 
-def native_request_recomputed(api: str, body: bytes, req_data: dict) -> bool:
-    """Inspect stop fields without rewriting the native response."""
-    streaming = req_data.get("stream", False)
-    payloads = [body]
-    if streaming:
-        frames = body.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n\n")
-        payloads = [
-            b"\n".join(line[5:].lstrip() for line in frame.splitlines() if line.startswith(b"data:"))
-            for frame in frames
-        ]
-    for payload in payloads:
-        try:
-            obj = json.loads(payload)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            if not streaming:
-                raise
-            continue
-        if not isinstance(obj, dict):
-            continue
-        result = obj.get("response", obj) if api == "/responses" else obj
-        if api == "/messages" and obj.get("type") == "message_delta":
-            result = obj.get("delta")
-        if not isinstance(result, dict):
-            continue
-        if result.get("stop_reason") == "recomputed":
-            return True
-        # Messages maps the scheduler marker to a stop sequence. Do not mistake
-        # an explicitly requested stop string for scheduler preemption.
-        if (
-            api == "/messages"
-            and result.get("stop_reason") == "stop_sequence"
-            and result.get("stop_sequence") == "recomputed"
-            and "recomputed" not in (req_data.get("stop_sequences") or [])
-        ):
-            return True
-    return False
-
-
 async def send_request_to_service(
     client: httpx.AsyncClient,
     endpoint: str,
@@ -989,15 +951,13 @@ async def stream_service_response(
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except httpx.RequestError as exc:
             if first_chunk_sent:
-                logger.error("Streaming to client interrupted after response started: %s", exc)
-                return
+                raise
             if attempt == max_attempts:
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except Exception as exc:
             if first_chunk_sent:
-                logger.error("Streaming to client interrupted after response started: %s", exc)
-                return
+                raise
             if attempt == max_attempts:
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
@@ -1117,61 +1077,19 @@ async def reassign_instances(
 async def _replay_first_chunk(first_chunk: bytes, gen: Any):
     """Replay a pre-read first chunk, then stream the rest of ``gen``.
 
-    ``handle_completions_impl`` pre-reads the first chunk of the decode stream
+    ``handle_request`` pre-reads the first chunk of the decode stream
     before committing the ASGI response head so an initial decode error can be
     returned with the real HTTP status; this replays that chunk so the client
     still receives the full stream.
     """
-    if first_chunk:
-        yield first_chunk
-    async for chunk in gen:
-        yield chunk
+    async with aclosing(gen):
+        if first_chunk:
+            yield first_chunk
+        async for chunk in gen:
+            yield chunk
 
 
-async def _handle_native_decode(api: str, req_data: dict, info: InstanceInfo) -> Response:
-    """Buffer each native attempt, retry recompute, and forward only its final body."""
-    runtime = get_runtime()
-    released_kv = False
-    max_attempts = max(1, get_global_args().max_retries)
-    if not req_data.get("stream"):
-        req_data.pop("stream_options", None)
-    try:
-        for attempt in range(max_attempts):
-            client = await runtime.get_client(ServerRole.DECODE, info.decoder_key)
-            body = bytearray()
-            async with client.stream("POST", api, json=req_data, headers=auth_headers(info.request_id)) as response:
-                if response.status_code >= 400:
-                    await response.aread()
-                    response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    if chunk and not released_kv:
-                        await runtime.schedule("release_prefill_kv", info.prefiller_key, info.prefiller_score)
-                        released_kv = True
-                    body += chunk
-            if not native_request_recomputed(api, bytes(body), req_data):
-                media_type = "text/event-stream" if req_data.get("stream") else "application/json"
-                return Response(bytes(body), media_type=media_type)
-            if attempt + 1 >= max_attempts:
-                break
-            req_data.pop("kv_transfer_params", None)
-            info = await reassign_instances(
-                api,
-                req_data,
-                len(json.dumps(req_data).encode("utf-8")),
-                info,
-                previous_prefiller_kv_released=released_kv,
-            )
-            released_kv = False
-        raise HTTPException(status_code=503, detail="Decode recompute retry limit reached.")
-    except (httpx.RequestError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-        logger.warning("Native decode failed for %s: %s", info.request_id, exc)
-        return JSONResponse({"error": {"message": "The decode backend did not complete the request."}}, status_code=502)
-    finally:
-        with CancelScope(shield=True):
-            await _finish_instance(runtime, info, release_prefill_kv=not released_kv)
-
-
-async def handle_completions_impl(api: str, request: Request):
+async def handle_request(api: str, request: Request):
     runtime = get_runtime()
     args = get_global_args()
     request_released = False
@@ -1207,14 +1125,14 @@ async def handle_completions_impl(api: str, request: Request):
         req_body = await request.body()
         request_length = len(req_body)
         instance_info = await assign_instances(api, req_data, request_length, is_initial_request=True)
-        if api in ("/messages", "/responses"):
-            request_released = True  # Native forwarding owns cleanup from this point.
-            return await _handle_native_decode(api, req_data, instance_info)
         stream_flag = bool(req_data.get("stream", False))
-        chat_flag = "messages" in req_data
+        chat_flag = api == "/chat/completions"
+        # Whole-request retries must not replay native events already sent.
+        buffer_response = api in ("/messages", "/responses")
+        transport_attempts = 1 if buffer_response else args.max_retries
 
-        if "prompt" in req_data:
-            origin_prompt = req_data["prompt"]
+        if api == "/completions":
+            origin_prompt = req_data.get("prompt", "")
         elif chat_flag:
             messages = req_data["messages"]
             origin_prompt = messages[0].get("content", "")
@@ -1225,7 +1143,7 @@ async def handle_completions_impl(api: str, request: Request):
         # Pre-open the decode response BEFORE committing the ASGI 200 head so an
         # initial decode 4xx/5xx/connection failure can be returned with the real
         # HTTP status code instead of an empty 200. On success the opened stream
-        # (first chunk already read) is handed to generate_stream via these vars.
+        # (first chunk already read) is handed to generate_response via these vars.
         preopened_gen = None
         preopened_first = b""
         decoder_client = await runtime.get_client(ServerRole.DECODE, instance_info.decoder_key)
@@ -1234,7 +1152,7 @@ async def handle_completions_impl(api: str, request: Request):
             api,
             req_data,
             request_id=instance_info.request_id,
-            max_retries=args.max_retries,
+            max_retries=transport_attempts,
             base_delay=args.retry_delay,
         )
         try:
@@ -1265,35 +1183,21 @@ async def handle_completions_impl(api: str, request: Request):
                 },
             )
 
-        async def generate_stream():
-            nonlocal instance_info
-            nonlocal request_released
-            nonlocal preopened_gen, preopened_first
+        async def generate_response():
+            # The four protocols share transport, retry, and cleanup. Only their
+            # response fields and the request to resume differ below.
+            nonlocal instance_info, request_released, preopened_gen
             generated_token = ""
-            released_kv = False
-            retry_count = 0
-            retry = True
             completion_tokens = 0
+            retry_count = 0
+            released_kv = False
             reported_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
-            frame_parser = SSEFrameParser()
-
-            async def release_prefill_kv_once() -> None:
-                nonlocal released_kv
-                if not released_kv:
-                    await runtime.schedule(
-                        "release_prefill_kv", instance_info.prefiller_key, instance_info.prefiller_score
-                    )
-                    released_kv = True
-
             try:
-                while retry:
+                while True:
                     retry = False
-                    # Each decoder attempt emits a self-contained stream, so the
-                    # frame buffer must be reset at every attempt boundary.
+                    body = bytearray()
                     frame_parser = SSEFrameParser()
                     if preopened_gen is not None:
-                        # First iteration: consume the decode stream pre-opened by the
-                        # caller so initial 4xx/5xx could be returned with the real status.
                         gen = _replay_first_chunk(preopened_first, preopened_gen)
                         preopened_gen = None
                     else:
@@ -1302,111 +1206,156 @@ async def handle_completions_impl(api: str, request: Request):
                             decoder_client,
                             api,
                             req_data,
-                            request_id=instance_info.request_id,
-                            max_retries=args.max_retries,
+                            instance_info.request_id,
+                            max_retries=transport_attempts,
                             base_delay=args.retry_delay,
                         )
-                    async for chunk in gen:
-                        if not released_kv and chunk:
-                            await release_prefill_kv_once()
-                        # The decode backend speaks SSE, but the network does
-                        # not respect frame boundaries: one frame can arrive
-                        # split across two chunks, and two frames can be
-                        # coalesced into one chunk. Reassemble frames before
-                        # decoding them, so no frame is dropped.
-                        frames = frame_parser.feed(chunk)
-                        if not frames:
-                            # No complete frame yet; forward the raw bytes so
-                            # the client still sees them, and wait for the
-                            # rest of the frame.
-                            if chunk:
-                                yield chunk
-                            continue
-                        for frame in frames:
-                            chunk_json = frame.payload
-                            is_sse = frame.is_sse
-                            choices = chunk_json.get("choices", [])
-                            # A frame is re-encoded only when the proxy has to
-                            # rewrite its payload (cached-token injection, or
-                            # the non-streaming reply). Otherwise the original
-                            # bytes are forwarded unchanged.
-                            out_chunk = chunk
-                            if not choices:
-                                if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
-                                    out_chunk = encode_response_chunk(chunk_json, is_sse)
-                                yield out_chunk
-                                continue
-                            if not stream_flag:
-                                out_chunk = encode_response_chunk(chunk_json, is_sse)
-
-                            choice = choices[0]
-                            delta = choice.get("delta") or {}
-                            message = choice.get("message") or {}
-                            content = delta.get("content") or message.get("content") or choice.get("text") or ""
-                            generated_token += content
-
-                            stop_reason = choice.get("stop_reason")
-                            usage = chunk_json.get("usage", {})
-                            completion_tokens = (
-                                (completion_tokens + 1)
-                                if stream_flag
-                                else (completion_tokens + usage.get("completion_tokens", 0))
-                            )
-                            if stop_reason == "recomputed":
-                                retry = True
-                                retry_count += 1
-                                if chat_flag:
-                                    messages[0]["content"] = (
-                                        origin_prompt
-                                        + ([{"type": "text", "text": generated_token}] if generated_token else [])
-                                        if isinstance(origin_prompt, list)
-                                        else (origin_prompt or "") + generated_token
+                    async with aclosing(gen):
+                        while True:
+                            chunk = await anext(gen, None)
+                            if chunk is not None:
+                                if chunk and not released_kv:
+                                    await runtime.schedule(
+                                        "release_prefill_kv", instance_info.prefiller_key, instance_info.prefiller_score
                                     )
-                                else:
-                                    req_data["prompt"] = origin_prompt + generated_token
-                                req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
-                                tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
-                                instance_info = await reassign_instances(
-                                    api,
-                                    req_data,
-                                    tmp_request_length,
-                                    instance_info,
-                                    previous_prefiller_kv_released=released_kv,
-                                )
-                                released_kv = False
+                                    released_kv = True
+                                if buffer_response:
+                                    body += chunk
+                                    continue
+                            elif not buffer_response:
                                 break
-                            if retry_count > 0 and not stream_flag:
-                                if chat_flag:
-                                    choice["message"]["content"] = generated_token
-                                else:
-                                    choice["text"] = generated_token
-                                out_chunk = encode_response_chunk(chunk_json, is_sse)
-                            yield out_chunk
-                        if retry:
-                            break
+                            if buffer_response:
+                                chunk = bytes(body)
+                                payloads = [chunk]
+                                if stream_flag:
+                                    raw_frames = chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n\n")
+                                    payloads = [
+                                        b"\n".join(
+                                            line[5:].lstrip()
+                                            for line in frame.splitlines()
+                                            if line.startswith(b"data:")
+                                        )
+                                        for frame in raw_frames
+                                    ]
+                                frames = []
+                                for payload in payloads:
+                                    try:
+                                        obj = json.loads(payload)
+                                    except (json.JSONDecodeError, UnicodeDecodeError):
+                                        if not stream_flag:
+                                            raise
+                                        continue
+                                    if isinstance(obj, dict):
+                                        frames.append((obj, stream_flag))
+                            else:
+                                frames = frame_parser.feed(chunk)
+                                if not frames:
+                                    if chunk:
+                                        yield chunk
+                                    continue
+                            for chunk_json, is_sse in frames:
+                                content = ""
+                                if api == "/chat/completions":
+                                    choice = next(iter(chunk_json.get("choices", [])), {})
+                                    content = (
+                                        (choice.get("delta") or {}).get("content")
+                                        or (choice.get("message") or {}).get("content")
+                                        or ""
+                                    )
+                                elif api == "/completions":
+                                    choice = next(iter(chunk_json.get("choices", [])), {})
+                                    content = choice.get("text") or ""
+                                elif api == "/messages":
+                                    choice = (
+                                        chunk_json.get("delta")
+                                        if chunk_json.get("type") == "message_delta"
+                                        else chunk_json
+                                    )
+                                elif api == "/responses":
+                                    choice = chunk_json.get("response", chunk_json)
+                                if not isinstance(choice, dict):
+                                    continue
+                                stop_reason = choice.get("stop_reason")
+                                if (
+                                    api == "/messages"
+                                    and stop_reason == "stop_sequence"
+                                    and choice.get("stop_sequence") == "recomputed"
+                                    and "recomputed" not in (req_data.get("stop_sequences") or [])
+                                ):
+                                    stop_reason = "recomputed"
+                                if not buffer_response:
+                                    out_chunk = chunk
+                                    if not choice:
+                                        if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
+                                            out_chunk = encode_response_chunk(chunk_json, is_sse)
+                                        yield out_chunk
+                                        continue
+                                    generated_token += content
+                                    completion_tokens += (
+                                        1
+                                        if stream_flag
+                                        else (chunk_json.get("usage") or {}).get("completion_tokens", 0)
+                                    )
+                                    if not stream_flag:
+                                        out_chunk = encode_response_chunk(chunk_json, is_sse)
+                                if stop_reason == "recomputed":
+                                    retry = True
+                                    break
+                                if not buffer_response:
+                                    if retry_count > 0 and not stream_flag:
+                                        if chat_flag:
+                                            choice["message"]["content"] = generated_token
+                                        else:
+                                            choice["text"] = generated_token
+                                        out_chunk = encode_response_chunk(chunk_json, is_sse)
+                                    yield out_chunk
+                            if buffer_response:
+                                if not retry:
+                                    yield chunk
+                                break
+                            if retry:
+                                break
+                    if not retry:
+                        break
+                    retry_count += 1
+                    if api == "/chat/completions":
+                        messages[0]["content"] = (
+                            origin_prompt + ([{"type": "text", "text": generated_token}] if generated_token else [])
+                            if isinstance(origin_prompt, list)
+                            else (origin_prompt or "") + generated_token
+                        )
+                        req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                    elif api == "/completions":
+                        req_data["prompt"] = origin_prompt + generated_token
+                        req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                    elif api in ("/messages", "/responses"):
+                        if retry_count >= max(1, args.max_retries):
+                            raise HTTPException(status_code=503, detail="Decode recompute retry limit reached.")
+                        req_data.pop("kv_transfer_params", None)
+                    instance_info = await reassign_instances(
+                        api,
+                        req_data,
+                        len(json.dumps(req_data).encode("utf-8")),
+                        instance_info,
+                        previous_prefiller_kv_released=released_kv,
+                    )
+                    released_kv = False
             except asyncio.CancelledError:
-                logger.warning(
-                    "Streaming from decoder %s:%s was cancelled; releasing request %s resources",
-                    instance_info.decoder_host,
-                    instance_info.decoder_port,
-                    instance_info.request_id,
-                )
                 raise
-            except Exception as exc:
-                logger.error(
-                    "Error during streaming from decoder %s:%s: %s while handling request %s; releasing prefiller KV",
-                    instance_info.decoder_host,
-                    instance_info.decoder_port,
-                    exc,
-                    instance_info.request_id,
-                )
+            except Exception:
+                if buffer_response:
+                    raise
+                logger.exception("Decode failed for request %s", instance_info.request_id)
             finally:
-                await _finish_instance(runtime, instance_info, release_prefill_kv=not released_kv)
-                released_kv = True
-                request_released = True
+                with CancelScope(shield=True):
+                    await _finish_instance(runtime, instance_info, release_prefill_kv=not released_kv)
+                    request_released = True
 
-        media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
-        return StreamingResponse(generate_stream(), media_type=media_type)
+        media_type = "text/event-stream" if stream_flag else "application/json"
+        if buffer_response:
+            async with aclosing(generate_response()) as output:
+                return Response(b"".join([chunk async for chunk in output]), media_type=media_type)
+        return StreamingResponse(generate_response(), media_type=media_type)
     except Exception as e:
         import traceback
 
@@ -1422,6 +1371,10 @@ async def handle_completions_impl(api: str, request: Request):
             except Exception:
                 err_body = {"error": {"message": e.response.text or "upstream error"}}
             return JSONResponse(err_body, status_code=e.response.status_code)
+        if isinstance(e, (httpx.RequestError, json.JSONDecodeError, UnicodeDecodeError)):
+            return JSONResponse(
+                {"error": {"message": "The decode backend did not complete the request."}}, status_code=502
+            )
         raise
 
 
@@ -1473,25 +1426,25 @@ def parse_server_addresses(instances: list[str]) -> list[tuple[str, int]]:
 @app.post("/v1/completions")
 @with_cancellation
 async def handle_completions(request: Request):
-    return await handle_completions_impl("/completions", request)
+    return await handle_request("/completions", request)
 
 
 @app.post("/v1/chat/completions")
 @with_cancellation
 async def handle_chat_completions(request: Request):
-    return await handle_completions_impl("/chat/completions", request)
+    return await handle_request("/chat/completions", request)
 
 
 @app.post("/v1/messages")
 @with_cancellation
 async def handle_anthropic_messages(request: Request):
-    return await handle_completions_impl("/messages", request)
+    return await handle_request("/messages", request)
 
 
 @app.post("/v1/responses")
 @with_cancellation
 async def handle_openai_responses(request: Request):
-    return await handle_completions_impl("/responses", request)
+    return await handle_request("/responses", request)
 
 
 async def handle_models_impl():

@@ -1,4 +1,4 @@
-"""Native proxy contracts, exercised through HTTP with mock P/D backends."""
+"""Proxy protocol contracts, exercised through HTTP with mock P/D backends."""
 
 import argparse
 import asyncio
@@ -68,6 +68,9 @@ def exchange(monkeypatch):
                 {"body": json.loads(request.content), "headers": request.headers, "path": request.url.path}
             )
             if role == "prefill":
+                if calls["decode"]:
+                    # Close the abandoned decode before starting another P/D attempt.
+                    assert scripts[len(calls["decode"]) - 1].is_closed
                 if prefill_error and len(calls[role]) == 2:
                     raise prefill_error
                 return httpx.Response(
@@ -99,6 +102,49 @@ def exchange(monkeypatch):
         return response, calls
 
     return lambda *args, **kwargs: asyncio.run(run(*args, **kwargs))
+
+
+@pytest.mark.parametrize("api", ["/chat/completions", "/completions", "/messages", "/responses"])
+def test_all_protocols_reassign_after_recompute(exchange, api):
+    payload = {"model": "m", "stream": True}
+    if api in ("/chat/completions", "/messages"):
+        payload.update(messages=[{"role": "user", "content": "hi"}], max_tokens=80)
+    elif api == "/completions":
+        payload.update(prompt="hi", max_tokens=80)
+    else:
+        payload.update(input="hi", max_output_tokens=80)
+
+    bodies = []
+    for text, stop_reason in [("part", "recomputed"), ("done", None)]:
+        result = {"stop_reason": stop_reason}
+        if api == "/chat/completions":
+            result["delta"] = {"content": text}
+        else:
+            result["text"] = text
+        if api in ("/chat/completions", "/completions"):
+            raw = json.dumps({"choices": [result], "usage": {"completion_tokens": 1}}).encode()
+            bodies.append(b"data: " + raw + b"\n\n")
+        else:
+            bodies.append(wire(api, result, True))
+
+    response, calls = exchange(api, payload, [httpx.Response(200, content=body) for body in bodies])
+    assert response.status_code == 200
+    assert b"recomputed" not in response.content
+    assert b"done" in response.content
+    assert len(calls["prefill"]) == len(calls["decode"]) == 2
+    first, second = [call["body"] for call in calls["decode"]]
+    assert first.pop("kv_transfer_params") == {"remote_block_ids": [1]}
+    assert second.pop("kv_transfer_params") == {"remote_block_ids": [2]}
+    assert first == payload
+    if api == "/chat/completions":
+        assert second == {**payload, "messages": [{"role": "user", "content": "hipart"}]}
+    elif api == "/completions":
+        assert second == {**payload, "prompt": "hipart"}
+    else:
+        assert second == payload
+        assert response.content == bodies[-1]
+    for role in calls.values():
+        assert all(call["path"] == "/v1" + api for call in role)
 
 
 @pytest.mark.parametrize("api", ["/messages", "/responses"])
