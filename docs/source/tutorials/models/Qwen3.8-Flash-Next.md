@@ -36,6 +36,14 @@ The examples use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`. Both PD r
 
 ## 4 Installation
 
+Qwen3.8-Flash-Next uses the `cann_ops_transformer` Python interface for standard GBSA Decode
+and Union GBSA Prefill. Install the CANN ops package for your device and activate the matching
+CANN environment. After installation, verify the import in the Python environment that runs the model.
+
+```bash
+python -c "from cann_ops_transformer.ops.attention.generic_block_sparse_attention import generic_block_sparse_attention"
+```
+
 ### 4.1 Docker Image Installation
 
 {% include "getting_started/installation/ascend_docker_runtime.inc.md" %}

@@ -50,15 +50,6 @@
         npu-smi info
         ```
 
-        Qwen3.8-Flash-Next uses the `cann_ops_transformer` Python interface for both
-        standard GBSA Decode and GBSA Union Prefill. Install the CANN ops package for
-        your device and activate the matching CANN environment. To verify that the
-        attention interface can be imported, run:
-
-        ```bash
-        python -c "from cann_ops_transformer.ops.attention.generic_block_sparse_attention import generic_block_sparse_attention"
-        ```
-
     #### Install vLLM and vLLM Ascend {: #installation-existing-cann-install }
 
 {% filter indent(4, true) %}{% include "getting_started/installation/install_vllm_ascend.inc.md" %}{% endfilter %}
