@@ -64,6 +64,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import MoECommType, select_moe_comm_method
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
@@ -1402,6 +1403,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 # ForwardContext, following the same pattern as Ascend DSA ops.
                 static_forward_context[self.decoder_replay_layer_name] = self.decoder_replay_layers
 
+            self._init_routing_input_ids_cache(vllm_config)
             rollback.pop_all()
 
     @property
@@ -1411,6 +1413,40 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             for layer_id in self.config.engram_layer_ids
             if not isinstance(self.layers[layer_id], PPMissingLayer)
         )
+
+    def _init_routing_input_ids_cache(self, vllm_config: VllmConfig) -> None:
+        parallel = vllm_config.parallel_config
+        if parallel.use_ubatching:
+            # Concurrent microbatches cannot share one routing-ID buffer.
+            return
+        max_tokens = max(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.compilation_config.max_cudagraph_capture_size or 0,
+        )
+        tp_size = parallel.tensor_parallel_size
+        max_padded_tokens = ((max_tokens + tp_size - 1) // tp_size) * tp_size
+        # If a policy can reach ALLGATHER, it still selects it as the token
+        # count increases. Check the largest supported padded batch.
+        if select_moe_comm_method(max_padded_tokens, vllm_config) != MoECommType.ALLGATHER:
+            return
+        max_rows = max_padded_tokens * parallel.data_parallel_size * parallel.prefill_context_parallel_size
+        # The decoder replay tail may compact tokens and change cross-DP row
+        # counts. Each segment therefore needs its own producer and storage.
+        for start, end in (
+            (self.start_layer, self.decoder_replay_start),
+            (self.decoder_replay_start, self.end_layer),
+        ):
+            buffer = None
+            for layer in self.layers[start:end]:
+                router = layer.mlp.experts.router
+                if router.tid2eid is None and router.bias_vl is None:
+                    continue
+                if buffer is None:
+                    # Reserve enough storage for either supported routing-ID dtype.
+                    buffer = torch.empty(max_rows, dtype=torch.int64, device=self.device)
+                    self.register_buffer(f"routing_input_ids_{start}", buffer, persistent=False)
+                    router.is_routing_input_ids_producer = True
+                router.routing_input_ids_buffer = buffer
 
     def _make_empty_intermediate_tensors(self, batch_size, dtype, device):
         # Profiling executes receiving stages before real PP activations exist.

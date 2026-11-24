@@ -14,6 +14,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -350,12 +351,15 @@ def test_a3_builder_normalizes_once_and_reuses_schedule_storage(monkeypatch, cau
         torch=torch,
         dataclass=dataclass,
         replace=replace,
+        Any=Any,
         FlashMLAImpl=type("UnusedA5", (), {}),
+        QuantFlashMLAImpl=type("UnusedQuant", (), {}),
         A3MLAAdapter=sink.A3MLAAdapter,
         get_dcp_local_seq_lens=lambda lengths, **kwargs: (lengths + 1) // 2,
     )
     ast_symbols("vllm_ascend/attention/flashmla.py", names, scope)
     impl = SimpleNamespace(
+        use_quant_flashmla=False,
         a3_mla_adapter=sink.A3MLAAdapter(sink.A3MLAConfig(8, 0.125), None, metadata_op),
         num_heads=8,
         scale=0.125,
@@ -468,7 +472,9 @@ def test_a3_callers_forward_the_matching_output_mask(monkeypatch, path):
             "_forward_external_flashmla",
             {"torch": torch, "record_attention_compute_start": lambda: None},
         )
-        impl = SimpleNamespace(kv_lora_rank=512, use_a3_mla_sink=True, _v_up_proj=lambda output: output)
+        impl = SimpleNamespace(
+            kv_lora_rank=512, use_a3_mla_sink=True, use_quant_flashmla=False, _v_up_proj=lambda output: output
+        )
         out = forward(impl, SimpleNamespace(ql_nope=q_nope, q_pe=q_pe), cache, SimpleNamespace(external_flashmla=flash))
         assert torch.all(out == 0)
     else:
@@ -486,7 +492,15 @@ def test_a3_callers_forward_the_matching_output_mask(monkeypatch, path):
             {"CPKVScope": kinds},
         )
         kind = kinds.CURRENT if path == "current" else kinds.HISTORY
-        out, lse = forward(SimpleNamespace(kv_lora_rank=512), flash, q_nope, q_pe, cache, None, attention_kind=kind)
+        out, lse = forward(
+            SimpleNamespace(kv_lora_rank=512, use_quant_flashmla=False),
+            flash,
+            q_nope,
+            q_pe,
+            cache,
+            None,
+            attention_kind=kind,
+        )
         assert torch.all(out == 1)
         assert torch.all(lse == 0)
 

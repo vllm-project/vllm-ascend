@@ -74,7 +74,7 @@ docker images | grep vllm-ascend
 
 ### 3. What models does vllm-ascend support?
 
-Find more details [<u>supported models</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html).
+Find more details on [<u>supported models</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html).
 
 ### 4. How to get in touch with our community?
 
@@ -87,7 +87,7 @@ There are many channels that you can communicate with our community developers /
 
 ### 5. What features does vllm-ascend V1 support?
 
-Find more details [<u>supported features</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html).
+Find more details on [<u>supported features</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html).
 
 ### 6. How to solve the problem of "Failed to infer device type" or "libatb.so: cannot open shared object file"?
 
