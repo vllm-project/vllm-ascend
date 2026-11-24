@@ -43,6 +43,7 @@ def embedding_runtime(monkeypatch):
     _stub(
         monkeypatch,
         f"{prefix}.npu",
+        SCALE_GROUP=32,
         HostUvaBuffer=Mock(),
         SharedUvaBuffer=Mock(),
         gather_dequantize_engram_int8=Mock(),

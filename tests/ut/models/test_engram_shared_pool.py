@@ -4,15 +4,18 @@
 import ast
 import importlib
 import importlib.util
+import json
 import socket
 import sys
 import threading
 import types
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 import torch
+from safetensors.torch import save_file
 
 
 @pytest.fixture
@@ -389,10 +392,13 @@ def test_owner_failure_releases_other_buffers_and_retries(pool_module, owner):
     assert owner.closed and failing.closed
 
 
-def test_model_construction_rolls_back_first_layer_when_second_attach_fails(pool_module, owner):
+@pytest.fixture
+def model_engram_init():
     path = Path(__file__).resolve().parents[3] / "vllm_ascend/models/deepseek_v41/model.py"
     model = next(
-        n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "DeepseekV41Model"
+        n
+        for n in ast.parse(path.read_text(encoding="utf-8")).body
+        if isinstance(n, ast.ClassDef) and n.name == "DeepseekV41Model"
     )
     init = next(n for n in model.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
     block = next(
@@ -403,7 +409,54 @@ def test_model_construction_rolls_back_first_layer_when_second_attach_fails(pool
         and isinstance(n.items[0].context_expr.func, ast.Name)
         and n.items[0].context_expr.func.id == "ExitStack"
     )
-    code = ast.fix_missing_locations(ast.Module(body=[block], type_ignores=[]))
+    tree = ast.fix_missing_locations(ast.Module(body=[block], type_ignores=[]))
+    return compile(tree, str(path), "exec")
+
+
+def test_model_preflights_all_local_layers_before_first_table(tmp_path, model_engram_init):
+    pytest.importorskip("vllm.models.deepseek_v41")
+    embedding = importlib.import_module("vllm_ascend.models.deepseek_v41.engram.embedding")
+
+    # This PP stage owns layers 9 and 14. The other stage's layer 2 has no local file.
+    tensors = {
+        "layers.9.engram.embed.weight": torch.empty(6, 256, dtype=torch.bfloat16),
+        "layers.14.engram.embed.weight": torch.empty(4, 256, dtype=torch.int8),
+        "layers.14.engram.embed.scale": torch.ones(4, 1),
+    }
+    save_file(tensors, tmp_path / "model.safetensors")
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": dict.fromkeys(tensors, "model.safetensors")})
+    )
+    construct_table = Mock(side_effect=AssertionError("Engram table constructed before preflight completed"))
+    ns = dict(
+        self=types.SimpleNamespace(
+            engram_layout=types.SimpleNamespace(primes=[[[2]], [[6]], [[4]]]),
+            engram_weight_root=tmp_path,
+            local_engram_layer_ids=(9, 14),
+            engram_dp_shared_memory=False,
+        ),
+        config=types.SimpleNamespace(engram_layer_ids=[2, 9, 14], engram_num_embeddings=[2, 6, 4], engram_head_dim=256),
+        vllm_config=types.SimpleNamespace(load_config=types.SimpleNamespace(load_format="auto"), quant_config=None),
+        ExitStack=ExitStack,
+        torch=torch,
+        shared_config=None,
+        shared_pool_endpoint=None,
+        shared_pool_identity=None,
+        remote_reader=None,
+        cpu_offload=True,
+        get_current_hardware_profile=lambda: types.SimpleNamespace(supports=lambda _: False),
+        HardwareCapability=types.SimpleNamespace(ENGRAM_MXFP8=object()),
+        EngramSharedInitError=RuntimeError,
+        AscendParallelEngramEmbedding=construct_table,
+        engram_storage_dtype=embedding.engram_storage_dtype,
+        preflight_engram_checkpoint=embedding.preflight_engram_checkpoint,
+    )
+    with pytest.raises(ValueError, match=r"layers\.14\.engram\.embed\.scale.*\(4, 8\).*\(4, 1\)"):
+        exec(model_engram_init, ns)
+    construct_table.assert_not_called()
+
+
+def test_model_construction_rolls_back_first_layer_when_second_attach_fails(pool_module, owner, model_engram_init):
     calls = []
 
     class Embedding:
@@ -449,27 +502,13 @@ def test_model_construction_rolls_back_first_layer_when_second_attach_fails(pool
         rollback_shared_engram=pool_module.rollback_shared_engram,
     )
     with pytest.raises(RuntimeError, match="second attach failed"):
-        exec(compile(code, str(path), "exec"), ns)
+        exec(model_engram_init, ns)
     assert calls == ["close first"]
     owner.close(timeout=1)
     assert owner.closed
 
 
-def test_merged_model_initializes_rotation_and_registers_replay():
-    path = Path(__file__).resolve().parents[3] / "vllm_ascend/models/deepseek_v41/model.py"
-    model = next(
-        n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "DeepseekV41Model"
-    )
-    init = next(n for n in model.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
-    block = next(
-        n
-        for n in init.body
-        if isinstance(n, ast.With)
-        and isinstance(n.items[0].context_expr, ast.Call)
-        and isinstance(n.items[0].context_expr.func, ast.Name)
-        and n.items[0].context_expr.func.id == "ExitStack"
-    )
-    tree = ast.fix_missing_locations(ast.Module(body=[block], type_ignores=[]))
+def test_merged_model_initializes_rotation_and_registers_replay(model_engram_init):
     swa = object()
     attn = types.SimpleNamespace(dsa_attn=types.SimpleNamespace(swa_cache_layer=swa))
     layer = types.SimpleNamespace(engram=types.SimpleNamespace(embed_tokens=None), self_attn=attn)
@@ -529,7 +568,7 @@ def test_merged_model_initializes_rotation_and_registers_replay():
         prefix="model",
         rollback_shared_engram=lambda fn: fn(),
     )
-    exec(compile(tree, str(path), "exec"), ns)
+    exec(model_engram_init, ns)
     torch.testing.assert_close(model_obj.engram_rotation, rotation)
     assert model_obj.engram_hash == "hash" and model_obj.decoder_replay_layers is replay
     assert context == {"model.decoder_replay": replay}

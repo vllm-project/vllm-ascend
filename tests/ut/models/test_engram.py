@@ -255,6 +255,7 @@ def test_loader_preserves_checkpoint_shards_across_dp_pcp_tp(tmp_path, monkeypat
         (tmp_path / "quant_model_weights.safetensors.index.json").write_text(
             json.dumps({"weight_map": {key: "quant.safetensors", scale_key: "quant.safetensors"}})
         )
+    embedding_mod.preflight_engram_checkpoint(tmp_path, [(1, 36)], 64)
     expected = codes if quantized else source
     storage: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor | None]] = {}
     writers, barriers = [], []
@@ -419,7 +420,7 @@ def test_loader_applies_mxfp8_checkpoint_scales(tmp_path):
     (tmp_path / "model.safetensors.index.json").write_text(
         json.dumps({"weight_map": {key: "model.safetensors", scale_key: "model.safetensors"}})
     )
-    embedding_mod.preflight_engram_checkpoint(tmp_path, [1])
+    embedding_mod.preflight_engram_checkpoint(tmp_path, [(1, 19)], 64)
     table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
     torch.nn.Module.__init__(table)
     table._shared_group = None
@@ -567,7 +568,7 @@ def test_native_mxfp8_preserves_shard_bits_and_lookup(tmp_path, monkeypatch):
         json.dumps({"weight_map": {key: "model.safetensors", scale_key: "model.safetensors"}})
     )
     assert embedding_mod.engram_storage_dtype(tmp_path, 1) == torch.float8_e4m3fn
-    embedding_mod.preflight_engram_checkpoint(tmp_path, [1])
+    embedding_mod.preflight_engram_checkpoint(tmp_path, [(1, 19)], 64)
     table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
     torch.nn.Module.__init__(table)
     table._shared_group = None
@@ -599,7 +600,59 @@ def test_native_mxfp8_requires_e8m0_scales_before_allocation(tmp_path):
         json.dumps({"weight_map": {key: "model.safetensors", scale_key: "model.safetensors"}})
     )
     with pytest.raises(ValueError, match="requires E8M0 scales"):
-        embedding_mod.preflight_engram_checkpoint(tmp_path, [1])
+        embedding_mod.preflight_engram_checkpoint(tmp_path, [(1, 8)], 64)
+
+
+@pytest.mark.parametrize(
+    "dtype,scale_dtype,bad_tensor,shape",
+    [
+        (torch.int8, torch.float32, "scale", (4, 1)),
+        (torch.float8_e4m3fn, torch.float8_e8m0fnu, "scale", (4, 1)),
+        (torch.int8, torch.float32, "scale", (4, 7)),
+        (torch.int8, torch.float32, "scale", (5, 8)),
+        (torch.int8, torch.float32, "scale", (4, 8, 1)),
+        (torch.int8, torch.float32, "weight", (4, 1)),
+        (torch.bfloat16, None, "weight", (3, 256)),
+    ],
+)
+def test_preflight_rejects_malformed_selected_checkpoint(tmp_path, dtype, scale_dtype, bad_tensor, shape):
+    prefix = "layers.1.engram.embed"
+    key, scale_key = f"{prefix}.weight", f"{prefix}.scale"
+    weight_shape = shape if bad_tensor == "weight" else (4, 256)
+    save_file({key: torch.empty(weight_shape, dtype=dtype)}, tmp_path / "codes.safetensors")
+    index = {key: "codes.safetensors"}
+    if scale_dtype is not None:
+        scale_shape = shape if bad_tensor == "scale" else (4, 8)
+        save_file({scale_key: torch.empty(scale_shape, dtype=scale_dtype)}, tmp_path / "scales.safetensors")
+        index[scale_key] = "scales.safetensors"
+    (tmp_path / "quant_model_weights.safetensors.index.json").write_text(json.dumps({"weight_map": index}))
+
+    # A valid table in the lower-priority index cannot mask the selected table's bad shape.
+    save_file({key: torch.zeros(4, 256, dtype=torch.bfloat16)}, tmp_path / "model.safetensors")
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {key: "model.safetensors"}}))
+    with pytest.raises(ValueError) as exc:
+        embedding_mod.preflight_engram_checkpoint(tmp_path, [(1, 4)], 256)
+    message = str(exc.value)
+    expected = (4, 256) if bad_tensor == "weight" else (4, 8)
+    assert "Engram layer 1" in message and f"{prefix}.{bad_tensor}" in message
+    assert f"expected shape {expected}" in message and f"got {shape}" in message
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.int8])
+def test_preflight_requires_complete_scale_groups_only_for_quantized_tables(tmp_path, dtype):
+    key, scale_key = "layers.1.engram.embed.weight", "layers.1.engram.embed.scale"
+    tensors = {key: torch.empty((4, 33), dtype=dtype)}
+    if dtype == torch.int8:
+        tensors[scale_key] = torch.ones(4, 1)
+    save_file(tensors, tmp_path / "model.safetensors")
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": dict.fromkeys(tensors, "model.safetensors")})
+    )
+    if dtype == torch.int8:
+        with pytest.raises(ValueError, match=r"layers\.1\.engram\.embed\.weight.*divisible by 32.*\(4, 33\)"):
+            embedding_mod.preflight_engram_checkpoint(tmp_path, [(1, 4)], 33)
+    else:
+        embedding_mod.preflight_engram_checkpoint(tmp_path, [(1, 4)], 33)
 
 
 @pytest.mark.parametrize("quantized", [False, True])

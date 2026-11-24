@@ -1306,18 +1306,21 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             if self.engram_layout is not None:
                 # Head buckets use TP x DP x PCP when sharded, or TP alone when host
                 # storage is shared across local DP x PCP replicas.
-                # Fail on an unreadable checkpoint before the first table exists:
-                # the allocation below is per-rank 24-51 GiB, and discovering a
-                # missing index/key during weight iteration would mean paying for
-                # it first.  `dummy` reads no checkpoint at all.
+                local_layer_ids = self.local_engram_layer_ids
+                local_layers = [
+                    (slot, layer_id, config.engram_num_embeddings[slot])
+                    for slot, layer_id in enumerate(config.engram_layer_ids)
+                    if layer_id in local_layer_ids
+                ]
+                # Check all local headers before the first 24-51 GiB per-rank allocation.
                 if vllm_config.load_config.load_format != "dummy":
                     preflight_engram_checkpoint(
-                        self.engram_weight_root, self.local_engram_layer_ids, AscendParallelEngramEmbedding
+                        self.engram_weight_root,
+                        ((layer_id, rows) for _, layer_id, rows in local_layers),
+                        config.engram_head_dim,
                     )
                 native_mxfp8 = get_current_hardware_profile().supports(HardwareCapability.ENGRAM_MXFP8)
-                for slot, (layer_id, rows) in enumerate(zip(config.engram_layer_ids, config.engram_num_embeddings)):
-                    if layer_id not in self.local_engram_layer_ids:
-                        continue
+                for slot, layer_id, rows in local_layers:
                     head_sizes = tuple(size for order in self.engram_layout.primes[slot] for size in order)
                     storage_dtype = torch.bfloat16 if vllm_config.quant_config is None else torch.int8
                     if vllm_config.load_config.load_format != "dummy":

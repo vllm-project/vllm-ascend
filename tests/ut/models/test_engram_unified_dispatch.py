@@ -95,7 +95,7 @@ def test_embedding_rejects_simultaneous_backends():
     tree = ast.fix_missing_locations(
         ast.Module(body=[ast.parse("from __future__ import annotations").body[0], init], type_ignores=[])
     )
-    ns: dict[str, Any] = {"torch": torch}
+    ns: dict[str, Any] = {"torch": torch, "SCALE_GROUP": 32}
     exec(compile(tree, str(ROOT / "engram/embedding.py"), "exec"), ns)
     with pytest.raises(ValueError, match="mutually exclusive"):
         ns["__init__"](

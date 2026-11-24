@@ -13,6 +13,7 @@ storage and lookup; upstream rank selection and hash gathering are reused:
 """
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -39,6 +40,7 @@ from .local_shared_vmm import (
     local_vmm_available,
 )
 from .npu import (
+    SCALE_GROUP,
     HostUvaBuffer,
     SharedUvaBuffer,
     gather_dequantize_engram_int8,
@@ -110,7 +112,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         dim: int,
         head_sizes: tuple[int, ...],
         layer_hash_index: int,
-        block_size: int = 32,
+        block_size: int = SCALE_GROUP,
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         storage_dtype: torch.dtype = torch.int8,
@@ -654,28 +656,32 @@ def engram_storage_dtype(root, layer_id: int) -> torch.dtype:
     raise ValueError(f"{key}: unsupported Engram checkpoint dtype {dtype}")
 
 
-def preflight_engram_checkpoint(root, layer_ids, embed_cls=AscendParallelEngramEmbedding) -> None:
-    """Check that this checkpoint can be served *before* any table is allocated.
+def _check_checkpoint_shape(layer_id: int, key: str, tensor, expected: tuple[int, int]) -> None:
+    actual = tuple(tensor.get_shape())
+    if actual != expected:
+        raise ValueError(f"Engram layer {layer_id}: {key!r} expected shape {expected}, got {actual}.")
 
-    The shard loader streams indexed safetensors, so a checkpoint without an
-    index (or with a missing Engram key, or an INT8 weight without its scale)
-    cannot be loaded here.  Finding that out during weight iteration would be
-    after every rank has already allocated and registered its table,
-    potentially the complete node table in row shared mode. Resolve the index
-    entries and read the safetensors headers first.  The loader
-    keeps its own check as the last line of defence.
-    """
+
+def preflight_engram_checkpoint(root, layer_rows: Iterable[tuple[int, int]], head_dim: int) -> None:
+    """Check the full tables in the safetensors headers before allocating this rank's shards."""
     root = Path(root)
-    for layer_id in layer_ids:
+    for layer_id, rows in layer_rows:
         key = f"layers.{layer_id}.engram.embed.weight"
-        index = embed_cls._checkpoint_index(root, key)
+        index = AscendParallelEngramEmbedding._checkpoint_index(root, key)
         shard = root / index[key]
         if not shard.is_file():
             raise ValueError(f"Engram layer {layer_id}: the checkpoint index points at {shard}, which does not exist.")
         with safe_open(shard, framework="pt", device="cpu") as file:
-            source_dtype = file.get_slice(key).get_dtype()
+            codes = file.get_slice(key)
+            _check_checkpoint_shape(layer_id, key, codes, (rows, head_dim))
+            source_dtype = codes.get_dtype()
         if source_dtype not in ("I8", "INT8", "F8_E4M3", "F8_E4M3FN"):
             continue
+        if head_dim % SCALE_GROUP:
+            raise ValueError(
+                f"Engram layer {layer_id}: {key!r} expected a width divisible by {SCALE_GROUP} "
+                f"for {source_dtype} codes, got shape {(rows, head_dim)}."
+            )
         scale_key = key.removesuffix(".weight") + ".scale"
         # The loader resolves scales from the weight's selected index too.
         if scale_key not in index:
@@ -693,6 +699,8 @@ def preflight_engram_checkpoint(root, layer_ids, embed_cls=AscendParallelEngramE
                 raise ValueError(
                     f"Engram layer {layer_id}: {scale_shard} does not contain the scale tensor {scale_key!r}."
                 )
-            scale_dtype = file.get_slice(scale_key).get_dtype()
+            scales = file.get_slice(scale_key)
+            _check_checkpoint_shape(layer_id, scale_key, scales, (rows, head_dim // SCALE_GROUP))
+            scale_dtype = scales.get_dtype()
             if source_dtype in ("F8_E4M3", "F8_E4M3FN") and scale_dtype != "F8_E8M0":
                 raise ValueError(f"Engram layer {layer_id}: MXFP8 table requires E8M0 scales, got {scale_dtype}.")

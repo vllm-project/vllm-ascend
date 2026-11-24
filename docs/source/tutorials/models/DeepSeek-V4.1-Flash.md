@@ -79,6 +79,11 @@ W4A8; W8A8 alternatives and their PD layouts are listed in the table.
 For A2/A3, you can also use [ModelSlim](https://github.com/Ascend/msmodelslim)
 to prepare a compatible W8A8 checkpoint from the official weights.
 
+At startup, the local loader checks each Engram table against the model configuration
+before allocating the tables. The weight shape must be `[engram_num_embeddings[slot], engram_head_dim]`,
+where `slot` is the layer's position in `engram_layer_ids`. INT8 and MXFP8 checkpoints
+require one scale per row for every 32 columns. BF16 checkpoints need only the weight.
+
 Download the selected checkpoint to the same absolute path on every server
 and make that directory available inside each container. Replace
 `<YOUR_MODEL_PATH>` in the subsequent `MODEL_PATH` assignments with this path.
