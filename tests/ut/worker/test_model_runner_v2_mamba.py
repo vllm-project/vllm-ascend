@@ -47,6 +47,11 @@ if not hasattr(_cp_utils, "prepare_dcp_local_seq_lens") and hasattr(_cp_utils, "
     )
 
 
+class _MetadataState(SimpleNamespace):
+    # Metadata-only doubles still use the real inherited entry check.
+    _check_finegrained_tp_idle_graph_step = AscendMambaHybridModelState._check_finegrained_tp_idle_graph_step
+
+
 class _FakeAttentionBackend:
     uses_descriptor_cache_view = False
 
@@ -396,7 +401,7 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(
 ):
     expected_metadata = {"gdn": object()}
     mock_build_attn_metadata.return_value = expected_metadata
-    state = SimpleNamespace(
+    state = _MetadataState(
         vllm_config=SimpleNamespace(
             num_speculative_tokens=num_spec,
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
@@ -463,7 +468,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(
     """vLLM #58400 requires prompt-tail drafts to use rollback-capable decode metadata."""
     drafts_missing = num_draft_tokens is None
     num_draft_tokens = num_draft_tokens or 0
-    state = SimpleNamespace(
+    state = _MetadataState(
         vllm_config=SimpleNamespace(
             num_speculative_tokens=3,
             speculative_config=SimpleNamespace(enable_adaptive_verification=adaptive),
@@ -519,7 +524,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(
 @pytest.mark.parametrize("is_target", [False, True])
 def test_kimi_pcp_metadata_respects_target_and_draft_groups(is_target):
     context = SimpleNamespace(global_batch=object(), global_block_tables=object(), global_slot_mappings=object())
-    state = SimpleNamespace(
+    state = _MetadataState(
         _uses_global_mamba_pcp=lambda: True,
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(
@@ -601,7 +606,7 @@ def test_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_capture, is
         global_block_tables=object(),
         global_slot_mappings=object(),
     )
-    state = SimpleNamespace(
+    state = _MetadataState(
         _uses_global_mamba_pcp=lambda: True,
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(
@@ -658,7 +663,7 @@ def test_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_capture, is
 def test_mamba_padding_is_independent_of_pcp_context(
     mock_build_attn_metadata, graph_mode, use_pcp_padding, has_pcp_context
 ):
-    state = SimpleNamespace(
+    state = _MetadataState(
         vllm_config=SimpleNamespace(num_speculative_tokens=0, parallel_config=SimpleNamespace()),
         max_model_len=1024,
     )
@@ -1421,7 +1426,7 @@ def test_init_model_state_uses_override_then_default():
 @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
 def test_prepare_attn_uses_promised_varlen_capture_bound(mock_build_attn_metadata):
     """A 16x1 dummy capture must allow a real 9-token verification query."""
-    state = SimpleNamespace(
+    state = _MetadataState(
         vllm_config=SimpleNamespace(num_speculative_tokens=8, parallel_config=SimpleNamespace()),
         max_model_len=32768,
     )

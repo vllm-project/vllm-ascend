@@ -13,6 +13,7 @@ from vllm.v1.request import RequestStatus
 from tests.ut.core.test_dyntra_lb_scheduler import create_dyntra_lb_scheduler, make_dyntra_test_config
 from tests.ut.core.test_score_encoder_cache_scheduler import _request as make_mm_request
 from tests.ut.kv_offload.utils import create_model_runner_output, create_request
+from vllm_ascend.ascend_config import FinegrainedTPConfig
 from vllm_ascend.core.dyntra_lb_scheduler import DyntraLBPolicyMixin
 from vllm_ascend.core.recompute_scheduler import (
     AsyncDyntraLBRecomputeScheduler,
@@ -28,9 +29,9 @@ from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
-def _oproj_tp_config(monkeypatch):
+def _finegrained_tp_config(monkeypatch):
     # _preempt_or_recompute reads the live AscendConfig singleton; default it to off.
-    finegrained_tp_config = SimpleNamespace(oproj_tensor_parallel_size=0, mlp_tensor_parallel_size=0)
+    finegrained_tp_config = FinegrainedTPConfig()
     monkeypatch.setattr(
         "vllm_ascend.core.recompute_scheduler.get_ascend_config",
         lambda: SimpleNamespace(finegrained_tp_config=finegrained_tp_config),
@@ -41,6 +42,7 @@ def _oproj_tp_config(monkeypatch):
 def _make_preempt_scheduler(*, connector=None):
     scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
     scheduler.connector = connector
+    scheduler.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=None))
     scheduler.kv_cache_manager = MagicMock()
     scheduler.kv_cache_manager.get_block_ids.return_value = ([3, 4],)
     scheduler._recomputed_reqs = []
@@ -157,11 +159,28 @@ def test_preempt_offload_failure_sends_request_back_to_p():
     scheduler.finish_requests.assert_called_once()
 
 
-def test_preempt_offload_failure_aborts_under_oproj_tp(_oproj_tp_config):
-    _oproj_tp_config.oproj_tensor_parallel_size = 2
+@pytest.mark.parametrize(
+    "size_field",
+    [
+        "oproj_tensor_parallel_size",
+        "mlp_tensor_parallel_size",
+        "shared_expert_tensor_parallel_size",
+        "qkv_iproj_tensor_parallel_size",
+        "gproj_tensor_parallel_size",
+    ],
+)
+@pytest.mark.parametrize("raises", [False, True])
+def test_preempt_offload_failure_aborts_with_graph_required(_finegrained_tp_config, size_field, raises):
+    setattr(_finegrained_tp_config, size_field, 2)
     connector = MagicMock()
+    # The hook returns False when capacity is insufficient.
     connector.update_state_before_preempt.return_value = False
+    if raises:
+        connector.update_state_before_preempt.side_effect = RuntimeError("offload failed")
     scheduler = _make_preempt_scheduler(connector=connector)
+    scheduler.vllm_config.model_config.hf_text_config = SimpleNamespace(
+        model_type="kimi_k31", linear_attn_config={"num_heads": 4}
+    )
     request = SimpleNamespace(
         request_id="req-1",
         client_index=0,

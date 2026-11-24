@@ -148,9 +148,7 @@ class RecomputeScheduler(Scheduler):
             except Exception:
                 offload_raised = True
                 logger.warning(
-                    "KV offload raised before decode-side preemption; sending "
-                    "the request back to P for recomputation: request_id=%s, "
-                    "num_computed_tokens=%d",
+                    "KV offload raised before decode-side preemption: request_id=%s, num_computed_tokens=%d",
                     request.request_id,
                     request.num_computed_tokens,
                     exc_info=True,
@@ -159,7 +157,7 @@ class RecomputeScheduler(Scheduler):
         if not offloaded:
             # Mirror the config gate: only a real split (size > 1) forbids the return to P.
             ftpc = get_ascend_config().finegrained_tp_config
-            if ftpc.oproj_tensor_parallel_size > 1 or ftpc.mlp_tensor_parallel_size > 1:
+            if ftpc.requires_graph(self.vllm_config):
                 logger.error(
                     "KV offload failed with fine-grained TP enabled; aborting the request instead "
                     "of returning it to P for recomputation: request_id=%s, "
