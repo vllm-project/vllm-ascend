@@ -55,27 +55,27 @@ def is_uva_available() -> bool:
     )
 
 
-def get_row_indices_from_key(key: int | slice | tuple, dim_size: int) -> set[int]:
-    """get the set of row indices involved in the given key."""
+def get_row_indices_from_key(key: int | slice | tuple, dim_size: int) -> range:
+    """Describe modified rows without materializing one Python object per row."""
     if isinstance(key, int):
         # parse index such as np[1]
         key = key if key >= 0 else dim_size + key
         # handle negative index
         if key < 0 or key >= dim_size:
             raise IndexError(f"row index {key} out of [0, {dim_size})")
-        return {key}
+        return range(key, key + 1)
     elif isinstance(key, slice):
         # parse slice such as np[1:3]
         start, stop, step = key.indices(dim_size)
-        return set(range(start, stop, step))
+        return range(start, stop, step)
     elif isinstance(key, tuple):
         # parse row slice such as np[1,:100]
         if len(key) == 0:
-            return set(range(dim_size))
+            return range(dim_size)
         return get_row_indices_from_key(key[0], dim_size)
     else:
         # for other types such as list/ndarray, we return all rows.
-        return set(range(dim_size))
+        return range(dim_size)
 
 
 class MonitoredNumPyArray:
@@ -87,10 +87,7 @@ class MonitoredNumPyArray:
 
     def __setitem__(self, key, value):
         self._array[key] = value
-        dim_size = self._array.shape[0]
-        row_indices = get_row_indices_from_key(key, dim_size)
-        for row in row_indices:
-            self._callback(row)
+        self._callback(key)
 
     def __getitem__(self, key):
         return self._array[key]
@@ -108,10 +105,7 @@ class MonitoredTorchTensor:
 
     def __setitem__(self, key, value):
         self._tensor[key] = value
-        dim_size = self._tensor.size(0)
-        row_indices = get_row_indices_from_key(key, dim_size)
-        for row in row_indices:
-            self._callback(row)
+        self._callback(key)
 
     def __getitem__(self, key):
         return self._tensor[key]
@@ -132,6 +126,7 @@ class UvaBufferWrapper:
         self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
         self._np: np.ndarray = self._cpu.numpy()
         self._modified_indices: set[int] = set()
+        self._modified_ranges: list[tuple[int, int]] = []
         requested_real_uva = is_uva_available()
         if requested_real_uva:
             import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
@@ -142,8 +137,17 @@ class UvaBufferWrapper:
             logger.warning_once("Pinned CPU memory is not mapped for NPU UVA; using the async H2D fallback")
         self._uva: torch.Tensor = view if view is not None else torch.zeros_like(self._cpu, device="npu")
 
-    def _mark_cpu_modified(self, key: int):
-        self._modified_indices.add(key)
+    def _mark_cpu_modified(self, key: int | slice | tuple):
+        rows = get_row_indices_from_key(key, self._cpu.shape[0])
+        if not rows:
+            return
+        if abs(rows.step) == 1:
+            # copy_to_uva writes dst[:n]. Track that as one interval, even
+            # for millions of rows, rather than n callbacks and set entries.
+            self._modified_ranges.append((min(rows[0], rows[-1]), max(rows[0], rows[-1]) + 1))
+        else:
+            # Only genuinely strided writes need individual row indices.
+            self._modified_indices.update(rows)
 
     @property
     def cpu(self):
@@ -154,7 +158,21 @@ class UvaBufferWrapper:
         return self._np if self._use_real_uva else MonitoredNumPyArray(self._np, self._mark_cpu_modified)
 
     def _sync_dirty_rows(self) -> None:
-        if not self._use_real_uva and self._modified_indices:
+        if self._use_real_uva:
+            return
+        if self._modified_ranges:
+            merged_ranges: list[tuple[int, int]] = []
+            for start, stop in sorted(self._modified_ranges):
+                if merged_ranges and start <= merged_ranges[-1][1]:
+                    merged_ranges[-1] = (merged_ranges[-1][0], max(stop, merged_ranges[-1][1]))
+                else:
+                    merged_ranges.append((start, stop))
+            for start, stop in merged_ranges:
+                # Slices preserve pinned storage. Do not merge across clean
+                # rows: their device values may be newer than the CPU mirror.
+                self._uva[start:stop].copy_(self._cpu[start:stop], non_blocking=True)
+            self._modified_ranges.clear()
+        if self._modified_indices:
             dirty_rows = sorted(self._modified_indices)
             n_dirty = len(dirty_rows)
             if dirty_rows[0] == 0 and dirty_rows[-1] == n_dirty - 1:

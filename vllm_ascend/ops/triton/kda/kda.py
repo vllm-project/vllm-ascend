@@ -266,10 +266,9 @@ def layer_norm_gated_fwd_kernel(
 
     # swish/sigmoid output gate
     if PACKED_GATE:
-        beta_width = H
-        gate_width = H * D
-        packed_row_width = beta_width + gate_width + gate_width
-        g_rows = (rows // H) * packed_row_width + (rows % H) * D
+        # Dense heads inside each token, with projection gaps between tokens.
+        # The view's pointer already includes the output-gate column offset.
+        g_rows = (rows // H) * G_ROW_STRIDE + (rows % H) * D
         g_offsets = g_rows[:, None] + o_d[None, :]
     elif STRIDED_GATE:
         g_offsets = rows[:, None] * G_ROW_STRIDE + o_d[None, :] * G_COL_STRIDE
@@ -461,12 +460,6 @@ def layer_norm_gated_fwd(
     return y, mean, rstd, residual_out if residual_out is not None else x
 
 
-def _packed_bfg_row_width(num_heads: int, head_dim: int) -> int:
-    # One beta value per head, followed by raw and output gate vectors.
-    gate_width = num_heads * head_dim
-    return num_heads + gate_width + gate_width
-
-
 def rms_norm_gated(
     x: torch.Tensor,
     g: torch.Tensor,
@@ -480,8 +473,8 @@ def rms_norm_gated(
     out: torch.Tensor | None = None,
 ):
     x_shape_og = x.shape
-    # K3 gates are views into the packed BFG projection. Flattening their
-    # token/head dimensions would materialize the projection gaps each layer.
+    # K3 gates can be views into either the BFG or the full QKVG projection.
+    # Read their token stride directly instead of flattening across row gaps.
     if (
         residual is None
         and not prenorm
@@ -493,11 +486,7 @@ def rms_norm_gated(
         and x.is_contiguous()
         and (
             g.is_contiguous()
-            or (
-                g.stride(-1) == 1
-                and g.stride(-2) == x.shape[-1]
-                and g.stride(-3) == _packed_bfg_row_width(x.shape[-2], x.shape[-1])
-            )
+            or (g.stride(-1) == 1 and g.stride(-2) == x.shape[-1] and g.stride(-3) >= x.shape[-2] * x.shape[-1])
         )
     ):
         if g.shape[-3:] != x.shape[-3:]:
@@ -536,7 +525,7 @@ def rms_norm_gated(
                 rstd=None,
                 eps=eps,
                 T=rows,
-                G_ROW_STRIDE=x.shape[-1],
+                G_ROW_STRIDE=g.stride(-3),
                 G_COL_STRIDE=1,
                 D=x.shape[-1],
                 H=x.shape[-2],

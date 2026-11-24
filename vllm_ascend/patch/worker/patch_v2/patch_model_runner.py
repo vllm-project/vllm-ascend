@@ -21,6 +21,7 @@ from vllm_ascend.ascend_forward_context import (
 )
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
+from vllm_ascend.worker.v2.async_utils import AscendAsyncOutput
 from vllm_ascend.worker.v2.moe_utils import (
     V2MoEPhaseMetadata,
     agree_v2_moe_batch,
@@ -328,3 +329,8 @@ upstream.copy_kv_cache_blocks_inplace = _copy_ascend_cache_blocks
 upstream.dispatch_cg_and_sync_dp = dispatch_cg_and_sync_dp
 
 upstream.GPUModelRunner.initialize_kv_cache = initialize_kv_cache
+
+# Replace the constructor used inside GPUModelRunner.sample_tokens, before it
+# submits output copies. All sampling, state updates and connector hooks remain
+# in the upstream implementation.
+upstream.AsyncOutput = AscendAsyncOutput

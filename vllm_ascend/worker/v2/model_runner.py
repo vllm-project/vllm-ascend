@@ -108,6 +108,7 @@ from vllm_ascend.utils import (
 from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
+from vllm_ascend.worker.v2.async_utils import NonFinalPrefillSamplerOutput
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
     skip_ring_state_update,
@@ -1092,6 +1093,32 @@ class NPUModelRunner(GPUModelRunner):
         return lmhead_tp_max_num_logits(self.max_num_reqs, self.decode_query_len)
 
     def sample(self, hidden_states, input_batch, grammar_output):
+        # Snapshot the phase before upstream sampling/postprocessing can update
+        # request state. A final prompt chunk must return its first token.
+        is_nonfinal_prefill = (
+            input_batch.num_reqs > 0
+            and input_batch.num_draft_tokens == 0
+            and np.all(input_batch.is_prefilling_np)
+            and np.all(
+                input_batch.num_computed_prefill_tokens_np + input_batch.num_scheduled_tokens
+                < input_batch.prefill_len_np
+            )
+        )
+        sampler_output, num_sampled, num_rejected = self._sample_with_lmhead_tp(
+            hidden_states, input_batch, grammar_output
+        )
+        if is_nonfinal_prefill:
+            sampler_output = NonFinalPrefillSamplerOutput(
+                sampled_token_ids=sampler_output.sampled_token_ids,
+                logprobs_tensors=sampler_output.logprobs_tensors,
+                num_nans=sampler_output.num_nans,
+                num_sampled=sampler_output.num_sampled,
+                num_rejected=sampler_output.num_rejected,
+                sampling_mask_tensors=sampler_output.sampling_mask_tensors,
+            )
+        return sampler_output, num_sampled, num_rejected
+
+    def _sample_with_lmhead_tp(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP: every rank must feed
         compute_logits the same row count — pad up to ``_lmhead_tp_max_num_logits()``
         and trim back; prompt_logprobs stays unsupported (same as V1)."""
