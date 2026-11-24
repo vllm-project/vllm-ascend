@@ -25,8 +25,6 @@ from vllm.model_executor.layers.activation import (
     SwigluStepAndMul,
 )
 
-from vllm_ascend.device.device_op import DeviceOperator
-
 
 class AscendQuickGELU(QuickGELU):
     def forward_oot(self, x: torch.tensor) -> torch.Tensor:
@@ -42,13 +40,11 @@ class AscendSiluAndMul(SiluAndMul):
 
 class AscendSiluAndMulWithClamp(SiluAndMulWithClamp):
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
-        # Dispatched through the device adaptor: A5 and 310P keep an eager fallback here.
-        out = DeviceOperator.clipped_swiglu(
-            x,
-            swiglu_limit=self.swiglu_limit,
-            swiglu_alpha=self.alpha,
-            swiglu_beta=self.beta,
-        )
+        d = x.shape[-1] // 2
+        gate = torch.clamp(x[..., :d], max=self.swiglu_limit)
+        up = torch.clamp(x[..., d:], min=-self.swiglu_limit, max=self.swiglu_limit)
+        x = torch.cat([gate, up], dim=-1)
+        out = torch_npu.npu_swiglu(x)
         return out
 
 

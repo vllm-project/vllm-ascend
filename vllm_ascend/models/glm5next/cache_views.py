@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pooled-cache physical views for GLM-Next on Model Runner V1."""
+"""Pooled-cache physical views for GLM-Next."""
 
 from collections.abc import Callable
 
@@ -24,10 +24,10 @@ def _row_major_strides(shape: tuple[int, ...]) -> list[int]:
     return strides
 
 
-def _view_kpool_tail_cache(
+def view_kpool_tail_cache(
     layer_name: str,
     kv_cache_spec: AscendIndexerKPoolTailSpec,
-    raw_cache: torch.Tensor,
+    raw_cache: torch.Tensor | tuple[torch.Tensor, ...],
     num_blocks: int,
 ) -> list[torch.Tensor]:
     if not isinstance(raw_cache, torch.Tensor):
@@ -44,13 +44,13 @@ def _view_kpool_tail_cache(
     return [
         torch.as_strided(
             typed_slot,
-            size=(num_blocks, 2, kv_cache_spec.block_size, kv_cache_spec.head_size),
-            stride=(page_el, kv_cache_spec.block_size * kv_cache_spec.head_size, kv_cache_spec.head_size, 1),
+            size=(num_blocks, kv_cache_spec.block_size, 2 * kv_cache_spec.head_size),
+            stride=(page_el, 2 * kv_cache_spec.head_size, 1),
         )
     ]
 
 
-def _view_compressed_indexer_cache(
+def view_compressed_indexer_cache(
     layer_name: str,
     kv_cache_spec: AscendMLAAttentionSpec,
     raw_cache: torch.Tensor | tuple[torch.Tensor, ...],
@@ -129,12 +129,12 @@ def view_glm5_next_cache(
     falls through to its generic reshape paths.
     """
     if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec):
-        return _view_kpool_tail_cache(layer_name, kv_cache_spec, raw_cache, num_blocks)
+        return view_kpool_tail_cache(layer_name, kv_cache_spec, raw_cache, num_blocks)
     if isinstance(kv_cache_spec, AscendMLAAttentionSpec) and getattr(
         kv_cache_spec, "indexes_kv_by_block_stride", False
     ):
         if get_kv_cache_compression_ratio(kv_cache_spec) > 1:
-            return _view_compressed_indexer_cache(layer_name, kv_cache_spec, raw_cache, attn_backend, kernel_block_size)
+            return view_compressed_indexer_cache(layer_name, kv_cache_spec, raw_cache, attn_backend, kernel_block_size)
         _k_dim, v_dim = get_kv_cache_dims(layer_name, kv_cache_spec)
         if v_dim == 0:
             return _view_nope_main_mla_cache(kv_cache_spec, raw_cache, attn_backend, kernel_block_size)

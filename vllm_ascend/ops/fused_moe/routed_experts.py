@@ -734,6 +734,11 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             enable_force_load_balance=enable_force_load_balance,
             input_ids=input_ids,
         )
+        capture_pair = getattr(self, "kimi_full_r3_capture_fn", None)
+        if capture_pair is not None:
+            if self.log2phy is not None or getattr(self, "mix_placement", False) or enable_force_load_balance:
+                raise RuntimeError("Kimi full R3 does not allow remapped/forced expert routing")
+            capture_pair(topk_ids, topk_weights)
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
         try:

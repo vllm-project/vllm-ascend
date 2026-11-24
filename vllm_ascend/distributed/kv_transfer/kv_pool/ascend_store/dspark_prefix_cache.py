@@ -20,6 +20,7 @@ from vllm_ascend.spec_decode.dspark_utils import get_dspark_aux_layer_ids
 
 _RPC_BLOCKS = 128
 _LEASE_TTL_MS = 5 * 60 * 1000
+_SSD_HIT_GVA = (1 << 64) - 1
 
 
 def _model_identity(model: Any) -> dict[str, Any]:
@@ -247,7 +248,7 @@ class DSparkPrefixCache:
                         key
                         for key, address in zip(missing, gvas)
                         if type(address) is int or isinstance(address, np.integer)
-                        if address > 0
+                        if 0 < address < _SSD_HIT_GVA
                     ]
                 if (
                     gvas is None
@@ -262,8 +263,10 @@ class DSparkPrefixCache:
                         raise RuntimeError("DSpark prefix allocation failed")
                     # Another DP writer owns these objects, possibly still WRITING.
                     # Joint prefix lookup will remain a miss until they are readable.
-                owned_indices = [index for index, address in zip(indices, gvas, strict=True) if address > 0]
-                owned_gvas = [address for address in gvas if address > 0]
+                owned_indices = [
+                    index for index, address in zip(indices, gvas, strict=True) if 0 < address < _SSD_HIT_GVA
+                ]
+                owned_gvas = [address for address in gvas if 0 < address < _SSD_HIT_GVA]
                 if not allocated:
                     continue
                 # WRITING objects need not expose readable metadata until publication.

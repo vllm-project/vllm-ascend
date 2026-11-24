@@ -574,11 +574,14 @@
 #       With PP batch queue, synchronous scheduling can schedule the next batch
 #       before the previous model output is consumed. Calling `post_step` in that
 #       window updates `request.spec_token_ids` from live request state that may
-#       already belong to the newer schedule step.
+#       already belong to the newer schedule step. A PD prefill node does not
+#       need CPU draft-token feedback, and fetching it can drain later PP batches.
 #    How：
 #       In PP + MTP + batch queue + sync scheduling, skip `post_step` after model
 #       execution and let scheduler output processing perform the spec token
-#       writeback from the corresponding `ModelRunnerOutput`.
+#       writeback from the corresponding `ModelRunnerOutput` in mixed deployment.
+#       Also skip the redundant draft-token RPC on V1 PD prefill nodes without
+#       enabling their sampled-token IPC path.
 #    Related PR (if no, explain why):
 #       Backport of local vLLM PP+MTP branch changes.
 #    Future Plan:
@@ -670,6 +673,31 @@
 #       Remove or narrow this patch if upstream exposes stable hooks for backend
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
+#
+# ** 18a. File: platform/patch_shm_broadcast.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.device_communicators.shm_broadcast.MessageQueue.enqueue`
+#   2. `vllm.distributed.device_communicators.shm_broadcast.MessageQueue.recv`
+#    Why:
+#       Out-of-band pickle buffers can alias live tensor/array memory. Reusing
+#       that memory after enqueue returns races asynchronous zero-copy ZMQ sends
+#       and can corrupt messages sent to remote readers or local overflow readers.
+#    How:
+#       Replace enqueue and copy buffers of at least 1 MiB into owned bytes before
+#       sending. Preserve upstream tensor reducers, wire format, shared-memory
+#       writes, timeouts, and reader notifications. Load through both platform
+#       and worker patches, including spawned EngineCore processes importing the
+#       existing patched run_engine_core entry point.
+#       On enqueue or ZMQ deserialization failures, log one bounded summary with
+#       the stage, object/exception type, frame count, total bytes, and up to eight
+#       frame sizes. Successful operations and polling/backpressure timeouts stay
+#       quiet. Preserve the original exception without logging payloads or another
+#       traceback; undecodable messages have an unknown object type.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/53217
+#    Future Plan:
+#       Remove the patch and both imports once the supported vLLM version includes
+#       the upstream out-of-band buffer copy fix and equivalent failure diagnostics.
 #
 # ** 19. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -775,59 +803,6 @@
 #    Future Plan:
 #       Remove this patch once upstream vLLM adds the terminal short-circuit
 #       to the outlines backend.
-#
-# ** 20a. File: platform/patch_swa_bounded_replay_legacy.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   Targets: CacheConfig, EngineArgs, Scheduler.schedule, KVCacheManager,
-#   NewRequestData, and SingleTypeKVCacheManager.cache_blocks.
-#    Why:
-#       vLLM 0.30 lacks the bounded-replay admission protocol required by
-#       the Ascend V4.1 worker. The release image and compiled operators must
-#       remain usable without replacing installed vLLM source files.
-#    How:
-#       Backport declared config/payload fields and the local-prefix rewind.
-#       Insert the minimal scheduling/allocation changes into the pinned
-#       methods, verifying each source anchor before compiling the replacement.
-#       SWA blocks remain private; cached groups adopt the full hit and replayed
-#       tokens consume compute budget without allocating duplicate slots.
-#       Register config and payload interfaces before parsing/serialization.
-#       Install scheduler/cache behavior only after config enables replay.
-#       Validate source anchors rather than matching a version string.
-#    Related upstream work: vLLM #56227.
-#    Future Plan:
-#       Remove after the release lane supplies the upstream replay protocol.
-#       Native replay implementations are detected and left unchanged.
-#       KV connectors are rejected while this backport only supports local hits.
-#
-# ** 20b. File: platform/patch_swa_bounded_replay.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.sched.output.CachedRequestData` (new field `replay_start`)
-#   2. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`
-#    Why:
-#       Sliding-window bounded replay (vLLM #56227) rebuilds the sliding-window KV
-#       of a prefix hit by recomputing the hit's last window, and tells the
-#       worker where that run begins through `NewRequestData.replay_start`.
-#       Upstream's V2 model runner folds resumed requests into that same
-#       new-request list, so one field covers them. The V1 runner resumes a
-#       preempted request through `CachedRequestData` instead, and a resumed
-#       request is exactly the one that can be rewound a second time --
-#       preemption clears the computed count, so readmission runs the prefix
-#       lookup again and re-sets the replay start. Without the field on that
-#       payload, the worker would not know to stop writing the replayed
-#       positions and would overwrite blocks still shared with every other
-#       request that hit the same prefix.
-#    How:
-#       Declare `replay_start` on the payload -- msgpack encodes only declared
-#       fields, so an attribute set after construction never crosses the process
-#       boundary -- and fill it from the resumed requests inside the single
-#       method upstream builds that payload in. The field list is redeclared at
-#       import time because msgspec caches it per type. Inert on a pin that
-#       predates the feature, which is probed rather than version-compared.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/56227
-#    Future Plan:
-#       Remove this patch once upstream carries the replay start on the V1
-#       resume path as well, i.e. once `CachedRequestData` declares the field.
 #
 # ** 21. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1174,6 +1149,35 @@
 #       patch Qwen3_5GatedDeltaNet._forward_core to use triton ops like `fused_recurrent_gated_delta_rule`.
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
+#   2. `vllm.model_executor.models.qwen3_5.Qwen3_5DecoderLayer.__init__` and
+#      `vllm.model_executor.models.qwen3_5.Qwen3_5DecoderLayer.forward`
+#    Why:
+#       Upstream gates sequence parallelism on `use_sequence_parallel_moe`, so
+#       dense Qwen3.5-family checkpoints (Qwen3.5/3.6/3.8-27B dense,
+#       model_type `qwen3_5_text`) cannot run sequence parallel at all. On
+#       Ascend the FlashComm switch (`additional_config.enable_flashcomm1`)
+#       also covers the dense family: hidden states and the residual stay
+#       sequence-sharded across the decoder stack, attention (full and GDN)
+#       gathers before / reduce-scatters after its sequence-parallel output
+#       projection, and the dense MLP gathers around its TP-sharded weights.
+#    How:
+#       `__init__`: after the upstream constructor, raise
+#       `use_attn_reduce_scatter_for_moe` for the dense family when dense SP
+#       is active (vllm_ascend.utils.enable_dense_sp resolves the FlashComm
+#       switch), and flip `o_proj` / GDN `out_proj` / dense `down_proj`
+#       to `reduce_results=False`. Reusing the upstream flag keeps
+#       Qwen3NextModel's entry chunk / exit all-gather and the MTP head's
+#       chunk / gather working unchanged.
+#       `forward`: replicate the upstream layout and, for dense MLPs, wrap
+#       gate_up/down with `sp_all_gather` / `sp_reduce_scatter` (MiniMax-M3 /
+#       DeepSeek-V4 pattern); MoE blocks keep the upstream
+#       `already_sequence_parallel=True` contract.
+#    Related PR (if no, explain why):
+#       No, upstream has no dense-model sequence-parallel switch.
+#    Future Plan:
+#       Contribute the dense-MLP gather/scatter layout upstream once vLLM
+#       grows a dense sequence-parallelism config; until then the patch is
+#       gated on the FlashComm switch and the `qwen3_5_text` model type.
 #
 # ** 15. File: worker/patch_qwen3_dflash.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1330,6 +1334,7 @@
 #       Native FP8 serving of zai-org/GLM-5.3-Flash on Ascend 950.
 #    Future Plan:
 #       Remove this patch when vLLM Triton ops dispatch to the Ascend backend.
+#
 # ** 22. File: worker/patch_v2/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`
@@ -1427,6 +1432,22 @@
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
 #
+# ** 27a. File: worker/patch_v2/patch_spec_pp.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. PPHandler sampled-token broadcast methods
+#    Why:
+#       Target-driven speculative decoding generates next-step draft tokens
+#       after target sampling. Non-last PP ranks need both results for the same
+#       delayed request-state update.
+#    How:
+#       Defer the target-token broadcast until drafting finishes, then carry
+#       accepted target tokens and next-step draft tokens in the same V2 PP
+#       queue slot.
+#    Related PR (if no, explain why):
+#       No, this enables the Ascend MRV2 implementation.
+#    Future Plan:
+#       Remove when vLLM natively transports draft tokens through PP.
+#
 # ** 28. File: worker/patch_v2/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.sample.logprob`, `vllm.v1.worker.gpu.sample.penalties.apply_penalties`,
@@ -1482,15 +1503,6 @@
 #       Remove the `_load_effective_token` patch after the new Q4
 #       Triton-Ascend release is available. Remove the marker-cache kernel
 #       patch when Triton-Ascend 3.6.0 is the minimum supported version.
-#   4. `vllm.v1.worker.gpu.sample.trace_replay.apply_trace_tokens`
-#    Why:
-#       Ascend rejects an empty Triton launch grid because it produces
-#       `coreDim=0`.
-#    How:
-#       Replace the outer caller with an equivalent implementation that returns
-#       before launching the unchanged upstream kernel when the batch is empty.
-#    Future Plan:
-#       Remove this patch when upstream guards empty launch grids.
 #
 #   4. `vllm.v1.worker.gpu.sample.output.SamplingMaskTensors.from_logits`
 #    Why:
@@ -1729,3 +1741,19 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+
+# ** File: platform/patch_shm_notify.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.device_communicators.shm_broadcast.SpinCondition.__init__`
+#   2. `vllm.distributed.device_communicators.shm_broadcast.SpinCondition.record_read`
+#    Why:
+#       Sustained SHM fast-path reads bypass notification polling. CONFLATE
+#       limits payloads but internal activate_read commands can accumulate.
+#    How:
+#       Backport upstream initialization and poll/recv behavior, servicing the
+#       notification socket every two seconds during successful reads.
+#       SHM and cancellation logic are unchanged.
+#    Related PR (if no, explain why):
+#       Merged upstream: https://github.com/vllm-project/vllm/pull/63165
+#    Future Plan:
+#       Remove once the supported vLLM version includes upstream PR #63165.

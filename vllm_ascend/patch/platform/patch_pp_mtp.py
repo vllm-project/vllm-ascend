@@ -96,12 +96,19 @@ def _patch_engine_core() -> None:
     @wraps(original_post_step)
     def _patched_post_step(self, model_executed: bool) -> None:
         scheduler = getattr(self, "scheduler", None)
+        vllm_config = getattr(scheduler, "vllm_config", None)
+        use_pp = getattr(scheduler, "use_pp", False)
         use_pp_mtp_runtime_patch = _use_pp_mtp_runtime_patch(
-            getattr(scheduler, "vllm_config", None),
-            getattr(scheduler, "use_pp", False),
+            vllm_config,
+            use_pp,
+        )
+        # Prefill nodes do not need CPU draft-token feedback. Avoid draining
+        # later PP batches through the synchronous draft-token RPC.
+        is_mrv1_pp_prefill = (
+            use_pp and not getattr(vllm_config, "use_v2_model_runner", False) and _is_pd_prefill_node(vllm_config)
         )
         if (
-            use_pp_mtp_runtime_patch
+            (use_pp_mtp_runtime_patch or is_mrv1_pp_prefill)
             and getattr(self, "batch_queue", None) is not None
             and not getattr(self, "async_scheduling", False)
             and getattr(self, "use_spec_decode", False)
@@ -226,12 +233,7 @@ def _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_outp
             request.spec_token_ids = []
             continue
 
-        next_spec_token_ids = spec_token_ids[req_index]
-        if scheduler.structured_output_manager.should_advance(request):
-            metadata = request.structured_output_request
-            assert metadata is not None and metadata.grammar is not None
-            next_spec_token_ids = metadata.grammar.validate_tokens(next_spec_token_ids)
-        request.spec_token_ids = next_spec_token_ids
+        request.spec_token_ids = scheduler.structured_output_manager.validate_tokens(request, spec_token_ids[req_index])
 
 
 def _patch_scheduler_update_from_output() -> None:

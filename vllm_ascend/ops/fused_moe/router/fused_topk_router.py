@@ -24,6 +24,9 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
+# WB-TOPK-SAVE-PATCH
+from vllm_ascend.ops.fused_moe.router import topk_save as _wb_topk_save
+
 
 DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID = 129257
 DEEPSEEK_V4_IMAGE_SENTINEL_COUNT = 5
@@ -138,6 +141,24 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         return True
 
     def _compute_routing(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+# WB-TOPK-SAVE-PATCH
+        out = self._compute_routing_impl(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            indices_type=indices_type,
+            input_ids=input_ids,
+        )
+        _wb_topk_save.accumulate(self, out[1])
+        return out
+
+    def _compute_routing_impl(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,

@@ -148,23 +148,34 @@ def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
             # but we fires all2all scenario first.
             # the result will be the same.
             # all2all scenario in vllm-ascend.
-            if _EXTRA_CTX.moe_comm_type == MoECommType.ALLTOALL:
-                gather_topk_ids_shape = (
-                    (token_num_per_dp, topk_ids.shape[1])
-                    if token_num_per_dp >= self.tp_size
-                    else (self.tp_size, topk_ids.shape[1])
-                )
-            # mc2 scenario in vllm-ascend
-            else:
-                gather_topk_ids_shape = (n * self.tp_size, topk_ids.shape[1])
-
+            # FIX(w00998236): SP ceil-div split can give different shard sizes
+            # across TP ranks (e.g. 13 vs 14 rows). The original code assumed
+            # uniform rows per rank and crashed in all_gather with a shape
+            # mismatch. Sync the max row count across the TP group, pad every
+            # rank's topk_ids to that count (pad value -1), then all_gather a
+            # uniform (n_max * tp_size, K) buffer. Downstream
+            # [:token_num_per_dp] slicing trims the trailing padding rows.
+            n_local = topk_ids.shape[0]
+            n_max_dev = torch.tensor([n_local], dtype=torch.int64,
+                                     device=topk_ids.device)
+            dist.all_reduce(n_max_dev, op=dist.ReduceOp.MAX,
+                            group=get_tp_group().device_group)
+            n_max = int(n_max_dev.item())
+            gather_topk_ids_shape = (n_max * self.tp_size, topk_ids.shape[1])
             gather_topk_ids = torch.empty(
                 gather_topk_ids_shape,
                 dtype=topk_ids.dtype,
                 device=topk_ids.device,
             )
             split_topk_ids = torch.tensor_split(gather_topk_ids, self.tp_size, dim=0)
-            dist.all_gather(list(split_topk_ids), topk_ids, get_tp_group().device_group)
+            if n_local < n_max:
+                pad = torch.full((n_max - n_local, topk_ids.shape[1]), -1,
+                                 dtype=topk_ids.dtype, device=topk_ids.device)
+                topk_ids_src = torch.cat([topk_ids, pad], dim=0)
+            else:
+                topk_ids_src = topk_ids
+            dist.all_gather(list(split_topk_ids), topk_ids_src,
+                            get_tp_group().device_group)
             topk_ids = gather_topk_ids
             start_loc = 0
             end_loc = token_num_per_dp

@@ -3,6 +3,7 @@
 """GLM-5.3-Flash KDA layer with separate convolutions and a bounded safe gate."""
 
 import torch
+import torch.distributed as dist
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -21,10 +22,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
-
-# FusedRMSNormGated is a CustomOp, so the Ascend implementation is picked up
-# through the OOT registration in `vllm_ascend.utils` rather than by import.
-from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.attention.utils import (
@@ -32,10 +29,12 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.models.glm5next.config import Glm5NextConfig
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
+from vllm_ascend.utils import get_potential_max_tokens, oproj_tp_enable
 
 
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -239,6 +238,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.g_b_proj",
         )
+        # Resolve FLA only when building the model, after device initialization.
+        from vllm_ascend.utils import register_ascend_fla_customop
+
+        register_ascend_fla_customop()
+        from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         self.o_proj = RowParallelLinear(
             projection_size,
@@ -316,7 +321,44 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
-        return self.o_proj(core_attn_out)[0]
+        return self._finalize_o_proj(core_attn_out)
+
+    def _finalize_o_proj(self, attn_output: torch.Tensor) -> torch.Tensor:
+        if not oproj_tp_enable():
+            return self.o_proj(attn_output)[0]
+        group = get_otp_group()
+        tp_size = group.world_size
+        chunk_size = self.o_proj.input_size_per_partition
+        num_tokens = attn_output.shape[0]
+        capacity = get_potential_max_tokens()
+        profile_tokens = 0
+        if num_tokens > capacity:
+            if get_forward_context().attn_metadata is not None:
+                raise ValueError(f"KDA OProj TP token count exceeds decode capacity: {num_tokens} > {capacity}.")
+            # Profiling keeps a full dummy batch, but still participates in OTP.
+            profile_tokens = num_tokens
+            attn_output = attn_output[:0]
+            num_tokens = 0
+        # DP ranks can replay different buckets; all four HCCL operands must stay fixed.
+        if not hasattr(self, "_oproj_send_buf"):
+            self._oproj_send_buf = attn_output.new_empty((tp_size, capacity, chunk_size))
+            self._oproj_recv_buf = torch.empty_like(self._oproj_send_buf)
+            self._oproj_reduce_buf = attn_output.new_empty((tp_size * capacity, self.o_proj.output_size))
+            self._oproj_output_buf = attn_output.new_empty((capacity, self.o_proj.output_size))
+        self._oproj_send_buf.zero_()
+        self._oproj_send_buf[:, :num_tokens].copy_(attn_output.reshape(num_tokens, tp_size, chunk_size).transpose(0, 1))
+        dist.all_to_all_single(self._oproj_recv_buf.view(-1), self._oproj_send_buf.view(-1), group=group.device_group)
+        bias = None if group.rank_in_group > 0 or self.o_proj.skip_bias_add else self.o_proj.bias
+        assert self.o_proj.quant_method is not None
+        self._oproj_reduce_buf.copy_(
+            self.o_proj.quant_method.apply(
+                self.o_proj, self._oproj_recv_buf.view(tp_size * capacity, chunk_size), bias=bias
+            )
+        )
+        dist.reduce_scatter_tensor(self._oproj_output_buf, self._oproj_reduce_buf, group=group.device_group)
+        if profile_tokens:
+            return self._oproj_output_buf.new_zeros((profile_tokens, self.o_proj.output_size))
+        return self._oproj_output_buf[:num_tokens]
 
     @eager_break_during_capture
     def _forward(

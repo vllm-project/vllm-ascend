@@ -35,9 +35,16 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     block_size_scales: list[list[int]]
     local_ip: str = ""
     handshake_port: int = 0
+    # Distinct from kernel blocks per scheduler page. None is legacy metadata.
+    indexer_replication_sizes: list[int] | None = None
 
     def __post_init__(self) -> None:
         num_layers = len(self.layer_names)
+        if self.indexer_replication_sizes is not None and (
+            len(self.indexer_replication_sizes) != num_layers
+            or any(size < 1 for size in self.indexer_replication_sizes)
+        ):
+            raise ValueError("Invalid per-layer indexer replication sizes.")
         per_layer_fields: tuple[tuple[str, Sequence[object]], ...] = (
             ("layer_block_sizes", self.layer_block_sizes),
             ("group_indices", self.group_indices),
@@ -105,6 +112,7 @@ class MooncakePPTransferMetadata:
     block_shapes: list[list[tuple[int, ...]]]
     block_size_scales: list[list[int]]
     metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata]
+    indexer_replication_sizes: list[int] | None = None
 
 
 @dataclass(frozen=True)

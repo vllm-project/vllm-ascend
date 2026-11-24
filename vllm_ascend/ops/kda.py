@@ -9,7 +9,6 @@ import torch
 # KDA operators from the flashserve/flash-linear-attention-npu ecosystem repository.
 # https://github.com/flashserve/flash-linear-attention-npu
 from fla_npu.ops.ascendc import chunk_kda_fwd, recurrent_kda
-from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
 KDA_CHUNK_SIZE = 64
 
@@ -74,8 +73,8 @@ def run_chunk_kda(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Consume preprocessed beta and return output plus the final VK state."""
     output, final_state, *_ = chunk_kda_fwd(
-        l2norm_fwd(q.contiguous()),
-        l2norm_fwd(k.contiguous()),
+        q.contiguous(),
+        k.contiguous(),
         v.contiguous(),
         raw_gate.contiguous(),
         beta.contiguous(),
@@ -89,6 +88,9 @@ def run_chunk_kda(
         safe_gate=lower_bound is not None,
         lower_bound=lower_bound if lower_bound is not None else -5.0,
         use_gate_in_kernel=True,
+        # Kernel-side normalization selects the validated three-stage prefill
+        # path and avoids the legacy fused path's short-prefill discrepancy.
+        use_qk_l2norm_in_kernel=True,
         A_log=a_log.reshape(-1).contiguous(),
         dt_bias=dt_bias.contiguous(),
         disable_recompute=False,

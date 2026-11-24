@@ -127,7 +127,9 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        cached_head_size = self.head_dim + 128 if self.dtype == torch.float8_e4m3fn else self.head_dim
+        # FP8 SWA cache row: quantMode=1 layout = 608 B/token (rope 128 +
+        # nope 448 + bf16 scale 14 + pad 18), i.e. head_dim + 96.
+        cached_head_size = self.head_dim + 96 if self.dtype == torch.float8_e4m3fn else self.head_dim
         return AscendSlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
@@ -1219,20 +1221,12 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                # Route the write through the parameter's loader. A live weight
-                # update runs inside vLLM's layerwise reload, which parks the
-                # layer on the meta device and buffers every load made through
-                # ``weight_loader`` so it can replay it onto the materialized
-                # layer. A direct ``param.data.copy_`` bypasses that buffer: it
-                # lands on the meta tensor (a no-op), so attention sinks would
-                # silently keep their dummy values after an update.
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 if enable_dsa_cp():
-                    weight_loader(param, loaded_weight)
+                    param.data.copy_(loaded_weight)
                 else:
                     # Handle attention sinks (distributed across ranks)
                     narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                    weight_loader(param, narrow_weight)
+                    param.data.copy_(narrow_weight)
                 loaded_params.add(name)
                 continue
 

@@ -52,6 +52,10 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             for connector in self._connectors
         )
 
+        self.requires_mamba_state_copy_after_load = any(
+            getattr(connector, "requires_mamba_state_copy_after_load", False) for connector in self._connectors
+        )
+
     def configure_dspark_prefix_cache(self, vllm_config: "VllmConfig") -> bool:
         """Select a store that restores both target and persistent draft KV."""
         providers = []
@@ -93,6 +97,11 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
     def _wait_for_external_slot_release(self, layer_idx: int) -> None:
         for provider in self._layerwise_slot_release_providers:
             provider.wait_for_layer_reuse(layer_idx)
+
+    def shutdown(self) -> None:
+        # Release provider waits before joining the store's receive threads.
+        self._connectors[:] = [*self._layerwise_slot_release_providers, *self._non_slot_release_connectors]
+        super().shutdown()
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         if getattr(self, "_external_slot_release_sink_configured", False):

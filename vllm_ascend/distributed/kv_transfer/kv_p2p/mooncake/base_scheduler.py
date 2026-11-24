@@ -184,6 +184,10 @@ class MooncakeBaseConnectorScheduler:
         if params is not None and params.get("do_remote_decode") and self.need_truncate:
             self._truncate_request_for_prefill(request)
 
+    def shutdown(self) -> None:
+        """Release scheduler-side resources when the engine shuts down."""
+        raise NotImplementedError
+
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         raise NotImplementedError
 

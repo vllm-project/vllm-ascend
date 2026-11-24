@@ -126,6 +126,7 @@ from vllm_ascend.worker.v2.pp_transport import (
 )
 
 _FP8_E4M3_MAX = 448.0
+_MAX_FUSED_QKNORM_ROPE_CACHE_INSERT_TOKENS = 262144
 
 
 def _resolve_layer_kv_cache_dtype(
@@ -479,12 +480,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.impl.forward(self, query, self.kv_cache, topk_idx, attn_output)
 
     def _can_fuse_sparse_prepare(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> bool:
-        # Direct cache stores benefit decode batches; retain the existing path
-        # for larger batches where per-token programs become more expensive.
-        max_fused_tokens = 512
+        # The kernel launches one program per token. A3 measurements keep it
+        # ahead of the separate prepare/cache chain through 256K-token prefill;
+        # retain the fallback beyond the validated range.
         return (
             HAS_TRITON
-            and hidden_states.shape[0] <= max_fused_tokens
+            and hidden_states.shape[0] <= _MAX_FUSED_QKNORM_ROPE_CACHE_INSERT_TOKENS
             and hidden_states.device.type == "npu"
             and hidden_states.dtype == torch.bfloat16
             and positions.ndim == 1

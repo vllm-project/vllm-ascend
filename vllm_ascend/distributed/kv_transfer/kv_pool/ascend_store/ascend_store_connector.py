@@ -43,6 +43,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
+    is_kv_save_role,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
@@ -56,6 +57,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
+
+
+_LOOKUP_SHUTDOWN_POLL_MS = 100
 
 
 class AscendStoreKVEvents(KVConnectorKVEvents):
@@ -114,22 +118,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.layerwise_data_plane = get_layerwise_data_plane(self.layerwise_protocol)
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
         validate_layerwise_topology(self.layerwise_protocol, vllm_config.parallel_config, self.use_layerwise)
-        self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "save_decode_cache", False
-        )
-        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
-        if (
-            self.kv_role == "kv_consumer"
-            and self.save_decode_cache
-            and not self.consumer_is_to_put
-            and self.use_layerwise
-        ):
-            raise ValueError(
-                "save_decode_cache on a kv_consumer does not support use_layerwise "
-                "unless consumer_is_to_put is enabled. "
-                "Decode-only saving is not implemented in the layerwise transfer path. "
-                "Set use_layerwise=False for Decode KV offload."
-            )
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
         if connector_name == "MooncakeConnectorStoreV1":
@@ -146,6 +134,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # align pre-copy is deferred behind this connector's layerwise loads.
         self._mamba_state: Any = None
         self.requires_mamba_state_copy_after_layer_load = self.use_layerwise
+        # Opt in only for synchronous bulk loads, not background retrieval.
+        self.requires_mamba_state_copy_after_load = not self.use_layerwise and not extra_config.get("load_async", False)
 
         self.connector_scheduler: KVPoolScheduler | None = None
         self.connector_worker: KVPoolWorker | None = None
@@ -164,6 +154,22 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             assert self.connector_worker is not None
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
+
+    def shutdown(self):
+        """Stop store users before closing the backend's native resources."""
+        try:
+            if self.connector_scheduler is not None:
+                client = self.connector_scheduler.client
+                try:
+                    if client is not None:
+                        client.close()
+                finally:
+                    self.connector_scheduler.store_scheduler.close()
+        finally:
+            if hasattr(self, "lookup_server"):
+                self.lookup_server.close()
+            if self.connector_worker is not None:
+                self.connector_worker.shutdown()
 
     def configure_dspark_prefix_cache(self, vllm_config: VllmConfig) -> bool:
         """Opt the SFA DSpark producer into joint external prefix reuse.
@@ -395,15 +401,15 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if not self.use_layerwise:
             return
 
-        if not self.can_put:
+        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
             # A load-only consumer does not publish KV.
             return
         assert self.connector_worker is not None
         self.connector_worker.save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):
-        if not self.can_put:
-            # A load-only consumer has no store thread to wait for.
+        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
+            # Don't do save if the role is kv_consumer
             return
 
         if self.use_layerwise:
@@ -476,9 +482,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             per_engine_labelvalues,
         )
 
-    def has_pending_push_work(self) -> bool:
-        return bool(self.connector_scheduler and self.connector_scheduler.has_pending_push_work())
-
 
 class LookupKeyServer:
     def __init__(
@@ -501,6 +504,10 @@ class LookupKeyServer:
 
         def process_request():
             while self.running:
+                if not self.socket.poll(timeout=_LOOKUP_SHUTDOWN_POLL_MS):
+                    continue
+                if not self.running:
+                    break
                 all_frames = self.socket.recv_multipart(copy=False)
                 token_len = int.from_bytes(all_frames[0], byteorder="big")
                 kv_group_ids = self.decoder.decode([all_frames[1]])
@@ -526,4 +533,7 @@ class LookupKeyServer:
         self.thread.start()
 
     def close(self):
+        self.running = False
+        self.thread.join()
         self.socket.close(linger=0)
+        self.ctx.term()

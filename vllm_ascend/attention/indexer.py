@@ -7,7 +7,7 @@ import torch
 import torch_npu
 from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_dcp_group, get_tp_group
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -45,6 +45,7 @@ from vllm_ascend.utils import (
     _round_up,
     enable_dsa_cp,
     enable_sfa_dcp_replicated_indexer,
+    enable_sfa_dcp_sharded_indexer,
     is_pd_decode_recompute_scheduler_enabled,
 )
 
@@ -89,6 +90,7 @@ class AscendSFAIndexerMetadata:
     # The selector receives ``(q_li, weights, indexer, metadata, q_li_scale)``;
     # ``q_li_scale`` is set only when LI C8 has already quantized ``q_li``.
     topk_selector: Any | None = None
+    local_visible_lengths: torch.Tensor | None = None
 
 
 class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
@@ -164,7 +166,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         return (num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
-    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+    def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
 
     # ---- model-side impl interface (per-layer instance) ----
@@ -186,7 +188,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 "Indexer backend requires the vLLM indexer module to expose "
                 "its k_cache (registered by the attention layer); got None."
             )
-        self.qk_rope_head_dim = qk_rope_head_dim
+        # Indexer RoPE is independent of the main MLA projection dimensions.
+        self.qk_rope_head_dim = getattr(getattr(vllm_indexer, "config", None), "index_rope_dim", qk_rope_head_dim)
         vllm_indexer.topk_indices_buffer = None  # delete topk_indices_buffer
 
         self.enable_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(self.k_cache.prefix)
@@ -207,7 +210,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         model_type = get_current_vllm_config().model_config.hf_config.model_type
         self.is_rope_neox_style = model_type not in ["glm_moe_dsa"]
-        self.use_torch_npu_lightning_indexer = model_type in ["glm_moe_dsa"]
+        self.use_torch_npu_lightning_indexer = model_type in ["glm_moe_dsa", "kimi_k31"]
 
         # Cache-write gathers for parallel layouts: PCP all-gathers every
         # non-replicated token across the CP group, DSA-CP all-gathers the
@@ -216,6 +219,17 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         self._pcp_active = parallel_config.prefill_context_parallel_size > 1
         self._is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(get_current_vllm_config())
         self._dsa_cp_active = enable_dsa_cp()
+        self._sharded_dcp = enable_sfa_dcp_sharded_indexer()
+        self._dcp_interleave = parallel_config.cp_kv_cache_interleave_size
+        if self._sharded_dcp:
+            from vllm_ascend.attention.context_parallel.sharded_indexer import MAX_EXACT_FLOAT32_INTEGER
+
+            if get_current_vllm_config().model_config.max_model_len > MAX_EXACT_FLOAT32_INTEGER:
+                raise ValueError("Sharded QLI's AiCore ID comparator supports at most 2**24 tokens.")
+            text_config = get_current_vllm_config().model_config.hf_text_config
+            expected_heads = getattr(text_config, "index_n_heads", getattr(text_config, "index_num_heads", self.n_head))
+            if self.n_head != expected_heads:
+                raise ValueError("Sharded QLI requires complete replicated indexer heads on every DCP rank.")
 
         # The LI C8 Hadamard matrices are created while the sleep-mode weights
         # mem-pool is active and are read by every forward, so they must survive
@@ -259,6 +273,18 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         x, scale = torch_npu.npu_dynamic_quant(x, dst_type=self.c8_k_cache_dtype)
         return x, scale.to(self.c8_k_scale_cache_dtype)
 
+    @staticmethod
+    def _write_cache_tensor(cache: torch.Tensor, updates: torch.Tensor, slots: torch.Tensor) -> None:
+        if cache.is_contiguous():
+            DeviceOperator.scatter_cache(cache.view(-1, *updates.shape[1:]), slots.view(-1, 1), updates)
+        else:
+            # A hybrid page contains K and scales, so flattening its component
+            # views would either fail or copy the write destination. Address the
+            # block/token axes explicitly to retain the original shared storage.
+            slots = slots.view(-1)
+            indices = torch.stack((slots // cache.shape[1], slots % cache.shape[1]), dim=-1)
+            DeviceOperator.scatter_cache(cache, indices, updates.view(-1, *cache.shape[2:]))
+
     def write_cache(
         self,
         k_li: torch.Tensor,
@@ -279,10 +305,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         if k_li.dtype == torch_npu.float4_e2m1fn_x2:
             indexer_k_cache = indexer_k_cache.view(torch.uint8)
             k_li = k_li.view(torch.uint8)
-        DeviceOperator.scatter_cache(
-            indexer_k_cache.view(-1, k_li.shape[-1]),
-            slot_mapping.view(-1, 1),
+        self._write_cache_tensor(
+            indexer_k_cache,
             k_li.view(-1, k_li.shape[-1]),
+            slot_mapping,
         )
         if self.enable_sparse_li_quant:
             assert k_li_scale is not None
@@ -293,10 +319,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             if indexer_scale_cache.dtype == torch.float8_e8m0fnu:
                 indexer_scale_cache = indexer_scale_cache.view(torch.uint8)
                 k_li_scale = k_li_scale.view(torch.uint8)
-            DeviceOperator.scatter_cache(
-                indexer_scale_cache.view(-1, *scale_per_token),
-                slot_mapping.view(-1, 1),
+            self._write_cache_tensor(
+                indexer_scale_cache,
                 k_li_scale.view(-1, *scale_per_token),
+                slot_mapping,
             )
 
     def forward_k(
@@ -323,13 +349,13 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k_li = self.k_norm(k_li).unsqueeze(1)
         k_li = k_li.view(-1, 1, self.head_dim)
 
-        if HAS_TRITON:
+        if self.qk_rope_head_dim and HAS_TRITON:
             cos = cos.view(-1, self.qk_rope_head_dim)
             sin = sin.view(-1, self.qk_rope_head_dim)
             k_li = rope_forward_triton_siso(
                 k_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
             )
-        else:
+        elif self.qk_rope_head_dim:
             k_li_pe, k_li_nope = torch.split(
                 k_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
             )
@@ -471,11 +497,11 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         else:
             q_li, _ = self.wq_b(q_c)
         q_li = q_li.view(-1, self.n_head, self.head_dim)
-        if HAS_TRITON:
+        if self.qk_rope_head_dim and HAS_TRITON:
             q_li = rope_forward_triton_siso(
                 q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
             )
-        else:
+        elif self.qk_rope_head_dim:
             q_li_pe, q_li_nope = torch.split(
                 q_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
             )
@@ -494,6 +520,25 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         topk_selector = getattr(indexer_metadata, "topk_selector", None)
         if topk_selector is not None:
             return topk_selector(q_li, weights, self, indexer_metadata, q_li_scale)
+        if self._sharded_dcp:
+            from vllm_ascend.attention.context_parallel.sharded_indexer import distributed_topk
+
+            if not self.enable_sparse_li_c8 or self.enable_sparse_li_c4:
+                raise NotImplementedError("Sharded Kimi indexer requires the native C8 QLI path.")
+            assert indexer_metadata.local_visible_lengths is not None
+            indices, scores = DeviceOperator.indexer_select_local_candidates(
+                q_li.view(*q_li_shape_ori),
+                weights,
+                self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
+                self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
+                indexer_metadata.block_table,
+                indexer_metadata.actual_seq_lengths_query,
+                indexer_metadata.actual_seq_lengths_key,
+                q_li_scale,
+                indexer_metadata.local_visible_lengths,
+                topk=self.topk_tokens,
+            )
+            return distributed_topk(indices, scores, get_dcp_group(), self.topk_tokens, self._dcp_interleave)
         return DeviceOperator.indexer_select_post_process(
             q_li,
             q_li_scale,
@@ -535,6 +580,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         # Match the logical block size selected for BlockTable.
         self.kernel_block_size = select_common_block_size(kv_cache_spec.block_size, [AscendSFAIndexerBackend])
+        self.use_rope = getattr(vllm_config.model_config.hf_text_config, "index_rope_dim", None) != 0
         scheduler_config = vllm_config.scheduler_config
         self.decode_threshold = 1
         self.speculative_config = vllm_config.speculative_config
@@ -554,6 +600,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         self._dsa_cp_seq_buffers: dict[object, tuple[torch.Tensor, torch.Tensor]] = {}
         self._dcp_block_table_buffers: dict[object, torch.Tensor] = {}
         self._dcp_slot_mapping_buffers: dict[object, torch.Tensor] = {}
+        self._sharded_seq_buffers: dict[object, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._sharded_request_buffers: dict[object, CpuGpuBuffer] = {}
         self._pcp_indexer_slot_mapping_buffers: dict[object, torch.Tensor] = {}
         self._lim_token_masks: dict[object, CpuGpuBuffer] = {}
         max_num_input_tokens = scheduler_config.max_num_batched_tokens
@@ -580,7 +628,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                     self.dsa_cp_seq_capacity,
                     max_num_reqs * (spec_tokens + 1) + 1,
                 )
-        self.use_dcp = enable_sfa_dcp_replicated_indexer(vllm_config)
+        self.use_sharded_dcp = enable_sfa_dcp_sharded_indexer(vllm_config)
+        self.use_dcp = enable_sfa_dcp_replicated_indexer(vllm_config) and not self.use_sharded_dcp
         if not self.use_dcp:
             return
 
@@ -1052,13 +1101,60 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
         block_size = self.kernel_block_size
 
-        cos, sin = get_cos_and_sin_mla(input_positions, use_cache=use_cached_rope)
+        cos, sin = get_cos_and_sin_mla(input_positions, use_cache=use_cached_rope, use_rope=self.use_rope)
         cos = cos[:num_input_tokens]
         sin = sin[:num_input_tokens]
         cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
         actual_seq_lengths_query = cum_query_lens
         actual_seq_lengths_key = seq_lens
+        local_visible = None
+        if self.use_sharded_dcp:
+            from vllm_ascend.attention.context_parallel.sharded_indexer import (
+                local_visible_lengths,
+                query_visible_lengths,
+            )
+
+            group = get_dcp_group()
+            interleave = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+            buffers = self._sharded_seq_buffers.get(buffer_key)
+            if buffers is None:
+                buffers = (
+                    torch.empty(
+                        self.vllm_config.scheduler_config.max_num_seqs + 1, dtype=torch.int32, device=self.device
+                    ),
+                    torch.empty((self._slot_capacity, 1), dtype=torch.int32, device=self.device),
+                )
+                self._sharded_seq_buffers[buffer_key] = buffers
+            key_buffer, visible_buffer = buffers
+            actual_seq_lengths_key = key_buffer[:num_reqs]
+            actual_seq_lengths_key.copy_(
+                local_visible_lengths(seq_lens, group.world_size, group.rank_in_group, interleave)
+            )
+            # Derive causal query positions from varlen metadata, including
+            # graph replay, where common.positions may be a dummy zero view.
+            rows = torch.arange(num_input_tokens, dtype=torch.int32, device=self.device)
+            requests_buffer = self._sharded_request_buffers.get(buffer_key)
+            if requests_buffer is None:
+                requests_buffer = CpuGpuBuffer(
+                    self._slot_capacity,
+                    dtype=torch.int32,
+                    device=self.device,
+                    pin_memory=is_pin_memory_available(),
+                )
+                self._sharded_request_buffers[buffer_key] = requests_buffer
+            ends = common_attn_metadata.query_start_loc_cpu[1 : num_reqs + 1].numpy()
+            requests_buffer.np[:num_input_tokens] = np.searchsorted(
+                ends, np.arange(num_input_tokens), side="right"
+            ).clip(max=num_reqs - 1)
+            requests = requests_buffer.copy_to_gpu(num_input_tokens)
+            visible = query_visible_lengths(seq_lens, cum_query_lens, rows, requests)
+            local_visible = visible_buffer[:num_input_tokens]
+            local_visible.copy_(
+                local_visible_lengths(visible, group.world_size, group.rank_in_group, interleave)
+                .to(torch.int32)
+                .view(-1, 1)
+            )
         if self.use_dsa_cp and not self.use_pcp:
             (
                 cos,
@@ -1101,4 +1197,5 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             actual_seq_lengths_query=actual_seq_lengths_query,
             actual_seq_lengths_key=actual_seq_lengths_key,
             num_decode_tokens=num_decode_tokens,
+            local_visible_lengths=local_visible,
         )

@@ -103,7 +103,7 @@ def _resolve_memfabric_transfer_protocol(vllm_config: VllmConfig) -> str | None:
     """Read the optional MemFabric data-path protocol.
 
     Read from ``kv_connector_extra_config["memfabric_transfer_protocol"]``:
-    ``sdma``/``device_rdma`` for A3 nodes, ``device_urma`` for A5 nodes.
+    ``sdma``/``device_rdma`` for A3 nodes, ``device_urma`` for 950PR&950DT Products.
     """
     extra = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
     return extra.get("memfabric_transfer_protocol")

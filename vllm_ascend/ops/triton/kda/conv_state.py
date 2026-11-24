@@ -51,7 +51,9 @@ def _copy_conv_state_kernel(
             values = tl.load(cache_row + cache_offsets, mask=active & in_range, other=0)
             tl.store(packed + packed_offsets, values, mask=in_range)
             if row_tile == 0:
-                tl.store(packed_indices + request, tl.where(active, request, -1))
+                # The final packed row is a dedicated non-negative null slot.
+                # AscendC UPDATE disables null-block filtering for -1.
+                tl.store(packed_indices + request, tl.where(active, request, REQUESTS))
 
 
 def copy_conv_state(
@@ -63,7 +65,7 @@ def copy_conv_state(
     *,
     write_back: bool,
 ) -> None:
-    """Pack active convolution states or restore them to the original cache view."""
+    """Pack/restore request rows; packed has one extra row for the null slot."""
     requests = cache_indices.shape[0]
     if requests == 0:
         return
