@@ -121,14 +121,25 @@ def resolve_cluster_ips(
     return get_cluster_ips(num_nodes)
 
 
-def get_available_port(start_port: int = 6000, end_port: int = 7000) -> int:
+def get_available_port(start_port: int = 6000, end_port: int = 7000, host: str = "127.0.0.1") -> int:
+    """Returns the first port in the range that is free on ``host``.
+
+    The probe must use the address the service will bind (the DP proxy is
+    started with --host <node ip>), not just loopback: a port free on
+    127.0.0.1 can already be held on the node's other addresses.
+
+    Parameters:
+    - start_port: First port of the scan range.
+    - end_port: Exclusive end of the scan range.
+    - host: Address to probe.
+
+    Returns:
+    - An available port number.
+    """
     for port in range(start_port, end_port):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
-                # Bind loopback only: this is an availability probe, not a
-                # service endpoint, so it must not claim ports on all
-                # interfaces.
-                s.bind(("127.0.0.1", port))
+                s.bind((host, port))
                 return port
             except OSError:
                 continue

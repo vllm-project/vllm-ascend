@@ -44,17 +44,23 @@ def disk_fallback_loader_extra_config(existing_extra: Any) -> dict[str, Any]:
     return kept
 
 
-def find_free_port():
+def find_free_port(host: str = "127.0.0.1"):
     """
-    Finds a free port on the local machine.
+    Finds a TCP port that is free on ``host``.
+
+    The probe must use the same address the caller will later bind: a port
+    that is free on loopback can already be held on the node's non-loopback
+    address (or vice versa), which would make the later bind fail.
+
+    Parameters:
+    - host: Address to probe. Defaults to loopback for callers that bind
+      127.0.0.1; pass the listener address (e.g. the driver IP) otherwise.
 
     Returns:
     - A free port number.
     """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        # Bind loopback only: this is an availability probe, not a service
-        # endpoint, so it must not claim ports on all interfaces.
-        s.bind(("127.0.0.1", 0))
+        s.bind((host, 0))
         return s.getsockname()[1]
 
 

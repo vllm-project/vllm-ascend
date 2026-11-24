@@ -15,6 +15,7 @@
 #
 
 import os
+import socket
 import tempfile
 from unittest.mock import patch
 
@@ -31,6 +32,14 @@ def test_find_free_port():
     port = find_free_port()
     assert isinstance(port, int)
     assert port > 0
+
+
+def test_find_free_port_probes_requested_host():
+    # The returned port must actually be bindable on the requested address,
+    # since the caller binds the same host afterwards.
+    port = find_free_port("127.0.0.1")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", port))
 
 
 def test_is_valid_path_prefix_empty():

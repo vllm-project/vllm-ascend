@@ -193,7 +193,9 @@ class MultiNodeConfig:
         master_ip = (
             self.disagg_cfg.master_ip_for_node(self.cur_index, self.nodes) if self.disagg_cfg else self.nodes[0].ip
         )
-        self.proxy_port = get_available_port()
+        # The proxy binds this node's IP (--host), so probe availability on
+        # the same address instead of loopback only.
+        self.proxy_port = get_available_port(host=self.cur_node.ip)
 
         self.envs = DistEnvBuilder(
             cur_node=self.cur_node,

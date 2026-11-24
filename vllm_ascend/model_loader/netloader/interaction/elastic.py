@@ -223,7 +223,12 @@ class ElasticClient:
         Returns:
         - A tuple containing the communication name and port.
         """
-        free_port = find_free_port()
+        if self.s is None:
+            raise RuntimeError("Socket was not created correctly.")
+        # Probe on this connection's own source address: the port is later
+        # bound there by the receiving side, and the server observes the
+        # same IP when it connects back.
+        free_port = find_free_port(self.s.getsockname()[0])
         data = {
             "label": "JOIN",
             "content": {
