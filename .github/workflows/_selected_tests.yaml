@@ -108,6 +108,16 @@ jobs:
       AWS_S3_FORCE_PATH_STYLE: "false"
       AWS_REGION: ap-southeast-1
       RUNS_ON_RUNNER_NAME: ""
+      # TEMPORARY (fork-only validation): the karc member reaches the internet
+      # through a squid proxy. Bypass it for GitHub/CI backends so the ARC hook
+      # workspace sync does not stall, force HTTP/1.1 for git, and pull wheels
+      # from the Huawei Cloud mirror instead of pypi.org.
+      NO_PROXY: "0.0.0.0,localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.buildkitd,.svc.cluster.local,.cluster.local,.actions.githubusercontent.com,.blob.core.windows.net,api.github.com,100.100.100.200,stats.vllm.ai,metadata.google.internal,169.254.169.254,github.com,.github.com,codeload.github.com"
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: "http.version"
+      GIT_CONFIG_VALUE_0: "HTTP/1.1"
+      PIP_INDEX_URL: https://mirrors.huaweicloud.com/repository/pypi/simple
+      UV_DEFAULT_INDEX: https://mirrors.huaweicloud.com/repository/pypi/simple
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
       env:
@@ -117,7 +127,11 @@ jobs:
         MAX_JOBS: 4
         UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://repo.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu/"
         UV_INDEX_STRATEGY: unsafe-best-match
-        UV_HTTP_TIMEOUT: 120
+        # karc over squid drags a single connection past 120s; widen the
+        # timeout, add retries and cap concurrency at 2.
+        UV_HTTP_TIMEOUT: 600
+        UV_HTTP_RETRIES: 5
+        UV_CONCURRENT_DOWNLOADS: 2
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
     steps:
