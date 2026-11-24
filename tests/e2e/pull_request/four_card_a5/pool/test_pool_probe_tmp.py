@@ -32,10 +32,16 @@ PROBE_ENVS = {
 META_LOG_TAIL_CHARS = 6000
 
 PROBE_SCRIPT = """
+import subprocess
+
 import torch
 import torch_npu
 from memcache_hybrid import DistributedObjectStore
 
+hal = "/usr/local/Ascend/driver/lib64/driver/libascend_hal.so"
+cmd = "nm -D " + hal + " | grep -i drvNotifyIdAddrOffset"
+nm = subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True)
+print(f"probe: hal_symbol rc={nm.returncode} out={nm.stdout.strip()!r} err={nm.stderr.strip()[-300:]!r}", flush=True)
 torch.npu.set_device(0)
 store = DistributedObjectStore()
 print("probe: init start", flush=True)
@@ -57,7 +63,7 @@ def _build_config() -> MemcacheKVPoolConfig:
                 "ock.mmc.meta_service.metrics_url": f"http://127.0.0.1:{metrics_port}",
             },
             "local": {
-                "ock.mmc.log_level": "info",
+                "ock.mmc.log_level": "debug",
                 "ock.mmc.local_service.world_size": 1,
                 "ock.mmc.local_service.protocol": "device_urma",
                 "ock.mmc.local_service.dram.size": PROBE_DRAM_SIZE,
@@ -90,7 +96,7 @@ def test_memcache_init_probe(round_index: int) -> None:
                 partial = exc.stdout or exc.stderr or ""
                 if isinstance(partial, bytes):
                     partial = partial.decode(errors="replace")
-                outcome = f"TIMEOUT stdout={partial.strip()!r}"
+                outcome = f"TIMEOUT stdout={partial.strip()[-4000:]!r}"
             elapsed = time.perf_counter() - started
             print(f"[pool_probe] case=init elapsed={elapsed:.1f}s {outcome}", flush=True)
             print(f"[pool_meta_log] path={pool.log_path} tail={_read_tail(pool.log_path)!r}", flush=True)
