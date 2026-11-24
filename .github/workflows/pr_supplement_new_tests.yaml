@@ -141,6 +141,9 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.base.ref }}
+          # This job holds the OBS credentials and never pushes; do not leave
+          # the GITHUB_TOKEN persisted in .git/config next to them.
+          persist-credentials: false
 
       - name: Setup Python
         uses: actions/setup-python@v7

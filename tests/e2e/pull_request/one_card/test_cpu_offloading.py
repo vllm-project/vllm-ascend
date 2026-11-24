@@ -176,9 +176,9 @@ def test_cpu_offloading(tmp_path, enable_tiering: bool) -> None:
     # on all interfaces: a loopback-only probe could hand back a port that
     # is already held on the node's other addresses, and the publisher bind
     # would fail later.
-    with zmq.Context() as probe_ctx, probe_ctx.socket(zmq.PUB) as probe:
+    with zmq.Context() as probe_ctx, probe_ctx.socket(zmq.PUB) as probe:  # type: ignore[attr-defined]
         probe.bind("tcp://*:0")
-        port = int(probe.getsockopt_string(zmq.LAST_ENDPOINT).rsplit(":", 1)[1])
+        port = int(probe.getsockopt_string(zmq.LAST_ENDPOINT).rsplit(":", 1)[1])  # type: ignore[attr-defined]
 
     events_endpoint = f"tcp://*:{port}"
     kv_events_config = KVEventsConfig(
