@@ -813,8 +813,8 @@ class AscendDSAV41Impl:
                 projector._forward_o_proj(o_proj_input, output)
             return output
         metadata = self._get_layer_metadata(forward_context.attn_metadata)
-        # Let future-layer KV loads overlap this layer's input preparation and attention.
         wait_for_kv_layer_from_connector(attn.v41_layer_name)
+        # Let future-layer KV loads overlap this layer's input preparation and attention.
         record_attention_compute_start()
         q, prepared_indexer = self._prepare_inputs_and_caches(
             attn, hidden_states, metadata, forward_context.attn_metadata
