@@ -50,6 +50,9 @@ from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
     draft_metadata_request_count,
     install_ascend_dflash_input_preparation,
 )
+from vllm_ascend.worker.v2.spec_decode.host_lengths import (
+    prepare_draft_host_lengths,
+)
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     build_dspark_draft_config,
@@ -302,16 +305,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         if getattr(self, "use_a3_mla_sink", False) or not needs_host_lengths:
             return None, is_prefilling
 
-        # FULL replay rebuilds metadata for the same prepared draft batch.
-        cache = self._proposal_host_lengths
-        shape = (num_reqs, num_reqs_padded)
-        if cache is not None and shape in cache:
-            return cache[shape], is_prefilling
-        seq_lens_cpu = torch.zeros(num_reqs_padded, dtype=torch.int32, device="cpu")
-        seq_lens_cpu[:num_reqs].copy_(self.input_buffers.seq_lens[:num_reqs])
-        if cache is not None:
-            cache[shape] = seq_lens_cpu
-        return seq_lens_cpu, is_prefilling
+        # FULL replay rebuilds metadata for the same prepared draft batch; the
+        # proposal-scoped cache in prepare_draft_host_lengths deduplicates it.
+        return prepare_draft_host_lengths(self, num_reqs, num_reqs_padded, step), is_prefilling
 
     # Graph capture builds metadata from the padded request shape.
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):

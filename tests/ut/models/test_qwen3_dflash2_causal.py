@@ -166,23 +166,3 @@ class TestResolveDraftLayerSlidingWindow:
         config = _config(dflash_config={"use_swa": True}, layer_types=_ALL_FULL)
         with pytest.raises(ValueError, match="requires a window size"):
             _resolve_draft_layer_sliding_window(config, 0)
-
-
-class TestGetDraftAttnSlidingWindow:
-    def _draft_model(self, config):
-        draft = DFlash2Qwen3ForCausalLM.__new__(DFlash2Qwen3ForCausalLM)
-        draft.config = config
-        draft.model = SimpleNamespace(layers=[object()] * _NUM_LAYERS)
-        return draft
-
-    def test_kimi_dflash2_checkpoint_publishes_window(self):
-        config = _config(
-            use_sliding_window=True,
-            sliding_window=1024,
-            max_window_layers=5,
-            layer_types=_ALL_SLIDING,
-        )
-        assert self._draft_model(config).get_draft_attn_sliding_window() == [1024] * _NUM_LAYERS
-
-    def test_legacy_checkpoint_publishes_none(self):
-        assert self._draft_model(_config()).get_draft_attn_sliding_window() == [None] * _NUM_LAYERS

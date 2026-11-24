@@ -26,11 +26,13 @@ import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_speculator_
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
+from vllm_ascend.worker.v2.spec_decode.host_lengths import prepare_draft_host_lengths, proposal_host_lengths
 
 
 def _spec(lengths, *, mla_draft=True):
     spec = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
-    spec._mla_draft = mla_draft
+    spec.attn_architecture = "MLA" if mla_draft else "GQA"
+    spec.use_flashmla = False
     spec.attn_backends = {"draft.0": AscendAttentionBackend}
     spec.input_buffers = SimpleNamespace(
         seq_lens=torch.tensor(lengths, dtype=torch.int32),
@@ -55,26 +57,29 @@ def _capture_factory(monkeypatch, supplied):
 
 
 class TestRejectionAdjustedHostLengths:
-    def test_zero_padded_host_copy(self, monkeypatch):
-        monkeypatch.setattr(
-            AscendDFlashSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config)
-        )
+    def test_zero_padded_host_copy(self):
         spec = _spec([1034, 1040, 7, 9])
-        host = spec._prepare_rejection_adjusted_host_lengths(2, 4)
+        host = prepare_draft_host_lengths(spec, 2, 4, 8)
         assert host.dtype == torch.int32
         assert host.device.type == "cpu"
         assert host.tolist() == [1034, 1040, 0, 0]
 
-    def test_host_lengths_refresh_after_rejection(self, monkeypatch):
-        monkeypatch.setattr(
-            AscendDFlashSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config)
-        )
+    def test_host_lengths_refresh_after_rejection(self):
         spec = _spec([1034, 1040, 7, 9])
-        first = spec._prepare_rejection_adjusted_host_lengths(2, 4)
+        first = prepare_draft_host_lengths(spec, 2, 4, 8)
         spec.input_buffers.seq_lens[:2].copy_(torch.tensor([1035, 1047], dtype=torch.int32))
-        second = spec._prepare_rejection_adjusted_host_lengths(2, 4)
+        second = prepare_draft_host_lengths(spec, 2, 4, 8)
         assert first.tolist() == [1034, 1040, 0, 0]
         assert second.tolist() == [1035, 1047, 0, 0]
+
+    def test_proposal_scope_caches_same_shape(self):
+        spec = _spec([1034, 1040, 7, 9])
+        with proposal_host_lengths(spec, 2):
+            first = prepare_draft_host_lengths(spec, 2, 4, 8)
+            second = prepare_draft_host_lengths(spec, 2, 4, 8)
+            assert first is second
+        third = prepare_draft_host_lengths(spec, 2, 4, 8)
+        assert third is not first
 
 
 class TestBuildDraftAttnMetadatasFactory:

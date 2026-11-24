@@ -581,9 +581,6 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
     def get_draft_attn_causal(self) -> list[bool]:
         return [_resolve_draft_layer_causal(self.config, i) for i in range(len(self.model.layers))]
 
-    def get_draft_attn_sliding_window(self) -> list[int | None]:
-        return [_resolve_draft_layer_sliding_window(self.config, i) for i in range(len(self.model.layers))]
-
     def post_process(self, vllm_config: VllmConfig) -> None:
         if get_rotation_path(vllm_config) is None:
             return

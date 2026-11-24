@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Mapping
-from contextlib import contextmanager, nullcontext
+from collections.abc import Mapping
+from contextlib import nullcontext
 from typing import Any, cast
 
 import numpy as np
@@ -19,24 +19,21 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 from vllm_ascend.ascend_config import draft_config_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
+from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory, build_attn_metadata_wrapper
+from vllm_ascend.worker.v2.spec_decode.host_lengths import (
+    detect_draft_attn_architecture,
+    draft_metadata_request_count,
+    prepare_draft_host_lengths,
+    proposal_host_lengths,
+)
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_draft_profile_inputs
 
 
-# TODO: Remove this helper and build_draft_attn_metadatas once tiling
-# eliminates replay-time metadata rebuilding. The rebuild currently needs
-# this count because it cannot access the effective num_reqs from upstream propose().
-@contextmanager
-def draft_metadata_request_count(speculator: Any, num_reqs: int):
-    previous = getattr(speculator, "_draft_metadata_num_reqs", None)
-    speculator._draft_metadata_num_reqs = num_reqs
-    try:
-        yield
-    finally:
-        speculator._draft_metadata_num_reqs = previous
 
 
 def install_ascend_dflash_input_preparation() -> None:
@@ -96,109 +93,61 @@ def _prepare_dflash_inputs_with_block_stride(
     )
 
 
-def validate_grouped_draft_attn(
-    model: Any,
-    kv_cache_config: Any,
-    *,
-    decode_context_parallel_size: int = 1,
-    mla_draft: bool = False,
-) -> None:
-    """Reject draft layers with mismatched attention modes in one KV cache group.
+def validate_grouped_draft_attn(model: Any, kv_cache_config: Any, attn_layers: Mapping[str, Any]) -> None:
+    """Reject draft layer modes the per-group metadata cannot express.
 
     The pinned upstream DFlash speculator stores draft causality per KV cache
     group (``_group_causal``), so the last layer's flag wins for the whole
-    group. DFlash2 MLA draft layers publish identical KV cache specs and land
-    in a single group even when the checkpoint mixes causal modes (e.g.
-    sliding/full/sliding ``layer_types``); a full-attention layer that loses
-    its non-causal mask then attends to later positions in its draft block.
-    Mixed causality needs the modes split into separate KV cache groups,
-    which Ascend MLA drafts do not publish yet; fail fast instead of silently
-    corrupting draft attention. The same per-group collapse applies to
-    sliding-window drafts: layers that publish different sliding windows
-    (or mix windowed and full attention) in one group would keep only
-    the last layer's window in the shared metadata, so they are rejected
-    as well. Models without the per-layer hooks keep the upstream
+    group; fail fast on mixed causality instead of silently corrupting draft
+    attention. Windowed MLA layers must be causal (the FIA pre_tokens band
+    is applied only in the causal decode branch) and must not use
+    ``AscendMlaDCPImpl``, which passes no band to FIA; it is the same
+    restriction upstream vLLM #68214 encodes by refusing DCP for windowed
+    DFlash2 drafts. Models without the per-layer hooks keep the upstream
     per-group fallback unchanged.
-
-    Decode context parallelism (DCP) selects ``AscendMlaDCPImpl`` for
-    every MLA attention group, and that decode path applies no
-    ``pre_tokens`` band (``sparse_mode=0`` with only the causal spec
-    mask), so a windowed MLA draft would silently attend the full
-    DCP-local KV and corrupt draft attention. The non-DCP FIA decode
-    path applies the ``sparse_mode=4`` window band only in the causal
-    branch, so a non-causal windowed MLA draft would equally lose the
-    window there. Both combinations are refused at startup; it is the
-    same restriction upstream vLLM #68214 encodes by refusing DCP for
-    windowed DFlash2 drafts.
     """
     get_layer_names = getattr(model, "get_draft_kv_cache_layer_names", None)
     get_causal = getattr(model, "get_draft_attn_causal", None)
     if get_layer_names is None or get_causal is None:
         return
-    layer_names = get_layer_names()
-    causal_modes = get_causal()
     name_to_gid = {
         layer_name: gid for gid, group in enumerate(kv_cache_config.kv_cache_groups) for layer_name in group.layer_names
     }
     causal_by_gid: dict[int, bool] = {}
-    for layer_name, causal in zip(layer_names, causal_modes):
+    for layer_name, causal in zip(get_layer_names(), get_causal()):
         gid = name_to_gid.get(layer_name)
-        if gid is None:
-            continue
-        causal = bool(causal)
-        if gid in causal_by_gid and causal_by_gid[gid] != causal:
-            raise ValueError(
-                "DFlash draft layers with mixed attention causality share one "
-                f"KV cache group (group {gid}); the per-group causal flag "
-                "would keep only the last layer's mode and corrupt draft "
-                "attention. Split the causal modes into separate KV cache "
-                "groups or use a checkpoint with homogeneous draft causality."
-            )
-        causal_by_gid[gid] = causal
-
-    get_windows = getattr(model, "get_draft_attn_sliding_window", None)
-    if get_windows is None:
-        return
-    window_by_gid: dict[int, int | None] = {}
-    for layer_name, window in zip(layer_names, get_windows()):
-        gid = name_to_gid.get(layer_name)
-        if gid is None:
-            continue
-        if gid in window_by_gid and window_by_gid[gid] != window:
-            raise ValueError(
-                "DFlash draft layers with mismatched sliding windows share one "
-                f"KV cache group (group {gid}); the per-group metadata would keep "
-                "only the last layer's window and corrupt draft attention. Split "
-                "the windows into separate KV cache groups or use a checkpoint with "
-                "homogeneous draft sliding windows."
-            )
-        window_by_gid[gid] = window
-
-    if mla_draft:
-        for gid, window in window_by_gid.items():
-            if window is not None and causal_by_gid.get(gid) is False:
+        if gid is not None:
+            causal = bool(causal)
+            if gid in causal_by_gid and causal_by_gid[gid] != causal:
                 raise ValueError(
-                    "Windowed MLA draft layers must be causal: the Ascend MLA "
-                    f"decode path applies the sliding-window band only in the "
-                    "causal branch (FIA sparse_mode=4), so a non-causal "
-                    "windowed draft would silently attend the full context "
-                    f"(KV cache group {gid}). Use a causal windowed draft, or "
-                    "a non-windowed draft for bidirectional attention."
+                    "DFlash draft layers with mixed attention causality share one "
+                    f"KV cache group (group {gid}); the per-group causal flag "
+                    "would keep only the last layer's mode and corrupt draft "
+                    "attention. Split the causal modes into separate KV cache "
+                    "groups or use a checkpoint with homogeneous draft causality."
                 )
-
-    if (
-        decode_context_parallel_size > 1
-        and mla_draft
-        and any(window is not None for window in window_by_gid.values())
-    ):
-        raise ValueError(
-            "DFlash draft layers carry a sliding window, but decode context "
-            "parallelism routes MLA draft attention through AscendMlaDCPImpl, "
-            "which applies no pre_tokens band and would silently drop the "
-            "window onto the full DCP-local KV. Run the draft without DCP "
-            "(or use a non-windowed draft); this matches upstream vLLM "
-            "#68214 refusing DCP for windowed DFlash2 drafts."
-        )
+            causal_by_gid[gid] = causal
+        impl = getattr(attn_layers.get(layer_name), "impl", None)
+        if not isinstance(impl, AscendMLAImpl) or getattr(impl, "sliding_window", None) is None:
+            continue
+        if not causal:
+            raise ValueError(
+                "Windowed MLA draft layers must be causal: the Ascend MLA decode "
+                "path applies the sliding-window band only in the causal branch "
+                "(FIA sparse_mode=4), so a non-causal windowed draft would "
+                f"silently attend the full context (layer {layer_name}). Use a "
+                "causal windowed draft, or a non-windowed draft for bidirectional "
+                "attention."
+            )
+        if isinstance(impl, AscendMlaDCPImpl):
+            raise ValueError(
+                "DFlash draft layers carry a sliding window, but decode context "
+                "parallelism routes MLA draft attention through AscendMlaDCPImpl, "
+                "which applies no pre_tokens band and would silently drop the "
+                "window onto the full DCP-local KV. Run the draft without DCP "
+                "(or use a non-windowed draft); this matches upstream vLLM "
+                "#68214 refusing DCP for windowed DFlash2 drafts."
+            )
 
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
@@ -219,21 +168,6 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             model.post_process(self.vllm_config)
         return model
 
-    def _prepare_rejection_adjusted_host_lengths(self, num_reqs, num_reqs_padded):
-        """Zero-padded host copy of the per-step device seq_lens (DSpark pattern).
-
-        The input-prep kernel rewrites input_buffers.seq_lens every step with
-        min(last_valid_pos + 1 + num_query_per_req, max_model_len), i.e. the
-        accepted context plus this step's queries. Feeding these exact lengths
-        through build_attn_metadata_factory keeps the FIA seq_lens_list at the
-        rejection-adjusted values in both eager and FULL-graph replay; the
-        optimistic CPU upper bound would drag up to num_speculative_tokens
-        stale rows into the right-aligned sliding window after a rejection.
-        """
-        seq_lens_cpu = torch.zeros(num_reqs_padded, dtype=torch.int32, device="cpu")
-        seq_lens_cpu[:num_reqs].copy_(self.input_buffers.seq_lens[:num_reqs])
-        return seq_lens_cpu
-
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         assert self.input_batch is not None
         num_reqs = getattr(self, "_draft_metadata_num_reqs", None)
@@ -247,12 +181,12 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         # sliding-window FIA branch (sparse_mode=4) instead of defaulting
         # attn_state to None and silently dropping the window.
         metadata_context = nullcontext()
-        if getattr(self, "_mla_draft", False):
+        if self.attn_architecture == "MLA" and not self.use_flashmla:
             metadata_context = build_attn_metadata_factory(
                 self.input_buffers.positions,
                 num_tokens_padded,
                 is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool, device="cpu"),
-                seq_lens_cpu=self._prepare_rejection_adjusted_host_lengths(num_reqs, num_reqs_padded),
+                seq_lens_cpu=prepare_draft_host_lengths(self, num_reqs, num_reqs_padded, self.num_query_per_req),
                 attn_state=AscendAttentionState.ChunkedPrefill,
                 parallel_config=self.attn_vllm_config.parallel_config,
             )
@@ -292,8 +226,9 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         lengths) must live here; ``build_draft_attn_metadatas`` alone only
         covers FULL-graph replay.
         """
-        if not getattr(self, "_mla_draft", False):
-            # GQA DFlash drafts keep the upstream metadata path unchanged.
+        if self.attn_architecture != "MLA" or self.use_flashmla:
+            # GQA and FlashMLA DFlash drafts keep the upstream path and
+            # consume the device lengths directly.
             return super()._build_attn_metadata(
                 num_reqs=num_reqs,
                 batch_desc=batch_desc,
@@ -316,7 +251,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 self.input_buffers.positions,
                 num_tokens,
                 is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool, device="cpu"),
-                seq_lens_cpu=self._prepare_rejection_adjusted_host_lengths(num_reqs, num_reqs_padded),
+                seq_lens_cpu=prepare_draft_host_lengths(self, num_reqs, num_reqs_padded, step),
                 attn_state=AscendAttentionState.ChunkedPrefill,
                 parallel_config=self.attn_vllm_config.parallel_config,
             ),
@@ -406,6 +341,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         )
         # npu needs attn_backends to update full graph params in run_fullgraph.
         attn_backends: dict[str, type[AttentionBackend]] = {}
+        resolved_layers: dict[str, Any] = {}
         active_layer_names = self.draft_attn_layer_names
         for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
             layer_names = kv_cache_group_spec.layer_names
@@ -416,21 +352,13 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
 
             for layer_name in layer_names:
+                resolved_layers[layer_name] = attn_layers[layer_name]
                 attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
         self.attn_backends = attn_backends
         install_ascend_dflash_input_preparation()
-        mla_draft = any(
-            getattr(backend, "get_name", lambda: None)() == "ASCEND_MLA"
-            for backend in attn_backends.values()
-        )
-        validate_grouped_draft_attn(
-            self.model,
-            kv_cache_config,
-            decode_context_parallel_size=self.vllm_config.parallel_config.decode_context_parallel_size,
-            mla_draft=mla_draft,
-        )
-        self._mla_draft = mla_draft
+        self.attn_architecture, self.use_flashmla = detect_draft_attn_architecture(self.attn_groups)
+        validate_grouped_draft_attn(self.model, kv_cache_config, resolved_layers)
 
     def propose(
         self,
@@ -475,7 +403,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         num_draft_reqs = input_batch.num_reqs
         if dummy_run and sync_state is not None:
             num_draft_reqs = min(num_draft_reqs, sync_state.num_reqs)
-        with draft_metadata_request_count(self, num_draft_reqs), build_attn_metadata_wrapper():
+        with proposal_host_lengths(self, num_draft_reqs), build_attn_metadata_wrapper():
             draft_tokens = super().propose(
                 input_batch,
                 attn_metadata,
