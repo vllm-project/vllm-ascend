@@ -40,9 +40,10 @@ from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     torch_gather_wrapper,
 )
+from vllm_ascend.worker.v2.spec_decode.target_embed_utils import TargetEmbedCleanupMixin
 
 
-class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
+class AscendMultiModuleMTPSpeculator(TargetEmbedCleanupMixin, MultiModuleMTPSpeculator):
     """Ascend multi-module MTP speculator.
 
     The whole draft loop (input rolling, per-module forward, sampling) is

@@ -54,9 +54,10 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     build_dspark_draft_config,
     prepare_replicated_draft_profile_inputs,
 )
+from vllm_ascend.worker.v2.spec_decode.target_embed_utils import TargetEmbedCleanupMixin
 
 
-class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
+class AscendDSparkSpeculator(TargetEmbedCleanupMixin, LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
     # the mixin's speculator-level logits hook is not used; load_draft_model

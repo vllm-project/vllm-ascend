@@ -29,6 +29,7 @@ from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory, build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_draft_profile_inputs
+from vllm_ascend.worker.v2.spec_decode.target_embed_utils import TargetEmbedCleanupMixin
 
 
 @contextmanager
@@ -151,7 +152,7 @@ def _prepare_dflash_inputs_with_block_stride(
     )
 
 
-class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
+class AscendDFlashSpeculator(TargetEmbedCleanupMixin, LmheadTPDraftSamplingMixin, DFlashSpeculator):
     use_a3_mla_sink: bool = False
     _windowed_fia_layers: tuple[str, ...] = ()
     _windowed_flashmla_builders: tuple[FlashMLAMetadataBuilder, ...] = ()

@@ -58,6 +58,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.sparse_kv_offload import SparseKVOffloadMetadata
+from vllm_ascend.worker.v2.spec_decode.target_embed_utils import TargetEmbedCleanupMixin
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -65,7 +66,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDependentARSpeculator):
+class AscendTargetDependentARSpeculator(
+    TargetEmbedCleanupMixin,
+    LmheadTPDraftSamplingMixin,
+    TargetDependentARSpeculator,
+):
     """Shared Ascend spec-decode loop for AscendEagle/AscendMTPSpeculator.
 
     GQA, MLA, DSA, and SFA draft decode state share one path. The current MTP path
