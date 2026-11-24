@@ -458,9 +458,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     def _forward(self, hidden_states: torch.Tensor, output_buffer: torch.Tensor | None) -> torch.Tensor | None:
         attn_metadata_raw = get_forward_context().attn_metadata
         attn_metadata = attn_metadata_raw.get(self.prefix) if isinstance(attn_metadata_raw, dict) else None
-        # Deferred RecoverSSM: on the first KDA layer, enqueue every pending
-        # fold chunk on a side stream so it runs ahead of the forward.
-        # _forward_core joins this layer's chunk before conv/verify reads state.
+        # Deferred RecoverSSM: on the first KDA layer, compact the conv history
+        # and prepare the replay plan once; each fused verify replays the
+        # pending state in-kernel.
         deferred = getattr(attn_metadata, "recoverssm_deferred", None)
         if (
             deferred is not None
@@ -582,8 +582,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         num_accepted_tokens = attn_metadata_narrowed.num_accepted_tokens
         num_spec_decodes = attn_metadata_narrowed.num_spec_decodes
         use_spec = num_spec_decodes > 0 and spec_state_indices_tensor is not None
-        # Join the side-stream fold started in _forward before conv rewrites
-        # conv_state and verify reads the checkpoint.
         deferred = getattr(attn_metadata_narrowed, "recoverssm_deferred", None)
         if use_spec and deferred is not None:
             deferred.wait_layer(self.prefix)

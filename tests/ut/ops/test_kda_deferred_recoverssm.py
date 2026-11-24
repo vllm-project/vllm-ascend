@@ -439,37 +439,56 @@ def test_fused_verify_matches_flush_then_verify():
 
 
 # ---------------------------------------------------------------------------
-# Test 4c: start_flush folds on the side stream; wait_layer joins per layer
+# Test 4c: start_flush gate (fusion threshold) picks fused vs flush+verify
 # ---------------------------------------------------------------------------
 
-def test_start_flush_side_stream_defers_and_joins():
-    """``start_flush`` enqueues one fold chunk per KDA layer on the side
-    stream (an event per chunk, no in-kernel replay plan); ``wait_layer``
-    waits for the layer's chunk and the chunks complete."""
+def test_start_flush_gate_selects_fused_vs_flush(monkeypatch):
+    """Below the ``recoverssm_replays`` threshold, ``start_flush`` folds the
+    pending replays (``flushed``, no replay plan); at or above it, it keeps the
+    fused ``compact_conv`` plan (``started``, replay plan available)."""
     from vllm_ascend.models.glm5next.recoverssm_deferred import KDARecoverSSMDeferred
 
     ctx, _ = _make_context(num_layers=2, heads=HEADS, max_reqs=8)
     state_indices = torch.tensor([1, 2], dtype=torch.int32, device=DEVICE)
     record_rows = torch.tensor([1, 2], dtype=torch.int32, device=DEVICE)
     pending = torch.zeros(8, dtype=torch.int32, device=DEVICE)
-    deferred = KDARecoverSSMDeferred(
-        record_rows=record_rows,
-        pending=pending,
-        eager=None,
-        context=ctx,
-        state_indices=state_indices,
-        layer_names=["layer0", "layer1"],
-    )
-    deferred.start_flush("layer0")
-    assert deferred.flushed
-    assert deferred.replay_plan() is None
-    assert len(deferred.fold_events) == 2
-    deferred.wait_layer("layer0")
-    deferred.wait_layer("layer1")
-    torch.npu.synchronize()
-    assert all(event.query() for event in deferred.fold_events)
 
-    print("[PASS] start_flush: side-stream chunks with per-layer events")
+    def make_deferred():
+        return KDARecoverSSMDeferred(
+            record_rows=record_rows,
+            pending=pending,
+            eager=None,
+            context=ctx,
+            state_indices=state_indices,
+            layer_names=["layer0", "layer1"],
+        )
+
+    # Force the flush path: an unattainably high threshold.
+    monkeypatch.setenv("VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS", "1000000")
+    deferred = make_deferred()
+    deferred.start_flush("layer0")
+    assert deferred.flushed and not deferred.started
+    assert deferred.replay_plan() is None
+
+    # Force the fused path: a zero threshold fuses any non-empty step.
+    monkeypatch.setenv("VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS", "0")
+    deferred = make_deferred()
+    deferred.start_flush("layer0")
+    assert deferred.started and not deferred.flushed
+    plan = deferred.replay_plan()
+    assert plan is not None and len(plan) == 4
+    # The plan arrays are allocated at max_num_reqs; only the real rows matter.
+    assert plan[0].shape[0] >= state_indices.shape[0]
+
+    # Without an override, the experiment build always fuses non-empty steps
+    # (the size-based threshold is removed).
+    monkeypatch.delenv("VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS")
+    deferred = make_deferred()
+    deferred.start_flush("layer0")
+    assert deferred.started and not deferred.flushed
+    assert deferred.replay_plan() is not None
+
+    print("[PASS] start_flush gate: below threshold flushes, at/above fuses")
 
 
 # ---------------------------------------------------------------------------

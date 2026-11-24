@@ -175,6 +175,7 @@ def _kda_recoverssm_verify_kernel(
     SPEC_QUERY_LEN: tl.constexpr,
     UNROLL_REPLAY: tl.constexpr,
     PIPELINE_STAGES: tl.constexpr,
+    MERGE_REDUCTIONS: tl.constexpr,
 ):
     # Advance a register-held checkpoint and record each token's compact
     # correction/key/gate; persistent checkpoint pages remain read-only.
@@ -388,8 +389,22 @@ def _kda_recoverssm_verify_kernel(
         weighted_k = normalized_k * decay
         weighted_q = q * decay
         tl.static_assert(raw_beta.dtype == tl.float32)
-        correction = (v - tl.sum(state * weighted_k[None, :], axis=1)) * tl.sigmoid(raw_beta)
-        out = tl.sum(state * weighted_q[None, :], axis=1) + correction * tl.sum(normalized_k * q)
+        if MERGE_REDUCTIONS:
+            # One [BV, BK, 2] reduction pass instead of two [BV, BK] passes:
+            # halving the per-token reduction count is the direct lever on
+            # triton-ascend, where reductions (not elementwise tile ops)
+            # dominate the vector engine time.
+            rk, rq = tl.split(
+                tl.sum(
+                    state[:, :, None] * tl.join(weighted_k, weighted_q)[None, :, :],
+                    axis=1,
+                )
+            )
+            correction = (v - rk) * tl.sigmoid(raw_beta)
+            out = rq + correction * tl.sum(normalized_k * q)
+        else:
+            correction = (v - tl.sum(state * weighted_k[None, :], axis=1)) * tl.sigmoid(raw_beta)
+            out = tl.sum(state * weighted_q[None, :], axis=1) + correction * tl.sum(normalized_k * q)
         # The post-update state of the last token is never read (the loop
         # ends and the checkpoint was already stored by the replay), so
         # skip its rank-1 update.
@@ -1145,6 +1160,7 @@ def kda_recoverssm_verify(
     replay_align: bool = False,
     records_pool_size: int | None = None,
     pipeline_stages: int = RECOVERSSM_VERIFY_PIPELINE_STAGES,
+    merge_reductions: bool = False,
 ) -> torch.Tensor:
     """Verify a KDA speculative window.
 
@@ -1318,6 +1334,7 @@ def kda_recoverssm_verify(
         SPEC_QUERY_LEN=spec_query_len,
         UNROLL_REPLAY=is_a5,
         PIPELINE_STAGES=pipeline_stages,
+        MERGE_REDUCTIONS=merge_reductions,
         num_warps=4,
         num_stages=pipeline_stages,
     )
@@ -1630,8 +1647,8 @@ class KDARecoverSSMCommitContext:
         record_rows: torch.Tensor,
         pending: torch.Tensor,
     ) -> int:
-        """Build the step's flush plan once (``commit_lens`` and the per-row
-        destination indices) so each layer can fold independently."""
+        """Build the step's flush plan (``commit_lens`` and the per-row
+        destination indices) once, for the fold kernels and the fused replay."""
         batch = state_indices.shape[0]
         if batch == 0:
             return 0
@@ -1683,40 +1700,7 @@ class KDARecoverSSMCommitContext:
         """
         if self.prepare_flush(state_indices, record_rows, pending) == 0:
             return
-        layer_idx, layer_slice, fold_layers = self._layer_range(None, None)
-        self._compact_conv(
-            state_indices, self._flush_batch, False, layer_idx, layer_slice, fold_layers
-        )
-
-    def flush_layers(
-        self,
-        state_indices: torch.Tensor,
-        record_rows: torch.Tensor,
-        pending: torch.Tensor,
-        stream: "torch.npu.Stream",
-    ) -> "list[torch.npu.Event]":
-        """Deferred RecoverSSM, side-stream flush: build the flush plan on the
-        current stream, then enqueue one fold chunk per KDA layer (conv
-        compaction + state commit) on ``stream``, recording an event after each
-        chunk.
-
-        Each layer waits its event before conv rewrites conv_state and verify
-        reads the checkpoint, so the chunks overlap the earlier layers' compute
-        on the main stream. The plan buffers are rewritten by the next step's
-        commit, which the last layer's wait already orders after every chunk.
-        """
-        batch = self.prepare_flush(state_indices, record_rows, pending)
-        if batch == 0:
-            return []
-        stream.wait_stream(torch.npu.current_stream())
-        events: list[torch.npu.Event] = []
-        with torch.npu.stream(stream):
-            for layer in range(len(self.checkpoints)):
-                self._fold(state_indices, batch, False, record_rows, layer, layer + 1)
-                event = torch.npu.Event()
-                event.record(stream)
-                events.append(event)
-        return events
+        self._compact_conv(state_indices, self._flush_batch, False)
 
     def _fold(
         self,
@@ -1724,45 +1708,29 @@ class KDARecoverSSMCommitContext:
         batch: int,
         align: bool,
         record_rows: torch.Tensor | None = None,
-        layer: int | None = None,
-        layer_end: int | None = None,
     ) -> None:
-        """Run a prepared plan: the conv state compaction and the state commit.
-        ``layer``/``layer_end`` fold a layer range (side-stream pipelining);
-        None folds all layers."""
-        layer_idx, layer_slice, fold_layers = self._layer_range(layer, layer_end)
-        self._compact_conv(state_indices, batch, align, layer_idx, layer_slice, fold_layers)
-        self._commit_state(
-            state_indices, batch, align, record_rows, layer_idx, layer_slice, fold_layers
-        )
-
-    def _layer_range(self, layer: int | None, layer_end: int | None):
-        num_layers = len(self.checkpoints)
-        if layer is None:
-            return 0, slice(None), num_layers
-        end = layer + 1 if layer_end is None else layer_end
-        return layer, slice(layer, end), end - layer
+        """Run a prepared plan: the conv state compaction and the state commit."""
+        self._compact_conv(state_indices, batch, align)
+        self._commit_state(state_indices, batch, align, record_rows)
 
     def _compact_conv(
         self,
         state_indices: torch.Tensor,
         batch: int,
         align: bool,
-        layer_idx: int,
-        layer_slice: slice,
-        fold_layers: int,
     ) -> None:
-        """Compact the conv history of the plan's requests (all or a layer range)."""
-        conv_ref = self.conv_states[layer_idx]
+        """Compact the conv history of the plan's requests."""
+        fold_layers = len(self.checkpoints)
+        conv_ref = self.conv_states[0]
         conv_dim = conv_ref.shape[1]
         block_history = triton.next_power_of_2(self.conv_history_len)
         conv_block_d = _conv_compaction_block_d(self.conv_dim_stride)
         _compact_conv_state_kernel[(triton.cdiv(conv_dim, conv_block_d), batch, fold_layers)](
             conv_ref,
-            self.conv_state_base_addrs[layer_slice],
-            self.conv_state_block_strides[layer_slice],
-            self.conv_state_dim_strides[layer_slice],
-            self.conv_state_token_strides[layer_slice],
+            self.conv_state_base_addrs,
+            self.conv_state_block_strides,
+            self.conv_state_dim_strides,
+            self.conv_state_token_strides,
             state_indices,
             self.commit_lens,
             self.final_state_indices,
@@ -1786,13 +1754,11 @@ class KDARecoverSSMCommitContext:
         batch: int,
         align: bool,
         record_rows: torch.Tensor | None,
-        layer_idx: int,
-        layer_slice: slice,
-        fold_layers: int,
     ) -> None:
         """Fold the plan's accepted records into the recurrent checkpoints."""
-        state_ref = self.checkpoints[layer_idx]
-        correction_ref = self.correction_caches[layer_idx]
+        fold_layers = len(self.checkpoints)
+        state_ref = self.checkpoints[0]
+        correction_ref = self.correction_caches[0]
         assert correction_ref.dtype == torch.float32
         _, num_heads, value_dim, key_dim = state_ref.shape
         block_k = triton.next_power_of_2(key_dim)
@@ -1826,16 +1792,16 @@ class KDARecoverSSMCommitContext:
         grid = (triton.cdiv(value_dim, block_v) * fold_layers * head_groups * batch,)
         commit_prefix_args = (
             state_ref,
-            self.state_base_addrs[layer_slice],
-            self.state_block_strides[layer_slice],
+            self.state_base_addrs,
+            self.state_block_strides,
             correction_ref,
-            self.correction_cache_base_addrs[layer_slice],
-            self.correction_cache_block_strides[layer_slice],
-            self.kg_caches[layer_idx],
-            self.kg_cache_base_addrs[layer_slice],
-            self.kg_cache_block_strides[layer_slice],
-            self.A_log[layer_slice],
-            self.dt_bias[layer_slice],
+            self.correction_cache_base_addrs,
+            self.correction_cache_block_strides,
+            self.kg_caches[0],
+            self.kg_cache_base_addrs,
+            self.kg_cache_block_strides,
+            self.A_log,
+            self.dt_bias,
             state_indices,
         )
         commit_suffix_args = (
@@ -1851,9 +1817,9 @@ class KDARecoverSSMCommitContext:
             correction_ref.stride(1),
             correction_ref.stride(2),
             correction_ref.stride(3),
-            self.kg_caches[layer_idx].stride(1),
-            self.kg_caches[layer_idx].stride(2),
-            self.kg_caches[layer_idx].stride(3),
+            self.kg_caches[0].stride(1),
+            self.kg_caches[0].stride(2),
+            self.kg_caches[0].stride(3),
             self.A_log.stride(0),
             self.A_log.stride(1),
             self.dt_bias.stride(0),
