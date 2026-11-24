@@ -2,7 +2,7 @@
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.qwen4_exp.gbsa import prepare_qsa_visible_lengths
+from vllm_ascend.ops.triton.qwen4_exp.prepare_qsa_visible_lengths_triton import prepare_qsa_visible_lengths
 
 
 @pytest.mark.parametrize("rows,kv_length", [(0, 4096), (1, 4096), (4095, 131071), (4096, 131072)])

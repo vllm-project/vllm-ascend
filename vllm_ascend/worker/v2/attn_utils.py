@@ -348,7 +348,7 @@ def _prepare_qsa_step_metadata(
 ) -> None:
     """Prepare cross-layer QSA metadata once while inputs are being built."""
     from vllm_ascend.models.qwen4_exp.attention_dispatch import prepare_qsa_union_batches
-    from vllm_ascend.ops.triton.qwen4_exp.gbsa import prepare_qsa_visible_lengths
+    from vllm_ascend.ops.triton.qwen4_exp.prepare_qsa_visible_lengths_triton import prepare_qsa_visible_lengths
 
     prepared_metadata_ids: set[int] = set()
     for layer_names, builder in qsa_main_builders:

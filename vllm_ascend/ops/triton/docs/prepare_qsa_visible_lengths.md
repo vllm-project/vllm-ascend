@@ -15,7 +15,7 @@
 | seq_lens | Input | Nonnegative current KV length per request | int32 | 1D, strided |
 | token_to_req | Input | Row-to-request mapping | int32 or int64 | 1D, strided |
 | visible_lengths | Output | Caller-owned buffer | int32 | 1D, contiguous |
-| rows | Attribute | Number of live rows | Python int | Scalar |
+| rows | Attribute | Number of live query rows. Launch one Triton program per row and skip the launch when zero. | Host-side Python `int` | Scalar |
 
 ## Constraints
 
