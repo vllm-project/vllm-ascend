@@ -303,10 +303,29 @@ class TestCaMem(PytestBase):
         mock_ctx.__exit__.return_value = None
 
         with patch("vllm_ascend.device_allocator.camem.use_memory_pool_with_allocator", return_value=mock_ctx):
+            original_empty_cache = torch.npu.empty_cache
             with allocator.use_memory_pool(tag="my_tag"):
                 assert allocator.current_tag == "my_tag"
-            # restore old tag after context manager exits
+                torch.npu.empty_cache()
+            # restore the allocator hook and tag after the context exits
+            assert torch.npu.empty_cache is original_empty_cache
             assert allocator.current_tag == old_tag
+
+    def test_use_memory_pool_restores_empty_cache_on_error(self):
+        allocator = CaMemAllocator.get_instance()
+        original_empty_cache = torch.npu.empty_cache
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__.return_value = "data"
+        mock_ctx.__exit__.return_value = None
+
+        with (
+            patch("vllm_ascend.device_allocator.camem.use_memory_pool_with_allocator", return_value=mock_ctx),
+            pytest.raises(RuntimeError, match="test error"),
+            allocator.use_memory_pool(tag="my_tag"),
+        ):
+            raise RuntimeError("test error")
+
+        assert torch.npu.empty_cache is original_empty_cache
 
     def test_use_memory_pool_keeps_all_pools_per_tag(self, monkeypatch):
         allocator = CaMemAllocator.get_instance()

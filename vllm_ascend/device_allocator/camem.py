@@ -295,25 +295,18 @@ class CaMemAllocator(CuMemAllocator):
         assert isinstance(tag, str)
 
         old_tag = self.current_tag
+        original_empty_cache = torch.npu.empty_cache
         self.current_tag = tag
+        # empty_cache invalidates the pluggable allocator's bookkeeping while
+        # its pool is active. Framework helpers may invoke it during model
+        # loading, so suppress it for the duration of this context only.
+        torch.npu.empty_cache = lambda: None
         try:
             with use_memory_pool_with_allocator(self.python_malloc_callback, self.python_free_callback) as data:
-                # start to hit another PyTorch bug in PyTorch 2.6,
-                # possibly because of gc-related issue w.r.t. the allocator and
-                # the memory pool.
-                # to avoid the issue, we keep a reference of the data.
-                # see https://github.com/pytorch/pytorch/issues/146431 .
+                # Keep the pool alive for tensors whose lifetimes outlast this
+                # context; see https://github.com/pytorch/pytorch/issues/146431 .
                 self.allocator_and_pools.setdefault(tag, []).append(data)
                 yield
         finally:
-            # PyTorch's bug, calling torch.cuda.empty_cache() will error
-            # when using pluggable allocator, see
-            # https://github.com/pytorch/pytorch/issues/145168 .
-            # if we have some memory allocated and then freed,
-            # the memory will not be released.
-            # right now it is fine, because we only use this allocator
-            # during weight loading and kv cache creation, where we only
-            # allocate memory.
-            # TODO: we need to find a way to release the memory,
-            # i.e. calling torch.cuda.empty_cache()
+            torch.npu.empty_cache = original_empty_cache
             self.current_tag = old_tag
