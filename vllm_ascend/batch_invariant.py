@@ -97,6 +97,7 @@ def reduce_sum(
     *,
     axis: int | None = None,
     dtype: torch.dtype | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """npu_reduce_sum_batch_invariant requires dim to be specified, but torch.sum
     doesn't require it, so we set dim to -1 by default if dim is None and x.dim()==1.
@@ -104,6 +105,7 @@ def reduce_sum(
     Mirrors ``torch.Tensor.sum``, which also accepts the NumPy-style ``axis``
     alias and an output ``dtype``. ``axis`` is mapped to ``dim`` and ``dtype``
     forces the native fallback so the returned type keeps the caller's intent.
+    Only reductions already handled by the native fallback accept an output buffer.
     """
     if axis is not None:
         if dim is not None:
@@ -118,7 +120,11 @@ def reduce_sum(
     # is None, CPU tensors, unsupported dtypes, explicit dtype) falls back to the
     # saved native torch.sum.
     if dtype is None and x.device.type == "npu" and (dim == -1 or dim == x.dim() - 1) and x.dtype in _SUPPORTED_DTYPES:
+        if out is not None:
+            raise TypeError("out is not supported by the batch-invariant floating-point reduction")
         return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
+    if out is not None:
+        return torch_sum(x, dim, keepdim, dtype=dtype, out=out)
     if dtype is None:
         return torch_sum(x, dim, keepdim)
     return torch_sum(x, dim, keepdim, dtype=dtype)
