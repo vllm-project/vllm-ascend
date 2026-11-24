@@ -39,9 +39,7 @@ def _accepted_lengths(batch: int) -> torch.Tensor:
     """Truncated-geometric accepted count per request (capped at spec_q - 1)."""
     max_len = SPEC_Q - 1
     rate = min(max(ACCEPT_RATE, 1e-6), 1 - 1e-6)
-    u = torch.rand(
-        batch, generator=torch.Generator(device=DEVICE).manual_seed(17)
-    ).clamp_min(1e-7)
+    u = torch.rand(batch, generator=torch.Generator().manual_seed(17)).clamp_min(1e-7)
     n = torch.floor(torch.log(u) / math.log(rate)).to(torch.int64).clamp(0, max_len)
     return n.to(torch.int32).to(DEVICE)
 
