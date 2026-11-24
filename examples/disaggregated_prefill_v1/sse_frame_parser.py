@@ -35,10 +35,12 @@ them, so both cases are handled.
 """
 
 import json
+import re
 from typing import Any, NamedTuple
 
 # The SSE frame terminator: a blank line.
-SSE_FRAME_SEPARATOR = b"\n\n"
+# Treat CRLF as one line ending, including when network chunks split it.
+SSE_FRAME_SEPARATOR = re.compile(rb"(?:\r\n|\r(?!\n)|(?<!\r)\n){2}")
 
 # Terminal sentinel emitted by the OpenAI-compatible streaming API.
 SSE_DONE_SENTINEL = "[DONE]"
@@ -139,11 +141,11 @@ class SSEFrameParser:
 
         Returns ``(INCOMPLETE, buffer)`` when the frame is not complete yet.
         """
-        separator = buffer.find(SSE_FRAME_SEPARATOR)
-        if separator < 0:
+        separator = SSE_FRAME_SEPARATOR.search(buffer)
+        if separator is None:
             return INCOMPLETE, buffer
-        raw = buffer[:separator]
-        rest = buffer[separator + len(SSE_FRAME_SEPARATOR) :]
+        raw = buffer[: separator.start()]
+        rest = buffer[separator.end() :]
         payload = SSEFrameParser._decode_frame(raw)
         if payload is INCOMPLETE:
             # A terminated frame whose body is not valid JSON is malformed.
@@ -162,9 +164,10 @@ class SSEFrameParser:
         text = raw.strip()
         if not text:
             return INCOMPLETE
-        is_sse = text.startswith(b"data:")
+        data = [line[5:].removeprefix(b" ") for line in text.splitlines() if line.startswith(b"data:")]
+        is_sse = bool(data)
         if is_sse:
-            text = text[len(b"data:") :].strip()
+            text = b"\n".join(data).strip()
         if not text:
             return INCOMPLETE
         if text == SSE_DONE_SENTINEL.encode():

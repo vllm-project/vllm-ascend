@@ -140,3 +140,36 @@ def test_every_split_point_yields_the_same_frame(split_at):
     frames = parser.feed(frame[split_at:])
 
     assert [f.payload for f in frames] == [_payload("split-anywhere")]
+
+
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n", b"\r"])
+@pytest.mark.parametrize("chunk_size", [1, 2, 4096])
+def test_named_events_and_multiline_data_across_network_chunks(newline, chunk_size):
+    payload = {"type": "message_delta", "delta": {"stop_reason": "recomputed", "text": "你好"}}
+    data = [b"data: " + line for line in json.dumps(payload, ensure_ascii=False, indent=2).encode().splitlines()]
+    event = newline.join([b": keepalive", b"id: event-1", b"event: message_delta", *data, b"", b""])
+    stream = event + event + b"data: [DONE]" + newline * 2
+    parser = SSEFrameParser()
+    frames = []
+    for offset in range(0, len(stream), chunk_size):
+        frames.extend(parser.feed(stream[offset : offset + chunk_size]))
+    assert [frame.payload for frame in frames] == [payload, payload]
+    assert all(frame.is_sse for frame in frames)
+    assert parser.flush() is None
+
+
+def test_one_crlf_does_not_terminate_an_event():
+    parser = SSEFrameParser()
+    assert parser.feed(b'data: {"stop_reason":"recomputed"}\r\n') == []
+    frames = parser.feed(b"\r\n")
+    assert [frame.payload for frame in frames] == [{"stop_reason": "recomputed"}]
+
+
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n", b"\r"])
+def test_flush_named_event_without_blank_line(newline):
+    parser = SSEFrameParser()
+    assert parser.feed(newline.join([b"event: message_delta", b'data: {"stop_reason":"recomputed"}'])) == []
+    frame = parser.flush()
+    assert frame is not None
+    assert frame.payload == {"stop_reason": "recomputed"}
+    assert frame.is_sse

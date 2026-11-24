@@ -227,6 +227,18 @@ def test_recompute_reuses_original_request_and_fresh_kv(exchange, api, streaming
         assert attempt["body"] == {**payload, "kv_transfer_params": {"remote_block_ids": [index]}}
 
 
+@pytest.mark.parametrize("api", ["/messages", "/responses"])
+def test_recompute_in_unterminated_final_event(exchange, api):
+    stopped = wire(api, {"stop_reason": "recomputed"}, True).rstrip(b"\r\n")
+    final = wire(api, {"text": "done"}, True)
+    response, calls = exchange(
+        api, {"stream": True}, [httpx.Response(200, content=stopped), httpx.Response(200, content=final)]
+    )
+    assert response.status_code == 200
+    assert response.content == final
+    assert len(calls["prefill"]) == len(calls["decode"]) == 2
+
+
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize(
     "api, stopped, options, retry",

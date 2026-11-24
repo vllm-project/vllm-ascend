@@ -1236,28 +1236,14 @@ async def handle_completions_impl(api: str, request: Request):
                         # split across two chunks, and two frames can be
                         # coalesced into one chunk. Reassemble frames before
                         # decoding them, so no frame is dropped.
-                        if native_api:
-                            payloads = [chunk]
-                            if stream_flag:
-                                raw_frames = chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n\n")
-                                payloads = [
-                                    b"\n".join(
-                                        line[5:].lstrip() for line in frame.splitlines() if line.startswith(b"data:")
-                                    )
-                                    for frame in raw_frames
-                                ]
-                            frames = []
-                            for payload in payloads:
-                                try:
-                                    obj = json.loads(payload)
-                                except (json.JSONDecodeError, UnicodeDecodeError):
-                                    if not stream_flag:
-                                        raise
-                                    continue
-                                if isinstance(obj, dict):
-                                    frames.append(SSEFrame(obj, stream_flag))
+                        if native_api and not stream_flag:
+                            obj = json.loads(chunk)
+                            frames = [SSEFrame(obj, False)] if isinstance(obj, dict) else []
                         else:
                             frames = frame_parser.feed(chunk)
+                            # Native attempts are fully buffered; include an unterminated final frame.
+                            if native_api and (tail := frame_parser.flush()) is not None:
+                                frames.append(tail)
                         if not frames:
                             # No complete frame yet; forward the raw bytes so
                             # the client still sees them, and wait for the
