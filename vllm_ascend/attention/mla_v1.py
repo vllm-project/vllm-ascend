@@ -1238,13 +1238,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.sliding_window is not None:
             # Only DFlash supplies the valid per-request Q prefix for BAND.
             # DCP's history pass uses a different, non-causal mask.
-            return (
-                dflash_draft_window
-                and method == "dflash"
-                and self.sliding_window > 0
-                and dcp_size == 1
-                and get_flashmla_ops() is not None
-            )
+            return dflash_draft_window and self.sliding_window > 0 and dcp_size == 1 and get_flashmla_ops() is not None
         # Replicated DSpark queries keep PCP=1 in their config, but reuse the
         # physical PCP group. Its ranks carry the same Q heads, so history
         # gathers only distinct TP heads, as _dcp_all_gather_fragments does.
