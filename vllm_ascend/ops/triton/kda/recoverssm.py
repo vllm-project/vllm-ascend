@@ -56,37 +56,6 @@ def recoverssm_replays(num_heads: int, requests: int) -> bool:
     return num_heads * requests >= int(forced)
 
 
-def _recoverssm_pipeline_stages() -> int:
-    """Software-pipeline depth for the fused verify's hot loops.
-
-    The default is 2 (one buffer ahead). Raise it to trade UB for deeper
-    load-ahead when the backend is pipelining; if the verify time is flat
-    across depths, the backend is not software-pipelining those loops and the
-    remaining lever is vector work, not scheduling.
-    """
-    return int(
-        os.environ.get(
-            "VLLM_ASCEND_RECOVERSSM_PIPELINE_STAGES",
-            str(RECOVERSSM_VERIFY_PIPELINE_STAGES),
-        )
-    )
-
-
-def _recoverssm_deferred_verify() -> bool:
-    """Whether the fused verify rebuilds each token's state dot products from a
-    per-slot correction history instead of materializing the rank-1 state update
-    every token.
-
-    The rank-1 version keeps a serial [BV, BK] recurrence whose updates and
-    reads cannot overlap the next token's loads. The deferred version keeps the
-    checkpoint read-only and contracts per-token keys against small history
-    slots, so the big reductions become independent across tokens; only a cheap
-    per-K/per-V slot chain stays serial. Set the env var to "0" to A/B the
-    original per-token state update.
-    """
-    return os.environ.get("VLLM_ASCEND_RECOVERSSM_DEFERRED_VERIFY", "1") != "0"
-
-
 @triton.jit
 def _kda_l2_normalize(vector):
     # AscendC normalizes nonzero vectors without CUDA's squared-norm bias.
@@ -223,6 +192,7 @@ def _kda_recoverssm_verify_kernel(
     UNROLL_REPLAY: tl.constexpr,
     PIPELINE_STAGES: tl.constexpr,
     DEFERRED_VERIFY: tl.constexpr,
+    MERGE_REDUCTIONS: tl.constexpr,
 ):
     # Advance a register-held checkpoint and record each token's compact
     # correction/key/gate; persistent checkpoint pages remain read-only.
@@ -389,21 +359,18 @@ def _kda_recoverssm_verify_kernel(
                 )
                 tl.store(final_ptrs, state, mask=mask_state)
                 if ALIGN_MODE:
-                    boundary_ptrs = (
-                        state_ptr
-                        + boundary_state_idx * stride_state_block
-                        + pid_h * stride_state_head
-                        + offs_v[:, None] * stride_state_v
-                        + offs_k[None, :] * stride_state_k
-                    )
-                    boundary_state = initial_state * boundary_decay[None, :] + boundary_correction
-                    tl.store(
-                        boundary_ptrs,
-                        boundary_state,
-                        mask=(boundary_state_idx > null_block_id)
-                        if mask_state is None
-                        else mask_state & (boundary_state_idx > null_block_id),
-                    )
+                    # Only crossing requests have a boundary page; skip the
+                    # dead materialization and store for the rest.
+                    if boundary_state_idx > null_block_id:
+                        boundary_ptrs = (
+                            state_ptr
+                            + boundary_state_idx * stride_state_block
+                            + pid_h * stride_state_head
+                            + offs_v[:, None] * stride_state_v
+                            + offs_k[None, :] * stride_state_k
+                        )
+                        boundary_state = initial_state * boundary_decay[None, :] + boundary_correction
+                        tl.store(boundary_ptrs, boundary_state, mask=mask_state)
 
     if DEFERRED_VERIFY:
         # Deferred verify: the checkpoint stays read-only and each token's
@@ -582,9 +549,27 @@ def _kda_recoverssm_verify_kernel(
             weighted_k = normalized_k * decay
             weighted_q = q * decay
             tl.static_assert(raw_beta.dtype == tl.float32)
-            correction = (v - tl.sum(state * weighted_k[None, :], axis=1)) * tl.sigmoid(raw_beta)
-            out = tl.sum(state * weighted_q[None, :], axis=1) + correction * tl.sum(normalized_k * q)
-            state = state * decay[None, :] + correction[:, None] * normalized_k[None, :]
+            if MERGE_REDUCTIONS:
+                # One [BV, BK, 2] reduction pass instead of two [BV, BK] passes:
+                # halving the per-token reduction count is the direct lever on
+                # triton-ascend, where reductions (not elementwise tile ops)
+                # dominate the vector engine time.
+                rk, rq = tl.split(
+                    tl.sum(
+                        state[:, :, None] * tl.join(weighted_k, weighted_q)[None, :, :],
+                        axis=1,
+                    )
+                )
+                correction = (v - rk) * tl.sigmoid(raw_beta)
+                out = rq + correction * tl.sum(normalized_k * q)
+            else:
+                correction = (v - tl.sum(state * weighted_k[None, :], axis=1)) * tl.sigmoid(raw_beta)
+                out = tl.sum(state * weighted_q[None, :], axis=1) + correction * tl.sum(normalized_k * q)
+            # The post-update state of the last token is never read (the loop
+            # ends and the checkpoint was already stored by the replay), so
+            # skip its rank-1 update.
+            if token_offset < query_len - 1:
+                state = state * decay[None, :] + correction[:, None] * normalized_k[None, :]
             tl.store(
                 out_ptr + token * stride_out_token + pid_h * V + offs_v,
                 out,
@@ -885,14 +870,18 @@ def _accumulate_kda_commit_step(
     final_correction = tl.fma(correction[:, None], weighted_k[None, :], final_correction)
     final_decay *= decay
     if ALIGN_MODE:
-        before_boundary = token_offset < boundary_recovery_len
-        boundary_k = normalized_k * boundary_decay
-        boundary_correction = tl.where(
-            before_boundary,
-            tl.fma(correction[:, None], boundary_k[None, :], boundary_correction),
-            boundary_correction,
-        )
-        boundary_decay *= tl.where(before_boundary, decay, 1.0)
+        # Non-crossing requests carry boundary_recovery_len == 0 and a null
+        # boundary page: their boundary accumulation is a no-op, so skip the
+        # dead [BV, BK] work instead of computing it and selecting it away.
+        if boundary_recovery_len > 0:
+            before_boundary = token_offset < boundary_recovery_len
+            boundary_k = normalized_k * boundary_decay
+            boundary_correction = tl.where(
+                before_boundary,
+                tl.fma(correction[:, None], boundary_k[None, :], boundary_correction),
+                boundary_correction,
+            )
+            boundary_decay *= tl.where(before_boundary, decay, 1.0)
     return final_decay, final_correction, boundary_decay, boundary_correction
 
 
@@ -1330,6 +1319,9 @@ def kda_recoverssm_verify(
     replay_boundary_recovery_lens: torch.Tensor | None = None,
     replay_align: bool = False,
     records_pool_size: int | None = None,
+    pipeline_stages: int = RECOVERSSM_VERIFY_PIPELINE_STAGES,
+    deferred_verify: bool = False,
+    merge_reductions: bool = False,
 ) -> torch.Tensor:
     """Verify a KDA speculative window.
 
@@ -1502,11 +1494,11 @@ def kda_recoverssm_verify(
         ALIGN_MODE=replay_align,
         SPEC_QUERY_LEN=spec_query_len,
         UNROLL_REPLAY=is_a5,
-        PIPELINE_STAGES=_recoverssm_pipeline_stages(),
-        DEFERRED_VERIFY=_recoverssm_deferred_verify()
-        and spec_query_len <= RECOVERSSM_MAX_HISTORY_SLOTS + 1,
+        PIPELINE_STAGES=pipeline_stages,
+        DEFERRED_VERIFY=deferred_verify and spec_query_len <= RECOVERSSM_MAX_HISTORY_SLOTS + 1,
+        MERGE_REDUCTIONS=merge_reductions,
         num_warps=4,
-        num_stages=_recoverssm_pipeline_stages(),
+        num_stages=pipeline_stages,
     )
     return out
 
