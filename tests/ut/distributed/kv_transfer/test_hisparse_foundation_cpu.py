@@ -343,18 +343,41 @@ def test_indexer_page_alignment_preserves_input_specs(indexer_spec, c8):
     assert specs["indexer"] is indexer_spec and indexer_spec.block_stride_alignment == 3
     if c8:
         alignment = math.lcm(*(spec.get_block_stride_alignment() for name, spec in result.items() if name != "source"))
-        assert alignment % 656 == 0 and alignment % 128 == 0
+        assert alignment % (128 * 656) == 0
+        assert result["indexer"].get_block_stride_alignment() % (128 * 656) == 0
         assert result["indexer"].page_size_padded == 128 * (128 + 4)
         assert indexer_spec.page_size_padded is None
         for name in ("resident", "hot"):
             assert specs[name].block_stride_alignment == 128
             assert packed_row_bytes is not None
-            # Core #64562 includes whole-page Hot alignment in the accessor.
             assert result[name].get_block_stride_alignment() == math.lcm(
-                specs[name].get_block_stride_alignment(), packed_row_bytes
+                specs[name].get_block_stride_alignment(), specs[name].block_size * packed_row_bytes
             )
     else:
         assert result["indexer"].get_block_stride_alignment() == math.lcm(3, indexer_spec.page_size_bytes)
+
+
+def test_indexer_page_alignment_whole_page_for_non_c8_with_packed_row_bytes(indexer_spec):
+    source = MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16)
+    non_c8_indexer = replace(indexer_spec, block_size=128, head_size=128, dtype=torch.bfloat16)
+    packed_row_bytes = 1152
+    specs = {
+        "source": source,
+        "indexer": non_c8_indexer,
+        "resident": HiSparseResidentSpec(block_size=128, page_size=128 * packed_row_bytes, block_stride_alignment=128),
+        "hot": HiSparseHotSpec(
+            block_size=128, page_size=128 * packed_row_bytes, blocks_per_request=1, block_stride_alignment=128
+        ),
+    }
+    result = align_hisparse_indexer_specs(specs, packed_row_bytes=packed_row_bytes)
+    assert result["source"] is source
+    expected_page_bytes = 128 * packed_row_bytes
+    assert result["indexer"].get_block_stride_alignment() % expected_page_bytes == 0
+    for name in ("resident", "hot"):
+        assert result[name].get_block_stride_alignment() % expected_page_bytes == 0
+        assert result[name].get_block_stride_alignment() == math.lcm(
+            specs[name].get_block_stride_alignment(), expected_page_bytes
+        )
 
 
 @pytest.mark.parametrize("field", ["scale_dim", "cache_sparse_li_c8", "cache_sparse_li_c4"])
