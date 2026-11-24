@@ -31,9 +31,7 @@ UNVERIFIED_GPU_WORKER_METHODS = (
     "randomize_dummy_inputs",
     "save_sharded_state",
     "save_tensorized_model",
-    "shutdown_weight_transfer_engine",
     "start_draft_weight_update",
-    "_start_weight_update",
     "elastic_ep_execute",
 )
 
@@ -57,6 +55,52 @@ def test_unverified_interface_rejects_calls_without_worker_state(name):
     kwargs = {p.name: object() for p in required if p.kind is p.KEYWORD_ONLY}
     with pytest.raises(NotImplementedError, match=name):
         method(*args, **kwargs)
+
+
+def test_weight_update_hook_rejects_draft_without_worker_state():
+    from vllm_ascend.worker.worker import NPUWorker
+
+    worker = object.__new__(NPUWorker)
+    with pytest.raises(NotImplementedError, match="Draft weight updates"):
+        worker._start_weight_update(is_draft=True)
+
+
+def test_shutdown_weight_transfer_engine_is_inherited():
+    from vllm.v1.worker.gpu_worker import Worker as GPUWorker
+
+    from vllm_ascend.worker.worker import NPUWorker
+
+    # Releasing the trainer connection needs no NPU state, so it is inherited.
+    assert NPUWorker.shutdown_weight_transfer_engine is GPUWorker.shutdown_weight_transfer_engine
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_shutdown_weight_transfer_engine_releases_trainer_connection(configured):
+    from vllm_ascend.worker.worker import NPUWorker
+
+    # Keep the engine in a local so the optional type narrows for mypy.
+    engine = Mock() if configured else None
+    worker = object.__new__(NPUWorker)
+    worker._weight_update_active = False
+    worker.weight_transfer_engine = engine
+
+    worker.shutdown_weight_transfer_engine()
+
+    if engine is not None:
+        engine.shutdown.assert_called_once_with()
+
+
+def test_shutdown_weight_transfer_engine_rejects_active_update():
+    from vllm_ascend.worker.worker import NPUWorker
+
+    worker = object.__new__(NPUWorker)
+    worker._weight_update_active = True
+    worker.weight_transfer_engine = Mock()
+
+    with pytest.raises(RuntimeError, match="during a weight update"):
+        worker.shutdown_weight_transfer_engine()
+
+    worker.weight_transfer_engine.shutdown.assert_not_called()
 
 
 @pytest.mark.parametrize("reset", [None, "absent", "callable"])
