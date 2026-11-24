@@ -90,6 +90,7 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
 
         self._update_packed_modules_mapping(model_type)
 
+        prefix = self._resolve_minimax_quant_prefix(model_type, layer, prefix)
         prefix = self.quant_prefix_mapper(model_type, prefix)
         quant_type = get_quant_type_for_layer(self.quant_description, prefix, self.packed_modules_mapping)
 

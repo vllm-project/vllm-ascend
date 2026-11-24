@@ -702,6 +702,34 @@ class AscendModelSlimConfig(QuantizationConfig):
             )
         return False
 
+    def _resolve_minimax_quant_prefix(self, model_type: str, layer: torch.nn.Module, prefix: str) -> str:
+        if model_type not in ("minimax", "minimax_m2"):
+            return prefix
+
+        parent, _, leaf = prefix.rpartition(".")
+        if leaf.isdigit() and parent.rpartition(".")[-1] == "experts" and is_fused_moe_layer(layer):
+            prefix = parent
+
+        parts = prefix.split(".")
+        if "mlp" not in parts:
+            return prefix
+
+        proj_name = parts[-1]
+        shard_prefixes = [
+            prefix.removesuffix(proj_name) + shard for shard in self.packed_modules_mapping.get(proj_name, [])
+        ]
+        if proj_name == "experts":
+            shard_prefixes.extend((f"{prefix}.gate_up_proj", f"{prefix}.down_proj"))
+
+        # Keep mapped metadata, including FLOAT and incomplete packs, in its
+        # own namespace so the normal quantization lookup can validate it.
+        if any(
+            _find_quant_description_key(self.quant_description, name) is not None for name in [prefix, *shard_prefixes]
+        ):
+            return prefix
+
+        return ".".join("block_sparse_moe" if part == "mlp" else part for part in parts)
+
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         self.model_type = model_type
         # Some model paths, e.g. qwen3-vl and qwen3_5_moe MTP drafter,
@@ -825,24 +853,13 @@ class AscendModelSlimConfig(QuantizationConfig):
         vllm_config = get_current_vllm_config()
         model_type = vllm_config.model_config.hf_config.model_type
 
-        if model_type in ["minimax", "minimax_m2"]:
-            # Adapt to Minimax architecture: update layer names to MoE convention
-            prefix = prefix.replace("mlp", "block_sparse_moe")
-            # Normalize the prefix by stripping specific expert indices (e.g., 'experts.0' -> 'experts')
-            parts = prefix.split(".")
-            if "experts" in parts and len(parts) > 2:
-                exp_idx = parts.index("experts")
-                if exp_idx + 1 < len(parts) and parts[exp_idx + 1].isdigit():
-                    parts = parts[: exp_idx + 1]
-                    prefix = ".".join(parts)
-
         if model_type in ["bailing_hybrid"]:
             # Adapt to bailing_hybrid architecture: update layer names to MoE convention
             prefix = prefix.replace("linear_attn", "attention")
             prefix = prefix.replace("self_attn", "attention")
         self._update_packed_modules_mapping(model_type)
-        runtime_prefix = prefix
-        prefix = self.quant_prefix_mapper(model_type, prefix)
+        runtime_prefix = self._resolve_minimax_quant_prefix(model_type, layer, prefix)
+        prefix = self.quant_prefix_mapper(model_type, runtime_prefix)
 
         # Kimi K3's mixed-precision packed KDA projection is split by the model
         # adapter, so it must be resolved BEFORE get_quant_type_for_layer.
