@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -124,8 +125,6 @@ def test_incompatible_draft_uses_ordinary_moe(pair, kwargs):
 
 
 def test_one_byte_over_capacity_falls_back(pair, monkeypatch):
-    import sys
-
     monkeypatch.setattr(sys.modules[__name__], "_get_mega_moe_ccl_buffer_size", lambda moe_expert_num: 4097)
     _, draft, _ = pair()
     assert draft.channel_mega_moe_fallback
@@ -187,3 +186,44 @@ def test_a3_and_single_model_registration_is_inert_without_collection():
     get_method = Mock(side_effect=AssertionError("unexpected A5 registration"))
     register_channel_layer(None, get_method)
     get_method.assert_not_called()
+
+
+def test_missing_owner_setting_does_not_match_an_optional_none(pair):
+    _, _, window = pair()
+    del window.owner.dispatch_quant_out_dtype
+    assert not window.fits(dict(window.params, dispatch_quant_out_dtype=None))
+
+
+def test_size_query_uses_draft_shape_and_owner_topology(pair, monkeypatch):
+    _, draft, window = pair()
+    window.owner.ep_world_size = 8
+    window.owner.topo_type = 1
+    window.owner.rank_num_per_server = 2
+    observed = []
+
+    def query(ep_world_size, moe_expert_num, num_topk, intermediate_hidden, server_num):
+        observed.append((ep_world_size, moe_expert_num, num_topk, intermediate_hidden, server_num))
+        return 4096
+
+    monkeypatch.setattr(sys.modules[__name__], "_get_mega_moe_ccl_buffer_size", query)
+    params = dict(window.params, num_experts=128, num_topk=3, intermediate_hidden=32)
+    assert window.fits(params)
+    assert observed == [(8, 128, 3, 32, 4)]
+    assert draft.routed_experts.channel_mega_moe_buffer.context is window.owner.context
+
+
+@pytest.mark.parametrize(("ep_size", "ranks"), [(0, 2), (8, 0), (8, -1), (8, 3)])
+def test_invalid_topology_rejects_shared_window(pair, ep_size, ranks):
+    _, _, window = pair()
+    window.owner.ep_world_size = ep_size
+    window.owner.topo_type = 1
+    window.owner.rank_num_per_server = ranks
+    assert not window.fits(window.params)
+
+
+def test_legacy_size_query_without_server_count_is_local_only(pair, monkeypatch):
+    _, _, window = pair()
+    monkeypatch.setattr(sys.modules[__name__], "_get_mega_moe_ccl_buffer_size", lambda moe_expert_num, num_topk: 4096)
+    assert window.fits(window.params)
+    window.owner.topo_type = 1
+    assert not window.fits(window.params)

@@ -58,9 +58,10 @@ class ChannelWindow:
 
     def fits(self, params):
         owner = self.owner
-        for field in ("hidden", "dispatch_quant_mode", "dispatch_quant_out_dtype"):
-            if params[field] != self.params[field]:
-                return False
+        missing = object()
+        ep_size = getattr(owner, "ep_world_size", 0)
+        if not isinstance(ep_size, int) or ep_size <= 0:
+            return False
         for field in ("num_experts", "num_topk", "num_max_tokens_per_rank"):
             if params[field] > self.params[field]:
                 return False
@@ -69,9 +70,17 @@ class ChannelWindow:
         # top-k weight format). Cross-server layouts also depend on topology.
         args = signature(self.factory).bind(owner.group, **params)
         args.apply_defaults()
-        values = dict(args.arguments, ep_world_size=owner.ep_world_size, moe_expert_num=params["num_experts"])
-        for field in ("combine_quant_mode", "comm_alg", "combine_comm_mode", "topk_weights_type"):
-            if field in values and values[field] != getattr(owner, field, None):
+        values = dict(args.arguments, ep_world_size=ep_size, moe_expert_num=params["num_experts"])
+        for field in (
+            "hidden",
+            "dispatch_quant_mode",
+            "dispatch_quant_out_dtype",
+            "combine_quant_mode",
+            "comm_alg",
+            "combine_comm_mode",
+            "topk_weights_type",
+        ):
+            if field in values and values[field] != getattr(owner, field, missing):
                 return False
         size_query = getattr(import_module(self.factory.__module__), "_get_mega_moe_ccl_buffer_size", None)
         if size_query is None:
@@ -80,9 +89,9 @@ class ChannelWindow:
         values["server_num"] = 0
         if getattr(owner, "topo_type", 0):
             ranks = getattr(owner, "rank_num_per_server", 0)
-            if "server_num" not in query_fields or not ranks or owner.ep_world_size % ranks:
+            if "server_num" not in query_fields or not isinstance(ranks, int) or ranks <= 0 or ep_size % ranks:
                 return False
-            values["server_num"] = owner.ep_world_size // ranks
+            values["server_num"] = ep_size // ranks
         if not query_fields.keys() <= values.keys():
             return False
         required = size_query(**{field: values[field] for field in query_fields})
