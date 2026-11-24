@@ -1,0 +1,10 @@
+pr: 23048
+entries:
+  - category: feature
+    text: >-
+      Added native Messages and synchronous Responses forwarding to the PD
+      example proxy, including prefiller cache usage reporting. With matching
+      Ascend backends, preempted native requests end with an error and are not
+      automatically replayed; callers decide whether retrying is safe.
+      Responses requires explicit history and does not support background mode
+      or previous_response_id.
