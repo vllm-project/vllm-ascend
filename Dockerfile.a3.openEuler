@@ -114,10 +114,23 @@ RUN set -e; cd /tmp; \
     done; \
     ls -lh /tmp/*.run; \
     chmod +x /tmp/*.run; \
-    /tmp/${CANN_TOOLKIT_PKG} --install || { rc=$?; echo "ERROR: CANN toolkit 安装失败 (exit $rc)"; exit $rc; }; \
-    /tmp/${CANN_NNAL_PKG} --install || { rc=$?; echo "ERROR: CANN nnal 安装失败 (exit $rc)"; exit $rc; }; \
+    fail() { \
+        rc=$1; name=$2; shift 2; \
+        echo "ERROR: CANN ${name} 安装失败 (exit $rc)"; \
+        df -h /tmp /usr/local || true; \
+        ls -l /tmp/*.run || true; \
+        echo "----- ${name} installer log (tail 80) -----"; \
+        tail -n 80 /tmp/cann_install.log || true; \
+        if [ -f /var/log/ascend_seclog/ascend_install.log ]; then \
+            echo "----- ascend_install.log (tail 80) -----"; \
+            tail -n 80 /var/log/ascend_seclog/ascend_install.log; \
+        fi; \
+        exit $rc; \
+    }; \
+    /tmp/${CANN_TOOLKIT_PKG} --install > /tmp/cann_install.log 2>&1 || fail $? toolkit; \
+    /tmp/${CANN_NNAL_PKG} --install > /tmp/cann_install.log 2>&1 || fail $? nnal; \
     if [ -f "/tmp/${CANN_OPS_PKG}" ]; then \
-        /tmp/${CANN_OPS_PKG} --install || { rc=$?; echo "ERROR: CANN A3-ops 安装失败 (exit $rc)"; exit $rc; }; \
+        /tmp/${CANN_OPS_PKG} --install > /tmp/cann_install.log 2>&1 || fail $? a3-ops; \
     fi; \
     rm -f /tmp/*.run
 
