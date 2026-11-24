@@ -1,0 +1,11 @@
+pr: 22755
+entries:
+  - category: feature
+    text: >-
+      Added experimental A8C4 sparse decode for MiniMax-M3/M3.1 on Ascend 950.
+      Enable sparse_attention_quant_config.enable_a8c4 with FP8 KV and compatible
+      CANN GBSA mode-8 operators and PyTorch bridge; currently only single-node
+      PP1 without CP or KV transfer is supported.
+      This mode retains FP8 for prefill and reserves more cache memory than native FP8.
+    model: minimax-m3.1
+    hardware: [A5]
