@@ -94,7 +94,7 @@
 /vllm_ascend/compilation @yiz-liu @wxsIcey
 
 # device / device_allocator
-/vllm_ascend/device @zzzzwwjj
+/vllm_ascend/device @zzzzwwjj @Tflowers-0129
 /vllm_ascend/device_allocator @weijinqian0 @Ronald1995
 
 # distributed
