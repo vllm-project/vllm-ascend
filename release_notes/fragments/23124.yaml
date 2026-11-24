@@ -1,0 +1,10 @@
+pr: 23124
+entries:
+  - category: bugfix
+    text: >-
+      Fixed startup failure when enabling CPU KV cache offloading with
+      --kv-offloading-size (or kv_connector="OffloadingConnector") on Ascend for
+      models whose KV cache tensors are packed, such as Qwen3.8-27B. The engine
+      previously aborted during offload worker initialization with
+      "Cannot coalesce a non-contiguous Ascend KV cache layout"; these layouts
+      are now offloaded correctly instead of being rejected.
