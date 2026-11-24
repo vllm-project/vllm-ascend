@@ -94,6 +94,22 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self._layerwise_mamba_copy: _LayerwiseMambaCopyState | None = None
         self._layer_state_ranges: dict[str, tuple[int, int]] | None = None
         self._pending_bulk_copy: tuple[MambaSpecDecodeGPUContext, int, torch.Tensor] | None = None
+        self._target_draft_only_groups: tuple[AttentionGroup, ...] = ()
+
+    def set_target_draft_metadata_layers(
+        self, target_attn_groups: list[list[AttentionGroup]], draft_layer_names: set[str]
+    ) -> None:
+        """Skip target-owned groups whose metadata the drafter builds itself.
+
+        Keep group identities so a separate draft group with the same layer names
+        remains usable, and retain mixed groups required by the target model.
+        """
+        self._target_draft_only_groups = tuple(
+            group
+            for groups in target_attn_groups
+            for group in groups
+            if group.layer_names and all(name in draft_layer_names for name in group.layer_names)
+        )
 
     def _get_layer_state_ranges(self, kv_cache_config: KVCacheConfig) -> dict[str, tuple[int, int]]:
         """Map every mamba layer name to its (start, end) range in the
@@ -356,6 +372,14 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         pcp_context = None
         if pcp_manager is not None and self._uses_global_mamba_pcp() and pcp_manager.is_target_attn_groups(attn_groups):
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
+
+        skipped_groups = getattr(self, "_target_draft_only_groups", ())
+        if skipped_groups:
+            # Keep the KV-group indices and use the same groups for RecoverSSM.
+            attn_groups = [
+                [group for group in groups if all(group is not skip for skip in skipped_groups)]
+                for groups in attn_groups
+            ]
 
         def build_metadata(**kwargs):
             if pcp_context is not None and (
