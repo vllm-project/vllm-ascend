@@ -33,6 +33,11 @@ BUILDERS = (
 )
 
 
+def test_device_builder_is_shared_between_fla_and_kda():
+    """One implementation, re-exported by both trees - no drifted copies."""
+    assert prepare_chunk_indices_dev is kda_prepare_chunk_indices_dev
+
+
 def _cu_seqlens(seq_lens, dtype):
     ends = torch.cumsum(torch.tensor(seq_lens, dtype=torch.int64), 0).tolist()
     return torch.tensor([0, *ends], dtype=dtype)
