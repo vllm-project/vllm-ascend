@@ -10,7 +10,10 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.quantization.quant_type import A2_SUPPORT_DISPATCH_FFN_COMBINE_QUANT_TYPES, is_mega_moe_supported
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     MoECommPolicy,
@@ -354,7 +357,17 @@ def _select_capacity_and_expert_density_moe_comm_method(
     if use_cann_megamoe(vllm_config):
         return MoECommType.FUSED_MC2
     if get_ascend_config().enable_fused_mc2 == 1 and get_ep_group().world_size <= 32:
-        return MoECommType.FUSED_MC2
+        # On A2 the dispatch_ffn_combine operator only exists for the weight
+        # layouts built into ascend910b (W4A8, W8A8, BF16/unquantized). A draft
+        # (MTP) MoE layer with another quant type must not select the fused
+        # path: the aclnn lookup would fail on its first forward. Fall through
+        # to the device's default policy for that layer instead.
+        if not (
+            get_ascend_device_type() == AscendDeviceType.A2
+            and is_draft_model
+            and draft_moe_quant_type not in A2_SUPPORT_DISPATCH_FFN_COMBINE_QUANT_TYPES
+        ):
+            return MoECommType.FUSED_MC2
     num_experts = vllm_config.model_config.get_num_experts()
     ep_world_size = (
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
