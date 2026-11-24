@@ -19,7 +19,6 @@ import torch
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
 from vllm_ascend.attention.utils import (
-    MLA_FLASH_BAND_SUPPORTED_Q_HEADS,
     MLA_FLASH_SUPPORTED_Q_HEADS,
     apply_prefill_as_decode_mask,
     get_flashmla_ops,
@@ -163,11 +162,8 @@ class FlashMLAConfig:
     sliding_window: int | None = None
 
     def __post_init__(self) -> None:
-        supported_heads = (
-            MLA_FLASH_BAND_SUPPORTED_Q_HEADS if self.sliding_window is not None else MLA_FLASH_SUPPORTED_Q_HEADS
-        )
-        if self.num_heads not in supported_heads:
-            raise ValueError(f"FlashMLA requires local Q heads in {supported_heads}, got {self.num_heads}")
+        if self.num_heads not in MLA_FLASH_SUPPORTED_Q_HEADS:
+            raise ValueError(f"FlashMLA requires local Q heads in {MLA_FLASH_SUPPORTED_Q_HEADS}, got {self.num_heads}")
         _check_mask_and_kv_layout(self.mask_mode, self.layout_kv, self.sliding_window)
 
     def window_kwargs(self) -> dict[str, int]:
@@ -278,7 +274,7 @@ class FlashMLAImpl:
 
     @classmethod
     def load(cls, config: FlashMLAConfig) -> "FlashMLAImpl":
-        available_ops = get_flashmla_ops(require_band=True) if config.sliding_window is not None else get_flashmla_ops()
+        available_ops = get_flashmla_ops()
         if available_ops is None:
             raise RuntimeError(
                 "FlashMLA requires cann_ops_transformer.ops.flash_mla "

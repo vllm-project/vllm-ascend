@@ -50,14 +50,6 @@ def test_flashmla_api_detection_distinguishes_absence_from_broken_import(monkeyp
         ),
     )
     assert flashmla.get_flashmla_ops() == (attention_op, metadata_op)
-    assert flashmla.get_flashmla_ops(require_band=True) is None
-    band_overload = SimpleNamespace(
-        _schema=torch._C.parse_schema("band(Tensor x, *, int win_left, int win_right) -> Tensor")
-    )
-    attention_op.default = band_overload
-    assert flashmla.get_flashmla_ops(require_band=True) is None
-    metadata_op.default = band_overload
-    assert flashmla.get_flashmla_ops(require_band=True) == (attention_op, metadata_op)
 
     def broken_dependency(_name):
         raise ModuleNotFoundError("No module named 'installed_package_dependency'", name="installed_package_dependency")
@@ -261,7 +253,7 @@ def test_flashmla_dspark_target_model_gate(monkeypatch, dcp_size, pcp_size, mode
     assert not AscendMLAImpl._can_use_flashmla(impl)
 
 
-def test_flashmla_window_requires_a5_and_both_band_operators(monkeypatch):
+def test_flashmla_window_requires_a5_and_flashmla_ops(monkeypatch):
     config = SimpleNamespace(
         use_v2_model_runner=True,
         speculative_config=SimpleNamespace(method="dflash"),
@@ -273,7 +265,7 @@ def test_flashmla_window_requires_a5_and_both_band_operators(monkeypatch):
     )
     impl = _selector_impl(
         vllm_config=config,
-        num_heads=3,
+        num_heads=12,
         num_kv_heads=1,
         kv_lora_rank=512,
         qk_rope_head_dim=64,
@@ -284,7 +276,7 @@ def test_flashmla_window_requires_a5_and_both_band_operators(monkeypatch):
         sliding_window=1024,
     )
     has_mla_flash = True
-    band_available = True
+    ops_available = True
     monkeypatch.setattr(
         mla_v1,
         "get_current_hardware_profile",
@@ -293,29 +285,21 @@ def test_flashmla_window_requires_a5_and_both_band_operators(monkeypatch):
         ),
     )
     monkeypatch.setattr(mla_v1, "supports_component_major_mla_pd", lambda _: True)
-    monkeypatch.setattr(
-        mla_v1,
-        "get_flashmla_ops",
-        lambda *, require_band=False: (object(), object()) if not require_band or band_available else None,
-    )
+    monkeypatch.setattr(mla_v1, "get_flashmla_ops", lambda: (object(), object()) if ops_available else None)
 
     assert impl._can_use_flashmla(dflash_draft_window=True)
     assert not impl._can_use_flashmla()  # A target layer cannot use the draft lengths.
     has_mla_flash = False  # A3.
     assert not impl._can_use_flashmla(dflash_draft_window=True)
     has_mla_flash = True
-    band_available = False
+    ops_available = False
     assert not impl._can_use_flashmla(dflash_draft_window=True)
-    band_available = True
+    ops_available = True
     config.parallel_config.decode_context_parallel_size = 2
     assert not impl._can_use_flashmla(dflash_draft_window=True)
     config.parallel_config.decode_context_parallel_size = 1
     impl.use_pcp = True
     assert not impl._can_use_flashmla(dflash_draft_window=True)
-    impl.use_pcp = False
-
-    impl.sliding_window = None
-    assert not impl._can_use_flashmla()  # Three heads are enabled only for BAND.
 
 
 def test_sliding_window_patch_clears_stale_flashmla_flag(monkeypatch):

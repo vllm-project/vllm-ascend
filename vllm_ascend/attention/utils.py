@@ -77,7 +77,6 @@ MLAPO_MAX_SUPPORTED_TOKENS = 1024
 # MLA models keep the FIA-compatible component-major cache layout on A5.
 # N1 is the post-TP local head count, not the global model configuration.
 MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
-MLA_FLASH_BAND_SUPPORTED_Q_HEADS = MLA_FLASH_SUPPORTED_Q_HEADS | {3}
 
 
 RuntimeComponentShape = tuple[int, int, int, int]
@@ -165,7 +164,7 @@ def _has_flashmla_module() -> bool:
     return find_spec("cann_ops_transformer") is not None
 
 
-def get_flashmla_ops(*, require_band: bool = False) -> tuple[Callable, Callable] | None:
+def get_flashmla_ops() -> tuple[Callable, Callable] | None:
     """Find the two FlashMLA APIs in the active CANN operator package.
 
     An absent package or API permits FIA selection before KV cache allocation.
@@ -184,16 +183,9 @@ def get_flashmla_ops(*, require_band: bool = False) -> tuple[Callable, Callable]
 
     attention_op = getattr(ops, "flash_mla", None)
     metadata_op = getattr(ops, "flash_mla_metadata", None)
-    if not callable(attention_op) or not callable(metadata_op):
-        return None
-    if require_band:
-        # CANN exports torch.ops overload packets. Older distributions have
-        # the same operator names but cannot encode window bounds in tiling.
-        for op in (attention_op, metadata_op):
-            schema = getattr(getattr(op, "default", None), "_schema", None)
-            if schema is None or not {"win_left", "win_right"}.issubset(arg.name for arg in schema.arguments):
-                return None
-    return attention_op, metadata_op
+    if callable(attention_op) and callable(metadata_op):
+        return attention_op, metadata_op
+    return None
 
 
 def get_quant_flashmla_ops() -> tuple[Callable, Callable] | None:

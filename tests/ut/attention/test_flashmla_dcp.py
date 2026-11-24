@@ -155,18 +155,17 @@ def runtime(monkeypatch):
         torch=torch,
     )
     tree = ast.parse((ROOT / "vllm_ascend/attention/utils.py").read_text(encoding="utf-8"))
-    head_constants = {"MLA_FLASH_SUPPORTED_Q_HEADS", "MLA_FLASH_BAND_SUPPORTED_Q_HEADS"}
-    constants = [
+    constant = next(
         node
         for node in tree.body
         if isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Name) and target.id in head_constants for target in node.targets)
-    ]
+        and any(isinstance(target, ast.Name) and target.id == "MLA_FLASH_SUPPORTED_Q_HEADS" for target in node.targets)
+    )
     prefill_flags = next(
         node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "apply_prefill_as_decode_mask"
     )
     exec(
-        compile(ast.Module(body=[*constants, prefill_flags], type_ignores=[]), "<attention-utils>", "exec"),
+        compile(ast.Module(body=[constant, prefill_flags], type_ignores=[]), "<attention-utils>", "exec"),
         utils.__dict__,
     )
     install("vllm.v1.attention.backends.utils", get_dcp_local_seq_lens=local_lengths)
@@ -1058,7 +1057,7 @@ def test_causal_target_and_noncausal_draft_do_not_share_schedules(runtime):
 
 
 def test_band_replay_refreshes_valid_query_prefix_and_write_slots(runtime):
-    builder = runtime.builder(size=1, heads=3, dtype=torch.bfloat16, sliding_window=1024)
+    builder = runtime.builder(size=1, heads=12, dtype=torch.bfloat16, sliding_window=1024)
     inputs = common([1028], [8])
     inputs.slot_mapping = torch.arange(1020, 1028)
     flash = builder.build(inputs, 1, 8, False, retain_for_graph=True)

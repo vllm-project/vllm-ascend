@@ -50,7 +50,6 @@ from vllm_ascend.attention.flashmla import (
 )
 from vllm_ascend.attention.utils import (
     ATTENTION_UPDATE_MAX_INPUTS,
-    MLA_FLASH_BAND_SUPPORTED_Q_HEADS,
     MLA_FLASH_SUPPORTED_Q_HEADS,
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
@@ -1231,6 +1230,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         method = getattr(config.speculative_config, "method", None)
         if config.speculative_config is not None and method not in ("dspark", "dflash"):
             return False
+        if not self._supports_flashmla(MLA_FLASH_SUPPORTED_Q_HEADS):
+            return False
         if self.fa_quant_layer or self.dtype not in (torch.bfloat16, torch.float16):
             return False
         dcp_size = config.parallel_config.decode_context_parallel_size
@@ -1242,11 +1243,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 and method == "dflash"
                 and self.sliding_window > 0
                 and dcp_size == 1
-                and self._supports_flashmla(MLA_FLASH_BAND_SUPPORTED_Q_HEADS)
-                and get_flashmla_ops(require_band=True) is not None
+                and get_flashmla_ops() is not None
             )
-        if not self._supports_flashmla(MLA_FLASH_SUPPORTED_Q_HEADS):
-            return False
         # Replicated DSpark queries keep PCP=1 in their config, but reuse the
         # physical PCP group. Its ranks carry the same Q heads, so history
         # gathers only distinct TP heads, as _dcp_all_gather_fragments does.

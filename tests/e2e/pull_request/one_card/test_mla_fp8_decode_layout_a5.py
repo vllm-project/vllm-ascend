@@ -54,9 +54,9 @@ def require_a5():
 
 @torch.inference_mode()
 def test_bf16_flashmla_band_at_model_limit_a5():
-    if get_flashmla_ops(require_band=True) is None:
-        pytest.skip("The installed FlashMLA operator pair does not expose BAND")
-    window, kv_len, heads = 1024, 1028, 3
+    if get_flashmla_ops() is None:
+        pytest.skip("FlashMLA operators are unavailable")
+    window, kv_len, heads = 1024, 1028, 12
     adapter = FlashMLAImpl.load(FlashMLAConfig(heads, 1.0, mask_mode=FLASHMLA_BAND_MASK_MODE, sliding_window=window))
     query = torch.zeros((8, heads, LATENT_DIM + ROPE_DIM), device="npu", dtype=torch.bfloat16)
     # Mark both ends of the window. Zero queries give each visible KV equal weight.
