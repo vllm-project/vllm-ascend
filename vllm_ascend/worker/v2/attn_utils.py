@@ -1018,7 +1018,8 @@ def _allocate_kv_cache(
             lambda size: _allocate_int8_cache_tensor(size, alignment, device),
             reuse_layout.cache_view_sizes,
         )
-        # Component-major views require slots that no other KV group overlays.
+        # Different KV groups can share a slot by using separate block pages.
+        # Splitting the whole slot by component can put data in another group's page.
         if len(kv_cache_config.kv_cache_groups) == 1:
             return prepare_sfa_cache_slot_views(
                 raw_caches, layer_kv_cache_spec, vllm_config, _get_attention_kv_cache_dims
