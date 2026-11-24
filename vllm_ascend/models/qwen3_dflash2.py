@@ -23,7 +23,7 @@ from vllm_ascend.ops.vocab_parallel_embedding import (
     gather_lm_head_hidden_states,
     gather_lm_head_outputs,
 )
-from vllm_ascend.utils import get_rotation_path
+from vllm_ascend.utils import get_rotation_path, vllm_version_is
 
 _MAX_EXACT_FP32_TOKEN_ID = 1 << 24
 
@@ -326,6 +326,11 @@ def _gather_lm_head_candidates(
 class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
     # vLLM #52816 likewise routes the draft model through this class factory.
     model_cls = DFlash2Qwen3Model
+
+    if not vllm_version_is("0.33.0"):
+        from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
+
+        speculator_config_class = DFlash2SpeculatorConfig
 
     # Share the target LM head so compute_candidates can top-k the full vocab.
     has_own_lm_head = False

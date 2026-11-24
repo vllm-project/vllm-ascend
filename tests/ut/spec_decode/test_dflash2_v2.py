@@ -312,6 +312,72 @@ def test_init_speculator_routes_dflash2_draft_model():
         d2.assert_not_called()
 
 
+def test_registered_dflash2_model_resolves_dflash2_speculator_config_and_routes(monkeypatch, tmp_path):
+    """Registered Ascend DFlash2 model resolves DFlash2SpeculatorConfig and routes to AscendDFlash2Speculator."""
+    from vllm import ModelRegistry
+    from vllm import envs as vllm_envs
+    from vllm.config import SpeculativeConfig
+    from vllm.model_executor.models import registry as registry_mod
+
+    from vllm_ascend.models import register_model
+    from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3ForCausalLM
+    from vllm_ascend.utils import vllm_version_is
+
+    monkeypatch.setattr(ModelRegistry, "models", ModelRegistry.models.copy())
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    monkeypatch.setattr(vllm_envs, "VLLM_CACHE_ROOT", str(tmp_path), raising=False)
+    monkeypatch.setattr(registry_mod, "_run_in_subprocess", lambda fn: fn())
+    if hasattr(registry_mod._try_load_model_cls, "cache_clear"):
+        registry_mod._try_load_model_cls.cache_clear()
+
+    register_model()
+
+    model_config = SimpleNamespace(
+        model="/test/DFlash2DraftModel",
+        model_impl="vllm",
+        convert_type="none",
+        runner_type="generate",
+        trust_remote_code=False,
+        _get_transformers_backend_cls=lambda: "TransformersForCausalLM",
+    )
+    resolved_cls, resolved_arch = ModelRegistry.resolve_model_cls(["DFlash2DraftModel"], model_config)
+    assert resolved_arch == "DFlash2DraftModel"
+    assert resolved_cls is DFlash2Qwen3ForCausalLM
+
+    model_info, inspected_arch = ModelRegistry.inspect_model_cls(["DFlash2DraftModel"], model_config)
+    assert inspected_arch == "DFlash2DraftModel"
+
+    if vllm_version_is("0.33.0"):
+        return
+
+    from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
+
+    assert model_info.speculator_config_class == "vllm.v1.worker.gpu.spec_decode.dflash2.config.DFlash2SpeculatorConfig"
+
+    speculative = object.__new__(SpeculativeConfig)
+    speculative.method = "dflash"
+    speculative.custom_method = None
+    speculative.enforce_eager = False
+    speculative.draft_model_config = SimpleNamespace(
+        speculator_config_class=model_info.speculator_config_class,
+        architectures=["DFlash2DraftModel"],
+    )
+    assert type(speculative.speculator_config) is DFlash2SpeculatorConfig
+    assert speculative.speculator_config.supports_watermarking is False
+    assert speculative.speculator_config.speculator_class == (
+        "vllm.v1.worker.gpu.spec_decode.dflash2.speculator.DFlash2Speculator"
+    )
+
+    cfg = SimpleNamespace(speculative_config=speculative)
+    with (
+        patch("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.AscendDFlash2Speculator") as d2,
+        patch("vllm_ascend.worker.v2.spec_decode.dflash.speculator.AscendDFlashSpeculator") as d1,
+    ):
+        assert init_speculator(cfg, torch.device("cpu")) is d2.return_value
+        d2.assert_called_once_with(cfg, torch.device("cpu"))
+        d1.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "architecture,speculator_path",
     [
