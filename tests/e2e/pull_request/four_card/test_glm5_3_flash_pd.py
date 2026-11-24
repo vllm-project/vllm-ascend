@@ -18,6 +18,7 @@ from tests.e2e.pull_request.four_card.test_glm5_3_flash import _write_model
 
 MODEL_NAME = "flash-pd-test"
 OUTPUT_TOKENS = 16
+MTP_TOKENS = 5
 
 
 class FlashPDServer(RemotePDServer):
@@ -89,7 +90,9 @@ def serve_args(model, port, kv_port, producer, eager, prefix_caching):
         "--mamba-cache-mode",
         "align" if prefix_caching else "none",
         "--speculative-config",
-        json.dumps({"method": "deepseek_mtp", "num_speculative_tokens": 3, "enforce_eager": producer or eager}),
+        json.dumps(
+            {"method": "deepseek_mtp", "num_speculative_tokens": MTP_TOKENS, "enforce_eager": producer or eager}
+        ),
         "--additional-config",
         json.dumps(
             {
@@ -188,7 +191,7 @@ def test_glm53flash_pcp2_dp2(tmp_path, eager, prefix_caching):
                 assert tuple(worker[key] for key in ("tp", "pcp", "dp", "ep")) == expected
                 assert worker["kda_heads"] == [64 // expected[1]] * 7
                 assert worker["replayssm"] and worker["has_speculator"]
-                assert worker["mtp_tokens"] == 3
+                assert worker["mtp_tokens"] == MTP_TOKENS
                 assert worker["prefix_caching"] == prefix_caching
                 assert worker["graph_mode"] == ("NONE" if url == p_url or eager else "FULL_DECODE_ONLY")
         rpc(d_url, "flash_pd_probe")
