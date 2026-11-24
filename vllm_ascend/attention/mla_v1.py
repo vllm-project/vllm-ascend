@@ -50,6 +50,7 @@ from vllm_ascend.attention.flashmla import (
 )
 from vllm_ascend.attention.utils import (
     ATTENTION_UPDATE_MAX_INPUTS,
+    MLA_FLASH_BAND_SUPPORTED_Q_HEADS,
     MLA_FLASH_SUPPORTED_Q_HEADS,
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
@@ -184,15 +185,9 @@ class AscendMLAAttention(MLAAttention):
             return spec
         values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
         if isinstance(spec, SlidingWindowMLASpec):
-            # Sliding-window drafts (e.g. Kimi-K3.1-DFlash2) keep full
-            # KV retention: DFlash context precompute writes every
-            # context row, and the window is enforced by the FIA
-            # pre_tokens band in the decode path instead of a
-            # window-limited cache. Publish the plain MLA spec so
-            # cache planning and block tables stay unchanged. The
-            # SlidingWindowMLASpec-only fields (sliding_window,
-            # extra_retained_tokens, bounded_replay) must not leak
-            # into the Ascend spec constructor.
+            # DFlash precomputes every context row. Retain the full KV cache
+            # and apply the window in the selected decode attention kernel.
+            # Only pass fields declared by the full-retention Ascend spec.
             allowed = {field.name for field in fields(AscendMLAAttentionSpec) if field.init}
             values = {name: value for name, value in values.items() if name in allowed}
         model_type = getattr(vllm_config.model_config.hf_text_config, "model_type", None)
@@ -1231,21 +1226,27 @@ class AscendMLAImpl(MLAAttentionImpl):
         dcp_size = config.parallel_config.decode_context_parallel_size
         return self.num_heads * dcp_size in supported_heads and get_quant_flashmla_ops() is not None
 
-    def _can_use_flashmla(self) -> bool:
+    def _can_use_flashmla(self, *, dflash_draft_window: bool = False) -> bool:
         config = self.vllm_config
-        # Upstream restricts FlashMLA drafts to DSpark; the DFlash2 MLA
-        # draft shares the same metadata contract, so allow it as well.
-        if config.speculative_config is not None and config.speculative_config.method not in ("dspark", "dflash"):
-            return False
-        if self.sliding_window is not None:
-            # FlashMLA has no sliding-window band; windowed drafts
-            # attend through the FIA pre_tokens path instead.
-            return False
-        if not self._supports_flashmla(MLA_FLASH_SUPPORTED_Q_HEADS):
+        method = getattr(config.speculative_config, "method", None)
+        if config.speculative_config is not None and method not in ("dspark", "dflash"):
             return False
         if self.fa_quant_layer or self.dtype not in (torch.bfloat16, torch.float16):
             return False
         dcp_size = config.parallel_config.decode_context_parallel_size
+        if self.sliding_window is not None:
+            # Only DFlash supplies the valid per-request Q prefix for BAND.
+            # DCP's history pass uses a different, non-causal mask.
+            return (
+                dflash_draft_window
+                and method == "dflash"
+                and self.sliding_window > 0
+                and dcp_size == 1
+                and self._supports_flashmla(MLA_FLASH_BAND_SUPPORTED_Q_HEADS)
+                and get_flashmla_ops(require_band=True) is not None
+            )
+        if not self._supports_flashmla(MLA_FLASH_SUPPORTED_Q_HEADS):
+            return False
         # Replicated DSpark queries keep PCP=1 in their config, but reuse the
         # physical PCP group. Its ranks carry the same Q heads, so history
         # gathers only distinct TP heads, as _dcp_all_gather_fragments does.

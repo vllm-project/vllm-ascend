@@ -361,6 +361,7 @@ def build_attn_metadata(
     seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     num_computed_tokens_cpu: torch.Tensor | None = None,
     positions: torch.Tensor | None = None,
+    draft_query_lens: torch.Tensor | None = None,
     attn_state: Any | None = None,
     graph_pad_size: int = -1,
     num_actual_tokens: int | None = None,
@@ -508,6 +509,7 @@ def build_attn_metadata(
             block_table_tensor=block_table,
             slot_mapping=slot_mapping,
             positions=positions,
+            draft_query_lens=draft_query_lens,
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
@@ -2128,6 +2130,7 @@ def build_attn_metadata_factory(
     attn_state=None,
     parallel_config=None,
     offload_kwargs=None,
+    draft_query_lens=None,
 ):
     """Wrap build_attn_metadata with Ascend draft-model context.
 
@@ -2146,6 +2149,8 @@ def build_attn_metadata_factory(
         kwargs["parallel_config"] = parallel_config
         if seq_lens_cpu is not None:
             kwargs["seq_lens_np"] = seq_lens_cpu.numpy()
+        if draft_query_lens is not None:
+            kwargs["draft_query_lens"] = draft_query_lens
         if offload_kwargs is not None:
             kwargs.update(offload_kwargs)
         return raw(*args, **kwargs)

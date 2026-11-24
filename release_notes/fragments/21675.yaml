@@ -3,7 +3,7 @@ entries:
   - category: feature
     text: Added MLA attention mode support for DFlash2 draft models in speculative decoding on Ascend NPUs, enabled via dflash_config.attention_mode="mla" for checkpoints such as Kimi-K3.1-Dflash2-Preview.
   - category: performance
-    text: Enabled the FlashMLA draft path and device-side sequence-length synchronization for the Kimi K3.1 target with DFlash2 drafts, removing per-step CPU length sync from the speculative decode hot path on verified parallel configurations.
+    text: Kimi DFlash2 MLA drafts on A5 can use non-quantized FlashMLA for causal sliding-window decode when both CANN operators support BAND. The draft supplies valid query lengths on device, including partially filled query blocks at the model length limit. A3 continues to use FIA.
   - category: bugfix
     text: Fixed DFlash2 MLA draft attention causality being resolved from a
       non-existent layer attribute, which silently routed every draft layer

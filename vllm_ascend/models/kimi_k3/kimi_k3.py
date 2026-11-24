@@ -592,20 +592,10 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
             attention_layer.impl.enable_mlapo = False
             mark_fused_preprocess_weights(attention_layer.impl)
         if sliding_window is not None:
-            # The upstream AMD Kimi wrapper drops **kwargs, so the
-            # window cannot reach the platform MLA wrapper through the
-            # constructor. Patch the already-registered layer instead,
-            # mirroring the DSpark configuration above. The draft KV
-            # cache keeps full retention; the window is enforced by
-            # the FIA pre_tokens band in the decode attention path.
+            # Upstream constructs the MLA layer without the window. Drop its
+            # full-attention selection until the draft resolves all its layers.
             attention_layer.sliding_window = sliding_window
             attention_layer.impl.sliding_window = sliding_window
-            # The impl computed use_flashmla in __init__ while the
-            # window was still None (the upstream MLA wrapper hardcodes
-            # sliding_window=None), so the FlashMLA gate never saw it
-            # and may have selected FlashMLA for this layer. FlashMLA
-            # has no sliding-window band; force the FIA path or decode
-            # attention would silently run window-free.
             attention_layer.impl.use_flashmla = False
         if not use_rope and not non_causal_multi_token_decode:
             return

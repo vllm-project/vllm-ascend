@@ -137,7 +137,7 @@ def test_window_at_model_limit_preserves_valid_draft_rows(monkeypatch, mode):
     # Only four queries of request 0 fit. Request 1 has room for all eight.
     num_rows = 3 if mode == CUDAGraphMode.FULL else 2
     spec = _spec([4096, 2048, 0][:num_rows])
-    spec._windowed_mla_layers = ("window",)
+    spec._windowed_fia_layers = ("window",)
     spec.attn_backends = dict.fromkeys(("window", "full"), AscendMLABackend)
     monkeypatch.setattr(AscendDFlashSpeculator, "max_model_len", 4096, raising=False)
     spec.draft_max_seq_len = 4096
@@ -215,3 +215,30 @@ def test_window_at_model_limit_preserves_valid_draft_rows(monkeypatch, mode):
             fresh = spec.build_draft_attn_metadatas(num_rows, lengths)[0]["window"].decode
         assert fresh.actual_seq_lengths_q[:2] == [6, 8]
         assert sample_pos_copies == 2
+
+
+def test_flashmla_window_supplies_live_device_query_prefix(monkeypatch):
+    spec = _spec([4096, 4096, 2048, 0])
+    spec._has_windowed_flashmla = spec.use_flashmla = True
+    spec.num_speculative_steps = 7
+    spec.sample_pos = torch.zeros(28, dtype=torch.int64)
+    spec.sample_pos[::7] = torch.tensor([4093, 4097, 2041, 0])
+    monkeypatch.setattr(AscendDFlashSpeculator, "max_model_len", 4096, raising=False)
+    monkeypatch.setattr(AscendDFlashSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
+    supplied = []
+    _capture_factory(monkeypatch, supplied)
+    monkeypatch.setattr(DFlashSpeculator, "_build_attn_metadata", lambda *args, **kwargs: {})
+    monkeypatch.setattr(dflash_speculator_module, "prepare_draft_fia_lengths", lambda *_a, **_kw: pytest.fail("D2H"))
+
+    for max_len, expected in [(4095, None), (4096, [4, 0, 8]), (4096, [6, 0, 8])]:
+        spec.draft_max_seq_len = max_len
+        with draft_metadata_request_count(spec, 3):
+            spec.build_draft_attn_metadatas(4, spec.input_buffers.seq_lens)
+        inputs = supplied[-1]
+        assert not inputs["is_prefilling"].any() and inputs["seq_lens_cpu"] is None
+        used_q = inputs["draft_query_lens"]
+        if expected is None:
+            assert used_q is None
+        else:
+            assert used_q.dtype == torch.int32 and used_q.tolist() == expected
+            spec.sample_pos[0] -= 2

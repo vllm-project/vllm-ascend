@@ -88,6 +88,28 @@ def test_mla_layer_requires_a_window_size(build_mla_layer):
         build_mla_layer(dflash_config={"use_swa": True})
 
 
+@pytest.mark.parametrize(
+    "windows, expected", [([1024, 1024], [True, True]), ([1024, None], [False, True]), ([1024, 512], [False, False])]
+)
+def test_flashmla_selects_a_uniform_draft_window(monkeypatch, windows, expected):
+    def init_draft(self, **_kwargs):
+        nn.Module.__init__(self)
+        self.layers = []
+        for window in windows:
+            impl = SimpleNamespace(
+                sliding_window=window,
+                use_flashmla=window is None,
+                _can_use_flashmla=lambda *, dflash_draft_window: dflash_draft_window,
+            )
+            self.layers.append(
+                SimpleNamespace(self_attn=SimpleNamespace(_attention_layer=SimpleNamespace(impl=impl), causal=True))
+            )
+
+    monkeypatch.setattr(dflash2.DFlash2Qwen3Model, "__init__", init_draft)
+    model = dflash2.DFlash2Qwen3MLAModel(vllm_config=None)
+    assert [layer.self_attn._attention_layer.impl.use_flashmla for layer in model.layers] == expected
+
+
 @pytest.fixture
 def mla_context_model(monkeypatch):
     class TupleLinear(nn.Linear):

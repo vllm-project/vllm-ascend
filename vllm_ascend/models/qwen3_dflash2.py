@@ -372,6 +372,19 @@ class DFlash2Qwen3MLAModel(DFlash2Qwen3Model):
         },
     )
 
+    def __init__(self, *, vllm_config: VllmConfig, start_layer_id: int = 0, prefix: str = "") -> None:
+        super().__init__(vllm_config=vllm_config, start_layer_id=start_layer_id, prefix=prefix)
+        # A shared FlashMLA schedule encodes one window. Keep heterogeneous
+        # drafts on their original per-layer paths before cache allocation.
+        attns = [layer.self_attn for layer in self.layers]
+        modes = {(attn._attention_layer.impl.sliding_window, attn.causal) for attn in attns}
+        if len(modes) == 1:
+            window, causal = modes.pop()
+            if window is not None and causal:
+                for attn in attns:
+                    impl = attn._attention_layer.impl
+                    impl.use_flashmla = impl._can_use_flashmla(dflash_draft_window=True)
+
     def _build_fused_kv_buffers(self) -> None:
         """The MLA writer uses the loaded per-layer projections directly."""
 

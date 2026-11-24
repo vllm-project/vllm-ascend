@@ -145,13 +145,12 @@ def _prepare_dflash_inputs_with_block_stride(
 
 
 def validate_grouped_draft_attn(model: Any, kv_cache_config: Any, attn_layers: Mapping[str, Any]) -> tuple[str, ...]:
-    """Validate per-group attention and return the layers using windowed MLA FIA.
+    """Validate per-group attention and return the layers using windowed MLA.
 
     The pinned upstream DFlash speculator stores draft causality per KV cache
     group (``_group_causal``), so the last layer's flag wins for the whole
     group; fail fast on mixed causality instead of silently corrupting draft
-    attention. Windowed MLA layers must be causal (the FIA pre_tokens band
-    is applied only in the causal decode branch) and must not use
+    attention. Windowed MLA drafts use a causal band and must not use
     ``AscendMlaDCPImpl``, which passes no band to FIA; it is the same
     restriction upstream vLLM #68214 encodes by refusing DCP for windowed
     DFlash2 drafts. Models without the per-layer hooks keep the upstream
@@ -184,12 +183,9 @@ def validate_grouped_draft_attn(model: Any, kv_cache_config: Any, attn_layers: M
             continue
         if not causal:
             raise ValueError(
-                "Windowed MLA draft layers must be causal: the Ascend MLA decode "
-                "path applies the sliding-window band only in the causal branch "
-                "(FIA sparse_mode=4), so a non-causal windowed draft would "
-                f"silently attend the full context (layer {layer_name}). Use a "
-                "causal windowed draft, or a non-windowed draft for bidirectional "
-                "attention."
+                f"Windowed MLA draft layers must be causal (layer {layer_name}). "
+                "The Ascend MLA draft applies a left window with no lookahead. "
+                "Use a non-windowed draft for bidirectional attention."
             )
         if isinstance(impl, AscendMlaDCPImpl):
             raise ValueError(
@@ -205,7 +201,8 @@ def validate_grouped_draft_attn(model: Any, kv_cache_config: Any, attn_layers: M
 
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
-    _windowed_mla_layers: tuple[str, ...] = ()
+    _windowed_fia_layers: tuple[str, ...] = ()
+    _has_windowed_flashmla = False
 
     if not vllm_version_is("0.33.0"):
 
@@ -262,10 +259,9 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         Eager propose() reaches the builder through this hook with only
         ``build_attn_metadata_wrapper()`` outside, so the FIA factory
         context must live here; ``build_draft_attn_metadatas`` alone only
-        covers FULL-graph replay. Only FIA-backed MLA drafts enter the
-        factory (``attn_state=ChunkedPrefill`` plus the rejection-adjusted
-        host lengths); GQA and FlashMLA drafts keep the upstream builder
-        inputs and consume the device lengths directly.
+        covers FULL-graph replay. FIA needs rejection-adjusted host lengths.
+        A windowed FlashMLA group consumes the device KV lengths directly
+        and needs the valid Q prefix when a proposal hits the model limit.
         """
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         # The draft forward may process padded inputs outside FULL graphs, but
@@ -273,11 +269,20 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         num_tokens = batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
         metadata_context = nullcontext()
         valid_queries = None
-        if self.attn_architecture == "MLA" and not self.use_flashmla:
-            capped_window = self._windowed_mla_layers and self.draft_max_seq_len == self.max_model_len
-            seq_lens_cpu, valid_queries = prepare_draft_fia_lengths(
-                self, num_reqs, num_reqs_padded, window_step=step if capped_window else None
-            )
+        if self.attn_architecture == "MLA" and (not self.use_flashmla or self._has_windowed_flashmla):
+            seq_lens_cpu = None
+            draft_query_lens = None
+            if not self.use_flashmla:
+                capped_fia = self._windowed_fia_layers and self.draft_max_seq_len == self.max_model_len
+                seq_lens_cpu, valid_queries = prepare_draft_fia_lengths(
+                    self, num_reqs, num_reqs_padded, window_step=step if capped_fia else None
+                )
+            if self._has_windowed_flashmla and self.draft_max_seq_len == self.max_model_len:
+                # First sample position is the (unclipped) first Q position + 1.
+                # KV lengths are already clipped by prepare_dflash_inputs.
+                stride = self.num_speculative_steps
+                first_sample = self.sample_pos[: num_reqs * stride : stride]
+                draft_query_lens = (self.max_model_len + 1 - first_sample).clamp_(0, step).to(torch.int32)
             metadata_context = build_attn_metadata_factory(
                 self.input_buffers.positions,
                 num_tokens,
@@ -285,6 +290,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 seq_lens_cpu=seq_lens_cpu,
                 attn_state=AscendAttentionState.ChunkedPrefill,
                 parallel_config=self.attn_vllm_config.parallel_config,
+                draft_query_lens=draft_query_lens,
             )
         with build_attn_metadata_wrapper(), metadata_context:
             attn_metadata = super()._build_attn_metadata(
@@ -309,7 +315,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         """Give FIA the valid query prefix and a separate zero-KV sequence for its padding."""
         width = self.num_query_per_req
         by_group = {}
-        for name in self._windowed_mla_layers:
+        for name in self._windowed_fia_layers:
             metadata = attn_metadata[name]
             group = id(metadata)
             if group not in by_group:
@@ -419,7 +425,11 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         self.attn_backends = attn_backends
         install_ascend_dflash_input_preparation()
         self.attn_architecture, self.use_flashmla = detect_draft_attn_architecture(self.attn_groups)
-        self._windowed_mla_layers = validate_grouped_draft_attn(self.model, kv_cache_config, resolved_layers)
+        windowed_layers = validate_grouped_draft_attn(self.model, kv_cache_config, resolved_layers)
+        self._windowed_fia_layers = tuple(
+            name for name in windowed_layers if not resolved_layers[name].impl.use_flashmla
+        )
+        self._has_windowed_flashmla = len(self._windowed_fia_layers) < len(windowed_layers)
 
     def propose(
         self,
