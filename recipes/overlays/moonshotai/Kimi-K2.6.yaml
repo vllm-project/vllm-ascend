@@ -4,36 +4,25 @@ meta:
   hardware:
     ascend_950dt: supported
     ascend_910c: supported
+hardware_notes:
+  ascend_910c:
+    title: W4A8 checkpoint required
+    body: >-
+      Select W4A8 (Ascend). Only the Eco-Tech/Kimi-K2.6-w4a8 checkpoint is covered
+      by this Ascend recipe. Other inherited variants may remain visible in the
+      current renderer and are not validated for Ascend.
+  ascend_950dt:
+    title: W4A8 checkpoint required
+    body: >-
+      Select W4A8 (Ascend). Only the Eco-Tech/Kimi-K2.6-w4a8 checkpoint is covered
+      by this Ascend recipe. Other inherited variants may remain visible in the
+      current renderer and are not validated for Ascend.
 hardware_opt_in_features:
   ascend_950dt:
     - spec_decoding
   ascend_910c:
     - spec_decoding
 variants:
-  default:
-    hardware_overrides:
-      ascend_910c:
-        support: unsupported
-      ascend_950dt:
-        support: unsupported
-  fp8:
-    hardware_overrides:
-      ascend_910c:
-        support: unsupported
-      ascend_950dt:
-        support: unsupported
-  nvfp4:
-    hardware_overrides:
-      ascend_910c:
-        support: unsupported
-      ascend_950dt:
-        support: unsupported
-  redhat_nvfp4:
-    hardware_overrides:
-      ascend_910c:
-        support: unsupported
-      ascend_950dt:
-        support: unsupported
   w4a8_ascend:
     model_id: Eco-Tech/Kimi-K2.6-w4a8
     precision: int4
@@ -137,7 +126,8 @@ guide_sections:
 
     The [official 910C example](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K2.6.html#51-single-node-online-deployment)
     uses one Atlas 800 A3 node (16 x 64 GB NPUs) with TP=4, DP=4 and EP.
-    Download the W4A8 checkpoint and use its local path if needed.
+    Select **W4A8 (Ascend)** in the builder. Other inherited variants are not
+    validated for Ascend. Download the W4A8 checkpoint and use its local path if needed.
 
     - **Ports:** the standalone command below serves on 8000; the DEP builder uses
       service port 8100 behind a router on 8000.
@@ -162,6 +152,9 @@ guide_sections:
     The image includes user-space dependencies. For source installation, use
     the top **INSTALL** block or the [official installation guide](https://docs.vllm.ai/projects/ascend/en/latest/getting_started/installation.html).
     This A3 environment is the 910C reference, not a validated 950DT configuration.
+
+    When using the shared Client Usage example, set `model` to
+    `Eco-Tech/Kimi-K2.6-w4a8` to match this recipe's served model name.
 
     #### Launch command
 
