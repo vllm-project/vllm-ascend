@@ -3985,27 +3985,32 @@ class TestKVPoolWorkerResetStore(unittest.TestCase):
 
 
 class TestLazyInitGate(unittest.TestCase):
-    """lazy_init must be requested for models that run the packed C8 pool path.
+    """Request lazy init for compressed, packed C8, and Qwen Flash Next models.
 
     Compressed models keep the #9771 request. Sparse-indexer models get it
     only when the packed C8 cache path is active (sparse + fp8/int8
     cache_dtype, the dtype-derived successor of v0.26's c8_enable_reshape_optim
     knob): that path plus an eager store setup is the fabric-memory hang, and
-    deferring the store setup to the first put() is the remedy. Sparse models
-    with other cache dtypes keep eager init, since the trigger does not
-    reproduce there (v0.26: c8_enable_reshape_optim off -> no failure).
+    deferring store setup is the remedy. Qwen Flash Next requests deferral
+    by its exact architecture name even without a packed C8 cache. Other
+    sparse models with non-C8 cache dtypes keep their existing eager behavior.
     """
 
     PW = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
 
-    def _run_init_backend(self, use_compress: bool, use_sparse: bool, cache_dtype: str) -> MagicMock:
+    def _run_init_backend(
+        self, use_compress: bool, use_sparse: bool, cache_dtype: str, architectures=None
+    ) -> MagicMock:
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
         worker = KVPoolWorker.__new__(KVPoolWorker)
         worker.backend = "mooncake"
         worker.use_compress = use_compress
         worker.use_sparse = use_sparse
-        worker.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype=cache_dtype))
+        worker.vllm_config = SimpleNamespace(
+            cache_config=SimpleNamespace(cache_dtype=cache_dtype),
+            model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=architectures)),
+        )
         backend_cls = MagicMock()
         fake_module = SimpleNamespace(Backend=backend_cls)
         with (
@@ -4036,6 +4041,35 @@ class TestLazyInitGate(unittest.TestCase):
         # eager-setup failure, so it must not request the deferral.
         backend_cls = self._run_init_backend(use_compress=False, use_sparse=True, cache_dtype="auto")
         self.assertFalse(backend_cls.call_args.kwargs["lazy_init"])
+
+    def test_qwen_flash_next_requests_lazy_init_without_compression(self):
+        for use_sparse, cache_dtype in ((False, "auto"), (True, "auto"), (True, "bfloat16")):
+            with self.subTest(use_sparse=use_sparse, cache_dtype=cache_dtype):
+                backend_cls = self._run_init_backend(
+                    use_compress=False,
+                    use_sparse=use_sparse,
+                    cache_dtype=cache_dtype,
+                    architectures=["Qwen4ExpForConditionalGeneration"],
+                )
+                self.assertTrue(backend_cls.call_args.kwargs["lazy_init"])
+
+    def test_architecture_match_is_exact(self):
+        for architectures in (
+            None,
+            [],
+            ["Qwen4ExpForCausalLM"],
+            ["Qwen4ExpForConditionalGenerationExtra"],
+            ["LlamaForCausalLM"],
+        ):
+            with self.subTest(architectures=architectures):
+                backend_cls = self._run_init_backend(False, True, "auto", architectures)
+                self.assertFalse(backend_cls.call_args.kwargs["lazy_init"])
+
+    def test_matching_architecture_in_list_requests_lazy_init(self):
+        backend_cls = self._run_init_backend(
+            False, False, "auto", ["OtherArchitecture", "Qwen4ExpForConditionalGeneration"]
+        )
+        self.assertTrue(backend_cls.call_args.kwargs["lazy_init"])
 
 
 if __name__ == "__main__":
