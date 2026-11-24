@@ -104,13 +104,14 @@ def _iter_layer_specs(kv_cache_spec: KVCacheSpec):
 
 
 def _has_ds4_compress_mla_group(kv_cache_config: KVCacheConfig, hash_block_size: int) -> bool:
-    """Any DeepSeek-V4 (v4.0) compressed-MLA group whose logical block size
+    """Any DeepSeek-V4/V4.1 compressed-MLA group whose logical block size
     exceeds ``hash_block_size``. Such groups fold ``compress_ratio`` into the
-    spec ``block_size`` (e.g. 4096 raw tokens for the C128 main group), so
-    full-block prefix-cache hits are pinned to whole blocks and any shorter
-    shared prefix misses entirely."""
+    spec ``block_size`` (e.g. 4096 raw tokens for the v4.0 C128 main group),
+    so full-block prefix-cache hits are pinned to whole blocks and any
+    shorter shared prefix misses entirely."""
     return any(
-        getattr(spec, "model_version", None) == "deepseek_v4" and spec.block_size > hash_block_size
+        getattr(spec, "model_version", None) in ("deepseek_v4", "deepseek_v41")
+        and spec.block_size > hash_block_size
         for g in kv_cache_config.kv_cache_groups
         for spec in _iter_layer_specs(_manager_spec(g.kv_cache_spec))
     )
@@ -121,14 +122,17 @@ def _ds4_tail_alignment_divides_hash(kv_cache_config: KVCacheConfig, hash_block_
     ``hash_block_size``, which is only correct while the hybrid
     ``cache_hit_alignment_tokens`` stays equal to ``hash_block_size``. That
     requires every non-cacheable tail pool's ``compress_ratio`` to divide
+    ``hash_block_size`` -- i.e. the LCM of the ratios must divide
     ``hash_block_size``; otherwise fall back to whole-block hits (correct,
     just coarse) instead of probing on a misaligned index."""
     tail_alignment = 1
     for g in kv_cache_config.kv_cache_groups:
         if not is_prefix_cacheable(g.kv_cache_spec):
             for spec in _iter_layer_specs(g.kv_cache_spec):
-                tail_alignment = lcm(tail_alignment, getattr(spec, "compress_ratio", 1))
-    return tail_alignment % hash_block_size == 0
+                # Guard against None/0 compress_ratio (TypeError/ZeroDivisionError).
+                ratio = getattr(spec, "compress_ratio", 1) or 1
+                tail_alignment = lcm(tail_alignment, ratio)
+    return hash_block_size % tail_alignment == 0
 
 
 class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
@@ -257,9 +261,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 )
                 for g in kv_cache_config.kv_cache_groups
             )
-            # DeepSeek-V4 (v4.0) compressed-MLA groups: full-block hits are
+            # DeepSeek-V4/V4.1 compressed-MLA groups: full-block hits are
             # pinned to whole (huge) logical blocks, e.g. 4096 tokens for the
-            # C128 main group. FullAttentionManager already supports
+            # v4.0 C128 main group. FullAttentionManager already supports
             # fine-grained hash lookup natively, so opening this gate unlocks
             # hash_block_size-granular partial hits with no custom manager.
             or (
