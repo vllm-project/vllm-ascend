@@ -6,7 +6,9 @@ from vllm.triton_utils import HAS_TRITON
 from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
 
 
-def can_use_fused_mrope(rotary_emb: torch.nn.Module, num_kv_heads: int) -> TypeGuard[AscendMRotaryEmbedding]:
+def can_use_fused_mrope(
+    rotary_emb: torch.nn.Module, num_kv_heads: int, num_q_heads: int
+) -> TypeGuard[AscendMRotaryEmbedding]:
     if not HAS_TRITON or not isinstance(rotary_emb, AscendMRotaryEmbedding):
         return False
     sections = rotary_emb.mrope_section
@@ -20,7 +22,7 @@ def can_use_fused_mrope(rotary_emb: torch.nn.Module, num_kv_heads: int) -> TypeG
         and 0 < rotary_emb.rotary_dim <= rotary_emb.head_size
         and all(
             size > 0 and (size & (size - 1)) == 0
-            for size in (rotary_emb.head_size, rotary_emb.rotary_dim, num_kv_heads)
+            for size in (rotary_emb.head_size, rotary_emb.rotary_dim, num_kv_heads, num_q_heads)
         )
     )
 

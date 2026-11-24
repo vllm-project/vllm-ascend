@@ -29,7 +29,7 @@ def tensor_parallel_wrap(func):
 
 def forward_with_split_qkv_rmsnorm_mrope(self, positions: torch.Tensor, hidden_states: torch.Tensor):
     qkv, _ = self.qkv_proj(hidden_states)
-    if can_use_fused_mrope(self.rotary_emb, self.num_kv_heads):
+    if can_use_fused_mrope(self.rotary_emb, self.num_kv_heads, self.num_heads):
         cos_sin, inline_positions, inv_freq = get_fused_mrope_inputs(self.rotary_emb, positions, qkv)
         q, k, v, _ = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
             qkv=qkv,

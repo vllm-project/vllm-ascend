@@ -6,8 +6,7 @@
 - **Formula**. For each Q or K head, compute the RMS reduction in FP32. Let `s(j)` select the temporal, height, or width axis for frequency lane `j`. Each rotating channel pair uses the same phase.
 
   ```text
-  w_eff = cast_to_weight_dtype(weight + rms_weight_offset)
-  u = x * rsqrt(mean(x²) + eps) * w_eff + bias
+  u = x * rsqrt(mean(x²) + eps) * weight + bias
   phase[t, j] = positions[s(j), t] * inv_freq[j]
   cos, sin = cos(phase), sin(phase)
   y_first  = u_first * cos - u_second * sin
@@ -16,10 +15,10 @@
 
   An omitted bias contributes zero. Only the first `rope_dim` channels rotate. The remaining channels retain their normalized values. The online path rounds cos and sin to the QKV dtype before the rotation.
 
-- **Algorithm flow**. Distribute contiguous token ranges across at most as many programs as there are vector cores. Each program builds the axis masks once.
+- **Algorithm flow**. Distribute contiguous token ranges across vector cores and process each token in the assigned range.
     1. Select the MRoPE axis for each frequency. The non-interleaved layout uses contiguous temporal, height, and width sections. The interleaved layout uses the height and width section lengths to select their lanes, with temporal values in the remaining lanes.
-    2. Compute cos and sin from FP32 inverse frequencies over a token tile, or load the supplied cache rows and select the same lanes.
-    3. Process Q and K in groups of heads. Use FP32 arithmetic for normalization and rotation. Write Q and K in the QKV dtype and copy V and the gate.
+    2. Compute cos and sin from FP32 inverse frequencies for the token, or load the supplied cache rows and select the same lanes.
+    3. Use FP32 arithmetic for Q and K normalization and rotation. Write Q and K in the QKV dtype and copy V and the gate.
 - **Supported modes**. Eager execution and ACLGraph capture and replay with Triton on Ascend. The nightly operator tests target Atlas A2, Atlas A3, and Atlas A5. The long-position replay case has been verified on Ascend 910B3.
 
 ## Parameters
@@ -41,7 +40,6 @@ Let `T` be the token count, `Hq` and `Hkv` the local head counts, `D` the head s
 | `has_gate` | Attribute | Indicates that the Q projection packs a gate for each head. Defaults to false. | Boolean | Scalar |
 | `positions` | Input | Temporal, height, and width position IDs for online calculation. | Int32 or Int64 | `[3, T]`, strided layouts supported |
 | `inv_freq` | Input | Inverse frequencies for online calculation. | FP32 | Contiguous, `R / 2` elements |
-| `rms_weight_offset` | Attribute | Value added to Q and K weights. Defaults to `0.0`. Qwen3.5 passes `1.0`. | Float | Scalar |
 | `q` | Output | Normalized and rotated query. | QKV dtype | Contiguous `[T, Hq * D]` |
 | `k` | Output | Normalized and rotated key. | QKV dtype | Contiguous `[T, Hkv * D]` |
 | `v` | Output | Copied value. | QKV dtype | Contiguous `[T, Hkv * D]` |
@@ -50,7 +48,7 @@ Let `T` be the token count, `Hq` and `Hkv` the local head counts, `D` the head s
 ## Constraints
 
 - Pass `cos_sin` or pass both `positions` and `inv_freq`. The operator expects the selected cache rows in cached mode. The caller gathers those rows from the model cache.
-- `Hq`, `Hkv`, and `D` must be positive. `Hkv`, `D`, and `R` must be powers of two, with `2 <= R <= D`. The three nonnegative section lengths must sum to `R / 2`. The fused path uses NeoX half-pair rotation.
+- `Hq`, `Hkv`, `D`, and `R` must be positive powers of two, with `2 <= R <= D`. The three nonnegative section lengths must sum to `R / 2`. The fused path uses NeoX half-pair rotation.
 - Pack `qkv` to width `(Hq + 2 * Hkv) * D` without a gate or `(2 * Hq + 2 * Hkv) * D` with a gate. Keep tensor inputs on the same NPU. The wrapper makes `qkv` and cached rows contiguous when needed. For `T = 0`, it returns empty outputs without launching the kernel.
 - The model patches select online calculation for eligible three-axis positions with unscaled FP32 inverse frequencies on the QKV device. One-dimensional text positions share the same cache index on all three axes. Scaled MRoPE such as YaRN uses cached rows. The model patches use separate QKV splitting, normalization, and rotation if the fused MRoPE capability check fails.
 - Use position IDs in the range supported by the model configuration. In ACLGraph replay, retain the captured tensor storage and update position values in place for the same shape, strides, and dtype. The model registers inverse frequencies before capture.

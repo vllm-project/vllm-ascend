@@ -495,7 +495,12 @@ def _run_inline_case(
         k_bias=k_bias,
         has_gate=has_gate,
     )
-    inline_out = op(positions=positions, inv_freq=inv_freq, rms_weight_offset=rms_weight_offset, **common)
+    inline_out = op(
+        cos_sin=None,
+        positions=positions,
+        inv_freq=inv_freq,
+        **(common | {"q_weight": q_weight_ref, "k_weight": k_weight_ref}),
+    )
     cache_out = op(cos_sin=cos_sin_cache, **(common | {"q_weight": q_weight_ref, "k_weight": k_weight_ref}))
 
     return dict(
@@ -591,7 +596,7 @@ def test_split_qkv_rmsnorm_mrope_inline_cos_sin_core_boundary(device: str):
     """Token counts around the per-core token budget (uneven core loads)."""
     cfg = INLINE_CONFIGS[0]
     core_num = get_vectorcore_num()
-    for num_tokens in (core_num - 1, core_num, core_num + 1):
+    for num_tokens in (core_num - 1, core_num, core_num + 1, 2 * core_num + 1):
         result = _run_inline_case(cfg, num_tokens, torch.bfloat16, device, has_bias=False, is_interleaved=True)
         _assert_inline_case(result, has_gate=cfg[5])
     gc.collect()
@@ -628,7 +633,7 @@ def test_split_qkv_rmsnorm_mrope_inline_cos_sin_long_positions(device: str) -> N
     k_weight = torch.randn(head_size, dtype=dtype, device=device)
     offsets = torch.arange(1, 3 * num_tokens + 1, dtype=torch.int64, device=device).reshape(3, num_tokens)
     positions = context_length - 257 - offsets
-    assert can_use_fused_mrope(rotary_emb, num_kv_heads)
+    assert can_use_fused_mrope(rotary_emb, num_kv_heads, num_q_heads)
     cache, inline_positions, inv_freq = get_fused_mrope_inputs(rotary_emb, positions, qkv)
     assert cache is None and inline_positions is positions
     assert inv_freq is not None and inv_freq is rotary_emb.inv_freq
@@ -648,11 +653,11 @@ def test_split_qkv_rmsnorm_mrope_inline_cos_sin_long_positions(device: str) -> N
 
     def run_inline():
         return op(
-            q_weight=q_weight,
-            k_weight=k_weight,
+            q_weight=rms_weight_offset + q_weight,
+            k_weight=rms_weight_offset + k_weight,
+            cos_sin=None,
             positions=inline_positions,
             inv_freq=inv_freq,
-            rms_weight_offset=rms_weight_offset,
             **common,
         )
 
@@ -711,15 +716,15 @@ def test_split_qkv_rmsnorm_mrope_inline_cos_sin_empty(device: str):
         rope_dim=rope_dim,
         has_gate=has_gate,
     )
-    q_i, k_i, v_i, g_i = op(positions=positions, inv_freq=inv_freq, rms_weight_offset=rms_weight_offset, **common)
-    q_c, k_c, v_c, g_c = op(cos_sin=cos_sin, rms_weight_offset=rms_weight_offset, **common)
+    q_i, k_i, v_i, g_i = op(cos_sin=None, positions=positions, inv_freq=inv_freq, **common)
+    q_c, k_c, v_c, g_c = op(cos_sin=cos_sin, **common)
     assert q_i.shape == q_c.shape == (0, q_size)
     assert k_i.shape == k_c.shape == (0, kv_size)
     assert v_i.shape == v_c.shape == (0, kv_size)
     assert g_i.shape == g_c.shape == (0, gate_size)
 
     with pytest.raises(ValueError, match="positions must have shape"):
-        op(positions=positions[0], inv_freq=inv_freq, **common)
+        op(cos_sin=None, positions=positions[0], inv_freq=inv_freq, **common)
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -753,22 +758,22 @@ def test_split_qkv_rmsnorm_mrope_inline_cos_sin_invalid_args(device: str):
     with pytest.raises(ValueError):
         op(cos_sin=cos_sin, positions=good_pos, inv_freq=good_inv, **base)
     with pytest.raises(ValueError):
-        op(positions=good_pos, **base)
+        op(cos_sin=None, positions=good_pos, **base)
     with pytest.raises(ValueError):
-        op(inv_freq=good_inv, **base)
+        op(cos_sin=None, inv_freq=good_inv, **base)
     with pytest.raises(ValueError):
-        op(positions=good_pos[0], inv_freq=good_inv, **base)
+        op(cos_sin=None, positions=good_pos[0], inv_freq=good_inv, **base)
     with pytest.raises(ValueError):
-        op(positions=good_pos[:, : num_tokens - 1], inv_freq=good_inv, **base)
+        op(cos_sin=None, positions=good_pos[:, : num_tokens - 1], inv_freq=good_inv, **base)
     with pytest.raises(ValueError):
-        op(positions=good_pos.to(torch.float32), inv_freq=good_inv, **base)
+        op(cos_sin=None, positions=good_pos.to(torch.float32), inv_freq=good_inv, **base)
     with pytest.raises(ValueError):
-        op(positions=good_pos, inv_freq=good_inv[:-1], **base)
+        op(cos_sin=None, positions=good_pos, inv_freq=good_inv[:-1], **base)
     with pytest.raises(ValueError, match="on the same device"):
-        op(positions=good_pos, inv_freq=make_mrope_inv_freq(rope_dim, "cpu"), **base)
+        op(cos_sin=None, positions=good_pos, inv_freq=make_mrope_inv_freq(rope_dim, "cpu"), **base)
     with pytest.raises(ValueError, match="contiguous float32"):
-        op(positions=good_pos, inv_freq=good_inv.to(torch.bfloat16), **base)
+        op(cos_sin=None, positions=good_pos, inv_freq=good_inv.to(torch.bfloat16), **base)
     with pytest.raises(ValueError, match="contiguous float32"):
-        op(positions=good_pos, inv_freq=good_inv.repeat(2)[::2], **base)
+        op(cos_sin=None, positions=good_pos, inv_freq=good_inv.repeat(2)[::2], **base)
     with pytest.raises(ValueError, match="q_weight must be contiguous"):
-        op(positions=good_pos, inv_freq=good_inv, **(base | {"q_weight": q_weight.repeat(2)[::2]}))
+        op(cos_sin=None, positions=good_pos, inv_freq=good_inv, **(base | {"q_weight": q_weight.repeat(2)[::2]}))

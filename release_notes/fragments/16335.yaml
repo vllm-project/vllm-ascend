@@ -2,8 +2,8 @@ pr: 16335
 entries:
   - category: performance
     text: >-
-      Reduced MRoPE preparation time during decode for Qwen3-VL and Qwen3.5.
-      In an Ascend 910B3 benchmark over 490 steady-state calls, device time
-      per call for the full MRoPE preparation chain fell from 24.999 µs to
-      6.637 µs (73.5% lower). The optimization applies automatically and
-      requires no configuration change.
+      Reduced MRoPE preparation time for Qwen3-VL and Qwen3.5. On Ascend
+      910B3, a Qwen3.5 single-token decode benchmark measured the full MRoPE
+      preparation chain at 15.621 µs versus 7.616 µs (51.2% lower), based on
+      three rounds of 1,500 steady-state calls each. The optimization applies
+      automatically and requires no configuration change.
