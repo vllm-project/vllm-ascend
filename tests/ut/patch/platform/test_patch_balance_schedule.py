@@ -1008,7 +1008,7 @@ def test_balance_schedule_encoder_lora_preempt_and_blocked():
     scheduler._mamba_block_aligned_split = MagicMock(side_effect=lambda req, n, *_a, **_k: n)
     scheduler.scheduler_config.long_prefill_token_threshold = 8
     scheduler.lora_config = MagicMock(max_loras=1)
-    scheduler._try_schedule_encoder_inputs = MagicMock(return_value=([0], 8, 99, [1]))
+    scheduler._try_schedule_encoder_inputs = MagicMock(return_value=([0], 8, 99, [1], []))
     scheduler.encoder_cache_manager.allocate = MagicMock()
     reqs = _create_requests(2, num_tokens=40, max_tokens=8)
     reqs[0].lora_request = MagicMock(lora_int_id=1)

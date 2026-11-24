@@ -1,0 +1,9 @@
+pr: 22494
+entries:
+  - category: documentation
+    text: >-
+      Added an experimental Hy4-Flash deployment guide for 950DT products,
+      covering single-node serving and TP4 Prefill with TP1/DP4 Decode,
+      DFly speculative decoding, and Engram shared CPU tables.
+      Serving examples enable asynchronous scheduling and enable prefix caching
+      for single-node and Prefill services; PD Decode keeps prefix caching disabled.

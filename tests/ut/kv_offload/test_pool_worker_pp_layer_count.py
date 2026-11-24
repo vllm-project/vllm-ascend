@@ -24,15 +24,14 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import Lo
 
 
 def test_reuse_layout_remap_to_stage_local():
-    stage_globals = list(range(38, 79))
-
-    local_map, local_independent = LayerwiseKVPoolWorker._remap_layout_to_stage_local(
-        {42: 39, 43: 40, 44: 41, 45: 42}, [38], stage_globals
+    stage_local = {layer: index for index, layer in enumerate(range(38, 79))}
+    local_map = LayerwiseKVPoolWorker._remap_layout_to_stage_local(
+        {42: (39,), 43: (40,), 44: (41,), 45: (39, 42)}, stage_local
     )
 
-    assert local_map == {4: 1, 5: 2, 6: 3, 7: 4}
-    assert local_independent == [0]
-    assert LayerwiseKVPoolWorker._remap_layout_to_stage_local({3: 0, 4: 1}, [0], list(range(38))) == ({3: 0, 4: 1}, [0])
+    assert local_map == {4: (1,), 5: (2,), 6: (3,), 7: (1, 4)}
+    first_stage = {layer: layer for layer in range(38)}
+    assert LayerwiseKVPoolWorker._remap_layout_to_stage_local({3: (0,), 4: (1,)}, first_stage) == {3: (0,), 4: (1,)}
 
 
 def _make_pp_layer_count_worker(pp_rank, pp_size=2, initial_num_layers=4, use_layerwise_transfer=False, num_groups=2):
@@ -97,7 +96,7 @@ def _make_pp_layer_count_worker(pp_rank, pp_size=2, initial_num_layers=4, use_la
     # _is_layerwise_save_owner gates the save path; attention groups never use
     # align state, and a bare producer owns every save.
     worker.kv_role = "kv_producer"
-    worker.consumer_is_to_put = False
+    worker.save_decode_cache = False
     worker.group_uses_align_state = [False] * num_groups
     worker.sharded_mamba_group_ids = set()
     worker.grouped_block_size = [16] * num_groups
@@ -185,7 +184,7 @@ def test_pp_stage_maps_multiple_cache_groups_to_local_layers(
         worker.sync_save_events[-1].record.assert_called_once_with()
         worker.kv_send_thread.add_stored_request.assert_called_once_with(request.req_id)
         worker.kv_send_thread.add_request.assert_called_once_with(tasks_by_layer[-1])
-        worker._wait_for_final_layer_save.assert_called_once_with(worker.num_layers, worker.kv_send_thread)
+        worker._wait_for_final_layer_save.assert_called_once_with(worker.num_layers)
         assert worker.current_layer == worker.num_layers
 
 

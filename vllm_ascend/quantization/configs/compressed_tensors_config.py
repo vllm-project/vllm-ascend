@@ -340,6 +340,14 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         """
         # use the per-layer format if defined, otherwise, use global format
         format = format if format is not None else self.quant_format
+        # Native Kimi-K3 checkpoints contain packed MXFP4 weights without
+        # an activation recipe. Reuse the Ascend W4A8 backend, which performs
+        # dynamic MXFP8 activation quantization at runtime.
+        if self._is_only_weight_mxfp4_packed(weight_quant, input_quant, format):
+            assert self.quant_description is not None
+            self.quant_description["group_size"] = weight_quant.group_size
+            return "W4A8_MXFP"
+
         act_quant_format = is_activation_quantization_format(format)
 
         # MXFP4 weights with explicitly configured dynamic MXFP8 activations.
@@ -390,6 +398,23 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             return "W4A16"
 
         raise NotImplementedError("No compressed-tensors compatible quantization type was found.")
+
+    def _is_only_weight_mxfp4_packed(
+        self,
+        weight_quant: "QuantizationArgs",
+        input_quant: Optional["QuantizationArgs"],
+        format: str | None,
+    ) -> bool:
+        if format != CompressionFormat.mxfp4_pack_quantized.value or weight_quant is None or input_quant is not None:
+            return False
+        return (
+            weight_quant.type == QuantizationType.FLOAT
+            and weight_quant.num_bits == 4
+            and weight_quant.strategy == QuantizationStrategy.GROUP.value
+            and weight_quant.group_size == 32
+            and not weight_quant.dynamic
+            and weight_quant.symmetric
+        )
 
     def _is_dynamic_group_mx(
         self,

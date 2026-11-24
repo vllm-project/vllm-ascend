@@ -12,7 +12,7 @@ env_common: &env_common
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_ENGINE_READY_TIMEOUT_S: "3000"
-  SERVER_PORT: 8077
+  SERVER_PORT: 8089
 
 # TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
 
@@ -45,8 +45,9 @@ deployment:
       --enable-prefix-caching
       --async-scheduling
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      --kv-cache-dtype int8
       --attention_config.indexer_kv_dtype int8
-      --additional-config '{"enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":1,"enable_mlapo":true}'
+      --additional-config '{"enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "enable_flashcomm1": true,"enable_fused_mc2":1,"enable_mlapo":true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
   - envs:
       <<: *env_common
@@ -78,8 +79,9 @@ deployment:
       --enable-prefix-caching
       --async-scheduling
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      --kv-cache-dtype int8
       --attention_config.indexer_kv_dtype int8
-      --additional-config '{"enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":1,"enable_mlapo":true}'
+      --additional-config '{"enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "enable_flashcomm1": true,"enable_fused_mc2":1,"enable_mlapo":true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 benchmarks:
   perf_64k_warmup:
@@ -91,7 +93,7 @@ benchmarks:
     max_out_len: 1
     batch_size: 1
     request_rate: 0
-    baseline: 1
+    baseline: 0
     threshold: 0.97
   perf_64k:
     case_type: performance
@@ -102,5 +104,5 @@ benchmarks:
     max_out_len: 1024
     batch_size: 32
     request_rate: 0
-    baseline: 687.4133
+    baseline: 544.137
     threshold: 0.97

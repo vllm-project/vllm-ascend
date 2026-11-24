@@ -45,7 +45,7 @@
 
 Every release of vLLM Ascend would not have been possible without the following contributors:
 
-Updated on 2026-11-18:
+Updated on 2026/11/18:
 
 | Number | Contributor | Date | Commit ID |
 |:------:|:-----------:|:-----:|:---------:|

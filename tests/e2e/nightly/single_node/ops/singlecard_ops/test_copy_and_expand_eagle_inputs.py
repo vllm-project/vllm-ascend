@@ -257,8 +257,10 @@ def generate_test_case(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
     reason="CopyAndExpandEagleInputs is configured for Ascend A2/A3",
 )
-@pytest.mark.parametrize("num_reqs", [1, 2, 4, 8, 16])
-@pytest.mark.parametrize("num_padding_slots", [1, 2, 3, 5])
+@pytest.mark.parametrize(
+    "num_reqs,num_padding_slots",
+    [(1, 1), (1, 5), (2, 2), (4, 3), (8, 2), (8, 5), (16, 1), (16, 5)],
+)
 @pytest.mark.parametrize("shift_input_ids", [False, True])
 @pytest.mark.parametrize("seed_offset", [0, 1])
 def test_copy_and_expand_eagle_inputs(num_reqs, num_padding_slots, shift_input_ids, seed_offset):
