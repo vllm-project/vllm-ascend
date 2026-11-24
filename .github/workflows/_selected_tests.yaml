@@ -366,6 +366,18 @@ jobs:
         run: |
           pip uninstall -y triton-ascend triton
 
+      - name: Probe Ascend NPU startup for sparse KV lifecycle test
+        if: ${{ matrix.group.npu_type == 'a3' && contains(matrix.group.tests, 'test_sparse_kv_offload_lifecycle.py') }}
+        timeout-minutes: 20
+        continue-on-error: true
+        run: |
+          set -e -o pipefail
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          log_dir="$RUNNER_TEMP/selected-tests-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card"
+          mkdir -p "$log_dir"
+          python -u .github/workflows/scripts/probe_npu_startup.py "$RUNNER_TEMP/npu-startup-probe" \
+            |& tee "$log_dir/npu-startup-probe.log"
+
       - name: Run selected tests with device
         id: tests-with-device
         if: ${{ matrix.group.npu_type != 'cpu' }}
