@@ -71,6 +71,7 @@ class _SinkOnlyModel(nn.Module):
     # Keep the actual predicates/mappings, including the MTP block container.
     no_mtp_block_in_name = mtp_module.DeepSeekV4MTP.no_mtp_block_in_name
     _remap_dspark_name = dspark_module.DSparkDeepseekV4ForCausalLM._remap_dspark_name
+    hf_to_vllm_mapper = target_module.AscendDeepseekV4ForCausalLM.hf_to_vllm_mapper
 
 
 @pytest.fixture(params=["target", "mtp", "dspark"])
