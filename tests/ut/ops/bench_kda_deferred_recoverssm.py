@@ -276,20 +276,30 @@ def _accuracy_check(
     def report(name: str, layers_a, layers_b) -> bool:
         worst_abs = 0.0
         worst_rel = 0.0
+        worst_layer = -1
+        worst_pos = None
         finite = True
-        for la, lb in zip(layers_a, layers_b):
-            # 先搬到 CPU 再转 float64：NPU 不支持 double，在设备上 .double()
-            # 会被降级成 float（见 ToKernelNpu 的 warning），比较失去精度。
-            a = la.kv_cache[1].cpu().double()
-            b = lb.kv_cache[1].cpu().double()
+        for li, (la, lb) in enumerate(zip(layers_a, layers_b)):
+            # checkpoint 本就是 float32，直接搬到 CPU 按原 dtype 对比即可，
+            # 无需转 double（不会增加有效精度，还会触发 NPU 降级警告）。
+            a = la.kv_cache[1].cpu()
+            b = lb.kv_cache[1].cpu()
             diff = (a - b).abs()
-            worst_abs = max(worst_abs, diff.max().item())
+            layer_abs = diff.max().item()
+            if layer_abs > worst_abs:
+                worst_abs = layer_abs
+                worst_layer = li
+                worst_pos = torch.unravel_index(diff.argmax(), diff.shape)
             worst_rel = max(worst_rel, (diff / (a.abs() + 1e-6)).max().item())
             finite = finite and torch.isfinite(a).all().item()
             finite = finite and torch.isfinite(b).all().item()
         ok = finite and worst_abs < 1e-3 and worst_rel < 1e-3
-        print(f"  [{'PASS' if ok else 'FAIL'}] {name}: "
-              f"max abs diff {worst_abs:.3e}, max rel diff {worst_rel:.3e}")
+        print(f"  [{'PASS' if ok else 'FAIL'}] {name}:")
+        print(f"    max abs diff {worst_abs:.3e}, max rel diff {worst_rel:.3e}")
+        if worst_pos is not None:
+            blk, h, vv, kk = (int(p) for p in worst_pos)
+            print(f"    worst at layer {worst_layer}, "
+                  f"checkpoint[block={blk}, head={h}, v={vv}, k={kk}]")
         return ok
 
     # --- 非 align: 多步 defer+flush vs 立即 commit ---
@@ -305,8 +315,11 @@ def _accuracy_check(
     ctxs_def, layers_def = make_paths(100)
     pending = torch.zeros(batch + 1, dtype=torch.int32, device=DEVICE)
     for _ in range(n_steps):
+        # pending 跨 group 共享：先让所有 group 折叠"上一步"的 pending，
+        # 再让所有 group 写入"本步"新 pending。逐 ctx 交替会重复折叠本步。
         for ctx in ctxs_def:
             ctx.flush(state_indices, record_rows, pending)
+        for ctx in ctxs_def:
             ctx.commit(
                 num_accepted_tokens=num_accepted,
                 state_indices=state_indices,
@@ -378,8 +391,13 @@ def _accuracy_check(
 
     a_def, l_def = make_align_paths(200)
     align_pending = torch.zeros(batch + 1, dtype=torch.int32, device=DEVICE)
+    # 三个阶段（pending 跨 group 共享、flush 不清空、commit 重写 pending）：
+    # 先让所有 group 折叠上一步 pending（这里为空），再让所有 group eager-commit
+    # （crossing 立即折叠 + 非 crossing 写 pending），最后统一 flush 折叠非
+    # crossing。逐 ctx 交替会让后一个 group 把本步 pending 重复折叠。
     for ctx in a_def:
         ctx.flush(align_indices, align_record_rows, align_pending)
+    for ctx in a_def:
         ctx.commit(
             num_accepted_tokens=align_num_accepted,
             state_indices=align_indices,
@@ -391,6 +409,7 @@ def _accuracy_check(
             pending=align_pending,
             eager=eager,
         )
+    for ctx in a_def:
         ctx.flush(align_indices, align_record_rows, align_pending)
 
     n_cross = int(crosses.sum().item())
