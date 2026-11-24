@@ -175,7 +175,6 @@ def _kda_recoverssm_verify_kernel(
     SPEC_QUERY_LEN: tl.constexpr,
     UNROLL_REPLAY: tl.constexpr,
     PIPELINE_STAGES: tl.constexpr,
-    MERGE_REDUCTIONS: tl.constexpr,
 ):
     # Advance a register-held checkpoint and record each token's compact
     # correction/key/gate; persistent checkpoint pages remain read-only.
@@ -389,22 +388,8 @@ def _kda_recoverssm_verify_kernel(
         weighted_k = normalized_k * decay
         weighted_q = q * decay
         tl.static_assert(raw_beta.dtype == tl.float32)
-        if MERGE_REDUCTIONS:
-            # One [BV, BK, 2] reduction pass instead of two [BV, BK] passes:
-            # halving the per-token reduction count is the direct lever on
-            # triton-ascend, where reductions (not elementwise tile ops)
-            # dominate the vector engine time.
-            rk, rq = tl.split(
-                tl.sum(
-                    state[:, :, None] * tl.join(weighted_k, weighted_q)[None, :, :],
-                    axis=1,
-                )
-            )
-            correction = (v - rk) * tl.sigmoid(raw_beta)
-            out = rq + correction * tl.sum(normalized_k * q)
-        else:
-            correction = (v - tl.sum(state * weighted_k[None, :], axis=1)) * tl.sigmoid(raw_beta)
-            out = tl.sum(state * weighted_q[None, :], axis=1) + correction * tl.sum(normalized_k * q)
+        correction = (v - tl.sum(state * weighted_k[None, :], axis=1)) * tl.sigmoid(raw_beta)
+        out = tl.sum(state * weighted_q[None, :], axis=1) + correction * tl.sum(normalized_k * q)
         # The post-update state of the last token is never read (the loop
         # ends and the checkpoint was already stored by the replay), so
         # skip its rank-1 update.
@@ -1160,7 +1145,6 @@ def kda_recoverssm_verify(
     replay_align: bool = False,
     records_pool_size: int | None = None,
     pipeline_stages: int = RECOVERSSM_VERIFY_PIPELINE_STAGES,
-    merge_reductions: bool = False,
 ) -> torch.Tensor:
     """Verify a KDA speculative window.
 
@@ -1334,7 +1318,6 @@ def kda_recoverssm_verify(
         SPEC_QUERY_LEN=spec_query_len,
         UNROLL_REPLAY=is_a5,
         PIPELINE_STAGES=pipeline_stages,
-        MERGE_REDUCTIONS=merge_reductions,
         num_warps=4,
         num_stages=pipeline_stages,
     )
