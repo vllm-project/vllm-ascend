@@ -818,6 +818,7 @@ class AscendDSAV41Impl:
             attn, hidden_states, metadata, forward_context.attn_metadata
         )
         num_tokens = metadata.swa.num_actual_tokens
+        # Let future-layer KV loads overlap index selection and attention after cache preparation.
         record_attention_compute_start()
         if num_tokens:
             positions = metadata.positions[:num_tokens]
