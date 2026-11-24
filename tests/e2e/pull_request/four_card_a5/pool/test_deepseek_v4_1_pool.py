@@ -183,6 +183,9 @@ def test_deepseek_v4_1_flash_dp8_tp1_dspark_pool_watch() -> None:
             prompt_ids=prompt_ids,
             replicas=DATA_PARALLEL_SIZE,
             lcm_block_size=POOL_LCM_BLOCK_SIZE,
+            # Only the exact token-identity comparison is disabled (DSpark's
+            # speculative verify can shift tokens). The long-prefix semantic
+            # guard stays on: answer_secret asserts R1/R2/R3 all answer 8.
             check_output=False,
             answer_secret=POOL_SECRET,
             tag="P2",

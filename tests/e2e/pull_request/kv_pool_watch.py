@@ -254,8 +254,10 @@ def run_pool_hit_sequence(
     ``prompt_ids`` supplies a measured long natural-language prompt;
     ``answer_secret`` asserts the cold and hit answers. ``replicas`` scales with
     DP size. ``lcm_block_size`` / ``expected_hit_tokens`` enable exact hit-token
-    checks. ``reset_local_cache`` is for hybrid cases. ``check_output=False``
-    skips H3 (DSpark and dummy-weight cases).
+    checks. ``reset_local_cache`` is for hybrid cases. ``check_output`` only
+    controls the H3 exact token comparison; the ``answer_secret`` semantic check
+    always runs for the cold and both hit rounds, so ``check_output=False``
+    still guards the restored-prefix content.
     """
     prompt_a = prompt_ids if prompt_ids is not None else build_pool_prompts(prompt_tokens)[0]
     prompt_b = build_pool_prompts(prompt_tokens)[1]
