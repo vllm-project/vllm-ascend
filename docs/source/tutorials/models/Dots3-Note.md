@@ -220,8 +220,8 @@ The three deployment forms are compared as follows:
 | Form | Input | Typical scenario | Modality configuration | Context | KV cache | MTP | Weight per worker |
 |---|---|---|---|---|---|---|---|
 | text-only | Text | Long-context dialogue, text reasoning | `--language-model-only` | 32768 | `--gpu-memory-utilization 0.92` | ✅ MTP3 | 36.26 GB |
-| image | Text + images (≤ 7 per request) | MMMU and other vision tasks | `--limit-mm-per-prompt '{"image":7,"video":0,"audio":0}'` | 32768 | `--kv-cache-memory-bytes 2816M` | ❌ | ~48.8 GB (+12.5 GB) |
-| audio | Text + audio | MMAR and other audio tasks | `--limit-mm-per-prompt '{"image":0,"video":0,"audio":1}'` | 4096 | `--kv-cache-memory-bytes 4G` | ✅ MTP3 | 37.88 GB (+1.62 GB) |
+| image | Text + images (≤ 7 per request) | MMMU and other vision tasks | `--limit-mm-per-prompt '{"image":7,"video":0,"audio":0}'` | 32768 | `--kv-cache-memory-bytes 2816MB` | ❌ | ~48.8 GB (+12.5 GB) |
+| audio | Text + audio | MMAR and other audio tasks | `--limit-mm-per-prompt '{"image":0,"video":0,"audio":1}'` | 4096 | `--kv-cache-memory-bytes 4GB` | ✅ MTP3 | 37.88 GB (+1.62 GB) |
 
 All three forms share 16 chips with TP16 + MoE expert parallelism (EP16). Before startup, confirm:
 
@@ -242,7 +242,7 @@ pkill -9 -f VLLM::Worker
 
 After confirming that the old process has exited and port 8000 is released, start another form to avoid residual processes occupying NPU memory.
 
-> **Concurrency suggestion**: text-only / audio use `--max-num-seqs 4`; image can use `--max-num-seqs 16`. The 2816MB KV for the image form is the upper limit allowed by the FusedMC2 computation peak under 16 concurrency (about 3.64 GiB per card); increasing KV to ≥3072MB will cause OOM. If a larger KV capacity is needed, reduce the concurrency to 8.
+> **Concurrency suggestion**: text-only / audio use `--max-num-seqs 4`; image can use `--max-num-seqs 16`. The 2.816GB KV for the image form is the upper limit allowed by the FusedMC2 computation peak under 16 concurrency (about 3.64 GiB per card); increasing KV to ≥3.072GB will cause OOM. If a larger KV capacity is needed, reduce the concurrency to 8.
 
 ### 5.2 text-only Online Deployment
 
@@ -395,8 +395,8 @@ The parameter classification and descriptions refer to the vLLM official [Engine
 | Form | KV cache | Reason |
 |---|---|---|
 | text-only | `--gpu-memory-utilization 0.92` | Automatic profiling, validated |
-| image | `--kv-cache-memory-bytes 2816M` | FusedMC2 peak needs about 3.64 GiB per card; too large a KV (3328MB) causes OOM; combined with `--max-num-batched-tokens 1024` to chunk large-image prefill |
-| audio | `--kv-cache-memory-bytes 4G` | Single-request budget is about 1,131 tokens (text 360 + audio 259 + output 512); 1GB provides only 2,220 tokens, insufficient, while 4GB provides 8,956 tokens (2.19x) |
+| image | `--kv-cache-memory-bytes 2816MB` | FusedMC2 peak needs about 3.64 GiB per card; too large a KV (3.328GB) causes OOM; combined with `--max-num-batched-tokens 1024` to chunk large-image prefill |
+| audio | `--kv-cache-memory-bytes 4GB` | Single-request budget is about 1,131 tokens (text 360 + audio 259 + output 512); 1GB provides only 2,220 tokens, insufficient, while 4GB provides 8,956 tokens (2.19x) |
 
 > **Why image/audio use explicit `--kv-cache-memory-bytes` (measured)**: automatic profiling under v0.22.1 can allocate a large KV (audio gets 21,565 tokens at 0.92 and 25,686 tokens at 0.95), but the actual peak memory during graph capture exceeds the limit and causes the worker to exit, with logs showing `Worker proc VllmWorker-* died unexpectedly`. Explicit KV is more conservative than automatic profiling and reserves headroom for the about 3.76 GiB peak of graph capture, so it is the currently validated stable approach.
 >

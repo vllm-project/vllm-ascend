@@ -48,7 +48,6 @@ examples and links together.
 | [spec_decode/prepare_dflash_inputs.py](spec_decode/prepare_dflash_inputs.py) | `worker/v2/spec_decode/dflash/speculator.py` | [prepare_dflash_inputs.md](docs/prepare_dflash_inputs.md) |
 | [spec_decode/resample.py](spec_decode/resample.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [resample.md](docs/resample.md) |
 | [mamba/gdn_prepare.py](mamba/gdn_prepare.py) | `attention/gdn_attn_builder.py` | [gdn_prepare.md](docs/gdn_prepare.md) |
-| [mamba/align_block_table.py](mamba/align_block_table.py) | `ops/gdn_attn_builder.py`, `models/glm5next/recoverssm_metadata.py` | [mamba_align_block_table.md](docs/mamba_align_block_table.md) |
 | [spec_decode/entropy_verify.py](spec_decode/entropy_verify.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [entropy_verify.md](docs/entropy_verify.md) |
 
 ## Shared runner support
@@ -92,7 +91,7 @@ configuration rather than the runner input or sampling interface.
 | [engram_gate.py](engram_gate.py) | Model/attention primitive or shared utility |
 | [engram_hash.py](engram_hash.py) | Model/attention primitive or shared utility |
 | [engram_lookup.py](engram_lookup.py) | Model/attention primitive or shared utility |
-| [eplb.py](eplb.py) | Model/attention primitive or shared utility |
+| [eplb.py](eplb.py) | Distributed [EPLB mapping and load recording](docs/eplb.md) |
 | [fla/chunk.py](fla/chunk.py) | Linear attention |
 | [fla/chunk_delta_h.py](fla/chunk_delta_h.py) | Linear attention |
 | [fla/chunk_delta_hupdate.py](fla/chunk_delta_hupdate.py) | Linear attention |

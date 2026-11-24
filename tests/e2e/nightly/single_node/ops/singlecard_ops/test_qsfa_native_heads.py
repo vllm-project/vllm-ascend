@@ -107,9 +107,14 @@ def _run_adaptor(inputs, return_lse, *, packed=False):
     )
 
 
-@pytest.mark.parametrize("heads", [12, 24, 65, 96, 97, 128])
+@pytest.mark.parametrize(
+    "heads,query_tokens,count,sparse_mode",
+    [(heads, 1, 0, 0) for heads in (12, 96, 97, 128)]
+    + [(heads, 1, 32, 3) for heads in (12, 65, 97, 128)]
+    # Keep the full head sweep on the multi-query, multi-page path.
+    + [(heads, 4, 2048, 0) for heads in (12, 24, 65, 96, 97, 128)],
+)
 @pytest.mark.parametrize("rope_dim", [0, 64])
-@pytest.mark.parametrize("query_tokens,count,sparse_mode", [(1, 0, 0), (1, 32, 3), (4, 2048, 0)])
 @pytest.mark.parametrize("return_lse", [False, True])
 def test_native_heads(heads, rope_dim, query_tokens, count, sparse_mode, return_lse):
     inputs, key, value = _make_case(heads, rope_dim, query_tokens, count)

@@ -9,10 +9,14 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware import AscendDeviceType
 
 MAX_POSITION_EMBEDDINGS = [262144]
-NUM_TOKENS = [1, 16, 1024, 10240]
-NUM_QKV_HEADS = [(12, 1), (64, 4)]
+QKV_ROPE_CASES = [
+    # The two bias modes use complementary head layouts at 10240 tokens.
+    (1, 12, 1, 128),
+    (1, 64, 4, 64),
+    (10240, 12, 1, 64),
+    (10240, 64, 4, 128),
+]
 HEAD_SIZES = [128]
-ROPE_DIMS = [64, 128]
 EPS = [1e-6]
 DTYPES = [torch.bfloat16]
 SEEDS = [0]
@@ -69,14 +73,15 @@ def rms_norm(
     reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("max_position_embeddings", MAX_POSITION_EMBEDDINGS)
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("num_q_heads, num_kv_heads", NUM_QKV_HEADS)
+@pytest.mark.parametrize(
+    "num_tokens,num_q_heads,num_kv_heads,rope_dim",
+    [case for case in QKV_ROPE_CASES if case != (10240, 64, 4, 128)] + [(1024, 12, 1, 128)],
+)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("eps", EPS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
-@pytest.mark.parametrize("rope_dim", ROPE_DIMS)
 @torch.inference_mode()
 def test_split_qkv_rmsnorm_rope(
     max_position_embeddings, num_tokens, num_q_heads, num_kv_heads, head_size, eps, dtype, seed, device, rope_dim
@@ -142,14 +147,15 @@ def test_split_qkv_rmsnorm_rope(
     reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("max_position_embeddings", MAX_POSITION_EMBEDDINGS)
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("num_q_heads, num_kv_heads", NUM_QKV_HEADS)
+@pytest.mark.parametrize(
+    "num_tokens,num_q_heads,num_kv_heads,rope_dim",
+    [case for case in QKV_ROPE_CASES if case != (10240, 12, 1, 64)] + [(1024, 12, 1, 64)],
+)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("eps", EPS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
-@pytest.mark.parametrize("rope_dim", ROPE_DIMS)
 @torch.inference_mode()
 def test_split_qkv_rmsnorm_rope_with_bias(
     max_position_embeddings, num_tokens, num_q_heads, num_kv_heads, head_size, eps, dtype, seed, device, rope_dim

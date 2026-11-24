@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
 
+from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 
 
 @pytest.mark.parametrize("kind", ["head_first", "sequence_first", "mixed_slice"])
-def test_a5_prefill_layout_preserves_values_and_output(kind):
+@pytest.mark.parametrize("chunk32_enabled", [False, True])
+def test_a5_prefill_layout_preserves_values_and_output(kind, chunk32_enabled):
     tokens, nk, nv, dim = 7, 2, 4, 16
     qkv = [torch.randn(1, h, tokens, dim).transpose(1, 2) for h in (nk, nk, nv)]
     if kind == "sequence_first":
@@ -21,11 +25,19 @@ def test_a5_prefill_layout_preserves_values_and_output(kind):
     state = torch.randn(1, nv, dim, dim)
     output = torch.randn(1, count, nv, dim)
     gate = torch.randn(1, count, nv)
-    meta = SimpleNamespace(cu_seqlens_host=None, chunk_indices_chunk64_host=None, keep_meta=None)
+    meta = SimpleNamespace(
+        cu_seqlens_host=(0, count),
+        chunk_indices_chunk64_host=(0, 0),
+        chunk_indices_chunk32_host=(0, 0) if chunk32_enabled else None,
+        keep_meta=None,
+    )
 
     def fused(q, k, v, g, beta, **kwargs):
         expected_layout = "BNSD" if kind == "head_first" else "BSND"
         assert kwargs["layout"] == expected_layout
+        assert kwargs["chunk_size"] == (32 if chunk32_enabled else 64)
+        expected_indices = meta.chunk_indices_chunk32_host if chunk32_enabled else meta.chunk_indices_chunk64_host
+        assert kwargs["chunk_indices"] is expected_indices
         for actual, original in zip((q, k, v), qkv):
             assert actual.is_contiguous()
             expected = original.transpose(1, 2) if kind == "head_first" else original
@@ -36,7 +48,11 @@ def test_a5_prefill_layout_preserves_values_and_output(kind):
         torch.testing.assert_close(beta, gate)
         return output, state
 
-    result, final_state = A5DeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
+    profile = get_hardware_profile(AscendDeviceType.A5)
+    if not chunk32_enabled:
+        profile = replace(profile, capabilities=profile.capabilities - {HardwareCapability.FLA_GDN_PREFILL_CHUNK32})
+    with patch("vllm_ascend.device.device_op.get_current_hardware_profile", return_value=profile):
+        result, final_state = A5DeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
     assert result is output
     assert final_state is state
 
@@ -88,8 +104,8 @@ def test_head_first_l2norm_fallback_accepts_multiple_heads(backend, sliced):
             return output.squeeze(0), kwargs["initial_state"]
 
         with (
-            patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=norm),
-            patch("vllm_ascend.ops.gdn.torch_npu.npu_chunk_gated_delta_rule", side_effect=fused, create=True),
+            patch("vllm_ascend.attention.gdn.l2norm_fwd", side_effect=norm),
+            patch("vllm_ascend.attention.gdn.torch_npu.npu_chunk_gated_delta_rule", side_effect=fused, create=True),
         ):
             actual, _ = AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
                 *qkv, gate, gate, state, torch.tensor([0, count], dtype=torch.int32), dim**-0.5

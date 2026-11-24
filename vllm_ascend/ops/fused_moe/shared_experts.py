@@ -172,7 +172,7 @@ class AscendSharedExperts:
         self._setup_megamoe_shared_fusion()
 
     def _setup_megamoe_shared_fusion(self) -> None:
-        """Fuse the shared expert into the A5 MegaMoe operator when supported.
+        """Fuse the shared expert into the MegaMoe operator when supported.
 
         When active, each shared linear's ``process_weights_after_loading`` is
         wrapped to rebuild the weight into the MegaMoe layout; the rebuilt
@@ -205,30 +205,22 @@ class AscendSharedExperts:
             # weights plus a 1-D per-output-channel uint64 scale, matching the
             # routed-expert INT8 descriptor contract.
             self._megamoe_shared_fusion_platform = "A3/INT8"
-        # Checks the ROUTED experts' quant type: the shared fusion stacks on
-        # top of the routed MegaMoe path, which must support the scenario
-        # first. The A5 scenarios are A8W8-FP / A8W4-FP / A4W4-FP, so all three
-        # MXFP types pass. On arch22 the fused shared payload is implemented for
-        # the A8W8-INT routed path only; the other INT layouts keep the separate
-        # shared forward. The shared expert's own quant type is resolved
-        # per-linear in _collect_megamoe_shared_weight and must be W8A8 as well
-        # (see the check there).
+        # On A3 the routed experts can be W8A8 or W4A8, while the shared
+        # linears must supply W8A8 weights.
         supported_quant_types = (
-            (QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP) if supports_mxfp_fusion else (QuantType.W8A8,)
+            (QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP)
+            if supports_mxfp_fusion
+            else (QuantType.W8A8, QuantType.W4A8)
         )
         if self.quant_type not in supported_quant_types:
-            # Only MXFP8 and MXFP4 are implemented. Their shared weights
-            # rebuild cheaply from the post-processed linear buffers: MXFP8
-            # needs an (out, in) transpose, packed MXFP4 additionally needs the
-            # same FRACTAL_NZ (w1) / FRACTAL_NZ_C0_32 (w2) rebuild as the
-            # routed experts.
-            logger.info_once(
-                "MegaMoe shared-expert fusion is not implemented for quant type %s on %s; "
-                "keeping the separate shared-expert forward.",
-                self.quant_type,
-                self._megamoe_shared_fusion_platform,
+            self._disable_megamoe_shared_fusion(
+                f"quant type {self.quant_type} is not supported on {self._megamoe_shared_fusion_platform}"
             )
-            self._megamoe_shared_fusion_disabled = True
+            return
+        if self.quant_type == QuantType.W4A8 and not moe_utils.supports_cann_mega_moe_mixed_int_shared():
+            self._disable_megamoe_shared_fusion(
+                "the CANN MegaMoe interface cannot describe W4A8 routed and W8A8 shared experts independently"
+            )
             return
         # Output gating (e.g. Qwen3-Next expert_gate) happens outside the
         # operator and cannot be fused.

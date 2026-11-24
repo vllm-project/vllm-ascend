@@ -16,9 +16,19 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.gpu.spec_decode import adaptive_verification
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend._310p.ops.gdn_attn_builder_310 import (
+from vllm_ascend._310p.attention.gdn_attn_builder_310 import (
     AscendGDNAttentionBackend310,
     GDNAttentionMetadataBuilder310,
+)
+from vllm_ascend.attention import gdn as ascend_gdn
+from vllm_ascend.attention import gdn_attn_builder as ascend_gdn_attn_builder
+from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.attention.gdn_attn_builder import (
+    AscendGDNAttentionBackend,
+    AscendGDNAttentionMetadataBuilder,
+    AscendGDNFusedAttentionBackend,
+    AscendGDNHostMetadataBackend,
+    AscendGDNHostMetadataBuilder,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -26,17 +36,6 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.glm5next.kda import Glm5NextGDNHostMetadataBuilder
 from vllm_ascend.models.glm5next.recoverssm_metadata import Glm5NextRecoverSSMMetadataBuilder
 from vllm_ascend.models.kimi_k3.recoverssm_metadata import AscendKimiKDARecoverSSMMetadataBuilder
-from vllm_ascend.ops import gdn as ascend_gdn
-from vllm_ascend.ops import gdn_attn_builder as ascend_gdn_attn_builder
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-from vllm_ascend.ops.gdn_attn_builder import (
-    AscendGDNAttentionBackend,
-    AscendGDNAttentionMetadataBuilder,
-    AscendGDNFusedAttentionBackend,
-    AscendGDNHostMetadataBackend,
-    AscendGDNHostMetadataBuilder,
-)
-from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend
 from vllm_ascend.ops.triton.fla import utils as fla_utils
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices as runtime_prepare_chunk_indices,
@@ -343,7 +342,7 @@ def test_kimi_recoverssm_does_not_inherit_glm_pcp_buffers():
     config.parallel_config.prefill_context_parallel_size = 2
     config.compilation_config.max_cudagraph_capture_size = 4
     spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
-    with patch("vllm_ascend.ops.kda_pcp.get_pcp_group", return_value=SimpleNamespace(rank_in_group=1)):
+    with patch("vllm_ascend.ops.recurrent_pcp.get_pcp_group", return_value=SimpleNamespace(rank_in_group=1)):
         builder = AscendKimiKDARecoverSSMMetadataBuilder(spec, ["layer0"], config, torch.device("cpu"))
     assert builder.decode_cudagraph_max_bs == 8
     assert config.compilation_config.max_cudagraph_capture_size == 4
@@ -480,22 +479,6 @@ def _patch_missing_runtime_cdiv(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _skip_unless_npu() -> None:
-    """Skip unless this process can actually place a tensor on an NPU.
-
-    ``torch.npu`` signals alone are unreliable under tests/ut: the CPU
-    conftest pins them to False/0, but other tests in the suite patch or
-    wholesale-replace ``torch.npu`` and can leave both ``is_available()`` and
-    ``device_count()`` truthy on the xdist worker (observed in CI, twice).
-    Allocation goes through torch's real device dispatch, which a faked
-    ``torch.npu`` cannot fool.
-    """
-    try:
-        torch.zeros(1, device="npu")
-    except Exception:
-        pytest.skip("requires a real Ascend NPU")
-
-
 def test_kimi_chunk_metadata_uses_linear_attention_head_count() -> None:
     builder = _make_builder(
         device=torch.device("cpu"),
@@ -518,7 +501,7 @@ def test_kimi_chunk_metadata_uses_linear_attention_head_count() -> None:
 
 def test_ascend_gdn_attention_uses_ascend_backend():
     from vllm_ascend.models.glm5next.kda import Glm5NextGDNHostMetadataBackend, Glm5NextLinearAttention
-    from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
+    from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention, KimiKDAHostMetadataBackend
 
     fused_backend = AscendGatedDeltaNetAttention.get_attn_backend(object())  # type: ignore[arg-type]
     kimi_attention = SimpleNamespace(use_recoverssm=False)
@@ -873,8 +856,6 @@ def test_non_spec_prefill_metadata_uses_prefill_tail_for_chunk_metadata(
 @pytest.mark.parametrize("cache_mode,expected_slots", [("none", [12, 20]), ("align", [15, 23])])
 @pytest.mark.parametrize("draft_count", [0, 3])
 def test_spec_rows_preserve_previous_accepted_state(builder_cls, graph_mode, cache_mode, expected_slots, draft_count):
-    if cache_mode == "align":
-        _skip_unless_npu()
     query_len = draft_count + 1
     common = create_common_attn_metadata(BatchSpec([64, 64], [query_len, query_len]), 16, torch.device("cpu"))
     common.block_table_tensor = torch.tensor([list(range(10, 18)), list(range(20, 28))], dtype=torch.int32)
@@ -1299,7 +1280,6 @@ def test_causal_conv1d_cache_indices_use_device_block_table(monkeypatch: pytest.
 
 
 def test_mamba_align_cache_indices_follow_device_seq_lens(monkeypatch: pytest.MonkeyPatch):
-    _skip_unless_npu()
     _patch_missing_runtime_cdiv(monkeypatch)
     batch_spec = BatchSpec(
         seq_lens=[1, 9],
@@ -1335,7 +1315,6 @@ def test_mamba_align_with_padded_block_table_rows(monkeypatch: pytest.MonkeyPatc
     """vLLM #58737 derives num_reqs from the block table and asserts it equals
     seq_lens. Ascend's ``unpadded()`` keeps the graph-padded block-table rows, so
     the GDN builder must hand the helper only the real request rows."""
-    _skip_unless_npu()
     _patch_missing_runtime_cdiv(monkeypatch)
     batch_spec = BatchSpec(
         seq_lens=[16, 16, 16, 16],
@@ -1544,9 +1523,6 @@ def test_spec_width_prompt_chunk_retains_prefill_metadata(
     mixed_spec: bool,
     graph_mode: CUDAGraphMode,
 ):
-    # All builder classes share the align call site (310P included), so every
-    # parametrization needs the probe; none of them can run on CPU runners.
-    _skip_unless_npu()
     _patch_missing_runtime_cdiv(monkeypatch)
     width = num_spec + 1
     query_lens = [width, width] if mixed_spec else [width]

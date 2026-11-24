@@ -29,14 +29,14 @@ The following hardware and software stack is validated together for this release
     | Layer | Component | Validated version / requirement | Role |
     | --- | --- | --- | --- |
     | Runtime environment | Python | `{{ release_image_python_version }}` | Python version used by the validated release image |
-    | Host enablement | Ascend HDK | `{{ release_hdk_version_a2_a3_300i_200i }}` | Driver and firmware for A2, A3, Atlas 300I DUO, and Atlas 200I Pro |
+    | Host enablement | Ascend HDK | `{{ release_hdk_version_a2_a3_300i_200i }}` | Driver and firmware for A2, A3, Atlas 300I Duo, and Atlas 200I Pro |
     | ^^ | ^^ | `{{ release_hdk_version_a5 }}` | Driver and firmware for Atlas 850E and Atlas 650E |
     | Ascend runtime | CANN Toolkit + Ops | `{{ release_cann_version }}` | Ascend user-space runtime, including the CANN Toolkit and hardware-specific Ops packages |
     | Ascend runtime | NNAL | `{{ release_nnal_version }}` | Provides `libatb.so` and ATB runtime capabilities |
     | Framework | PyTorch | `{{ release_pytorch_version }}` | Tensor framework used by vLLM |
     | Framework | TorchNPU | `{{ release_torch_npu_version }}` | Connects PyTorch to the Ascend runtime |
-    | Kernel acceleration | Triton Ascend | `{{ release_triton_ascend_version }}` | Used on A2, A3, and 950DT Products; not used on Atlas 300I DUO or Atlas 200I Pro |
-    | Kernel acceleration | FLA NPU | `{{ release_fla_npu_version }}` | Provides convolution and gated delta-rule operators on A2, A3, and 950DT Products; not required on Atlas 300I DUO or Atlas 200I Pro |
+    | Kernel acceleration | Triton Ascend | `{{ release_triton_ascend_version }}` | Used on A2, A3, and 950DT Products; not used on Atlas 300I Duo or Atlas 200I Pro |
+    | Kernel acceleration | FLA NPU | `{{ release_fla_npu_version }}` | Provides convolution and gated delta-rule operators on A2, A3, and 950DT Products; not required on Atlas 300I Duo or Atlas 200I Pro |
     | Inference engine | vLLM | `{{ release_vllm_version }}` | Model inference engine |
     | Hardware plugin | vLLM Ascend | `{{ release_vllm_ascend_version }}` | Connects vLLM to the Ascend software stack |
 
@@ -56,7 +56,7 @@ npu-smi info
 
 The output should list the expected NPU devices, with `Health` shown as `OK` and no driver initialization errors. Device names, chip counts, and table columns vary by hardware and driver version. A missing device or a health status other than `OK` needs investigation before continuing.
 
-```bash
+```output
 +------------------------------------------------------------------------------------------------+
 | npu-smi xx.x.x                   Version: xx.x.x                                               |
 +---------------------------+---------------+----------------------------------------------------+
@@ -145,7 +145,7 @@ COMPILE_CUSTOM_KERNELS=0 SOC_VERSION=ascend910b1 \
 ```
 
 - `COMPILE_CUSTOM_KERNELS=0` skips building the native extensions and custom operators. These components are enabled by default for a normal NPU installation.
-- `SOC_VERSION` supplies the package's target hardware without querying `npu-smi`. Use `ascend910b1` for A2, `ascend910_9391` for A3, `ascend310p1` for Atlas 300I DUO / Atlas 200I Pro, or `ascend950dt_9582` for 950DT Products. This selects build metadata; it does not emulate an NPU.
+- `SOC_VERSION` supplies the package's target hardware without querying `npu-smi`. Use `ascend910b1` for A2, `ascend910_9391` for A3, `ascend310p1` for Atlas 300I Duo / Atlas 200I Pro, or `ascend950dt_9582` for 950DT Products. This selects build metadata; it does not emulate an NPU.
 - `--no-build-isolation` uses the packaging tools installed in this virtual environment instead of installing the full `pyproject.toml` build requirements.
 - `--no-deps` skips runtime dependencies from `requirements.txt`. Do not install those dependencies for this packaging-only check.
 
@@ -173,7 +173,7 @@ Exit the disposable container when finished; `--rm` removes it and the files cre
 
 Check the physical links, the status of each node, and inter-node connectivity in order.
 
-The commands below use `hccn_tool` (Huawei Collective Communications Network Tool), the Ascend NPU cluster network management tool installed with the driver. if the command is missing, check the driver installation and executable path.
+The commands below use `hccn_tool` (Huawei Collective Communication Network Tool), the Ascend NPU cluster network management tool installed with the driver; if the command is missing, check the driver installation and executable path.
 
 #### Physical link requirements {: #installation-multi-node-physical }
 
@@ -320,7 +320,7 @@ A2 and A3 Products address the peer NPU by IPv4. 950DT Products connect the NPUs
 
 Successful output includes received replies and a summary with equal transmitted/received packet counts and zero packet loss. For A2 and A3 Products (`hccn_tool`), for example:
 
-```text
+```output
 3 packets transmitted, 3 received, 0.00% packet loss
 ```
 
