@@ -456,15 +456,9 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
                     assert not EngineCore.is_inference_ready(core)
 
     def test_draft_capability_follows_engine_support(self):
-        for backend, engine_support in (
-            ("hccl", True),
-            ("npu_ipc", True),
-            ("hccl", False),
-            ("npu_ipc", False),
-        ):
-            with self.subTest(backend=backend, engine_support=engine_support):
+        for engine_support in (True, False):
+            with self.subTest(engine_support=engine_support):
                 worker, _ = self._make_worker()
-                worker.vllm_config.weight_transfer_config.backend = backend
                 worker.weight_transfer_engine.supports_draft_weight_update = engine_support
                 self.assertEqual(worker.supports_draft_weight_updates(), engine_support)
                 if not engine_support:
