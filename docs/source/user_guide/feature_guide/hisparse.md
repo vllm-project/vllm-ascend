@@ -29,7 +29,8 @@ serving path or change the existing non-HiSparse BF16 path.
 
 On a single Ascend 950 node with colocated Prefill and Decode, you can
 [combine HiSparse with AscendStore](#combining-hisparse-with-ascendstore)
-to offload historical KV to local DDR and reuse complete prefixes across requests.
+to offload historical KV to local DDR and reuse full KV blocks from MemCache
+across requests.
 
 ### Constraints and Limitations
 
@@ -93,9 +94,9 @@ the private Host allocator. Omitting it uses native ACL Host-memory registration
 AscendStore saves and restores Host Source and NPU Indexer pages. HiSparse
 manages the Host Source, Resident, and Hot buffers.
 
-Use a vLLM Core build with Ascend HiSparse support. Stock vLLM v0.33.0
-supports HiSparse on CUDA only. Keep the attention options above and pass the
-following JSON to `--kv-transfer-config`.
+Use the vLLM Core revision pinned by the matching vLLM Ascend build with
+Ascend HiSparse support. Keep the attention options above and pass the following
+JSON to `--kv-transfer-config`.
 
 ```json
 {
@@ -119,7 +120,8 @@ following JSON to `--kv-transfer-config`.
 ```
 
 See [KV Cache Pool](kv_cache_pool_ascend_store.md) for MemCache setup and
-[AscendStore settings](#ascendstore-settings) for the required options.
+[AscendStore settings](#ascendstore-settings) for the required options. After
+startup, [verify an external replay](#verifying-ascendstore-external-replay).
 Mooncake support is deferred pending a fix for
 [PUT timeout data corruption](https://github.com/kvcache-ai/Mooncake/issues/4491).
 
@@ -136,6 +138,7 @@ pool. Files overwritten in place keep the same model path.
 
 Send a request and check the server's metrics endpoint for the HiSparse miss
 counter. The counter can stay at zero when selected rows are already on the NPU.
+Use the external replay check below to verify that AscendStore reads from MemCache.
 
 ```bash
 curl -fsS http://127.0.0.1:8000/metrics | grep '^vllm:hisparse_cache_misses_total'
@@ -149,8 +152,9 @@ enabled, and `kv_load_failure_policy=fail`. Add
 
 1. Send a `/v1/completions` request with a fresh `cache_salt`, a prompt that
    spans several full KV blocks, and `temperature=0`. Set
-   `return_token_ids=true` and `logprobs=5` to compare the outputs. After
-   it completes, send the same request again to obtain a local-hit reference.
+   `return_token_ids=true` and `logprobs=5` to compare the outputs. Send the same
+   request again. Check that `vllm:prefix_cache_hits_total` increases and
+   `vllm:external_prefix_cache_hits_total` stays unchanged to establish a local-hit reference.
 2. Clear only the server's local prefix cache and check that the response
    contains `"success": true`. Leave the MemCache pool running.
 

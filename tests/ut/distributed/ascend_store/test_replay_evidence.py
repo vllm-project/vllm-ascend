@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from tests.e2e.nightly.single_node.hisparse_ascendstore.replay_helpers import (
+from tests.SIT.cases.features.kv_pool.hisparse_ascendstore.replay_helpers import (
     COMPUTED_TOKENS,
     EXTERNAL_GETS,
     EXTERNAL_HITS,
@@ -17,27 +17,28 @@ from tests.e2e.nightly.single_node.hisparse_ascendstore.replay_helpers import (
 
 
 @pytest.mark.parametrize(
-    ("hits", "external_hits", "computed", "local_hits", "get_keys", "valid"),
+    ("hit", "external_hits", "computed", "local_hits", "get_keys", "valid"),
     [
-        ([128, 128], 256, 2, 0, 8, True),
-        ([128, 0], 128, 130, 0, 8, False),  # One request missed despite a positive aggregate.
-        ([128, 128], 256, 130, 0, 8, False),  # Lookup succeeded but part of the prefix was recomputed.
-        ([128, 128], 128, 2, 128, 8, False),
-        ([128, 128], 128, 2, 0, 8, False),
-        ([128, 128], 256, 2, 0, 0, False),
+        (128, 128, 1, 0, 8, True),
+        (0, 0, 129, 0, 8, False),
+        (64, 64, 65, 0, 8, False),  # Restored less than the local reference.
+        (128, 128, 129, 0, 8, False),  # Lookup succeeded but the prefix was recomputed.
+        (128, 128, 1, 128, 8, False),
+        (128, 64, 1, 0, 8, False),
+        (128, 128, 1, 0, 0, False),
     ],
 )
-def test_external_replay_requires_each_request_to_load_its_warm_prefix(
-    hits, external_hits, computed, local_hits, get_keys, valid
+def test_external_replay_requires_reading_the_whole_cached_prefix(
+    hit, external_hits, computed, local_hits, get_keys, valid
 ):
-    warm = [{"cached_tokens": 128}, {"cached_tokens": 128}]
-    replay = [{"cached_tokens": count} for count in hits]
+    local = {"cached_tokens": 128}
+    replay = {"cached_tokens": hit}
     counts = {EXTERNAL_HITS: external_hits, COMPUTED_TOKENS: computed, LOCAL_HITS: local_hits, EXTERNAL_GETS: get_keys}
     if valid:
-        assert_external_replay(warm, replay, counts, 129)
+        assert_external_replay(local, replay, counts, 129)
     else:
         with pytest.raises(AssertionError):
-            assert_external_replay(warm, replay, counts, 129)
+            assert_external_replay(local, replay, counts, 129)
 
 
 @pytest.mark.parametrize("draft_tokens", [3, 4])
