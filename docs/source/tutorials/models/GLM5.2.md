@@ -161,7 +161,6 @@ For 950DT products PD deployment, prepare the platform-generated HCCL/HIXL confi
     --name $NAME \
     --net=host \
     --shm-size=500g \
-    --privileged \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
