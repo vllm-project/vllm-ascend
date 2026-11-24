@@ -102,7 +102,7 @@ def test_dcp_factory_preserves_complete_physical_pages(physical_size, max_len):
 def test_indexer_builder_uses_owner_local_metadata_without_replica_buffers(physical_size):
     config = _config(140000, physical_size)
     spec = AscendSFAIndexerCacheSpec(block_size=physical_size, num_kv_heads=1, head_size=128, dtype=torch.uint8)
-    builder = _create_builder(spec, config, True)
+    builder = _create_attention_group(spec, config, indexer=True).get_metadata_builder()
     assert builder.use_sharded_dcp
     assert builder.kernel_block_size == 128
     assert not hasattr(builder, "replicated_col_idx_buf")
