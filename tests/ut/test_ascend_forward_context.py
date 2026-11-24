@@ -352,6 +352,51 @@ def test_select_moe_comm_method_a2_uses_mc2_within_capacity(monkeypatch, num_tok
     ("num_tokens", "ep_world_size", "expected"),
     [
         (128, 8, MoECommType.FUSED_MC2),
+        (4097, 8, MoECommType.FUSED_MC2),
+        (128, 128, MoECommType.MC2),
+        (4097, 128, MoECommType.ALLGATHER),
+    ],
+)
+def test_select_moe_comm_method_a2_enable_fused_mc2(
+    monkeypatch,
+    num_tokens,
+    ep_world_size,
+    expected,
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A2,
+        capacity=128,
+        ep_world_size=ep_world_size,
+        enable_fused_mc2=1,
+    )
+    vllm_config = _make_vllm_config(world_size=ep_world_size, num_experts=128, quant_type="w4a8")
+
+    assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+@pytest.mark.parametrize("cann_megamoe_available", [True, False])
+def test_select_moe_comm_method_a2_cann_megamoe_selection(monkeypatch, cann_megamoe_available):
+    # EP=48 is above the plain dispatch_ffn_combine bound (32), so only the
+    # MegaMoe capability branch can select FUSED_MC2 here.
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A2,
+        capacity=128,
+        ep_world_size=48,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: cann_megamoe_available)
+    vllm_config = _make_vllm_config(world_size=48, num_experts=128, quant_type="w4a8")
+
+    expected = MoECommType.FUSED_MC2 if cann_megamoe_available else MoECommType.ALLGATHER
+    assert afc.select_moe_comm_method(4097, vllm_config) == expected
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "ep_world_size", "expected"),
+    [
+        (128, 8, MoECommType.FUSED_MC2),
         (128, 128, MoECommType.MC2),
         (4097, 8, MoECommType.FUSED_MC2),
         (4097, 128, MoECommType.ALLTOALL),
@@ -725,7 +770,8 @@ def test_extra_ctx_env_true_uses_additional_kwargs(monkeypatch):
         (8, 1, 16384, 500, 2, "mtp", 16384),
         (3, 8, 513, 16, 1, "mtp", 111),
         (1, 16, 16384, 512, 4, "mtp", 3968),
-        (1, 8, 16384, 500, 2, "dflash", 16384),
+        (1, 8, 16384, 64, 4, "dspark", 2400),
+        (1, 8, 16384, 64, 4, "dflash", 2400),
     ],
 )
 @pytest.mark.parametrize("prefill_mc2", [True, False])

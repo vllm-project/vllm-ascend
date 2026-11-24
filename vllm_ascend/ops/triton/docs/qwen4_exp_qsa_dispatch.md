@@ -47,6 +47,19 @@ pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qwen4_exp
 
 The native test is discovered by the existing `singlecard-ops-a3` nightly matrix. It compiles and executes QSA packing, FIA wide-to-narrow workspace reuse, and GBSA preparation against independent PyTorch expectations, including residual boundaries, invalid holes, ragged requests, and a non-contiguous block table.
 
+The production QSA-to-CANN GBSA integration path is covered by:
+
+```bash
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/test_qwen4_exp_gbsa.py
+```
+
+This supplemental test passes compact LI-v2 indices through
+`qsa_gbsa_attention`, compares the BF16 output with an independent dense FP32
+attention reference, and covers eager execution, `torch.compile`, and NPUGraph
+replay after updating an input. Triton packing and metadata outputs remain
+exactly compared in `test_qwen4_exp_qsa.py`, as required for integer and index
+results.
+
 ## Origin and differences
 
 These kernels are Ascend-specific adapters for the upstream Qwen4Exp QSA metadata contract. They replace host-side expansion, compaction, and block-table gathering with device-side preparation while keeping the upstream selected-group order and residual-group semantics.

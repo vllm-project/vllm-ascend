@@ -10,7 +10,7 @@ Hence, KV Cache Pool is proposed to utilize various types of storage including o
 
 vLLM Ascend currently supports [MooncakeStore](https://github.com/kvcache-ai/Mooncake), one of the most recognized KV Cache storage engines.
 
-While one can utilize MooncakeStore in vLLM V1 engine by setting it as a remote backend of LMCache with GPU (see [Tutorial](https://github.com/LMCache/LMCache/blob/dev/docs/source/mp/l2_storage/mooncake_store.rst)), we find it would be better to integrate a connector that directly supports MooncakeStore and can utilize the data transfer strategy that best fits NPU hardware.
+While one can utilize MooncakeStore in vLLM V1 engine by setting it as a remote backend of LMCache with NPU (see [Tutorial](https://github.com/LMCache/LMCache/blob/dev/docs/source/mp/l2_storage/mooncake_store.rst)), we find it would be better to integrate a connector that directly supports MooncakeStore and can utilize the data transfer strategy that best fits NPU hardware.
 
 Hence, we propose to integrate MooncakeStore with a brand new **MooncakeStoreConnectorV1**, which is indeed largely inspired by **LMCacheConnectorV1** (see the [How is MooncakeStoreConnectorV1 Implemented?](#how-is-mooncakestoreconnectorv1-implemented) section).
 
@@ -51,7 +51,7 @@ Currently, we only perform put and get operations of KV Pool for **Prefill Nodes
 
 The key benefit of doing this is that we can keep the gain in performance by computing less with Prefix Caching from on-chip memory and KV Pool for Prefill Nodes, while not sacrificing the data transfer efficiency between Prefill and Decode nodes with P2P KV Connector that transfers KV Caches between NPU devices directly.
 
-To enable this feature, we need to set up both Mooncake Connector and MooncakeStore Connector with a Multi Connector, which is a KV Connector class provided by vLLM that can call multiple KV Connectors in a specific order.
+To enable this feature, we need to set up both MooncakeConnector and MooncakeStoreConnector with a MultiConnector, which is a KV Connector class provided by vLLM that can call multiple KV Connectors in a specific order.
 
 For details, please also refer to the [Mooncake connector deployment guide](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/mooncake_connector_deployment_guide.md).
 
@@ -66,7 +66,7 @@ The KV Connector methods that need to be implemented can be categorized into sch
 ### KV Connector Scheduler-Side Methods
 
 `get_num_new_matched_tokens`: Get prefix cache hit in number of tokens through looking up into the KV pool.  
-`update_states_after_alloc`:  Update KVConnector state after temporary buffer alloc.  
+`update_state_after_alloc`: Update KVConnector state after temporary buffer alloc.  
 `build_connector_meta`: Attach the connector metadata to the request object.  
 `request_finished`: Once a request is finished, determine whether request blocks should be freed now or will be sent asynchronously and freed later.
 

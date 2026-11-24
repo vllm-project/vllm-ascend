@@ -856,6 +856,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             lora_capture_cases=self.lora_capture_cases,
         )
         check_attention_cp_compatibility(self.vllm_config)
+        metadata_groups = list(self.attn_groups)
         if isinstance(self.speculator, DraftModelSpeculator):
             self.speculator.set_attn(
                 self.model_state,
@@ -864,6 +865,12 @@ class NPUModelRunner310V2(NPUModelRunner):
                 self.input_buffers,
                 self.attn_groups,
             )
+            metadata_groups.extend(self.speculator.attn_groups)
+
+        # Skip remapping to preserve 310P's existing block table expansion.
+        for groups in metadata_groups:
+            for attn_group in groups:
+                attn_group.block_table_is_kernel_granular = True  # type: ignore[attr-defined]
         if self.speculator is not None:
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 

@@ -1,0 +1,19 @@
+# AI review POC operator allowlist (RFC #21451)
+#
+# One GitHub username per line. People listed here may apply the
+# `ai-review` label to ANY pull request to start an agent review; anyone
+# else applying the label results in a single notice comment and the label
+# is removed.
+#
+# To join the POC as an operator: ask in RFC #21451 or ping a maintainer.
+# To shrink/roll back the POC: remove lines here — no code change needed.
+#
+# Maintainers: keep this list small (3–5) during the POC.
+wxsIcey
+ShyRa1n
+kunpengW-code
+drslark
+lcfenglinwan
+wangxiyuan
+zhangxinyuehfad
+MrZ20

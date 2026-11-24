@@ -373,6 +373,7 @@ Parameter descriptions:
             "kv_role": "kv_producer",
             "kv_port": "30100",
             "kv_connector_extra_config": {
+                    "use_ascend_direct": true,
                     "prefill": {
                             "dp_size": 4,
                             "tp_size": 4
@@ -435,7 +436,7 @@ Parameter descriptions:
             --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
             --trust-remote-code \
             --max-num-seqs 8 \
-            --max-model-len 133720 \
+            --max-model-len 133120 \
             --max-num-batched-tokens 32 \
             --no-enable-prefix-caching \
             --gpu-memory-utilization 0.91 \
@@ -450,6 +451,7 @@ Parameter descriptions:
             "kv_role": "kv_consumer",
             "kv_port": "30200",
             "kv_connector_extra_config": {
+                    "use_ascend_direct": true,
                     "prefill": {
                             "dp_size": 4,
                             "tp_size": 4
@@ -512,7 +514,7 @@ Parameter descriptions:
             --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
             --trust-remote-code \
             --max-num-seqs 8 \
-            --max-model-len 133720 \
+            --max-model-len 133120 \
             --max-num-batched-tokens 32 \
             --no-enable-prefix-caching \
             --gpu-memory-utilization 0.91 \
@@ -527,6 +529,7 @@ Parameter descriptions:
             "kv_role": "kv_consumer",
             "kv_port": "30300",
             "kv_connector_extra_config": {
+                    "use_ascend_direct": true,
                     "prefill": {
                             "dp_size": 4,
                             "tp_size": 4
@@ -743,7 +746,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows:
 
 ```shell
-vllm bench serve --model Eco-Tech/Kimi-K2.6-w4a8 --trust-remote-code --dataset-name random --random-input 1024 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model Eco-Tech/Kimi-K2.6-w4a8 --trust-remote-code --dataset-name random --random-input-len 1024 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.

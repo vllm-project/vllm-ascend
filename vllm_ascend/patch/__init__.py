@@ -56,13 +56,26 @@
 #   Target: VllmConfig.validate_mamba_cached_kernel and its Pydantic validator.
 #   Why: Ascend's GLM and Kimi KDA RecoverSSM paths have platform-specific
 #        cache and parallelism restrictions, and upstream does not recognize
-#        all Kimi K3.1 architecture aliases.
+#        all Kimi K3.1 architecture aliases. Ascend also implements it for GLM-Next and Qwen GDN.
 #   How: Select the request-indexed KDA path from its text-config contract,
 #        validate its execution constraints and derive use_kda_recoverssm from
 #        use_replayssm. Other models and disabled configurations retain the
 #        upstream validator.
 #   Related PR: No upstream platform-specific ReplaySSM selector exists yet.
 #   Future plan: Remove when upstream supports the Ascend KDA configuration contract.
+# --------------------------------
+# * worker/patch_qwen3_5.py (RecoverSSM):
+#   Target: QwenGatedDeltaNetAttention descriptors/forward and Qwen3.5/Qwen3-Next text model descriptors.
+#   Why: Qwen GDN has scalar gates and grouped Q/K heads, unlike KDA.
+#   How: Select AscendGDNRecoverSSMAttentionBackend and three paged views
+#   (conv, checkpoint, FP32 replay) only when enabled.
+#        Keep use_kda_recoverssm as the paired upstream's generic lifecycle flag;
+#        the GDN builder creates its own context without patching Kimi's kernels.
+#        Text model entrypoints delegate to shared model-side config helpers,
+#        using the same enable predicate as the layer.
+#   Related PR: https://github.com/vllm-project/vllm/pull/61309 (not in the paired checkout).
+#   Future plan: Remove model descriptor patches when the paired upstream provides
+#        compatible helpers; remove the selector patch when GDN recovery hooks are available.
 # --------------------------------
 # * Platform Patch:
 # ==========#
@@ -228,7 +241,9 @@
 #       No, vllm-ascend-specific MoE runner integration.
 #    Future Plan:
 #       Remove this patch once upstream exposes a backend dispatch / plugin hook
-#       for selecting the MoE runner implementation.
+#       for selecting the MoE runner implementation. Register warmup from the
+#       selected Ascend router initialization when that hook is available.
+#       Until then the factory registers EPLB map variants during model construction.
 #
 #   2. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
 #    Why:
@@ -246,6 +261,19 @@
 #       Remove this DeepSeek-V4-specific argument bridge once upstream exposes
 #       a backend-neutral router configuration object or MoE factory extension
 #       hook that carries vision routing metadata into the Ascend runner.
+#
+#   3. `vllm.model_executor.layers.fused_moe.FusedMoEFactory` (vLLM 0.33.0 only)
+#    Why:
+#       The 0.33.0 Ling model always passes `activation="silu"`, so a routed
+#       layer with a configured `swiglu_limit` is clamped before SiLU instead of
+#       taking the swiglustep path that clamps after SiLU.
+#    How:
+#       `_ascend_FusedMoE` switches such a call made directly from
+#       `bailing_moe_v3` to `swiglustep`, the rule the fixed upstream model applies.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/65088
+#    Future Plan:
+#       Remove this check when vLLM 0.33.0 support ends.
 #
 # ** 9. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -496,7 +524,7 @@
 #       supports local drafter models with PP > 1, or moves the PP validation to a
 #       separate hook that can be overridden per-model-type.
 #
-# ** 19. File: platform/patch_speculative_config.py**
+# ** 18. File: platform/patch_speculative_config.py**
 # Native MiniMax Flash draft extension:
 #   Targets: SpeculativeConfig.__post_init__ and draft HF configuration loading.
 #   Why: native DSpark exports use a standalone architecture and carry their
@@ -566,7 +594,7 @@
 #       parallelism for non-MoE draft models (upstream #56930) or exposes a
 #       backend-safe draft parallel config selection.
 #
-# ** 20. File: platform/patch_structured_output.py**
+# ** 19. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
 #      `vllm.v1.structured_output.StructuredOutputManager.grammar_init`
@@ -1390,6 +1418,16 @@
 #       Remove once upstream exposes a backend hook for KV cache
 #       allocation/binding.
 #
+#   5. `vllm.v1.worker.utils.AttentionGroup._with_kernel_block_table`
+#    Why:
+#       310P V2 already supplies kernel block IDs.
+#    How:
+#       Skip expansion for groups marked as kernel-granular.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/57169
+#    Future Plan:
+#       Remove when 310P target and draft paths supply manager block IDs.
+#
 # ** 23. File: worker/patch_block_table.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.block_table.BlockTables`
@@ -1456,6 +1494,17 @@
 #       Define AscendModelState and initialize it in init_model_state.
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
+#
+#   2. `vllm.v1.worker.gpu.model_states.interface.ModelState.gather_mm_embeddings`
+#    Why:
+#       An idle PCP rank can retain a zero-token request inside an image span.
+#    How:
+#       Return empty media embeddings and a mask for an idle PCP rank so it
+#       can continue to the shared padded token embedding exchange.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/64435
+#    Future Plan:
+#       Remove the wrapper once the paired vLLM includes the upstream guard.
 #
 # ** 28. File: worker/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1595,7 +1644,7 @@
 #       the runner still passes the global request count, so no uniform decode
 #       graph matches.
 #    How:
-#       When `is_pcp_decode_sharding_enabled()` holds, derive the request
+#       When `parallel_config.pcp_shard_decode_requests` holds, derive the request
 #       count from the local tokens and the uniform query length.
 #    Related PR (if no, explain why):
 #       No upstream PR yet; vLLM #52162 still passes the global request count.

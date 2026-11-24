@@ -21,12 +21,12 @@ from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_pro
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import (
     NPUPlatform,
+    _normalize_sleep_backend,
     _setup_compile_backend,
     _validate_deepseek_v4_tp_config,
     _validate_deepseek_v41_adaptive_config,
     _validate_draft_decode_context_parallel_config,
     _validate_eplb_config,
-    _validate_glm5next_dflash2_pp_config,
     _validate_parallel_config,
     _validate_sfa_dcp_kv_sp,
     _validate_target_dcp_config,
@@ -72,36 +72,6 @@ def test_kimi_hybrid_pd_rejects_sub_kernel_interleave(connector, interleave):
         pytest.raises(ValueError, match="interleave.*kernel block size"),
     ):
         _validate_sfa_dcp_kv_sp(config)
-
-
-@pytest.mark.parametrize(
-    ("pp_size", "method", "architecture", "model_type", "should_raise"),
-    [
-        (2, "dflash", "DFlash2DraftModel", "glm5_next_text", True),
-        (2, "dflash", "DFlash2DraftModel", "glm5_next", True),
-        (1, "dflash", "DFlash2DraftModel", "glm5_next_text", False),
-        (2, "dflash", "DFlashDraftModel", "glm5_next_text", False),
-        (2, "dspark", "DFlash2DraftModel", "glm5_next_text", False),
-        (2, "dflash", "DFlash2DraftModel", "qwen3", False),
-    ],
-)
-def test_glm5next_dflash2_rejects_pipeline_parallel_size_above_one(
-    pp_size, method, architecture, model_type, should_raise
-):
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=model_type)),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
-        speculative_config=SimpleNamespace(
-            method=method,
-            draft_model_config=SimpleNamespace(architectures=[architecture]),
-        ),
-    )
-
-    if should_raise:
-        with pytest.raises(ValueError, match="requires pipeline_parallel_size=1"):
-            _validate_glm5next_dflash2_pp_config(config)
-    else:
-        _validate_glm5next_dflash2_pp_config(config)
 
 
 @pytest.mark.parametrize(
@@ -509,6 +479,8 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.model_config = MagicMock()
         mock_vllm_config.model_config.is_hybrid = False
         mock_vllm_config.model_config.is_encoder_decoder = False
+        mock_vllm_config.model_config.enable_sleep_mode = False
+        mock_vllm_config.model_config.sleep_mode_backend = "cumem"
         mock_vllm_config.device_config = MagicMock()
         mock_vllm_config.device_config.device_type = "npu"
         mock_vllm_config.parallel_config = MagicMock()
@@ -2921,3 +2893,33 @@ class TestNPUPlatform(TestBase):
             self.platform.get_static_graph_wrapper_cls(),
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
+
+
+@pytest.mark.parametrize(
+    "enable_sleep_mode, backend, expected",
+    [
+        (True, "cumem", "camem"),
+        (True, "camem", "camem"),
+        (False, "cumem", "cumem"),
+        (False, "third_party", "third_party"),
+    ],
+)
+def test_normalize_sleep_backend(enable_sleep_mode, backend, expected):
+    model_config = SimpleNamespace(
+        enable_sleep_mode=enable_sleep_mode,
+        sleep_mode_backend=backend,
+    )
+
+    _normalize_sleep_backend(model_config)
+
+    assert model_config.sleep_mode_backend == expected
+
+
+def test_normalize_sleep_backend_rejects_third_party():
+    model_config = SimpleNamespace(
+        enable_sleep_mode=True,
+        sleep_mode_backend="third_party",
+    )
+
+    with pytest.raises(ValueError, match="Only the in-tree camem backend"):
+        _normalize_sleep_backend(model_config)
