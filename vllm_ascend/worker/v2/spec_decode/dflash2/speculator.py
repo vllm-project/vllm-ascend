@@ -19,6 +19,7 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import _DRAFT_NOISE_SALT, _log1p_neg_stable, tl_rand32
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 
+from vllm_ascend.ops.triton.sample.rng import spec_step_seed
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
     AscendDFlashSpeculator,
 )
@@ -89,7 +90,8 @@ def _selector_walk_kernel_ascend(
             # (int64 counters lower to 64-bit multiplies whose runtime
             # helper, __multi3, is unavailable); seeds, token ids and
             # positions all fit int32.
-            gumbel_seed = tl.randint(seed.to(tl.int32), position.to(tl.int32))
+            step_seed = spec_step_seed(seed, step).to(tl.int32)
+            gumbel_seed = tl.randint(step_seed, position.to(tl.int32))
             uniform = tl_rand32(gumbel_seed, candidates.to(tl.int32), includes_zero=False)
             noise = -tl.log(-_log1p_neg_stable(uniform))
             sampled_scores = scores / effective_temp + noise

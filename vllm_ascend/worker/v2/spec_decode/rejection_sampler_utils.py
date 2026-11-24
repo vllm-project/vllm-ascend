@@ -35,6 +35,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
 )
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ops.triton.sample.rng import spec_step_seed
 from vllm_ascend.ops.triton.spec_decode.entropy_verify import (
     _entropy_partials_kernel,
     _entropy_verify,
@@ -165,7 +166,9 @@ def _probabilistic_rejection_kernel(
                 accepted = draft_sampled >= 0
                 if accepted:
                     u_pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
-                    u_seed = tl.randint(seed, u_pos)
+                    # An uncommitted position can be verified again at a
+                    # different step in the next block.
+                    u_seed = tl.randint(spec_step_seed(seed, i), u_pos)
                     u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
                     u = tl.maximum(u, _TL_RAND_MIN)
                     prefix_joint_ratio = tl.exp(tl.load(cumulative_log_p_ptr + logit_idx).to(tl.float32))
