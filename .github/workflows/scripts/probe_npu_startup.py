@@ -7,7 +7,6 @@ import argparse
 import faulthandler
 import os
 import platform
-import re
 import subprocess
 import sys
 import time
@@ -21,10 +20,16 @@ TRACEBACK_INTERVAL_SECONDS = 60
 KILL_GRACE_SECONDS = 5
 MAX_LOG_LINES = 24
 OPERATIONS = ("mem_get_info", "set_device")
-NATIVE_LOG_MARKERS = re.compile(
-    r"aclrt(GetMemInfo|SetDevice)|rt(GetMemInfo|MemGetInfo|SetDevice)|halMemGetInfo|drvMemGetInfo"
-    r"|\[ERROR\]|\[WARN(?:ING)?\]|timeout|timed out|\bioctl\b",
-    re.IGNORECASE,
+NATIVE_LOG_MARKERS = (
+    "getmeminfo",
+    "memgetinfo",
+    "setdevice",
+    "[error]",
+    "[warn]",
+    "[warning]",
+    "timeout",
+    "timed out",
+    "ioctl",
 )
 
 
@@ -84,7 +89,10 @@ def show_native_logs(operation, directory, pid):
         log(f"{operation} native log {path.parent.name}/{path.name}")
         try:
             with path.open(encoding="utf-8", errors="replace") as stream:
-                matches = deque((line.rstrip() for line in stream if NATIVE_LOG_MARKERS.search(line)), MAX_LOG_LINES)
+                matches = deque(
+                    (line.rstrip() for line in stream if any(marker in line.lower() for marker in NATIVE_LOG_MARKERS)),
+                    MAX_LOG_LINES,
+                )
         except OSError as exc:
             log(f"{operation} could not read {path.name} ({type(exc).__name__})")
             continue
