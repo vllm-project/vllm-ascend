@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
 from contextlib import AbstractContextManager
+from copy import copy
 from dataclasses import replace
 
 import torch
 import torch.distributed as dist
+from vllm.config import VllmConfig
 from vllm.distributed import get_dp_group
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -19,8 +21,9 @@ from vllm_ascend.ascend_forward_context import (
     get_mc2_tokens_capacity,
     use_cann_megamoe,
 )
+from vllm_ascend.attention.attention_v1 import AscendKimiK31GQADraftAttentionImpl
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
-from vllm_ascend.core.kv_cache_interface import get_kv_cache_dcp_size
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_dcp_size, uses_kimi_k31_gqa_draft
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 from vllm_ascend.worker.v2.moe_utils import (
     V2MoEPhaseMetadata,
@@ -128,6 +131,45 @@ def dispatch_cg_and_sync_dp(
                 num_tokens_across_dp=torch.full_like(dp_sync.num_tokens_across_dp, state.padded_num_tokens),
             )
     return batch_desc, dp_sync
+
+
+def _check_attention_cp_compatibility(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    target_layer_names: set[str] | None,
+    draft_layer_names: set[str] | None,
+) -> None:
+    parallel = vllm_config.parallel_config
+    dcp_size = parallel.decode_context_parallel_size
+    if (
+        draft_layer_names
+        and dcp_size > 1
+        and parallel.prefill_context_parallel_size == 1
+        and uses_kimi_k31_gqa_draft(vllm_config)
+    ):
+        # Upstream uses target_layer_names only for PCP. Its DCP checks
+        # inspect the shared registry, which also contains the local draft.
+        local_draft_names = {
+            name
+            for group in kv_cache_config.kv_cache_groups
+            if get_kv_cache_dcp_size(group.kv_cache_spec, dcp_size) == 1
+            for name in group.layer_names
+            if name in draft_layer_names
+        }
+        forward_context = vllm_config.compilation_config.static_forward_context
+        local_draft_names = {
+            name
+            for name in local_draft_names
+            if isinstance(getattr(forward_context.get(name), "impl", None), AscendKimiK31GQADraftAttentionImpl)
+        }
+        if local_draft_names:
+            # Keep the shared registry used by runtime and KV cache binding.
+            vllm_config = copy(vllm_config)
+            vllm_config.compilation_config = copy(vllm_config.compilation_config)
+            vllm_config.compilation_config.static_forward_context = {
+                name: layer for name, layer in forward_context.items() if name not in local_draft_names
+            }
+    upstream.check_attention_cp_compatibility(vllm_config, target_layer_names)
 
 
 # Adapted from vLLM ced6857afa GPUModelRunner.initialize_kv_cache.
@@ -278,7 +320,9 @@ def initialize_kv_cache(
     )
     if self.cache_config.kv_sharing_fast_prefill and self.pcp_manager is None:
         self.fast_prefill = upstream.FastPrefillHelper(self.cudagraph_manager, self.max_num_tokens)
-    upstream.check_attention_cp_compatibility(self.vllm_config, target_attn_layer_names)
+    _check_attention_cp_compatibility(
+        self.vllm_config, self.kv_cache_config, target_attn_layer_names, draft_attn_layer_names
+    )
     if isinstance(self.speculator, upstream.DraftModelSpeculator):
         # HACK(woosuk)
         self.speculator.set_attn(
