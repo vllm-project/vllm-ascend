@@ -332,38 +332,47 @@ QWEN3_DRAFT_TARGET = WeightUpdateModelCase(
 )
 
 
-def _qwen3_draft_case(method: str, architecture: str) -> DraftWeightUpdateCase:
-    overrides = {
-        "num_hidden_layers": 1,
-        "layer_types": ["full_attention"],
-        "architectures": [architecture],
-        "draft_vocab_size": 151936,
-        # MRV2 reads the top-level capture-after indices (1-based), while
-        # DFlash's target_layer_ids below use zero-based decoder indices.
-        "eagle_aux_hidden_state_layer_ids": [1, 2, 3],
-    }
-    if method == "dflash":
-        overrides.update(
-            block_size=3,
-            num_target_layers=4,
-            dflash_config={"mask_token_id": 151669, "target_layer_ids": [0, 1, 2]},
-        )
-    return DraftWeightUpdateCase(
-        id=f"qwen3-{method}",
-        target=QWEN3_DRAFT_TARGET,
-        method=method,
-        draft_architecture="Eagle3Qwen3ForCausalLM" if method == "eagle3" else "DFlashQwen3ForCausalLM",
-        draft=WeightUpdateModelCase(
-            id=f"qwen3-{method}-draft",
-            model="Qwen/Qwen3-8B",
-            hf_overrides=overrides,
-            checkpoint_parameter_adapter=qwen3_draft_parameters,
-        ),
-    )
-
-
-QWEN3_EAGLE3_CASE = _qwen3_draft_case("eagle3", "Eagle3Qwen3ForCausalLM")
-QWEN3_DFLASH_CASE = _qwen3_draft_case("dflash", "DFlashDraftModel")
+QWEN3_EAGLE3_CASE = DraftWeightUpdateCase(
+    id="qwen3-eagle3",
+    target=QWEN3_DRAFT_TARGET,
+    method="eagle3",
+    draft_architecture="Eagle3Qwen3ForCausalLM",
+    draft=replace(
+        QWEN3_DRAFT_TARGET,
+        id="qwen3-eagle3-draft",
+        hf_overrides={
+            "num_hidden_layers": 1,
+            "layer_types": ["full_attention"],
+            "architectures": ["Eagle3Qwen3ForCausalLM"],
+            "draft_vocab_size": 151936,
+            # MRV2 uses 1-based capture-after indices.
+            "eagle_aux_hidden_state_layer_ids": [1, 2, 3],
+        },
+        checkpoint_parameter_adapter=qwen3_draft_parameters,
+    ),
+)
+QWEN3_DFLASH_CASE = DraftWeightUpdateCase(
+    id="qwen3-dflash",
+    target=QWEN3_DRAFT_TARGET,
+    method="dflash",
+    draft_architecture="DFlashQwen3ForCausalLM",
+    draft=replace(
+        QWEN3_DRAFT_TARGET,
+        id="qwen3-dflash-draft",
+        hf_overrides={
+            "num_hidden_layers": 1,
+            "layer_types": ["full_attention"],
+            "architectures": ["DFlashDraftModel"],
+            "draft_vocab_size": 151936,
+            "eagle_aux_hidden_state_layer_ids": [1, 2, 3],
+            "block_size": 3,
+            "num_target_layers": 4,
+            # DFlash uses zero-based target decoder indices.
+            "dflash_config": {"mask_token_id": 151669, "target_layer_ids": [0, 1, 2]},
+        },
+        checkpoint_parameter_adapter=qwen3_draft_parameters,
+    ),
+)
 DEEPSEEK_V4_DSPARK_CASE = DraftWeightUpdateCase(
     id="deepseek-v4-flash-dspark",
     method="dspark",
