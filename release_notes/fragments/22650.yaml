@@ -1,4 +1,8 @@
 pr: 22650
 entries:
-  - category: config
-    text: kv_load_failure_policy="repair" is now refused at startup on execution paths that can never dispatch repairs (the recompute-scheduler, dyntra-lb and balance scheduling forks, and KV cache layouts the repair fence cannot prove); the error names the exact switch to change. The "fail" and "recompute" policies are unchanged on every path.
+  - category: bugfix
+    text: Under kv_load_failure_policy='repair', an unsupported KV cache layout
+      now fails at startup with an explicit error naming the required layout
+      (VLLM_KV_CACHE_LAYOUT=HND or LBHNC), and vLLM builds without the repair
+      executor log a visible warning instead of silently skipping the startup
+      check.
