@@ -47,7 +47,7 @@ For disjoint P/D device assignments and the interaction between
     for i in {0..7}; do hccn_tool -i $i -ip -g;done
     ```
 
-4. Cross-Node PING Test
+4. (Optional) Cross-Node PING Test (skip for single-node deployment)
 
     ```bash
     # Execute on the target node (replace 'x.x.x.x' with actual npu ip address).
@@ -150,13 +150,17 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
 
 !!! note "Timeout for long sequences or high concurrency"
 
-    For long sequences or high concurrency, the default KV-cache release timeout of 480 seconds may be insufficient. Increase it as needed in the prefiller startup script. For versions that use `VLLM_MOONCAKE_CONNECTOR_TIMEOUT` for this timeout, add:
+    The fixed timeout below applies to `MooncakeConnectorV1`. For
+    `MooncakeConnectorV2`, configure `kv_lease_duration` instead; see
+    [MooncakeConnectorV2 KV Leases](pd_disaggregation_mooncake_multi_node.md#mooncakeconnectorv2-kv-leases).
+
+    For long sequences or high concurrency, the default KV-cache release timeout of 480 seconds may be insufficient. Increase it as needed by setting `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT` in the prefiller startup script:
 
     ```shell
-    export VLLM_MOONCAKE_CONNECTOR_TIMEOUT=1800
+    export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800
     ```
 
-    The value is in seconds: `1800` allows 30 minutes before timeout. In current versions, this setting is named `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`; use `export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800` instead. Check the variable name supported by your installed version.
+    The value is in seconds: `1800` allows 30 minutes before timeout.
 
     Increasing this timeout generally does not affect inference accuracy or performance during normal operation. If a decoder (D) node fails while requests still have KV caches on the prefiller (P) node that the decoder has not received, a longer timeout delays releasing those caches. They continue to occupy HBM, reducing the memory available for other requests on the P node until they are released.
 
@@ -245,7 +249,7 @@ python load_balance_proxy_server_example.py \
     --host 192.0.0.1 \
     --port 8080 \
     --prefiller-hosts 192.0.0.1 \
-    --prefiller-port 13700 \
+    --prefiller-ports 13700 \
     --decoder-hosts 192.0.0.1 \
     --decoder-ports 13701
 ```
@@ -253,7 +257,7 @@ python load_balance_proxy_server_example.py \
 |Parameter  | Meaning |
 | --- | --- |
 | --port | Proxy port |
-| --prefiller-port | All prefiller ports |
+| --prefiller-ports | All prefiller ports |
 | --decoder-ports | All decoder ports |
 
 ## Verification
@@ -302,7 +306,7 @@ curl http://192.0.0.1:8080/v1/chat/completions \
         "messages": [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
+                {"type": "image_url", "image_url": {"url": "https://example.com/qwen.png"}},
                 {"type": "text", "text": "What is the text in the illustration?"}
             ]}
             ],
