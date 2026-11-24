@@ -1,0 +1,7 @@
+pr: 22635
+entries:
+  - category: bugfix
+    text: >-
+      Fixed DeepSeek V4.1 target-token prompt scoring with bounded replay
+      by retaining all required prefill rows. Ordinary generation keeps
+      its existing replay-window behavior.
