@@ -565,6 +565,52 @@ def test_prefill_mask_is_reused_without_mutating_layer_topk(
     torch.testing.assert_close(mask, expected_mask)
 
 
+@pytest.mark.parametrize(
+    "all_resident,resident_rows,direct",
+    [
+        (False, range(1, 3), True),  # Only Decode spilled.
+        (True, range(0), True),
+        (False, range(2, 3), False),  # One Prefill spilled.
+        (False, range(1, 2), False),  # Incomplete query-row mapping.
+        (False, None, False),  # Core only provided the batch-wide flag.
+    ],
+)
+def test_mixed_c8_prefill_uses_only_resident_query_rows(monkeypatch, all_resident, resident_rows, direct):
+    impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
+    impl.enable_sparse_sfa_c8 = True
+    storage = torch.zeros(8, 128, 1)
+    impl.hisparse_cache = NS(
+        all_context_pages_resident=all_resident,
+        dummy_batch=False,
+        draft_layer=False,
+        view=NS(attention_block_stride=128, block_size=128, attention_cache=storage, cache=storage),
+        block_table=torch.tensor([[4], [0], [6]], dtype=torch.int32),
+        runtime=NS(request_state_indices=torch.tensor([1, 2, 0])),
+    )
+    if resident_rows is not None:
+        impl.hisparse_cache.resident_prefill_rows = resident_rows
+    metadata = NS(
+        num_decodes=1, num_decode_tokens=1, num_reqs=3, num_prefills=2, num_actual_tokens=5, hisparse_for_capture=False
+    )
+    monkeypatch.setattr(
+        sfa_hisparse, "get_forward_context", lambda: NS(cudagraph_runtime_mode=sfa_hisparse.CUDAGraphMode.NONE)
+    )
+    monkeypatch.setattr(torch, "npu", NS(is_current_stream_capturing=lambda: False), raising=False)
+    monkeypatch.setattr(
+        sfa_hisparse.AscendSFAImpl,
+        "_execute_sparse_flash_attention_process",
+        lambda self, *args, block_table: block_table,
+    )
+    query = torch.zeros(4, 1)
+    result = impl._try_c8_resident_prefill(
+        query, query, query.int(), metadata, torch.tensor([1, 3, 5]), torch.tensor([128, 2, 2])
+    )
+    if direct:
+        torch.testing.assert_close(result, torch.tensor([[6], [4]], dtype=torch.int32))
+    else:
+        assert result is None
+
+
 def test_prefill_mask_refreshes_for_new_batches_and_draft_owners(prefill_mask_builder):
     first = prefill_mask_builder([0, 7], 8)
     second = prefill_mask_builder([0, 2], 8)

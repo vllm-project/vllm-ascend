@@ -143,6 +143,7 @@ class PCPHiSparseConnector(ActiveKVConnector):
         ]
         # Keep Core's lifecycle canonical and snapshot all gathered slots.
         load_kwargs = super()._build_load_kwargs(scheduler_output, global_batch, attn_metadata)
+        load_kwargs["attention_request_ids"] = input_batch.req_ids
         load_kwargs["num_tokens"] = count
         return load_kwargs
 

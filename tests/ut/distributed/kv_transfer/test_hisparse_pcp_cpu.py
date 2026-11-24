@@ -123,7 +123,7 @@ def test_unquantized_pcp_writes_all_gathered_rows_without_query_truncation(
 
 def make_connector(padded_tokens=3):
     meta = metadata()
-    local = NS(num_tokens=3, idx_mapping=torch.tensor([7, 7, 9], dtype=torch.int64))
+    local = NS(num_tokens=3, req_ids=["A", "A", "B"], idx_mapping=torch.tensor([7, 7, 9], dtype=torch.int64))
     global_batch = NS(
         num_tokens=7,
         idx_mapping=torch.tensor([7, 9], dtype=torch.int32),
@@ -200,7 +200,10 @@ def test_host_mirror_mapping_shared_across_groups_and_scheduling_steps(monkeypat
         batch.query_start_loc = torch.tensor(starts, dtype=torch.int32)
         manager._padded_gather_idx = torch.tensor(indices)
         connector.prepare_draft_decode()
-        connector._build_load_kwargs(scheduler, local, {"layer0": meta, "draft": draft_meta})
+        local.req_ids = [requests[0], requests[0], requests[1]]
+        kwargs = connector._build_load_kwargs(scheduler, local, {"layer0": meta, "draft": draft_meta})
+        assert kwargs["attention_request_ids"] == local.req_ids
+        assert kwargs["request_ids"] == requests
         connector._start_load_kv()
         connector.prepare_host_mirror()
         assert draft.source_block_table is manager._local_block_tables[0]
