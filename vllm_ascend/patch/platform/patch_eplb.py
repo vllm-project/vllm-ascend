@@ -85,6 +85,9 @@ class _CudaAlikeEplbPlatformProxy:
     def is_cuda_alike(self) -> bool:
         return _is_npu_platform(self._platform) or self._platform.is_cuda_alike()
 
+    def supports_eplb(self) -> bool:
+        return _is_npu_platform(self._platform) or self._platform.supports_eplb()
+
     def __getattr__(self, name):
         return getattr(self._platform, name)
 
@@ -291,28 +294,38 @@ def _patch_eplb_policy_config() -> None:
     if get_args(policy_field.type) == _ASCEND_EPLB_POLICIES and policy_field.default == "stair":
         return
 
-    decorators = getattr(config_cls, "__pydantic_decorators__", None)
-    validator = None if decorators is None else decorators.model_validators.get("_validate_eplb_config")
-    if validator is None:
-        raise RuntimeError("Unsupported vLLM EPLB contract: policy validator is missing.")
-    original_validator = validator.func
+    if vllm_version_is("0.33.0"):
+        decorators = getattr(config_cls, "__pydantic_decorators__", None)
+        validator = None if decorators is None else decorators.model_validators.get("_validate_eplb_config")
+        if validator is None:
+            raise RuntimeError("Unsupported vLLM EPLB contract: policy validator is missing.")
+        original_validator = validator.func
 
-    @wraps(original_validator)
-    def _validate_with_stair(config):
-        if config.policy != "stair":
-            return original_validator(config)
-        config.policy = "default"
-        try:
-            validated = original_validator(config)
-        finally:
-            config.policy = "stair"
-        return validated
+        @wraps(original_validator)
+        def _validate_with_stair(config):
+            if config.policy != "stair":
+                return original_validator(config)
+            config.policy = "default"
+            try:
+                return original_validator(config)
+            finally:
+                config.policy = "stair"
+
+        validator.func = _validate_with_stair
+    else:
+
+        def _validate_async_communicator(config):
+            # Main validates in the platform hook only when EPLB is enabled.
+            # Keep standalone Ascend EPLBConfig validation as well.
+            if config.use_async and config.communicator in ("torch_nccl", "pynccl"):
+                raise ValueError(f"{config.communicator} communicator is incompatible with async EPLB.")
+
+        config_cls.__post_init__ = _validate_async_communicator  # type: ignore[attr-defined]
 
     _parallel_config.EPLBPolicyOption = policy_type  # type: ignore[misc]
     config_cls.__annotations__["policy"] = policy_type
     policy_field.type = policy_type
     policy_field.default = "stair"
-    validator.func = _validate_with_stair
 
 
 def _patch_eplb_communicator_config() -> None:
