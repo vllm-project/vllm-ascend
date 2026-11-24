@@ -165,7 +165,7 @@ def test_session_header_precedence_only_when_enabled(monkeypatch, enabled):
     monkeypatch.setattr(proxy, "assign_instances", capture_assignment)
     request = Request({"type": "http", "headers": [(b"x-session-id", b"header-session")]}, receive)
     with pytest.raises(RuntimeError, match="stop after inspecting"):
-        asyncio.run(proxy.handle_request("/v1/chat/completions", request))
+        asyncio.run(proxy.handle_completions_impl("/v1/chat/completions", request))
     assert received[0]["user"] == ("header-session" if enabled else "body-session")
 
 
