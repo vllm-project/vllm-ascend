@@ -158,8 +158,8 @@ class TestStandardConnectorHooks(unittest.TestCase):
                 "wait",
                 "cache-only-write",
                 "wait",
-                "final-write",
                 "gate",
+                "final-write",
                 "indexer",
                 "attention",
                 "project",
@@ -173,7 +173,7 @@ class TestStandardConnectorHooks(unittest.TestCase):
                 events.clear()
                 layer_metadata.swa.num_actual_tokens = num_tokens
                 attn.v41_impl.forward(attn, None, hidden, hidden)
-                expected = ["wait", "final-write", "gate"]
+                expected = ["wait", "gate", "final-write"]
                 if num_tokens:
                     expected += ["indexer", "attention"]
                 expected += ["project", "save"]

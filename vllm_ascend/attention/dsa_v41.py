@@ -813,13 +813,13 @@ class AscendDSAV41Impl:
                 projector._forward_o_proj(o_proj_input, output)
             return output
         metadata = self._get_layer_metadata(forward_context.attn_metadata)
+        # Let future-layer KV loads overlap this layer's input preparation and attention.
         wait_for_kv_layer_from_connector(attn.v41_layer_name)
+        record_attention_compute_start()
         q, prepared_indexer = self._prepare_inputs_and_caches(
             attn, hidden_states, metadata, forward_context.attn_metadata
         )
         num_tokens = metadata.swa.num_actual_tokens
-        # Let future-layer KV loads overlap index selection and attention after cache preparation.
-        record_attention_compute_start()
         if num_tokens:
             positions = metadata.positions[:num_tokens]
             cos, sin = metadata.rope(attn.rotary_emb.layername, num_tokens)
