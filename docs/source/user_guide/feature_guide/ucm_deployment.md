@@ -70,11 +70,11 @@ UCM currently provides the following capabilities:
 - OS: Linux
 - Hardware with Ascend NPUs. It is typically the Atlas 800 A2 series.
 - vLLM: main branch
-- vLLM Ascend: main branch
+- vLLM-Ascend: main branch
 
 ### UCM Installation
 
-**Please refer to the [official UCM installation guide for Ascend NPU](https://ucm.readthedocs.io/en/latest/user-guide/quick_start/#vllm-ascend)**
+**Please refer to the [official UCM installation guide for Ascend NPU](https://ucm.readthedocs.io/en/latest/user-guide/quick_start/#vllm-ascend).**
 
 ### PD Disaggregation Scenario
 
@@ -771,7 +771,7 @@ Before each test, KV cache must be pre-seeded with a prefix ratio of **0.8**:
 
 Example for 32k input scenario:
 
-- Pre-seed: 128 requests with 25600 (32k × 0.8) input tokens + 1 output token
+- Pre-seed: 128 requests with 25600 (32000 × 0.8) input tokens + 1 output token
 - Test: 128 requests with 32000 input tokens + 1000 output tokens
 
 This procedure ensures the prefix portion (80% of input) is cached before measuring performance, simulating real-world prefix reuse scenarios.

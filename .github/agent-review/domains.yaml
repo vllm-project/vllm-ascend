@@ -12,7 +12,7 @@
 #   created (later entries win, so append at the end of CODEOWNERS).
 #   Until such an entry exists, the /.github owner is the fallback owner.
 #
-# First glob that matches wins; order matters.
+# Collect every domain with a matching glob. A file can match multiple domains.
 domains:
   - name: ci
     description: CI workflows, bot jobs, runner images, test selection
@@ -38,3 +38,16 @@ domains:
       - "vllm_ascend/_310p/**"
       - "vllm_ascend/attention/**"
       - "vllm_ascend/compilation/**"
+  - name: speculative-decoding
+    description: draft dispatch, target verification, and speculative state and parallelism
+    paths:
+      - "vllm_ascend/worker/v2/spec_decode/**"
+      - "vllm_ascend/worker/v2/sample/rejection_greedy.py"
+      - "vllm_ascend/worker/spec_decode_utils.py"
+      - "vllm_ascend/worker/dspark_utils.py"
+      - "vllm_ascend/_310p/worker/v2/spec_decode/**"
+      - "vllm_ascend/_310p/worker/v2/rejection_sampler.py"
+      - "vllm_ascend/ops/triton/spec_decode/**"
+      - "tests/ut/spec_decode/**"
+      - "tests/ut/_310p/spec_decode/**"
+      - "tests/e2e/**/spec_decode/**"

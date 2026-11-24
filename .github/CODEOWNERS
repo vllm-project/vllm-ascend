@@ -43,6 +43,7 @@
 /.github/agent-review/L1/ @wangxiyuan
 /.github/agent-review/L2/ci/ @zhangxinyuehfad
 /.github/agent-review/L2/release-note/ @wangxiyuan
+/.github/agent-review/L2/speculative-decoding/ @drslark @slippersss
 
 # Dockerfiles
 /Dockerfile* @zhangxinyuehfad @czydyy @winson-00178005

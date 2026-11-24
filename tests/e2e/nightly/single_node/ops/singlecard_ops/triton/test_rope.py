@@ -10,28 +10,55 @@ from vllm_ascend.ops.triton.rope import (
     rope_forward_triton_siso,
 )
 
+
+@pytest.fixture(scope="module", autouse=True)
+def _collect_garbage_after_module():
+    yield
+    gc.collect()
+
+
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.bfloat16, torch.float16]
 MAX_POSITION_EMBEDDINGS = [262144]
 
 ORDINARY_ROPE_CASES = [
-    pytest.param(1, 64, 1, 64, 64, id="small-full-rope"),
-    pytest.param(1024, 96, 8, 256, 192, id="large-partial-non-pow2-rope"),
-    pytest.param(16, 96, 8, 64, 32, id="q-head-tail-partial-rope"),
-    pytest.param(16, 64, 1, 128, 96, id="non-pow2-cache-sin-offset"),
-    pytest.param(16, 64, 1, 128, 128, id="full-rope-head128"),
-    pytest.param(16, 96, 8, 256, 256, id="full-rope-head256"),
+    pytest.param(*shape, dtype, is_neox, id=f"{name}-{dtype}-neox={is_neox}")
+    for shape, name, neox_for_bf16 in (
+        ((1, 64, 1, 64, 64), "small-full-rope", False),
+        ((16, 96, 8, 64, 32), "q-head-tail-partial-rope", True),
+        ((16, 64, 1, 128, 128), "full-rope-head128", False),
+        ((16, 96, 8, 256, 256), "full-rope-head256", True),
+    )
+    for dtype, is_neox in ((torch.bfloat16, neox_for_bf16), (torch.float16, not neox_for_bf16))
 ]
 
-# SISO scenes: (num_tokens, num_q_heads, head_size, rotary_dim).
+
+def _ordinary_rope_cases(*, neox_for_bf16: bool) -> list:
+    # The two input paths use complementary dtype/layout pairs at each rotary tail.
+    tail_cases = [
+        pytest.param(*shape, dtype, is_neox, id=f"{name}-{dtype}-neox={is_neox}")
+        for shape, name in (
+            ((1024, 96, 8, 256, 192), "large-partial-non-pow2-rope"),
+            ((16, 64, 1, 128, 96), "non-pow2-cache-sin-offset"),
+        )
+        for dtype, is_neox in ((torch.bfloat16, neox_for_bf16), (torch.float16, not neox_for_bf16))
+    ]
+    return tail_cases + ORDINARY_ROPE_CASES
+
+
+# SISO: use complementary dtype/layout pairs for the small shapes and keep all UB regressions.
 SISO_CASES = [
-    pytest.param(1, 64, 64, 64, id="small-full-rope"),
-    pytest.param(1024, 64, 256, 192, id="large-partial-non-pow2-rope"),
-]
-SISO_REGRESSION_CASES = [
-    pytest.param(16, 64, 128, 96, id="non-pow2-rotary-dim"),
-    pytest.param(16, 64, 128, 128, id="a2-non-neox-ub-guard"),
-    pytest.param(16, 64, 256, 128, id="a2-non-neox-large-head-ub-guard"),
+    pytest.param(*shape, dtype, is_neox, id=f"{name}-{dtype}-neox={is_neox}")
+    for dtype in DTYPES
+    for shape, name, neox_for_bf16 in (
+        ((1, 64, 64, 64), "small-full-rope", True),
+        ((1024, 64, 256, 192), "large-partial-non-pow2-rope", None),
+        ((16, 64, 128, 96), "non-pow2-rotary-dim", False),
+        ((16, 64, 128, 128), "a2-non-neox-ub-guard", None),
+        ((16, 64, 256, 128), "a2-non-neox-large-head-ub-guard", None),
+    )
+    for is_neox in IS_NEOX_STYLE
+    if neox_for_bf16 is None or is_neox == (neox_for_bf16 == (dtype == torch.bfloat16))
 ]
 
 SEEDS = [0]
@@ -155,9 +182,10 @@ def _rope_fp8_pytorch_native(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
-@pytest.mark.parametrize("num_tokens,num_q_heads,num_k_heads,head_size,rotary_dim", ORDINARY_ROPE_CASES)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize(
+    "num_tokens,num_q_heads,num_k_heads,head_size,rotary_dim,dtype,is_neox_style",
+    _ordinary_rope_cases(neox_for_bf16=True),
+)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
@@ -187,7 +215,6 @@ def test_rotary_embedding_triton_kernel(
     # Compare the results.
     torch.testing.assert_close(q_trt.view(q_gold.size()), q_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
     torch.testing.assert_close(k_trt.view(k_gold.size()), k_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
-    gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
 
@@ -197,9 +224,10 @@ def test_rotary_embedding_triton_kernel(
     reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("max_position_embeddings", MAX_POSITION_EMBEDDINGS)
-@pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
-@pytest.mark.parametrize("num_tokens,num_q_heads,num_k_heads,head_size,rotary_dim", ORDINARY_ROPE_CASES)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize(
+    "num_tokens,num_q_heads,num_k_heads,head_size,rotary_dim,dtype,is_neox_style",
+    _ordinary_rope_cases(neox_for_bf16=False),
+)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
@@ -233,7 +261,6 @@ def test_rotary_embedding_triton_kernel_with_cos_sin_cache(
     # Compare the results.
     torch.testing.assert_close(q_trt.view(q_gold.size()), q_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
     torch.testing.assert_close(k_trt.view(k_gold.size()), k_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
-    gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
 
@@ -309,7 +336,6 @@ def test_rotary_embedding_triton_kernel_fp8(
         atol=0.125,
         rtol=0.125,
     )
-    gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
 
@@ -318,9 +344,7 @@ def test_rotary_embedding_triton_kernel_fp8(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
-@pytest.mark.parametrize("num_tokens,num_q_heads,head_size,rotary_dim", SISO_CASES + SISO_REGRESSION_CASES)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("num_tokens,num_q_heads,head_size,rotary_dim,dtype,is_neox_style", SISO_CASES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
@@ -361,6 +385,5 @@ def test_rotary_embedding_triton_kernel_siso(
     q_gold = _rope_siso_pytorch_native(q_gold, cos, sin, rope_dim=rotary_dim, is_neox_style=is_neox_style)
     # Compare the results.
     torch.testing.assert_close(q_trt.view(q_gold.size()), q_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
-    gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()

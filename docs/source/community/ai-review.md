@@ -10,7 +10,7 @@ The mechanism was proposed in [RFC #21451](https://github.com/vllm-project/vllm-
 reviewer applies "ai-review" label
         │
         ▼
-workflow gate (write permission + author in allowlist)
+workflow gate (write permission + label applier in allowlist)
         │
         ▼
 orchestrator assembles prompt ──► dsh agent (headless) ──► findings
@@ -30,7 +30,7 @@ new push ──► ai-review-passed revoked ──► incremental re-review
 ### Triggering and the gray-release gate
 
 - A reviewer with write permission applies the `ai-review` label to a PR.
-- The PR author must be listed in `.github/agent-review/allowlist.txt`. For any other PR the agent posts a single notice and removes the label. The gray release scales by editing this file; removing lines rolls it back with no code change.
+- The person applying the label must be listed in `.github/agent-review/allowlist.txt` — the allowlist authorizes operators, not PRs. From anyone else the agent posts a single notice and removes the label. The gray release scales by editing this file; removing lines rolls it back with no code change.
 - During the gray release the agent's PR comments are posted by the maintainer's bot account, with an "AI review" banner marking them as machine output and clarifying that `ai-review-passed` is not an approve.
 
 ### Review rounds
@@ -68,7 +68,7 @@ State is carried in a machine-readable signature block at the end of every agent
 
 ## For PR authors
 
-1. Ask a maintainer to add you to the allowlist (or self-request in RFC #21451).
+1. Ask a reviewer to apply the `ai-review` label (only allowlisted operators can — see below), or become an operator yourself via RFC #21451.
 2. When you want a deep review, ask a reviewer to apply the `ai-review` label to your PR.
 3. The agent posts findings as inline comments on your diff plus one summary comment. To trigger the next round, add a **top-level PR comment** containing `/ai-review` — replies inside an inline finding thread also reach the agent, but a plain comment without the command never does.
 4. Fix what is marked `MUST-FIX` and push. The agent re-reviews the new diff automatically; when nothing blocking remains it applies the `ai-review-passed` label and a human reviewer takes over.
@@ -81,7 +81,7 @@ The review rules live in `.github/agent-review/` and follow the project's owners
 ```text
 .github/agent-review/
 ├── instructions.md        # output protocol (maintainers)
-├── allowlist.txt          # gray-release authors (maintainers)
+├── allowlist.txt          # operators allowed to apply the label (maintainers)
 ├── domains.yaml           # coarse path-glob → domain registry (maintainers)
 ├── L1/checklist.md        # cross-domain global rules (maintainers)
 └── L2/<domain>/           # one directory per domain, owned by that
