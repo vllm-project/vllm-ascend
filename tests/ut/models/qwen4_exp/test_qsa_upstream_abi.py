@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock
 
 import pytest
@@ -9,11 +10,14 @@ from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.ops import metadata as upstream_metadata_ops
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker import cp_utils
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.models.qwen4_exp import qsa
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
 def test_replicated_qsa_draft_passes_pcp_compatibility(monkeypatch) -> None:
@@ -432,8 +436,11 @@ def test_pcp_qsa_full_graph_keeps_capture_and_replay_extents(monkeypatch, local_
     global_slots = torch.full((1, 4), -1, dtype=torch.long)
     restore = torch.arange(4)
     main_builder = object.__new__(qsa.AscendQSAMetadataBuilder)
+    kv_cache_spec = MLAAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, tokens_per_state=4
+    )
     indexer_builder = qsa.AscendPCPQSAIndexerMetadataBuilder(
-        MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, tokens_per_state=4),
+        kv_cache_spec,
         ["indexer"],
         SimpleNamespace(
             scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=4),
@@ -458,10 +465,17 @@ def test_pcp_qsa_full_graph_keeps_capture_and_replay_extents(monkeypatch, local_
     monkeypatch.setattr(qsa, "get_pcp_group", lambda: object())
     monkeypatch.setattr(qsa, "all_gather_async", lambda rows, *_args, **_kwargs: (torch.cat((rows, rows + 2)), None))
     groups = [
-        SimpleNamespace(
-            layer_names=["main"], backend=qsa.AscendQSABackend, get_metadata_builder=lambda _: main_builder
-        ),
-        SimpleNamespace(layer_names=["indexer"], get_metadata_builder=lambda _: indexer_builder),
+        AttentionGroup(
+            backend=backend,
+            layer_names=[name],
+            kv_cache_spec=kv_cache_spec,
+            kv_cache_group_id=0,
+            metadata_builders=[builder],
+        )
+        for name, backend, builder in (
+            ("main", qsa.AscendQSABackend, main_builder),
+            ("indexer", qsa.AscendPCPQSAIndexerBackend, indexer_builder),
+        )
     ]
     cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=None)])
 
@@ -474,21 +488,22 @@ def test_pcp_qsa_full_graph_keeps_capture_and_replay_extents(monkeypatch, local_
             global_slots[0, :global_live_tokens] = torch.arange(10, 10 + global_live_tokens)
             restore[:global_live_tokens] = torch.arange(2, 2 + global_live_tokens)
             restore[global_live_tokens:] = 0
-        context = SimpleNamespace(
+        global_batch = SimpleNamespace(
+            num_reqs=global_live_tokens,
+            num_reqs_after_padding=4,
+            num_tokens=global_live_tokens,
+            num_tokens_after_padding=4,
+            query_start_loc=global_starts,
+            query_start_loc_np=global_starts.numpy(),
+            seq_lens=(torch.arange(4) < global_live_tokens).to(torch.int32) * 8,
+            positions=torch.arange(4),
+            num_scheduled_tokens=torch.ones(global_live_tokens, dtype=torch.int32).numpy(),
+        )
+        context = AscendPCPAttentionContext(
             local_num_tokens=2,
             local_token_indices=None if capture else torch.arange(local_live),
             hidden_restore_idx=restore,
-            global_batch=SimpleNamespace(
-                num_reqs=global_live_tokens,
-                num_reqs_after_padding=4,
-                num_tokens=global_live_tokens,
-                num_tokens_after_padding=4,
-                query_start_loc=global_starts,
-                query_start_loc_np=global_starts.numpy(),
-                seq_lens=(torch.arange(4) < global_live_tokens).to(torch.int32) * 8,
-                positions=torch.arange(4),
-                num_scheduled_tokens=torch.ones(global_live_tokens, dtype=torch.int32).numpy(),
-            ),
+            global_batch=cast(AscendInputBatch, global_batch),
             global_block_tables=(global_table,),
             global_slot_mappings=global_slots,
         )
