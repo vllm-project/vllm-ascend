@@ -4,7 +4,7 @@ This document will guide you through model inference stress testing and accuracy
 
 ## 1. Online server
 
-You can run docker container to start the vLLM server on a single NPU:
+You can run Docker container to start the vLLM server on a single NPU:
 
 ```bash
 # Update DEVICE according to your device (/dev/davinci[0-7])
@@ -33,7 +33,7 @@ vllm serve Qwen/Qwen2.5-7B-Instruct --max-model-len 26240
 
 If the vLLM server is started successfully, you can see information shown below:
 
-```shell
+```output
 INFO:     Started server process [6873]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -172,4 +172,4 @@ Percentile results:
 +------------+----------+---------+-------------+--------------+---------------+----------------------+
 ```
 
-See more detail in [EvalScope doc - Model Inference Stress Testing](https://evalscope.readthedocs.io/en/latest/user_guides/stress_test/quick_start.html#basic-usage).
+See more details in [EvalScope doc - Model Inference Stress Testing](https://evalscope.readthedocs.io/en/latest/user_guides/stress_test/quick_start.html#basic-usage).

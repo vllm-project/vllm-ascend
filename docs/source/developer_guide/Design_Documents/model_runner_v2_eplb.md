@@ -196,15 +196,15 @@ committed `EplbState` and the in-place lookup refresh. For successful movement
 with unchanged model behavior, inspect the quantization-owned weight view. For
 missing or shifted load statistics, verify that the fused routing operation
 records physical IDs and excludes padding. Startup rejections should be checked against
-the user-guide support matrix and
+the [EPLB user guide](../../user_guide/feature_guide/expert_parallelism_load_balancer.md) support matrix and
 [additional configuration reference](../../user_guide/configuration/additional_config.md).
 
-Useful log anchors: `Ascend EPLB selected ...` lines record the communicator
+Useful log anchors: `Ascend EPLB selected …` lines record the communicator
 consensus decision; `Ascend async EPLB cycle committed` lines summarize each
 committed movement cycle (predicted imbalance — mean and p95 max-to-average
 rank-load ratios, lower is better — before and after, changed layers,
 transfer counts); with `--eplb-config.log_balancedness true`, upstream
-`EPLB step: ... balancedness=...` lines record per-step load balance.
+`EPLB step: … balancedness=…` lines record per-step load balance.
 
 Repository test placement and registration rules are documented in the
 [testing guide](../contribution/testing.md).

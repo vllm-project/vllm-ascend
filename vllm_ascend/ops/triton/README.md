@@ -91,7 +91,7 @@ configuration rather than the runner input or sampling interface.
 | [engram_gate.py](engram_gate.py) | Model/attention primitive or shared utility |
 | [engram_hash.py](engram_hash.py) | Model/attention primitive or shared utility |
 | [engram_lookup.py](engram_lookup.py) | Model/attention primitive or shared utility |
-| [eplb.py](eplb.py) | Model/attention primitive or shared utility |
+| [eplb.py](eplb.py) | Distributed [EPLB mapping and load recording](docs/eplb.md) |
 | [fla/chunk.py](fla/chunk.py) | Linear attention |
 | [fla/chunk_delta_h.py](fla/chunk_delta_h.py) | Linear attention |
 | [fla/chunk_delta_hupdate.py](fla/chunk_delta_hupdate.py) | Linear attention |
