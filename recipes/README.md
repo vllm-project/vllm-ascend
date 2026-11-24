@@ -98,6 +98,47 @@ serving settings against the PR target branch through the local
 `_recipes_validate_ascend.yaml` reusable workflow. See the [checker guide](tools/README.md)
 for its rules, baseline policy, local commands and coverage limits.
 
+## Ascend Store pool profiles
+
+Keep reusable storage preparation in `pool_profiles/mooncake.yaml` or
+`pool_profiles/memcache.yaml`. An independent, non-default model preset selects
+`vllm-ascend/mooncake` or `vllm-ascend/memcache` through `select.kv_offload`.
+Use the existing Ascend HTTP proxy and the direct connector from the model's
+versioned PD tutorial.
+
+Describe the actual physical hosts, their containers and each process in the
+preset's `deployment`. A separate Decode rank needs its own placement when
+the tutorial launches independent API servers. Ranks managed by one vLLM
+process share that placement. List its allocated NPU IDs and the exact role
+arguments. The renderer adds the composite `--kv-transfer-config` from
+`launch.transfer`, the backend profile and any per-process `launch.store`
+overrides. Record the tested image tag, versioned tutorial and tutorial source
+revision. Keep the ordinary serving presets available.
+
+Use the `hardware` step to verify host requirements and `shared-prefix` to
+issue the model-specific proxy requests before backend verification. Record
+which hosts and containers run each step, the prerequisite step IDs and the
+observable result. New-pool steps can prepare files and start the control
+service. The reuse path reads approved files and checks the existing control
+endpoint. Place site inputs in typed fields and pass them as individual shell
+words, argv values or serialized configuration values. Mount checkpoint
+directories read-only. Model weights may be on shared storage; configure the
+SSD tier separately on each host.
+
+The release tutorial baselines cover MiniMax-M3.1-Flash on A3 and 950DT
+(Mooncake) and Qwen3.8-Flash-Next on A2, A3 and 950DT (Memcache). The source
+tests render both modes, inspect all P/D processes and compare the proxy
+endpoints, visible devices and cache roles. Run these against a renderer
+with pool-profile support:
+
+```bash
+node recipes/tools/test-pool-profiles.mjs --renderer /path/to/recipes
+```
+
+Hardware verification additionally needs the image digest and package
+versions, an end-to-end proxy request, external prefix-hit evidence, and a
+recorded SSD eviction followed by successful restoration.
+
 ## Pull request previews
 
 The existing PR labeler adds the `recipe` label to PRs changing `recipes/**`.

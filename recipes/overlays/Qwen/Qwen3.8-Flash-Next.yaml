@@ -245,6 +245,1091 @@ variants:
           pip: false
 
 presets:
+  ascend_a2_memcache_pool:
+    label: A2 · Memcache three-tier PD
+    hardware: ascend_910b
+    strategy: pd_cluster
+    variants:
+      - ascend_w4a8
+    workload: Prefill/decode with external prefix reuse and SSD offload
+    description: One Prefill and one Decode host with independent SSDs. Follow the versioned deployment steps to create
+      a pool or reuse a running one.
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      kv_offload: vllm-ascend/memcache
+      frontend: python
+      features:
+        tool_calling: false
+        reasoning: false
+        spec_decoding: true
+    source:
+      label: Qwen3.8-Flash-Next, A2 pooled serving
+      href: https://docs.vllm.ai/projects/ascend/en/v0.32.0rc/tutorials/models/Qwen3.8-Flash-Next.html#55-pd-separation-with-memcache-three-tier-kv-cache-pool
+      key: qwen3.8-flash-next-a2-pool
+      revision: 355fb06e9a616e563a7643fa8fa3db2b03dd69d3
+    image:
+      vllm: quay.io/ascend/vllm-ascend:v0.32.0rc1-a2
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: tep
+        tp: 4
+        pp: 2
+      decode:
+        nodes: 1
+        parallelism: dep
+        tp: 2
+        pp: 1
+    deployment:
+      ascend_version: v0.32.0rc
+      tutorial: https://docs.vllm.ai/projects/ascend/en/v0.32.0rc/tutorials/models/Qwen3.8-Flash-Next.html#55-pd-separation-with-memcache-three-tier-kv-cache-pool
+      hosts: [p, d]
+      containers:
+        p:
+          host: p
+          docker_args: &a2_memcache_pool_docker [--net=host, --privileged=true, --shm-size=128g, --device, /dev/davinci0, --device,
+            /dev/davinci1, --device, /dev/davinci2, --device, /dev/davinci3, --device, /dev/davinci4, --device, /dev/davinci5,
+            --device, /dev/davinci6, --device, /dev/davinci7, --device, /dev/davinci_manager, --device, /dev/devmm_svm,
+            --device, /dev/hisi_hdc, -v, '/usr/local/dcmi:/usr/local/dcmi', -v, '/usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool',
+            -v, '/usr/local/bin/npu-smi:/usr/local/bin/npu-smi', -v, '/usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/',
+            -v, '/usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info', -v, '/etc/ascend_install.info:/etc/ascend_install.info',
+            -v, '/etc/hccn.conf:/etc/hccn.conf:ro', -v, '/root/.cache:/root/.cache']
+        d:
+          host: d
+          docker_args: *a2_memcache_pool_docker
+      placements:
+        - id: control
+          role: meta
+          container: p
+          mode: new
+        - id: prefill
+          role: prefill
+          container: p
+          devices: [0, 1, 2, 3, 4, 5, 6, 7]
+          launch:
+            argv:
+              - vllm
+              - serve
+              - '{{weights_dir}}'
+              - --host
+              - 0.0.0.0
+              - --port
+              - '25568'
+              - --served-model-name
+              - qwen38-flash-next-a2-pd
+              - --trust-remote-code
+              - --quantization
+              - ascend
+              - --tensor-parallel-size
+              - '4'
+              - --pipeline-parallel-size
+              - '2'
+              - --data-parallel-size
+              - '1'
+              - --max-model-len
+              - '141312'
+              - --max-num-seqs
+              - '32'
+              - --max-num-batched-tokens
+              - '8192'
+              - --gpu-memory-utilization
+              - '0.90'
+              - --enable-prefix-caching
+              - --async-scheduling
+              - --enable-expert-parallel
+              - --mamba-cache-mode
+              - align
+              - --mamba-ssm-cache-dtype
+              - bfloat16
+              - --engram-config
+              - '{"cpu_offload":true,"dp_shared_memory":false}'
+              - --enforce-eager
+              - --additional-config
+              - '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
+              - --speculative-config
+              - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}'
+            env:
+              VLLM_USE_V2_MODEL_RUNNER: '1'
+              VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+              VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+              VLLM_HOST_IP: '{{hosts.p.address}}'
+              HCCL_IF_IP: '{{hosts.p.address}}'
+              GLOO_SOCKET_IFNAME: '{{nic}}'
+              TP_SOCKET_IFNAME: '{{nic}}'
+              HCCL_SOCKET_IFNAME: '{{nic}}'
+              no_proxy: localhost,127.0.0.1,{{hosts.p.address}},{{hosts.d.address}}
+              NO_PROXY: localhost,127.0.0.1,{{hosts.p.address}},{{hosts.d.address}}
+              VLLM_USE_MODELSCOPE: 'True'
+              ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+              HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+              HCCL_BUFFSIZE: '8192'
+              PYTHONHASHSEED: '0'
+              MMC_LOCAL_CONFIG_PATH: '{{config_dir}}/{{prefill_config}}'
+              HCCL_INTRA_ROCE_ENABLE: '1'
+            setup: |-
+              set -e
+              if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then source /usr/local/Ascend/ascend-toolkit/set_env.sh; fi
+              if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then source /usr/local/Ascend/nnal/atb/set_env.sh; fi
+              unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+              unset VLLM_PP_LAYER_PARTITION
+              unset ASCEND_ENABLE_USE_FABRIC_MEM ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES
+              libs=$(python -c 'import importlib.util as u, pathlib, sysconfig; print(":".join([str(pathlib.Path(next(iter(u.find_spec(p).submodule_search_locations)), "lib")) for p in ("memcache_hybrid","memfabric_hybrid")]+[sysconfig.get_config_var("LIBDIR"),next(iter(u.find_spec("mooncake").submodule_search_locations))]))')
+              export LD_LIBRARY_PATH="$libs:${LD_LIBRARY_PATH:-}"
+            transfer:
+              kv_connector: MooncakeConnectorV2
+              kv_role: kv_producer
+              kv_port: 32600
+              kv_connector_extra_config:
+                prefill:
+                  dp_size: 1
+                  tp_size: 4
+                  pp_size: 2
+                decode:
+                  dp_size: 4
+                  tp_size: 2
+            store:
+              lookup_rpc_port: qwen38_pool_p
+        - id: decode
+          role: decode
+          container: d
+          devices: [0, 1, 2, 3, 4, 5, 6, 7]
+          launch:
+            argv:
+              - vllm
+              - serve
+              - '{{weights_dir}}'
+              - --host
+              - 0.0.0.0
+              - --port
+              - '25569'
+              - --served-model-name
+              - qwen38-flash-next-a2-pd
+              - --trust-remote-code
+              - --quantization
+              - ascend
+              - --tensor-parallel-size
+              - '2'
+              - --data-parallel-size
+              - '4'
+              - --max-model-len
+              - '141312'
+              - --max-num-seqs
+              - '32'
+              - --max-num-batched-tokens
+              - '8192'
+              - --gpu-memory-utilization
+              - '0.90'
+              - --enable-prefix-caching
+              - --async-scheduling
+              - --enable-expert-parallel
+              - --mamba-cache-mode
+              - align
+              - --mamba-ssm-cache-dtype
+              - bfloat16
+              - --engram-config
+              - '{"cpu_offload":true,"dp_shared_memory":true}'
+              - --compilation-config
+              - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+              - --additional-config
+              - '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}'
+              - --speculative-config
+              - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}'
+            env:
+              VLLM_USE_V2_MODEL_RUNNER: '1'
+              VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+              VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+              VLLM_HOST_IP: '{{hosts.d.address}}'
+              HCCL_IF_IP: '{{hosts.d.address}}'
+              GLOO_SOCKET_IFNAME: '{{nic}}'
+              TP_SOCKET_IFNAME: '{{nic}}'
+              HCCL_SOCKET_IFNAME: '{{nic}}'
+              no_proxy: localhost,127.0.0.1,{{hosts.p.address}},{{hosts.d.address}}
+              NO_PROXY: localhost,127.0.0.1,{{hosts.p.address}},{{hosts.d.address}}
+              VLLM_USE_MODELSCOPE: 'True'
+              ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+              HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
+              HCCL_BUFFSIZE: '512'
+              PYTHONHASHSEED: '0'
+              MMC_LOCAL_CONFIG_PATH: '{{config_dir}}/{{decode_config}}'
+              HCCL_INTRA_ROCE_ENABLE: '1'
+            setup: |-
+              set -e
+              if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then source /usr/local/Ascend/ascend-toolkit/set_env.sh; fi
+              if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then source /usr/local/Ascend/nnal/atb/set_env.sh; fi
+              unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+              unset VLLM_PP_LAYER_PARTITION
+              unset ASCEND_ENABLE_USE_FABRIC_MEM ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES
+              libs=$(python -c 'import importlib.util as u, pathlib, sysconfig; print(":".join([str(pathlib.Path(next(iter(u.find_spec(p).submodule_search_locations)), "lib")) for p in ("memcache_hybrid","memfabric_hybrid")]+[sysconfig.get_config_var("LIBDIR"),next(iter(u.find_spec("mooncake").submodule_search_locations))]))')
+              export LD_LIBRARY_PATH="$libs:${LD_LIBRARY_PATH:-}"
+            transfer:
+              kv_connector: MooncakeConnectorV2
+              kv_role: kv_consumer
+              kv_port: 32700
+              kv_connector_extra_config:
+                prefill:
+                  dp_size: 1
+                  tp_size: 4
+                  pp_size: 2
+                decode:
+                  dp_size: 4
+                  tp_size: 2
+            store:
+              lookup_rpc_port: qwen38_pool_d
+        - id: proxy
+          role: proxy
+          container: p
+          launch:
+            argv:
+              - python3
+              - /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
+              - --host
+              - 0.0.0.0
+              - --port
+              - '25570'
+              - --prefiller-hosts
+              - '{{hosts.p.address}}'
+              - --prefiller-ports
+              - '25568'
+              - --decoder-hosts
+              - '{{hosts.d.address}}'
+              - --decoder-ports
+              - '25569'
+            env:
+              NO_PROXY: localhost,127.0.0.1,{{hosts.p.address}},{{hosts.d.address}}
+              no_proxy: localhost,127.0.0.1,{{hosts.p.address}},{{hosts.d.address}}
+            setup: |-
+              set -e
+              test -r /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
+      constants:
+        prefill_config: mmc-local.conf
+        decode_config: mmc-local.conf
+      defaults:
+        hosts.p.protocol: device_rdma
+        hosts.p.local_services: 8
+        hosts.d.protocol: device_rdma
+        hosts.d.local_services: 8
+      steps:
+        - id: hardware
+          title: Confirm the selected hardware and communication environment
+          stage: storage
+          target: hosts
+          command: npu-smi info
+          check: Check npu-smi info on both hosts. A2 three-tier pooling requires host HDK 25.5.1 or later and device_rdma.
+        - id: start-prefill
+          title: Start Prefill
+          stage: serve
+          target: placement:prefill
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - endpoints
+        - id: start-decode
+          title: Start Decode
+          stage: serve
+          target: placement:decode
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - endpoints
+        - id: role-apis
+          title: Check model API readiness
+          stage: serve
+          target: placement:prefill
+          command: |-
+            set -e
+            curl --noproxy '*' --fail --silent http://{{hosts.p.address}}:25568/v1/models
+            curl --noproxy '*' --fail --silent http://{{hosts.d.address}}:25569/v1/models
+          check: Every published P/D endpoint lists the selected served model; confirm the expected role, device and
+            rank layout in its log.
+          depends_on:
+            - start-prefill
+            - start-decode
+        - id: start-proxy
+          title: Start the Ascend HTTP proxy
+          stage: serve
+          target: placement:proxy
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - role-apis
+        - id: service
+          title: Send a request through the proxy
+          stage: serve
+          target: placement:proxy
+          command: 'curl --fail http://127.0.0.1:25570/v1/chat/completions -H ''Content-Type: application/json'' -d
+            ''{"model":"qwen38-flash-next-a2-pd","messages":[{"role":"user","content":"Hello!"}],"temperature":0,"max_tokens":32}'''
+          check: Confirm the response and P-to-D transfer in the model logs before checking external pool reuse.
+          depends_on:
+            - start-proxy
+        - id: shared-prefix
+          title: Warm the pool and replay a shared prefix
+          stage: serve
+          target: placement:proxy
+          command: |-
+            python - 25570 qwen38-flash-next-a2-pd <<'PY'
+            import json, sys, urllib.request
+            port, model = sys.argv[1:]
+            prefix = "The KV cache stores repeated prefixes so later inference can reuse model state. " * 256
+            for question in ("Summarize the passage.", "Give the purpose in one sentence."):
+                body = {"model":model, "messages":[{"role":"user","content":prefix + question}], "temperature":0,"max_tokens":32}
+                request = urllib.request.Request("http://127.0.0.1:"+port+"/v1/chat/completions",
+                                                 json.dumps(body).encode(), {"Content-Type":"application/json"})
+                with urllib.request.urlopen(request, timeout=300) as response:
+                    print(json.load(response)["choices"][0]["message"]["content"])
+            PY
+          check: Correlate the second request with backend lookup/get evidence on Prefill. Local prefix hits alone
+            do not establish external reuse.
+          depends_on:
+            - service
+  ascend_a3_memcache_pool:
+    label: A3 · Memcache three-tier PD
+    hardware: ascend_910c
+    strategy: pd_cluster
+    variants:
+      - ascend_w4a8
+    workload: Prefill/decode with external prefix reuse and SSD offload
+    description: Prefill and Decode occupy disjoint device groups in one container. Follow the versioned deployment
+      steps to create a pool or reuse a running one.
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      kv_offload: vllm-ascend/memcache
+      frontend: python
+      features:
+        tool_calling: false
+        reasoning: false
+        spec_decoding: true
+    source:
+      label: Qwen3.8-Flash-Next, A3 pooled serving
+      href: https://docs.vllm.ai/projects/ascend/en/v0.32.0rc/tutorials/models/Qwen3.8-Flash-Next.html#55-pd-separation-with-memcache-three-tier-kv-cache-pool
+      key: qwen3.8-flash-next-a3-pool
+      revision: 355fb06e9a616e563a7643fa8fa3db2b03dd69d3
+    image:
+      vllm: quay.io/ascend/vllm-ascend:v0.32.0rc1-a3
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: tep
+        tp: 2
+        pp: 2
+      decode:
+        nodes: 1
+        parallelism: dep
+        tp: 2
+        pp: 1
+    deployment:
+      ascend_version: v0.32.0rc
+      tutorial: https://docs.vllm.ai/projects/ascend/en/v0.32.0rc/tutorials/models/Qwen3.8-Flash-Next.html#55-pd-separation-with-memcache-three-tier-kv-cache-pool
+      hosts: [p]
+      containers:
+        p:
+          host: p
+          docker_args: [--net=host, --privileged=true, --shm-size=128g, --device, /dev/davinci0, --device, /dev/davinci1,
+            --device, /dev/davinci2, --device, /dev/davinci3, --device, /dev/davinci4, --device, /dev/davinci5, --device,
+            /dev/davinci6, --device, /dev/davinci7, --device, /dev/davinci8, --device, /dev/davinci9, --device, /dev/davinci10,
+            --device, /dev/davinci11, --device, /dev/davinci12, --device, /dev/davinci13, --device, /dev/davinci14,
+            --device, /dev/davinci15, --device, /dev/davinci_manager, --device, /dev/devmm_svm, --device, /dev/hisi_hdc,
+            -v, '/usr/local/dcmi:/usr/local/dcmi', -v, '/usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool',
+            -v, '/usr/local/bin/npu-smi:/usr/local/bin/npu-smi', -v, '/usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/',
+            -v, '/usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info', -v, '/etc/ascend_install.info:/etc/ascend_install.info',
+            -v, '/etc/hccn.conf:/etc/hccn.conf:ro', -v, '/root/.cache:/root/.cache']
+      placements:
+        - id: control
+          role: meta
+          container: p
+          mode: new
+        - id: prefill
+          role: prefill
+          container: p
+          devices: [0, 1, 2, 3, 4, 5, 6, 7]
+          launch:
+            argv:
+              - vllm
+              - serve
+              - '{{weights_dir}}'
+              - --host
+              - 0.0.0.0
+              - --port
+              - '25568'
+              - --served-model-name
+              - qwen38-flash-next-a3-pd
+              - --trust-remote-code
+              - --quantization
+              - ascend
+              - --tensor-parallel-size
+              - '2'
+              - --pipeline-parallel-size
+              - '2'
+              - --data-parallel-size
+              - '2'
+              - --max-model-len
+              - '262144'
+              - --max-num-seqs
+              - '32'
+              - --max-num-batched-tokens
+              - '8192'
+              - --gpu-memory-utilization
+              - '0.90'
+              - --enable-prefix-caching
+              - --async-scheduling
+              - --enable-expert-parallel
+              - --mamba-cache-mode
+              - align
+              - --mamba-ssm-cache-dtype
+              - bfloat16
+              - --engram-config
+              - '{"cpu_offload":true,"dp_shared_memory":true}'
+              - --enforce-eager
+              - --additional-config
+              - '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
+              - --speculative-config
+              - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}'
+            env:
+              VLLM_USE_V2_MODEL_RUNNER: '1'
+              VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+              VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+              VLLM_HOST_IP: '{{address}}'
+              HCCL_IF_IP: '{{address}}'
+              GLOO_SOCKET_IFNAME: '{{nic}}'
+              TP_SOCKET_IFNAME: '{{nic}}'
+              HCCL_SOCKET_IFNAME: '{{nic}}'
+              no_proxy: localhost,127.0.0.1,{{address}}
+              NO_PROXY: localhost,127.0.0.1,{{address}}
+              VLLM_USE_MODELSCOPE: 'True'
+              ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+              HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+              HCCL_BUFFSIZE: '8192'
+              PYTHONHASHSEED: '0'
+              MMC_LOCAL_CONFIG_PATH: '{{config_dir}}/{{prefill_config}}'
+              ACL_OP_INIT_MODE: '1'
+              ASCEND_ENABLE_USE_FABRIC_MEM: '1'
+            setup: |-
+              set -e
+              if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then source /usr/local/Ascend/ascend-toolkit/set_env.sh; fi
+              if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then source /usr/local/Ascend/nnal/atb/set_env.sh; fi
+              unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+              unset VLLM_PP_LAYER_PARTITION
+              unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES
+              libs=$(python -c 'import importlib.util as u, pathlib, sysconfig; print(":".join([str(pathlib.Path(next(iter(u.find_spec(p).submodule_search_locations)), "lib")) for p in ("memcache_hybrid","memfabric_hybrid")]+[sysconfig.get_config_var("LIBDIR"),next(iter(u.find_spec("mooncake").submodule_search_locations))]))')
+              export LD_LIBRARY_PATH="$libs:${LD_LIBRARY_PATH:-}"
+            transfer:
+              kv_connector: MooncakeConnectorV2
+              kv_role: kv_producer
+              kv_port: 32600
+              kv_connector_extra_config:
+                prefill:
+                  dp_size: 2
+                  tp_size: 2
+                  pp_size: 2
+                decode:
+                  dp_size: 4
+                  tp_size: 2
+            store:
+              lookup_rpc_port: qwen38_pool_p
+        - id: decode
+          role: decode
+          container: p
+          devices: [8, 9, 10, 11, 12, 13, 14, 15]
+          launch:
+            argv:
+              - vllm
+              - serve
+              - '{{weights_dir}}'
+              - --host
+              - 0.0.0.0
+              - --port
+              - '25569'
+              - --served-model-name
+              - qwen38-flash-next-a3-pd
+              - --trust-remote-code
+              - --quantization
+              - ascend
+              - --tensor-parallel-size
+              - '2'
+              - --data-parallel-size
+              - '4'
+              - --max-model-len
+              - '262144'
+              - --max-num-seqs
+              - '32'
+              - --max-num-batched-tokens
+              - '8192'
+              - --gpu-memory-utilization
+              - '0.90'
+              - --enable-prefix-caching
+              - --async-scheduling
+              - --enable-expert-parallel
+              - --mamba-cache-mode
+              - align
+              - --mamba-ssm-cache-dtype
+              - bfloat16
+              - --engram-config
+              - '{"cpu_offload":true,"dp_shared_memory":true}'
+              - --compilation-config
+              - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+              - --additional-config
+              - '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}'
+              - --speculative-config
+              - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}'
+            env:
+              VLLM_USE_V2_MODEL_RUNNER: '1'
+              VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+              VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+              VLLM_HOST_IP: '{{address}}'
+              HCCL_IF_IP: '{{address}}'
+              GLOO_SOCKET_IFNAME: '{{nic}}'
+              TP_SOCKET_IFNAME: '{{nic}}'
+              HCCL_SOCKET_IFNAME: '{{nic}}'
+              no_proxy: localhost,127.0.0.1,{{address}}
+              NO_PROXY: localhost,127.0.0.1,{{address}}
+              VLLM_USE_MODELSCOPE: 'True'
+              ASCEND_RT_VISIBLE_DEVICES: 8,9,10,11,12,13,14,15
+              HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
+              HCCL_BUFFSIZE: '512'
+              PYTHONHASHSEED: '0'
+              MMC_LOCAL_CONFIG_PATH: '{{config_dir}}/{{decode_config}}'
+              ACL_OP_INIT_MODE: '1'
+              ASCEND_ENABLE_USE_FABRIC_MEM: '1'
+            setup: |-
+              set -e
+              if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then source /usr/local/Ascend/ascend-toolkit/set_env.sh; fi
+              if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then source /usr/local/Ascend/nnal/atb/set_env.sh; fi
+              unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+              unset VLLM_PP_LAYER_PARTITION
+              unset HCCL_INTRA_ROCE_ENABLE ASCEND_GLOBAL_RESOURCE_CONFIG ASCEND_LOCAL_COMM_RES
+              libs=$(python -c 'import importlib.util as u, pathlib, sysconfig; print(":".join([str(pathlib.Path(next(iter(u.find_spec(p).submodule_search_locations)), "lib")) for p in ("memcache_hybrid","memfabric_hybrid")]+[sysconfig.get_config_var("LIBDIR"),next(iter(u.find_spec("mooncake").submodule_search_locations))]))')
+              export LD_LIBRARY_PATH="$libs:${LD_LIBRARY_PATH:-}"
+            transfer:
+              kv_connector: MooncakeConnectorV2
+              kv_role: kv_consumer
+              kv_port: 32700
+              kv_connector_extra_config:
+                prefill:
+                  dp_size: 2
+                  tp_size: 2
+                  pp_size: 2
+                decode:
+                  dp_size: 4
+                  tp_size: 2
+            store:
+              lookup_rpc_port: qwen38_pool_d
+        - id: proxy
+          role: proxy
+          container: p
+          launch:
+            argv:
+              - python3
+              - /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
+              - --host
+              - 0.0.0.0
+              - --port
+              - '25570'
+              - --prefiller-hosts
+              - '{{hosts.p.address}}'
+              - --prefiller-ports
+              - '25568'
+              - --decoder-hosts
+              - '{{hosts.p.address}}'
+              - --decoder-ports
+              - '25569'
+            env:
+              NO_PROXY: localhost,127.0.0.1,{{hosts.p.address}}
+              no_proxy: localhost,127.0.0.1,{{hosts.p.address}}
+            setup: |-
+              set -e
+              test -r /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
+      constants:
+        prefill_config: mmc-local.conf
+        decode_config: mmc-local.conf
+      defaults:
+        hosts.p.protocol: device_sdma
+        hosts.p.local_services: 16
+        meta_port: 15000
+        config_port: 16000
+        metrics_port: 18000
+      inputs:
+        device_2:
+          scope: host
+          type: device
+          label: Second dedicated host cache device
+        cache_device_2:
+          scope: host
+          type: device
+          label: Second block device inside the container
+          default: /dev/recipe-cache1
+      devices:
+        - source: '{{device_2}}'
+          target: '{{cache_device_2}}'
+      steps:
+        - id: hardware
+          title: Confirm the selected hardware and communication environment
+          stage: storage
+          target: hosts
+          command: npu-smi info
+          check: Verify the A3 HCCS network and LingQu Computing Network 1.5 or later for device_sdma. The serving
+            container must expose all 16 logical devices and both dedicated cache devices. Compare usable host DRAM
+            to the budget for 16 LocalServices.
+          depends_on:
+            - second-disk
+        - id: second-disk
+          title: Identify and check the second A3 device
+          stage: storage
+          target: hosts
+          mode: new
+          command: |-
+            set -e
+            device={{device_2}}
+            test -b "$device" && test "$(stat -Lc %t:%T "$device")" != "$(stat -Lc %t:%T {{device}})"
+            test "$(lsblk -nrpo NAME -- "$device" | wc -l)" -eq 1
+            test -z "$(lsblk -nrpo MOUNTPOINTS -- "$device" | tr -d '[:space:]')"
+            sudo blkid -p -- "$device" && { echo "Device contains a signature"; exit 1; }
+            test "$?" -eq 2
+          check: Confirm that this second device is dedicated, blank and unmounted. Each SSD is mapped once in this
+            single physical container.
+        - id: start-prefill
+          title: Start Prefill
+          stage: serve
+          target: placement:prefill
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - endpoints
+        - id: start-decode
+          title: Start Decode
+          stage: serve
+          target: placement:decode
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - endpoints
+        - id: role-apis
+          title: Check model API readiness
+          stage: serve
+          target: placement:prefill
+          command: |-
+            set -e
+            curl --noproxy '*' --fail --silent http://{{hosts.p.address}}:25568/v1/models
+            curl --noproxy '*' --fail --silent http://{{hosts.p.address}}:25569/v1/models
+          check: Every published P/D endpoint lists the selected served model; confirm the expected role, device and
+            rank layout in its log.
+          depends_on:
+            - start-prefill
+            - start-decode
+        - id: start-proxy
+          title: Start the Ascend HTTP proxy
+          stage: serve
+          target: placement:proxy
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - role-apis
+        - id: service
+          title: Send a request through the proxy
+          stage: serve
+          target: placement:proxy
+          command: 'curl --fail http://127.0.0.1:25570/v1/chat/completions -H ''Content-Type: application/json'' -d
+            ''{"model":"qwen38-flash-next-a3-pd","messages":[{"role":"user","content":"Hello!"}],"temperature":0,"max_tokens":32}'''
+          check: Confirm the response and P-to-D transfer in the model logs before checking external pool reuse.
+          depends_on:
+            - start-proxy
+        - id: shared-prefix
+          title: Warm the pool and replay a shared prefix
+          stage: serve
+          target: placement:proxy
+          command: |-
+            python - 25570 qwen38-flash-next-a3-pd <<'PY'
+            import json, sys, urllib.request
+            port, model = sys.argv[1:]
+            prefix = "The KV cache stores repeated prefixes so later inference can reuse model state. " * 256
+            for question in ("Summarize the passage.", "Give the purpose in one sentence."):
+                body = {"model":model, "messages":[{"role":"user","content":prefix + question}], "temperature":0,"max_tokens":32}
+                request = urllib.request.Request("http://127.0.0.1:"+port+"/v1/chat/completions",
+                                                 json.dumps(body).encode(), {"Content-Type":"application/json"})
+                with urllib.request.urlopen(request, timeout=300) as response:
+                    print(json.load(response)["choices"][0]["message"]["content"])
+            PY
+          check: Correlate the second request with backend lookup/get evidence on Prefill. Local prefix hits alone
+            do not establish external reuse.
+          depends_on:
+            - service
+  ascend_950dt_memcache_pool:
+    label: 950DT · Memcache three-tier PD
+    hardware: ascend_950dt
+    strategy: pd_cluster
+    variants:
+      - ascend_a5_w4a8_mxfp
+    workload: Prefill/decode with external prefix reuse and SSD offload
+    description: Prefill and Decode occupy disjoint device groups in one container. Follow the versioned deployment
+      steps to create a pool or reuse a running one.
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      kv_offload: vllm-ascend/memcache
+      frontend: python
+      features:
+        tool_calling: true
+        reasoning: true
+        spec_decoding: true
+    source:
+      label: Qwen3.8-Flash-Next, 950DT pooled serving
+      href: https://docs.vllm.ai/projects/ascend/en/v0.32.0rc/tutorials/models/Qwen3.8-Flash-Next.html#55-pd-separation-with-memcache-three-tier-kv-cache-pool
+      key: qwen3.8-flash-next-950dt-pool
+      revision: 355fb06e9a616e563a7643fa8fa3db2b03dd69d3
+    image:
+      vllm: quay.io/ascend/vllm-ascend:v0.32.0rc1-a5
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: tep
+        tp: 2
+        pp: 1
+      decode:
+        nodes: 1
+        parallelism: dep
+        tp: 2
+        pp: 1
+    deployment:
+      ascend_version: v0.32.0rc
+      tutorial: https://docs.vllm.ai/projects/ascend/en/v0.32.0rc/tutorials/models/Qwen3.8-Flash-Next.html#55-pd-separation-with-memcache-three-tier-kv-cache-pool
+      hosts: [p]
+      containers:
+        p:
+          host: p
+          docker_args: [--net=host, --privileged=true, --shm-size=500g, --device, /dev/davinci_manager, --device,
+            /dev/hisi_hdc, --device, /dev/ummu, --device, /dev/uburma, --device, /dev/davinci0, --device, /dev/davinci1,
+            --device, /dev/davinci2, --device, /dev/davinci3, --device, /dev/davinci4, --device, /dev/davinci5, --device,
+            /dev/davinci6, --device, /dev/davinci7, -v, '/usr/local/Ascend/driver:/usr/local/Ascend/driver', -v, '/usr/local/Ascend/firmware:/usr/local/Ascend/firmware',
+            -v, '/root/host:/root/host', -v, '/usr/local/sbin:/usr/local/sbin', -v, '/usr/local/dcmi:/usr/local/dcmi',
+            -v, '/var/log/npu:/usr/slog', -v, '/etc/ascend_install.info:/etc/ascend_install.info', -v, '/usr/local/bin/npu-smi:/usr/local/bin/npu-smi',
+            -v, '/etc/hixlep:/etc/hixlep', -v, '/etc/hccn.conf:/etc/hccn.conf:ro', -v, '/usr/bin/urma_admin:/usr/bin/urma_admin:ro',
+            -v, '/root/.cache:/root/.cache']
+      placements:
+        - id: control
+          role: meta
+          container: p
+          mode: new
+        - id: prefill
+          role: prefill
+          container: p
+          devices: [0, 1, 2, 3]
+          launch:
+            argv:
+              - vllm
+              - serve
+              - '{{weights_dir}}'
+              - --host
+              - 0.0.0.0
+              - --port
+              - '8247'
+              - --served-model-name
+              - qwen38-megamoe-sp-pd
+              - --trust-remote-code
+              - --quantization
+              - ascend
+              - --tensor-parallel-size
+              - '2'
+              - --data-parallel-size
+              - '2'
+              - --max-model-len
+              - '262144'
+              - --max-num-seqs
+              - '64'
+              - --max-num-batched-tokens
+              - '4096'
+              - --gpu-memory-utilization
+              - '0.9'
+              - --enable-prefix-caching
+              - --mamba-cache-mode
+              - align
+              - --mamba-ssm-cache-dtype
+              - bfloat16
+              - --async-scheduling
+              - --enable-expert-parallel
+              - --engram-config
+              - '{"cpu_offload":true,"dp_shared_memory":true}'
+              - --compilation-config
+              - '{"cudagraph_mode":"NONE"}'
+              - --additional-config
+              - '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}'
+              - --speculative-config
+              - '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'
+              - --enable-auto-tool-choice
+              - --tool-call-parser
+              - qwen3_coder
+              - --reasoning-parser
+              - qwen3
+              - --data-parallel-address
+              - '{{address}}'
+              - --data-parallel-rpc-port
+              - '29770'
+            env:
+              ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
+              VLLM_HOST_IP: '{{address}}'
+              HCCL_IF_IP: '{{address}}'
+              GLOO_SOCKET_IFNAME: '{{nic}}'
+              TP_SOCKET_IFNAME: '{{nic}}'
+              HCCL_SOCKET_IFNAME: '{{nic}}'
+              NO_PROXY: localhost,127.0.0.1,{{address}}
+              no_proxy: localhost,127.0.0.1,{{address}}
+              PYTHONHASHSEED: '0'
+              VLLM_USE_MODELSCOPE: 'True'
+              VLLM_USE_V2_MODEL_RUNNER: '1'
+              VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+              VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+              HCCL_BUFFSIZE: '512'
+              MMC_LOCAL_CONFIG_PATH: '{{config_dir}}/{{prefill_config}}'
+              ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3
+              HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+            setup: |-
+              set -e
+              if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then source /usr/local/Ascend/ascend-toolkit/set_env.sh; fi
+              if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then source /usr/local/Ascend/nnal/atb/set_env.sh; fi
+              unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY ALL_PROXY all_proxy
+              unset HCCL_INTRA_ROCE_ENABLE ASCEND_ENABLE_USE_FABRIC_MEM ASCEND_GLOBAL_RESOURCE_CONFIG
+              unset ASCEND_RT_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES MMC_LOCAL_CONFIG_PATH MMC_META_CONFIG_PATH
+              ulimit -l unlimited
+              ulimit -s 65536
+              export PYTHONPATH="/vllm-workspace/vllm-ascend:${PYTHONPATH:-}"
+              op=/vllm-workspace/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash
+              if [ -f "$op" ]; then source "$op"; fi
+              libdirs=$(python -c 'from pathlib import Path; from importlib.util import find_spec; print(":".join(str(Path(next(iter(find_spec(p).submodule_search_locations)),"lib")) for p in ("torch","torch_npu")))')
+              export LD_LIBRARY_PATH="$libdirs:${LD_LIBRARY_PATH:-}"
+              libs=$(python -c 'import importlib.util as u, pathlib, sysconfig; print(":".join([str(pathlib.Path(next(iter(u.find_spec(p).submodule_search_locations)), "lib")) for p in ("memcache_hybrid","memfabric_hybrid")]+[sysconfig.get_config_var("LIBDIR"),next(iter(u.find_spec("mooncake").submodule_search_locations))]))')
+              export LD_LIBRARY_PATH="$libs:${LD_LIBRARY_PATH:-}"
+            transfer:
+              kv_connector: MooncakeConnectorV2
+              kv_role: kv_producer
+              kv_port: '32470'
+              kv_connector_extra_config:
+                prefill:
+                  dp_size: 2
+                  tp_size: 2
+                decode:
+                  dp_size: 2
+                  tp_size: 2
+            store:
+              lookup_rpc_port: '0'
+        - id: decode
+          role: decode
+          container: p
+          devices: [4, 5, 6, 7]
+          launch:
+            argv:
+              - vllm
+              - serve
+              - '{{weights_dir}}'
+              - --host
+              - 0.0.0.0
+              - --port
+              - '8248'
+              - --served-model-name
+              - qwen38-megamoe-sp-pd
+              - --trust-remote-code
+              - --quantization
+              - ascend
+              - --tensor-parallel-size
+              - '2'
+              - --data-parallel-size
+              - '2'
+              - --max-model-len
+              - '262144'
+              - --max-num-seqs
+              - '64'
+              - --max-num-batched-tokens
+              - '4096'
+              - --gpu-memory-utilization
+              - '0.9'
+              - --enable-prefix-caching
+              - --mamba-cache-mode
+              - align
+              - --mamba-ssm-cache-dtype
+              - bfloat16
+              - --async-scheduling
+              - --enable-expert-parallel
+              - --engram-config
+              - '{"cpu_offload":true,"dp_shared_memory":true}'
+              - --compilation-config
+              - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+              - --additional-config
+              - '{"enable_flashcomm1":true,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}'
+              - --speculative-config
+              - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}'
+              - --enable-auto-tool-choice
+              - --tool-call-parser
+              - qwen3_coder
+              - --reasoning-parser
+              - qwen3
+              - --data-parallel-address
+              - '{{address}}'
+              - --data-parallel-rpc-port
+              - '29780'
+            env:
+              ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
+              VLLM_HOST_IP: '{{address}}'
+              HCCL_IF_IP: '{{address}}'
+              GLOO_SOCKET_IFNAME: '{{nic}}'
+              TP_SOCKET_IFNAME: '{{nic}}'
+              HCCL_SOCKET_IFNAME: '{{nic}}'
+              NO_PROXY: localhost,127.0.0.1,{{address}}
+              no_proxy: localhost,127.0.0.1,{{address}}
+              PYTHONHASHSEED: '0'
+              VLLM_USE_MODELSCOPE: 'True'
+              VLLM_USE_V2_MODEL_RUNNER: '1'
+              VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+              VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+              HCCL_BUFFSIZE: '512'
+              MMC_LOCAL_CONFIG_PATH: '{{config_dir}}/{{decode_config}}'
+              ASCEND_RT_VISIBLE_DEVICES: 4,5,6,7
+              HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
+            setup: |-
+              set -e
+              if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then source /usr/local/Ascend/ascend-toolkit/set_env.sh; fi
+              if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then source /usr/local/Ascend/nnal/atb/set_env.sh; fi
+              unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY ALL_PROXY all_proxy
+              unset HCCL_INTRA_ROCE_ENABLE ASCEND_ENABLE_USE_FABRIC_MEM ASCEND_GLOBAL_RESOURCE_CONFIG
+              unset ASCEND_RT_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES MMC_LOCAL_CONFIG_PATH MMC_META_CONFIG_PATH
+              ulimit -l unlimited
+              ulimit -s 65536
+              export PYTHONPATH="/vllm-workspace/vllm-ascend:${PYTHONPATH:-}"
+              op=/vllm-workspace/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash
+              if [ -f "$op" ]; then source "$op"; fi
+              libdirs=$(python -c 'from pathlib import Path; from importlib.util import find_spec; print(":".join(str(Path(next(iter(find_spec(p).submodule_search_locations)),"lib")) for p in ("torch","torch_npu")))')
+              export LD_LIBRARY_PATH="$libdirs:${LD_LIBRARY_PATH:-}"
+              libs=$(python -c 'import importlib.util as u, pathlib, sysconfig; print(":".join([str(pathlib.Path(next(iter(u.find_spec(p).submodule_search_locations)), "lib")) for p in ("memcache_hybrid","memfabric_hybrid")]+[sysconfig.get_config_var("LIBDIR"),next(iter(u.find_spec("mooncake").submodule_search_locations))]))')
+              export LD_LIBRARY_PATH="$libs:${LD_LIBRARY_PATH:-}"
+            transfer:
+              kv_connector: MooncakeConnectorV2
+              kv_role: kv_consumer
+              kv_port: '32480'
+              kv_connector_extra_config:
+                prefill:
+                  dp_size: 2
+                  tp_size: 2
+                decode:
+                  dp_size: 2
+                  tp_size: 2
+            store:
+              lookup_rpc_port: '1'
+        - id: proxy
+          role: proxy
+          container: p
+          launch:
+            argv:
+              - python3
+              - /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
+              - --host
+              - 0.0.0.0
+              - --port
+              - '8249'
+              - --prefiller-hosts
+              - '{{hosts.p.address}}'
+              - --prefiller-ports
+              - '8247'
+              - --decoder-hosts
+              - '{{hosts.p.address}}'
+              - --decoder-ports
+              - '8248'
+              - --workers
+              - '1'
+            env:
+              NO_PROXY: localhost,127.0.0.1,{{hosts.p.address}}
+              no_proxy: localhost,127.0.0.1,{{hosts.p.address}}
+            setup: |-
+              set -e
+              test -r /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
+      constants:
+        prefill_config: mmc-local-p.conf
+        decode_config: mmc-local-d.conf
+      defaults:
+        hosts.p.protocol: device_urma
+        hosts.p.local_services: 8
+        meta_port: 25250
+        config_port: 25251
+        metrics_port: 25252
+      steps:
+        - id: hardware
+          title: Confirm the selected hardware and communication environment
+          stage: storage
+          target: hosts
+          command: npu-smi info
+          check: Check the 950DT Device UB runtime, /etc/hixlep and its transport-specific communication devices/files.
+            Confirm host HDK/CANN compatibility and any required site-specific route configuration from the release
+            tutorial.
+        - id: start-prefill
+          title: Start Prefill
+          stage: serve
+          target: placement:prefill
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - endpoints
+        - id: prefill-ready
+          title: Wait for the Prefill API
+          stage: serve
+          target: placement:prefill
+          command: curl --fail --silent http://127.0.0.1:8247/v1/models
+          check: The served model is listed before Decode starts.
+          depends_on:
+            - start-prefill
+        - id: start-decode
+          title: Start Decode
+          stage: serve
+          target: placement:decode
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - prefill-ready
+        - id: role-apis
+          title: Check model API readiness
+          stage: serve
+          target: placement:prefill
+          command: |-
+            set -e
+            curl --noproxy '*' --fail --silent http://{{hosts.p.address}}:8247/v1/models
+            curl --noproxy '*' --fail --silent http://{{hosts.p.address}}:8248/v1/models
+          check: Every published P/D endpoint lists the selected served model; confirm the expected role, device and
+            rank layout in its log.
+          depends_on:
+            - start-prefill
+            - start-decode
+        - id: start-proxy
+          title: Start the Ascend HTTP proxy
+          stage: serve
+          target: placement:proxy
+          action: launch
+          check: Keep this process running in its own terminal.
+          depends_on:
+            - role-apis
+        - id: service
+          title: Send a request through the proxy
+          stage: serve
+          target: placement:proxy
+          command: 'curl --fail http://127.0.0.1:8249/v1/chat/completions -H ''Content-Type: application/json'' -d
+            ''{"model":"qwen38-megamoe-sp-pd","messages":[{"role":"user","content":"Hello!"}],"temperature":0,"max_tokens":32}'''
+          check: Confirm the response and P-to-D transfer in the model logs before checking external pool reuse.
+          depends_on:
+            - start-proxy
+        - id: shared-prefix
+          title: Warm the pool and replay a shared prefix
+          stage: serve
+          target: placement:proxy
+          command: |-
+            python - 8249 qwen38-megamoe-sp-pd <<'PY'
+            import json, sys, urllib.request
+            port, model = sys.argv[1:]
+            prefix = "The KV cache stores repeated prefixes so later inference can reuse model state. " * 256
+            for question in ("Summarize the passage.", "Give the purpose in one sentence."):
+                body = {"model":model, "messages":[{"role":"user","content":prefix + question}], "temperature":0,"max_tokens":32}
+                request = urllib.request.Request("http://127.0.0.1:"+port+"/v1/chat/completions",
+                                                 json.dumps(body).encode(), {"Content-Type":"application/json"})
+                with urllib.request.urlopen(request, timeout=300) as response:
+                    print(json.load(response)["choices"][0]["message"]["content"])
+            PY
+          check: Correlate the second request with backend lookup/get evidence on Prefill. Local prefix hits alone
+            do not establish external reuse.
+          depends_on:
+            - service
   ascend_a2_w4a8_pd:
     label: A2 W4A8 PD Separation (1P1D)
     hardware: ascend_910b
@@ -1286,10 +2371,13 @@ guide_sections:
     Use the proxy ports in the linked procedure for each workload point.
     Both long-context roles use YaRN and a 1,010,000-token service limit.
 
-    #### MemCache three-tier pooling on A3 and 950DT
+    #### Memcache three-tier pooling
 
-    Use the model deployment tutorial for the complete pooling procedure, including the Prefill and Decode commands.
-
-    1. Before starting the container, prepare the SSD or loop devices and mount them together with the MemCache configuration directory as shown in [Section 4.3, Docker for three-tier PD pooling](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#43-docker-for-three-tier-pd-pooling).
-    2. In [Section 5.5, PD separation with a MemCache three-tier KV cache pool](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#55-pd-separation-with-memcache-three-tier-kv-cache-pool), select your hardware. For a new pool, configure the MetaService and LocalService files and start MetaService. For an existing pool, use its endpoints and LocalService files and preserve its disk initialization settings.
-    3. Confirm the MetaService and ConfigStore endpoints are reachable, then use the service environment and P/D launch commands in the same hardware tab.
+    Select the **Memcache three-tier PD** preset for [A2](?hardware=ascend_910b&variant=ascend_w4a8&strategy=pd_cluster&preset=ascend_a2_memcache_pool),
+    [A3](?hardware=ascend_910c&variant=ascend_w4a8&strategy=pd_cluster&preset=ascend_a3_memcache_pool) or
+    [950DT](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=pd_cluster&preset=ascend_950dt_memcache_pool).
+    Open **Deployment** and choose a new or existing pool. A2 uses two hosts,
+    each with a dedicated device. A3 uses two devices in one serving
+    container, and 950DT uses one device with separate P/D local configurations.
+    Follow the role layouts, endpoint checks and SSD restore procedure in the
+    [v0.32.0rc pooling tutorial](https://docs.vllm.ai/projects/ascend/en/v0.32.0rc/tutorials/models/Qwen3.8-Flash-Next.html#55-pd-separation-with-memcache-three-tier-kv-cache-pool).

@@ -190,3 +190,19 @@ test("parallel sizes follow decimal integer token syntax rather than Number coer
     assert.ok(codes(scenario({ workers: [{ role: "server", env: {}, argv: ["--pipeline-parallel-size", token] }] })).includes("ASC025"), token);
   }
 });
+
+
+test("pool validation locates an incorrect child role on a nonzero Decode rank", () => {
+  const config = (role) => JSON.stringify({ kv_connector: "MultiConnector", kv_role: "kv_consumer",
+    kv_connector_extra_config: { connectors: [
+      { kv_connector: "MooncakeConnectorV1", kv_role: "kv_consumer" },
+      { kv_connector: "AscendStoreConnector", kv_role: role, kv_connector_extra_config: { backend: "mooncake" } },
+    ] } });
+  const workers = ["kv_consumer", "kv_producer"].map((role, index) => ({
+    placement: `decode${index}`, role: "decode", argv: ["--kv-transfer-config", config(role)],
+  }));
+  const findings = checkScenario(scenario({ deployType: "pd_cluster", poolBackend: "mooncake", workers }));
+  const defective = findings.filter((f) => f.code === "ASC015");
+  assert.deepEqual(defective.map((f) => f.placement), ["decode1"]);
+  assert.equal(defective[0].evidence.at(-1), config("kv_producer"));
+});

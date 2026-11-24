@@ -86,7 +86,7 @@ all warnings when no baseline is supplied.
 | ASC001 | Empty/default GPU image, inherited NVIDIA/CUDA image map, or known NVIDIA image path. Custom NPU images need no particular registry or tag suffix. |
 | ASC002–003 | Visible pip tab using generic/CUDA defaults or explicitly selecting known CUDA wheel indexes. Adding dependencies does not replace the main pip installation command. |
 | ASC004–005 | Both installation methods disabled, or custom Docker setup directly pulling a known NVIDIA image. |
-| ASC010–014 | Missing PD expectations, connector/router mismatch, malformed KV JSON, or invalid producer/consumer role. NIXL is not banned by name. |
+| ASC010–015 | Missing PD expectations, connector/router mismatch, malformed KV JSON, or invalid producer/consumer role. NIXL is not banned by name. |
 | ASC020–023 | CUDA-only PD pinning; conflicting, duplicated, malformed or out-of-range device IDs; symbolic IDs reported as warnings. |
 | ASC024–025 | Single-node TP×DP×PP exceeding visible capacity, invalid parallel sizes, or symbolic sizes reported as warnings. TP/DP/PP aliases follow last-value precedence. |
 | ASC030 | Known FLASHINFER attention or MoE backend settings retained in NPU output. |
@@ -165,3 +165,9 @@ Input/tool failures also write a failure report when `--report` is supplied.
 The workflow does not create or update branch-protection requirements. The
 existing reusable check is preserved; requiring the new Ascend check is a
 separate repository setting.
+
+Pooled presets are checked per serving process, including each Decode rank on
+a multi-host group. ASC015 checks the root role, direct transport, storage
+connector and selected backend. The JSON report includes the placement ID for
+a failing worker. The model-specific release expectations run separately with
+`node recipes/tools/test-pool-profiles.mjs --renderer /path/to/recipes`.

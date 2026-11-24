@@ -58,8 +58,8 @@ function staticDevices(value) {
 export function checkScenario(scenario) {
   const { installation: install, workers = [], profile, deployType, expectedPD, router } = scenario;
   const findings = [];
-  const add = (code, message, fix, severity = "error", role = null) => {
-    const worker = workers.find((w) => w.role === role);
+  const add = (code, message, fix, severity = "error", worker = null) => {
+    const role = worker?.role ?? null;
     const argv = worker?.argv || [];
     const env = worker?.env || {};
     const evidence = code === "ASC001" ? [install.image, install.imageSource]
@@ -72,7 +72,7 @@ export function checkScenario(scenario) {
                 : ["ASC024", "ASC025"].includes(code) ? [flagValue(argv, "--tensor-parallel-size"), flagValue(argv, "--data-parallel-size"),
                   flagValue(argv, "--pipeline-parallel-size"), env.ASCEND_RT_VISIBLE_DEVICES, profile.gpu_count]
                   : code === "ASC030" ? [flagValue(argv, "--attention-backend"), flagValue(argv, "--moe-backend"), env.VLLM_USE_FLASHINFER_MOE_FP8] : null;
-    findings.push({ code, severity, role, message, fix, evidence });
+    findings.push({ code, severity, role, ...(worker?.placement && { placement: worker.placement }), message, fix, evidence });
   };
   if (!install.dockerEnabled && !install.pipEnabled) {
     add("ASC004", "Both Docker and pip installation are disabled.", "Enable one supported installation method.");
@@ -110,16 +110,27 @@ export function checkScenario(scenario) {
     for (const worker of workers) {
       let config;
       try { config = JSON.parse(flagValue(worker.argv, "--kv-transfer-config")); }
-      catch { add("ASC012", "Missing or invalid --kv-transfer-config JSON.", "Provide a valid PD KV transfer configuration.", "error", worker.role); continue; }
+      catch { add("ASC012", "Missing or invalid --kv-transfer-config JSON.", "Provide a valid PD KV transfer configuration.", "error", worker); continue; }
       if (!config || typeof config !== "object" || Array.isArray(config) || typeof config.kv_connector !== "string") {
-        add("ASC012", "KV transfer config must be a non-null object with a connector name.", "Provide a valid PD KV transfer configuration.", "error", worker.role); continue;
+        add("ASC012", "KV transfer config must be a non-null object with a connector name.", "Provide a valid PD KV transfer configuration.", "error", worker); continue;
       }
       if (expectedPD?.connector && config.kv_connector !== expectedPD.connector) {
-        add("ASC011", `PD connector is ${config.kv_connector}; expected ${expectedPD.connector}.`, "Check the generated configuration against the Ascend tutorial.", "error", worker.role);
+        add("ASC011", `PD connector is ${config.kv_connector}; expected ${expectedPD.connector}.`, "Check the generated configuration against the Ascend tutorial.", "error", worker);
       }
       const expectedRole = worker.role === "prefill" ? "kv_producer" : "kv_consumer";
+      if (scenario.poolBackend) {
+        const children = config.kv_connector_extra_config?.connectors;
+        const [direct, store] = Array.isArray(children) ? children : [];
+        if (config.kv_connector !== "MultiConnector" || children?.length !== 2
+          || config.kv_role !== expectedRole || direct?.kv_role !== expectedRole || store?.kv_role !== expectedRole
+          || !["MooncakeConnectorV1", "MooncakeConnectorV2"].includes(direct?.kv_connector)
+          || store?.kv_connector !== "AscendStoreConnector" || store?.kv_connector_extra_config?.backend !== scenario.poolBackend) {
+          add("ASC015", "Pooled worker disagrees with its role, direct transport or storage backend.",
+            "Check the resolved MultiConnector root and both children for this placement.", "error", worker);
+        }
+      }
       if (![expectedRole, "kv_both"].includes(config.kv_role)) {
-        add("ASC014", `Invalid ${worker.role} KV role: ${config.kv_role}.`, `Use ${expectedRole} or the connector's documented kv_both mode.`, "error", worker.role);
+        add("ASC014", `Invalid ${worker.role} KV role: ${config.kv_role}.`, `Use ${expectedRole} or the connector's documented kv_both mode.`, "error", worker);
       }
     }
   }
@@ -129,17 +140,17 @@ export function checkScenario(scenario) {
     const ascend = staticDevices(env.ASCEND_RT_VISIBLE_DEVICES);
     const cuda = staticDevices(env.CUDA_VISIBLE_DEVICES);
     if (deployType === "pd_cluster" && env.CUDA_VISIBLE_DEVICES != null && env.ASCEND_RT_VISIBLE_DEVICES == null) {
-      add("ASC020", "PD pins CUDA devices without an Ascend device selection.", "Check the NPU role allocation and renderer platform branch.", "error", worker.role);
+      add("ASC020", "PD pins CUDA devices without an Ascend device selection.", "Check the NPU role allocation and renderer platform branch.", "error", worker);
     }
     if (ascend && cuda && ascend.join(",") !== cuda.join(",")) {
-      add("ASC021", "Ascend and CUDA device lists disagree.", "Review the generated PD device allocation; do not assume CUDA pinning selects NPUs.", "error", worker.role);
+      add("ASC021", "Ascend and CUDA device lists disagree.", "Review the generated PD device allocation; do not assume CUDA pinning selects NPUs.", "error", worker);
     }
     if (env.ASCEND_RT_VISIBLE_DEVICES != null && ascend === null) {
-      add("ASC023", "Ascend device selection is symbolic; IDs and capacity were not statically checked.", "Validate resolved device IDs on the target host.", "warning", worker.role);
+      add("ASC023", "Ascend device selection is symbolic; IDs and capacity were not statically checked.", "Validate resolved device IDs on the target host.", "warning", worker);
     }
     if (ascend && (!ascend.length || new Set(ascend).size !== ascend.length
       || ascend.some((id) => id >= profile.gpu_count))) {
-      add("ASC022", `Invalid, duplicated or out-of-range NPU list: ${env.ASCEND_RT_VISIBLE_DEVICES}.`, "Use distinct node-local NPU IDs within the selected hardware profile.", "error", worker.role);
+      add("ASC022", `Invalid, duplicated or out-of-range NPU list: ${env.ASCEND_RT_VISIBLE_DEVICES}.`, "Use distinct node-local NPU IDs within the selected hardware profile.", "error", worker);
     }
     if (deployType === "single_node") {
       const sizes = ["--tensor-parallel-size", "--data-parallel-size", "--pipeline-parallel-size"]
@@ -149,13 +160,13 @@ export function checkScenario(scenario) {
       const invalid = sizes.filter(([, value]) => !symbolic(value)).some(([, value]) =>
         !/^\+?\d+$/.test(String(value).trim()) || !Number.isSafeInteger(Number(value)) || Number(value) <= 0);
       if (invalid) add("ASC025", "Parallelism contains an invalid positive decimal integer.",
-        "Resolve TP, DP and PP to positive decimal integers before deployment.", "error", worker.role);
+        "Resolve TP, DP and PP to positive decimal integers before deployment.", "error", worker);
       if (unresolved) add("ASC025", "Parallelism is symbolic and not statically checked.",
-        "Resolve TP, DP and PP before deployment.", "warning", worker.role);
+        "Resolve TP, DP and PP before deployment.", "warning", worker);
       const needed = sizes.reduce((product, [, value]) => product * Number(value), 1);
       const available = ascend?.length ?? profile.gpu_count;
       if (Number.isFinite(needed) && needed > available) {
-        add("ASC024", `Single-node TP×DP×PP needs ${needed} NPUs; ${available} selected.`, "Align parallel sizes and visible NPUs.", "error", worker.role);
+        add("ASC024", `Single-node TP×DP×PP needs ${needed} NPUs; ${available} selected.`, "Align parallel sizes and visible NPUs.", "error", worker);
       }
     }
     const backend = flagValue(argv, "--attention-backend");
@@ -163,7 +174,7 @@ export function checkScenario(scenario) {
     if (backend?.toUpperCase().includes("FLASHINFER")
       || moeBackend?.toUpperCase().includes("FLASHINFER")
       || /^(1|true|yes)$/i.test(String(env.VLLM_USE_FLASHINFER_MOE_FP8 || ""))) {
-      add("ASC030", "Generated NPU command retains a FLASHINFER backend setting.", "Move GPU-only settings out of shared base configuration or override them through a supported layer.", "error", worker.role);
+      add("ASC030", "Generated NPU command retains a FLASHINFER backend setting.", "Move GPU-only settings out of shared base configuration or override them through a supported layer.", "error", worker);
     }
   }
   return findings;
