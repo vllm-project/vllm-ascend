@@ -32,6 +32,7 @@
 # 可选参数：
 #   --build-arg KYLIN_REPO_URL=<麒麟 dnf 源 .repo 地址>   基础镜像已内置源，缺省即用镜像内配置
 #   --build-arg CANN_BASE_URL=<内网 CANN 包地址>          外网不可达时改为内网镜像
+#   --build-arg CANN_PKG_ARCH=aarch64|x86_64             缺省按构建架构自动选择
 #   --build-arg ETCD_VERSION=v3.5.21                     内置 etcd 版本
 #   --build-arg MAX_JOBS=32
 #
@@ -55,10 +56,11 @@ ARG MOONCAKE_TAG=v0.3.12.post1
 ARG MAX_JOBS
 
 # CANN 9.1.0 官方包（内网可整体替换 CANN_BASE_URL）
+# 包名中的架构段默认按构建架构自动选择（aarch64 / x86_64），
+# CI 的 a3 矩阵同时跑 amd64 与 arm64 runner，写死会在另一架构上装不上。
 ARG CANN_BASE_URL=https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.1.0
-ARG CANN_TOOLKIT_PKG=Ascend-cann-toolkit_9.1.0_linux-aarch64.run
-ARG CANN_NNAL_PKG=Ascend-cann-nnal_9.1.0_linux-aarch64.run
-ARG CANN_OPS_PKG=Ascend-cann-A3-ops_9.1.0_linux-aarch64.run
+ARG CANN_VERSION=9.1.0
+ARG CANN_PKG_ARCH=""
 
 WORKDIR /workspace
 SHELL ["/bin/bash", "-c"]
@@ -99,15 +101,26 @@ ENV PATH=/usr/local/bin:$PATH \
 
 # 3) 下载并安装 CANN 9.1.0（toolkit 必装；nnal、A3-ops 存在则装；驱动由宿主机提供）
 RUN set -e; cd /tmp; \
+    if [ -z "${CANN_PKG_ARCH}" ]; then \
+        case "$(uname -m)" in \
+            aarch64) CANN_PKG_ARCH=aarch64 ;; \
+            x86_64)  CANN_PKG_ARCH=x86_64 ;; \
+            *) echo "ERROR: 不支持的架构 $(uname -m)"; exit 1 ;; \
+        esac; \
+    fi; \
+    TOOLKIT_PKG="Ascend-cann-toolkit_${CANN_VERSION}_linux-${CANN_PKG_ARCH}.run"; \
+    NNAL_PKG="Ascend-cann-nnal_${CANN_VERSION}_linux-${CANN_PKG_ARCH}.run"; \
+    OPS_PKG="Ascend-cann-A3-ops_${CANN_VERSION}_linux-${CANN_PKG_ARCH}.run"; \
+    echo "INFO: CANN 包架构 ${CANN_PKG_ARCH}"; \
     fetch() { \
         echo "INFO: downloading $1"; \
         curl -fL --retry 3 --retry-delay 5 --connect-timeout 30 \
             -H "Referer: https://www.hiascend.com/" \
             -o "$(basename "$1")" "$1"; \
     }; \
-    fetch "${CANN_BASE_URL}/${CANN_TOOLKIT_PKG}"; \
-    fetch "${CANN_BASE_URL}/${CANN_NNAL_PKG}"; \
-    fetch "${CANN_BASE_URL}/${CANN_OPS_PKG}" || echo "WARN: ops 包下载失败，跳过"; \
+    fetch "${CANN_BASE_URL}/${TOOLKIT_PKG}"; \
+    fetch "${CANN_BASE_URL}/${NNAL_PKG}"; \
+    fetch "${CANN_BASE_URL}/${OPS_PKG}" || echo "WARN: ops 包下载失败，跳过"; \
     df -h /tmp; \
     for t in awk sed grep tar gzip md5sum; do \
         command -v "$t" >/dev/null || echo "WARN: 缺少命令 $t"; \
@@ -127,10 +140,10 @@ RUN set -e; cd /tmp; \
         fi; \
         exit $rc; \
     }; \
-    /tmp/${CANN_TOOLKIT_PKG} --install --quiet > /tmp/cann_install.log 2>&1 || fail $? toolkit; \
-    /tmp/${CANN_NNAL_PKG} --install --quiet > /tmp/cann_install.log 2>&1 || fail $? nnal; \
-    if [ -f "/tmp/${CANN_OPS_PKG}" ]; then \
-        /tmp/${CANN_OPS_PKG} --install --quiet > /tmp/cann_install.log 2>&1 || fail $? a3-ops; \
+    /tmp/${TOOLKIT_PKG} --install --quiet > /tmp/cann_install.log 2>&1 || fail $? toolkit; \
+    /tmp/${NNAL_PKG} --install --quiet > /tmp/cann_install.log 2>&1 || fail $? nnal; \
+    if [ -f "/tmp/${OPS_PKG}" ]; then \
+        /tmp/${OPS_PKG} --install --quiet > /tmp/cann_install.log 2>&1 || fail $? a3-ops; \
     fi; \
     rm -f /tmp/*.run
 
@@ -178,12 +191,25 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     python3 -m pip cache purge
 
 # 7) memfabric kernel + flash-linear-attention + flash_attn_npu
+#    FLA(a3) 在 Ascend 源上的所有版本都只提供 manylinux_2_34 轮子，而麒麟 V10 glibc 是 2.28，
+#    pip 会直接判 "not a supported wheel"。该包是 py3-none（纯 python + CANN 算子 .so），
+#    所以按架构下载后把平台标签改写为 any 再本地安装，绕开 pip 的标签校验。
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A3 --install-for-all && \
+    case "$(uname -m)" in \
+        aarch64) PKG_ARCH=aarch64 ;; \
+        x86_64)  PKG_ARCH=x86_64 ;; \
+        *) echo "ERROR: 不支持的架构 $(uname -m)"; exit 1 ;; \
+    esac && \
+    FLA_WHL="flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-manylinux_2_34-${PKG_ARCH}.whl" && \
+    curl -fL --retry 3 --retry-delay 5 -o /tmp/fla.whl \
+        "${ASCEND_INDEX_URL}/flash-linear-attention-npu-a3/${FLA_WHL//+/%2B}" && \
+    cp /tmp/fla.whl "/tmp/flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-any.whl" && \
     python3 -m pip install --force-reinstall --no-deps \
-        "flash-linear-attention-npu-a3===${FLA_VERSION}" && \
+        "/tmp/flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-any.whl" && \
+    rm -f /tmp/fla.whl "/tmp/flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-any.whl" && \
     FLASH_ATTN_BUILD_NPU=910 python3 -m pip install --no-build-isolation \
         "flash_attn_npu==${FLASH_ATTN_NPU_VERSION}" && \
     python3 -m pip cache purge
