@@ -70,7 +70,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
-from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder, prepare_sfa_cache_slot_views
+from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     requires_contiguous_pa_kv_cache,
@@ -1012,19 +1012,12 @@ def _allocate_kv_cache(
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     reuse_layout = get_layerwise_reuse_layout(kv_cache_config)
     if reuse_layout is not None:
-        raw_caches = allocate_cache_backing(
+        return allocate_cache_backing(
             kv_cache_config,
             layer_kv_cache_spec,
             lambda size: _allocate_int8_cache_tensor(size, alignment, device),
             reuse_layout.cache_view_sizes,
         )
-        # Different KV groups can share a slot by using separate block pages.
-        # Splitting the whole slot by component can put data in another group's page.
-        if len(kv_cache_config.kv_cache_groups) == 1:
-            return prepare_sfa_cache_slot_views(
-                raw_caches, layer_kv_cache_spec, vllm_config, _get_attention_kv_cache_dims
-            )
-        return raw_caches
 
     attn_layers: dict[str, AttentionLayerBase] | None = None
     # Gemma 4 full/sliding groups share one pool while retaining contiguous
@@ -1607,6 +1600,18 @@ def allocate_kv_cache_main(
     )
 
     attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers, kernel_block_sizes)
+
+    # Different KV groups can share a slot by using separate block pages.
+    # Splitting the whole slot by component can put data in another group's page.
+    if len(kv_cache_config.kv_cache_groups) == 1 and get_layerwise_reuse_layout(kv_cache_config) is not None:
+        for group in attn_groups:
+            prepare_view = getattr(group.backend, "prepare_layerwise_cache_view", None)
+            if prepare_view is None:
+                continue
+            for layer_name in group.layer_names:
+                raw_cache = raw_tensors[layer_name]
+                if isinstance(raw_cache, torch.Tensor):
+                    raw_tensors[layer_name] = prepare_view(raw_cache, group.kv_cache_spec, attn_layers[layer_name])
 
     return _reshape_kv_cache_v2(
         attn_groups=attn_groups,

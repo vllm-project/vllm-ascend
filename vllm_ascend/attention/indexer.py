@@ -333,12 +333,14 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         return "ASCEND_SFA_INDEXER"
 
     @staticmethod
-    def split_contiguous_kv_cache(
+    def prepare_layerwise_cache_view(
         raw_cache: torch.Tensor,
         spec: AscendSFAIndexerCacheSpec,
-        layer_name: str,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Expose all K blocks and all scale blocks as two byte views."""
+        layer: AscendSFAIndexerCache,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Keep the native layout with all K blocks followed by all scale blocks."""
+        if not spec.scale_dim:
+            return raw_cache
         num_blocks, remainder = divmod(raw_cache.numel(), spec.page_size_bytes)
         assert remainder == 0
         num_rows = num_blocks * spec.block_size * spec.num_kv_heads * spec.sfa_dcp_replicated_indexer_size
@@ -348,7 +350,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         required_bytes = scale_offset + num_rows * spec.scale_dim * scale_elem_size
         if required_bytes > raw_cache.numel():
             raise ValueError(
-                f"Indexer KV cache for {layer_name} requires {required_bytes} bytes "
+                f"Indexer KV cache for {layer.prefix} requires {required_bytes} bytes "
                 f"for aligned K/scale views, got {raw_cache.numel()} bytes."
             )
         return raw_cache[:k_bytes], raw_cache[scale_offset:required_bytes]
