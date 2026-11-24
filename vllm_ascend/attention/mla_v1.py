@@ -1360,8 +1360,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         self._prepare_strided_kv_workspace()
         if self.use_flashmla and (self.supports_prolog_v3_writer() or (self.use_quant_flashmla and self.use_mla_rope)):
             self._prepare_flashmla_writer_buffers()
-        if self.use_quant_flashmla and self._quant_flashmla_prolog_workspace is None:
-            self._prepare_quant_flashmla_prolog_workspace()
+            if self.use_quant_flashmla and self._quant_flashmla_prolog_workspace is None:
+                self._prepare_quant_flashmla_prolog_workspace()
 
     def _prepare_flashmla_writer_buffers(self) -> None:
         """Keep a bounded dense PROLOG workspace alive across graph replay."""
