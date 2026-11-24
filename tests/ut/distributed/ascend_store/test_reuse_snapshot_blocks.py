@@ -51,6 +51,7 @@ def worker():
     w.can_put = True
     w.num_kv_cache_groups, w.num_layers = 1, 2
     w.grouped_block_size, w.hash_block_size = [128], 128
+    w.group_block_len = {}
     w.group_uses_align_state = [False]
     w.cacheable_group_ids = {0}
     w.cache_coordinator = None
