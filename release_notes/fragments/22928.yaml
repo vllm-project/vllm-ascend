@@ -1,8 +1,0 @@
-pr: 22928
-entries:
-  - category: performance
-    text: >-
-      Set `gdn_checkpoint_policy` to `prefix_only` to prioritize GDN prefix
-      reuse on Model Runner V2 with align-mode local prefix caching. Warm
-      requests skip new GDN suffix checkpoints, including a final prefill
-      split when it would only serve to save such a checkpoint.
