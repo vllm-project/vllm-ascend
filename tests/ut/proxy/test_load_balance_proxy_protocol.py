@@ -14,12 +14,12 @@ from examples.disaggregated_prefill_v1 import load_balance_proxy_server_example 
 
 @pytest.mark.parametrize("api", ["/messages", "/responses"])
 @pytest.mark.parametrize("streaming", [False, True])
-def test_native_preemption_is_forwarded_once_without_replay(installed_runtime, api, streaming):
+def test_native_backend_error_is_forwarded_once(installed_runtime, api, streaming):
     scheduler, prefill, _ = installed_runtime
     attempts = []
-    error = {"type": "error", "error": {"type": "api_error", "message": "preempted"}}
+    error = {"type": "error", "error": {"type": "api_error", "message": "backend failed"}}
     if api == "/responses" and streaming:
-        error = {"type": "error", "code": "pd_preempted", "message": "preempted", "sequence_number": 2}
+        error = {"type": "error", "code": "server_error", "message": "backend failed", "sequence_number": 2}
     raw = json.dumps(error).encode()
     if streaming:
         raw = b"event: error\ndata: " + raw + b"\n\n"
@@ -36,7 +36,13 @@ def test_native_preemption_is_forwarded_once_without_replay(installed_runtime, a
             ) as client:
                 return await client.post(
                     "/v1" + api,
-                    json={"model": "m", "messages": [], "input": "hi", "stream": streaming},
+                    json={
+                        "model": "m",
+                        "messages": [],
+                        "input": "hi",
+                        "stream": streaming,
+                        "vllm_xargs": {"existing_option": 1},
+                    },
                 )
 
     result = asyncio.run(exercise())
@@ -46,7 +52,7 @@ def test_native_preemption_is_forwarded_once_without_replay(installed_runtime, a
     else:
         assert result.json() == error
     assert len(attempts) == len(prefill.posts) == 1
-    assert attempts[0]["vllm_xargs"]["ascend_pd_fail_on_recompute"] is True
+    assert attempts[0]["vllm_xargs"] == {"existing_option": 1}
     assert scheduler.request_num == 0
     assert all(entry.active_kv_cache == 0 for entry in scheduler.prefillers.values())
     assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
@@ -60,7 +66,6 @@ def test_native_disconnect_closes_backend_and_releases_load(installed_runtime, a
     class BackendStream(httpx.AsyncByteStream):
         async def __aiter__(self):
             yield b'event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n'
-            await asyncio.Event().wait()
 
         async def aclose(self):
             closed.append(True)
@@ -86,6 +91,47 @@ def test_native_disconnect_closes_backend_and_releases_load(installed_runtime, a
 
     asyncio.run(exercise())
     assert closed == [True]
+    assert scheduler.request_num == 0
+    assert all(entry.active_kv_cache == 0 for entry in scheduler.prefillers.values())
+    assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
+
+
+@pytest.mark.parametrize("stage", ["decode", "retry_prefill"])
+def test_native_cancellation_during_recompute_releases_load(installed_runtime, monkeypatch, stage):
+    scheduler, prefill, _ = installed_runtime
+    proxy.global_args.max_retries = 2
+    closed = []
+    original_post = prefill.post
+
+    async def prefill_post(*args, **kwargs):
+        response = await original_post(*args, **kwargs)
+        if len(prefill.posts) == 2:
+            raise asyncio.CancelledError
+        return response
+
+    monkeypatch.setattr(prefill, "post", prefill_post)
+
+    class BackendStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"type":"message_delta","delta":{"stop_reason":"recomputed"}}\n\n'
+            if stage == "decode":
+                raise asyncio.CancelledError
+
+        async def aclose(self):
+            closed.append(True)
+
+    async def backend(request):
+        return httpx.Response(200, stream=BackendStream())
+
+    async def exercise():
+        async with httpx.AsyncClient(base_url="http://decode/v1", transport=httpx.MockTransport(backend)) as decoder:
+            proxy.runtime._clients[proxy.ServerRole.DECODE][proxy.server_key("127.0.0.1", 8200)] = decoder
+            with pytest.raises(asyncio.CancelledError):
+                await proxy.handle_completions_impl("/messages", _request({"stream": True, "messages": []}))
+
+    asyncio.run(exercise())
+    assert closed == [True]
+    assert len(prefill.posts) == (1 if stage == "decode" else 2)
     assert scheduler.request_num == 0
     assert all(entry.active_kv_cache == 0 for entry in scheduler.prefillers.values())
     assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
@@ -419,9 +465,9 @@ def test_stream_usage_is_patched_across_http_chunk_boundaries(installed_runtime,
     assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
 
 
-def test_messages_does_not_retry_when_body_has_no_choices(installed_runtime):
+def test_messages_does_not_retry_on_normal_stop(installed_runtime):
     scheduler, prefill, decode = installed_runtime
-    decode.chunks = [json.dumps({"type": "message", "stop_reason": "recomputed", "content": "done"}).encode()]
+    decode.chunks = [json.dumps({"type": "message", "stop_reason": "end_turn", "content": "done"}).encode()]
 
     async def run():
         response = await proxy.handle_completions_impl(
@@ -432,10 +478,114 @@ def test_messages_does_not_retry_when_body_has_no_choices(installed_runtime):
 
     body = asyncio.run(run())
 
-    assert body["stop_reason"] == "recomputed"
+    assert body["stop_reason"] == "end_turn"
     assert body["content"] == "done"
     assert len(prefill.posts) == 1
     assert scheduler.request_num == 0
+
+
+@pytest.mark.parametrize(
+    "api, payload, req_data, expected",
+    [
+        ("/messages", {"stop_reason": "recomputed"}, {}, True),
+        ("/messages", {"type": "message_delta", "delta": {"stop_reason": "recomputed"}}, {}, True),
+        ("/messages", {"stop_reason": "stop_sequence", "stop_sequence": "recomputed"}, {}, True),
+        (
+            "/messages",
+            {"stop_reason": "stop_sequence", "stop_sequence": "recomputed"},
+            {"stop_sequences": ["recomputed"]},
+            False,
+        ),
+        ("/messages", {"stop_reason": "end_turn", "content": [{"text": "recomputed"}]}, {}, False),
+        ("/responses", {"stop_reason": "recomputed"}, {}, True),
+        ("/responses", {"type": "response.completed", "response": {"stop_reason": "recomputed"}}, {}, True),
+        ("/responses", {"status": "completed", "output": [{"stop_reason": "recomputed"}]}, {}, False),
+        ("/responses", {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}, {}, False),
+    ],
+)
+def test_native_recompute_detection_uses_stop_fields(api, payload, req_data, expected):
+    assert proxy.native_request_recomputed(api, payload, req_data) is expected
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("api", ["/messages", "/responses"])
+@pytest.mark.parametrize("exhausted", [False, True])
+def test_native_recompute_reassigns_original_request(installed_runtime, api, exhausted, streaming):
+    scheduler, prefill, _ = installed_runtime
+    proxy.global_args.max_retries = 2
+    attempts = []
+    request_body = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "hello"}],
+        "input": [{"role": "user", "content": "hello"}],
+        "max_tokens": 80,
+        "max_output_tokens": 80,
+        "stream": streaming,
+    }
+    if api == "/messages":
+        recomputed = {"type": "message", "stop_reason": "stop_sequence", "stop_sequence": "recomputed"}
+        completed = {"type": "message", "stop_reason": "end_turn", "content": [{"type": "text", "text": "done"}]}
+    else:
+        # Optional backend extension: upstream Responses currently omits this field.
+        recomputed = {"id": "resp_old", "stop_reason": "recomputed", "output": []}
+        completed = {"id": "resp_new", "status": "completed", "output": []}
+
+    async def backend(request):
+        attempts.append(json.loads(request.content))
+        # The next prefill must supply fresh transfer metadata.
+        prefill.payload["kv_transfer_params"] = {"remote_block_ids": [2]}
+        retry = exhausted or len(attempts) == 1
+        obj = recomputed if retry else completed
+        if not streaming:
+            return httpx.Response(200, json=obj)
+        if api == "/messages":
+            prefix = {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "discard" if retry else "done"},
+            }
+            event = {"type": "message_delta", "delta": obj}
+        else:
+            prefix = {"type": "response.output_text.delta", "delta": "discard" if retry else "done"}
+            event = {"type": "response.completed", "response": obj}
+        raw = b"".join(
+            b"event: " + item["type"].encode() + b"\ndata: " + json.dumps(item).encode() + b"\n\n"
+            for item in (prefix, event)
+        )
+        return httpx.Response(200, content=raw)
+
+    async def exercise():
+        async with httpx.AsyncClient(base_url="http://decode/v1", transport=httpx.MockTransport(backend)) as decoder:
+            proxy.runtime._clients[proxy.ServerRole.DECODE][proxy.server_key("127.0.0.1", 8200)] = decoder
+            async with httpx.AsyncClient(
+                base_url="http://proxy", transport=httpx.ASGITransport(app=proxy.app)
+            ) as client:
+                return await client.post("/v1" + api, json=request_body)
+
+    result = asyncio.run(exercise())
+    if exhausted:
+        assert result.status_code == 503
+        assert "retry limit" in result.json()["detail"]
+    else:
+        assert result.status_code == 200
+        if streaming:
+            assert result.headers["content-type"] == "text/event-stream; charset=utf-8"
+            assert b"discard" not in result.content
+            assert b"recomputed" not in result.content
+            frames = result.content.strip().split(b"\n\n")
+            assert len(frames) == 2
+            last_event = json.loads(frames[-1].split(b"data: ", 1)[1])
+            assert last_event["delta" if api == "/messages" else "response"] == completed
+        else:
+            assert result.json() == completed
+    assert len(attempts) == len(prefill.posts) == 2
+    for attempt in attempts:
+        assert {key: attempt[key] for key in request_body} == request_body
+        assert "vllm_xargs" not in attempt
+    assert attempts[0]["kv_transfer_params"]["remote_block_ids"] == [1]
+    assert attempts[1]["kv_transfer_params"]["remote_block_ids"] == [2]
+    assert scheduler.request_num == 0
+    assert all(entry.active_kv_cache == 0 for entry in scheduler.prefillers.values())
+    assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
 
 
 def test_incomplete_nonstream_response_fails_and_releases_load(installed_runtime):

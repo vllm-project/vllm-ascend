@@ -10,17 +10,25 @@ The vllm version must be the same as the main branch of vllm-ascend, for example
 ### Native API forwarding in the load-balancing proxy
 
 `load_balance_proxy_server_example.py` also forwards `/v1/messages` and
-`/v1/responses` when both backends expose those native APIs. Use matching Ascend
-backends with the native preemption error adapter. Responses requests must supply
-explicit input history; `background` and `previous_response_id` are unsupported.
+`/v1/responses` when both backends expose those native APIs. Responses requests
+must supply explicit input history; `background` and `previous_response_id` are
+unsupported.
 
-Each native request uses one prefill attempt and one decode attempt. The proxy
-preserves native JSON/SSE fields and updates cached-token usage from the
-prefiller. If the decode scheduler preempts a request, the request ends with an
-error, including when some output has already been streamed. The proxy does not
-replay tools, reconstruct thinking state, or continue a partial assistant turn.
-The caller decides whether retrying the original request is safe. Chat and
-Completions keep their existing retry behavior.
+The proxy preserves native JSON/SSE fields and reports prefiller cache usage.
+When a native response exposes `stop_reason="recomputed"`, it uses the existing
+P/D reassignment path to retry the original request, including its full input
+and token limit. `--max-retries` limits the number of attempts; exhaustion returns
+HTTP 503. Native SSE is buffered until decoding finishes, so a discarded attempt
+does not duplicate output or protocol events. This means native streams do not
+deliver tokens in real time, and a retry can repeat backend tool execution.
+Chat and Completions keep their existing streaming and continuation behavior.
+
+Messages also recognizes `stop_reason="stop_sequence"` with
+`stop_sequence="recomputed"`, unless the caller explicitly requested that stop
+sequence. Current upstream Responses does not expose the scheduler's stop reason;
+its recompute retry path requires a backend that includes that field in the JSON
+response or SSE `response` object. The proxy cannot infer an omitted stop reason.
+No scheduler changes or backend patches are required by this proxy change.
 
 ### 1.Run `prefill` Node
 

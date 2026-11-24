@@ -52,7 +52,6 @@ import vllm_ascend.patch.platform.patch_fused_moe  # noqa
 import vllm_ascend.patch.platform.patch_engram_config  # noqa
 
 import vllm_ascend.patch.platform.patch_example_connector  # noqa
-import vllm_ascend.patch.platform.patch_pd_recompute  # noqa
 
 # ** File: platform/patch_example_connector.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

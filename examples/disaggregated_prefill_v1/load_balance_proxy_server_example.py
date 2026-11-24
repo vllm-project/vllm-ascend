@@ -15,8 +15,9 @@
 # - Forwards native Anthropic /v1/messages and OpenAI /v1/responses APIs.
 # - Responses requests must be synchronous and supply their own conversation
 #   history; background and previous_response_id are not supported.
-# - Native APIs need matching Ascend backends. Preempted requests end with an
-#   error; the proxy does not replay native requests or resume partial output.
+# - Native recompute handling uses the proxy's existing P/D reassignment.
+#   Native SSE is buffered per attempt so whole-request retries do not duplicate
+#   output; it is delivered only after decoding finishes.
 # - Streams responses from backend servers to clients.
 #
 # Prerequisites:
@@ -142,7 +143,7 @@ from typing import Any, cast
 
 import httpx
 from anyio import CancelScope
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 try:
@@ -962,20 +963,56 @@ def write_cached_tokens_for_api(api: str, chunk_json: dict, cached_tokens: int |
     return True
 
 
-def patch_cached_tokens_in_sse_frame(api: str, frame: bytes, cached_tokens: int | None) -> bytes:
+def prepare_native_sse_frame(api: str, frame: bytes, cached_tokens: int | None, req_data: dict) -> tuple[bytes, bool]:
     lines = frame.splitlines(keepends=True)
     data_indices = [index for index, line in enumerate(lines) if line.startswith(b"data:")]
     payload = b"\n".join(lines[index][5:].strip() for index in data_indices)
     try:
         obj = json.loads(payload)
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return frame
-    if not isinstance(obj, dict) or not write_cached_tokens_for_api(api, obj, cached_tokens):
-        return frame
+        return frame, False
+    if not isinstance(obj, dict):
+        return frame, False
+    recomputed = native_request_recomputed(api, obj, req_data)
+    if not write_cached_tokens_for_api(api, obj, cached_tokens):
+        return frame, recomputed
     first = data_indices[0]
     ending = lines[first][len(lines[first].rstrip(b"\r\n")) :]
     lines[first] = b"data: " + json.dumps(obj).encode("utf-8") + ending
-    return b"".join(line for index, line in enumerate(lines) if index == first or index not in data_indices)
+    return b"".join(line for index, line in enumerate(lines) if index == first or index not in data_indices), recomputed
+
+
+def split_native_sse_frames(body: bytes) -> list[bytes]:
+    frames = []
+    frame = bytearray()
+    for line in body.splitlines(keepends=True):
+        frame += line
+        if line in (b"\n", b"\r\n", b"\r"):
+            frames.append(bytes(frame))
+            frame.clear()
+    if frame:
+        frames.append(bytes(frame))
+    return frames
+
+
+def native_request_recomputed(api: str, obj: dict, req_data: dict) -> bool:
+    """Read the scheduler marker only from protocol stop fields."""
+    if _api_kind(api) == "messages":
+        result = obj.get("delta", obj) if obj.get("type") == "message_delta" else obj
+        if not isinstance(result, dict):
+            return False
+        # vLLM's Messages serializer maps a string stop_reason to stop_sequence.
+        # A user-supplied stop sequence with the same spelling is ambiguous.
+        if (
+            result.get("stop_reason") == "stop_sequence"
+            and result.get("stop_sequence") == "recomputed"
+            and "recomputed" not in (req_data.get("stop_sequences") or [])
+        ):
+            return True
+    else:
+        # Responses can only retry when the backend exposes the marker.
+        result = obj.get("response", obj)
+    return isinstance(result, dict) and result.get("stop_reason") == "recomputed"
 
 
 async def send_request_to_service(
@@ -1182,81 +1219,63 @@ async def _replay_first_chunk(first_chunk: bytes, gen: Any):
         yield chunk
 
 
-class NativeStreamingResponse(StreamingResponse):
-    """Close the pre-opened backend even when ASGI sending is cancelled."""
-
-    def __init__(self, first_chunk, chunks):
-        self.chunks = chunks
-        super().__init__(_replay_first_chunk(first_chunk, chunks), media_type="text/event-stream")
-
-    async def __call__(self, scope, receive, send):
-        try:
-            await super().__call__(scope, receive, send)
-        finally:
-            with CancelScope(shield=True):
-                await self.body_iterator.aclose()
-                await self.chunks.aclose()
-
-
 async def _handle_native_decode(api: str, req_data: dict, info: InstanceInfo) -> Response:
-    """Forward one native response; preemption is terminal and never replayed."""
+    """Retry whole native requests using the existing P/D reassignment path."""
     runtime = get_runtime()
     streaming = bool(req_data.get("stream", False))
-    payload = {
-        **req_data,
-        "vllm_xargs": {**(req_data.get("vllm_xargs") or {}), "ascend_pd_fail_on_recompute": True},
-    }
-
-    async def chunks():
-        released_kv = False
-        try:
+    cached_tokens = info.prefiller_cached_tokens
+    max_attempts = max(1, get_global_args().max_retries)
+    released_kv = False
+    try:
+        for attempt in range(max_attempts):
             client = await runtime.get_client(ServerRole.DECODE, info.decoder_key)
+            body = bytearray()
             async with aclosing(
-                stream_service_response(client, api, payload, info.request_id, max_retries=1)
+                stream_service_response(client, api, req_data, info.request_id, max_retries=1)
             ) as upstream:
-                buffer = bytearray()
                 async for chunk in upstream:
                     if chunk and not released_kv:
                         await runtime.schedule("release_prefill_kv", info.prefiller_key, info.prefiller_score)
                         released_kv = True
-                    buffer += chunk
-                    if not streaming:
-                        continue
-                    while True:
-                        boundaries = [
-                            (offset, len(separator))
-                            for separator in (b"\n\n", b"\r\n\r\n", b"\r\r")
-                            if (offset := buffer.find(separator)) >= 0
-                        ]
-                        if not boundaries:
-                            break
-                        offset, size = min(boundaries)
-                        frame = bytes(buffer[: offset + size])
-                        del buffer[: offset + size]
-                        yield patch_cached_tokens_in_sse_frame(api, frame, info.prefiller_cached_tokens)
-                if streaming:
-                    if buffer:
-                        yield bytes(buffer)
-                else:
-                    obj = json.loads(buffer)
-                    if write_cached_tokens_for_api(api, obj, info.prefiller_cached_tokens):
-                        yield encode_response_chunk(obj, False)
-                    else:
-                        yield bytes(buffer)
-        finally:
-            with CancelScope(shield=True):
-                await _finish_instance(runtime, info, release_prefill_kv=not released_kv)
-
-    output = chunks()
-    try:
-        if not streaming:
-            async with aclosing(output):
-                return Response(b"".join([chunk async for chunk in output]), media_type="application/json")
-        first_chunk = await anext(output, b"")
+                    body += chunk
+            if streaming:
+                # Keep an attempt private until its stop reason is known, so a
+                # retry cannot emit duplicate native message/response events.
+                frames = [
+                    prepare_native_sse_frame(api, frame, cached_tokens, req_data)
+                    for frame in split_native_sse_frames(bytes(body))
+                ]
+                recomputed = any(retry for _, retry in frames)
+                output = b"".join(frame for frame, _ in frames)
+            else:
+                obj = json.loads(body)
+                recomputed = native_request_recomputed(api, obj, req_data)
+                output = (
+                    encode_response_chunk(obj, False)
+                    if write_cached_tokens_for_api(api, obj, cached_tokens)
+                    else bytes(body)
+                )
+            if not recomputed:
+                return Response(output, media_type="text/event-stream" if streaming else "application/json")
+            if attempt + 1 >= max_attempts:
+                break
+            # Reuse Chat/Completions reassignment, keeping native inputs intact.
+            req_data.pop("kv_transfer_params", None)
+            info = await reassign_instances(
+                api,
+                req_data,
+                len(json.dumps(req_data).encode("utf-8")),
+                info,
+                previous_prefiller_kv_released=released_kv,
+            )
+            released_kv = False
+        raise HTTPException(status_code=503, detail="Decode recompute retry limit reached.")
     except (httpx.RequestError, json.JSONDecodeError) as exc:
         logger.warning("Native decode failed for %s: %s", info.request_id, exc)
         return JSONResponse({"error": {"message": "The decode backend did not complete the request."}}, status_code=502)
-    return NativeStreamingResponse(first_chunk, output)
+    finally:
+        with CancelScope(shield=True):
+            await _finish_instance(runtime, info, release_prefill_kv=not released_kv)
 
 
 async def handle_completions_impl(api: str, request: Request):
