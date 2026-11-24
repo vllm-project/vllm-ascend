@@ -49,15 +49,10 @@ class AscendEPLBController(EPLBController):
         self.load_collection_phase = ascend_eplb_config.load_collection_phase
         # The communicator choice needs one binding class on every EPLB rank,
         # so reach a group consensus before the policy or state is built.
-        stair_config = (
-            resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config)
-            if parallel_config.enable_eplb
-            else ascend_eplb_config.stair_config
-        )
-        self.eplb_policy = create_eplb_policy(
-            parallel_config.eplb_config.policy,
-            stair_config,
-        )
+        self.eplb_policy = None
+        if parallel_config.enable_eplb:
+            stair_config = resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config)
+            self.eplb_policy = create_eplb_policy(parallel_config.eplb_config.policy, stair_config)
         self._load_collection_phase_matched = True
 
     def prepare_load(self) -> None:

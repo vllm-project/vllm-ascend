@@ -55,7 +55,7 @@ class TestAscendEPLBController(unittest.TestCase):
         return controller
 
     def test_prepare_load_resets_state_when_eplb_is_disabled(self):
-        controller = self._make_controller(enable_eplb=False)
+        controller = self._make_controller(enable_eplb=False, policy=None)
         controller.state = MagicMock()
 
         with patch("vllm_ascend.worker.v2.eplb.AscendEplbState") as ascend_state:
