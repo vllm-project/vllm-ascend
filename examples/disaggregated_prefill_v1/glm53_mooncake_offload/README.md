@@ -1,7 +1,8 @@
 # Mooncake Push with layerwise Store offload
 
-Use the mainline MooncakePushConnector together with Mooncake Store offload.
-Install the vLLM version verified by the current vLLM-Ascend mainline.
+These configurations require the Mooncake Push slot-release fence from
+[PR #21891](https://github.com/vllm-project/vllm-ascend/pull/21891).
+Install a vLLM-Ascend build with that support and its verified vLLM version.
 
 - P: use `prefill_kv_transfer.json` with `--kv-transfer-config`.
 - D: use `decode_kv_transfer.json` with `--kv-transfer-config`.

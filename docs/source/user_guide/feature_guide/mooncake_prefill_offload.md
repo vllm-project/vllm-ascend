@@ -29,7 +29,9 @@ synchronous scheduling, chunked prefill and `--mamba-cache-mode align`.
 Native MTP is supported during prefill. Run speculative decode on a
 separate decoder with shared buffers disabled.
 
-For disaggregated P/D, pair AscendStore with a Mooncake Push child in
+Disaggregated P/D with shared buffers requires the Mooncake Push slot-release
+fence from [PR #21891](https://github.com/vllm-project/vllm-ascend/pull/21891).
+With that support installed, pair AscendStore with a Mooncake Push child in
 `MultiConnector` on the producer. Select Push with `MooncakePushConnector`
 or with `MooncakeConnectorV2` and `use_layerwise: true` in its connector
 extra config. Use Push on the decoder and the D-first layerwise proxy.
@@ -39,9 +41,8 @@ Example configurations are in
 ## Cache lifecycle
 
 Before overwriting a shared slot, the next layer waits for Store to save
-every predecessor that owns bytes in that slot and for Push to finish its
-source reads. The named KDA save hook and Push fencing follow
-[PR #21891](https://github.com/vllm-project/vllm-ascend/pull/21891).
+every predecessor that owns bytes in that slot. In P/D deployments, the
+Push fence also waits for source reads to finish.
 
 Mooncake opens batched GET/PUT sessions before the layer hooks and commits
 objects after their final group layer. Private snapshots include the
