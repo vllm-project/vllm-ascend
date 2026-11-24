@@ -105,11 +105,20 @@ def test_selected_token_rank_is_one_based():
     assert all(rank >= 1 for rank in ranks), f"ranks must be 1-based, got {ranks}"
 
 
-@pytest.mark.parametrize("entry", ["direct", "sampler", "prompt_logprob", "rejection_sampler"])
+def test_compute_topk_scores_bindings():
+    importlib.import_module("vllm_ascend.patch.worker.patch_triton")
+    for module_name in (
+        "vllm.v1.worker.gpu.sample.sampler",
+        "vllm.v1.worker.gpu.sample.prompt_logprob",
+        "vllm.v1.worker.gpu.spec_decode.rejection_sampler",
+    ):
+        assert importlib.import_module(module_name).compute_topk_scores is compute_topk_scores, module_name
+
+
 @pytest.mark.parametrize("num_logprobs", [0, 2])
 @pytest.mark.parametrize("logits_mode", [False, True])
 @pytest.mark.parametrize("tensor_metadata", [False, True])
-def test_custom_token_scores(num_logprobs, logits_mode, tensor_metadata, entry):
+def test_custom_token_scores(num_logprobs, logits_mode, tensor_metadata):
     """Mixed requests preserve requested order, expanded mapping and padding."""
     init_device_properties_triton()
     logits = torch.tensor(
@@ -128,17 +137,7 @@ def test_custom_token_scores(num_logprobs, logits_mode, tensor_metadata, entry):
         token_ids=SimpleNamespace(gpu=torch.tensor([[5, 0], [0, 0], [1, 0]], dtype=torch.int32, device="npu")),
     )
     metadata = torch.tensor([0, 2, 4], dtype=torch.int32, device="npu") if tensor_metadata else [0, 2, 4]
-    score_fn = compute_topk_scores
-    if entry != "direct":
-        importlib.import_module("vllm_ascend.patch.worker.patch_triton")
-        path = (
-            "vllm.v1.worker.gpu.spec_decode.rejection_sampler"
-            if entry == "rejection_sampler"
-            else f"vllm.v1.worker.gpu.sample.{entry}"
-        )
-        score_fn = importlib.import_module(path).compute_topk_scores
-        assert score_fn is compute_topk_scores
-    result = score_fn(logits, num_logprobs, sampled, metadata, state, mapping, 2, logits_mode)
+    result = compute_topk_scores(logits, num_logprobs, sampled, metadata, state, mapping, 2, logits_mode)
     expected_ids = torch.zeros((4, 3), dtype=sampled.dtype, device="npu")
     valid = torch.zeros((4, 3), dtype=torch.bool, device="npu")
     expected_ids[:, 0] = sampled
