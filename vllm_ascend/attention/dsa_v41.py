@@ -971,19 +971,27 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
 
     def _resolve_layer_compress_ratio(self) -> int:
-        """Return the layer plan's compression ratio for this cache group."""
-        marker = ".layers."
-        for name in self._v41_layer_names:
-            if marker not in name:
-                continue
-            try:
-                layer_idx = int(name.split(marker, 1)[1].split(".", 1)[0])
-            except (IndexError, ValueError):
-                continue
-            from vllm_ascend.models.deepseek_v41.model import build_layer_plan
+        """Return this cache group's layer compression ratio.
 
-            config = self.vllm_config.model_config.hf_text_config
-            return int(build_layer_plan(config).layer(layer_idx).compress_ratio)
+        Reads ``compress_ratios`` directly instead of building the full
+        layer plan: ``role.compress_ratio`` is exactly
+        ``compress_ratios[layer_idx]`` across the backbone range.
+
+        The spec's ``tokens_per_state`` cannot be used instead -- a group
+        may hold long-KV, index-K and folded-index specs at once, and the
+        folded index rows report ``INDEX_FOLD_ROWS`` rather than the layer
+        ratio.
+        """
+        config = self.vllm_config.model_config.hf_text_config
+        ratios = tuple(config.compress_ratios)[: int(config.num_hidden_layers)]
+        for name in self._v41_layer_names:
+            _, sep, rest = name.partition(".layers.")
+            if not sep:
+                continue
+            head = rest.split(".", 1)[0]
+            if head.isdigit() and int(head) < len(ratios):
+                return int(ratios[int(head)])
+            return 0
         return 0
 
     @classmethod
