@@ -1,14 +1,16 @@
 name: karc hook cpFromPod probe
 
-# TEMPORARY (fork-only experiment, do not merge): grow $RUNNER_TEMP
-# (= /__w/_temp inside the job pod) step by step. Every step boundary makes the
-# container hook copy the whole directory back to the runner (execCpFromPod), so
-# this measures at which size the tar stream gets cut:
+# TEMPORARY (fork-only experiment, do not merge): compare the container hook's
+# step-boundary file sync between the offline karc cluster and a cloud A3 pool.
+#
+# Every step boundary makes the container hook tar the whole $RUNNER_TEMP back
+# to the runner pod (execCpFromPod) and copy it into the next step pod
+# (execCpToPod). On karc that channel measured ~0.13 MiB/s, which turns a
+# 512 MiB temp directory into a >1 h stall and ends in
 #   Error: Unexpected end of data  at Extract._final
 #
-# The first attempt ran without a `container:` block, so the runner executed
-# every step inside the runner pod itself and the container hook never engaged.
-# This version keeps the same container image/env as _selected_tests.yaml.
+# This run does the same single 512 MiB step on the cloud 2-card A3 pool so the
+# two throughput numbers are directly comparable.
 
 on:
   pull_request:
@@ -25,7 +27,7 @@ defaults:
 
 jobs:
   probe:
-    runs-on: [linux-aarch64-a3-800i-karc-fed-2]
+    runs-on: [linux-aarch64-a3-800i-fed-2]
     timeout-minutes: 90
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.1-a3-ubuntu22.04-py3.12
@@ -37,35 +39,15 @@ jobs:
         run: |
           hostname
           whoami
-          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
           echo "RUNNER_TEMP=$RUNNER_TEMP"
           df -h "$RUNNER_TEMP" || true
+          ip -o link show eth0 || true
+          ip -br addr show eth0 || true
 
       - name: grow temp to 512 MiB
         run: |
           date -u +"start %T"
           dd if=/dev/urandom of="$RUNNER_TEMP/probe-512m.bin" bs=1M count=512 status=none
-          du -sh "$RUNNER_TEMP"
-          date -u +"end   %T"
-
-      - name: grow temp to 3 GiB
-        run: |
-          date -u +"start %T"
-          dd if=/dev/urandom of="$RUNNER_TEMP/probe-2g.bin" bs=1M count=2560 status=none
-          du -sh "$RUNNER_TEMP"
-          date -u +"end   %T"
-
-      - name: grow temp to 6 GiB
-        run: |
-          date -u +"start %T"
-          dd if=/dev/urandom of="$RUNNER_TEMP/probe-3g.bin" bs=1M count=3072 status=none
-          du -sh "$RUNNER_TEMP"
-          date -u +"end   %T"
-
-      - name: grow temp to 9 GiB
-        run: |
-          date -u +"start %T"
-          dd if=/dev/urandom of="$RUNNER_TEMP/probe-6g.bin" bs=1M count=3072 status=none
           du -sh "$RUNNER_TEMP"
           date -u +"end   %T"
 
