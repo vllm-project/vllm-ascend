@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm_ascend.ops.triton.kda.candidate_pages import store_candidate_pages
 from vllm_ascend.ops.triton.mamba.state_ops import gather_initial_states
 
 
@@ -229,17 +230,7 @@ def run_upstream_state_batch(
         packed, conv, state, u, k, decay, plan.scratch_slots, plan.scratch_accepted, **kwargs
     )
 
-    steps = torch.arange(window, device=state.device)
-    live = plan.active[:, None] & (steps[None, :] < plan.lengths[:, None])
-    for step in range(window):
-        # Upstream stores normalized k in FP16. Reconstruct from the public
-        # replay values in FP32, using the checkpoint's [value,key] order.
-        state = state * decay[:, :, step].unsqueeze(-2) + (
-            u[:, :, step].unsqueeze(-1) * k[:, :, step].float().unsqueeze(-2)
-        )
-        destinations = plan.destinations[:, step]
-        valid = live[:, step] & (destinations > 0) & (destinations < state_cache.size(0))
-        _scatter_rows(state_cache, state, destinations, valid)
+    store_candidate_pages(state_cache, state, u, k, decay, plan.destinations, plan.lengths, plan.active)
 
     # conv stores [h1,h2,q0,...]. Commit with c accepted tokens reads the
     # three entries starting at c-1. Retain the old suffix beyond each real
