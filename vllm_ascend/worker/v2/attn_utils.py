@@ -1971,11 +1971,20 @@ def _reshape_kv_cache_v2(
 
                 attn_impl = vllm_config.compilation_config.static_forward_context[layer_name].impl
                 if attn_impl.use_flashmla:
-                    # FlashMLA consumes one token-fused tensor with
-                    # [nope | rope] in the trailing 576 lanes of every token.
+                    cache_shape = (*component_shape, fused_dim)
+                    if (
+                        getattr(attn_impl, "use_quant_flashmla", False)
+                        and attn_impl.num_heads == 96
+                        and not attn_impl.use_dcp
+                        and vllm_config.kv_transfer_config is None
+                        and kernel_block_size == 128
+                        and hasattr(torch.ops._C_ascend, "quant_flash_mla_nz")
+                    ):
+                        # Persist each FP8 row in 32-byte fragments consumed directly by the Cube.
+                        cache_shape = (component_shape[0], 1, fused_dim // 32, kernel_block_size, 32)
                     fused_cache = make_page_strided_cache_view(
                         single_raw_mla_cache,
-                        (*component_shape, fused_dim),
+                        cache_shape,
                         kv_cache_spec.dtype,
                         slot_bytes,
                     )
