@@ -13,7 +13,7 @@ if(EXISTS "${qmla_kernel}/quant_flash_mla_kernel.h")
               --cce-auto-sync=off -DENABLE_CV_COMM_VIA_SSBUF=true -Wno-deprecated-declarations
               "-I${qmla_impl}/common" "-I${qmla_impl}/common/op_kernel" "-I${qmla_kernel}"
               -c "${src}" -o "${obj}"
-      DEPENDS "${src}" "${CMAKE_CURRENT_LIST_DIR}/decode.h" ${qmla_headers}
+      DEPENDS "${src}" "${CMAKE_CURRENT_LIST_DIR}/decode.h" "${CMAKE_CURRENT_LIST_DIR}/pv_tail.h" ${qmla_headers}
       VERBATIM)
     target_sources(vllm_ascend_C PRIVATE "${obj}")
   endforeach()
