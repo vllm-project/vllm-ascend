@@ -70,6 +70,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     is_kv_save_role,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
+from vllm_ascend.models.deepseek_v4.cache_config import is_deepseek_v4_cache
 from vllm_ascend.models.deepseek_v4.cache_transfer import transfer_cache_views
 
 # PERF-TUNE switch: defer the last layer's save drain out of the forward
@@ -1632,8 +1633,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         # Those writes do not open the attention gate used by prefetch tasks.
         speculative = getattr(getattr(self, "vllm_config", None), "speculative_config", None)
         if (
-            getattr(getattr(self, "kv_cache_config", None), "dsv4_component_identity", None) is not None
-            and getattr(speculative, "method", None) == "dspark"
+            getattr(speculative, "method", None) == "dspark"
+            and self.use_block_key_layerwise
+            and self.layerwise_offload
+            and is_deepseek_v4_cache(self.kv_cache_config.kv_cache_groups)
         ):
             first_draft = self._global_to_local_layer.get(self.hf_config.num_hidden_layers)
             if first_draft is not None:

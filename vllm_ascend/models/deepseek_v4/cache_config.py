@@ -4,9 +4,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-from dataclasses import asdict
 from types import MappingProxyType
 
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
@@ -37,18 +34,6 @@ def is_deepseek_v4_cache(groups_or_specs) -> bool:
         )
     )
     return any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in specs)
-
-
-def component_layout_identity(groups) -> str:
-    components = []
-    for group_id, group in enumerate(groups):
-        if not isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            raise ValueError("DSV4 layout identity requires unprojected component specs")
-        for name in sorted(group.layer_names):
-            spec = group.kv_cache_spec.kv_cache_specs[name]
-            components.append((group_id, name, type(spec).__name__, asdict(spec), spec.page_size_bytes))
-    payload = json.dumps(("dsv4-components-v2", components), sort_keys=True, default=str)
-    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def validate_dsv4_transfer_speculation(config) -> None:

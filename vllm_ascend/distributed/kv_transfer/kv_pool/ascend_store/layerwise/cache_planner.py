@@ -16,7 +16,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, KVCacheTensor
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import get_backend_class
 from vllm_ascend.models.deepseek_v4.cache_config import (
-    component_layout_identity,
     is_deepseek_v4_cache,
     validate_deepseek_v4_reuse_config,
 )
@@ -354,8 +353,6 @@ def plan_layerwise_cache_reuse(
     )
     layout = planner.build()
     if not layout.has_layer_reuse:
-        if dsv4:
-            kv_cache_config.dsv4_component_identity = component_layout_identity(kv_cache_config.kv_cache_groups)
         return None
 
     for name in layout.reused_cache_names:
@@ -370,8 +367,6 @@ def plan_layerwise_cache_reuse(
         getattr(spec, "store_on_host", False) for spec in planner.spec_by_entry.values()
     ):
         raise ValueError("Layerwise offload requires device-resident cache tensors.")
-    if dsv4:
-        kv_cache_config.dsv4_component_identity = component_layout_identity(kv_cache_config.kv_cache_groups)
     if _is_mooncake(extra_config):
         windows = {}
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups):

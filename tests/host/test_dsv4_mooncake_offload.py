@@ -7,12 +7,10 @@ Run: python -m pytest --noconftest tests/host/test_dsv4_mooncake_offload.py
 
 import ast
 import ctypes
-import hashlib
-import json
 from math import lcm
 import re
 from collections import defaultdict
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace as NS
 from typing import Any
@@ -81,9 +79,6 @@ def ns():
         re=re,
         np=np,
         defaultdict=defaultdict,
-        hashlib=hashlib,
-        json=json,
-        asdict=asdict,
         logger=MagicMock(),
         KVCacheConfig=Cache,
         KVCacheTensor=Tensor,
@@ -251,16 +246,6 @@ def test_all_resident_control(ns):
     plan = ns["make_plan"](config, groups(), 1)
     assert plan.layerwise_reuse_layout is None
     assert all(len(t.layers) == 1 for t in plan.kv_cache_tensors)
-
-
-def test_layout_identity_changes_with_format_but_not_ring_size(ns):
-    gs = groups()
-    a = ns["make_plan"](configuration(1), gs, 2)
-    b = ns["make_plan"](configuration(4), gs, 9)
-    assert a.dsv4_component_identity == b.dsv4_component_identity
-    name = gs[0].layer_names[0]
-    gs[0].kv_cache_spec.kv_cache_specs[name] = replace(gs[0].kv_cache_spec.kv_cache_specs[name], dtype="fp8")
-    assert ns["component_layout_identity"](gs) != a.dsv4_component_identity
 
 
 @pytest.mark.parametrize(
