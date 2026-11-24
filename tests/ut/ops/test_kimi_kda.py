@@ -46,10 +46,9 @@ def test_fused_bfg_head_parallel_keeps_unpadded_checkpoint_layout():
         )
     assert tuple(linear.weight.shape) == (10, 6)
     if not vllm_version_is("0.34.0"):
-        # The inherited loader queries this property even on the custom
-        # head-parallel path that bypasses the merged-layer constructor.
+        # The head-parallel path bypasses the merged-layer constructor.
         assert linear._checkpoint_output_sizes == [4, 8, 8]
-        assert linear.padding_fill_params() == []
+        assert not getattr(linear.weight, "fill_on_reload", False)
         linear.weight.data.fill_(3)
         linear._zero_output_padding(linear.weight)
         torch.testing.assert_close(linear.weight, torch.full_like(linear.weight, 3))
