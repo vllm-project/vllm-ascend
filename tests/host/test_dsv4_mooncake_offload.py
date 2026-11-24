@@ -128,12 +128,36 @@ def ns():
     planning["cache_view_alignment"] = lambda spec: 1
     n["LayerwiseCachePlanner"] = planning["LayerwiseCachePlanner"]
     definitions("vllm_ascend/models/deepseek_v4/cache_config.py", n)
-    build = n["build_deepseek_v4_reuse_config"]
-    build_node = next(node for node in ast.parse(Path(build.__code__.co_filename).read_text()).body
-                      if isinstance(node, ast.FunctionDef) and node.name == build.__name__)
-    build_node.body = [node for node in build_node.body if not isinstance(node, ast.ImportFrom)]
+    planner_path = STORE + "layerwise/cache_planner.py"
+    model_path = "vllm_ascend/models/deepseek_v4/cache_config.py"
+    from types import MappingProxyType
+
+    n["MappingProxyType"] = MappingProxyType
+    for path, name in ((planner_path, "SPEC_REUSE_RULES"), (model_path, "DEEPSEEK_V4_SPEC_REUSE_RULES")):
+        tree = ast.parse((ROOT / path).read_text())
+        tree.body = [
+            node for node in tree.body if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)
+        ]
+        exec(compile(tree, str(ROOT / path), "exec"), n)
+    n["resolve_obj_by_qualname"] = lambda path: n[path.rsplit(".", 1)[-1]]
     n["get_layerwise_offload_config"] = n["get_layerwise_reuse_config"]
-    exec(compile(ast.Module(body=[build_node], type_ignores=[]), build.__code__.co_filename, "exec"), n)
+    definitions(planner_path, n, {"_is_mooncake", "get_spec_reuse_rules", "plan_layerwise_cache_reuse"})
+
+    def make_plan(config, groups, num_blocks):
+        tensors = [
+            Tensor(num_blocks * spec.page_size_bytes, [name], block_stride=spec.page_size_bytes)
+            for group in groups
+            for name, spec in group.kv_cache_spec.kv_cache_specs.items()
+        ]
+        native = Cache(num_blocks, tensors, groups)
+        layout = n["plan_layerwise_cache_reuse"](native, config)
+        native.layerwise_reuse_layout = layout
+        if layout is not None:
+            native.kv_cache_tensors = list(layout.kv_cache_tensors)
+        return native
+
+    n["make_plan"] = make_plan
     definitions(STORE + "layerwise/metadata.py", n, {"SharedBlockData", "LayerRangeReqMeta", "get_partial_block_index"})
     definitions(STORE + "layerwise/kv_transfer.py", n, {"LayerBatchBuilder"})
     definitions(
@@ -153,9 +177,9 @@ def configuration(buffers=2):
         kv_transfer_config=NS(
             kv_connector_extra_config=dict(layerwise_num_shared_buffers=buffers, layerwise_independent_layers=[0, 1])
         ),
-        model_config=NS(get_num_layers=lambda parallel: 43, get_total_num_hidden_layers=lambda: 43, enforce_eager=True),
+        model_config=NS(hf_text_config=NS(model_type="deepseek_v4"), get_num_layers=lambda parallel: 43, get_total_num_hidden_layers=lambda: 43, enforce_eager=True),
         parallel_config=NS(pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1),
-        cache_config=NS(prefix_cache_retention_interval=None),
+        cache_config=NS(prefix_cache_retention_interval=None, num_gpu_blocks_override=None),
         scheduler_config=NS(async_scheduling=False),
         speculative_config=None,
     )
@@ -181,7 +205,7 @@ def groups():
 @pytest.mark.parametrize("buffers", [1, 2, 3, 4])
 def test_component_slots_and_physical_capacity(ns, buffers):
     gs = groups()
-    plan = ns["build_deepseek_v4_reuse_config"](configuration(buffers), gs, 7)
+    plan = ns["make_plan"](configuration(buffers), gs, 7)
     layout = plan.layerwise_reuse_layout
     assert layout.independent_layers == [0, 1]
     assert layout.has_layer_reuse
@@ -199,11 +223,11 @@ def test_component_slots_and_physical_capacity(ns, buffers):
             key = (owners[name], layout.cache_layer_indices[name])
             assert key not in seen
             seen.add(key)
-    probe = ns["build_deepseek_v4_reuse_config"](configuration(buffers), gs, 1)
+    probe = ns["make_plan"](configuration(buffers), gs, 1)
     assert sum(t.size for t in plan.kv_cache_tensors) == 7 * sum(t.size for t in probe.kv_cache_tensors)
     resident_config = configuration()
     resident_config.kv_transfer_config.kv_connector_extra_config["layerwise_independent_layers"] = "all"
-    resident = ns["build_deepseek_v4_reuse_config"](resident_config, gs, 1)
+    resident = ns["make_plan"](resident_config, gs, 1)
     assert sum(t.size for t in probe.kv_cache_tensors) < sum(t.size for t in resident.kv_cache_tensors)
 
 
@@ -214,9 +238,8 @@ def test_dspark_draft_is_excluded_from_rotation(ns):
     draft = "model.layers.43.self_attn"
     cache_groups[0].layer_names.append(draft)
     cache_groups[0].kv_cache_spec.kv_cache_specs[draft] = Spec()
-    plan = ns["build_deepseek_v4_reuse_config"](config, cache_groups, 7)
-    assert plan.layerwise_draft_layer_names == (draft,)
-    assert draft in plan.dsv4_resident_cache_names
+    plan = ns["make_plan"](config, cache_groups, 7)
+    assert plan.layerwise_reuse_layout.draft_entry_names == frozenset({draft})
     assert draft not in plan.dsv4_shared_cache_names
     assert 43 not in plan.layerwise_reuse_layout.prefetch_layer_map
 
@@ -224,16 +247,16 @@ def test_dspark_draft_is_excluded_from_rotation(ns):
 def test_all_resident_control(ns):
     config = configuration()
     config.kv_transfer_config.kv_connector_extra_config["layerwise_independent_layers"] = "all"
-    plan = ns["build_deepseek_v4_reuse_config"](config, groups(), 1)
-    assert not plan.layerwise_reuse_layout.has_layer_reuse
+    plan = ns["make_plan"](config, groups(), 1)
+    assert plan.layerwise_reuse_layout is None
     assert not plan.dsv4_shared_cache_names
     assert all(len(t.layers) == 1 for t in plan.kv_cache_tensors)
 
 
 def test_layout_identity_changes_with_format_but_not_ring_size(ns):
     gs = groups()
-    a = ns["build_deepseek_v4_reuse_config"](configuration(1), gs, 2)
-    b = ns["build_deepseek_v4_reuse_config"](configuration(4), gs, 9)
+    a = ns["make_plan"](configuration(1), gs, 2)
+    b = ns["make_plan"](configuration(4), gs, 9)
     assert a.dsv4_component_identity == b.dsv4_component_identity
     name = gs[0].layer_names[0]
     gs[0].kv_cache_spec.kv_cache_specs[name] = replace(gs[0].kv_cache_spec.kv_cache_specs[name], dtype="fp8")
@@ -248,7 +271,7 @@ def test_reject_unsupported_parallel(ns, field_name, value):
     config = configuration()
     setattr(config.parallel_config, field_name, value)
     with pytest.raises(ValueError, match="PP=PCP=DCP"):
-        ns["build_deepseek_v4_reuse_config"](config, groups(), 1)
+        ns["make_plan"](config, groups(), 1)
 
 
 @pytest.mark.parametrize("mode", ["speculative", "graph"])
@@ -259,7 +282,7 @@ def test_reject_unsupported_execution(ns, mode):
     else:
         config.model_config.enforce_eager = False
     with pytest.raises(ValueError):
-        ns["build_deepseek_v4_reuse_config"](config, groups(), 1)
+        ns["make_plan"](config, groups(), 1)
 
 
 def test_mixed_batch_restores_only_shared_bytes_for_continuation(ns):
@@ -334,12 +357,12 @@ def test_glm_main_pack_planner_retains_group_predecessors(ns):
     ]
     config = configuration(1)
     config.kv_transfer_config.kv_connector_extra_config["layerwise_independent_layers"] = []
-    plan = ns["build_deepseek_v4_reuse_config"](config, groups, 1)
+    plan = ns["make_plan"](config, groups, 1)
     assert plan.layerwise_reuse_layout.prefetch_layer_map == {2: (0,), 4: (2,), 3: (1,), 5: (3,)}
 
 
 def test_mrv2_allocates_the_exact_plan(ns):
-    plan = ns["build_deepseek_v4_reuse_config"](configuration(), groups(), 3)
+    plan = ns["make_plan"](configuration(), groups(), 3)
     specs = {name: g.kv_cache_spec.kv_cache_specs[name] for g in groups() for name in g.layer_names}
     allocations = []
 

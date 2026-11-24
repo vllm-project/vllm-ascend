@@ -159,9 +159,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
     ) -> int | None:
         """Return the device memory cost per global block ID."""
         extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
-        if extra_config is not None and kv_cache_groups and (
-            get_spec_reuse_rules(vllm_config) is not None or _is_deepseek_v4_groups(kv_cache_groups)
-        ):
+        if extra_config is not None and kv_cache_groups and get_spec_reuse_rules(vllm_config) is not None:
             probe = self.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)
             backing_bytes = get_layerwise_reuse_backing_bytes(probe)
             if backing_bytes is not None:

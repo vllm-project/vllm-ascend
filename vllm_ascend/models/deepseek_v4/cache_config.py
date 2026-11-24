@@ -7,11 +7,19 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, replace
+from types import MappingProxyType
 
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheTensor, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
 
+
+DEEPSEEK_V4_SPEC_REUSE_RULES = MappingProxyType(
+    {
+        AscendMLAAttentionSpec: lambda spec: spec.model_version == "deepseek_v4",
+        AscendSlidingWindowMLASpec: True,
+    }
+)
 
 
 def is_deepseek_v4_cache(groups_or_specs) -> bool:
@@ -49,18 +57,8 @@ def validate_dsv4_transfer_speculation(config) -> None:
         raise ValueError("DSV4 Mooncake transfer supports native MTP and DSpark speculation")
 
 
-def build_deepseek_v4_reuse_config(config, groups, num_blocks):
-    """Plan the same named component slots for the capacity probe and allocation."""
-    if not is_deepseek_v4_cache(groups):
-        return None
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
-        LayerwiseCachePlanner,
-        get_layerwise_offload_config,
-    )
-
-    extra = get_layerwise_offload_config(getattr(config, "kv_transfer_config", None))
-    if extra is None or str(extra.get("backend", "mooncake")).lower() != "mooncake":
-        return None
+def prepare_deepseek_v4_reuse_config(config, cache_config):
+    """Expand native KV tensors into descriptors for individual components."""
     parallel = config.parallel_config
     if any(
         getattr(parallel, field, 1) != 1
@@ -73,31 +71,31 @@ def build_deepseek_v4_reuse_config(config, groups, num_blocks):
     if getattr(config.cache_config, "cache_dtype", None) == "turboquant":
         raise ValueError("DSV4 Mooncake temporal offload does not support TurboQuant")
 
+    tensors = []
+    for group in cache_config.kv_cache_groups:
+        for name in group.layer_names:
+            page_size = group.kv_cache_spec.kv_cache_specs[name].page_size_bytes
+            tensors.append(
+                KVCacheTensor(
+                    size=cache_config.num_blocks * page_size,
+                    layers=[name],
+                    offset=0,
+                    layer_stride=0,
+                    block_stride=page_size,
+                )
+            )
+    return replace(cache_config, kv_cache_tensors=tensors)
+
+
+def finalize_deepseek_v4_reuse_layout(config, cache_config, layout):
+    """Use one backing per slot and attach the window and transfer metadata."""
+    groups = cache_config.kv_cache_groups
     specs = {name: group.kv_cache_spec.kv_cache_specs[name] for group in groups for name in group.layer_names}
-    native = [
-        KVCacheTensor(
-            size=num_blocks * spec.page_size_bytes,
-            layers=[name],
-            offset=0,
-            layer_stride=0,
-            block_stride=spec.page_size_bytes,
-        )
-        for name, spec in specs.items()
-    ]
-    plan = KVCacheConfig(num_blocks=num_blocks, kv_cache_tensors=native, kv_cache_groups=groups)
-    plan.prefix_cache_retention_interval = getattr(config.cache_config, "prefix_cache_retention_interval", None)
-    # DSV4 groups contain only attention history, window pages and compressor
-    # state. The common planner excludes draft and independently resident layers.
-    rules = {
-        AscendMLAAttentionSpec: lambda spec: spec.model_version == "deepseek_v4",
-        AscendSlidingWindowMLASpec: True,
-    }
-    planner = LayerwiseCachePlanner(plan, config, extra, spec_reuse_rules=rules)
-    layout = planner.build()
+    num_blocks = cache_config.num_blocks
     if layout.has_layer_reuse:
         # The DSV4 allocator uses an independent, device-aligned backing per
         # slot. Preserve the planner's alias relationships and page strides.
-        plan.kv_cache_tensors = [
+        tensors = tuple(
             KVCacheTensor(
                 size=num_blocks * slot.block_stride,
                 layers=slot.layers,
@@ -106,30 +104,23 @@ def build_deepseek_v4_reuse_config(config, groups, num_blocks):
                 block_stride=slot.block_stride,
             )
             for slot in layout.kv_cache_tensors
-        ]
-        layout = replace(layout, kv_cache_tensors=tuple(plan.kv_cache_tensors))
-    plan.layerwise_reuse_layout = layout
-    plan.layerwise_kv_cache_reuse = layout.has_layer_reuse
-    plan.layerwise_kv_cache_scratch = layout.has_layer_reuse
-    plan.layerwise_store_verified_prefix = layout.has_layer_reuse
-    plan.layerwise_draft_layer_names = tuple(sorted(planner.draft_names))
-    plan.dsv4_resident_cache_names = tuple(sorted(specs.keys() - layout.reused_cache_names))
-    plan.dsv4_shared_cache_names = tuple(sorted(layout.reused_cache_names))
-    plan.dsv4_window_group_ids = tuple(
+        )
+        layout = replace(layout, kv_cache_tensors=tensors)
+    cache_config.dsv4_shared_cache_names = tuple(sorted(layout.reused_cache_names))
+    cache_config.dsv4_window_group_ids = tuple(
         group_id
         for group_id, group in enumerate(groups)
         if all(getattr(specs[name], "sliding_window", None) is not None for name in group.layer_names)
     )
-    plan.dsv4_nominal_windows = {
+    cache_config.dsv4_nominal_windows = {
         group_id: max(
             specs[name].sliding_window + (getattr(specs[name], "extra_retained_tokens", 0) or 0)
             for name in groups[group_id].layer_names
         )
-        for group_id in plan.dsv4_window_group_ids
+        for group_id in cache_config.dsv4_window_group_ids
     }
     if getattr(config, "speculative_config", None) is None:
-        plan.dsv4_continuation_windows = plan.dsv4_nominal_windows
-    plan.dsv4_component_identity = component_layout_identity(groups)
-    plan.kv_cache_allocation_alignment = 2 * 1024 * 1024
-    plan.kv_transfer_config = config.kv_transfer_config
-    return plan
+        cache_config.dsv4_continuation_windows = cache_config.dsv4_nominal_windows
+    cache_config.dsv4_component_identity = component_layout_identity(groups)
+    cache_config.kv_cache_allocation_alignment = 2 * 1024 * 1024
+    return layout

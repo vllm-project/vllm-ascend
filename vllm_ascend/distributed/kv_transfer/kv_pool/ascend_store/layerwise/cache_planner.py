@@ -14,7 +14,11 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, KVCacheTensor
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import get_backend_class
-from vllm_ascend.models.deepseek_v4.cache_config import build_deepseek_v4_reuse_config, is_deepseek_v4_cache
+from vllm_ascend.models.deepseek_v4.cache_config import (
+    finalize_deepseek_v4_reuse_layout,
+    is_deepseek_v4_cache,
+    prepare_deepseek_v4_reuse_config,
+)
 
 from .layerwise_cache_layout import (
     LayerwiseCacheConfig,
@@ -27,7 +31,10 @@ from .layerwise_cache_layout import (
 )
 
 SPEC_REUSE_RULES = MappingProxyType(
-    {"glm5_next_text": "vllm_ascend.models.glm5next.cache_reuse.GLM5_NEXT_SPEC_REUSE_RULES"}
+    {
+        "glm5_next_text": "vllm_ascend.models.glm5next.cache_reuse.GLM5_NEXT_SPEC_REUSE_RULES",
+        "deepseek_v4": "vllm_ascend.models.deepseek_v4.cache_config.DEEPSEEK_V4_SPEC_REUSE_RULES",
+    }
 )
 
 
@@ -37,6 +44,10 @@ def get_spec_reuse_rules(vllm_config: VllmConfig) -> SpecReuseRules | None:
     if not isinstance(model_type, str):
         return None
     path = SPEC_REUSE_RULES.get(model_type)
+    if model_type == "deepseek_v4":
+        extra = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
+        if extra is None or not _is_mooncake(extra):
+            return None
     return resolve_obj_by_qualname(path) if path is not None else None
 
 
@@ -304,35 +315,24 @@ def plan_layerwise_cache_reuse(
     # An empty device pool has no byte views to reuse.
     if not kv_cache_config.kv_cache_tensors or kv_cache_config.num_blocks == 0 or not kv_cache_config.kv_cache_groups:
         return None
-    if _is_mooncake(extra_config) and is_deepseek_v4_cache(kv_cache_config.kv_cache_groups):
-        plan = build_deepseek_v4_reuse_config(
-            vllm_config, kv_cache_config.kv_cache_groups, kv_cache_config.num_blocks
-        )
-        assert plan is not None
-        for name in (
-            "dsv4_component_identity",
-            "dsv4_shared_cache_names",
-            "dsv4_window_group_ids",
-            "dsv4_nominal_windows",
-            "dsv4_continuation_windows",
-            "kv_cache_allocation_alignment",
-        ):
-            if hasattr(plan, name):
-                setattr(kv_cache_config, name, getattr(plan, name))
-        return plan.layerwise_reuse_layout if plan.layerwise_reuse_layout.has_layer_reuse else None
+    dsv4 = _is_mooncake(extra_config) and is_deepseek_v4_cache(kv_cache_config.kv_cache_groups)
     rules = get_spec_reuse_rules(vllm_config)
-    if rules is None:
+    model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
+    if rules is None or (model_type == "deepseek_v4" and not dsv4):
         if _is_mooncake(extra_config):
             raise ValueError("Mooncake shared KV buffers require a model with registered reuse rules")
         return None
+    planning_config = prepare_deepseek_v4_reuse_config(vllm_config, kv_cache_config) if dsv4 else kv_cache_config
     planner = LayerwiseCachePlanner(
-        kv_cache_config,
+        planning_config,
         vllm_config,
         extra_config,
         spec_reuse_rules=rules,
     )
     layout = planner.build()
     if not layout.has_layer_reuse:
+        if dsv4:
+            finalize_deepseek_v4_reuse_layout(vllm_config, kv_cache_config, layout)
         return None
 
     for name in layout.reused_cache_names:
@@ -347,4 +347,6 @@ def plan_layerwise_cache_reuse(
         getattr(spec, "store_on_host", False) for spec in planner.spec_by_entry.values()
     ):
         raise ValueError("Layerwise offload requires device-resident cache tensors.")
+    if dsv4:
+        layout = finalize_deepseek_v4_reuse_layout(vllm_config, kv_cache_config, layout)
     return layout
