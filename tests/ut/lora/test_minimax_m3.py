@@ -98,3 +98,64 @@ def test_three_adapter_slices_preserve_indexer_and_clear_previous_adapter(shape)
     assert torch.equal(result[..., 4:], original[..., 4:])
     wrapper.reset_lora(0)
     assert torch.equal(wrapper._apply_lora_to_output(x, original.clone()), original)
+
+
+@pytest.mark.parametrize("tp,rank", [(1, 0), (2, 1), (8, 7)])
+def test_indexer_five_slices_follow_kv_replicas_and_replicated_key(tp, rank):
+    from vllm_ascend.lora.utils import MiniMaxM3QKVIndexerWithLoRA
+
+    base = make_layer()
+    base.tp_size, base.tp_rank = tp, rank
+    base.num_kv_head_replicas = max(tp // 2, 1)
+    base.num_heads = 8 // tp
+    base.num_kv_heads = max(2 // tp, 1)
+    base.output_sizes = [16, max(4, tp * 2), max(4, tp * 2), max(4, tp * 2), 2 * tp]
+    wrapper = MiniMaxM3QKVIndexerWithLoRA(base)
+    config = SimpleNamespace(max_lora_rank=2, lora_dtype=torch.float32, fully_sharded_loras=False)
+    wrapper.create_lora_weights(2, config)
+    aa = [torch.ones(2, 4) for _ in range(5)]
+    bb = [torch.arange(size * 2).reshape(size, 2).float() for size in (16, 4, 4, 4, 2)]
+    wrapper.set_lora(1, aa, bb)
+    for index in range(5):
+        width = wrapper.output_slices[index]
+        shard = rank if index == 0 else rank // base.num_kv_head_replicas if index < 4 else 0
+        assert torch.equal(wrapper.lora_b_stacked[index][1, 0, :width], bb[index][shard * width : (shard + 1) * width])
+        assert torch.count_nonzero(wrapper.lora_b_stacked[index][0]) == 0
+    wrapper.reset_lora(1)
+    assert torch.count_nonzero(wrapper.lora_a_packed) == 0
+    assert torch.count_nonzero(wrapper.lora_b_packed) == 0
+
+
+def test_dense_five_target_mapping_rejects_indexer_weights():
+    from vllm_ascend.lora.utils import MiniMaxM3DenseQKVWithLoRA
+
+    base = make_layer()
+    base.output_sizes = base.output_sizes[:3]
+    base.weight = torch.nn.Parameter(torch.zeros(8, 4))
+    wrapper = MiniMaxM3DenseQKVWithLoRA(base)
+    config = SimpleNamespace(max_lora_rank=2, lora_dtype=torch.float32, fully_sharded_loras=False)
+    wrapper.create_lora_weights(2, config)
+    aa = [torch.ones(2, 4), None, None, None, None]
+    bb = [torch.ones(4, 2), None, None, None, None]
+    wrapper.set_lora(0, aa, bb)
+    assert torch.count_nonzero(wrapper.lora_b_stacked[0][0]) > 0
+    with pytest.raises(ValueError, match="no indexer projections"):
+        wrapper.set_lora(1, [*aa[:3], aa[0], None], bb)
+
+
+def test_five_slice_wrappers_do_not_claim_unrelated_packed_mappings():
+    from vllm_ascend.lora.utils import MiniMaxM3DenseQKVWithLoRA, MiniMaxM3QKVIndexerWithLoRA
+    from vllm_ascend.ops.linear import AscendQKVParallelLinear
+
+    dense = AscendQKVParallelLinear.__new__(AscendQKVParallelLinear)
+    torch.nn.Module.__init__(dense)
+    config = SimpleNamespace(fully_sharded_loras=False)
+    for wrapper, source in ((MiniMaxM3DenseQKVWithLoRA, dense), (MiniMaxM3QKVIndexerWithLoRA, make_layer())):
+        assert wrapper.can_replace_layer(
+            source_layer=source,
+            lora_config=config,
+            packed_modules_list=["q_proj", "k_proj", "v_proj", "index_q_proj", "index_k_proj"],
+        )
+        assert not wrapper.can_replace_layer(
+            source_layer=source, lora_config=config, packed_modules_list=["q_proj", "k_proj", "v_proj", "other", "tail"]
+        )

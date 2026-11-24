@@ -236,6 +236,9 @@ class MiniMaxM3SparseForConditionalGeneration(
 
         self.vision_tower = self.model.vision_tower
         self.language_model = self.model.language_model
+        if hasattr(self.language_model, "lora_worker_manager_cls"):
+            self.packed_modules_mapping = dict(self.language_model.packed_modules_mapping)
+            self.lora_worker_manager_cls = self.language_model.lora_worker_manager_cls
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
         self._sync_moe_parameters()
 

@@ -1,8 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+
 import torch
 import vllm
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.config import LoRAConfig
+from vllm.distributed.utils import divide
 from vllm.lora.layers import (
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
@@ -24,6 +29,8 @@ from vllm_ascend.lora.fused_moe import (
     AscendFusedMoEWithLoRA,
 )
 from vllm_ascend.ops.linear import AscendQKVParallelLinear
+
+_MINIMAX_M3_QKV_PROJECTIONS = ("q_proj", "k_proj", "v_proj", "index_q_proj", "index_k_proj")
 
 
 def _apply_packed_lora(layer, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
@@ -136,6 +143,15 @@ class AscendMergedQKVParallelLinearWithLoRA(_PackedLoRAAWeightsMixin, MergedQKVP
         )
 
 
+def _is_minimax_m3_qkv_layer(source_layer: nn.Module) -> bool:
+    if getattr(source_layer, "shard_ids", ()) != ("q", "k", "v", "index_q", "index_k"):
+        return False
+    # Keep unrelated model selection independent of M3 imports.
+    from vllm_ascend.models.minimax_m3.msa_m3 import AscendMiniMaxM3QKVParallelLinearWithIndexer
+
+    return type(source_layer) is AscendMiniMaxM3QKVParallelLinearWithIndexer
+
+
 class MiniMaxM3QKVParallelLinearWithLoRA(AscendMergedQKVParallelLinearWithLoRA):
     """Apply Q/K/V adapters while preserving the fused M3 indexer tail."""
 
@@ -148,18 +164,7 @@ class MiniMaxM3QKVParallelLinearWithLoRA(AscendMergedQKVParallelLinearWithLoRA):
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(cls, source_layer, lora_config, packed_modules_list, model_config=None):
-        if len(packed_modules_list) != 3 or getattr(source_layer, "shard_ids", ()) != (
-            "q",
-            "k",
-            "v",
-            "index_q",
-            "index_k",
-        ):
-            return False
-        # Delay the model import until wrapper selection, after model registration.
-        from vllm_ascend.models.minimax_m3.msa_m3 import AscendMiniMaxM3QKVParallelLinearWithIndexer
-
-        return type(source_layer) is AscendMiniMaxM3QKVParallelLinearWithIndexer
+        return len(packed_modules_list) == 3 and _is_minimax_m3_qkv_layer(source_layer)
 
     def _apply_lora_to_output(self, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         width = sum(self.output_slices)
@@ -167,6 +172,37 @@ class MiniMaxM3QKVParallelLinearWithLoRA(AscendMergedQKVParallelLinearWithLoRA):
         prefix = output[..., :width].contiguous()
         output[..., :width] = super()._apply_lora_to_output(x, prefix)
         return output
+
+
+class MiniMaxM3QKVIndexerWithLoRA(AscendMergedQKVParallelLinearWithLoRA):
+    """Five M3 slices with index_q sharded like KV and index_k replicated."""
+
+    def __init__(self, base_layer):
+        super().__init__(base_layer)
+        self.output_slices = tuple(divide(size, self.tp_size) for size in base_layer.output_sizes)
+        self.output_ids = (*self.output_ids, self.kv_shard_id, 0)
+        self.n_slices = len(self.output_slices)
+
+    @classmethod
+    @_not_fully_sharded_can_replace
+    def can_replace_layer(cls, source_layer, lora_config, packed_modules_list, model_config=None):
+        return tuple(packed_modules_list) == _MINIMAX_M3_QKV_PROJECTIONS and _is_minimax_m3_qkv_layer(source_layer)
+
+
+class MiniMaxM3DenseQKVWithLoRA(AscendMergedQKVParallelLinearWithLoRA):
+    """Dense M3 attention has three physical slices under the five-item mapping."""
+
+    def set_lora(self, index, lora_a, lora_b):
+        if any(weight is not None for weight in (*lora_a[3:], *lora_b[3:])):
+            raise ValueError("Dense MiniMax M3 attention has no indexer projections.")
+        super().set_lora(index, lora_a[:3], lora_b[:3])
+
+    @classmethod
+    @_not_fully_sharded_can_replace
+    def can_replace_layer(cls, source_layer, lora_config, packed_modules_list, model_config=None):
+        return (
+            tuple(packed_modules_list) == _MINIMAX_M3_QKV_PROJECTIONS and type(source_layer) is AscendQKVParallelLinear
+        )
 
 
 class _TransposedLoRABMixin(BaseLinearLayerWithLoRA):
@@ -241,6 +277,8 @@ def refresh_all_lora_classes():
         AscendFusedMoEWithLoRA,
         AscendFusedMoE3DWithLoRA,
         MiniMaxM3QKVParallelLinearWithLoRA,
+        MiniMaxM3QKVIndexerWithLoRA,
+        MiniMaxM3DenseQKVWithLoRA,
     )
     existing_classes = tuple(cls for cls in vllm.lora.utils._all_lora_classes if cls not in ascend_classes)
     vllm.lora.utils._all_lora_classes = (

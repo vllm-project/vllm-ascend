@@ -1,5 +1,8 @@
 # MiniMax-M3.1-Flash BF16 LoRA 验证
 
+本页保留原 Q/K/V/O P0–P9 合同。新增 indexer、普通/共享/路由专家、混批和 TP/DP/EP 的入口见
+[全语言模块 BF16 验证](BF16_FULL_SCOPE.md)，结果见[本轮报告](VALIDATION-full-bf16.md)。
+
 本目录连接 MindSpeed-Agent_9400 的 LoRA P0–P9 runner，提供 M3 的配置生成和版本兼容采集器。设备验证需要真实本地 BF16 模型及 NPU；没有 adapter 时由参考生成器生成确定性 A/B/zero。生成的 adapter 只用于正确性诊断。
 
 ## 版本与范围
