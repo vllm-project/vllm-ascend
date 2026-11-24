@@ -24,7 +24,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import LoadConfig, ModelConfig, VllmConfig
 
 _HISPARSE_POOL_KEY_NAMESPACE = "hisparse-ascendstore-v1"
 _HF_CONFIG_METADATA = frozenset({"_name_or_path", "transformers_version"})
@@ -63,14 +63,19 @@ def _without_hf_config_metadata(value: Any) -> Any:
     return value
 
 
-def _model_cache_identity(model: ModelConfig, load_format: str) -> tuple[Any, ...]:
+def _model_cache_identity(model: ModelConfig, load_config: LoadConfig) -> tuple[Any, ...]:
     # Read the loaded HF configs after overrides have been applied. Include the
     # text config separately because some models resolve it outside the root config.
     effective_configs = tuple(
         _without_hf_config_metadata(config.to_dict()) if config is not None else None
         for config in (getattr(model, "hf_config", None), getattr(model, "hf_text_config", None))
     )
-    return _checkpoint_identity(model), effective_configs, load_format == "dummy"
+    identity = (_checkpoint_identity(model), effective_configs, load_config.load_format == "dummy")
+    if load_config.load_format == "sharded_state":
+        # Different shard sets can coexist under the same checkpoint path.
+        extra_config = load_config.model_loader_extra_config or {}
+        return (*identity, ("sharded_state", extra_config.get("pattern")))
+    return identity
 
 
 def build_pool_key_namespace(
@@ -84,8 +89,8 @@ def build_pool_key_namespace(
     speculative = vllm_config.speculative_config
     draft = speculative.draft_model_config if speculative is not None else None
     identity = (
-        _model_cache_identity(model, vllm_config.load_config.load_format),
-        _model_cache_identity(draft, get_draft_load_config(vllm_config).load_format) if draft is not None else None,
+        _model_cache_identity(model, vllm_config.load_config),
+        _model_cache_identity(draft, get_draft_load_config(vllm_config)) if draft is not None else None,
         _hisparse_page_geometry(config, dcp_size, granularity),
     )
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:24]

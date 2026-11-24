@@ -189,6 +189,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             if not extra_config.get("load_async", False):
                 # HiSparse publishes imported Host Source pages on receive completion.
                 incompatibilities.append("requires load_async=true")
+            if extra_config.get("discard_partial_chunks", True) is not True:
+                incompatibilities.append("requires discard_partial_chunks=true to save only complete blocks")
             # A one-token prefill chunk may take the decode path. A later
             # prefill PUT can publish that row before the deferred page copy.
             hisparse_config = vllm_config.attention_config.hisparse_config

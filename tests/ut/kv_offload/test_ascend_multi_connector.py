@@ -1,5 +1,6 @@
 """Tests for Ascend-specific MultiConnector allocation fan-out."""
 
+from threading import Event, Thread
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -55,6 +56,61 @@ def test_ordinary_store_alias_still_reaches_core():
     config.kv_transfer_config.kv_connector_extra_config["connectors"][0]["kv_connector"] = "MooncakeConnectorStoreV1"
     with patch.object(MultiConnector, "__init__", lambda self, **_: setattr(self, "_connectors", [])):
         AscendMultiConnector(config, KVConnectorRole.SCHEDULER, None)
+
+
+@pytest.mark.parametrize("source_first", [True, False])
+def test_hisparse_source_outlives_store_receive(source_first):
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+    config = _hisparse_store_multi_config()
+    if not source_first:
+        config.kv_transfer_config.kv_connector_extra_config["connectors"].reverse()
+    get_entered = Event()
+    release_get = Event()
+    host_released = Event()
+    host_live_when_get_resumes = []
+
+    class Receiver(Thread):
+        def run(self):
+            get_entered.set()
+            if release_get.wait(timeout=5):
+                host_live_when_get_resumes.append(not host_released.is_set())
+
+        def stop(self):
+            release_get.set()
+
+    receiver = Receiver()
+    store = KVPoolWorker.__new__(KVPoolWorker)
+    store.kv_recv_thread = receiver
+    store.kv_send_thread = None
+    store.m_store = SimpleNamespace(close=MagicMock())
+    store._closed = False
+    source = SimpleNamespace(shutdown=host_released.set)
+    children = [source, store] if source_first else [store, source]
+    with patch.object(MultiConnector, "__init__", lambda self, **_: setattr(self, "_connectors", children)):
+        connector = AscendMultiConnector(config, KVConnectorRole.SCHEDULER, None)
+
+    receiver.start()
+    try:
+        assert get_entered.wait(timeout=5)
+        connector.shutdown()
+        assert host_live_when_get_resumes == [True]
+        assert host_released.is_set()
+        assert not receiver.is_alive()
+        store.m_store.close.assert_called_once_with()
+    finally:
+        release_get.set()
+        receiver.join(timeout=5)
+
+
+def test_hisparse_source_stays_live_if_store_shutdown_fails():
+    source = SimpleNamespace(shutdown=MagicMock())
+    store = SimpleNamespace(shutdown=MagicMock(side_effect=RuntimeError("Store could not stop")))
+    with patch.object(MultiConnector, "__init__", lambda self, **_: setattr(self, "_connectors", [source, store])):
+        connector = AscendMultiConnector(_hisparse_store_multi_config(), KVConnectorRole.SCHEDULER, None)
+    with pytest.raises(RuntimeError, match="Store could not stop"):
+        connector.shutdown()
+    source.shutdown.assert_not_called()
 
 
 def test_hisparse_rejects_prefill_context_parallelism_before_constructing_children():

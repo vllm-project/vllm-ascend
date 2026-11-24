@@ -653,7 +653,13 @@ class BaseKVPoolScheduler(ABC):
         """
         force_skip_save = self.kv_role == "kv_consumer"
 
+        cancelled_load_req_ids = set()
         for finished_req_id in scheduler_output.finished_req_ids:
+            load_spec = self.load_specs.pop(finished_req_id, None)
+            if load_spec is not None and load_spec.can_load and finished_req_id in self._async_loading_req_ids:
+                # Core is waiting for receive completion once it hands us the
+                # destination pages. A spec still present here was never sent.
+                cancelled_load_req_ids.add(finished_req_id)
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._preempted_req_ids.discard(finished_req_id)
@@ -667,6 +673,7 @@ class BaseKVPoolScheduler(ABC):
         meta = AscendConnectorMetadata(
             scheduler_output.preempted_req_ids,
             self._async_loading_req_ids.copy(),
+            cancelled_load_req_ids=cancelled_load_req_ids,
         )
 
         for request in scheduler_output.scheduled_new_reqs:

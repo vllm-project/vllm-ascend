@@ -42,6 +42,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     KeyMetadata,
     LoadSpec,
     ReqMeta,
+    RequestTracker,
 )
 
 # isort: on
@@ -614,20 +615,25 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         )
         return t, store
 
-    def test_put_uses_only_locally_projected_groups(self):
-        thread, store = self._make_thread([0])
-        thread.token_database = make_projected_database()
-        thread.block_size = [16, 16]
-        store.exists = MagicMock(return_value=[0])
-        request = make_projected_request(1)
-        thread.add_stored_request(request)
-        thread.request_queue.put(request)
+    def test_c8_indexer_put_waits_for_a_complete_prefill_block(self):
+        sender, store = self._make_thread(block_size=128, kv_role="kv_both")
+        sender.token_database.set_group_buffers({0: [4096, 32768]}, {0: [16384, 512]})
+        store.exists = MagicMock(
+            side_effect=lambda keys: [int(any(key in put[0] for put in store.put_calls)) for key in keys]
+        )
+        tracker = RequestTracker(req_id="r1", token_len=1, allocated_block_ids_by_group=[[1, 2]], num_prompt_tokens=257)
+        hashes = [b"first-page", b"second-page"]
+        meta = ReqMeta.from_request_tracker(tracker, 128, block_hashes=hashes, discard_partial_chunks=True)
+        self.assertIsNone(meta)
+        self.assertEqual(store.put_calls, [])
 
-        thread._handle_request(request)
-
-        store.exists.assert_called_once()
-        keys, addrs, sizes = store.put_calls[0]
-        self.assertEqual((len(keys), addrs, sizes), (1, [[1016]], [[16]]))
+        tracker.token_len = 129
+        meta = ReqMeta.from_request_tracker(tracker, 128, block_hashes=hashes, discard_partial_chunks=True)
+        assert meta is not None
+        self.assertTrue(sender._handle_stored_request(meta))
+        ((keys, _, sizes),) = store.put_calls
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(sizes, [[16384, 512]])
 
     def test_save_keeps_checks_for_align_state_slots(self):
         thread, store = self._make_thread()

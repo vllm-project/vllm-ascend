@@ -31,6 +31,7 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         colocated_pair = {"HiSparseConnector", "AscendStoreConnector"}
         if "HiSparseConnector" in names and "MooncakeConnectorStoreV1" in names:
             raise ValueError("Use AscendStoreConnector when combining the pool with HiSparseConnector.")
+        self._hisparse_store_shutdown_order: tuple[int, int] | None = None
         if colocated_pair <= names:
             # Both children share the local Host Source and Indexer import path.
             # Reject other transfer topologies before creating any child.
@@ -58,6 +59,11 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
                 raise ValueError(
                     f"HiSparse with AscendStore requires single-node colocated Prefill and Decode, got {nnodes} nodes."
                 )
+            child_names = [child["kv_connector"] for child in children]
+            self._hisparse_store_shutdown_order = (
+                child_names.index("AscendStoreConnector"),
+                child_names.index("HiSparseConnector"),
+            )
 
         super().__init__(
             vllm_config=vllm_config,
@@ -162,6 +168,13 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             provider.wait_for_layer_reuse(layer_idx)
 
     def shutdown(self) -> None:
+        if self._hisparse_store_shutdown_order is not None:
+            store_index, hisparse_index = self._hisparse_store_shutdown_order
+            # Join the Store's transfers before freeing HiSparse Host memory.
+            # If Store shutdown raises, the Host registration must stay live.
+            self._connectors[store_index].shutdown()
+            self._connectors[hisparse_index].shutdown()
+            return
         # Release provider waits before joining the store's receive threads.
         self._connectors[:] = [*self._layerwise_slot_release_providers, *self._non_slot_release_connectors]
         super().shutdown()

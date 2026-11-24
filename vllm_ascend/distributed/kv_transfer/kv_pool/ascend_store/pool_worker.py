@@ -968,17 +968,23 @@ class BaseKVPoolWorker(ABC):
             done_sending = set()
 
         done_recving: set[str] = set()
+        failed: set[str] = set()
         if self.kv_recv_thread is not None:
             if self.load_async and not self.use_layerwise:
                 assert isinstance(self.kv_recv_thread, KVCacheStoreRecvingThread)
                 done_recving, failed = self.kv_recv_thread.get_and_clear_receive_results(
                     meta.loading_req_ids, meta.preempted_req_ids
                 )
-                if failed:
-                    with self._invalid_block_ids_lock:
-                        self._failed_requests.update(failed)
             else:
                 self.kv_recv_thread.discard_finished_requests(meta.preempted_req_ids)
+
+        # A cancelled load that never reached the worker needs a terminal
+        # acknowledgement, with failure set so HiSparse cannot publish its pages.
+        done_recving.update(meta.cancelled_load_req_ids)
+        failed.update(meta.cancelled_load_req_ids)
+        if failed:
+            with self._invalid_block_ids_lock:
+                self._failed_requests.update(failed)
 
         logger.debug(
             "Number of completed KV cache send requests: %d, receive requests: %d, tp_rank:%d",

@@ -119,7 +119,8 @@ Keep the attention options above and replace the transfer configuration with:
 
 See [KV Cache Pool](kv_cache_pool_ascend_store.md) for MemCache setup.
 Use the `host_tcp` protocol in its local configuration and keep
-`load_async=true`. This combination supports only MemCache whole-block
+`load_async=true` and `discard_partial_chunks=true` (the default).
+This combination supports only MemCache whole-block
 transfers and excludes external PD transport. Startup rejects Mooncake
 because a timed-out write can overwrite another pool object
 ([Mooncake #4491](https://github.com/kvcache-ai/Mooncake/issues/4491)).
@@ -133,7 +134,8 @@ from local compute and skips further external lookups for that request.
 AscendStore keys for HiSparse use the `hisparse-ascendstore-v1` namespace.
 This version identifies the external pool key format. The keys include the
 target and draft checkpoint identities, resolved revisions, dummy-weight mode,
-effective model configurations (including RoPE settings), and page layout. If the Hub revision
+`sharded_state` filename patterns, effective model configurations (including
+RoPE settings), and page layout. If the Hub revision
 resolver is unavailable, pin the checkpoint commit when sharing a persistent
 pool. Use a versioned directory when replacing local weights in a persistent
 pool. Files overwritten in place keep the same model path.

@@ -119,6 +119,34 @@ def test_dummy_weights_cannot_reuse_checkpoint_pool(model_role):
 
 
 @pytest.mark.parametrize("model_role", ["target", "draft"])
+def test_hisparse_pool_keys_distinguish_shard_patterns(model_role, tmp_path):
+    from safetensors.torch import load_file, save_file
+    from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader.sharded_state_loader import ShardedStateLoader
+
+    cache = KVCacheConfig(2, [], [], hisparse_host_num_blocks=3)
+    target = _checkpoint(str(tmp_path) if model_role == "target" else "team/glm")
+    draft = _checkpoint(str(tmp_path) if model_role == "draft" else "team/draft")
+    config = _key_config(target, draft)
+    keys = []
+    for prefix, weight in [("a", 1.0), ("b", 2.0)]:
+        save_file({"weight": torch.tensor([weight])}, tmp_path / f"{prefix}-rank-0-part-0.safetensors")
+        pattern = f"{prefix}-rank-{{rank}}-part-{{part}}.safetensors"
+        loader_config = LoadConfig(load_format="sharded_state", model_loader_extra_config={"pattern": pattern})
+        loader = ShardedStateLoader(loader_config)
+        (shard,) = tmp_path.glob(loader.pattern.format(rank=0, part="*"))
+        assert load_file(shard)["weight"].item() == weight
+        if model_role == "target":
+            config.load_config = loader_config
+        else:
+            config.speculative_config.draft_load_config = loader_config
+        key = build_pool_key_namespace(config, cache, 1, 128)
+        assert build_pool_key_namespace(config, cache, 1, 128) == key
+        keys.append(key)
+    assert keys[0] != keys[1]
+
+
+@pytest.mark.parametrize("model_role", ["target", "draft"])
 @pytest.mark.parametrize(
     ("config_attr", "field", "original", "override"),
     [
@@ -588,6 +616,20 @@ def test_hisparse_requires_async_store_load(extra_config):
     )
     cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
     with pytest.raises(ValueError, match="requires load_async=true"):
+        AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
+
+
+def test_hisparse_rejects_partial_chunk_saves():
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(),
+        attention_config=SimpleNamespace(hisparse_config=SimpleNamespace(eager_host_mirror=True)),
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_both",
+            kv_connector_extra_config={"backend": "memcache", "load_async": True, "discard_partial_chunks": False},
+        ),
+    )
+    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
+    with pytest.raises(ValueError, match="requires discard_partial_chunks=true"):
         AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
 
 

@@ -20,13 +20,15 @@ import tempfile
 import unittest
 from contextlib import ExitStack
 from dataclasses import replace
+from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
 import torch
-from vllm.v1.core.sched.output import KVConnectorBlockState
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -36,7 +38,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.serial_utils import MsgpackEncoder
+from vllm.v1.request import RequestStatus
 from zmq.constants import RCVTIMEO, REP
 from zmq.error import ZMQError
 from zmq.sugar.context import Context
@@ -48,6 +50,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import bac
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreRecvingThread
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     LAYERWISE_REUSE_BACKING_BYTES,
 )
@@ -67,6 +70,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
     KVPoolScheduler,
     LookupKeyClient,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
 
 @pytest.fixture(autouse=True)
@@ -1755,6 +1759,88 @@ def test_failed_hisparse_import_skips_repeated_get(hisparse, finished, should_re
     assert scheduler.get_num_new_matched_tokens(request, 0) == (256, True)
 
 
+@patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+def test_abort_after_deferred_load_is_released_before_worker_dispatch(_):
+    config = make_config(kv_role="kv_both", extra_config={"load_async": True})
+    store = KVPoolScheduler(config, use_layerwise=False)
+    request = MagicMock(request_id="req", status=RequestStatus.WAITING_FOR_REMOTE_KVS)
+    request.is_finished.side_effect = lambda: RequestStatus.is_finished(request.status)
+    store.load_specs["req"] = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=False)
+
+    core = Scheduler.__new__(Scheduler)
+    core.connector = store
+    core.requests = {"req": request}
+    core.deferred_loads = {"req": (2, 16, 0, 0)}
+    core.processed_step_seq = 2
+    core.connector_prefix_cache_stats = None
+    core.kv_cache_manager = MagicMock()
+    core.kv_cache_manager.get_blocks.return_value.get_block_ids.return_value = ([1],)
+    core.defer_block_free = False
+    core.waiting = core.kv_holding_waiting = core.async_kv_waiting = MagicMock()
+    core.deferred_waiting = set()
+    core.finished_recving_kv_req_ids = set()
+    core.failed_recving_kv_req_ids = set()
+    core._aborted_kv_loads = set()
+    core.aux_output_connector = core.ec_connector = None
+    core._inflight_prefills = set()
+    core._unreserve_parked = core._set_kv_fetch_stage = MagicMock()
+    core._connector_finished = lambda req: store.request_finished_all_groups(req, ([1],))
+    core.encoder_cache_manager = MagicMock()
+    core._pending_encoder_input_ids = {}
+    core.finished_req_ids = set()
+    core.finished_req_ids_dict = None
+    core.get_request_counts = lambda: (0, 0)
+
+    core._drain_deferred_loads()
+    assert not core.deferred_loads
+    assert store.load_specs["req"].can_load
+    core.finish_requests("req", RequestStatus.FINISHED_ABORTED)
+    assert "req" in core.requests
+    core.kv_cache_manager.free.assert_not_called()
+    output = SimpleNamespace(
+        finished_req_ids=core.finished_req_ids,
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+    )
+    meta = store.build_connector_meta(output)
+    core.finished_req_ids.clear()
+    assert not meta.requests
+    assert meta.cancelled_load_req_ids == {"req"}
+    assert not store.load_specs
+    assert core.has_finished_requests()
+
+    worker = KVPoolWorker.__new__(KVPoolWorker)
+    worker.kv_recv_thread = MagicMock(spec=KVCacheStoreRecvingThread)
+    worker.kv_recv_thread.get_and_clear_receive_results.return_value = (set(), set())
+    worker.kv_send_thread = None
+    worker.load_async = True
+    worker.use_layerwise = False
+    worker.tp_rank = 0
+    worker._failed_requests = set()
+    worker._invalid_block_ids_lock = Lock()
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    for rank in range(2):
+        worker.start_load_kv(meta)
+        _, finished = worker.get_finished(set(), meta)
+        worker_output = KVConnectorOutput(finished_recving=finished, failed_recving=worker.get_failed_requests())
+        completed = aggregator.aggregate([SimpleNamespace(kv_connector_output=worker_output)]).kv_connector_output
+        core._update_from_kv_xfer_finished(completed)
+        if rank == 0:
+            assert "req" in core.requests
+            core.kv_cache_manager.free.assert_not_called()
+
+    worker.kv_recv_thread.add_request.assert_not_called()
+    assert completed.finished_recving == completed.failed_recving == {"req"}
+    core.kv_cache_manager.free.assert_called_once_with(request)
+    assert not core._aborted_kv_loads
+    assert not core.has_finished_requests()
+    assert "req" not in core.requests
+    next_meta = store.build_connector_meta(output)
+    assert not next_meta.loading_req_ids
+    assert not next_meta.cancelled_load_req_ids
+
+
 class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
     """Test update_connector_output."""
 
@@ -1907,6 +1993,7 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
 
         metadata = scheduler.build_connector_meta(output)
         self.assertEqual(metadata.loading_req_ids, {"r1", "other"})
+        self.assertFalse(metadata.cancelled_load_req_ids)
         scheduler.update_connector_output(KVConnectorOutput(finished_recving={"r1"}))
         output.finished_req_ids.clear()
         self.assertEqual(scheduler.build_connector_meta(output).loading_req_ids, {"other"})

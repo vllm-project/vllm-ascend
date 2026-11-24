@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Opt-in GLM-5.3 replay regression against a dedicated A5 serving instance.
+"""Opt-in GLM-5.3 replay regression against dedicated A5 serving instances.
 
 Pass --hisparse-replay-url for an idle test server in dev mode with prefix
 caching enabled. Select the configured connectors with --hisparse-replay-mode.
@@ -8,6 +8,8 @@ Use the same model, runner, and graph settings in all arms. The Store modes
 reset the server's local cache during the test. Pass --hisparse-replay-mtp for
 MTP=3 with async scheduling, or --hisparse-replay-long to include 128K inputs
 on a server with a context window that leaves room for the output tokens.
+In store mode, pass --hisparse-replay-reference-url for a second, HiSparse-only
+server to compare its local hits with both the local and external store arms.
 """
 
 import pytest
@@ -27,13 +29,7 @@ from tests.e2e.nightly.single_node.hisparse_ascendstore.replay_helpers import (
 )
 
 
-@pytest.fixture(scope="module")
-def serving_instance(pytestconfig):
-    url = pytestconfig.getoption("--hisparse-replay-url").rstrip("/")
-    if not url:
-        pytest.skip("Pass --hisparse-replay-url to run against a dedicated A5 test server")
-    mode = pytestconfig.getoption("--hisparse-replay-mode")
-    config = server_config(url)
+def assert_replay_mode(config, mode):
     transfer = config["kv_transfer_config"]
     names = set()
     if transfer:
@@ -52,17 +48,49 @@ def serving_instance(pytestconfig):
     assert names == expected[mode], f"Replay mode {mode!r} does not match server connectors {names}"
     if mode in {"store", "plain-store"}:
         assert transfer["kv_load_failure_policy"] == "fail"
+
+
+@pytest.fixture(scope="module")
+def serving_instances(pytestconfig):
+    url = pytestconfig.getoption("--hisparse-replay-url").rstrip("/")
+    if not url:
+        pytest.skip("Pass --hisparse-replay-url to run against a dedicated A5 test server")
+    mode = pytestconfig.getoption("--hisparse-replay-mode")
+    config = server_config(url)
+    assert_replay_mode(config, mode)
     if pytestconfig.getoption("--hisparse-replay-mtp"):
         require_mtp3(config)
-    return url, served_model(url), mode
+
+    reference_url = pytestconfig.getoption("--hisparse-replay-reference-url").rstrip("/")
+    reference = None
+    if reference_url:
+        assert mode == "store" and reference_url != url, "The reference requires two servers in store mode"
+        reference_config = server_config(reference_url)
+        assert_replay_mode(reference_config, "only")
+        for section, fields in (
+            (
+                "model_config",
+                ("model", "model_weights", "revision", "code_revision", "dtype", "quantization", "enforce_eager"),
+            ),
+            ("attention_config", ("hisparse_config", "indexer_kv_dtype")),
+            ("cache_config", ("block_size", "cache_dtype", "prefix_match_unit")),
+            ("compilation_config", ("cudagraph_mode",)),
+            ("parallel_config", ("tensor_parallel_size", "decode_context_parallel_size")),
+            ("scheduler_config", ("async_scheduling", "max_num_batched_tokens")),
+        ):
+            for field in fields:
+                assert config[section].get(field) == reference_config[section].get(field), f"{section}.{field} differs"
+        assert config["speculative_config"] == reference_config["speculative_config"]
+        reference = (reference_url, served_model(reference_url))
+    return url, served_model(url), mode, reference
 
 
 @pytest.mark.parametrize("prompt_length", [16383, 16384, 16385, 131072])
 @pytest.mark.parametrize("concurrency", [1, 2])
-def test_hisparse_prefix_replay(serving_instance, prompt_length, concurrency, pytestconfig):
+def test_hisparse_prefix_replay(serving_instances, prompt_length, concurrency, pytestconfig):
     if prompt_length == 131072 and not pytestconfig.getoption("--hisparse-replay-long"):
         pytest.skip("Pass --hisparse-replay-long for the 128K case")
-    url, model, mode = serving_instance
+    url, model, mode, reference = serving_instances
     output_tokens = pytestconfig.getoption("--hisparse-replay-output-tokens")
     workloads = make_workloads(prompt_length, concurrency, seed=16384)
 
@@ -90,6 +118,21 @@ def test_hisparse_prefix_replay(serving_instance, prompt_length, concurrency, py
             assert counts[DRAFTS] > 1, name
         if name == "external":
             comparisons.append((arms[0][0], local, name, replay))
+
+    if reference is not None:
+        reference_url, reference_model = reference
+        _, counts = run_arm(reference_url, reference_model, workloads, output_tokens=output_tokens)
+        assert counts[LOCAL_HITS] == counts[EXTERNAL_HITS] == counts[EXTERNAL_GETS] == 0
+        reference_local, counts = run_arm(reference_url, reference_model, workloads, output_tokens=output_tokens)
+        assert counts[EXTERNAL_HITS] == counts[EXTERNAL_GETS] == 0
+        hit_lengths = [choice["cached_tokens"] for choice in reference_local]
+        assert all(isinstance(length, int) and length > 0 for length in hit_lengths), hit_lengths
+        assert counts[LOCAL_HITS] == sum(hit_lengths)
+        if mtp:
+            assert counts[DRAFTS] > 1
+        for name, replay, _ in arms:
+            assert [choice["cached_tokens"] for choice in replay] == hit_lengths, name
+            comparisons.append(("HiSparse-only local", reference_local, f"Store {name}", replay))
 
     failures = []
     for ref_name, reference, name, replay in comparisons:
