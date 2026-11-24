@@ -140,11 +140,20 @@ def ns():
     definitions(planner_path, n, {"_is_mooncake", "get_spec_reuse_rules", "plan_layerwise_cache_reuse"})
 
     def make_plan(config, groups, num_blocks):
-        tensors = [
-            Tensor(num_blocks * spec.page_size_bytes, [name], block_stride=spec.page_size_bytes)
-            for group in groups
-            for name, spec in group.kv_cache_spec.kv_cache_specs.items()
-        ]
+        # Exercise grouped descriptors with nonzero offsets and layer strides.
+        buckets = []
+        for group in groups:
+            by_stride = defaultdict(list)
+            for name in group.layer_names:
+                by_stride[group.kv_cache_spec.kv_cache_specs[name].page_size_bytes].append(name)
+            buckets.extend(sorted(by_stride.items()))
+        backing_size = sum(num_blocks * stride * len(names) for stride, names in buckets)
+        tensors = []
+        offset = 0
+        for stride, names in buckets:
+            layer_stride = num_blocks * stride
+            tensors.append(Tensor(backing_size, names, offset, layer_stride, stride))
+            offset += layer_stride * len(names)
         native = Cache(num_blocks, tensors, groups)
         layout = n["plan_layerwise_cache_reuse"](native, config)
         native.layerwise_reuse_layout = layout
@@ -224,7 +233,7 @@ def test_component_slots_and_physical_capacity(ns, buffers):
     resident_config = configuration()
     resident_config.kv_transfer_config.kv_connector_extra_config["layerwise_independent_layers"] = "all"
     resident = ns["make_plan"](resident_config, gs, 1)
-    assert probe.kv_cache_tensors[0].size < sum(t.size for t in resident.kv_cache_tensors)
+    assert probe.kv_cache_tensors[0].size < resident.kv_cache_tensors[0].size
 
 
 def test_dspark_draft_is_excluded_from_rotation(ns):
@@ -245,7 +254,7 @@ def test_all_resident_control(ns):
     config.kv_transfer_config.kv_connector_extra_config["layerwise_independent_layers"] = "all"
     plan = ns["make_plan"](config, groups(), 1)
     assert plan.layerwise_reuse_layout is None
-    assert all(len(t.layers) == 1 for t in plan.kv_cache_tensors)
+    assert any(len(t.layers) > 1 for t in plan.kv_cache_tensors)
 
 
 @pytest.mark.parametrize(

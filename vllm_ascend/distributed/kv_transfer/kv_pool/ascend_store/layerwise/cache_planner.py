@@ -3,7 +3,6 @@
 """Plan layerwise cache reuse from native cache groups."""
 
 from collections import defaultdict
-from dataclasses import replace
 from math import lcm
 from types import MappingProxyType
 from typing import Any
@@ -133,26 +132,10 @@ class LayerwiseCachePlanner:
         extra_config: dict[str, Any],
         *,
         spec_reuse_rules: SpecReuseRules,
-        expand_component_descriptors: bool = False,
     ) -> None:
         self.extra_config = extra_config
         self.spec_reuse_rules = spec_reuse_rules
         self.spec_by_entry = get_layerwise_kv_cache_specs(config)
-        if expand_component_descriptors:
-            # Plan from one native descriptor per component before assigning slots.
-            config = replace(
-                config,
-                kv_cache_tensors=[
-                    KVCacheTensor(
-                        size=config.num_blocks * spec.page_size_bytes,
-                        layers=[name],
-                        offset=0,
-                        layer_stride=0,
-                        block_stride=spec.page_size_bytes,
-                    )
-                    for name, spec in self.spec_by_entry.items()
-                ],
-            )
         self.config = config
         self.group_id_by_entry = {
             entry_name: group_id
@@ -349,7 +332,6 @@ def plan_layerwise_cache_reuse(
         vllm_config,
         extra_config,
         spec_reuse_rules=rules,
-        expand_component_descriptors=dsv4,
     )
     layout = planner.build()
     if not layout.has_layer_reuse:
