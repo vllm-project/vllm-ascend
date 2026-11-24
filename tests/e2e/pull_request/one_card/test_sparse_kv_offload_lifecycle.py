@@ -9,6 +9,7 @@ Request admission, completion/abort, metadata publication, host KV reload and
 the attention kernel all use the serving implementation.
 """
 
+import faulthandler
 import json
 import os
 import subprocess
@@ -321,4 +322,9 @@ def test_sparse_kv_offload_runner_request_lifecycle(tmp_path):
 
 
 if __name__ == "__main__":
-    _run_in_worker_process(sys.argv[1])
+    # Capture where the worker stalls before the parent enforces its timeout.
+    faulthandler.dump_traceback_later(180, repeat=True)
+    try:
+        _run_in_worker_process(sys.argv[1])
+    finally:
+        faulthandler.cancel_dump_traceback_later()
