@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+from copy import deepcopy
+
 import pytest
 
 from tests.e2e.nightly.single_node.hisparse_ascendstore.replay_helpers import (
@@ -9,6 +11,7 @@ from tests.e2e.nightly.single_node.hisparse_ascendstore.replay_helpers import (
     EXTERNAL_HITS,
     LOCAL_HITS,
     assert_external_replay,
+    assert_matching_replay_config,
 )
 
 
@@ -34,3 +37,30 @@ def test_external_replay_requires_each_request_to_load_its_warm_prefix(
     else:
         with pytest.raises(AssertionError):
             assert_external_replay(warm, replay, counts, 129)
+
+
+@pytest.mark.parametrize("draft_tokens", [3, 4])
+def test_reference_replay_checks_mtp_tokens_with_different_server_ports(draft_tokens):
+    config = {
+        "model_config": {},
+        "attention_config": {},
+        "cache_config": {},
+        "compilation_config": {},
+        "parallel_config": {},
+        "scheduler_config": {},
+    }
+    config["speculative_config"] = {
+        "method": "mtp",
+        "num_speculative_tokens": 3,
+        "target_parallel_config": {"tensor_parallel_size": 2, "master_port": 29501},
+        "draft_parallel_config": {"tensor_parallel_size": 2, "master_port": 29501},
+    }
+    reference = deepcopy(config)
+    reference["speculative_config"]["target_parallel_config"]["master_port"] = 29502
+    reference["speculative_config"]["draft_parallel_config"]["master_port"] = 29502
+    reference["speculative_config"]["num_speculative_tokens"] = draft_tokens
+    if draft_tokens == 3:
+        assert_matching_replay_config(config, reference)
+    else:
+        with pytest.raises(AssertionError, match=r"speculative_config\.num_speculative_tokens differs"):
+            assert_matching_replay_config(config, reference)

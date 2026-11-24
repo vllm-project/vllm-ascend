@@ -1403,6 +1403,7 @@ def test_connector_metadata_without_pending_requests_does_not_scan_cached_ids(cl
     scheduler._finished_partial_tail_metas = {}
     scheduler.kv_role = "kv_both"
     scheduler.can_put = False
+    scheduler.load_specs = {}
     scheduler._request_trackers = {}
     scheduler._unfinished_requests = {} if cleared_by == "already-empty" else {"retired": (None, [])}
     scheduler._preempted_req_ids = set()

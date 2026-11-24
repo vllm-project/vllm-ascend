@@ -134,8 +134,8 @@ from local compute and skips further external lookups for that request.
 AscendStore keys for HiSparse use the `hisparse-ascendstore-v1` namespace.
 This version identifies the external pool key format. The keys include the
 target and draft checkpoint identities, resolved revisions, dummy-weight mode,
-`sharded_state` filename patterns, effective model configurations (including
-RoPE settings), and page layout. If the Hub revision
+filename patterns for `sharded_state` and `runai_streamer_sharded`, effective
+model configurations (including RoPE settings), and page layout. If the Hub revision
 resolver is unavailable, pin the checkpoint commit when sharing a persistent
 pool. Use a versioned directory when replacing local weights in a persistent
 pool. Files overwritten in place keep the same model path.

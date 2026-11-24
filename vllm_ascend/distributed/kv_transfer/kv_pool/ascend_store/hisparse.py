@@ -71,8 +71,8 @@ def _model_cache_identity(model: ModelConfig, load_config: LoadConfig) -> tuple[
         for config in (getattr(model, "hf_config", None), getattr(model, "hf_text_config", None))
     )
     identity = (_checkpoint_identity(model), effective_configs, load_config.load_format == "dummy")
-    if load_config.load_format == "sharded_state":
-        # Different shard sets can coexist under the same checkpoint path.
+    if load_config.load_format in ("sharded_state", "runai_streamer_sharded"):
+        # Both formats use Core's ShardedStateLoader to select files by pattern.
         extra_config = load_config.model_loader_extra_config or {}
         return (*identity, ("sharded_state", extra_config.get("pattern")))
     return identity

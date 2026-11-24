@@ -20,6 +20,7 @@ from tests.e2e.nightly.single_node.hisparse_ascendstore.replay_helpers import (
     EXTERNAL_HITS,
     LOCAL_HITS,
     assert_external_replay,
+    assert_matching_replay_config,
     make_workloads,
     require_mtp3,
     reset_local_cache,
@@ -67,20 +68,7 @@ def serving_instances(pytestconfig):
         assert mode == "store" and reference_url != url, "The reference requires two servers in store mode"
         reference_config = server_config(reference_url)
         assert_replay_mode(reference_config, "only")
-        for section, fields in (
-            (
-                "model_config",
-                ("model", "model_weights", "revision", "code_revision", "dtype", "quantization", "enforce_eager"),
-            ),
-            ("attention_config", ("hisparse_config", "indexer_kv_dtype")),
-            ("cache_config", ("block_size", "cache_dtype", "prefix_match_unit")),
-            ("compilation_config", ("cudagraph_mode",)),
-            ("parallel_config", ("tensor_parallel_size", "decode_context_parallel_size")),
-            ("scheduler_config", ("async_scheduling", "max_num_batched_tokens")),
-        ):
-            for field in fields:
-                assert config[section].get(field) == reference_config[section].get(field), f"{section}.{field} differs"
-        assert config["speculative_config"] == reference_config["speculative_config"]
+        assert_matching_replay_config(config, reference_config)
         reference = (reference_url, served_model(reference_url))
     return url, served_model(url), mode, reference
 

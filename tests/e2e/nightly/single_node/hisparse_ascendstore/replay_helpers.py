@@ -109,6 +109,52 @@ def require_mtp3(config):
     assert config["scheduler_config"]["async_scheduling"] is True
 
 
+def assert_matching_replay_config(config, reference_config):
+    # Core's embedded target and draft parallel configs also contain per-server
+    # deployment settings. Compare the replay settings explicitly.
+    for section, fields in (
+        (
+            "model_config",
+            ("model", "model_weights", "revision", "code_revision", "dtype", "quantization", "enforce_eager"),
+        ),
+        ("attention_config", ("hisparse_config", "indexer_kv_dtype")),
+        ("cache_config", ("block_size", "cache_dtype", "prefix_match_unit")),
+        ("compilation_config", ("cudagraph_mode",)),
+        ("parallel_config", ("tensor_parallel_size", "decode_context_parallel_size")),
+        ("scheduler_config", ("async_scheduling", "max_num_batched_tokens")),
+        (
+            "speculative_config",
+            (
+                "method",
+                "num_speculative_tokens",
+                "num_speculative_tokens_per_batch_size",
+                "model",
+                "revision",
+                "code_revision",
+                "quantization",
+                "enforce_eager",
+                "draft_tensor_parallel_size",
+                "draft_decode_context_parallel_size",
+                "kv_cache_dtype",
+                "draft_lm_head_quantization",
+                "draft_sample_method",
+                "rejection_sample_method",
+                "parallel_drafting",
+                "index_share_for_mtp_iteration",
+                "use_local_argmax_reduction",
+                "attention_backend",
+                "moe_backend",
+            ),
+        ),
+    ):
+        settings = config[section]
+        reference = reference_config[section]
+        assert (settings is None) == (reference is None), f"{section} is enabled on only one server"
+        if settings is not None:
+            for field in fields:
+                assert settings.get(field) == reference.get(field), f"{section}.{field} differs"
+
+
 def served_model(url):
     response = requests.get(f"{url}/v1/models", timeout=30)
     response.raise_for_status()

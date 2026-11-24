@@ -119,9 +119,11 @@ def test_dummy_weights_cannot_reuse_checkpoint_pool(model_role):
 
 
 @pytest.mark.parametrize("model_role", ["target", "draft"])
-def test_hisparse_pool_keys_distinguish_shard_patterns(model_role, tmp_path):
+@pytest.mark.parametrize("load_format", ["sharded_state", "runai_streamer_sharded"])
+def test_hisparse_pool_keys_distinguish_shard_patterns(model_role, load_format, tmp_path):
     from safetensors.torch import load_file, save_file
     from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader import get_model_loader
     from vllm.model_executor.model_loader.sharded_state_loader import ShardedStateLoader
 
     cache = KVCacheConfig(2, [], [], hisparse_host_num_blocks=3)
@@ -132,8 +134,9 @@ def test_hisparse_pool_keys_distinguish_shard_patterns(model_role, tmp_path):
     for prefix, weight in [("a", 1.0), ("b", 2.0)]:
         save_file({"weight": torch.tensor([weight])}, tmp_path / f"{prefix}-rank-0-part-0.safetensors")
         pattern = f"{prefix}-rank-{{rank}}-part-{{part}}.safetensors"
-        loader_config = LoadConfig(load_format="sharded_state", model_loader_extra_config={"pattern": pattern})
-        loader = ShardedStateLoader(loader_config)
+        loader_config = LoadConfig(load_format=load_format, model_loader_extra_config={"pattern": pattern})
+        loader = get_model_loader(loader_config)
+        assert isinstance(loader, ShardedStateLoader)
         (shard,) = tmp_path.glob(loader.pattern.format(rank=0, part="*"))
         assert load_file(shard)["weight"].item() == weight
         if model_role == "target":
