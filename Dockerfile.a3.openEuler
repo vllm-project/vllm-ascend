@@ -351,9 +351,9 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
         x86_64)  PKG_ARCH=x86_64 ;; \
         *) echo "ERROR: 不支持的架构 $(uname -m)"; exit 1 ;; \
     esac && \
-    FLA_WHL="flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-manylinux_2_34-${PKG_ARCH}.whl" && \
+    FLA_WHL="flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-manylinux_2_34_${PKG_ARCH}.whl" && \
     curl -fL --retry 3 --retry-delay 5 -o /tmp/fla.whl \
-        "${ASCEND_INDEX_URL}/flash-linear-attention-npu-a3/${FLA_WHL//+/%2B}" && \
+        "${ASCEND_INDEX_URL}/flash-linear-attention-npu-a3/${FLA_WHL}" && \
     cp /tmp/fla.whl "/tmp/flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-any.whl" && \
     python3 -m pip install --force-reinstall --no-deps \
         "/tmp/flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-any.whl" && \
