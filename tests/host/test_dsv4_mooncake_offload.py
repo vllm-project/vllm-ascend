@@ -139,10 +139,9 @@ def ns():
     definitions(
         STORE + "layerwise/planes/block_key_offload.py",
         n,
-        {"snapshot_key", "_load_entries", "_save_dsv4_entries", "_continuation_window_start"},
+        {"snapshot_key", "_load_entries", "_save_entries", "_continuation_window_start"},
     )
     definitions("vllm_ascend/models/deepseek_v4/cache_transfer.py", n)
-    n["_save_entries"] = n["_save_dsv4_entries"]
     n["selected"] = lambda mask, index: mask is None or (index < len(mask) and mask[index])
     n["KV_CACHE_BUFFER_ALIGNMENT"] = 2 * 1024 * 1024
     n["block_hash_to_str"] = lambda value: value.hex()
@@ -409,7 +408,7 @@ def test_dsv4_window_continuation_restores_live_pages_only(ns):
         block_ids_by_group=[[0, 7]],
     )
     entries = ns["_load_entries"](worker, request, 0, [b"evicted", b"live"], [True, False])
-    assert entries == [(b"live".hex(), 1)]
+    assert entries == []
     worker._offload_active_pages = {("request", "incarnation", 0): (256, {1: "committed-private-page"})}
     assert ns["_load_entries"](worker, request, 0, [], None) == [("committed-private-page", 1)]
     worker._offload_active_pages[("request", "incarnation", 0)] = (128, {1: "stale"})
@@ -429,11 +428,12 @@ def test_mtp_prefill_uses_same_window_for_save_and_continuation(ns):
     assert window_start(worker, 4, 114688, 2, resumed) is None
 
 
-def test_window_save_keeps_public_checkpoint_and_private_tail(ns):
+def test_window_save_respects_public_mask_at_aligned_endpoint(ns):
     worker = NS(
         grouped_block_size=[128],
         group_uses_align_state=[False],
-        kv_cache_config=NS(dsv4_continuation_windows={0: 129}),
+        cache_transfer_granularity=128,
+        _reused_layers_by_group={0: {0}},
         _is_layerwise_save_owner=lambda group: True,
         _layerwise_save_full_end=lambda *args: 4,
         _make_layerwise_full_key=lambda group, key: key,
@@ -441,17 +441,17 @@ def test_window_save_keeps_public_checkpoint_and_private_tail(ns):
     request = NS(
         target_token_len=512, save_start_token=0, can_save=True,
         block_ids_by_group=[[1, 2, 3, 4]], store_masks=[[True, False, False, False]],
-        layerwise_request_id="incarnation",
+        layerwise_request_id="incarnation", load_spec=None,
     )
-    entries = ns["_save_entries"](worker, request, NS(), 0, [b"a", b"b", b"c", b"d"])
-    assert entries == [(b"a".hex(), 0), ("offload_v1:incarnation:512:3", 3)]
+    entries = ns["_save_entries"](worker, request, NS(), 0, [b"a", b"b", b"c", b"d"], {}, dsv4=True)
+    assert entries == [(b"a".hex(), 0)]
 
 
-def test_untrimmed_shared_window_saves_masked_live_page_for_continuation(ns):
+def test_untrimmed_shared_window_skips_masked_public_page(ns):
     worker = NS(
         grouped_block_size=[128],
         group_uses_align_state=[False],
-        use_eagle=True,
+        cache_transfer_granularity=128,
         kv_cache_config=NS(dsv4_component_identity="dsv4", dsv4_window_group_ids=(0,)),
         _group_reuses_buffer=lambda group: True,
         _reused_layers_by_group={0: {0}},
@@ -471,8 +471,8 @@ def test_untrimmed_shared_window_saves_masked_live_page_for_continuation(ns):
         ),
     )
     hashes = [b"a", b"b", b"c"]
-    saved = ns["_save_entries"](worker, request, NS(), 0, hashes)
-    assert saved == [("offload_v1:incarnation:384:0", 0), (b"c".hex(), 2)]
+    saved = ns["_save_entries"](worker, request, NS(), 0, hashes, {}, dsv4=True)
+    assert saved == [(b"c".hex(), 2)]
     worker._offload_active_pages = {
         ("request", "incarnation", 0): (384, {index: key for key, index in saved})
     }
@@ -794,7 +794,7 @@ def test_transfer_suffix_snapshots_match_next_step_keys(ns, endpoint, size, hash
             kvpool_store_skip_tokens=None, layerwise_snapshot_end_token=endpoint,
         ),
     )
-    saved = ns["_save_entries"](worker, request, NS(), 0, hashes)
+    saved = ns["_save_entries"](worker, request, NS(), 0, hashes, {}, dsv4=True)
     saved_keys = {key for key, _ in saved}
     worker._snapshot_keys = {"request": {0: {
         total - 1 if slot is None else slot: key for key, slot in saved if "offload_v1:" in key

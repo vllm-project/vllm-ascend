@@ -63,14 +63,19 @@ def _load_entries(worker, request, group, hashes, mask):
         return [(expected, index)]
 
     config = getattr(worker, "kv_cache_config", None)
+    dsv4_continuation = running and getattr(config, "dsv4_component_identity", None) is not None
     live_window = running and group in getattr(config, "dsv4_window_group_ids", ())
     first = _continuation_window_start(worker, group, tokens, size, request) if live_window else None
     checkpoint = getattr(worker, "_offload_active_pages", {}).get(
         (request.req_id, request.layerwise_request_id, group)
-    ) if running and getattr(config, "dsv4_component_identity", None) is not None else None
+    ) if dsv4_continuation else None
+    saved_pages = checkpoint[1] if checkpoint is not None else snapshots
     entries = []
     for index in range(first or 0, end):
-        if not live_window and not selected(mask, index):
+        if dsv4_continuation:
+            if mask is not None and index < len(mask) and not mask[index] and index not in saved_pages:
+                continue
+        elif not live_window and not selected(mask, index):
             continue
         if ids[index] == 0:
             if live_window:
@@ -91,7 +96,7 @@ def _load_entries(worker, request, group, hashes, mask):
     return entries
 
 
-def _save_entries(worker, request, view, group, hashes, snapshots):
+def _save_entries(worker, request, view, group, hashes, snapshots, *, dsv4=False):
     if not request.can_save:
         return []
     size = worker.grouped_block_size[group]
@@ -127,12 +132,20 @@ def _save_entries(worker, request, view, group, hashes, snapshots):
     if end > len(ids) or (partial is not None and (partial >= len(ids) or ids[partial] == 0)):
         raise ValueError("Mooncake offload save has no allocated checkpoint or block")
     mask = request.store_masks[group] if request.store_masks is not None else None
+    snapshot_start = None
+    if dsv4 and not recurrent:
+        # The public prefix ends at a boundary common to all cache groups.
+        transfer_size = worker.cache_transfer_granularity
+        public_tokens = min(tokens, len(hashes) * size) // transfer_size * transfer_size
+        snapshot_start = public_tokens // size
     entries = []
     for index in range(start, end):
-        # Reachability masks describe published pages, not new private pages.
-        if ids[index] == 0 or (index < len(hashes) and mask is not None and index < len(mask) and not mask[index]):
+        if ids[index] == 0:
             continue
-        if index < len(hashes):
+        private = index >= len(hashes) or (snapshot_start is not None and index >= snapshot_start)
+        if not private:
+            if mask is not None and index < len(mask) and not mask[index]:
+                continue
             key = worker._make_layerwise_full_key(group, block_hash_to_str(hashes[index]))
             snapshots.pop(index, None)
         else:
@@ -142,82 +155,6 @@ def _save_entries(worker, request, view, group, hashes, snapshots):
         key = snapshots[partial] = snapshot_key(worker, request, group, partial, tokens)
         entries.append((key, None))
     return entries if worker._is_layerwise_save_owner(group) else []
-
-
-def _save_dsv4_entries(worker, request, view, group, hashes):
-    size = worker.grouped_block_size[group]
-    recurrent = worker.group_uses_align_state[group]
-    # Resident recurrent state is selected by the model after speculative
-    # acceptance. Only scratch-backed recurrent state needs a private snapshot
-    # at every chunk endpoint, including an unaligned or not-yet-hashed one.
-    reused_state = recurrent and group in worker._reused_layers_by_group
-    partial = get_partial_block_index(request.target_token_len, size, len(hashes), not recurrent or reused_state)
-    if reused_state and request.target_token_len > 0:
-        transfer_size = worker.cache_transfer_granularity
-        # Match RequestTracker's snapshot identity in the transfer LCM unit.
-        # A smaller recurrent group can already be aligned/hashed while the
-        # overall chunk still needs an immutable request endpoint snapshot.
-        if request.target_token_len % transfer_size or (
-            request.target_token_len // transfer_size
-            > len(request.block_hashes) * worker.hash_block_size // transfer_size
-        ):
-            partial = (request.target_token_len - 1) // size
-    end = request.target_token_len // size
-    if partial is not None:
-        end = min(end, partial)
-    start = min(request.save_start_token // size, end)
-    view.save_key_block_offset = start
-    view.save_block_keys = [None] * (end - start)
-    view.partial_block_index = partial
-    if not request.can_save or not worker._is_layerwise_save_owner(group):
-        return []
-    ids = request.block_ids_by_group[group]
-    if end > len(ids) or (partial is not None and partial >= len(ids)):
-        raise ValueError("Mooncake offload save exceeds the allocated block table")
-    mask = request.store_masks[group] if request.store_masks is not None else None
-    # RequestTracker describes the private suffix in transfer-LCM units.
-    # A finer group can have hashed complete pages inside that suffix. Saving
-    # those under public keys makes the next step's private-key GET miss.
-    snapshot_start = None
-    if not recurrent:
-        transfer_size = getattr(worker, "cache_transfer_granularity", size)
-        full_transfer_blocks = request.target_token_len // transfer_size
-        hashed_transfer_blocks = len(hashes) * size // transfer_size
-        if request.target_token_len % transfer_size or full_transfer_blocks > hashed_transfer_blocks:
-            snapshot_start = min(full_transfer_blocks, hashed_transfer_blocks) * transfer_size // size
-    entries = []
-    window_start = _continuation_window_start(worker, group, request.target_token_len, size, request)
-    if window_start is None and group in getattr(
-        getattr(worker, "kv_cache_config", None), "dsv4_window_group_ids", ()
-    ) and group in worker._reused_layers_by_group:
-        # Speculative decoding disables window trimming. Keep every live
-        # page needed for continuation, including pages outside the public mask.
-        window_start = 0
-    for index in range(start, end):
-        if ids[index] == 0:
-            continue
-        public_page = mask is None or (index < len(mask) and mask[index])
-        private_window_page = window_start is not None and index >= window_start
-        if window_start is None:
-            if mask is not None and index < len(mask) and not mask[index]:
-                continue
-        elif not public_page and not private_window_page:
-            continue
-        use_private_snapshot = (snapshot_start is not None and index >= snapshot_start) or (
-            private_window_page and not public_page
-        )
-        key = (
-            snapshot_key(worker, request, group, index, request.target_token_len)
-            if use_private_snapshot or index >= len(hashes)
-            else worker._make_layerwise_full_key(group, block_hash_to_str(hashes[index]))
-        )
-        entries.append((key, index - start))
-    if reused_state and request.target_token_len > 0:
-        partial = (request.target_token_len - 1) // size
-        view.partial_block_index = partial
-    if partial is not None and partial < len(ids) and ids[partial] != 0:
-        entries.append((snapshot_key(worker, request, group, partial, request.target_token_len), None))
-    return entries
 
 
 def _open_puts(worker, slots):
@@ -278,7 +215,7 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
         # window for its full pages and let private snapshots cover the tail.
         aligned = cached // worker.cache_transfer_granularity * worker.cache_transfer_granularity
         masks = worker._compute_reachable_load_masks(request, aligned)
-        if cached != aligned and running:
+        if cached != aligned and running and not dsv4:
             masks = None
         for group in worker.cacheable_group_ids:
             view = copy(request)
@@ -295,25 +232,27 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
                 view.load_block_keys[index] = key
                 get_slots.append((view, key, request.block_ids_by_group[group][index], index))
             group_snapshots = snapshots.setdefault(group, previous.get(group, {}).copy())
-            if dsv4 and not worker.group_uses_align_state[group]:
-                saves = _save_dsv4_entries(worker, request, view, group, hashes)
-                if request.can_save and request.layerwise_request_id and not request.is_last_chunk and (
-                    group in worker._reused_layers_by_group
-                ):
-                    pages = {index: key for key, index in entries}
-                    for key, slot in saves:
-                        index = view.partial_block_index if slot is None else view.save_key_block_offset + slot
-                        pages[index] = key
-                    ids = request.block_ids_by_group[group]
-                    first = _continuation_window_start(
-                        worker, group, request.target_token_len, worker.grouped_block_size[group], request
-                    )
-                    pending[(request.req_id, request.layerwise_request_id, group)] = (
-                        request.target_token_len,
-                        {index: key for index, key in pages.items() if (first or 0) <= index < len(ids) and ids[index]},
-                    )
-            else:
-                saves = _save_entries(worker, request, view, group, hashes, group_snapshots)
+            saves = _save_entries(worker, request, view, group, hashes, group_snapshots, dsv4=dsv4)
+            if (
+                dsv4
+                and not worker.group_uses_align_state[group]
+                and request.can_save
+                and request.layerwise_request_id
+                and not request.is_last_chunk
+                and group in worker._reused_layers_by_group
+            ):
+                pages = {index: key for key, index in entries}
+                for key, slot in saves:
+                    index = view.partial_block_index if slot is None else view.save_key_block_offset + slot
+                    pages[index] = key
+                ids = request.block_ids_by_group[group]
+                first = _continuation_window_start(
+                    worker, group, request.target_token_len, worker.grouped_block_size[group], request
+                )
+                pending[(request.req_id, request.layerwise_request_id, group)] = (
+                    request.target_token_len,
+                    {index: key for index, key in pages.items() if (first or 0) <= index < len(ids) and ids[index]},
+                )
             put_slots.extend((view, key, slot, sum(worker.group_block_len[group])) for key, slot in saves)
             groups[group].append(view)
     try:
