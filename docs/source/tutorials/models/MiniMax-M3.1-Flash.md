@@ -1478,7 +1478,7 @@ The 1P1D topology uses one Prefill service with `DP1 × TP4 × PP2` on one host 
 
     **1. Prefill node**
 
-    Save as `run_prefill.sh` alongside `mooncake.json`.
+    Save as `run_prefill.sh` alongside `mooncake.json`. Like the A3 Prefill script in [Section 5.3](#53-pd-disaggregation-1p1d), this script selects CANN MegaMoE (`enable_fused_mc2=2`) and requires `cann_ops_transformer` in the Prefill environment. Apply the same 4K-input overrides from that section when serving 4K inputs.
 
     ```bash
     #!/usr/bin/env bash
@@ -1490,15 +1490,17 @@ The 1P1D topology uses one Prefill service with `DP1 × TP4 × PP2` on one host 
     NIC_NAME="<CURRENT_NODE_NIC>"
     SERVICE_PORT=19100
     KV_PORT=24000
-    MAX_NUM_SEQS=8
+    MAX_NUM_SEQS=16
     MAX_MODEL_LEN=133000
-    MAX_BATCHED_TOKENS=8192
-    GPU_MEMORY_UTILIZATION=0.85
+    MAX_BATCHED_TOKENS=32768
+    MAX_SCHEDULED_TOKENS=32768
+    LONG_PREFILL_TOKEN_THRESHOLD=32768
+    GPU_MEMORY_UTILIZATION=0.86
 
     # Fixed runtime configuration.
     export VLLM_PP_LAYER_PARTITION=15,15,15,15
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export HCCL_BUFFSIZE=512
+    export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP="$LOCAL_IP"
     unset HCCL_INTRA_ROCE_ENABLE
     export HCCL_OP_EXPANSION_MODE=AIV
@@ -1543,6 +1545,7 @@ The 1P1D topology uses one Prefill service with `DP1 × TP4 × PP2` on one host 
         --max-model-len "$MAX_MODEL_LEN" \
         --max-num-seqs "$MAX_NUM_SEQS" \
         --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
+        --max-num-scheduled-tokens "$MAX_SCHEDULED_TOKENS" \
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --block-size 128 \
         --kv-cache-dtype bfloat16 \
@@ -1553,14 +1556,14 @@ The 1P1D topology uses one Prefill service with `DP1 × TP4 × PP2` on one host 
         --reasoning-parser minimax_m3 \
         --data-parallel-size 1 \
         --enforce-eager \
-        --long-prefill-token-threshold 2048 \
+        --long-prefill-token-threshold "$LONG_PREFILL_TOKEN_THRESHOLD" \
         --additional-config '{
             "enable_cpu_binding":true,
-            "multistream_overlap_shared_expert":true,
+            "multistream_overlap_shared_expert":false,
             "enable_shared_expert_dp":true,
             "weight_nz_mode":1,
             "enable_flashcomm1":true,
-            "enable_fused_mc2":0
+            "enable_fused_mc2":2
         }' \
         --kv-transfer-config '{
             "kv_connector": "MultiConnector",
