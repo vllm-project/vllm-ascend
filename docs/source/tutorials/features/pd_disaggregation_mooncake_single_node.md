@@ -47,7 +47,7 @@ For disjoint P/D device assignments and the interaction between
     for i in {0..7}; do hccn_tool -i $i -ip -g;done
     ```
 
-4. Cross-Node PING Test
+4. (Optional) Cross-Node PING Test (skip for single-node deployment)
 
     ```bash
     # Execute on the target node (replace 'x.x.x.x' with actual npu ip address).
@@ -245,7 +245,7 @@ python load_balance_proxy_server_example.py \
     --host 192.0.0.1 \
     --port 8080 \
     --prefiller-hosts 192.0.0.1 \
-    --prefiller-port 13700 \
+    --prefiller-ports 13700 \
     --decoder-hosts 192.0.0.1 \
     --decoder-ports 13701
 ```
@@ -253,7 +253,7 @@ python load_balance_proxy_server_example.py \
 |Parameter  | Meaning |
 | --- | --- |
 | --port | Proxy port |
-| --prefiller-port | All prefiller ports |
+| --prefiller-ports | All prefiller ports |
 | --decoder-ports | All decoder ports |
 
 ## Verification
@@ -302,7 +302,7 @@ curl http://192.0.0.1:8080/v1/chat/completions \
         "messages": [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
+                {"type": "image_url", "image_url": {"url": "https://example.com/qwen.png"}},
                 {"type": "text", "text": "What is the text in the illustration?"}
             ]}
             ],

@@ -1378,7 +1378,7 @@ models = [
         type=VLLMCustomAPIChatStream,
         abbr='vllm-api-stream-chat',
         path="/root/.cache/ds_r1",
-        model="dsr1",
+        model="ds_r1",
         request_rate = 14,
         retry = 2,
         host_ip = "192.0.0.1", # Proxy service host IP
@@ -1414,7 +1414,7 @@ Since the computation of some NPU operators requires several rounds of warm-up t
 Check service health using the proxy server endpoint.
 
 ```shell
-curl http://192.0.0.1:8080/v1/completions \
+curl http://192.0.0.1:1999/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "ds_r1",
