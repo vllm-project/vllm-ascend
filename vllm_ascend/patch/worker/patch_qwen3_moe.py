@@ -2,10 +2,6 @@ import torch
 
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeDecoderLayer
 
-from vllm_ascend.model_executor.fusion.kernels.fused_norm_quant import (
-    maybe_fused_norm_quant,
-)
-
 
 def _patched_qwen3_moe_decoder_layer_forward(
     self,
@@ -19,7 +15,7 @@ def _patched_qwen3_moe_decoder_layer_forward(
         hidden_states = self.input_layernorm(hidden_states)
     else:
         hidden_states, residual = self.input_layernorm.forward_fused(
-            self.input_layernorm, hidden_states, residual, self.self_attn.qkv_proj
+            hidden_states, residual, self.self_attn.qkv_proj
         )
 
     hidden_states = self.self_attn(

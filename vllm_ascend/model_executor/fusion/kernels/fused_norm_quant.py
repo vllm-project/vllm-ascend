@@ -2,9 +2,10 @@ from collections.abc import Callable
 
 import torch
 from vllm.logger import logger
+from vllm import envs
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
-    get_input_quant_key,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -13,16 +14,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.ops.layernorm import AscendRMSNorm
-from vllm_ascend.ops.linear import AscendQKVParallelLinear
-from vllm_ascend.utils import enable_custom_op
+
 
 
 def _add_rms_norm_quant(
-    norm: AscendRMSNorm,
+    norm: torch.nn.Module,
     hidden_states: torch.Tensor,
     residual: torch.Tensor,
-    linear: AscendQKVParallelLinear,
+    linear: LinearBase,
 ):
     
     output = torch.ops.npu.npu_add_rms_norm_quant(
@@ -46,27 +45,24 @@ def _add_rms_norm_quant(
     ), out1
 
 
-_FUSED_NORM_QUANT: dict[tuple[type, QuantKey], Callable] = {}
+_FUSED_NORM_QUANT: dict[tuple[str, QuantKey], Callable] = {}
 
 
-ascend_compilation_config = get_ascend_config().ascend_compilation_config
-profile = get_current_hardware_profile()
-
-if ascend_compilation_config.fuse_norm_quant and profile.supports(
+if  get_current_hardware_profile().supports(
     HardwareCapability.GRAPH_NORM_QUANT_FUSION
 ):
-    if enable_custom_op():
-        _FUSED_NORM_QUANT[(AscendRMSNorm, kInt8StaticTensorSym)] = _add_rms_norm_quant
+    if not envs.VLLM_BATCH_INVARIANT:
+        _FUSED_NORM_QUANT[("AscendRMSNorm", kInt8StaticTensorSym)] = _add_rms_norm_quant
 
 
 def fused_norm_quant(
     key: QuantKey,
-    norm: AscendRMSNorm,
+    norm: torch.nn.Module,
     hidden_states: torch.Tensor,
     residual: torch.Tensor,
-    linear: AscendQKVParallelLinear,
+    linear: LinearBase,
 ) -> tuple[QuantizedActivation, torch.Tensor] | tuple[torch.Tensor, torch.Tensor]:
-    registry_key = (type(norm), key)
+    registry_key = ((type(norm).__name__), key)
     producer = _FUSED_NORM_QUANT.get(registry_key)
     if producer is not None:
         return producer(norm, hidden_states, residual, linear)

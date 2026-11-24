@@ -27,9 +27,9 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.model_executor.fusion.kernels.fused_norm_quant import fused_norm_quant
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.ops.layernorm import AscendRMSNorm
 from vllm_ascend.ops.linear import AscendQKVParallelLinear
 from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.ascend_config import get_ascend_config
 
 # Scanning quant_description is O(number of quantized tensors) and every
 # RMSNorm used to redo it. The answer is a property of the checkpoint, so
@@ -112,19 +112,21 @@ class AscendRMSNorm(RMSNorm):
         return x
 
     def forward_fused(
-        norm: AscendRMSNorm,
+        self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
         linear: AscendQKVParallelLinear,
     ) -> tuple[QuantizedActivation, torch.Tensor] | tuple[torch.Tensor, torch.Tensor]:
         
         if hidden_states.dtype not in (torch.bfloat16, torch.float16):
-            return norm(hidden_states, residual)
+            return self.forward_oot(hidden_states, residual)
+
+        ascend_compilation_config = get_ascend_config().ascend_compilation_config
 
         key = get_input_quant_key(linear)
-        if key is not None:
-            return fused_norm_quant(key, norm, hidden_states, residual, linear)
-        return norm(hidden_states, residual)
+        if key is not None and ascend_compilation_config.fuse_norm_quant:
+            return fused_norm_quant(key, self, hidden_states, residual, linear)
+        return self.forward_oot(hidden_states, residual)
 
 
 class AscendGemmaRMSNorm(GemmaRMSNorm):
