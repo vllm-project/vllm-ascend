@@ -68,20 +68,13 @@ class AscendDeepseekV41ForCausalLM(
     language_model_cls = AscendDeepseekV41LLMForCausalLM
 
     def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
-        # AscendMMEncoderAttention dispatches to FIA, irrespective of the
-        # upstream backend marker. CUDA's TORCH_SDPA/FLASHINFER rejection
-        # therefore does not describe the operator captured on NPU.
-        def pad_cu_seqlens(dst: torch.Tensor, src: torch.Tensor) -> None:
-            n = min(src.shape[0], dst.shape[0])
-            dst[:n].copy_(src[:n])
-            if n < dst.shape[0]:
-                dst[n:] = src[-1] if n else 0
-
+        # With the Ascend attention custom op enabled, forward_oot uses FIA
+        # even when the upstream backend marker is TORCH_SDPA. The upstream
+        # CUDA backend check would reject this FIA path.
         return EncoderCudaGraphConfig(
             modalities=["image"],
             buffer_keys=["patches", "vit_cos", "vit_sin", "cu_seqlens", "max_seqlen", "merge_idx", "merge_mask"],
             out_hidden_size=self.config.hidden_size,
-            padding_logics={"cu_seqlens": pad_cu_seqlens},
         )
 
     @property
