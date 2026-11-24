@@ -276,8 +276,8 @@ The control flow is:
 
 The repository contains runnable tests for draft weight transfer:
 
-- [`test_qwen_hccl.py`](../../../../tests/e2e/pull_request/two_card/rlhf/weight_transfer/hccl/test_qwen_hccl.py)
-- [`test_deepseek_hccl.py`](../../../../tests/e2e/pull_request/two_card/rlhf/weight_transfer/hccl/test_deepseek_hccl.py)
+- [`test_qwen_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/4194b1810a2ae90407a5c523d72f6ca5f9365940/tests/e2e/pull_request/two_card/rlhf/weight_transfer/hccl/test_qwen_hccl.py)
+- [`test_deepseek_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/4194b1810a2ae90407a5c523d72f6ca5f9365940/tests/e2e/pull_request/two_card/rlhf/weight_transfer/hccl/test_deepseek_hccl.py)
 
 ### Pause and resume generation
 
