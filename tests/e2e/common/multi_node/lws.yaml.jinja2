@@ -184,7 +184,7 @@ spec:
 {% if tests | default('') %}
               - name: MULTI_NODE_TEST_PATH
                 value: {{ tests | tojson }}
-{% endif %}                
+{% endif %}
               - name: TEST_FREQUENCY
                 value: "{{ test_frequency | default("nightly") }}"
               - name: LOG_PREFIX
