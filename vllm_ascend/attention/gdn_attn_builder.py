@@ -27,6 +27,7 @@ from vllm.v1.attention.backends.gdn_attn import (
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     PAD_SLOT_ID,
+    mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
@@ -38,9 +39,6 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_offsets,
     prepare_final_chunk_indices,
     prepare_update_chunk_offsets,
-)
-from vllm_ascend.ops.triton.mamba.align_block_table import (
-    mamba_get_block_table_tensor,
 )
 from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
 
@@ -1441,7 +1439,7 @@ class AscendGDNFusedAttentionBackend(AscendGDNAttentionBackend):
     def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder]:
         # Import lazily to avoid the gdn <-> builder import cycle at module
         # initialization.  The probe result is cached by the attention class.
-        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+        from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 
         if get_pcp_group().world_size == 1 and AscendGatedDeltaNetAttention._supports_host_metadata_prefill():
             return AscendGDNHostMetadataBuilder

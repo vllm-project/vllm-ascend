@@ -76,6 +76,10 @@ class TestRenderTemplate:
         out = ai.render_template("{{A}}", {"A": "{{B}}", "B": "boom"})
         assert out == "{{B}}"
 
+    def test_int_values_are_stringified(self):
+        out = ai.render_template("round {{ROUND}}/{{MAX}}", {"ROUND": 2, "MAX": 5})
+        assert out == "round 2/5"
+
     def test_unknown_placeholder_left_visible(self):
         out = ai.render_template("keep {{TYPO}} here", {})
         assert out == "keep {{TYPO}} here"
