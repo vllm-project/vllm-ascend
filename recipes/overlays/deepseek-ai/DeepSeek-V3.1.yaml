@@ -29,9 +29,10 @@ variants:
       - deepseek_v3
       - '--seed'
       - '1024'
+      - '--additional-config'
+      - '{"scheduler_config":{"enable_balance_scheduling":true}}'
     extra_env:
       HCCL_OP_EXPANSION_MODE: AIV
-      VLLM_ASCEND_BALANCE_SCHEDULING: '1'
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     hardware_overrides:
       ascend_910c:
