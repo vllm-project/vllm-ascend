@@ -48,6 +48,10 @@ permissions:
 jobs:
   select-full-tests:
     if: github.event_name == 'workflow_dispatch'
+    # resolve_latest_release_branch.py queries the GitHub search API for PRs,
+    # which needs issues: read.
+    permissions:
+      issues: read
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint

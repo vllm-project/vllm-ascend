@@ -391,6 +391,10 @@ jobs:
         needs.pre-commit.result == 'success' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise')
       }}
+    # test_selector.py fetches the PR diff via the GitHub API, which needs
+    # pull-requests: read.
+    permissions:
+      pull-requests: read
     runs-on: linux-amd64-cpu-4-hk
     outputs:
       coverage_paths: ${{ steps.export-paths.outputs.coverage_paths }}
