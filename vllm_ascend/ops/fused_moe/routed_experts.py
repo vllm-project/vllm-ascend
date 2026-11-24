@@ -107,10 +107,13 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
 
         # Keep expert-aware loaders attached for later online weight updates.
+        enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         for name in ("w13_weight", "w2_weight"):
             weight = getattr(layer, name)
             transposed = self._maybe_pad_weight(weight.data).transpose(1, 2).contiguous()
-            if weight.shape == transposed.shape:
+            if not enable_fused_mc2 or weight.shape == transposed.shape:
+                # ND weights are read in place by captured graphs, so keep the
+                # parameter's storage across direct reloads.
                 replace_parameter(layer, name, transposed)
             else:
                 # NZ packing reads the NPU storage's base shape. Reusing the
@@ -124,7 +127,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # ND format (or other formats), remove this specific 'if' check and the forced
         # npu_format_cast. At that point, the operator should be able to handle weights
         # in their native format without explicit casting here.
-        enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
             use_megamoe = use_cann_megamoe(get_current_vllm_config())
             if not use_megamoe:

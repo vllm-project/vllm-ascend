@@ -291,6 +291,39 @@ def test_process_weights_after_loading_uses_version_specific_layout(
     assert layer.w2_weight.weight_loader is w2_loader
 
 
+def test_process_weights_after_loading_keeps_nd_storage_for_captured_graphs(
+    monkeypatch,
+):
+    """A direct reload must not move ND weights to new storage.
+
+    Captured ACLGraphs keep the addresses of the weights they read, so the
+    transposed ND weights have to stay in the parameter's own storage.
+    """
+    method = _build_unquantized_method()
+    layer = _build_weight_layer()
+    ascend_config = SimpleNamespace(enable_fused_mc2=False)
+
+    monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: ascend_config)
+    monkeypatch.setattr(routed_experts_module, "maybe_trans_nz", lambda weight: weight)
+    upstream_method_base = AscendUnquantizedFusedMoEMethod.__mro__[2]
+    monkeypatch.setattr(
+        upstream_method_base,
+        "process_weights_after_loading",
+        lambda self, layer: None,
+        raising=False,
+    )
+
+    w13_ptr = layer.w13_weight.data_ptr()
+    w2_ptr = layer.w2_weight.data_ptr()
+
+    method.process_weights_after_loading(layer)
+
+    assert layer.w13_weight.shape == (2, 4, 3)
+    assert layer.w2_weight.shape == (2, 3, 4)
+    assert layer.w13_weight.data_ptr() == w13_ptr
+    assert layer.w2_weight.data_ptr() == w2_ptr
+
+
 def test_process_weights_after_loading_splits_lists_for_dynamic_eplb(monkeypatch):
     method = _build_unquantized_method(dynamic_eplb=True)
     layer = _build_weight_layer()
