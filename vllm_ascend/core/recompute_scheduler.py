@@ -47,6 +47,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     DyntraLBPolicyMixin,
     print_scheduler_summary,
 )
+from vllm_ascend.core.pd_recompute import PD_FAIL_ON_RECOMPUTE
 from vllm_ascend.core.scheduler_output import make_cached_request_data
 from vllm_ascend.utils import get_ascend_config, vllm_version_is
 
@@ -89,6 +90,7 @@ class RecomputeSchedulerConfig(SchedulerConfig):
 class RecomputeReqInfo:
     request_id: str
     client_index: int
+    fail_on_recompute: bool = False
 
 
 @dataclass
@@ -188,10 +190,12 @@ class RecomputeScheduler(Scheduler):
         return True
 
     def _finish_recomputed_request(self, request: Request) -> None:
+        params = request.sampling_params
         self._recomputed_reqs.append(
             RecomputeReqInfo(
                 request_id=request.request_id,
                 client_index=request.client_index,
+                fail_on_recompute=bool(params and (params.extra_args or {}).get(PD_FAIL_ON_RECOMPUTE)),
             )
         )
         finished_reqs = self.finish_requests(
@@ -1084,7 +1088,7 @@ class RecomputeScheduler(Scheduler):
                 EngineCoreOutput(
                     request_id=req_info.request_id,
                     new_token_ids=[],
-                    finish_reason=FinishReason.STOP,
+                    finish_reason=FinishReason.ERROR if req_info.fail_on_recompute else FinishReason.STOP,
                     stop_reason="recomputed",
                 )
             )

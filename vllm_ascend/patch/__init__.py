@@ -275,6 +275,17 @@
 #    Future Plan:
 #       Remove this check when vLLM 0.33.0 support ends.
 #
+# ** File: platform/patch_pd_recompute.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Targets: AsyncLLM.generate and the Responses streaming error serializer.
+# Why: native PD APIs must report preemption before partial tool/structured
+# output is interpreted as a successful response. Only opted-in requests are
+# inspected; ordinary generation keeps the original iterator.
+# Related upstream PR: none yet; this adapts Ascend's existing recomputed stop
+# reason. No resumption, token replay, or tool-loop changes are introduced.
+# Future plan: remove when upstream exposes request-level preemption errors
+# before native serialization and accepts Responses error events natively.
+#
 # ** 9. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.find_longest_cache_hit_per_group`

@@ -7,6 +7,21 @@ The vllm version must be the same as the main branch of vllm-ascend, for example
 
 ## run
 
+### Native API forwarding in the load-balancing proxy
+
+`load_balance_proxy_server_example.py` also forwards `/v1/messages` and
+`/v1/responses` when both backends expose those native APIs. Use matching Ascend
+backends with the native preemption error adapter. Responses requests must supply
+explicit input history; `background` and `previous_response_id` are unsupported.
+
+Each native request uses one prefill attempt and one decode attempt. The proxy
+preserves native JSON/SSE fields and updates cached-token usage from the
+prefiller. If the decode scheduler preempts a request, the request ends with an
+error, including when some output has already been streamed. The proxy does not
+replay tools, reconstruct thinking state, or continue a partial assistant turn.
+The caller decides whether retrying the original request is safe. Chat and
+Completions keep their existing retry behavior.
+
 ### 1.Run `prefill` Node
 
 ```shell

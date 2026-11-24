@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.request import RequestStatus
 
 from tests.ut.core.test_dyntra_lb_scheduler import create_dyntra_lb_scheduler, make_dyntra_test_config
@@ -72,6 +72,7 @@ def test_preempt_offloads_before_upstream_releases_blocks():
         request_id="req-1",
         client_index=0,
         num_computed_tokens=17,
+        sampling_params=None,
     )
 
     def assert_offload_completed_before_release(*args, **kwargs):
@@ -108,6 +109,7 @@ def test_preempt_without_offload_hook_sends_request_back_to_p(connector):
         request_id="req-1",
         client_index=2,
         num_computed_tokens=17,
+        sampling_params=None,
     )
     scheduler.finish_requests = MagicMock(return_value=[request])
 
@@ -139,6 +141,7 @@ def test_preempt_offload_failure_sends_request_back_to_p():
         request_id="req-1",
         client_index=0,
         num_computed_tokens=17,
+        sampling_params=None,
     )
     scheduler.finish_requests = MagicMock(return_value=[request])
 
@@ -166,6 +169,7 @@ def test_preempt_offload_failure_aborts_under_oproj_tp(_oproj_tp_config):
         request_id="req-1",
         client_index=0,
         num_computed_tokens=17,
+        sampling_params=None,
     )
     scheduler.finish_requests = MagicMock(return_value=[request])
 
@@ -214,6 +218,7 @@ def test_preempt_without_computed_kv_still_uses_recompute_fallback():
         request_id="req-1",
         client_index=0,
         num_computed_tokens=0,
+        sampling_params=None,
     )
 
     scheduler.finish_requests = MagicMock(return_value=[request])
@@ -242,6 +247,7 @@ def test_preempt_offload_exception_uses_recompute_fallback():
         request_id="req-1",
         client_index=0,
         num_computed_tokens=17,
+        sampling_params=None,
     )
     scheduler.finish_requests = MagicMock(return_value=[request])
 
@@ -257,9 +263,10 @@ def test_preempt_offload_exception_uses_recompute_fallback():
     scheduler.finish_requests.assert_called_once()
 
 
-def test_recomputed_output_precedes_regular_output():
+@pytest.mark.parametrize("fail_on_recompute", [False, True])
+def test_recomputed_output_precedes_regular_output(fail_on_recompute):
     scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
-    scheduler_output = SimpleNamespace(recomputed_reqs=[RecomputeReqInfo("recomputed-request", 0)])
+    scheduler_output = SimpleNamespace(recomputed_reqs=[RecomputeReqInfo("recomputed-request", 0, fail_on_recompute)])
     regular_output = EngineCoreOutput(
         request_id="regular-request",
         new_token_ids=[1],
@@ -281,6 +288,7 @@ def test_recomputed_output_precedes_regular_output():
         "regular-request",
     ]
     assert outputs[0].outputs[0].stop_reason == "recomputed"
+    assert outputs[0].outputs[0].finish_reason == (FinishReason.ERROR if fail_on_recompute else FinishReason.STOP)
 
 
 def test_recompute_scheduler_variants_keep_offload_preemption():
@@ -521,3 +529,17 @@ def test_main_encoder_allocation_uses_native_helper(monkeypatch):
     native_allocate.assert_called_once_with(request, [1], [2])
     scheduler.encoder_cache_manager.allocate.assert_not_called()
     scheduler.ec_connector.update_state_after_alloc.assert_not_called()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_native_preemption_records_error_without_replay_metadata(enabled):
+    scheduler = _make_preempt_scheduler()
+    request = SimpleNamespace(
+        request_id="native",
+        client_index=1,
+        sampling_params=SimpleNamespace(extra_args={"ascend_pd_fail_on_recompute": enabled}),
+    )
+    scheduler.finish_requests = MagicMock(return_value=[request])
+    scheduler._finish_recomputed_request(request)
+    assert scheduler._recomputed_reqs == [RecomputeReqInfo("native", 1, enabled)]
+    scheduler.finish_requests.assert_called_once_with("native", RequestStatus.FINISHED_ABORTED)

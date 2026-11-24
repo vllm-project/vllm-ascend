@@ -12,10 +12,16 @@
 # Features:
 # - Load balances requests to multiple prefiller and decoder servers.
 # - Supports OpenAI-compatible /v1/completions and /v1/chat/completions endpoints.
+# - Forwards native Anthropic /v1/messages and OpenAI /v1/responses APIs.
+# - Responses requests must be synchronous and supply their own conversation
+#   history; background and previous_response_id are not supported.
+# - Native APIs need matching Ascend backends. Preempted requests end with an
+#   error; the proxy does not replay native requests or resume partial output.
 # - Streams responses from backend servers to clients.
 #
 # Prerequisites:
 # - Python 3.10+
+# - Both backends must expose any Messages/Responses API used through the proxy.
 # - Install dependencies:
 #     pip install fastapi<0.124.0 httpx uvicorn vllm
 #
@@ -127,7 +133,7 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from multiprocessing.managers import BaseManager
@@ -135,6 +141,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import httpx
+from anyio import CancelScope
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
@@ -878,6 +885,99 @@ def build_prefill_request(req_data: dict) -> dict:
     return payload
 
 
+def _api_kind(api: str) -> str:
+    path = "/" + api.strip("/")
+    if path.endswith("/responses"):
+        return "responses"
+    if path.endswith("/messages"):
+        return "messages"
+    return "openai"
+
+
+def build_prefill_request_for_api(api: str, req_data: dict) -> dict:
+    if _api_kind(api) != "responses":
+        return build_prefill_request(req_data)
+    payload = req_data.copy()
+    payload["kv_transfer_params"] = {
+        "do_remote_decode": True,
+        "do_remote_prefill": False,
+        "remote_engine_id": None,
+        "remote_block_ids": None,
+        "remote_host": None,
+        "remote_port": None,
+    }
+    payload["stream"] = False
+    payload["max_output_tokens"] = 1
+    payload.pop("max_tokens", None)
+    payload.pop("min_tokens", None)
+    payload.pop("stream_options", None)
+    payload.pop("max_completion_tokens", None)
+    return payload
+
+
+def extract_cached_tokens_for_api(api: str, response_json: dict) -> int | None:
+    kind = _api_kind(api)
+    usage = response_json.get("usage") or {}
+    if kind == "messages":
+        cached = usage.get("cache_read_input_tokens")
+        return cached if isinstance(cached, int) else 0
+    if kind == "responses":
+        details = usage.get("input_tokens_details") or {}
+        cached = details.get("cached_tokens")
+        return cached if isinstance(cached, int) else 0
+    return extract_cached_tokens(response_json)
+
+
+def write_cached_tokens_for_api(api: str, chunk_json: dict, cached_tokens: int | None) -> bool:
+    kind = _api_kind(api)
+    if kind == "openai":
+        return update_cached_tokens_in_chunk(chunk_json, cached_tokens)
+    if cached_tokens is None:
+        return False
+    usage = chunk_json.get("usage")
+    if not isinstance(usage, dict):
+        response_obj = chunk_json.get("response" if kind == "responses" else "message")
+        usage = response_obj.get("usage") if isinstance(response_obj, dict) else None
+    if not isinstance(usage, dict):
+        return False
+    if kind == "messages":
+        input_tokens = usage.get("input_tokens")
+        previous_cached = usage.get("cache_read_input_tokens", 0)
+        if isinstance(input_tokens, int) and isinstance(previous_cached, int):
+            # Messages input_tokens excludes cache reads; preserve total input.
+            usage["input_tokens"] = input_tokens + previous_cached - cached_tokens
+        usage["cache_read_input_tokens"] = cached_tokens
+        return True
+    details = usage.get("input_tokens_details")
+    if not isinstance(details, dict):
+        details = {}
+    details["cached_tokens"] = cached_tokens
+    cached_per_turn = details.get("cached_tokens_per_turn")
+    # An empty list means per-turn accounting is unavailable; preserve it.
+    if isinstance(cached_per_turn, list) and cached_per_turn:
+        # Only the first turn is prefetched by P. Later tool turns run on D.
+        details["cached_tokens_per_turn"] = [cached_tokens, *cached_per_turn[1:]]
+        details["cached_tokens"] = sum(details["cached_tokens_per_turn"])
+    usage["input_tokens_details"] = details
+    return True
+
+
+def patch_cached_tokens_in_sse_frame(api: str, frame: bytes, cached_tokens: int | None) -> bytes:
+    lines = frame.splitlines(keepends=True)
+    data_indices = [index for index, line in enumerate(lines) if line.startswith(b"data:")]
+    payload = b"\n".join(lines[index][5:].strip() for index in data_indices)
+    try:
+        obj = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return frame
+    if not isinstance(obj, dict) or not write_cached_tokens_for_api(api, obj, cached_tokens):
+        return frame
+    first = data_indices[0]
+    ending = lines[first][len(lines[first].rstrip(b"\r\n")) :]
+    lines[first] = b"data: " + json.dumps(obj).encode("utf-8") + ending
+    return b"".join(line for index, line in enumerate(lines) if index == first or index not in data_indices)
+
+
 async def send_request_to_service(
     client: httpx.AsyncClient,
     endpoint: str,
@@ -886,9 +986,9 @@ async def send_request_to_service(
     max_retries: int = 3,
     base_delay: float = 0.2,
 ):
-    req_data = build_prefill_request(req_data)
+    req_data = build_prefill_request_for_api(endpoint, req_data)
     headers = auth_headers(request_id)
-    max_attempts = max(1, max_retries)
+    max_attempts = 1 if _api_kind(endpoint) != "openai" else max(1, max_retries)
     for attempt in range(1, max_attempts + 1):
         try:
             response = await client.post(endpoint, json=req_data, headers=headers)
@@ -914,7 +1014,7 @@ async def stream_service_response(
     base_delay: float = 0.2,
 ):
     headers = auth_headers(request_id)
-    max_attempts = max(1, max_retries)
+    max_attempts = 1 if _api_kind(endpoint) != "openai" else max(1, max_retries)
     req_data = req_data.copy()
     if not req_data.get("stream", False):
         req_data.pop("stream_options", None)
@@ -938,6 +1038,8 @@ async def stream_service_response(
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except httpx.RequestError as exc:
+            if _api_kind(endpoint) != "openai":
+                raise
             if first_chunk_sent:
                 logger.error("Streaming to client interrupted after response started: %s", exc)
                 return
@@ -945,6 +1047,8 @@ async def stream_service_response(
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except Exception as exc:
+            if _api_kind(endpoint) != "openai":
+                raise
             if first_chunk_sent:
                 logger.error("Streaming to client interrupted after response started: %s", exc)
                 return
@@ -1022,7 +1126,7 @@ async def assign_instances(
     kv_transfer_params = response_json.get("kv_transfer_params", {})
     if kv_transfer_params:
         req_data["kv_transfer_params"] = kv_transfer_params
-    prefiller_cached_tokens = extract_cached_tokens(response_json)
+    prefiller_cached_tokens = extract_cached_tokens_for_api(api, response_json)
 
     decoder_key = None
     try:
@@ -1078,12 +1182,112 @@ async def _replay_first_chunk(first_chunk: bytes, gen: Any):
         yield chunk
 
 
+class NativeStreamingResponse(StreamingResponse):
+    """Close the pre-opened backend even when ASGI sending is cancelled."""
+
+    def __init__(self, first_chunk, chunks):
+        self.chunks = chunks
+        super().__init__(_replay_first_chunk(first_chunk, chunks), media_type="text/event-stream")
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with CancelScope(shield=True):
+                await self.body_iterator.aclose()
+                await self.chunks.aclose()
+
+
+async def _handle_native_decode(api: str, req_data: dict, info: InstanceInfo) -> Response:
+    """Forward one native response; preemption is terminal and never replayed."""
+    runtime = get_runtime()
+    streaming = bool(req_data.get("stream", False))
+    payload = {
+        **req_data,
+        "vllm_xargs": {**(req_data.get("vllm_xargs") or {}), "ascend_pd_fail_on_recompute": True},
+    }
+
+    async def chunks():
+        released_kv = False
+        try:
+            client = await runtime.get_client(ServerRole.DECODE, info.decoder_key)
+            async with aclosing(
+                stream_service_response(client, api, payload, info.request_id, max_retries=1)
+            ) as upstream:
+                buffer = bytearray()
+                async for chunk in upstream:
+                    if chunk and not released_kv:
+                        await runtime.schedule("release_prefill_kv", info.prefiller_key, info.prefiller_score)
+                        released_kv = True
+                    buffer += chunk
+                    if not streaming:
+                        continue
+                    while True:
+                        boundaries = [
+                            (offset, len(separator))
+                            for separator in (b"\n\n", b"\r\n\r\n", b"\r\r")
+                            if (offset := buffer.find(separator)) >= 0
+                        ]
+                        if not boundaries:
+                            break
+                        offset, size = min(boundaries)
+                        frame = bytes(buffer[: offset + size])
+                        del buffer[: offset + size]
+                        yield patch_cached_tokens_in_sse_frame(api, frame, info.prefiller_cached_tokens)
+                if streaming:
+                    if buffer:
+                        yield bytes(buffer)
+                else:
+                    obj = json.loads(buffer)
+                    if write_cached_tokens_for_api(api, obj, info.prefiller_cached_tokens):
+                        yield encode_response_chunk(obj, False)
+                    else:
+                        yield bytes(buffer)
+        finally:
+            with CancelScope(shield=True):
+                await _finish_instance(runtime, info, release_prefill_kv=not released_kv)
+
+    output = chunks()
+    try:
+        if not streaming:
+            async with aclosing(output):
+                return Response(b"".join([chunk async for chunk in output]), media_type="application/json")
+        first_chunk = await anext(output, b"")
+    except (httpx.RequestError, json.JSONDecodeError) as exc:
+        logger.warning("Native decode failed for %s: %s", info.request_id, exc)
+        return JSONResponse({"error": {"message": "The decode backend did not complete the request."}}, status_code=502)
+    return NativeStreamingResponse(first_chunk, output)
+
+
 async def handle_completions_impl(api: str, request: Request):
     runtime = get_runtime()
     args = get_global_args()
     request_released = False
     try:
         req_data = await request.json()
+        if _api_kind(api) == "responses":
+            # Reject before scheduling: P must finish before D starts, and
+            # response history is local to each backend instance.
+            unsupported = None
+            if req_data.get("background"):
+                unsupported = "background"
+            elif req_data.get("previous_response_id") is not None:
+                unsupported = "previous_response_id"
+            if unsupported is not None:
+                return JSONResponse(
+                    {
+                        "error": {
+                            "message": (
+                                f"The PD proxy does not support {unsupported}. "
+                                "Use synchronous requests with explicit input history."
+                            ),
+                            "type": "invalid_request_error",
+                            "param": unsupported,
+                            "code": "unsupported_parameter",
+                        }
+                    },
+                    status_code=400,
+                )
         if args.enable_prefill_affinity and (session_id := request.headers.get("X-Session-Id")):
             req_data["user"] = session_id
         if request_id := request.headers.get("X-Request-Id"):
@@ -1091,6 +1295,9 @@ async def handle_completions_impl(api: str, request: Request):
         req_body = await request.body()
         request_length = len(req_body)
         instance_info = await assign_instances(api, req_data, request_length, is_initial_request=True)
+        if _api_kind(api) != "openai":
+            request_released = True  # Native forwarding owns cleanup from this point.
+            return await _handle_native_decode(api, req_data, instance_info)
         stream_flag = bool(req_data.get("stream", False))
         chat_flag = "messages" in req_data
 
@@ -1361,6 +1568,18 @@ async def handle_completions(request: Request):
 @with_cancellation
 async def handle_chat_completions(request: Request):
     return await handle_completions_impl("/chat/completions", request)
+
+
+@app.post("/v1/messages")
+@with_cancellation
+async def handle_anthropic_messages(request: Request):
+    return await handle_completions_impl("/messages", request)
+
+
+@app.post("/v1/responses")
+@with_cancellation
+async def handle_openai_responses(request: Request):
+    return await handle_completions_impl("/responses", request)
 
 
 async def handle_models_impl():
