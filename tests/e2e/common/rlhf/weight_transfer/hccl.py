@@ -76,20 +76,8 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
     ) as (server, reference, dummy_signature):
         client = server.get_client()
 
-        from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
-
-        register_engines_once()
-        engine = WeightTransferTrainerFactory.trainer_init(
-            HCCLTrainerInitInfo(
-                rank=0,
-                master_address=get_ip(),
-                master_port=get_open_port(),
-                world_size=INFERENCE_WORLD_SIZE + 1,
-                packed=packed,
-                packed_buffer_size_bytes=packed_buffer_size_for(source),
-            ),
-            client=HTTPVLLMWeightSyncClient(base_url=server.url_root, timeout=UPDATE_TIMEOUT),
-            source=source,
+        engine = create_hccl_trainer(
+            HTTPVLLMWeightSyncClient(base_url=server.url_root, timeout=UPDATE_TIMEOUT), source, packed
         )
         signatures = []
         try:
@@ -129,8 +117,8 @@ class WeightUpdateClient(HTTPVLLMWeightSyncClient):
         self._post("start_draft_weight_update" if self.is_draft else "start_weight_update")
 
 
-def create_draft_hccl_trainer(client, source, packed: bool, buffer_source):
-    """Initialize the normal factory engine with a draft-selecting client."""
+def create_hccl_trainer(client, source, packed: bool, buffer_source=None):
+    """Initialize HCCL for either a target or draft synchronization client."""
     from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
 
     register_engines_once()
@@ -141,11 +129,25 @@ def create_draft_hccl_trainer(client, source, packed: bool, buffer_source):
             master_port=get_open_port(),
             world_size=INFERENCE_WORLD_SIZE + 1,
             packed=packed,
-            packed_buffer_size_bytes=packed_buffer_size_for(buffer_source),
+            packed_buffer_size_bytes=packed_buffer_size_for(source if buffer_source is None else buffer_source),
         ),
         client=client,
         source=source,
     )
+
+
+def collect_draft_observation(server, case: WeightUpdateModelCase):
+    """Measure startup and updated models after generation refreshes derived state."""
+    signature = generation_signature(server.get_client(), case.id, prompts=case.prompts)
+    snapshot = snapshot_weight_update_models(server)
+    projections = post_control(server, "collective_rpc", json={"method": "snapshot_draft_context_projections"}).json()[
+        "results"
+    ]
+    return snapshot, {
+        "parameters": parameter_digests(snapshot),
+        "generation": signature,
+        "context_projections": projections,
+    }
 
 
 def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_eager: bool, speculative_case):
@@ -184,15 +186,7 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
             server_port=port,
             env_dict=env_dict,
         ) as server:
-            signature = generation_signature(server.get_client(), case.id, prompts=case.prompts)
-            projections = post_control(
-                server, "collective_rpc", json={"method": "snapshot_draft_context_projections"}
-            ).json()["results"]
-            references[role] = {
-                "parameters": parameter_digests(snapshot_weight_update_models(server)),
-                "generation": signature,
-                "context_projections": projections,
-            }
+            _, references[role] = collect_draft_observation(server, case)
             (tmp_path / f"{role}-reference.json").write_text(json.dumps(references[role], indent=2))
 
     wait_for_free_device_memory(INFERENCE_DEVICE_INDEX, 0.2)
@@ -208,7 +202,7 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
         client = server.get_client()
         sync_client = WeightUpdateClient(server.url_root)
         assert draft_updated.draft_source is not None
-        engine = create_draft_hccl_trainer(sync_client, draft_updated.draft_source, packed, target_updated)
+        engine = create_hccl_trainer(sync_client, draft_updated.draft_source, packed, target_updated)
         try:
             # Reuse HCCL for warmup and all updates; capture graphs before
             # recording the addresses which live updates must preserve.
@@ -239,18 +233,11 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
                 # Failed transfers leave partially updated weights; keep generation paused.
                 engine.send_weights()
                 post_control(server, "resume")
-                after = snapshot_weight_update_models(server)
-                projections = post_control(
-                    server, "collective_rpc", json={"method": "snapshot_draft_context_projections"}
-                ).json()["results"]
-                signature = generation_signature(client, case.id, prompts=case.prompts)
-                observation = {
-                    "parameters": parameter_digests(after),
-                    "generation": signature,
-                    "context_projections": projections,
-                }
+                after, observation = collect_draft_observation(server, case)
                 (tmp_path / f"update-{update_round}-{role}-snapshot.json").write_text(json.dumps(after, indent=2))
-                (tmp_path / f"update-{update_round}-{role}-generation.json").write_text(json.dumps(signature, indent=2))
+                (tmp_path / f"update-{update_round}-{role}-generation.json").write_text(
+                    json.dumps(observation["generation"], indent=2)
+                )
                 results.append((role, observation, parameter_addresses(after)))
         finally:
             engine.shutdown()
