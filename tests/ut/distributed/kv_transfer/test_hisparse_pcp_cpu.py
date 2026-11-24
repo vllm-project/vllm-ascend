@@ -370,7 +370,12 @@ def test_builder_padding_uses_safe_prefill_request_without_forward_ops(
         assert built.req_id_per_token[-1].item() == num_reqs - 1
     if prefill_lens:
         source = torch.zeros(1, 128, 2)
-        cache = NS(view=None, block_table=None, runtime=NS(gather_prefill_cache=lambda *args, **kwargs: source))
+        cache = NS(
+            view=None,
+            block_table=None,
+            runtime=NS(gather_prefill_cache=lambda *args, **kwargs: source),
+            stage_prefill_rows=lambda *args: source,
+        )
         group = NS(cache=lambda index: cache)
         _, table, request_rows = HiSparseMLAIndexGroup.stage_prefill_rows(group, 0, source, built)
         # This lookup used to fail for PCP's [3 decode, 2 prefill, 1 pad] layout.
