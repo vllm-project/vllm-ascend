@@ -1,0 +1,7 @@
+pr: 23079
+entries:
+  - category: dependency
+    text: >-
+      A5 UBX Docker images for Ubuntu 22.04 and openEuler 24.03 now use
+      CANN 9.2.0_20261120181100 instead of 9.2.0_20261113162300.
+    hardware: [A5]
