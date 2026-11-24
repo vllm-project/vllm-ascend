@@ -237,9 +237,9 @@ Before starting the service:
     export VLLM_USE_MODELSCOPE=True
     export HCCL_BUFFSIZE=512
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    sysctl -w vm.swappiness=0
-    sysctl -w kernel.numa_balancing=0
-    sysctl kernel.sched_migration_cost_ns=50000
+    sysctl -w vm.swappiness=0 || true
+    sysctl -w kernel.numa_balancing=0 || true
+    sysctl -w kernel.sched_migration_cost_ns=50000 || true  # no-op on EEVDF (Linux 6.6+), which removed this parameter
     # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
     # To reduce memory fragmentation and avoid out of memory
 
@@ -307,9 +307,9 @@ Before starting the service:
     export HCCL_BUFFSIZE=512
     # To reduce memory fragmentation and avoid out of memory
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    sysctl -w vm.swappiness=0
-    sysctl -w kernel.numa_balancing=0
-    sysctl kernel.sched_migration_cost_ns=50000
+    sysctl -w vm.swappiness=0 || true
+    sysctl -w kernel.numa_balancing=0 || true
+    sysctl -w kernel.sched_migration_cost_ns=50000 || true  # no-op on EEVDF (Linux 6.6+), which removed this parameter
 
     # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8) or a local directory path
     # Ensure the model path matches the directory recorded during download
@@ -372,9 +372,9 @@ Before starting the service:
     export VLLM_USE_MODELSCOPE=True
     export HCCL_BUFFSIZE=512
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    sysctl -w vm.swappiness=0
-    sysctl -w kernel.numa_balancing=0
-    sysctl kernel.sched_migration_cost_ns=50000
+    sysctl -w vm.swappiness=0 || true
+    sysctl -w kernel.numa_balancing=0 || true
+    sysctl -w kernel.sched_migration_cost_ns=50000 || true  # no-op on EEVDF (Linux 6.6+), which removed this parameter
     # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
     # To reduce memory fragmentation and avoid out of memory
 
@@ -486,9 +486,18 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 ```
 
-### 5.2 Prefill-Decode Disaggregation (Atlas 800I A3)
+### 5.2 Prefill-Decode Disaggregation (Atlas 800I A3) {: #52-prefill-decode-disaggregation-atlas-800i-a3 }
 
 PD disaggregation separates Prefill and Decode into different service groups. Prefill groups process large prompt chunks with a large `--max-num-batched-tokens` in eager mode; Decode groups serve token generation with a small `--max-num-batched-tokens`, `FULL_DECODE_ONLY` aclgraph, and the recompute scheduler. A Pull proxy forwards each request to Prefill first and then to Decode, and Decode pulls the KV cache from Prefill through Mooncake.
+
+The launch scripts below tune kernel parameters with `sysctl`. This requires `root` **and** write permission on `/proc/sys` — inside a container, being `root` (`id -u` returning `0`) is not sufficient by default: a non-privileged container mounts `/proc/sys` read-only. Use a privileged container (`--privileged`), or configure these kernel parameters on the host beforehand. Verify with a dry-run write before starting:
+
+```shell
+id -u          # must print 0 for root
+sysctl -w vm.swappiness=0 && echo OK   # dry-run the write permission; "OK" means /proc/sys is writable
+```
+
+The scripts run under `set -euo pipefail`; a `sysctl` call that fails (for example `kernel.sched_migration_cost_ns`, which the EEVDF scheduler removed in Linux 6.6+) aborts the launch, so the scripts guard each tuning call with `|| true`.
 
 This example deploys **3P1D on one 16-NPU Atlas 800I A3 host** for the 64K-input / 1K-output workload with a 0% prefix-cache hit rate. Each service group uses TP2 on 2 NPUs. "3P1D" describes four service groups; it does not mean that P and D must occupy separate hosts.
 
@@ -518,9 +527,9 @@ MODEL_PATH="<LOCAL_W8A8_MODEL_PATH>"   # e.g. Qwen3.8-27B-w8a8
 export ASCEND_RT_VISIBLE_DEVICES=8,9
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 export OMP_NUM_THREADS=1
-sysctl -w vm.swappiness=0
-sysctl -w kernel.numa_balancing=0
-sysctl kernel.sched_migration_cost_ns=50000
+sysctl -w vm.swappiness=0 || true
+sysctl -w kernel.numa_balancing=0 || true
+sysctl -w kernel.sched_migration_cost_ns=50000 || true  # no-op on EEVDF (Linux 6.6+), which removed this parameter
 export TASK_QUEUE_ENABLE=2
 
 # HCCL_OP_EXPANSION_MODE="AIV" is only used on the Decode side; unset any
@@ -592,9 +601,9 @@ MODEL_PATH="<LOCAL_W8A8_MODEL_PATH>"
 export ASCEND_RT_VISIBLE_DEVICES=14,15
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 export OMP_NUM_THREADS=1
-sysctl -w vm.swappiness=0
-sysctl -w kernel.numa_balancing=0
-sysctl kernel.sched_migration_cost_ns=50000
+sysctl -w vm.swappiness=0 || true
+sysctl -w kernel.numa_balancing=0 || true
+sysctl -w kernel.sched_migration_cost_ns=50000 || true  # no-op on EEVDF (Linux 6.6+), which removed this parameter
 export TASK_QUEUE_ENABLE=1
 
 export HCCL_IF_IP="127.0.0.1"
@@ -667,7 +676,7 @@ The P:D group ratio and the parameter values in the two scripts should be adapte
 - The P:D group ratio follows the workload. Workloads dominated by long, uncached inputs (e.g., long-context summarization over unique documents) need more Prefill groups; workloads with a high prefix-cache hit rate spend most wall time in decode and shift capacity toward Decode (e.g., 1P2D).
 - On Prefill, `--max-num-batched-tokens` should be no smaller than the effective uncached input length (within the HBM activation budget), so a prompt is prefilled in a single chunk instead of being split into multiple rounds. The example uses `66000` for a 64K-token 0%-cache-hit input budget; scale it down when prefix caching absorbs most of the input, because a cold request of the full length can transiently exceed the activation budget and cause OOM.
 - `--max-num-seqs` on Prefill bounds concurrent prefill batches per group. Keep it small for long-input workloads so each chunk gets the full HBM activation budget; larger values are reasonable for short inputs.
-- Qwen3.8-27B is a hybrid-attention model: only 16 of 64 layers use full attention, and the other 48 Gated DeltaNet layers carry a recurrent state. Enabling prefix caching in PD mode therefore requires `--mamba-cache-mode align` so the recurrent state is aligned with the cached KV blocks; enable it on both P and D (replace `--no-enable-prefix-caching` in the two scripts).
+- Qwen3.8-27B is a hybrid-attention model: only 16 of 64 layers use full attention, and the other 48 Gated DeltaNet layers carry a recurrent state. Enabling prefix caching in PD mode therefore requires `--mamba-cache-mode align` so the recurrent state is aligned with the cached KV blocks; enable both prefix caching and `--mamba-cache-mode align` on P and D (replace `--no-enable-prefix-caching` with `--enable-prefix-caching --mamba-cache-mode align` in both scripts).
 - For short-prompt or multimodal workloads, `"gdn_prefill_backend": "fla_npu"` in the Prefill `--additional-config` selects the FLA NPU prefill backend for the linear-attention layers and improves prefill throughput.
 - `HCCL_OP_EXPANSION_MODE="AIV"` is set only on Decode. Do not export it (directly or through a shared terminal) when launching Prefill; long-input prefill slows down with AIV.
 - Keep `--served-model-name`, the checkpoint, and the MTP `method`/`num_speculative_tokens` identical on P and D; change them only together.
@@ -675,7 +684,7 @@ The P:D group ratio and the parameter values in the two scripts should be adapte
 - `engine_id` must be unique across all services in the same PD cluster. Each service must also use its own HTTP port and Mooncake KV port.
 - If multiple PD deployments run on the same host, stagger their HTTP and Mooncake KV ports.
 
-### 5.3 Prefill-Decode Disaggregation (950PR&950DT Products)
+### 5.3 Prefill-Decode Disaggregation (950PR&950DT Products) {: #53-prefill-decode-disaggregation-950pr950dt-products }
 
 This example deploys **4P1D on one 950-series host** with the `Qwen3.8-27B-w8a8c8-mxfp8` checkpoint and C8 (`--kv-cache-dtype mxfp8`). Each group is single-NPU TP1, following the DP-first principle for this model size. P1-P4 use the same script with different `ASCEND_RT_VISIBLE_DEVICES` (0/1/2/3), HTTP port (9090/9092/9094/9096), Mooncake `kv_port` (58010/58020/58030/58040), and `engine_id` (3/4/5/6). The values below are for P1.
 
@@ -700,9 +709,9 @@ export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 export ASCEND_RT_VISIBLE_DEVICES=0
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 export OMP_NUM_THREADS=1
-sysctl -w vm.swappiness=0
-sysctl -w kernel.numa_balancing=0
-sysctl kernel.sched_migration_cost_ns=50000
+sysctl -w vm.swappiness=0 || true
+sysctl -w kernel.numa_balancing=0 || true
+sysctl -w kernel.sched_migration_cost_ns=50000 || true  # no-op on EEVDF (Linux 6.6+), which removed this parameter
 export TASK_QUEUE_ENABLE=1
 
 # Single-host deployment; use the host service IP for multi-host deployment
@@ -766,9 +775,9 @@ export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 export ASCEND_RT_VISIBLE_DEVICES=4
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 export OMP_NUM_THREADS=1
-sysctl -w vm.swappiness=0
-sysctl -w kernel.numa_balancing=0
-sysctl kernel.sched_migration_cost_ns=50000
+sysctl -w vm.swappiness=0 || true
+sysctl -w kernel.numa_balancing=0 || true
+sysctl -w kernel.sched_migration_cost_ns=50000 || true  # no-op on EEVDF (Linux 6.6+), which removed this parameter
 export TASK_QUEUE_ENABLE=1
 
 export HCCL_IF_IP="127.0.0.1"
@@ -798,7 +807,7 @@ vllm serve "${MODEL_PATH}" \
     --mm-processor-cache-gb 3 \
     --mm-encoder-tp-mode data \
     --mm-processor-cache-type shm \
-    --compilation-config '{"cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144,148,152,156,160,164,168,172,176,180,184,188,192,196,200,204,208,212,216,220,224,228,232,236,240,244,248,252,256], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --compilation-config '{"cudagraph_capture_sizes": [4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144,148,152,156,160,164,168,172,176,180,184,188,192,196,200,204,208,212,216,220,224,228,232,236,240,244,248,252,256], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true}' \
     --distributed-executor-backend mp \
     --no-disable-hybrid-kv-cache-manager \
@@ -841,9 +850,9 @@ Send client requests to `http://<HOST_IP>:8090`.
 - C8 (`--kv-cache-dtype mxfp8`) is supported on 950PR&950DT Products only. With it enabled, `--block-size` must be a multiple of 512 (it defaults to 512 if unset).
 - After the PD data path is up, check outputs for repeated punctuation or abnormal repetition, which indicate a KV-transfer or quantization mismatch.
 
-### 5.4 Request Forwarding
+### 5.4 Request Forwarding {: #54-request-forwarding }
 
-Use the proxy paired with the actual connector, rather than choosing it by hardware name. The standard proxy script is in `examples/disaggregated_prefill_v1/`; run the command from that directory. Replace the example hosts with reachable service IPs and use each service's HTTP port. P, D, and the client must use the same `--served-model-name`.
+Use the proxy paired with the actual connector, rather than choosing it by hardware name. The standard proxy script is in `examples/disaggregated_prefill_v1/`; run the command from that directory. Replace the example hosts with reachable service IPs and use each service's HTTP port. `--served-model-name` is a server-side CLI parameter configured identically when launching P and D; the client is not involved in configuring it, but each client request must set its `model` field to that same served-model name (for example `"model": "qwen3.8"` in the request body).
 
 | Connector | Request Order | Proxy | Scope |
 | --------- | ------------- | ----- | ----- |
@@ -851,7 +860,7 @@ Use the proxy paired with the actual connector, rather than choosing it by hardw
 
 Do not use a DP RPC port or a Mooncake KV-transfer port as a proxy backend. If requests reach the proxy but return no output, verify the P and D `/health` endpoints from the proxy host, confirm that the configured backend addresses exactly match each service's `--host` and HTTP port, and then run the end-to-end checks in [Section 6](#6-functional-verification).
 
-## 6 Functional Verification
+## 6 Functional Verification {: #6-functional-verification }
 
 After the service is started, the model can be invoked by sending a prompt. Two API interfaces are supported: `completions` and `chat/completions`. Use the `--served-model-name` you configured (`qwen3.8` for `Qwen3.8-27B`).
 
@@ -959,7 +968,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 >
 > **950PR&950DT Products**: The `Qwen3.8-27B-w8a8c8-mxfp8` model weight easily fits in a single NPU (96 GB HBM per NPU on 950DT Products, 128 GB on 950PR Products). Following the **DP-first** principle, **TP=1 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. The C8 weights are recommended for long-sequence scenarios and are served with `--kv-cache-dtype mxfp8`; for short-sequence scenarios (e.g., 16K input), use `Qwen3.8-27B-w8a8-mxfp8` without `--kv-cache-dtype mxfp8`. `--max-model-len` can support up to **262144** in the same TP=1 + DP=8 layout.
 
-### 9.2 Tuning Guidelines
+### 9.2 Tuning Guidelines {: #92-tuning-guidelines }
 
 #### 9.2.1 General Tuning Reference
 
