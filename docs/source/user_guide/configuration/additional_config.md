@@ -438,4 +438,13 @@ decode engine's existing additional configuration.
 }
 ```
 
+
+For the experimental Cube/Vector variant, use
+`"backend": "mega_recurrent_kda_mx"` and a wheel exporting
+`npu_mega_recurrent_kda_mx`. This variant retains E4M3FN QKV weight bytes and
+E8M0 scales in the checkpoint layout. It moves the QKV GEMM into the same A5
+launch as the convolution and recurrence. The backend receives dynamically
+quantized activations from the existing vLLM path. Beta and gate projection,
+gated norm, and output projection run through the existing vLLM layers.
+
 The default `native` backend continues to use the existing KDA kernels.

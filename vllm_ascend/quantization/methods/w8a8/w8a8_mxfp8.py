@@ -239,6 +239,11 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         data_ptr never changes across RL weight reloads.
         """
 
+        if getattr(layer, "_mega_kda_mx_qkv", False):
+            # The mixed KDA kernel reads the checkpoint's dense [N,K]
+            # bytes and scales in [N,K/32] order.
+            return
+
         # Check if already transformed to avoid double transformation
         if getattr(layer, "_mxfp8_transformed", False):
             return

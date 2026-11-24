@@ -10,9 +10,18 @@ import torch
 from vllm_ascend.ops import mega_kda
 
 
-def test_mega_kda_reads_device_metadata_and_merges_token_order(monkeypatch):
+@pytest.mark.parametrize("mixed", [False, True])
+def test_mega_kda_reads_device_metadata_and_merges_token_order(monkeypatch, mixed):
     dim = mega_kda.MEGA_KDA_HEAD_DIM
-    qkv = torch.randn(4, 3 * dim, dtype=torch.bfloat16)
+    mx = None
+    if mixed:
+        qkv = torch.arange(4 * dim, dtype=torch.int32).to(torch.uint8).reshape(4, dim)
+        scales = torch.arange(16, dtype=torch.uint8).reshape(4, 2, 2)
+        weight = torch.zeros(3 * dim, dim, dtype=torch.uint8)
+        weight_scale = torch.zeros(3 * dim, dim // 32, dtype=torch.uint8)
+        mx = mega_kda.MxQkvProjection(scales, weight, weight_scale)
+    else:
+        qkv = torch.randn(4, 3 * dim, dtype=torch.bfloat16)
     raw_gate = torch.randn(1, 4, 1, dim, dtype=torch.bfloat16)
     gate = torch.randn(4, 1, dim, dtype=torch.bfloat16)
     beta = torch.randn(1, 4, 1, dtype=torch.bfloat16)
@@ -53,7 +62,7 @@ def test_mega_kda_reads_device_metadata_and_merges_token_order(monkeypatch):
         ),
     )
 
-    mega_kda.run_mega_kda(layer, operator, metadata, qkv, raw_gate, gate, beta, result, packed_weights)
+    mega_kda.run_mega_kda(layer, operator, metadata, qkv, raw_gate, gate, beta, result, packed_weights, mx)
 
     spec_args, prefill_args = [call.args for call in launch.call_args_list]
     torch.testing.assert_close(spec_args[2], qkv[spec_indices])
@@ -62,6 +71,12 @@ def test_mega_kda_reads_device_metadata_and_merges_token_order(monkeypatch):
     assert spec_args[7] is spec_slots
     assert spec_args[9] is accepted
     assert prefill_args[10] is no_initial
+    if mixed:
+        spec_call, prefill_call = launch.call_args_list
+        torch.testing.assert_close(spec_call.kwargs["mx_input_scale"], scales[spec_indices])
+        torch.testing.assert_close(prefill_call.kwargs["mx_input_scale"], scales[prefill_indices])
+        assert spec_call.kwargs["mx_weights"][0].data_ptr() == weight.data_ptr()
+        assert spec_call.kwargs["mx_weights"][1].shape == (3 * dim, dim // 64, 2)
     expected = torch.stack([prefill_output[0], spec_output[0], prefill_output[1], spec_output[1]]).reshape_as(result)
     torch.testing.assert_close(norm.call_args.args[0], expected)
     assert norm.call_args.kwargs["out"] is result

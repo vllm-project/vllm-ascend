@@ -5,6 +5,7 @@
 
 import ctypes
 import os
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -20,10 +21,20 @@ MEGA_KDA_HEAD_DIM = 128
 MEGA_KDA_CONV_WIDTH = 4
 _SPEC_CONV_PREFIX_ROWS = 2
 _OP_NAMESPACE = "vllm_ascend_mega_kda"
+_MX_SCALE_PAIR_SIZE = 64
+
+
+@dataclass(frozen=True)
+class MxQkvProjection:
+    """MXFP8 activation scales and the output-major checkpoint weights."""
+
+    input_scale: torch.Tensor
+    weight: torch.Tensor
+    weight_scale: torch.Tensor
 
 
 @lru_cache(maxsize=1)
-def load_mega_kda(package_dir: str) -> torch._ops.OpOverload:
+def load_mega_kda(package_dir: str, op_name: str = "npu_mega_kda_projected") -> torch._ops.OpOverload:
     """Register the optional wheel before the worker captures an NPU graph."""
     package = Path(package_dir).resolve() / "fla_npu"
     launcher = package / "libfla_npu_stable.so"
@@ -43,9 +54,9 @@ def load_mega_kda(package_dir: str) -> torch._ops.OpOverload:
     if error:
         raise RuntimeError(f"MegaKDA registration failed: {os.fsdecode(error)}")
     try:
-        return getattr(torch.ops, _OP_NAMESPACE).npu_mega_kda_projected.default
+        return getattr(getattr(torch.ops, _OP_NAMESPACE), op_name).default
     except AttributeError as exc:
-        raise RuntimeError("The A5 fla_npu wheel must export npu_mega_kda_projected") from exc
+        raise RuntimeError(f"The A5 fla_npu wheel must export {op_name}") from exc
 
 
 def _validate_pool_layout(tensor: torch.Tensor, slot_shape: tuple[int, ...], dtype: torch.dtype) -> None:
@@ -72,15 +83,25 @@ def _run_projected(
     conv_slots: torch.Tensor,
     accepted: torch.Tensor,
     has_initial: torch.Tensor,
+    mx_weights: tuple[torch.Tensor, torch.Tensor] | None = None,
+    mx_input_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     conv, state = layer.kv_cache
     rows, width = gate.shape
     heads = layer.local_num_heads
     head_dim = MEGA_KDA_HEAD_DIM
-    if width != heads * head_dim or qkv.shape != (rows, 3 * width) or beta.shape != (rows, heads):
+    if width != heads * head_dim or beta.shape != (rows, heads):
         raise ValueError("Unsupported MegaKDA projection geometry")
-    if any(tensor.dtype != torch.bfloat16 for tensor in (qkv, gate, beta, conv_weight)):
-        raise ValueError("MegaKDA requires BF16 projected activations and packed convolution weights")
+    if any(tensor.dtype != torch.bfloat16 for tensor in (gate, beta, conv_weight)):
+        raise ValueError("MegaKDA requires BF16 gate, beta and packed convolution weights")
+    if mx_weights is None:
+        if qkv.shape != (rows, 3 * width) or qkv.dtype != torch.bfloat16:
+            raise ValueError("Projected MegaKDA requires BF16 QKV activations")
+        projection_args = (qkv.contiguous(),)
+    else:
+        assert mx_input_scale is not None
+        weight, weight_scale = mx_weights
+        projection_args = (qkv.contiguous(), weight, mx_input_scale.contiguous(), weight_scale)
 
     history = conv.shape[1]
     _validate_pool_layout(conv, (history, 3 * width), torch.bfloat16)
@@ -106,7 +127,7 @@ def _run_projected(
     stream = torch.npu.current_stream(qkv.device).npu_stream
     assert layer.gate_lower_bound is not None
     return op(
-        qkv.contiguous(),
+        *projection_args,
         gate.contiguous(),
         beta.contiguous(),
         conv_weight,
@@ -136,6 +157,7 @@ def run_mega_kda(
     beta: torch.Tensor,
     core_attn_out: torch.Tensor,
     conv_weight: torch.Tensor,
+    mx: MxQkvProjection | None = None,
 ) -> None:
     """Pass replay-time metadata through to the NPU without host readbacks."""
     total = metadata.num_actual_tokens
@@ -148,13 +170,31 @@ def run_mega_kda(
     qkv = qkv[:total]
     raw_gate = raw_gate[0, :total].flatten(1)
     beta = beta[0, :total]
+    mx_weights = None
+    mx_input_scale = None
+    if mx is not None:
+        columns = qkv.size(-1)
+        expected_weight = (3 * raw_gate.shape[1], columns)
+        if columns % _MX_SCALE_PAIR_SIZE or mx.weight.shape != expected_weight:
+            raise ValueError("Mixed MegaKDA requires the original output-major MXFP8 QKV weight")
+        qkv = qkv.view(torch.uint8)
+        scale_pairs = columns // _MX_SCALE_PAIR_SIZE
+        mx_input_scale = mx.input_scale[:total].contiguous().view(torch.uint8)
+        mx_weights = (
+            mx.weight.contiguous().view(torch.uint8),
+            mx.weight_scale.contiguous().view(torch.uint8).reshape(expected_weight[0], scale_pairs, 2),
+        )
 
     def run(indices, prefix, slots, conv_slots, accepted, has_initial):
         if indices is None:
             activations = qkv, raw_gate, beta
         else:
             activations = tuple(tensor.index_select(0, indices) for tensor in (qkv, raw_gate, beta))
-        return _run_projected(layer, op, *activations, conv_weight, prefix, slots, conv_slots, accepted, has_initial)
+        args = (layer, op, *activations, conv_weight, prefix, slots, conv_slots, accepted, has_initial)
+        if mx_input_scale is None:
+            return _run_projected(*args)
+        scales = mx_input_scale if indices is None else mx_input_scale.index_select(0, indices)
+        return _run_projected(*args, mx_weights=mx_weights, mx_input_scale=scales)
 
     spec_out = non_spec_out = None
     if has_spec:

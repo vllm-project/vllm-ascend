@@ -350,16 +350,16 @@ class EplbConfig:
 class KDABackendConfig:
     """Select an optional kernel backend for KDA layers."""
 
-    backend: Literal["native", "mega_kda"] = "native"
+    backend: Literal["native", "mega_kda", "mega_recurrent_kda_mx"] = "native"
     operator_package_dir: str | None = None
 
     @model_validator(mode="after")
     def _validate_package_dir(self):
-        if self.backend == "mega_kda":
+        if self.backend != "native":
             if not self.operator_package_dir or not os.path.isabs(self.operator_package_dir):
                 raise ValueError("kda_backend_config.operator_package_dir must be absolute for MegaKDA")
         elif self.operator_package_dir is not None:
-            raise ValueError("kda_backend_config.operator_package_dir requires the mega_kda backend")
+            raise ValueError("kda_backend_config.operator_package_dir requires a MegaKDA backend")
         return self
 
 
@@ -847,7 +847,7 @@ class AscendConfig:
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
         validate_expert_offload_config(self.expert_offload_config, vc, self)
-        if self.kda_backend_config.backend == "mega_kda":
+        if self.kda_backend_config.backend != "native":
             if not is_950():
                 raise ValueError("The MegaKDA backend requires Ascend 950")
             hf_config = getattr(vc.model_config, "hf_config", None)
