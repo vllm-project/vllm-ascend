@@ -1,0 +1,107 @@
+# Source: https://github.com/vllm-project/vllm/blob/9df94b99774f1a0e17716f26dbb4eac50cc66f7a/recipes/models/Qwen/Qwen3-8B.yaml
+# Ascend lane extracted from a measured vLLM-Ascend deployment (hardware-scoped overrides only).
+# Source: https://github.com/vllm-project/vllm/blob/main/recipes/models/Qwen/Qwen3-8B.yaml
+meta:
+  hardware:
+    ascend_910b: verified
+hardware_overrides:
+  npu:
+    extra_args:
+      - '--trust-remote-code'
+      - '--distributed-executor-backend'
+      - mp
+      - '--max-model-len'
+      - '5500'
+      - '--gpu-memory-utilization'
+      - '0.8247'
+      - '--enable-chunked-prefill'
+      - '--enable-prefix-caching'
+      - '--block-size'
+      - '128'
+      - '--max-num-seqs'
+      - '8'
+      - '--max-num-batched-tokens'
+      - '8192'
+    extra_env:
+      HCCL_CONNECT_TIMEOUT: '7200'
+      VLLM_USE_MODELSCOPE: 'False'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_BUFFSIZE: '1024'
+      VLLM_ASCEND_ENABLE_BATCH_MEMCPY: '1'
+      VLLM_ASCEND_ENABLE_PREFETCH_MLP: '1'
+      HCCL_EXEC_TIMEOUT: '0'
+      HCCL_OP_EXPANSION_MODE: AIV
+      TASK_QUEUE_ENABLE: '1'
+      OMP_NUM_THREADS: '1'
+hardware_notes:
+  ascend_910b:
+    title: vLLM Ascend A2 image required
+    body: |-
+      Pin quay.io/ascend/vllm-ascend:v0.30.0 - the NVIDIA pip wheel cannot run on Ascend NPU.
+      PD roles = prefill + decode; total NPUs = 1.
+      If `--data-parallel-multi-port-external-lb` is present, delete it.
+      Before declaring PD ready: every backend process healthy, requests via the router/proxy succeed, KV transfer completes.
+      stop/cleanup: stop prefill/decode processes and the proxy on every node before restart.
+      Set HCCL_BUFFSIZE=1024 before launch.
+strategy_hardware:
+  pd_cluster:
+    npu: unsupported
+    ascend_910b: supported
+strategy_min_gpus:
+  ascend_910b:
+    pd_cluster: 1
+presets:
+  pd_measured:
+    label: "PD 混部(实测配置)"
+    hardware: ascend_910b
+    strategy: pd_cluster
+    default: true
+    select:
+      pd_connector: mooncake_ascend
+      pd_router: ascend
+    points:
+      measured:
+        label: "实测拓扑(PD 混部,同节点 TP 1)"
+        default: true
+        roles:
+          prefill: { tp: 1, nodes: 1 }
+          decode: { tp: 1, nodes: 1 }
+variants:
+  default:
+    supported_hardware: [ascend_910b]
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+guide_sections:
+  ascend: |-
+    ### Huawei Atlas 800I A2 (Ascend 910B) (vLLM Ascend)
+
+    Verified with `quay.io/ascend/vllm-ascend:v0.30.0` on Atlas 800I A2 (Ascend 910B), as a prefill/decode PD cluster (topology per hardware notes).
+
+    ```bash
+    export HCCL_CONNECT_TIMEOUT=7200
+    export VLLM_USE_MODELSCOPE=False
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=1024
+    export VLLM_ASCEND_ENABLE_BATCH_MEMCPY=1
+    export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
+    export HCCL_EXEC_TIMEOUT=0
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export TASK_QUEUE_ENABLE=1
+    export OMP_NUM_THREADS=1
+    vllm serve Qwen/Qwen3-8B \
+      --served-model-name qwen3 \
+      --trust-remote-code \
+      --distributed-executor-backend mp \
+      --tensor-parallel-size 1 \
+      --max-model-len 5500 \
+      --gpu-memory-utilization 0.8247 \
+      --enable-chunked-prefill \
+      --enable-prefix-caching \
+      --block-size 128 \
+      --max-num-seqs 8 \
+      --max-num-batched-tokens 8192
+    ```
