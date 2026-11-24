@@ -33,6 +33,10 @@ def _common_serve_args(
     port: int,
     gpu_memory_utilization: float,
     tensor_parallel_size: int,
+    max_model_len: int = 1024,
+    enable_sleep_mode: bool = True,
+    compilation_config: str | None = FULL_DECODE_ONLY_CONFIG,
+    additional_config: str = '{"weight_nz_mode": 0}',
 ) -> list[str]:
     """Flags a live-update lane and its reference share.
 
@@ -42,20 +46,11 @@ def _common_serve_args(
     dtype, graph mode, NZ layout, memory budget, max length, tokenizer/executor
     backend and config overrides all stay identical.
     """
-    return [
+    args = [
         "--dtype",
         "bfloat16",
-        "--compilation-config",
-        FULL_DECODE_ONLY_CONFIG,
-        # Each NPU IPC trainer rank shares a chip with a rollout worker: the co-located
-        # trainer only gets the HBM it needs once the rollout engine sleeps, so
-        # the lane releases the engine with a level-2 sleep before every
-        # transfer. That requires the CaMem pool, and both builders enable it so
-        # the reference stays a plain startup load of the same payload under the
-        # very same allocation pool; the reference itself never sleeps.
-        "--enable-sleep-mode",
         "--max-model-len",
-        "1024",
+        str(max_model_len),
         "--gpu-memory-utilization",
         str(gpu_memory_utilization),
         "--tensor-parallel-size",
@@ -64,9 +59,16 @@ def _common_serve_args(
         str(port),
         "--trust-remote-code",
         "--additional-config",
-        '{"weight_nz_mode": 0}',
+        additional_config,
         *case.server_args(),
     ]
+    if compilation_config is not None:
+        args += ["--compilation-config", compilation_config]
+    # Colocated IPC transfers need the CaMem pool for level-2 sleep. Draft
+    # HCCL transfers use separate NPUs and do not need sleep mode.
+    if enable_sleep_mode:
+        args.append("--enable-sleep-mode")
+    return args
 
 
 def live_update_serve_args(
@@ -329,26 +331,25 @@ def draft_serve_args(checkpoint: Path, speculative_case, port: int, *, enforce_e
     args = [
         "--tokenizer",
         case.model,
-        *case.server_args(),
         "--served-model-name",
         case.id,
-        "--dtype",
-        "bfloat16",
-        "--max-model-len",
-        "128",
         "--max-num-seqs",
         "2",
         "--max-num-batched-tokens",
         "128",
         "--no-enable-prefix-caching",
-        "--gpu-memory-utilization",
-        "0.2",
         "--kv-cache-memory-bytes",
         str(128 * 2**20),
-        "--port",
-        str(port),
-        "--additional-config",
-        '{"rl_config": {"enabled": true}}',
+        *_common_serve_args(
+            case,
+            port=port,
+            gpu_memory_utilization=0.2,
+            tensor_parallel_size=1,
+            max_model_len=128,
+            enable_sleep_mode=False,
+            compilation_config=None,
+            additional_config='{"rl_config": {"enabled": true}}',
+        ),
         "--speculative-config",
         json.dumps(
             {
