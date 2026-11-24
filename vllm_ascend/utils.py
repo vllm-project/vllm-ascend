@@ -90,16 +90,14 @@ _IS_ROT_WEIGHT_USED = None
 def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max_num_reqs: int) -> int:
     """Keep replicated draft requests when profiling PCP-local prefill.
 
-    Initial memory profiling precedes KV/PCP-manager initialization.
-    Block drafters retain the global budget: their context-KV precompute
-    processes all target hidden states, independently of short queries.
+    Initial profiling runs before KV cache initialization. DFlash and DSpark
+    gather global context from the local target outputs for their replicated drafts.
+    The runner validates PCP support before using this budget.
     """
     pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
     if pcp_size <= 1:
         return max_num_tokens
     spec = vllm_config.speculative_config
-    if spec is not None and spec.method not in ("mtp", "eagle", "eagle3"):
-        return max_num_tokens
 
     # PCP: bound replicated decodes, including uneven whole-request sharding.
     # Shared config keeps this bound identical across pipeline stages.
@@ -980,10 +978,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     # Override selected ops when the compatibility implementations are required.
     if get_current_hardware_profile().supports(HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS):
+        from vllm_ascend._310p.attention.gdn_310 import AscendGatedDeltaNetAttention310
         from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310, AscendRoutedExperts310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
-        from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
         from vllm_ascend._310p.ops.layernorm import (
             AscendGemmaRMSNorm310,
             AscendRMSNorm310,
@@ -1014,7 +1012,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             }
         )
     else:
-        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+        from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 
         REGISTERED_ASCEND_OPS["GatedDeltaNetAttention"] = AscendGatedDeltaNetAttention
 
@@ -1110,7 +1108,7 @@ def enable_sp(vllm_config=None) -> bool:
     # Qwen3.5 patch (vllm_ascend.patch.worker.patch_qwen3_5). The lazy import
     # keeps this module free of the patch module's import-time monkey
     # patches. Mirror the STANDARD_WORKER_PATCHES gate from
-    # patch/worker/__init__.py: patch_qwen3_5 imports vllm_ascend.ops.gdn
+    # patch/worker/__init__.py: patch_qwen3_5 imports vllm_ascend.attention.gdn
     # (fla_npu) at module level, which 310P runners do not install, so
     # devices excluded from the standard worker patch bundle must not
     # import it from here either.
@@ -2013,15 +2011,9 @@ def use_updatable_graph(
 
     if issubclass(attn_backend, AscendAttentionBackend):
         return True
-
-    from vllm.distributed import get_dcp_group
-
     from vllm_ascend.attention.mla_v1 import AscendMLABackend
 
-    # Non-DCP MLA now registers decode FIA tasks during capture. Keep DCP MLA
-    # on its specialized graph-parameter path until its grouped update logic is
-    # migrated separately.
-    return issubclass(attn_backend, AscendMLABackend) and get_dcp_group().world_size == 1
+    return issubclass(attn_backend, AscendMLABackend)
 
 
 def _is_glm_model(model_config) -> bool:

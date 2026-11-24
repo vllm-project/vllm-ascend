@@ -40,7 +40,6 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.models.glm5next.cache_views import GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE
 
 # Below this many query rows per rank, keep every rank scoring the whole
 # batch: short batches spend more on the extra TP gather than the removed
@@ -299,17 +298,24 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         # The HiSparse indexer has its own packed manager pages; its table and
         # slot mapping are not split like the ordinary main/Indexer group.
         self.logical_block_size = kv_cache_spec.block_size if use_hisparse else vllm_config.cache_config.block_size
+        # AttentionGroup.create_metadata_builders() passes a copied spec whose
+        # block_size is the final per-group kernel block size.
+        self.kernel_block_size = kv_cache_spec.block_size
         self.storage_block_size = get_storage_block_size(kv_cache_spec)
         if self.storage_block_size <= 0:
             raise ValueError(f"Indexer KPool storage block size must be positive, got {self.storage_block_size}.")
         self.compress_ratio = compress_ratio
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
-        if self.logical_block_size % GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE:
+        if self.kernel_block_size <= 0 or self.logical_block_size % self.kernel_block_size:
             raise ValueError(
-                "GLM-Next logical block size must be divisible by the SFA "
-                f"kernel block size: logical={self.logical_block_size}, "
-                f"kernel={GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE}."
+                "GLM-Next logical block size must contain whole kernel blocks: "
+                f"logical={self.logical_block_size}, kernel={self.kernel_block_size}."
+            )
+        if self.kernel_block_size % self.compress_ratio:
+            raise ValueError(
+                "GLM-Next kernel block size must be divisible by the compression "
+                f"ratio: kernel={self.kernel_block_size}, ratio={self.compress_ratio}."
             )
         if use_hisparse:
             # CANN PoolKeyIndexer PA_BBND counts pooled rows per block.
@@ -321,9 +327,9 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             self.kernel_row_block_size = self.storage_block_size
             self.kernel_blocks_per_logical_block = 1
         else:
-            self.kernel_row_block_size = GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE // self.compress_ratio
+            self.kernel_row_block_size = self.kernel_block_size // self.compress_ratio
             # Ordinary MTP tables count expanded kernel pages.
-            self.kernel_blocks_per_logical_block = self.logical_block_size // GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE
+            self.kernel_blocks_per_logical_block = self.logical_block_size // self.kernel_block_size
         scheduler_config = vllm_config.scheduler_config
         # Builders also run in CPU unit tests without the distributed runtime;
         # treat that as TP1 so the sharding gate stays closed there.

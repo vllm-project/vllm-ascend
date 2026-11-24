@@ -177,6 +177,7 @@ def test_v2_shares_storage_and_keeps_distinct_blocks_isolated(monkeypatch, dtype
     )
     groups = [
         SimpleNamespace(
+            kernel_block_size=None,
             kv_cache_group_id=index,
             kv_cache_spec=group.kv_cache_spec,
             layer_names=group.layer_names,
@@ -188,7 +189,6 @@ def test_v2_shares_storage_and_keeps_distinct_blocks_isolated(monkeypatch, dtype
     allocate = Mock(side_effect=lambda size: torch.zeros(size, dtype=torch.int8))
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
     monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", lambda size, *_: allocate(size))
     raw = attn_utils._allocate_kv_cache(cache, {}, torch.device("cpu"))

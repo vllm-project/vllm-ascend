@@ -270,11 +270,15 @@ jobs:
           } >> $GITHUB_OUTPUT
 
       - name: Prepare scripts
+        id: prepare-scripts
         run: |
           install -D tests/e2e/common/multi_node/run.sh /root/.cache/tests/run.sh
           install -D tests/e2e/common/multi_node/download_archive.sh /root/.cache/tests/download_archive.sh
           install -D tests/e2e/nightly/scripts/bisect_args.sh /root/.cache/tests/bisect_args.sh
           install -D .github/workflows/scripts/collect_download.py /root/.cache/tests/collect_download.py
+          if ${{ startsWith(inputs.request_id, 'daily-') }} && bash .github/workflows/scripts/stage_ci_actions.sh; then
+            echo 'daily_issue_action_ready=true' >> "$GITHUB_OUTPUT" || true
+          fi
 
       - name: Launch cluster
         env:
@@ -587,8 +591,11 @@ jobs:
 
       - name: Dispatch Daily Issue update
         id: daily-report
-        if: ${{ !cancelled() && startsWith(inputs.request_id, 'daily-') && steps.stream_logs.outcome == 'failure' }}
-        uses: ./.github/actions/dispatch-daily-issue
+        if: >-
+          ${{ !cancelled() && steps.prepare-scripts.outputs.daily_issue_action_ready == 'true' &&
+              steps.stream_logs.outcome == 'failure' }}
+        continue-on-error: true
+        uses: ./../../_temp/ci-workflow/.github/actions/dispatch-daily-issue
         with:
           github-token: ${{ secrets.PAT_TOKEN }}
           request-id: ${{ inputs.request_id }}

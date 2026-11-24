@@ -163,6 +163,22 @@ pytest -q \
   tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qwen4_exp_hc.py
 ```
 
+Production binding and shared-wrapper coverage is provided by the supplemental
+suite:
+
+```bash
+pytest -q \
+  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qwen4_exp_hc_core.py
+```
+
+It checks registration and full-graph capture for grouped Gemma RMSNorm, SiLU,
+gate mix, combine, and fused combine-plus-normalize. It also covers production
+Qwen4Exp widths, shared and per-branch weights, optional injection logits,
+contiguous and row-strided inputs, and representative row counts. The dedicated
+`test_qwen4_exp_hc.py` operator suite remains the accuracy acceptance suite and
+applies the repository BF16 rule: `rtol=atol=2^-6`, at least 99% of elements
+within the mixed tolerance, and maximum absolute error no greater than `1`.
+
 The suite uses `hc_count=4` and BF16 inputs. It covers:
 
 - rows `2047`, `2048`, and `2049`, including the dispatch boundary;

@@ -436,22 +436,19 @@ def fia_v2_boundary(monkeypatch):
 
 @pytest.fixture
 def mla_fia_graph(monkeypatch):
-    num_tokens = 2
-    graph = SimpleNamespace(
-        events={num_tokens: []},
-        handles={num_tokens: []},
-        attn_params={num_tokens: []},
-        workspaces={num_tokens: None},
-    )
-    monkeypatch.setattr(mla_cp, "get_graph_params", lambda: graph)
-    monkeypatch.setattr(
-        mla_cp, "update_graph_params_workspaces", lambda count, workspace: graph.workspaces.update({count: workspace})
-    )
-    monkeypatch.setattr(mla_cp, "weak_ref_tensors", lambda tensor: tensor)
-    monkeypatch.setattr(mla_cp.torch_npu.npu, "current_stream", Mock())
-    monkeypatch.setattr(torch.npu, "ExternalEvent", Mock())
-    monkeypatch.setattr(torch.npu, "graph_task_group_begin", Mock())
-    monkeypatch.setattr(torch.npu, "graph_task_group_end", Mock(return_value="fia-v2-handle"))
+    graph = SimpleNamespace(resources={}, tasks=[])
+
+    def get_resource(key, factory):
+        if key not in graph.resources:
+            graph.resources[key] = factory()
+        return graph.resources[key]
+
+    def register(operation, kwargs, provider):
+        graph.tasks.append((kwargs, provider))
+        operation(**kwargs)
+
+    monkeypatch.setattr(mla_cp, "get_capture_resource", get_resource)
+    monkeypatch.setattr(mla_cp, "register_task", register)
     return graph
 
 
@@ -476,6 +473,7 @@ def _assert_cache_view_preserved(actual, original):
 @pytest.mark.parametrize("layout", ["BNSD", "BSND"])
 def test_mla_dcp_fia_v2_preserves_strided_cache_and_lse(monkeypatch, fia_v2_boundary, mla_fia_graph, capturing, layout):
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.layer_name = "model.layers.0.self_attn.attn"
     impl.num_heads = 2
     impl.num_kv_heads = 1
     impl.kv_lora_rank = 4
@@ -539,13 +537,13 @@ def test_mla_dcp_fia_v2_preserves_strided_cache_and_lse(monkeypatch, fia_v2_boun
         assert call.block_size == 2
     call = fia_v2_boundary.calls[0]
     if capturing:
-        assert call.workspace is mla_fia_graph.workspaces[2]
+        assert call.workspace is next(iter(mla_fia_graph.resources.values()))
         assert call.out is not None
-        assert len(mla_fia_graph.attn_params[2]) == 1
-        assert mla_fia_graph.handles[2] == ["fia-v2-handle"]
+        assert len(mla_fia_graph.tasks) == 1
+        assert mla_fia_graph.tasks[0][1].layer_name == (impl.layer_name, CPKVScope.FULL)
     else:
         assert call.out is None
-        assert not mla_fia_graph.attn_params[2]
+        assert not mla_fia_graph.tasks
 
 
 @pytest.mark.parametrize("capturing", [False, True], ids=["eager", "capture"])
@@ -560,7 +558,6 @@ def test_mla_dcp_split_fia_v2_returns_lse(monkeypatch, fia_v2_boundary, mla_fia_
         "_EXTRA_CTX",
         SimpleNamespace(capturing=capturing, is_draft_model=False, is_draft_model_prefill=False),
     )
-    mla_fia_graph.workspaces[2] = torch.empty(128, dtype=torch.uint8)
     q_nope, q_pe = torch.randn(2, 2, 4), torch.randn(2, 2, 2)
     if scope is CPKVScope.HISTORY:
         nope, rope = _make_page_strided_mla_cache()
@@ -603,16 +600,14 @@ def test_mla_dcp_split_fia_v2_returns_lse(monkeypatch, fia_v2_boundary, mla_fia_
         _assert_cache_view_preserved(call.key, nope)
         _assert_cache_view_preserved(call.key_rope, rope)
     if capturing:
-        assert call.workspace is mla_fia_graph.workspaces[2]
-        params = mla_fia_graph.attn_params[2][0]
-        assert params.attention_kind is scope
-        assert params.layer_name == impl.layer_name
-        assert params.attention_params[1] is key
-        assert params.attention_params[3] is key_rope
-        assert mla_fia_graph.handles[2] == ["fia-v2-handle"]
+        assert call.workspace is next(iter(mla_fia_graph.resources.values()))
+        params, provider = mla_fia_graph.tasks[0]
+        assert provider.layer_name == (impl.layer_name, scope)
+        assert params["key"] is key
+        assert params["key_rope"] is key_rope
     else:
         assert call.out is None
-        assert not mla_fia_graph.attn_params[2]
+        assert not mla_fia_graph.tasks
 
 
 @pytest.mark.parametrize(
@@ -640,25 +635,21 @@ def test_mla_split_selection_matches_shared_policy(use_spec_decode, is_draft, is
 
 
 @pytest.mark.parametrize(
-    "dcp_size,dcp_rank,workspace_sizes,cached_size",
+    "dcp_size,dcp_rank",
     [
-        (1, 0, None, None),
-        (2, 0, None, None),
-        (2, 1, None, None),
-        (16, 15, None, None),
-        (2, 1, (64, 128), None),
-        (2, 1, (128, 64), None),
-        (2, 1, (64, 128), 256),
+        (1, 0),
+        (2, 0),
+        (2, 1),
+        (16, 15),
     ],
 )
 @pytest.mark.parametrize("pcp_size", [1, 2])
 @pytest.mark.parametrize("history_dtype", [torch.bfloat16, torch.float16, torch.float32])
-def test_split_decode_packs_on_main_overlapping_current_attention(
-    dcp_size, dcp_rank, workspace_sizes, cached_size, history_dtype, pcp_size
-):
+def test_split_decode_packs_on_main_overlapping_current_attention(dcp_size, dcp_rank, history_dtype, pcp_size):
     import vllm_ascend.attention.context_parallel.mla_cp as mla_cp
 
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.use_quant_flashmla = False
     impl.scale = 0.5
     impl.speculative_config = None
     impl.num_heads = 2
@@ -727,15 +718,7 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         yield
         active[0] = "main"
 
-    graph_params = SimpleNamespace(workspaces={2: torch.empty(cached_size, dtype=torch.uint8) if cached_size else None})
-    workspace_query = Mock(
-        side_effect=[torch.empty(n, dtype=torch.uint8) for n in workspace_sizes] if workspace_sizes else []
-    )
-
     def attention(q, q_rope, k, k_rope, **kwargs):
-        if workspace_sizes is not None:
-            assert set(graph_params.workspaces) == {2}
-            assert graph_params.workspaces[2].numel() == (cached_size or max(workspace_sizes))
         expected_stream = "main" if kwargs["attention_kind"] == CPKVScope.HISTORY else "attn"
         assert active[0] == expected_stream
         events.append(kwargs["attention_kind"])
@@ -796,11 +779,7 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         patch.object(
             mla_cp,
             "_EXTRA_CTX",
-            SimpleNamespace(capturing=workspace_sizes is not None, is_draft_model=False, is_draft_model_prefill=False),
-        ),
-        patch.object(mla_cp, "get_graph_params", return_value=graph_params),
-        patch.object(
-            mla_cp.torch_npu, "_npu_fused_infer_attention_score_v2_get_max_workspace", workspace_query, create=True
+            SimpleNamespace(capturing=False, is_draft_model=False, is_draft_model_prefill=False),
         ),
         patch.object(mla_cp, "cp_decode_comm_stream", return_value=attn),
         patch.object(torch.npu, "current_stream", return_value=main),
@@ -826,15 +805,6 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
             metadata,
         )
     torch.testing.assert_close(actual, expected)
-    assert workspace_query.call_count == (2 if workspace_sizes is not None and cached_size is None else 0)
-    for index, call in enumerate(workspace_query.call_args_list):
-        kwargs = call.kwargs
-        assert kwargs["return_softmax_lse"] is True
-        assert kwargs["num_query_heads"] == (query_head_count if index == 0 else impl.num_heads)
-        assert kwargs["softmax_scale"] == impl.scale
-        assert kwargs["actual_seq_qlen"] == [2]
-        assert kwargs["actual_seq_kvlen"] == [2]
-        assert {"softmax_lse_flag", "num_heads", "scale", "antiquant_mode", "antiquant_scale"}.isdisjoint(kwargs)
     history_update.assert_called_once()
     update.assert_called_once()
     assert record_stream.call_count == 7
