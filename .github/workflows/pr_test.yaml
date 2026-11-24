@@ -102,13 +102,22 @@ jobs:
           GITHUB_OUTPUT="$RUNNER_TEMP/all-test-groups.txt" \
             python3 .github/workflows/scripts/select_tests.py --all-tests --skip-cpu-ut --skip-a5
           python3 - <<'PY'
+          import copy
           import json
           import os
           from pathlib import Path
 
+          import yaml
+
           # Smoke settings: one partition per card count, only a few cases.
+          # PT CI only carries A3 cases for 2/4 cards (runner_mapping stops at
+          # four_card; eight_card is empty and sixteen_card does not exist).
+          # The 8/16-card karc runners therefore re-run the 4-card selection,
+          # which validates the label, placement and whole-machine scheduling
+          # rather than 8/16-card coverage.
           KEEP_TESTS = 3
-          NPU_COUNTS = (2, 4, 8, 16)
+          BASE_COUNTS = (2, 4)
+          EXTRA_COUNTS = (8, 16)
 
           outputs = dict(
               line.split("=", 1)
@@ -117,7 +126,7 @@ jobs:
           all_groups = json.loads(outputs["test_groups"])
           a3_groups = [group for group in all_groups if group["npu_type"] == "a3"]
           candidates = [
-              group for group in a3_groups if int(group["num_npus"]) in NPU_COUNTS
+              group for group in a3_groups if int(group["num_npus"]) in BASE_COUNTS
           ]
           # Keep the first partition of each card count. "partition" is a range
           # string such as "1-5", so sort it textually instead of comparing to 1.
@@ -130,20 +139,42 @@ jobs:
           picked = {}
           for group in candidates:
               picked.setdefault(int(group["num_npus"]), group)
-          if sorted(picked) != sorted(NPU_COUNTS):
-              raise SystemExit(f"Expected A3 partitions for {NPU_COUNTS}, got {sorted(picked)}")
+          if sorted(picked) != sorted(BASE_COUNTS):
+              raise SystemExit(f"Expected A3 partitions for {BASE_COUNTS}, got {sorted(picked)}")
 
-          prefix = "linux-aarch64-a3-800i-karc-fed-"
-          groups = [picked[count] for count in sorted(picked)]
-          for group in groups:
+          def trim(group):
+              with open(
+                  ".github/workflows/scripts/test_config.yaml", encoding="utf-8"
+              ) as config:
+                  skip = set(yaml.safe_load(config)["skip_tests"])
               tests = group["tests"]
-              if isinstance(tests, list):
-                  group["tests"] = tests[:KEEP_TESTS]
-              else:
-                  group["tests"] = " ".join(str(tests).split()[:KEEP_TESTS])
+              if not isinstance(tests, list):
+                  tests = str(tests).split()
+              tests = [
+                  test
+                  for test in tests
+                  if str(test).replace("\\", "/") not in skip
+              ]
+              group["tests"] = tests[:KEEP_TESTS]
               if not group["tests"]:
                   raise SystemExit(f"Empty test selection for {group['num_npus']} cards")
-              group["runner"] = prefix + str(group["num_npus"])
+              return group
+
+          prefix = "linux-aarch64-a3-800i-karc-fed-"
+          groups = []
+          for count in BASE_COUNTS:
+              group = trim(copy.deepcopy(picked[count]))
+              group["runner"] = prefix + str(count)
+              groups.append(group)
+          for count in EXTRA_COUNTS:
+              group = trim(copy.deepcopy(picked[4]))
+              group["runner"] = prefix + str(count)
+              group["num_npus"] = count
+              group["partition_name"] = f"a3-{count}"
+              group["partition"] = "1-1"
+              groups.append(group)
+
+          for group in groups:
               print(f"{group['runner']} / part {group.get('partition')}: {group['tests']}")
 
           target_ids = sorted({group["csrc_cache_target"] for group in groups})
