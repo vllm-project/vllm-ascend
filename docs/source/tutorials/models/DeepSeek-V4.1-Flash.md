@@ -1023,8 +1023,8 @@ vLLM Ascend revision.
         --enable-expert-parallel \
         --enable-eplb \
         --eplb-config '{
-            "window_size":64,
-            "step_interval":128,
+            "window_size":1000,
+            "step_interval":3000,
             "policy":"stair",
             "num_redundant_experts":16
         }' \
@@ -2156,8 +2156,8 @@ Select the tab for the target hardware.
         --enable-expert-parallel \
         --enable-eplb \
         --eplb-config '{
-            "window_size":64,
-            "step_interval":128,
+            "window_size":1000,
+            "step_interval":3000,
             "policy":"stair",
             "num_redundant_experts":16
         }' \
@@ -2558,8 +2558,8 @@ for the required software and networking versions.
         --enable-expert-parallel \
         --enable-eplb \
         --eplb-config '{
-            "window_size":64,
-            "step_interval":128,
+            "window_size":1000,
+            "step_interval":3000,
             "policy":"stair",
             "num_redundant_experts":16
         }' \
@@ -3311,6 +3311,22 @@ to determine a better parameter set in one run and push performance toward the
 hardware limit.
 For the complete, step-by-step usage guide please refer to
 **[Optix-for-PD-disaggregation](https://gitcode.com/Ascend/msmodeling/blob/master/docs/en/quick_start/optix_agent_pd_disaggregation.md)**.
+
+### 9.2 EPLB Tuning for Short Benchmarks
+
+The A3 Prefill examples in Sections 5.2–5.4 set `window_size` to `1000` and
+`step_interval` to `3000` in `--eplb-config`. When benchmarking Expert Parallel
+Load Balancing (EPLB) with a small dataset or a short test run, consider reducing
+these values, for example to `64` and `128`, respectively.
+
+A smaller statistics window lets EPLB respond to recent expert load, while a
+shorter rebalancing interval allows more rounds of expert redistribution within
+the available inference steps. With larger values, a short benchmark may finish
+before enough rebalancing rounds have occurred, leaving substantial expert load
+imbalance and making the results less representative of balanced execution.
+Choose the window and interval according to the benchmark duration and workload,
+and allow enough inference steps for repeated rebalancing before assessing EPLB's
+performance impact.
 
 ## 10 FAQ
 
