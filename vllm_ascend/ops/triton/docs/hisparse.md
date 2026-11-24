@@ -28,6 +28,40 @@ Host address. Dimensions and strides are nonnegative integer attributes, with
 positive block sizes and row widths. Byte strides and element strides are
 distinguished below; the Python wrappers supply the launch geometry.
 
+### `scatter_min_representatives`
+
+The Ascend prefill adapter uses this wrapper for Core's representative-page
+selection. It updates `representatives` in place and returns the same tensor,
+matching `scatter_reduce_(0, index, source, reduce="amin", include_self=True)`.
+Duplicate IDs take the exact signed minimum, including the existing output;
+unreferenced destinations retain their values. A 256-element tile performs
+atomic minimums on NPU with the default `acq_rel` memory semantics, avoiding
+the int64 CPU fallback. The wrapper introduces no Host tensor reads,
+allocation or synchronization.
+
+| Parameter | Input/Output/Attribute | Description | Data type | Data format |
+| --- | --- | --- | --- | --- |
+| `representatives` | Input/Output | Existing values participate in the minimum | INT64 | Contiguous `[capacity]` |
+| `index` | Input | Destination IDs in `[0, capacity)` | INT64 | Contiguous `[rows]` |
+| `source` | Input | Values to reduce, including the full signed INT64 range | INT64 | Contiguous `[rows]` |
+
+All three vectors must reside on the same NPU; output storage must not overlap
+either input. The caller guarantees device placement, valid IDs and
+stream/lifetime ordering. Metadata checks enforce rank, dtype, contiguity and
+matching input lengths.
+Empty input launches nothing; nonempty input requires nonempty output.
+`rows <= INT32_MAX - 256` bounds row-offset arithmetic. Other reductions and
+`include_self=False` are unsupported.
+
+`num_rows` is runtime with `do_not_specialize`; pointer alignment specialization
+is also disabled. The fixed `BLOCK_SIZE=256` is the only constexpr, while dtype
+and backend options remain part of Triton's actual cache key. Startup registration
+and runtime share one `AscendTritonJitKernel` instance, registered by the selected
+`AscendHiSparseMetadataBuilder` inside the runner's active initialization window.
+Warmup compiles metadata without executing atomics. Runtime uses explicitly bound
+arguments to avoid repeated Python signature binding. The launcher retains no
+request tensors or outputs.
+
 ### `gather_rows_kernel`
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
@@ -136,7 +170,7 @@ the maximum INT64 sentinel. Sorting is performed by the Python wrapper.
 - Written-slot invalidation changes tags only. The sorted route treats writes
   outside INT32 range as nonmatching sentinels. The wrapper selects direct or
   sorted invalidation from the actual geometry and device capability.
-- Scatter requires unique valid destinations within one launch. Padding and
+- Packed KV scatter requires unique valid destinations within one launch. Padding and
   rows beyond the optional valid prefix must leave other storage unchanged.
 - Resident gather follows Core's negative-ID-to-row-zero convention; it is not
   a skip convention. IDs above the source capacity leave staging unchanged.
@@ -174,11 +208,16 @@ operator tests.
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_hisparse.py
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_hisparse_arch22_ops.py -k invalidation
 pytest -sv tests/ut/model_executor/warmup/test_hisparse_recycled_invalidate.py
+pytest -sv tests/ut/model_executor/warmup/test_hisparse_representatives.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_hisparse_representatives.py
 ```
 
 Warmup unit tests use CPU contract doubles for eligibility, the no-write sentinel,
 bucket padding and fallback checks. They do not establish NPU correctness or
-hardware compilation coverage. Execution status belongs in the PR description;
+hardware compilation coverage. Representative-minimum tests separately cover
+exact INT64 results, duplicate IDs, masked tails, offset views and changed-input
+graph replay, plus CPU warmup and launch-binding contracts.
+Execution status belongs in the PR description;
 adding a case is not a claim that it has passed on hardware.
 
 ## Example

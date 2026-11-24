@@ -25,7 +25,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from fnmatch import filter as fnmatch_filter
 from threading import RLock
 from types import NoneType
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import torch
@@ -83,6 +83,7 @@ from vllm.v1.worker.startup_plan import (
 from vllm.v1.worker.worker_base import CompilationTimes
 from vllm.v1.worker.workspace import init_workspace_manager
 
+import vllm_ascend.device_allocator.sleep_mode_backend  # noqa: F401  (registers camem)
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
@@ -126,7 +127,6 @@ from vllm_ascend.utils import (
 
 if TYPE_CHECKING:
     from vllm.config.profiler import ProfilerConfig
-    from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.distributed.parallel_state import Handle
     from vllm.distributed.weight_transfer import WeightTransferEngine
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -287,12 +287,6 @@ class NPUWorker(GPUWorker):
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
 
-    # Quarantine newly visible GPUWorker interfaces until each NPU contract is
-    # validated.
-    @property
-    def sleep_mode_backend(self) -> "SleepModeBackend":
-        raise NotImplementedError("GPUWorker.sleep_mode_backend is not validated on Ascend.")
-
     def _get_sleep_parameters(self, model: nn.Module) -> dict[str, nn.Parameter]:
         raise NotImplementedError("GPUWorker._get_sleep_parameters is not validated on Ascend.")
 
@@ -307,12 +301,6 @@ class NPUWorker(GPUWorker):
 
     def _scoped_allocator_max_split(self, max_split_size_mb: int):
         raise NotImplementedError("GPUWorker._scoped_allocator_max_split is not validated on Ascend.")
-
-    def _init_workspace_and_model_runner(self) -> None:
-        raise NotImplementedError("GPUWorker._init_workspace_and_model_runner is not validated on Ascend.")
-
-    def _make_model_runner(self) -> NoReturn:
-        raise NotImplementedError("GPUWorker._make_model_runner is not validated on Ascend.")
 
     def handle_ft_command(self, ft_request):
         raise NotImplementedError("GPUWorker.handle_ft_command is not validated on Ascend.")
@@ -441,6 +429,9 @@ class NPUWorker(GPUWorker):
         return apply_process_metrics_level(level)
 
     def sleep(self, level: int = 1) -> None:
+        # Resolve the backend before cleanup or KV unregistration so a bad
+        # backend configuration leaves the worker state intact.
+        backend = self.sleep_mode_backend
         self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Level-1 only offloads the weights pool. Persistent metadata such as
@@ -461,9 +452,8 @@ class NPUWorker(GPUWorker):
             self.sleep_wakeup_manager.sleep()
         self.synchronize_device()
 
-        allocator = CaMemAllocator.get_instance()
         global_te.unregister_buffer()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        backend.suspend(level)
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -485,8 +475,7 @@ class NPUWorker(GPUWorker):
                 "or enable additional_config.rl_config (enabled: true) which disables NZ "
                 "automatically."
             )
-        allocator = CaMemAllocator.get_instance()
-        allocator.wake_up(tags=tags)
+        self.sleep_mode_backend.resume(tags)
         if tags is None or "kv_cache" in tags:
             global_te.reregister_buffer()
 
@@ -733,25 +722,30 @@ class NPUWorker(GPUWorker):
         # TODO: Drop this separate call when supported vLLM FLA or Triton Ascend
         # versions fix import-time NPU init and general registration is restored.
         register_ascend_fla_customop()
+
+        self._init_workspace_and_model_runner()
+
+    def _init_workspace_and_model_runner(self) -> None:
         # Initialize workspace manager
         num_ubatches = 1
         init_workspace_manager(self.device, num_ubatches)
-        # Init ModelRunner here, so that we have access to self.device.
+        self.model_runner = self._make_model_runner()
+
+        if self.rank == 0:
+            # If usage stat is enabled, collect relevant info.
+            report_usage_stats(self.vllm_config)
+
+    def _make_model_runner(self):
         if self.vllm_config.is_mm_encoder_only:
             from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
             from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
             with torch_cuda_wrapper():
-                self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
-        else:
-            from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+                return MMEncoderModelRunner(self.vllm_config, self.device)
+        from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
-            self.model_runner = NPUModelRunner(self.vllm_config, self.device)
-
-        if self.rank == 0:
-            # If usage stat is enabled, collect relevant info.
-            report_usage_stats(self.vllm_config)
+        return NPUModelRunner(self.vllm_config, self.device)
 
     def _apply_kv_offload_decode_memory_constraints(
         self,
