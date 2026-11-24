@@ -15,6 +15,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    SparseCacheRole,
     UniformTypeKVCacheSpecs,
 )
 
@@ -109,6 +110,7 @@ def make_index_cache_spec(*, block_size, head_size, compress_ratio):
         model_version="deepseek_v41",
         # Both supported vLLM lanes (#57169) omit MLA `storage_block_size`.
         **{},
+        cache_role=SparseCacheRole.INDEXER,
         scale_dim=scale_dim,
         scale_dtype=scale_dtype,
     )
@@ -124,6 +126,7 @@ def make_folded_index_cache_spec(*, block_size):
         head_size=INDEX_FOLD_ROWS * (INDEX_HEAD_DIM // 2 + INDEX_HEAD_DIM // 32),
         dtype=torch.uint8,
         tokens_per_state=INDEX_FOLD_ROWS,
+        cache_role=SparseCacheRole.INDEXER,
         model_version="deepseek_v41",
         # Both supported vLLM lanes (#57169) omit MLA `storage_block_size`.
         **{},

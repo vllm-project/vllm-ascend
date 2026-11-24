@@ -42,7 +42,7 @@ def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
         return kv_cache_spec.block_size // kv_cache_spec.tokens_per_state
     if isinstance(kv_cache_spec, MLAAttentionSpec):
         return kv_cache_spec.block_size
-    return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
+    return getattr(kv_cache_spec, "storage_block_size", None) or kv_cache_spec.block_size
 
 
 def is_circular_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:

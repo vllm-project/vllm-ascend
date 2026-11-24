@@ -927,6 +927,10 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
                     compress_ratio=role.compress_ratio,
                 ),
             )
+        if role.is_kv_source:
+            from vllm_ascend.models.deepseek_v41.hisparse import create_source_handle
+
+            self.long_kv_cache.hisparse_cache = create_source_handle(vllm_config, layer_idx, self.long_kv_cache.spec)
         self.compressor = (
             DeepseekV41Compressor(config, role.compress_ratio, vllm_config, f"{prefix}.compressor")
             if role.is_kv_source
