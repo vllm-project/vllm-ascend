@@ -224,8 +224,9 @@ def test_kimi_k31_qkv_tp_uses_the_outer_model_type():
 
 
 @pytest.mark.parametrize("model_type", ["kimi_linear", "glm5_next", "other"])
-def test_gproj_config_has_no_model_schema_dependency(model_type):
+def test_gproj_uses_kimi_outer_config_for_text_backbones(model_type):
     vc = valid_config()
+    vc.model_config.hf_config = SimpleNamespace(model_type="kimi_k31")
     vc.model_config.hf_text_config = SimpleNamespace(model_type=model_type)
     FinegrainedTPConfig(gproj_tensor_parallel_size=2)._validate_preconditions(vc)
 

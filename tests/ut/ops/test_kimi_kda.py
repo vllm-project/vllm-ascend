@@ -114,6 +114,7 @@ class _RecordingStreamSwitch:
 def test_kda_output_norm_uses_checkpoint_epsilon():
     def fake_upstream_init(attention, _config, _vllm_config, _prefix):
         nn.Module.__init__(attention)
+        attention.recoverssm_records = None
         attention.o_norm = SimpleNamespace(eps=1e-5)
         attention.conv_size = 4
         attention.local_projection_size = 2
@@ -707,6 +708,8 @@ def test_recoverssm_dispatches_without_spec_mask_and_sigmoids_beta_once(mixed):
         use_recoverssm=True,
         _mega_kda_op=None,
         recoverssm_records=records,
+        recoverssm_decay_cache=None,
+        recoverssm_normalized_key_cache=None,
         A_log=torch.zeros(1),
         dt_bias=torch.zeros(dim),
         gate_lower_bound=-5.0,
@@ -903,7 +906,7 @@ def test_local_tp_projection_stream_order(monkeypatch, groups, mode, comm_mode, 
         mark("recurrent")
         return v.contiguous()
 
-    def verify(q, k, v, *args):
+    def verify(q, k, v, *args, **kwargs):
         mark("verify")
         return v.contiguous()
 
@@ -947,6 +950,10 @@ def test_local_tp_projection_stream_order(monkeypatch, groups, mode, comm_mode, 
     ):
         monkeypatch.setattr(projection_module, name, MagicMock())
     layer = SimpleNamespace(
+        _full_kda_op=None,
+        _mega_kda_op=None,
+        recoverssm_decay_cache=None,
+        recoverssm_normalized_key_cache=None,
         qkv_layout=q_layout,
         gate_layout=g_layout,
         num_heads=2,
@@ -1073,6 +1080,7 @@ def test_kimi_projection_checks_its_own_head_contract(qkv_size, gate_size, heads
     def init(attention, config, vllm_config, prefix):
         nn.Module.__init__(attention)
         attention.num_heads = heads
+        attention.recoverssm_records = None
 
     config = SimpleNamespace(linear_attn_config={"use_full_rank_gate": full_rank})
     vc = SimpleNamespace(
@@ -1087,6 +1095,11 @@ def test_kimi_projection_checks_its_own_head_contract(qkv_size, gate_size, heads
     )
     with (
         patch("vllm_ascend.ops.kimi_kda.KimiK3DeltaAttention.__init__", init),
+        patch.object(
+            projection_module,
+            "get_ascend_config",
+            return_value=SimpleNamespace(kda_backend_config=SimpleNamespace(backend="native")),
+        ),
         pytest.raises(ValueError, match=error),
     ):
         AscendKimiK3DeltaAttention(config, vc)

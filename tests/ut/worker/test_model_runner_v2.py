@@ -851,6 +851,7 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
         impl.v_head_dim = 1
         impl.enable_mlapo = False
         impl.fa_quant_layer = False
+        impl.use_quant_flashmla = False
         impl.use_flashmla = False
         impl.use_pcp = False
         impl.use_dcp = False

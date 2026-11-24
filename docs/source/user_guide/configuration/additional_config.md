@@ -422,9 +422,12 @@ KV consumer. The default is `native`.
 | Backend | Operator and scope |
 | --- | --- |
 | `mega_recurrent_kda_mx` | The upstream `npu_mega_recurrent_kda` public API consumes BF16 hidden states and returns the local BF16 output projection. |
+| `mega_recurrent_kda` | The full BF16 `npu_mega_recurrent_kda_v2` wheel uses ReplaySSM on TP1. QKV is expanded from MXFP8 at load time. Pure speculative batches use the fused layer when the commit context has normalized key and decay buffers. Other batches use native KDA. |
 | `mega_kda` | The separate `npu_mega_kda_projected` wheel accepts projected QKV and uses the model's external gated norm and output projection. This backend requires ReplaySSM to be disabled. |
 
-For the full operator, build an Ascend 950 wheel from
+All three backends require ordinary QKV, gate and output projection groups. Other fine-grained TP groups can remain enabled.
+
+For the MXFP8 operator, build an Ascend 950 wheel from
 [the upstream integration guide](https://github.com/chen-linxin/flash-linear-attention-npu/blob/0c59c1d363b5debe1b7f76ddc59e44d48351523d/fla/ops/ascendc/kda/mega_recurrent_kda/docs/model_integration.md).
 Install the wheel and expose its OPP before starting workers:
 
