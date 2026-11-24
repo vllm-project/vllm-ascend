@@ -1,0 +1,6 @@
+pr: 23000
+entries:
+  - category: feature
+    text: >-
+      Set `dump_on_profile_run` in additional configuration to capture msprobe weight statistics
+      at startup and compare them with the first prefill after an RL weight update in eager mode.
