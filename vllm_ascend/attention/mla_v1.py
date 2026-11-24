@@ -988,7 +988,6 @@ class MLAParamProvider:
     is_draft_model: bool = False
     num_tokens: int | None = None
     eagle_spec_multiple: int | None = None
-    disable_padded_batch: bool = False
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         decode = attn_metadata[self.layer_name].decode
@@ -996,8 +995,6 @@ class MLAParamProvider:
         if self.is_draft_model:
             actual_seq_qlen = decode.actual_seq_lengths_q
             block_table = decode.block_table
-            if self.disable_padded_batch:
-                block_table = block_table[: len(actual_seq_qlen)]
             return {
                 "actual_seq_qlen": actual_seq_qlen,
                 "actual_seq_kvlen": decode.seq_lens_list + [0] * (len(actual_seq_qlen) - len(decode.seq_lens_list)),
