@@ -62,6 +62,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         mock_context = MagicMock()
         mock_context.mc2_mask = torch.tensor([1, 0, 1])
         mock_context.padded_num_tokens = 4
+        mock_context.use_mega_moe = False
         mock_get_forward_context.return_value = mock_context
 
         layer = PrepareAndFinalizeWithMC2(self.moe_config)
@@ -97,6 +98,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
             context = MagicMock()
             context.mc2_mask = torch.arange(padded_num_tokens) < num_tokens
             context.padded_num_tokens = padded_num_tokens
+            context.use_mega_moe = False
             mock_context.return_value = context
             for rank in range(4):
                 with self.subTest(num_tokens=num_tokens, rank=rank):
@@ -141,6 +143,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         mock_context = MagicMock()
         mock_context.mc2_mask = torch.tensor([1, 0, 1, 0])
         mock_context.padded_num_tokens = 4
+        mock_context.use_mega_moe = False
         mock_get_forward_context.return_value = mock_context
 
         layer = PrepareAndFinalizeWithMC2(self.moe_config)
