@@ -334,7 +334,15 @@ Text requests do not require `--limit-mm-per-prompt`, but omitting this flag doe
 
 ### 5.2 Multi-Node Deployment
 
-Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi-node deployment on A3 servers without prefill–decode disaggregation is not recommended. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `NETWORK_INTERFACE` based on the actual environment. Set `NETWORK_INTERFACE` to the local communication NIC name (for example, `eth0`); HCCL and Gloo use this value directly.
+Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi-node deployment on A3 servers without prefill–decode disaggregation is not recommended. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, and `LOG_PATH` as described in Section 3.1.
+
+Before running either node's deployment command, define the following variables in its container shell. Use the same `NODE0_IP` and `NODE1_IP` values on both nodes, set to their reachable communication IPs. Set `NETWORK_INTERFACE` to the current node's communication NIC name (for example, `eth0`); HCCL and Gloo use it directly. The commands below derive `local_ip` and `node0_ip` from these variables.
+
+```bash
+export NODE0_IP="<NODE0_COMMUNICATION_IP>"
+export NODE1_IP="<NODE1_COMMUNICATION_IP>"
+export NETWORK_INTERFACE="<CURRENT_NODE_NIC>"
+```
 
 === "A3 series (BF16)"
 
@@ -673,13 +681,13 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
 === "A3 series (W8A8)"
 
-    Prefill-Decode disaggregation can be deployed on 3 Atlas 800I A3 (64GB × 24) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
+    Prefill-Decode disaggregation can be deployed on 3 Atlas 800I A3 (64GB × 16) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
 
 
     **1. Prefill node**
 
     ```bash
-    unset http_proxy https_proxy ftp_proxy
+    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
 
     # Replace IP, NIC and weight-path placeholders for this node.
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
@@ -934,7 +942,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
     The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in [Section 6](#6-functional-verification).
 
-    To use MindIE PyMotor instead of the example proxy, follow [Deploy vLLM Ascend with MindIE-Motor](../../user_guide/deployment_guide/using_mindie_motor.md) and register the same one Prefill and eight Decode endpoints. Send benchmark requests to the Motor inference endpoint. Changing the request router does not require changing the P/D parallel sizes or scheduler limits above.
+    To use MindIE Motor instead of the example proxy, follow [Deploy vLLM Ascend with MindIE-Motor](../../user_guide/deployment_guide/using_mindie_motor.md) and register the same one Prefill and eight Decode endpoints. Send benchmark requests to the Motor inference endpoint. Changing the request router does not require changing the P/D parallel sizes or scheduler limits above.
 
 === "950DT products"
 
@@ -1468,7 +1476,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     **1. Prefill node**
 
     ```bash
-    unset http_proxy https_proxy ftp_proxy
+    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
 
     # Replace IP, NIC and weight-path placeholders for this node.
     export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"

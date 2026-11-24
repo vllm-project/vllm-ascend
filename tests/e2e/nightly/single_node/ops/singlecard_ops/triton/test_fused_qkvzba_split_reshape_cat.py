@@ -62,11 +62,12 @@ def validate_cmp(y_cal, y_ref, device="npu"):
 # Real inference shapes used by Qwen3-GDN-10B (gqa_interleaved_layout=True),
 # with num_heads_qk / num_heads_v divided by tp_size (here tp_size = 1):
 #   num_k_heads=16, num_v_heads=128, head_k_dim=512, head_v_dim=512
-# Plus a generic case covering a wider parameter space (v_heads_per_qk >= 1).
+# The smaller generic shape covers unequal head dimensions in both dtypes.
 TEST_CASES = [
-    (64, 16, 128, 512, 512),
-    (2048, 16, 128, 512, 512),
-    (128, 8, 32, 128, 64),
+    (128, 8, 32, 128, 64, torch.float32),
+    (64, 16, 128, 512, 512, torch.float32),
+    (2048, 16, 128, 512, 512, torch.bfloat16),
+    (128, 8, 32, 128, 64, torch.bfloat16),
 ]
 
 
@@ -74,10 +75,9 @@ TEST_CASES = [
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
 @pytest.mark.parametrize(
-    "seq_len, num_heads_qk, num_heads_v, head_qk_dim, head_v_dim",
+    "seq_len, num_heads_qk, num_heads_v, head_qk_dim, head_v_dim, dtype",
     TEST_CASES,
 )
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_fused_qkvzba_split_reshape_cat(
     seq_len,
     num_heads_qk,

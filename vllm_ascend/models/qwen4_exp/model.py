@@ -35,7 +35,7 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
 )
 
 from . import ple_embedding  # noqa: F401 - register the OOT host embedding before model construction
-from .ple import patch_upstream_ple_short_conv
+from .ple import AscendPCPPLELayer, patch_upstream_ple_short_conv
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
 # CUDA glue functions are module globals, so replace them before importing the
@@ -52,17 +52,48 @@ upstream_hc.hc_silu = hc_silu
 patch_upstream_ple_short_conv()
 
 from vllm.models.qwen4_exp.amd import model as upstream_model  # noqa: E402
+from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer  # noqa: E402
 
 from .qsa import AscendQwen4ExpQSAAttention  # noqa: E402
 
 upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
 
 
+def _build_ascend_ple(config, vllm_config: VllmConfig, **kwargs) -> Qwen4ExpPLELayer:
+    # Choose the backend before PLE allocates its host table and registers
+    # the layer in the static forward context.
+    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+        return AscendPCPPLELayer(config, vllm_config=vllm_config, **kwargs)
+    return Qwen4ExpPLELayer(config, vllm_config=vllm_config, **kwargs)
+
+
+# The upstream decoder resolves this module global when it creates each PLE.
+upstream_model.Qwen4ExpPLELayer = _build_ascend_ple
+
+
 class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
     """Qwen4Exp backbone with Ascend-safe graph shape annotations."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        parallel = vllm_config.parallel_config
+        use_pcp = parallel.prefill_context_parallel_size > 1
+        if use_pcp:
+            if parallel.decode_context_parallel_size != 1:
+                raise NotImplementedError("Qwen4Exp PCP requires DCP=1")
+
+            from vllm_ascend.ops.head_parallel import get_head_parallel_size
+
+            text_config = vllm_config.model_config.hf_text_config
+            head_shards = get_head_parallel_size(parallel)
+            if text_config.linear_num_key_heads % head_shards or text_config.linear_num_value_heads % head_shards:
+                raise ValueError("Qwen4Exp GDN key and value heads must be divisible by TP * PCP")
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        if use_pcp:
+            from vllm_ascend.attention.gdn import shard_gdn_heads_over_pcp
+
+            for layer in self.layers[self.start_layer : self.end_layer]:
+                if hasattr(layer, "linear_attn"):
+                    shard_gdn_heads_over_pcp(layer.linear_attn, parallel)
         # With max_num_seqs=1 the PLE query-start buffer has a static length of
         # two. Marking that length dynamic makes TorchDynamo reject the static
         # specialization used by PLE during FULL_DECODE_ONLY graph capture.
@@ -79,6 +110,15 @@ upstream_model.Qwen4ExpModel = AscendQwen4ExpModel
 
 class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
     """Qwen3.8-Flash-Next text model using Ascend platform operators."""
+
+    @classmethod
+    def get_gdn_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
+        upstream_shape = super().get_gdn_mamba_state_shape_from_config
+        if vllm_config.parallel_config.prefill_context_parallel_size == 1:
+            return upstream_shape(vllm_config)
+        from vllm_ascend.ops.head_parallel import get_head_sharded_state_shape
+
+        return get_head_sharded_state_shape(vllm_config, upstream_shape)
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
@@ -106,6 +146,10 @@ class AscendQwen4ExpProcessingInfo(_AscendProcessorMixin, upstream_model.Qwen4Ex
 )
 class AscendQwen4ExpForConditionalGeneration(_AscendVLPreprocessMixin, upstream_model.Qwen4ExpForConditionalGeneration):
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
+
+    @classmethod
+    def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
+        return AscendQwen4ExpForCausalLM.get_mamba_state_shape_from_config(vllm_config)
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):

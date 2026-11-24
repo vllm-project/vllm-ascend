@@ -3,6 +3,10 @@ from vllm import ModelRegistry
 
 def register_model():
     ModelRegistry.register_model(
+        "Lfm2VlForConditionalGeneration",
+        "vllm_ascend.models.lfm2_vl:AscendLfm2VLForConditionalGeneration",
+    )
+    ModelRegistry.register_model(
         "Qwen4ExpForCausalLM",
         "vllm_ascend.models.qwen4_exp:AscendQwen4ExpForCausalLM",
     )
