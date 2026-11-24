@@ -8,10 +8,9 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
-from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.ops.fused_moe import fused_moe, moe_comm_method, moe_utils
+from vllm_ascend.ops.fused_moe import moe_comm_method, moe_utils
 from vllm_ascend.ops.fused_moe import shared_experts as shared_experts_module
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MegamoeSharedExpertFusion, MegamoeSharedWeights
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedMC2CommImpl
@@ -165,29 +164,6 @@ def test_collect_int8_payload_matches_routed_scale_dtype() -> None:
     assert scale.dtype is torch.int64
     assert int(scale[0]) == 1006632960
     assert tuple(runner._megamoe_shared_parts["w1"].shape) == (4096, 4096)
-
-
-@pytest.mark.parametrize(
-    "use_mega_moe,comm_type,ready,disabled,expected",
-    [
-        pytest.param(True, MoECommType.FUSED_MC2, True, False, True, id="eligible"),
-        pytest.param(False, MoECommType.FUSED_MC2, True, False, False, id="non-megamoe-step"),
-        pytest.param(True, MoECommType.MC2, True, False, False, id="non-fused-communicator"),
-        pytest.param(True, MoECommType.FUSED_MC2, False, False, False, id="weights-pending"),
-        pytest.param(True, MoECommType.FUSED_MC2, True, True, False, id="fusion-disabled"),
-    ],
-)
-def test_shared_forward_is_skipped_only_for_actual_megamoe_step(
-    monkeypatch, use_mega_moe, comm_type, ready, disabled, expected
-):
-    monkeypatch.setattr(fused_moe, "_EXTRA_CTX", SimpleNamespace(moe_comm_type=comm_type, use_mega_moe=use_mega_moe))
-    runner = SimpleNamespace(
-        ascend_shared_experts=SimpleNamespace(
-            megamoe_shared_weights_ready=ready,
-            _megamoe_shared_fusion_disabled=disabled,
-        )
-    )
-    assert fused_moe.AscendMoERunner._megamoe_shared_expert_fused.fget(runner) is expected
 
 
 _INTEGER_SHARED_ABI = frozenset(

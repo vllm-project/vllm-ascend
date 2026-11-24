@@ -347,7 +347,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             shared_experts is not None
             and getattr(shared_experts, "megamoe_shared_weights_ready", False)
             and not getattr(shared_experts, "_megamoe_shared_fusion_disabled", False)
-            and getattr(_EXTRA_CTX, "use_mega_moe", False)
             and _EXTRA_CTX.moe_comm_type is MoECommType.FUSED_MC2
         )
 
