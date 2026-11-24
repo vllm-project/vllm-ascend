@@ -43,8 +43,8 @@ UCM currently provides the following capabilities:
 
 | Capability | Description |
 |------------|-------------|
-| **Prefix Cache** | Persistent KV cache storage with support for NFS Store, 3FS Store, and Pipeline Store |
-| **Sparse Attention** | Training-free sparse attention methods including GSA (Graph-based Sparse Attention) and CacheBlend for long-context acceleration |
+| **Prefix Cache** | Persistent KV cache storage with support for NFS Store, 3FS Store, and PipelineStore |
+| **Sparse Attention** | Training-free sparse attention methods including GSA (Geometry Sparse Attention) and CacheBlend for long-context acceleration |
 | **PD Disaggregation** | Prefill-Decode disaggregation with multiple modes: P2P, Centralized PD, NPGD, and xPYD |
 | **ReRoPE** | Support for Rotary Position Embedding extensions |
 
@@ -52,7 +52,7 @@ UCM currently provides the following capabilities:
 
 - CUDA (NVIDIA H100, H20, L40, L20)
 - CANN (Atlas A2 inference products, Atlas A3 inference products)
-- MUSA (Mthreads S5000)
+- MUSA (Moore Threads S5000)
 - MACA (MetaX C500)
 
 **Supported Frameworks:**
@@ -68,7 +68,7 @@ UCM currently provides the following capabilities:
 ### Prerequisites
 
 - OS: Linux
-- Hardware with Ascend NPUs. It is typically the Atlas 800 A2 series.
+- Hardware with Ascend NPUs. It is typically the Atlas 800 A2 or Atlas 800T A2 series.
 - vLLM: main branch
 - vLLM-Ascend: main branch
 

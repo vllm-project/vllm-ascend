@@ -202,7 +202,7 @@ Single-node deployment runs both Prefill and Decode on the same node. The follow
     # Reduce memory fragmentation and avoid out-of-memory errors.
 
     # Ensure the model path matches the directory recorded during download
-    vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct --additional-config '{"enable_fused_mc2":1}' \
+    vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
       --host 0.0.0.0 \
       --port 8000 \
       --served-model-name qwen3-vl-30b \
@@ -230,7 +230,7 @@ Key Parameter Descriptions:
 
 - `--tensor-parallel-size 2` maps the model to two NPUs. Increase TP only after validating memory, communication, and throughput on your hardware.
 - `--enable-expert-parallel` enables expert parallelism for MoE layers. Do not mix MoE tensor parallelism and expert parallelism in the same MoE layer.
-- `--max-model-len` is the maximum input plus output length for a single request. By default, the model can support long context, but `128000` is a practical validation value for many image/video workloads.
+- `--max-model-len` is the maximum input plus output length for a single request. The deployment examples set it to `32768`; `128000` is a practical validation value for long-context image/video workloads and can be used after confirming KV cache capacity.
 - `--max-num-seqs` is the maximum number of active requests scheduled by each DP group. Video requests consume more memory, so the video example uses a smaller value.
 - `--max-num-batched-tokens` is the maximum number of tokens processed in one scheduler step. A larger value can improve prefill efficiency but consumes more activation memory.
 - `--gpu-memory-utilization` controls how much HBM vLLM can use to calculate KV cache capacity. Increase it only after confirming the service is stable.
