@@ -37,6 +37,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
 )
 from vllm.distributed import get_dcp_group, get_tensor_model_parallel_rank
+from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
@@ -779,6 +780,17 @@ def _align_up(value: int, alignment: int) -> int:
     return (value + alignment - 1) // alignment * alignment
 
 
+def _requires_device_kv_alignment(vllm_config: VllmConfig) -> bool:
+    if vllm_config.kv_transfer_config is None:
+        return False
+    if not has_kv_transfer_group():
+        return True
+
+    connector_worker = getattr(get_kv_transfer_group(), "connector_worker", None)
+    spec = getattr(connector_worker, "spec", None)
+    return getattr(spec, "requires_device_kv_alignment", True) is not False
+
+
 def _allocate_int8_cache_tensor(
     numel: int,
     alignment: int,
@@ -786,14 +798,15 @@ def _allocate_int8_cache_tensor(
 ) -> torch.Tensor:
     """Allocate an int8 raw cache tensor.
 
-    When KV transfer is enabled, the returned tensor's data_ptr is aligned
-    to `alignment`. This keeps the original Mooncake/ADXL alignment behavior.
+    KV transfer backends keep aligned addresses unless their spec explicitly
+    opts out. Slicing to align each allocation can introduce different
+    storage offsets across layers and prevent attention tiling reuse.
     """
     if numel <= 0:
         raise ValueError(f"Invalid cache tensor size: {numel}")
 
     vllm_config = get_current_vllm_config()
-    if vllm_config.kv_transfer_config is None:
+    if not _requires_device_kv_alignment(vllm_config):
         return torch.zeros(numel, dtype=torch.int8, device=device)
 
     raw_tensor = torch.zeros(

@@ -57,6 +57,7 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu import NPUOffloadingSpec
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
@@ -2854,6 +2855,32 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     assert forwarded["positions"].tolist() == [0, 1]
     assert forwarded["is_prefilling"] is True
     assert module.build_attn_metadata is stub
+
+
+@pytest.mark.parametrize("backend", ["disabled", "uninitialized", "pd", "default_spec", "cpu_offload"])
+def test_raw_kv_cache_alignment_follows_transfer_backend(monkeypatch, backend):
+    config = SimpleNamespace(kv_transfer_config=None if backend == "disabled" else object())
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "has_kv_transfer_group", lambda: backend not in {"disabled", "uninitialized"})
+    connector = SimpleNamespace()
+    if backend == "default_spec":
+        connector.connector_worker = SimpleNamespace(spec=object())
+    if backend == "cpu_offload":
+        connector.connector_worker = SimpleNamespace(spec=object.__new__(NPUOffloadingSpec))
+    monkeypatch.setattr(attn_utils, "get_kv_transfer_group", lambda: connector)
+
+    size, alignment = 8, 64
+    cache = attn_utils._allocate_int8_cache_tensor(size, alignment, torch.device("cpu"))
+
+    assert cache.shape == (size,)
+    assert cache.dtype == torch.int8
+    assert not torch.count_nonzero(cache)
+    if backend in {"disabled", "cpu_offload"}:
+        assert cache.storage_offset() == 0
+        assert cache.untyped_storage().nbytes() == size
+    else:
+        assert cache.data_ptr() % alignment == 0
+        assert cache.untyped_storage().nbytes() == size + alignment
 
 
 def test_mrv2_binds_v41_cache_views_directly():
