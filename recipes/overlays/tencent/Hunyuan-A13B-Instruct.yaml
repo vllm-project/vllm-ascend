@@ -5,6 +5,35 @@ meta:
   hardware:
     ascend_910c: verified
 
+variants:
+  ascend_bf16:
+    precision: bf16
+    label: BF16 (Ascend A3)
+    vram_minimum_gb: 40
+    description: Single-node TP4 BF16 verified on Atlas 800 A3 (4 Ascend910 dies).
+    supported_hardware:
+      - ascend_910c
+    tp: 4
+    min_vllm_version: 0.23.0
+    extra_args:
+      - '--trust-remote-code'
+      - '--host'
+      - '0.0.0.0'
+      - '--served-model-name'
+      - 'Hunyuan'
+      - '--max-model-len'
+      - '32768'
+      - '--gpu-memory-utilization'
+      - '0.90'
+    extra_env:
+      HCCL_INTRA_ROCE_ENABLE: '1'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_BUFFSIZE: '512'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a3
+        docker_serve_command: vllm serve
+
 guide_sections:
   ascend: |
     ### Ascend Atlas 800 A3 (910C)
