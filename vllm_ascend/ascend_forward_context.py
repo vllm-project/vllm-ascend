@@ -265,10 +265,12 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     ascend_config = get_ascend_config()
     use_mega_moe = use_cann_megamoe(vllm_config)
 
-    # Cap for fused MC2 / MegaMoe: regular MC2 (gated by enable_prefill_mc2) uses
-    # HCCL comm buffer (HCCL_BUFFSIZE); MegaMoe (use_mega_moe, non-decode-only)
-    # uses the symm buffer (separate torch alloc, not HCCL_BUFFSIZE).
-    if ascend_config.enable_prefill_mc2 or (use_mega_moe and not _is_decode_only_node(vllm_config)):
+    # Shared-expert MegaMoe also handles scheduler-sized profile runs on
+    # decode-only nodes, so its symmetric buffer must cover the profile batch.
+    use_scheduler_capacity = ascend_config.enable_prefill_mc2 or (
+        use_mega_moe and (not _is_decode_only_node(vllm_config) or ascend_config.megamoe_shared_expert_fusion)
+    )
+    if use_scheduler_capacity:
         max_num_tokens = get_pcp_profile_num_tokens(
             vllm_config, vllm_config.scheduler_config.max_num_batched_tokens, max_num_reqs
         )

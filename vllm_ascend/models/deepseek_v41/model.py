@@ -178,19 +178,18 @@ class DeepseekV41MLP(nn.Module):
         reduce_results: bool = True,
         is_sequence_parallel=False,
         prefix: str = "",
+        replicate_weights: bool = False,
     ) -> None:
         super().__init__()
 
-        # If is_sequence_parallel, the input and output tensors are sharded
-        # across the ranks within the tp_group. In this case the weights are
-        # replicated and no collective ops are needed.
-        # Otherwise we use standard TP with an allreduce at the end.
+        # Sequence parallelism and replicated shared experts both keep a full
+        # copy of the weights per rank. Their callers handle the token layout.
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
-            disable_tp=is_sequence_parallel,
+            disable_tp=is_sequence_parallel or replicate_weights,
             prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -199,7 +198,7 @@ class DeepseekV41MLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             reduce_results=reduce_results,
-            disable_tp=is_sequence_parallel,
+            disable_tp=is_sequence_parallel or replicate_weights,
             prefix=f"{prefix}.down_proj",
         )
         if swiglu_limit is not None:
@@ -261,7 +260,8 @@ class DeepseekV41MoE(nn.Module):
         self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
         self.physical_expert_end = self.physical_expert_start + self.n_local_physical_experts
 
-        self.is_fusion_moe_shared_experts_enabled = getattr(get_ascend_config(), "mix_placement", False)
+        ascend_config = get_ascend_config()
+        self.is_fusion_moe_shared_experts_enabled = getattr(ascend_config, "mix_placement", False)
         if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:
             self.shared_experts = None
         else:
@@ -276,6 +276,17 @@ class DeepseekV41MoE(nn.Module):
                 is_sequence_parallel=self.is_sequence_parallel,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
+                # Mode 3 needs the full shared MLP on every rank. SP already
+                # replicates the linears, so only the SEDP-only case needs this.
+                replicate_weights=(
+                    not is_draft_layer
+                    and self.tp_size > 1
+                    and not self.is_sequence_parallel
+                    and ascend_config.megamoe_shared_expert_fusion
+                    and ascend_config.enable_shared_expert_dp
+                    and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION)
+                    and not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+                ),
             )
 
         self.hash = layer_idx < config.num_hash_layers and not is_draft_layer
