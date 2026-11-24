@@ -121,6 +121,10 @@ a3:
         size: 3
   double_node:
     test_config:
+      - name: Kimi-K3.1-Pro-W4A8-E256-A3-1P1D
+        config_file_path: Kimi-K3.1-Pro-W4A8-E256-A3-1P1D.yaml
+        config_base_path: tests/SIT/cases/models/configs/Kimi
+        size: 2
       - name: multi-node-GLM-5.1-W8A8C8-MTP-A3_198k_function
         config_file_path: GLM-5.1-W8A8C8-A3_198k_function.yaml
         config_base_path: tests/SIT/cases/models/configs/GLM
