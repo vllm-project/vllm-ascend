@@ -584,10 +584,15 @@ def test_video_pruning_replaces_full_placeholder(pruning_spec, monkeypatch):
         ctx=SimpleNamespace(get_mm_config=lambda: SimpleNamespace(get_video_pruning_spec=lambda: pruning_spec))
     )
     upstream_calls = []
+
+    def upstream_expands_only_video_token(hf_processor):
+        upstream_calls.append(hf_processor)
+        return True
+
     monkeypatch.setattr(
         Qwen3VLMultiModalProcessor,
         "_expands_only_video_token",
-        staticmethod(lambda hf_processor: upstream_calls.append(hf_processor) or True),
+        staticmethod(upstream_expands_only_video_token),
     )
 
     assert processor._expands_only_video_token(object()) is False
@@ -602,10 +607,15 @@ def test_disabled_video_pruning_preserves_upstream_placeholder(upstream_result, 
     )
     hf_processor = object()
     upstream_calls = []
+
+    def upstream_expands_only_video_token(value):
+        upstream_calls.append(value)
+        return upstream_result
+
     monkeypatch.setattr(
         Qwen3VLMultiModalProcessor,
         "_expands_only_video_token",
-        staticmethod(lambda value: upstream_calls.append(value) or upstream_result),
+        staticmethod(upstream_expands_only_video_token),
     )
 
     assert processor._expands_only_video_token(hf_processor) is upstream_result
