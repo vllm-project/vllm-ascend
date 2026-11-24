@@ -234,6 +234,7 @@ class BaseKVPoolWorker(ABC):
         if vllm_version_is("0.33.0"):
             use_eagle_fn = getattr(speculative_config, "use_eagle", None)
             self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
+        self.num_hash_lookahead_tokens = 0 if vllm_version_is("0.34.0") else vllm_config.num_hash_lookahead_tokens
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
@@ -469,7 +470,7 @@ class BaseKVPoolWorker(ABC):
             use_eagle=self.use_eagle,
             retention_interval=retention_interval,
             enable_partial_hash_hits=self.enable_partial_hash_hits,
-            num_hash_lookahead_tokens=0 if vllm_version_is("0.34.0") else vllm_config.num_hash_lookahead_tokens,
+            num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
         )
 
     def _infer_group_uses_align_state(self) -> list[bool]:
