@@ -150,6 +150,10 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
 
 !!! note "Timeout for long sequences or high concurrency"
 
+    The fixed timeout below applies to `MooncakeConnectorV1`. For
+    `MooncakeConnectorV2`, configure `kv_lease_duration` instead; see
+    [MooncakeConnectorV2 KV Leases](pd_disaggregation_mooncake_multi_node.md#mooncakeconnectorv2-kv-leases).
+
     For long sequences or high concurrency, the default KV-cache release timeout of 480 seconds may be insufficient. Increase it as needed by setting `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT` in the prefiller startup script:
 
     ```shell
