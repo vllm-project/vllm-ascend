@@ -1,0 +1,5 @@
+pr: 22984
+entries:
+  - category: performance
+    text: Added general Ascend Atlas A3 (arch22) MegaMHC seam dispatch, offline second-order Ozaki dual-BF16 weight packing, and weight lifecycle management with automatic runtime detection. End-to-end validation on 8x Ascend 910C with DeepSeek-V4.1-Flash reduced decode step latency by 3.4% to 11.3% and saved ~0.27 GiB/die of ACLGraph memory.
+    hardware: [A3]
