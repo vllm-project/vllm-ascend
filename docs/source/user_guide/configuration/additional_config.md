@@ -42,6 +42,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
+| `draft_sampling_config` | dict | `{}` | Experimental request-sharded draft sampling. Currently supports DeepSeek V4.1 DSpark on Model Runner V2. |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
 | `runtime_config_path`               | str  | `None`  | Path to Runtime Guard JSON config. Default: `<cwd>/runtime/config/runtime_config.json`. See [Runtime Guard](../feature_guide/runtime_guard.md). |
@@ -359,3 +360,26 @@ convolution allocates its output separately.
 Small prefix match units can increase checkpoint traffic.
 
 Validate correctness, quality and performance on the deployment hardware before deploying in production.
+
+## Draft sampling
+
+`draft_sampling_config` controls experimental request-sharded draft sampling.
+
+| Field | Type | Default | Behavior |
+| --- | --- | --- | --- |
+| `batch_sharded` | bool | `false` | Enable the Ascend HCCL DSpark draft path. Also requires `--enable-batch-sharded-sampling`. |
+| `shard_min_reqs` | int or null | `null` | Minimum active request count; null resolves to TP size. The resolved value must be between 1 and `max_num_seqs`. Smaller batches use replicated draft sampling. |
+
+For an existing DeepSeek V4.1 DSpark launch, add:
+
+```bash
+--enable-batch-sharded-sampling \
+--additional-config '{"draft_sampling_config":{"batch_sharded":true,"shard_min_reqs":8}}'
+```
+
+This initial path requires Model Runner V2, TP greater than one and
+DP=PP=PCP=DCP=1. It supports full-vocabulary drafting with a replicated Markov
+W2 projection. Fine-grained LM-head TP, adaptive verification/online estimation,
+watermarking, truncated top-k drafting and confidence heads are unsupported.
+The vLLM 0.33.0 compatibility path supports greedy drafting only; the newer
+Core API supports probabilistic drafting with a sharded draft-logits cache.

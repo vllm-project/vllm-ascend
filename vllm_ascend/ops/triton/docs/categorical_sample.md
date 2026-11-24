@@ -33,6 +33,7 @@
 | `is_drafting` | Attribute | If `True`, adds a fixed RNG-position salt to keep the optional drafting stream separate | bool | scalar |
 | `logits_cache` | Input/Output | Optional cache buffer `[max_num_reqs, num_cols, cache_vocab_size]`; stores raw logits before temperature scaling | fp32 / bf16 | ND |
 | `logits_cache_col` | Input | Optional cache-column selector; either a scalar or shape `[num_tokens]` | int32 | scalar / ND |
+| `logits_cache_row_mapping` | Input | Optional request-state to local cache-row mapping; negative rows suppress writes | int32 / int64 | ND |
 | `use_fp64` | Attribute | Compatibility argument; must be `False` on this NPU implementation | bool | scalar |
 | `sampled_token_ids` | Output | Sampled token ID for each input row, shape `[num_tokens]` | int64 | ND |
 
@@ -68,3 +69,20 @@ The single-operator tests use the long-vocabulary inference shape `vocab_size=15
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_categorical_sample.py
 ```
+
+## Request-sharded draft cache writes
+
+`logits_cache_row_mapping`, when supplied, maps a request-state index to a
+local cache row. Negative mappings suppress cache writes. Request-state
+indices continue to select temperature and random seeds; the mapping affects
+cache writes only. The cache receives raw logits before temperature scaling.
+
+Cache address calculation clamps a negative mapped row to zero while the
+original row-validity mask suppresses the store. Callers must supply valid
+nonnegative mappings within the cache row capacity and valid cache columns.
+
+Coverage is provided by
+`test_categorical_sample_mapped_cache_writes_preserve_rng_and_guards`, including
+scalar/per-token cache columns, unmapped request states, padded requests,
+seeded output parity and untouched cache guard rows. Hardware validation is
+required; these cases are not established by CPU tests.

@@ -376,6 +376,29 @@ class RejectionSamplerConfig:
 
 
 @config
+class DraftSamplingConfig:
+    """Ascend draft sampling options; batch sharding currently supports DSpark."""
+
+    batch_sharded: bool = False
+    shard_min_reqs: int | None = None
+
+    @model_validator(mode="after")
+    def _validate_values(self):
+        if self.shard_min_reqs is not None and self.shard_min_reqs < 1:
+            raise ValueError("draft_sampling_config.shard_min_reqs must be positive")
+        return self
+
+    def resolve_shard_min_reqs(self, tp_size: int, max_num_reqs: int) -> int:
+        threshold = tp_size if self.shard_min_reqs is None else self.shard_min_reqs
+        if not 1 <= threshold <= max_num_reqs:
+            raise ValueError(
+                "draft_sampling_config.shard_min_reqs must be between 1 and max_num_seqs "
+                "(the default is the TP size)"
+            )
+        return threshold
+
+
+@config
 class RlConfig:
     """Unified defaults for reinforcement-learning workloads.
 
@@ -724,6 +747,7 @@ class AscendConfig:
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
+    draft_sampling_config: DraftSamplingConfig = dataclasses.field(default_factory=DraftSamplingConfig)
     quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
 
     # ---- sub-configs declared later in this module ----

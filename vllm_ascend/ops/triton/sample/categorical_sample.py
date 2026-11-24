@@ -99,7 +99,8 @@ def _categorical_prepare_mass_kernel(
             if logits_cache_row_mapping_ptr is not None:
                 cache_row = tl.load(
                     logits_cache_row_mapping_ptr + req_state_idx,
-                    mask=is_valid_req, other=-1,
+                    mask=is_valid_req,
+                    other=-1,
                 ).to(tl.int64)
             if logits_cache_col_ptr is not None:
                 if PER_TOKEN_COL:
@@ -108,8 +109,9 @@ def _categorical_prepare_mass_kernel(
                     col = tl.load(logits_cache_col_ptr)
             else:
                 col = 0
+            safe_cache_row = tl.maximum(0, cache_row)
             tl.store(
-                logits_cache_ptr + cache_row * logits_cache_stride_0 + col * logits_cache_stride_1 + offsets,
+                logits_cache_ptr + safe_cache_row * logits_cache_stride_0 + col * logits_cache_stride_1 + offsets,
                 logits,
                 mask=mask & is_valid_req & (cache_row >= 0),
             )
