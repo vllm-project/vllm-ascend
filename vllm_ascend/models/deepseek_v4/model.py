@@ -106,6 +106,7 @@ from vllm_ascend.utils import (
     dsv4_skips_indexer_topk,
     extract_dsv4_layer_index,
     get_dsv4_compress_ratio,
+    speculator_uses_target_hidden_states,
     vllm_version_is,
 )
 from vllm_ascend.worker.v2.pp_transport import (
@@ -914,7 +915,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if (
             get_pp_group().is_last_rank
             and spec_config is not None
-            and (spec_config.use_eagle() or spec_config.uses_draft_model())
+            and (
+                speculator_uses_target_hidden_states(spec_config)
+                or (vllm_version_is("0.33.0") and spec_config.uses_draft_model())
+            )
         ):
             # Bind the buffer before compilation: lazy allocation in forward
             # can leave FULL graph replay writing a different tensor from the

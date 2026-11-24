@@ -48,7 +48,7 @@ from vllm_ascend.device.device_config import (  # noqa: F401
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 
 if TYPE_CHECKING:
-    from vllm.config import CacheConfig, VllmConfig
+    from vllm.config import CacheConfig, SpeculativeConfig, VllmConfig
 else:
     VllmConfig = None
 
@@ -815,6 +815,12 @@ def vllm_version_is(target_vllm_version: str):
             "to control it by hand. And please make sure the value follows the "
             "format of x.y.z."
         )
+
+
+def speculator_uses_target_hidden_states(config: SpeculativeConfig) -> bool:
+    if vllm_version_is("0.33.0"):
+        return config.use_eagle()
+    return config.uses_target_hidden_states
 
 
 def get_mamba_cache_mode(cache_config: CacheConfig) -> str:

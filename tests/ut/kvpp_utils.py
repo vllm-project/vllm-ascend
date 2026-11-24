@@ -26,6 +26,7 @@ def make_kvpp_config(tp=3, pcp=1):
         num_speculative_tokens_per_batch_size=None,
     )
     speculative_config.use_eagle = lambda: speculative_config.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+    speculative_config.uses_target_hidden_states = speculative_config.use_eagle()
     return SimpleNamespace(
         compilation_config=SimpleNamespace(
             static_forward_context={

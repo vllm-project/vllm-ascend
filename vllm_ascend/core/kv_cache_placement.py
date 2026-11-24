@@ -22,7 +22,13 @@ from vllm_ascend.core.kv_cache_compat import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.quantization.utils import enable_fa_quant
-from vllm_ascend.utils import calc_split_factor, enable_sfa, kv_cache_spec_uses_packed_sfa_main_cache, vllm_version_is
+from vllm_ascend.utils import (
+    calc_split_factor,
+    enable_sfa,
+    kv_cache_spec_uses_packed_sfa_main_cache,
+    speculator_uses_target_hidden_states,
+    vllm_version_is,
+)
 
 # One buffer for the current layer and one for the next layer's prefetch.
 KVPP_SCRATCH_BUFFER_COUNT = 2
@@ -123,7 +129,7 @@ def register_kvpp_draft_layers(
 ) -> None:
     """Record loader-discovered ownership on this worker's cache modules."""
     spec = vllm_config.speculative_config
-    if spec is None or not spec.use_eagle():
+    if spec is None or not speculator_uses_target_hidden_states(spec):
         return
     if not is_last_pp_rank:
         draft_names = set()
@@ -146,7 +152,7 @@ def register_kvpp_draft_layers(
 def find_draft_layers(vllm_config: VllmConfig, local_layer_names: Iterable[str]) -> set[str]:
     """Read exact worker-local ownership, never infer it from layer indices."""
     spec = vllm_config.speculative_config
-    if spec is None or not spec.use_eagle():
+    if spec is None or not speculator_uses_target_hidden_states(spec):
         return set()
     context = vllm_config.compilation_config.static_forward_context
     result = set()

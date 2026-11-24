@@ -124,6 +124,7 @@ from vllm_ascend.utils import (
     register_device_print,
     setup_ascend_local_comm_res,
     shared_expert_tp_enable,
+    speculator_uses_target_hidden_states,
     vllm_version_is,
 )
 
@@ -1186,7 +1187,7 @@ class NPUWorker(GPUWorker):
                 speculative = self.vllm_config.speculative_config
                 if (
                     speculative is not None
-                    and speculative.use_eagle()
+                    and speculator_uses_target_hidden_states(speculative)
                     and any(config.manager_cls is SlidingWindowManager for config in configs.values())
                 ):
                     unify_hybrid_kv_cache_specs(configs)
@@ -1215,7 +1216,7 @@ class NPUWorker(GPUWorker):
             speculative_config = self.vllm_config.speculative_config
             if (
                 speculative_config is not None
-                and speculative_config.use_eagle()
+                and speculator_uses_target_hidden_states(speculative_config)
                 and any(isinstance(spec, SlidingWindowSpec) for spec in kv_cache_spec.values())
             ):
                 # Use the same full-allocation specs for KVPP budgeting and

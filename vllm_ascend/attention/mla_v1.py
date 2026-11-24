@@ -95,6 +95,7 @@ from vllm_ascend.utils import (
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
+    speculator_uses_target_hidden_states,
     vllm_version_is,
 )
 
@@ -3231,7 +3232,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             assert isinstance(self.layer_name, str)
             is_draft_model = _EXTRA_CTX.is_draft_model
             eagle_spec_multiple = None
-            if not is_draft_model and self.speculative_config is not None and self.speculative_config.use_eagle():
+            if (
+                not is_draft_model
+                and self.speculative_config is not None
+                and speculator_uses_target_hidden_states(self.speculative_config)
+            ):
                 eagle_spec_multiple = self.speculative_config.num_speculative_tokens + 1
             provider = MLAParamProvider(
                 layer_name=self.layer_name,
