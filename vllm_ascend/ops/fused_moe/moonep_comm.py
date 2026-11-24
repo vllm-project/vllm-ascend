@@ -394,7 +394,6 @@ class _MoonEPRuntime:
             dev = f"npu:{torch.npu.current_device()}"
             self._pads[(E, K, H)] = {
                 "hidden": torch.zeros(capacity, H, dtype=torch.bfloat16, device=dev),
-                "route": torch.zeros(capacity, K, dtype=torch.float32, device=dev),
                 "topk": torch.zeros(capacity, K, dtype=torch.int32, device=dev),
                 "combine_route": torch.zeros(capacity, ((K + 7) // 8) * 8, dtype=torch.float32, device=dev),
             }
@@ -587,33 +586,35 @@ def _geometry(E: int, K: int, H: int) -> dict:
     return geo
 
 
-# Reuse device-side row-count scratch across layers with the same geometry.
+# Reuse the planning compatibility input and any legacy count scratch.
 _SCRATCH: dict = {}
 
 
-def _scratch_for(E: int, K: int, H: int, extra: int, device) -> dict:
-    """``extra`` = B, the per-rank prefetch-slot count: the library's cu_seqlens
-    has E + B entries, which can exceed E + K."""
-    key = (int(E), int(K), int(H))
+def _scratch_for(E: int, K: int, H: int, device) -> dict:
+    key = (E, K, H)
     sc = _SCRATCH.get(key)
-    if sc is not None:
-        return sc
-    nrows = int(E) + int(extra)
-    # cu_pad[0] is zero for the whole run (nothing ever writes index 0), so the
-    # per-group row counts come out of a single subtract -- counts[i] =
-    # cu_pad[i+1] - cu_pad[i] == cu[i] - cu[i-1] with the implicit cu[-1] = 0.
-    # That replaces the old `counts[0] = cu64[0]` scalar splice, which cost a
-    # kernel launch of its own every layer.
-    cu_pad = torch.zeros(nrows + 1, dtype=torch.int64, device=device)
-    sc = {
-        "cu_pad": cu_pad,
-        # Planning validates this vector but derives counts from topk itself.
-        "tpe_compat": torch.zeros(int(E), dtype=torch.int32, device=device),
-        "counts": torch.empty(nrows, dtype=torch.int64, device=device),
-        "own": torch.empty(int(E), dtype=torch.int64, device=device),
-    }
-    _SCRATCH[key] = sc
+    if sc is None:
+        # Planning derives the real expert loads from Top-K expert IDs.
+        sc = {"tpe_compat": torch.zeros(E, dtype=torch.int32, device=device)}
+        _SCRATCH[key] = sc
     return sc
+
+
+def _local_counts_from_cu(cu: torch.Tensor, sc: dict, E: int) -> torch.Tensor:
+    """Recover Home then Slot counts when the SDK only returns prefixes."""
+    ep_group = get_ep_group()
+    epn = E // ep_group.world_size
+    start = ep_group.rank_in_group * epn
+    n_cu = cu.numel()
+    if "cu_pad" not in sc:
+        sc["cu_pad"] = torch.zeros(n_cu + 1, dtype=torch.int64, device=cu.device)
+        sc["counts"] = torch.empty(n_cu, dtype=torch.int64, device=cu.device)
+    cu_pad = sc["cu_pad"]
+    counts = sc["counts"]
+    # The fixed zero at index 0 also handles the first expert's count.
+    cu_pad[1:].copy_(cu)
+    torch.sub(cu_pad[1:], cu_pad[:-1], out=counts)
+    return torch.cat((counts[start : start + epn], counts[E:]))
 
 
 def _select_buffer_for_step(E: int, K: int, H: int, tokens: int):
@@ -720,20 +721,28 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         buffer, capacity = _select_buffer_for_step(E, K, H, T)
         pads = _pads_for(E, K, H)
         hidden_c = pads["hidden"][:capacity]
-        route_c = pads["route"][:capacity]
         topk_c = pads["topk"][:capacity]
+        route_c = None
+        if (
+            not buffer._require_ctx().get("planning_skips_source_dup", False)
+            or token_dispatch_input.routing.apply_router_weight_on_input
+        ):
+            if "route" not in pads:
+                pads["route"] = torch.zeros_like(pads["topk"], dtype=torch.float32)
+            route_c = pads["route"][:capacity]
+            route_c[:T].copy_(topk_weights)
         if hidden_states.dtype != torch.bfloat16:
             hidden_states = hidden_states.to(torch.bfloat16)
         # copy_ casts on the device: no per-call .to() temporaries.
         if not use_mxfp8:
             hidden_c[:T].copy_(hidden_states)
-        route_c[:T].copy_(topk_weights)
         topk_c[:T].copy_(topk_ids)
+        # Weighted combine reads the original FP32 Top-K weights on the source rank.
         source_topk_weights_sk = pads["combine_route"][:capacity]
         source_topk_weights_sk[:T, :K].copy_(topk_weights)
         # SDK validates this compatibility tensor; Planning rebuilds real load
         # from topk_c, independently of these unused histogram values.
-        sc = _scratch_for(E, K, H, buffer._require_ctx()["B"], topk_c.device)
+        sc = _scratch_for(E, K, H, topk_c.device)
         tpe = sc["tpe_compat"]
 
         dispatch_scale = None
@@ -776,28 +785,9 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             )
             self._logged_transports.add(log_key)
 
-        # Per-local-expert row counts = cu diff over this rank's owned global
-        # expert range [rank*epn, (rank+1)*epn). Shard rows are prefix-packed
-        # in ascending owned-expert order, which is exactly the row/group order
-        # the grouped-matmul MLP expects. Slot groups follow the home groups.
-        ep_group = get_ep_group()
-        epn = E // ep_group.world_size
-        rank = ep_group.rank_in_group
-        # counts[i] = cu[i] - cu[i-1] with an implicit cu[-1] = 0 (the leading
-        # zero term is why this is shifted: slicing per rank would be off by one
-        # for rank 0). All three buffers are pre-allocated scratch: the old
-        # cast+cat+sub+contiguous chain allocated four tensors per layer.
-        counts = sc["counts"]
-        cu_pad = sc["cu_pad"]
-        n_cu = int(cu.numel())
-        cu_pad[1 : n_cu + 1].copy_(cu)  # int32 -> int64 cast
-        torch.sub(cu_pad[1 : n_cu + 1], cu_pad[:n_cu], out=counts[:n_cu])
-        own_counts = sc["own"]
-        own_counts[:epn].copy_(counts[rank * epn : (rank + 1) * epn])
-        own_counts = own_counts[:epn]
-        # Rows for prefetched Slot experts stay local and follow home rows.
-        slot_counts = counts[E:].contiguous()
-        local_counts = torch.cat((own_counts, slot_counts))
+        local_counts = getattr(plan, "local_counts", None)
+        if local_counts is None:
+            local_counts = _local_counts_from_cu(cu, sc, E)
         # Keep the row count on the device. The MLP takes the full [NvS, H]
         # shard plus the count-mode `group_list`; grouped matmul walks exactly
         # sum(group_list) rows. Combine masks the untouched tail on the device.
