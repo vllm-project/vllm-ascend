@@ -1,0 +1,7 @@
+pr: 23041
+entries:
+  - category: feature
+    text: >-
+      Added an auto-scaling encoder proxy for EPD disaggregated deployments.
+      The encoder instance count now follows the active-token load instead of a
+      fixed count chosen at startup, so the E:PD ratio tracks the request mix.
