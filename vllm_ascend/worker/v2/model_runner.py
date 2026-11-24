@@ -1548,7 +1548,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Without a CPU consumer, retain the upstream optimistic upper bound.
         # prepare_pos_seq_lens still reads exact rejection-corrected NPU state.
-        seq_lens = self.input_buffers.seq_lens_np
+        seq_lens = self.input_buffers.seq_lens_cpu.numpy()
         for i, req_id in enumerate(req_ids):
             seq_lens[i] = computed[req_to_index[req_id]] + num_scheduled_tokens[req_id]
 
