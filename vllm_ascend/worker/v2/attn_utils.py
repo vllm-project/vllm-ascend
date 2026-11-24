@@ -1601,6 +1601,18 @@ def allocate_kv_cache_main(
 
     attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers, kernel_block_sizes)
 
+    # Different KV groups can share a slot by using separate block pages.
+    # Splitting the whole slot by component can put data in another group's page.
+    if len(kv_cache_config.kv_cache_groups) == 1 and get_layerwise_reuse_layout(kv_cache_config) is not None:
+        for group in attn_groups:
+            prepare_view = getattr(group.backend, "prepare_layerwise_cache_view", None)
+            if prepare_view is None:
+                continue
+            for layer_name in group.layer_names:
+                raw_cache = raw_tensors[layer_name]
+                if isinstance(raw_cache, torch.Tensor):
+                    raw_tensors[layer_name] = prepare_view(raw_cache, group.kv_cache_spec, attn_layers[layer_name])
+
     return _reshape_kv_cache_v2(
         attn_groups=attn_groups,
         kv_cache_raw_tensors=raw_tensors,
@@ -1644,10 +1656,6 @@ def _reshape_kv_cache_v2(
 
     vllm_config = get_current_vllm_config()
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
-    # Reshape the whole slot by component only when no other group can use its pages.
-    use_contiguous_components = (
-        len(kv_cache_config.kv_cache_groups) == 1 and get_layerwise_reuse_layout(kv_cache_config) is not None
-    )
     kv_caches: dict[str, Any] = {}
     # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
     # view from the same deterministic layout that _allocate_kv_cache used:
@@ -1833,26 +1841,6 @@ def _reshape_kv_cache_v2(
                     )
                     if group_spec.cache_sparse_li_c4:
                         indexer_scale_cache_shape = (*indexer_scale_cache_shape[:-1], group_spec.scale_dim // 2, 2)
-
-                    # Without offload, the Indexer allocator already returns (K, scale).
-                    # Offload provides one byte tensor. Both shapes are known here,
-                    # so we can calculate where to split it.
-                    if use_contiguous_components and isinstance(raw_cache, torch.Tensor):
-                        # With one cache group, use [all K blocks][all scale blocks]
-                        k_bytes = math.prod(kv_cache_shape) * get_dtype_size(group_spec.dtype)
-                        scale_elem_size = get_dtype_size(group_spec.scale_dtype)
-                        scale_offset = _align_up(k_bytes, scale_elem_size)
-                        scale_bytes = math.prod(indexer_scale_cache_shape) * scale_elem_size
-                        required_bytes = scale_offset + scale_bytes
-                        if required_bytes > sum_page_size_bytes:
-                            raise ValueError(
-                                f"Indexer KV cache for {layer_name} requires {required_bytes} bytes "
-                                f"for aligned K/scale views, got {sum_page_size_bytes} bytes."
-                            )
-                        raw_k_tensor = raw_cache[:k_bytes]
-                        raw_scale_tensor = raw_cache[scale_offset:required_bytes]
-                        # The else branch below sets the dtype and shape of both slices.
-                        raw_cache = (raw_k_tensor, raw_scale_tensor)
 
                 if isinstance(raw_cache, torch.Tensor):
                     if group_spec.scale_dim:
@@ -2112,22 +2100,6 @@ def _reshape_kv_cache_v2(
                     kv_cache_spec.dtype,
                     vllm_config.model_config,
                 )
-
-            if (
-                use_contiguous_components
-                and isinstance(kv_cache_spec, AscendMLAAttentionSpec)
-                and isinstance(raw_cache, torch.Tensor)
-                and enable_sfa(vllm_config)
-                and not packed_sfa_main_cache
-            ):
-                # Without offload, each layer gets separate NoPE and RoPE tensors.
-                # With offload, split one shared slot into [all NoPE blocks][all RoPE blocks]
-                # so the same (NoPE, RoPE) reshape path can be used.
-                nope_bytes = math.prod(k_shape) * get_dtype_size(k_dtype)
-                rope_bytes = math.prod(v_shape) * get_dtype_size(v_dtype)
-                # NoPE and RoPE use the same dtype. Adding nope_bytes to the aligned
-                # slot start keeps the RoPE offset aligned for v_dtype.
-                raw_cache = raw_cache.split((nope_bytes, rope_bytes))
 
             if packed_sfa_main_cache:
                 raw_k_tensor = raw_cache
