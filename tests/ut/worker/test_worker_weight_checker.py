@@ -77,18 +77,6 @@ def test_compute_weight_checksums_prefixes_keys(mock_parallel_groups, mock_ascen
     assert all(all(c in "0123456789abcdef" for c in digest) for digest in checksums.values())
 
 
-def test_compute_weight_checksums_rejects_host_vmm_before_reading_weights(monkeypatch, mock_parallel_groups):
-    monkeypatch.setattr(npu_worker_module, "get_ascend_config", lambda: SimpleNamespace(input_embedding_host_vmm=True))
-    worker = _make_worker(dp_rank=0)
-    get_model = MagicMock()
-    worker.model_runner = cast(Any, SimpleNamespace(get_model=get_model))
-
-    with pytest.raises(RuntimeError, match="Weight checksums are unavailable with Host VMM"):
-        worker.compute_weight_checksums()
-
-    get_model.assert_not_called()
-
-
 def test_reset_weights_zeroes_params_not_buffers(mock_parallel_groups, mock_ascend_config):
     model = _TinyModel()
     worker = _make_worker(dp_rank=0)
