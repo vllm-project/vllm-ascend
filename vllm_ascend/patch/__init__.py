@@ -265,9 +265,7 @@
 #       `DPEngineCoreProc` and the Ascend DP subclasses inherit it; the
 #       wrapper is marked and the patch is idempotent.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/66295 (withdrawn unmerged;
-#       it synthesized the same empty output inside `update_from_output`).
-#       No vllm-ascend PR covers this gate today, so the fix ships here.
+#       None. No vllm-ascend PR covers this gate today, so the fix ships here.
 #    Future Plan:
 #       Transitional fix. Remove this patch and its platform import once a
 #       pinned vLLM release carries an equivalent scheduler-side drain that
