@@ -11,7 +11,7 @@ from vllm_ascend.models.qwen4_exp import model
 
 @pytest.mark.parametrize(
     ("dp", "pcp", "expected"),
-    [(4, 2, ["PCP"]), (4, 1, ["base"]), (1, 1, ["base"]), (1, 2, ["base", "PCP"])],
+    [(1, 1, ["base"]), (4, 1, ["base"]), (1, 2, ["PCP"]), (2, 2, ["PCP"]), (4, 2, ["PCP"]), (1, 4, ["PCP"])],
 )
 def test_ple_construction_and_registration(monkeypatch, dp, pcp, expected):
     calls = []

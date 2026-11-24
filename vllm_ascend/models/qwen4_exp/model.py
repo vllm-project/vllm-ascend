@@ -60,10 +60,9 @@ upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
 
 
 def _build_ascend_ple(config, vllm_config: VllmConfig, **kwargs) -> Qwen4ExpPLELayer:
-    # Each DP replica builds its own decoder. Choose the PCP backend before
-    # the constructor allocates and registers the pinned embedding table.
-    parallel = vllm_config.parallel_config
-    if parallel.data_parallel_size > 1 and parallel.prefill_context_parallel_size > 1:
+    # Choose the backend before PLE allocates its host table and registers
+    # the layer in the static forward context.
+    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
         return AscendPCPPLELayer(config, vllm_config=vllm_config, **kwargs)
     return Qwen4ExpPLELayer(config, vllm_config=vllm_config, **kwargs)
 
@@ -92,23 +91,9 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
         if use_pcp:
             from vllm_ascend.attention.gdn import shard_gdn_heads_over_pcp
 
-            static_context = vllm_config.compilation_config.static_forward_context
             for layer in self.layers[self.start_layer : self.end_layer]:
                 if hasattr(layer, "linear_attn"):
                     shard_gdn_heads_over_pcp(layer.linear_attn, parallel)
-                if layer.ple is not None and not isinstance(layer.ple, AscendPCPPLELayer):
-                    ple_prefix = layer.ple.prefix
-                    ple_id = layer.ple.ple_dense_layer_id
-                    del static_context[ple_prefix]
-                    del layer.ple
-                    layer.ple = AscendPCPPLELayer(
-                        self.config,
-                        vllm_config,
-                        layer_idx=layer.layer_idx,
-                        ple_dense_layer_id=ple_id,
-                        prefix=ple_prefix,
-                        use_sequence_parallel=layer.use_hc_sequence_parallel,
-                    )
         # With max_num_seqs=1 the PLE query-start buffer has a static length of
         # two. Marking that length dynamic makes TorchDynamo reject the static
         # specialization used by PLE during FULL_DECODE_ONLY graph capture.
