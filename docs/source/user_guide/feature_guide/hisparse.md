@@ -171,7 +171,7 @@ enabled, and `kv_load_failure_policy=fail`. Add
 
 ## Configuration Parameters
 
-| Parameter | Meaning |
+| Parameter | Description |
 | --- | --- |
 | `hisparse_config` | Enables Core HiSparse for the supported sparse Attention backend. |
 | `eager_host_mirror` | Keep `true` for this foundation; Core maintains the Host KV mirror. |
@@ -181,13 +181,14 @@ enabled, and `kv_load_failure_policy=fail`. Add
 
 ### AscendStore settings
 
-| Where to set it | Setting |
+| Parameter | Description |
 | --- | --- |
-| `--kv-transfer-config` | Use `MultiConnector` with one `HiSparseConnector` and one `AscendStoreConnector`. Set `kv_role=kv_both` on the parent and both children. |
-| AscendStore child's `kv_connector_extra_config` | Set `backend=memcache` and `load_async=true`. Keep `use_layerwise=false` and `discard_partial_chunks=true` for whole-block transfers. |
-| MemCache local configuration | Set `protocol` to `host_tcp`. |
-| `--attention-config` | Set `hisparse_config.eager_host_mirror=true`, including for Prefill-only saves. |
-| Parallel configuration | Keep `prefill_context_parallel_size=1`. |
+| `kv_connector` / `kv_role` | In `--kv-transfer-config`, use `MultiConnector` with one `HiSparseConnector` and one `AscendStoreConnector`. Set `kv_role=kv_both` on the parent and both children. |
+| `backend` / `load_async` | In the AscendStore child's `kv_connector_extra_config`, set `backend=memcache` and `load_async=true`. |
+| `use_layerwise` / `discard_partial_chunks` | In the AscendStore child's `kv_connector_extra_config`, keep `use_layerwise=false` and `discard_partial_chunks=true` for whole-block transfers. |
+| `protocol` | Set to `host_tcp` in the MemCache local configuration. |
+| `hisparse_config.eager_host_mirror` | Set to `true` in `--attention-config`, including for Prefill-only saves. |
+| `prefill_context_parallel_size` | Keep at `1`. |
 
 To fall back to local computation after an external load fails, set
 `kv_load_failure_policy=recompute` in `--kv-transfer-config`.
