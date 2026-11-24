@@ -59,6 +59,7 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
+    context_kv_only = False
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
     # the mixin's speculator-level logits hook is not used; load_draft_model
     # wraps the draft model's compute_draft_logits to pad the LM-head input to
@@ -263,7 +264,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
 
             self.attn_backends = attn_backends
             self.attn_architecture, self.use_flashmla, self.use_a3_mla_sink = detect_draft_attn_architecture(
-                self.attn_groups
+                self.attn_groups, inspect_mla_builders=vllm_version_is("0.33.0") or not self.context_kv_only
             )
             install_ascend_dflash_input_preparation()
 

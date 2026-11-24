@@ -73,10 +73,14 @@ def prepare_draft_fia_lengths(
     return result
 
 
-def detect_draft_attn_architecture(attn_groups: Any) -> tuple[str | None, bool, bool]:
+def detect_draft_attn_architecture(
+    attn_groups: Any, *, inspect_mla_builders: bool = True
+) -> tuple[str | None, bool, bool]:
     """Return the draft architecture and whether all MLA groups use FlashMLA or the A3 sink."""
     backend = _get_graph_update_backend(attn_groups)
     if issubclass(backend, AscendMLABackend):
+        if not inspect_mla_builders:
+            return "MLA", False, False
         builders = [
             group.get_metadata_builder(0)
             for groups in attn_groups
