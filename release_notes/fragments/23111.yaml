@@ -1,0 +1,7 @@
+pr: 23111
+entries:
+  - category: other
+    text: >-
+      Qwen3.8-Flash-Next now uses the unified MRV2 KV cache allocator on Ascend.
+      Its cache groups use separate memory regions to avoid overlap, which can
+      reduce the number of cache blocks available within the same memory budget.
