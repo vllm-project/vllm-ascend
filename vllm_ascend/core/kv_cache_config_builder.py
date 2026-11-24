@@ -21,6 +21,7 @@ from vllm.v1.core.kv_cache_planning import (
     unify_hybrid_kv_cache_specs,
 )
 from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
     MLAAttentionSpec,
@@ -40,6 +41,10 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
+from vllm_ascend.models.hy_v4_flash.cache_layout import (
+    group_hy4_packed_cache,
+    is_hy4_packed_cache,
+)
 from vllm_ascend.models.kimi_k3.cache_config import _get_kimi_k3_dspark_mixed_kv_cache_groups
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import paired_sfa_cache_groups, paired_sfa_pool_bytes
 from vllm_ascend.models.qwen4_exp.cache_config import (
@@ -75,6 +80,9 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         if is_deepseek_v41_cache(kv_cache_spec):
             return make_cache_groups(group_cache_specs(kv_cache_spec))
 
+        if kv_cache_spec and all(is_hy4_packed_cache(spec) for spec in kv_cache_spec.values()):
+            return group_hy4_packed_cache(kv_cache_spec)
+
         grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
         if grouped_specs is not None and len(grouped_specs) >= 2:
             # A uniform spec is not a mixed-page-size layout; grouping it here
@@ -86,6 +94,18 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return kimi_k3_groups
 
         return super().get_kv_cache_groups(vllm_config, kv_cache_spec)
+
+    def get_kv_cache_config_from_groups(
+        self, vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec], num_blocks: int
+    ) -> KVCacheConfig:
+        config = super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
+        if config.prefix_cache_retention_interval is None and any(
+            is_hy4_packed_cache(group.kv_cache_spec) for group in kv_cache_groups
+        ):
+            # Keep reusable prompt and shared-prefix tails in the evictable
+            # prefix cache. DSA groups continue hashing all full pages.
+            config.prefix_cache_retention_interval = 0
+        return config
 
     def _get_pool_bytes_per_block(
         self,

@@ -19,7 +19,7 @@ def _read_index_history(
 ):
     row = tl.program_id(0)
     token = first_token + row
-    page = tl.load(table + token // PAGE_ROWS).to(tl.int32)
+    page = tl.load(table + token // PAGE_ROWS).to(tl.int64)
     slot = page * PAGE_ROWS + token % PAGE_ROWS
     source = cache + slot * ROW_WORDS + KEY_OFFSET
     key = tl.arange(0, KEY_WORDS)

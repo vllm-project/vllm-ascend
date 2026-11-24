@@ -41,6 +41,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     ensure_zmq_send,
     zmq_ctx,
 )
+from vllm_ascend.models.hy_v4_flash.cache_layout import hy4_required_pages, hy4_transfer_layout
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -359,6 +360,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         kv_cache_config: "KVCacheConfig",
     ) -> None:
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        self._hy4_cache_layout = hy4_transfer_layout(kv_cache_config.kv_cache_groups)
 
         # Requests waiting for the worker to start a READ transfer.
         self._reqs_need_recv: dict[str, tuple[Request, BlockIds, BlockIds, int]] = {}
@@ -469,6 +471,47 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             raise RuntimeError("Timed out starting Mooncake scheduler sending thread")
         if not self._sending_thread.is_alive():
             raise RuntimeError("Mooncake scheduler sending thread failed to start")
+
+    def can_restore_sliding_window(self, request: "Request") -> bool:
+        params = request.kv_transfer_params
+        if not params or not params.get("do_remote_prefill"):
+            return False
+        layout = self._hy4_cache_layout
+        if layout is None or params.get("hy4_cache_layout") != layout:
+            return False
+        prompt_tokens = request.num_prompt_tokens
+        if (
+            not prompt_tokens
+            or params.get("remote_num_prompt_tokens") != prompt_tokens
+            or self._state_prefill_token_count(prompt_tokens) != prompt_tokens
+            or not all(params.get(key) for key in ("remote_engine_id", "remote_host", "remote_port", "remote_request_id"))
+        ):
+            return False
+        remote_groups = params.get("remote_block_ids")
+        if not isinstance(remote_groups, (list, tuple)) or len(remote_groups) != len(layout):
+            return False
+
+        for group, pages in zip(self.kv_cache_groups, remote_groups, strict=True):
+            required = hy4_required_pages(group.kv_cache_spec, prompt_tokens)
+            if (
+                not isinstance(pages, (list, tuple))
+                or len(pages) != required.stop
+                or any(type(pages[index]) is not int or pages[index] <= 0 for index in required)
+            ):
+                return False
+        return True
+
+    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
+        params = request.kv_transfer_params
+        if (
+            params
+            and params.get("do_remote_prefill")
+            and self._hy4_cache_layout is not None
+            and not self.can_restore_sliding_window(request)
+        ):
+            logger.warning("Ignoring incomplete HY4 KV handoff for %s; computing KV locally.", request.request_id)
+            return 0, False
+        return super().get_num_new_matched_tokens(request, num_computed_tokens)
 
     def update_state_after_alloc(
         self,
@@ -609,7 +652,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                 raise RuntimeError("Mooncake scheduler metadata has not been initialized")
             self._sending_thread.add_delayed_request(request.request_id)
 
-        return delay_free_blocks, {
+        transfer_params: dict[str, Any] = {
             "do_remote_prefill": True,
             "do_remote_decode": False,
             "remote_block_ids": computed_block_ids,
@@ -621,6 +664,9 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             "remote_kv_lease_duration": self._kv_lease_duration,
             "last_token_id": request.output_token_ids[-1],
         }
+        if self._hy4_cache_layout is not None:
+            transfer_params["hy4_cache_layout"] = self._hy4_cache_layout
+        return delay_free_blocks, transfer_params
 
     def update_connector_output(
         self,

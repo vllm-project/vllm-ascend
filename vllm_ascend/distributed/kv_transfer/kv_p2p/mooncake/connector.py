@@ -241,6 +241,10 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
 class MooncakePullConnector(MooncakeBaseConnector):
     """Pull-based Mooncake KV transfer connector."""
 
+    def can_restore_sliding_window(self, request: "Request") -> bool:
+        scheduler = self.connector_scheduler
+        return isinstance(scheduler, MooncakePullConnectorScheduler) and scheduler.can_restore_sliding_window(request)
+
     def __init__(
         self,
         vllm_config: VllmConfig,

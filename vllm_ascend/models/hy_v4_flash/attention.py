@@ -10,6 +10,7 @@ from typing import ClassVar
 import torch
 import torch_npu
 from torch import nn
+from vllm import envs
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
@@ -31,7 +32,7 @@ from vllm.models.hy_v4_flash.reference import (
 )
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
-from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
+from vllm.v1.kv_cache_interface import HiddenStateCacheSpec, MLAAttentionSpec, SlidingWindowMLASpec
 
 from vllm_ascend.attention.utils import SFA_QSFA_TILE_SIZE
 from vllm_ascend.device.device_config import get_ascend_device_type
@@ -39,6 +40,7 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.hisparse.c8 import C8_ROW_BYTES, dequantize_c8_rows, pack_c8_components
 from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter
+from vllm_ascend.models.hy_v4_flash.cache_layout import PACKED_CACHE_FORMAT
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.fp8_block import AscendFp8BlockLinearMethod
 from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
@@ -537,12 +539,27 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         return FlashAttentionBackend
 
     def get_kv_cache_spec(self, vllm_config):
-        return HiddenStateCacheSpec(
+        geometry = dict(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.cache_width,
             dtype=torch.uint8 if self.use_fp8_cache else torch.bfloat16,
         )
+        if (
+            not envs.VLLM_USE_V2_MODEL_RUNNER
+            or vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+            or not vllm_config.additional_config.get("hy4flash_swa_cache", True)
+        ):
+            return HiddenStateCacheSpec(**geometry)
+        if self.is_window_layer:
+            return SlidingWindowMLASpec(
+                **geometry,
+                cache_dtype_str=PACKED_CACHE_FORMAT,
+                sliding_window=self.window,
+                # A P/D consumer can replay the final prefill token.
+                extra_retained_tokens=int(vllm_config.kv_transfer_config is not None),
+            )
+        return MLAAttentionSpec(**geometry, cache_dtype_str=PACKED_CACHE_FORMAT)
 
     def _project_query(self, hidden_states):
         q_a = self.q_a_proj(hidden_states)[0]

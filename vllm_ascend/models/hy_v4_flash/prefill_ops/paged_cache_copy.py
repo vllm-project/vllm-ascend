@@ -42,7 +42,7 @@ def _copy_paged_cache_lanes(
     TILE_WORDS: tl.constexpr,
 ):
     logical_page = tl.program_id(0)
-    physical_page = tl.load(table + logical_page).to(tl.int32)
+    physical_page = tl.load(table + logical_page).to(tl.int64)
     in_page = tl.arange(0, PAGE_ROWS)
     logical_row = logical_page * PAGE_ROWS + in_page
     physical_row = physical_page * PAGE_ROWS + in_page

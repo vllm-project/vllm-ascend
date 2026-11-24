@@ -47,6 +47,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     group_concurrent_contiguous,
     zmq_ctx,
 )
+from vllm_ascend.models.hy_v4_flash.cache_layout import hy4_required_pages, is_hy4_packed_cache
 
 
 class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
@@ -530,7 +531,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         transfer_block_ids_by_spec: dict[
             str,
             dict[
-                tuple[int, int, tuple[tuple[int, ...], ...], int, tuple[int, ...]],
+                tuple[int, int, int, tuple[tuple[int, ...], ...], int, tuple[int, ...]],
                 list[tuple[int, list[int], list[int]]],
             ],
         ] = {}
@@ -602,7 +603,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         transfer_block_ids_by_spec: dict[
             str,
             dict[
-                tuple[int, int, tuple[tuple[int, ...], ...], int, tuple[int, ...]],
+                tuple[int, int, int, tuple[tuple[int, ...], ...], int, tuple[int, ...]],
                 list[tuple[int, list[int], list[int]]],
             ],
         ],
@@ -628,6 +629,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             request_block_ids_by_spec = transfer_block_ids_by_spec.setdefault(request_id, {})
             for local_layer_index, remote_layer_index in layer_pairs:
                 spec_index = self.spec_indices[local_layer_index]
+                group_index = self.group_indices[local_layer_index]
                 spec = self.kv_cache_specs[spec_index]
                 layer_pair = (local_layer_index, remote_layer_index)
                 remote_tp_rank_groups = tp_rank_groups_by_layer[layer_pair]
@@ -636,6 +638,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 )
                 cache_key = (
                     spec_index,
+                    group_index,
                     layer_remote_dcp_size,
                     tuple(tuple(group) for group in remote_tp_rank_groups),
                     remote_metadata.group_indices[remote_layer_index],
@@ -651,7 +654,6 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 )
                 transfer_block_ids = request_block_ids_by_spec.get(cache_key)
                 if transfer_block_ids is None:
-                    group_index = self.group_indices[local_layer_index]
                     if not isinstance(spec, MambaSpec):
                         local_kernel_block_size = (
                             self.layer_block_sizes[local_layer_index] // self.block_size_scales[local_layer_index][0]
@@ -769,6 +771,31 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                     f"request={request_id!r}, local={len(local_kernel_block_ids)}, "
                     f"remote={len(remote_kernel_block_ids)}"
                 )
+        elif is_hy4_packed_cache(spec):
+            if (
+                local_block_size != remote_block_size
+                or local_block_size_scale != remote_block_size_scale
+                or local_num_prompt_tokens != remote_num_prompt_tokens
+                or local_dcp_size != 1
+                or remote_dcp_size != 1
+            ):
+                raise ValueError(f"Mooncake HY4 P/D page geometry differs for {request_id}.")
+            required = hy4_required_pages(spec, remote_num_prompt_tokens)
+            if len(local_full_group_block_ids) < required.stop or len(remote_group_block_ids) != required.stop:
+                raise ValueError(f"Mooncake HY4 P/D block tables are incomplete for {request_id}.")
+            missing = set(local_group_block_ids)
+            local_pages = []
+            remote_pages = []
+            for position in required:
+                local_id = local_full_group_block_ids[position]
+                remote_id = remote_group_block_ids[position]
+                if local_id <= 0 or remote_id <= 0:
+                    raise ValueError(f"Mooncake HY4 required page {position} is missing for {request_id}.")
+                if local_id in missing:
+                    local_pages.append(local_id)
+                    remote_pages.append(remote_id)
+            local_kernel_block_ids = self._expand_block_ids(local_pages, local_block_size_scale)
+            remote_kernel_block_ids = self._expand_block_ids(remote_pages, remote_block_size_scale)
         elif isinstance(spec, SlidingWindowSpec):
             assert local_block_size == remote_block_size, "Mooncake SWA requires the same P/D logical block size."
             local_unhashed_start_idx = len(local_full_group_block_ids) - len(local_group_block_ids)
@@ -877,9 +904,10 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         else:
             raise NotImplementedError(f"Mooncake block ID expansion does not support {type(spec).__name__}")
 
-        num_kernel_blocks = min(len(local_kernel_block_ids), len(remote_kernel_block_ids))
-        local_kernel_block_ids = local_kernel_block_ids[:num_kernel_blocks]
-        remote_kernel_block_ids = remote_kernel_block_ids[:num_kernel_blocks]
+        if not is_hy4_packed_cache(spec):
+            num_kernel_blocks = min(len(local_kernel_block_ids), len(remote_kernel_block_ids))
+            local_kernel_block_ids = local_kernel_block_ids[:num_kernel_blocks]
+            remote_kernel_block_ids = remote_kernel_block_ids[:num_kernel_blocks]
         return [
             (
                 candidate_tp_ranks[0]

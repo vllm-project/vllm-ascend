@@ -98,6 +98,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
+from vllm_ascend.models.hy_v4_flash.cache_layout import is_hy4_packed_cache
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
     HIDDEN,
@@ -1110,6 +1111,36 @@ def can_share_full_and_sliding_kv_cache(vllm_config: VllmConfig, specs: Iterable
     )
 
 
+def _allocate_hy4_packed_kv_cache(
+    kv_cache_config: KVCacheConfig,
+    specs: dict[str, KVCacheSpec],
+    allocate: Callable[[int], torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    descriptors = kv_cache_config.kv_cache_tensors
+    sizes = {descriptor.size for descriptor in descriptors}
+    if len(sizes) != 1:
+        raise ValueError("HY4 packed KV cache requires one shared backing allocation.")
+    size = sizes.pop()
+    regions = {}
+    for descriptor in descriptors:
+        for index, name in enumerate(get_kv_cache_tensor_layers(descriptor)):
+            page_size = specs[name].page_size_bytes
+            length = kv_cache_config.num_blocks * page_size
+            start = descriptor.offset + index * descriptor.layer_stride
+            if (
+                descriptor.layer_stride != length
+                or descriptor.block_stride != page_size
+                or start < 0
+                or start + length > size
+            ):
+                raise ValueError(f"Invalid HY4 packed KV cache descriptor for {name}.")
+            regions[name] = (start, length)
+    if regions.keys() != specs.keys():
+        raise ValueError("HY4 packed KV cache descriptors must cover every layer.")
+    backing = allocate(size)
+    return {name: backing.narrow(0, start, length) for name, (start, length) in regions.items()}
+
+
 def allocate_shared_attention_kv_cache(
     kv_cache_config: KVCacheConfig,
     allocate: Callable[[int], torch.Tensor],
@@ -1192,6 +1223,10 @@ def _allocate_kv_cache(
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    if layer_kv_cache_spec and all(is_hy4_packed_cache(spec) for spec in layer_kv_cache_spec.values()):
+        return _allocate_hy4_packed_kv_cache(
+            kv_cache_config, layer_kv_cache_spec, lambda size: _allocate_int8_cache_tensor(size, alignment, device)
+        )
     attn_layers: dict[str, AttentionLayerBase] | None = None
     # Gemma 4 full/sliding groups share one pool while retaining contiguous
     # K/V views. The worker keeps the full budget only for this V2 path.
@@ -1999,6 +2034,14 @@ def _reshape_kv_cache_v2(
                     get_tensor_model_parallel_rank(),
                     vllm_config,
                     get_ascend_config().sparse_kv_offload_config,
+                )
+                continue
+            if is_hy4_packed_cache(kv_cache_spec):
+                kv_caches[layer_name] = raw_cache.view(kv_cache_spec.dtype).view(
+                    kv_cache_config.num_blocks,
+                    kv_cache_spec.num_kv_heads,
+                    kv_cache_spec.block_size,
+                    kv_cache_spec.head_size,
                 )
                 continue
             if is_hidden_state_cache_spec(kv_cache_spec):

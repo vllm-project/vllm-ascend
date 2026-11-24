@@ -835,8 +835,15 @@ class NPUWorker(WorkerBase):
         if getattr(self, "use_v2_model_runner", False):
             # Load V2 helpers only for V2 workers; V1 retains private allocation
             # and must keep its original multi-group budget scaling.
+            from vllm_ascend.models.hy_v4_flash.cache_layout import is_hy4_packed_cache
             from vllm_ascend.worker.v2.attn_utils import can_share_full_and_sliding_kv_cache
 
+            if layout.is_layer_compact and layout.is_block_compact and all(
+                is_hy4_packed_cache(spec) for spec in per_layer_specs
+            ):
+                # Each group overlays the same physical layer slots. The
+                # planner already budgets the shared backing by its actual size.
+                return available_memory
             shares_attention_pool = can_share_full_and_sliding_kv_cache(self.vllm_config, per_layer_specs)
         # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
         # are, remove this is_step_model exemption: this line and the

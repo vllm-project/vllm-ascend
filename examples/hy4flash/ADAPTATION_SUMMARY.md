@@ -180,9 +180,11 @@ C8 QSFA 和 SMLA 当前仅有算子探针。模型的 attention 使用分页读�
 
 ## 源码配套
 
-分支以 `vllm-ascend` 的 `915d58873c0854c0550b56f66a126ca2cb114e71` 为基线，包含 Ascend 模型实现、运行时接入和测试。引擎侧采用 vLLM `ba15685ab7f4f5fbed8630bbb7441f8837e76fbe`，完整改动随分支放在 `patches/hy4flash-vllm-ba15685.patch`，覆盖模型配置、文本和视觉共用实现、Engram、处理器及参考计算。启动脚本位于 `examples/hy4flash/start_hy4flash.sh`。两份源码采用同级目录布局。
+分支以 `vllm-ascend` 的 `915d58873c0854c0550b56f66a126ca2cb114e71` 为基线，包含 Ascend 模型实现、运行时接入和测试。引擎侧采用 vLLM `ba15685ab7f4f5fbed8630bbb7441f8837e76fbe`，完整改动随分支放在 `patches/hy4flash-vllm-ba15685.patch`，覆盖模型配置、文本和视觉共用实现、Engram、处理器、参考计算及 SWA KV Cache 所需的调度与 Mooncake 接口。启动脚本位于 `examples/hy4flash/start_hy4flash.sh`。两份源码采用同级目录布局。
 
 在具有配套 vLLM Ascend 编译依赖的环境中，准备有该分支的 `vllm-ascend` 源码和上述基线的 `vllm` 源码。对干净的 vLLM 基线应用一次补丁，再复制启动脚本到两份源码的上一级。
+
+HY4 Flash 在 V2 Model Runner 和混合 KV Cache 管理器下默认启用 SWA KV Cache。可以在 `--additional-config` 中设置 `hy4flash_swa_cache: false` 关闭。升级已有环境时，在干净的 vLLM 基线上应用下方更新后的完整补丁。
 
 ```bash
 git -C vllm apply --check ../vllm-ascend/patches/hy4flash-vllm-ba15685.patch

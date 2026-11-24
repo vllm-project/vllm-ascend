@@ -12,6 +12,7 @@ import torch
 import zmq
 from cachetools import TTLCache
 from vllm.sampling_params import SamplingParams
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MLAAttentionSpec, SlidingWindowMLASpec
 from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import heartbeat as heartbeat_module
@@ -34,6 +35,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
     MooncakeSchedulerRecvingThread,
     MooncakeSchedulerSendingThread,
 )
+from vllm_ascend.models.hy_v4_flash.cache_layout import PACKED_CACHE_FORMAT, hy4_transfer_layout
 
 from .helpers import (
     make_blocks,
@@ -71,6 +73,7 @@ def make_sending_thread(
 
 def make_pull_scheduler() -> MooncakePullConnectorScheduler:
     scheduler = MooncakePullConnectorScheduler.__new__(MooncakePullConnectorScheduler)
+    scheduler._hy4_cache_layout = None
     scheduler.need_truncate = False
     scheduler._logged_mamba_allocation = False
     scheduler.num_speculative_tokens = 0
@@ -437,6 +440,40 @@ def test_base_scheduler_clips_attention_and_keeps_mamba_state_blocks() -> None:
     )
 
     assert result == ([10, 11], [20, 21])
+
+
+@pytest.mark.parametrize("missing_group", [None, 0, 1, 2, 6])
+def test_hy4_handoff_requires_all_groups(missing_group: int | None) -> None:
+    scheduler = make_pull_scheduler()
+    layout_kwargs = dict(
+        block_size=64, num_kv_heads=1, head_size=1000, dtype=torch.uint8, cache_dtype_str=PACKED_CACHE_FORMAT
+    )
+    dsa = MLAAttentionSpec(**layout_kwargs)
+    swa = SlidingWindowMLASpec(**layout_kwargs, sliding_window=512, extra_retained_tokens=1)
+    specs = [dsa, dsa] + [swa] * 5
+    scheduler.kv_cache_groups = [KVCacheGroupSpec([f"attn.{i}"], spec) for i, spec in enumerate(specs)]
+    scheduler._hy4_cache_layout = hy4_transfer_layout(scheduler.kv_cache_groups)
+    # A 577-token prompt places its SWA tail after one evicted 64-token page.
+    tables = [list(range(1, 11)) for _ in range(2)] + [[0, *range(2, 11)] for _ in range(5)]
+    if missing_group is not None:
+        tables[missing_group][1] = 0
+    request = make_request(
+        prompt_token_ids=list(range(577)),
+        num_prompt_tokens=577,
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "remote_engine_id": "producer",
+            "remote_host": "127.0.0.1",
+            "remote_port": 6000,
+            "remote_request_id": "transfer",
+            "remote_num_prompt_tokens": 577,
+            "remote_block_ids": tables,
+            "hy4_cache_layout": scheduler._hy4_cache_layout,
+        },
+    )
+    assert scheduler.can_restore_sliding_window(request) == (missing_group is None)
+    expected = (321, True) if missing_group is None else (0, False)
+    assert scheduler.get_num_new_matched_tokens(request, 256) == expected
 
 
 def test_get_num_new_matched_tokens_records_local_prefix() -> None:
@@ -859,6 +896,7 @@ def test_set_worker_metadata_is_ignored_on_consumer() -> None:
 def prefix_connector():
     result = MooncakePullConnector.__new__(MooncakePullConnector)
     result.connector_scheduler = MooncakePullConnectorScheduler.__new__(MooncakePullConnectorScheduler)
+    result.connector_scheduler._hy4_cache_layout = None
     result.connector_scheduler.need_truncate = True
     result.connector_scheduler._heartbeat_thread = None
     return result

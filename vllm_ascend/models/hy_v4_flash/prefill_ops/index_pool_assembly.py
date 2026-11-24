@@ -35,7 +35,7 @@ def _assemble_index_pool_groups(
     if WITH_HISTORY and tile == 0:
         is_history = row < Past
         token = First + row
-        page = tl.load(BlockTable + token // PAGE_ROWS, is_history, other=0).to(tl.int32)
+        page = tl.load(BlockTable + token // PAGE_ROWS, is_history, other=0).to(tl.int64)
         slot = page * PAGE_ROWS + token % PAGE_ROWS
         history = tl.load(
             CacheKeys + slot[:, None] * KEY_ROW + KEY_START + channel[None, :],
@@ -48,7 +48,7 @@ def _assemble_index_pool_groups(
             other=0,
         )
         key = tl.where(is_history[:, None], history, current)
-        first_page = tl.load(BlockTable + First // PAGE_ROWS).to(tl.int32)
+        first_page = tl.load(BlockTable + First // PAGE_ROWS).to(tl.int64)
         first_slot = first_page * PAGE_ROWS + First % PAGE_ROWS
         axis = tl.arange(0, 1 if AXES == 1 else 4)
         coordinate = tl.load(

@@ -3227,3 +3227,101 @@ index 0000000000000000000000000000000000000000..cd3f8f09428fa40bff1f1973c03dc73a
 +                raise ValueError("Media count must match image/video placeholders")
 +            data.update(self.tokenizer(expanded_texts, **text_options))
 +        return BatchFeature(data)
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/base.py b/vllm/distributed/kv_transfer/kv_connector/v1/base.py
+index 89fd727..90a7530 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/base.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/base.py
+@@ -194,6 +194,10 @@ class KVConnectorBase_V1(ABC):
+         """
+         return False
+
++    def can_restore_sliding_window(self, request: "Request") -> bool:
++        """Whether this handoff supplies the sliding-window pages at its endpoint."""
++        return False
++
+     @classmethod
+     def supports_lookahead_block_hashes(
+         cls, kv_transfer_config: "KVTransferConfig"
+diff --git a/vllm/v1/core/kv_cache_manager.py b/vllm/v1/core/kv_cache_manager.py
+index 3fb3e3d..a3e9ab5 100644
+--- a/vllm/v1/core/kv_cache_manager.py
++++ b/vllm/v1/core/kv_cache_manager.py
+@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
+     AttentionSpec,
+     CrossAttentionSpec,
+     EncoderOnlyAttentionSpec,
++    FullAttentionSpec,
+     KVCacheConfig,
+     MambaSpec,
+     get_kv_cache_spec_kind,
+@@ -350,7 +351,11 @@ class KVCacheManager:
+         return blocks, num_new_computed_tokens, shared_prefix_boundary
+
+     def get_computed_blocks_for_connector(
+-        self, request: Request, max_cache_hit_length: int | None = None
++        self,
++        request: Request,
++        max_cache_hit_length: int | None = None,
++        *,
++        restore_sliding_window: bool = False,
+     ) -> tuple[KVCacheBlocks, int, int, bool]:
+         """Local prefix-cache lookup for a request scheduled with a KV connector.
+
+@@ -373,7 +378,7 @@ class KVCacheManager:
+         """
+         coordinator = self.coordinator
+         if not (
+-            self.kv_cache_config.has_mamba_layers
++            (self.kv_cache_config.has_mamba_layers or restore_sliding_window)
+             and isinstance(coordinator, HybridKVCacheCoordinator)
+             and coordinator.full_attention_group_id is not None
+         ):
+@@ -387,6 +392,33 @@ class KVCacheManager:
+         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
+             request.block_hashes, max_cache_hit_length
+         )
++        if restore_sliding_window:
++            full_hits = (
++                hit
++                for group, hit in zip(
++                    self.kv_cache_config.kv_cache_groups, per_group_hits, strict=True
++                )
++                if isinstance(group.kv_cache_spec, FullAttentionSpec)
++            )
++            num_local = min(full_hits)
++            num_local -= num_local % coordinator.scheduler_block_size
++            # Transfer restores the final window from P. Discard shorter
++            # local window hits so allocation cannot retain interior null pages.
++            computed = tuple(
++                blocks[: num_local // group.kv_cache_spec.block_size]
++                if isinstance(group.kv_cache_spec, FullAttentionSpec)
++                else []
++                for group, blocks in zip(
++                    self.kv_cache_config.kv_cache_groups, computed, strict=True
++                )
++            )
++            return (
++                self.create_kv_cache_blocks(computed),
++                num_local,
++                0,
++                num_local > 0,
++            )
++
+         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
+             # A lagging group hit deeper than full attention means its
+             # full-attention blocks were evicted; use the reconciled boundary
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index 852ad0b..ebce5f3 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -689,7 +689,9 @@ class Scheduler(SchedulerInterface):
+         connector = self.connector
+         if connector is not None and connector.supports_divergent_local_hybrid_hits:
+             return self.kv_cache_manager.get_computed_blocks_for_connector(
+-                request, max_cache_hit_length
++                request,
++                max_cache_hit_length,
++                restore_sliding_window=connector.can_restore_sliding_window(request),
+             )
+
+         blocks, num_local, shared_prefix_boundary = (
