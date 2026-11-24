@@ -480,6 +480,7 @@ jobs:
               uv pip install -r requirements-dev.txt
               uv pip install tblib 
               uv pip install "runai-model-streamer[s3,gcs]"
+              uv pip install timm "accelerate>=1.1.0" 
 
           - name: Install FLA NPU for A2 upstream tests
             run: |
