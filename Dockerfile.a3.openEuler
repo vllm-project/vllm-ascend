@@ -14,27 +14,157 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+# 基于空白麒麟 V10 SP3（glibc 2.28）自建 vLLM v0.23.0 + vllm-ascend 0.23.0 环境。
+#
+# 交付形态：完全离线镜像。构建期允许联网（麒麟 dnf 源 / PyPI / CANN 下载），
+# 运行期所需依赖全部固化进镜像，不依赖外网。
+#
+# 构建上下文要求：无（CANN/etcd 在镜像内下载，motor wheel 走 build secret）
+#
+#   MindIE-Motor（PD 分离）官方 wheel 通过 build secret 提供：
+#     docker buildx build --secret id=motor_wheel,src=<motor>.whl --build-arg MOTOR_REQUIRED=1 ...
+#   未传 secret 且 MOTOR_REQUIRED=0（默认）时仅告警并跳过，便于 CI 构建基础镜像。
+#
+# mooncake 与客户环境一致：不做 pip 安装，从源码编译 0.3.12.post1
+# memfabric / memcache 由 requirements.txt 固定版本（1.3.0）随 vllm-ascend 安装。
+# etcd 由官方 release 下载后内置，供 MindIE-Motor 做服务发现。
+#
+# 可选参数：
+#   --build-arg KYLIN_REPO_URL=<麒麟 dnf 源 .repo 地址>   基础镜像已内置源，缺省即用镜像内配置
+#   --build-arg CANN_BASE_URL=<内网 CANN 包地址>          外网不可达时改为内网镜像
+#   --build-arg CANN_PKG_ARCH=aarch64|x86_64             缺省按构建架构自动选择
+#   --build-arg ETCD_VERSION=v3.5.21                     内置 etcd 版本
+#   --build-arg MAX_JOBS=32
+#
+# 本仓库源码必须是 releases/v0.23.0 分支（main 为 vLLM 0.33 世代，无法在此环境运行）。
 
-FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.3.0_20261113161300-a3-openeuler24.03-py3.12
+ARG OS_IMAGE=cr.kylinos.cn/kylin/kylin-server-init:v10sp3-2403
+FROM ${OS_IMAGE}
+
+ARG PYTHON_VERSION=3.12.4
+ARG KYLIN_REPO_URL=""
+ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
+ARG VLLM_TAG=v0.23.0
+ARG VLLM_COMMIT=""
+ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu/
+ARG ASCEND_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
+ARG SOC_VERSION=ascend910_9382
+ARG FLA_VERSION="26.10.0+feature"
+ARG FLASH_ATTN_NPU_VERSION="0.5.0"
+ARG MOONCAKE_REPO=https://github.com/kvcache-ai/Mooncake.git
+ARG MOONCAKE_TAG=v0.3.12.post1
+ARG MAX_JOBS
+
+# CANN 9.1.0 官方包（内网可整体替换 CANN_BASE_URL）
+# 包名中的架构段默认按构建架构自动选择（aarch64 / x86_64），
+# CI 的 a3 矩阵同时跑 amd64 与 arm64 runner，写死会在另一架构上装不上。
+ARG CANN_BASE_URL=https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.1.0
+ARG CANN_VERSION=9.1.0
+ARG CANN_PKG_ARCH=""
 
 WORKDIR /workspace
-
 SHELL ["/bin/bash", "-c"]
 
-# Install clang-15 (for triton-ascend)
-RUN yum update -y && \
-    yum install -y git vim wget curl protobuf protobuf-compiler protobuf-devel net-tools gcc gcc-c++ make cmake numactl numactl-devel libibverbs-devel hiredis-devel clang patch && \
-    rm -rf /var/cache/yum/*
+# 1) 系统依赖：基础镜像已内置 kylin_aarch64.repo（V10SP3-2403 base/updates），
+#    这里只校验 dnf 可用；KYLIN_REPO_URL 非空时用外部 .repo 覆盖。
+RUN set -e; \
+    PM="$(command -v dnf || command -v yum || true)"; \
+    if [ -z "$PM" ]; then \
+        echo "ERROR: 基础镜像无 dnf/yum，需换带包管理器的麒麟基础镜像"; \
+        exit 1; \
+    fi; \
+    if [ -n "${KYLIN_REPO_URL}" ]; then \
+        curl -fsSL "${KYLIN_REPO_URL}" -o /etc/yum.repos.d/kylin.repo; \
+    fi; \
+    $PM makecache || { echo "ERROR: dnf 无可用软件源，请配置 .repo 或传 KYLIN_REPO_URL"; exit 1; }; \
+    $PM install -y git vim wget curl make patch tar gzip gawk sed grep findutils gcc gcc-c++ \
+        openssl-devel bzip2-devel libffi-devel zlib-devel xz-devel \
+        sqlite-devel readline-devel ncurses-devel \
+        numactl numactl-devel libibverbs-devel hiredis-devel libcurl-devel \
+        yaml-cpp-devel gflags-devel boost-devel \
+        jemalloc clang && \
+    rm -rf /var/cache/yum/* /var/cache/dnf/*
 
-# Install modelscope (for fast download) and ray (for multinode)
-RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
+# 2) 源码编译 Python 3.12（麒麟 V10 自带 3.7，不满足 torch 2.10 / vLLM 0.23 要求）
+RUN curl -fsSL https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz -o /tmp/Python.tgz && \
+    mkdir -p /tmp/pybuild && tar -xzf /tmp/Python.tgz -C /tmp/pybuild --strip-components=1 && \
+    cd /tmp/pybuild && \
+    ./configure --prefix=/usr/local --enable-shared --with-ensurepip=install && \
+    make -j"${MAX_JOBS:-$(nproc)}" && make install && \
+    mkdir -p /etc/ld.so.conf.d && echo /usr/local/lib > /etc/ld.so.conf.d/usr-local.conf && ldconfig && \
+    cd /tmp && rm -rf /tmp/pybuild /tmp/Python.tgz && \
+    LD_LIBRARY_PATH=/usr/local/lib python3 -V && \
+    LD_LIBRARY_PATH=/usr/local/lib python3 -m pip install -U pip setuptools wheel
+
+ENV PATH=/usr/local/bin:$PATH \
+    LD_LIBRARY_PATH=/usr/local/lib
+
+# 3) 下载并安装 CANN 9.1.0（toolkit 必装；nnal、A3-ops 存在则装；驱动由宿主机提供）
+RUN set -e; cd /tmp; \
+    if [ -z "${CANN_PKG_ARCH}" ]; then \
+        case "$(uname -m)" in \
+            aarch64) CANN_PKG_ARCH=aarch64 ;; \
+            x86_64)  CANN_PKG_ARCH=x86_64 ;; \
+            *) echo "ERROR: 不支持的架构 $(uname -m)"; exit 1 ;; \
+        esac; \
+    fi; \
+    TOOLKIT_PKG="Ascend-cann-toolkit_${CANN_VERSION}_linux-${CANN_PKG_ARCH}.run"; \
+    NNAL_PKG="Ascend-cann-nnal_${CANN_VERSION}_linux-${CANN_PKG_ARCH}.run"; \
+    OPS_PKG="Ascend-cann-A3-ops_${CANN_VERSION}_linux-${CANN_PKG_ARCH}.run"; \
+    echo "INFO: CANN 包架构 ${CANN_PKG_ARCH}"; \
+    fetch() { \
+        echo "INFO: downloading $1"; \
+        curl -fL --retry 3 --retry-delay 5 --connect-timeout 30 \
+            -H "Referer: https://www.hiascend.com/" \
+            -o "$(basename "$1")" "$1"; \
+    }; \
+    fetch "${CANN_BASE_URL}/${TOOLKIT_PKG}"; \
+    fetch "${CANN_BASE_URL}/${NNAL_PKG}"; \
+    fetch "${CANN_BASE_URL}/${OPS_PKG}" || echo "WARN: ops 包下载失败，跳过"; \
+    df -h /tmp; \
+    for t in awk sed grep tar gzip md5sum; do \
+        command -v "$t" >/dev/null || echo "WARN: 缺少命令 $t"; \
+    done; \
+    ls -lh /tmp/*.run; \
+    chmod +x /tmp/*.run; \
+    fail() { \
+        rc=$1; name=$2; shift 2; \
+        echo "ERROR: CANN ${name} 安装失败 (exit $rc)"; \
+        df -h /tmp /usr/local || true; \
+        ls -l /tmp/*.run || true; \
+        echo "----- ${name} installer log (tail 80) -----"; \
+        tail -n 80 /tmp/cann_install.log || true; \
+        if [ -f /var/log/ascend_seclog/ascend_install.log ]; then \
+            echo "----- ascend_install.log (tail 80) -----"; \
+            tail -n 80 /var/log/ascend_seclog/ascend_install.log; \
+        fi; \
+        exit $rc; \
+    }; \
+    /tmp/${TOOLKIT_PKG} --install --quiet > /tmp/cann_install.log 2>&1 || fail $? toolkit; \
+    /tmp/${NNAL_PKG} --install --quiet > /tmp/cann_install.log 2>&1 || fail $? nnal; \
+    if [ -f "/tmp/${OPS_PKG}" ]; then \
+        /tmp/${OPS_PKG} --install --quiet > /tmp/cann_install.log 2>&1 || fail $? a3-ops; \
+    fi; \
+    rm -f /tmp/*.run
+
+# 4) modelscope / ray（多机） / protobuf；cmake>=3.26 与 ninja 由 pip 提供
+#    （麒麟源里的 cmake 版本低于 vllm-ascend 要求，且镜像初始无 cmake）
+RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' \
+        'cmake>=3.26' ninja && \
     python3 -m pip cache purge
 
-# Install vLLM
-ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.33.0
-ARG VLLM_COMMIT=""
-ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
+# 4b) glog：麒麟 V10 SP3 源里没有 glog/glog-devel，mooncake 依赖 libglog，源码编译
+ARG GLOG_TAG=v0.6.0
+RUN git clone --depth 1 -b ${GLOG_TAG} https://github.com/google/glog.git /tmp/glog && \
+    cmake -S /tmp/glog -B /tmp/glog/build \
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    cmake --build /tmp/glog/build -j"${MAX_JOBS:-$(nproc)}" && \
+    cmake --install /tmp/glog/build && ldconfig && \
+    rm -rf /tmp/glog
+
+# 5) 安装 vLLM v0.23.0（源码方式，TARGET_DEVICE=empty；0.23 无 rust 前端）
 RUN if [ -n "$VLLM_COMMIT" ]; then \
       git init /vllm-workspace/vllm && \
       git -C /vllm-workspace/vllm fetch --depth 1 $VLLM_REPO "$VLLM_COMMIT" && \
@@ -42,61 +172,98 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
     else \
       git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
     fi && \
-    VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
-    # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
+    VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] \
+        --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton && \
-    # The same step also builds the optional Rust frontend (vllm-rs).
-    cd /vllm-workspace/vllm && \
-    export PATH="/root/.cargo/bin:$PATH" && \
-    export PROTOC_INCLUDE=/usr/include && \
-    python3 -m pip install -r requirements/build/rust.txt && \
-    bash tools/build_rust.sh && \
     python3 -m pip cache purge
 
-# Install vllm-ascend
-# Dependency versions used by the vllm-ascend build.
-ARG SOC_VERSION="ascend910_9391"
-# Cap opc/c++/rust build parallelism to bound memory on shared buildkitd nodes:
-# the heavy vllm-ascend compile otherwise spawns unbounded jobs and can exhaust
-# a 128Gi node (OOM-killing kubelet). CI passes --build-arg MAX_JOBS=32 /
-# CARGO_BUILD_JOBS=32; leaving them unset keeps the default nproc parallelism.
-ARG MAX_JOBS
-ARG CARGO_BUILD_JOBS
+# 6) 编译安装 vllm-ascend（源码必须是 releases/v0.23.0）
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
     OMP_NUM_THREADS=1
 COPY . /vllm-workspace/vllm-ascend/
-
-ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi \
-    https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly"
-ARG COMPILE_CUSTOM_KERNELS=1
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
+    python3 -m pip install -e /vllm-workspace/vllm-ascend/ \
+        --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip cache purge
 
-# ===== Install FLA and flash_attn_npu =====
-ARG FLA_VERSION="26.10.0+feature"
-ARG FLASH_ATTN_NPU_VERSION="0.5.0"
-ARG MOONCAKE_VERSION="0.3.14"
-RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+# 7) memfabric kernel + flash-linear-attention + flash_attn_npu
+#    FLA(a3) 在 Ascend 源上的所有版本都只提供 manylinux_2_34 轮子，而麒麟 V10 glibc 是 2.28，
+#    pip 会直接判 "not a supported wheel"。该包是 py3-none（纯 python + CANN 算子 .so），
+#    所以按架构下载后把平台标签改写为 any 再本地安装，绕开 pip 的标签校验。
+RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    source /usr/local/Ascend/cann/set_env.sh && \
-    export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
-    # Install memfabric_hybrid kernels
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A3 --install-for-all && \
-    # Install flash-linear-attention-npu from the Ascend mirror
+    case "$(uname -m)" in \
+        aarch64) PKG_ARCH=aarch64 ;; \
+        x86_64)  PKG_ARCH=x86_64 ;; \
+        *) echo "ERROR: 不支持的架构 $(uname -m)"; exit 1 ;; \
+    esac && \
+    FLA_WHL="flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-manylinux_2_34-${PKG_ARCH}.whl" && \
+    curl -fL --retry 3 --retry-delay 5 -o /tmp/fla.whl \
+        "${ASCEND_INDEX_URL}/flash-linear-attention-npu-a3/${FLA_WHL//+/%2B}" && \
+    cp /tmp/fla.whl "/tmp/flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-any.whl" && \
     python3 -m pip install --force-reinstall --no-deps \
-        "flash-linear-attention-npu-a3===${FLA_VERSION}" && \
-    # Keep the CANN env and --no-build-isolation: the isolated build env lacks torch/torch_npu.
-    FLASH_ATTN_BUILD_NPU=910 python3 -m pip install --no-build-isolation "flash_attn_npu==${FLASH_ATTN_NPU_VERSION}" && \
-    # Install mooncake-transfer-engine-npu from the Ascend nightly mirror
-    python3 -m pip install "mooncake-transfer-engine-npu===${MOONCAKE_VERSION}" && \
+        "/tmp/flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-any.whl" && \
+    rm -f /tmp/fla.whl "/tmp/flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-any.whl" && \
+    FLASH_ATTN_BUILD_NPU=910 python3 -m pip install --no-build-isolation \
+        "flash_attn_npu==${FLASH_ATTN_NPU_VERSION}" && \
     python3 -m pip cache purge
 
-# Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
-RUN echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib' >> ~/.bashrc
+# 8) 从源码编译 mooncake 0.3.12.post1（与客户环境一致，不走 pip 二进制）
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    git clone --depth 1 -b ${MOONCAKE_TAG} ${MOONCAKE_REPO} /tmp/Mooncake && \
+    cd /tmp/Mooncake && mkdir -p build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release \
+        -DWITH_TE=ON -DUSE_CUDA=OFF -DUSE_ASCEND=ON && \
+    make -j"${MAX_JOBS:-$(nproc)}" && make install && ldconfig
+
+# 9) mooncake python 绑定
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    cd /tmp/Mooncake && python3 -m pip install . && \
+    rm -rf /tmp/Mooncake && python3 -m pip cache purge
+
+RUN echo 'export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD' >> ~/.bashrc && \
+    echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib' >> ~/.bashrc
+
+# 10) 内置 etcd（MindIE-Motor 服务发现；离线运行不再依赖外部 etcd）
+ARG ETCD_VERSION=v3.5.21
+RUN set -e; \
+    case "$(uname -m)" in \
+        aarch64) ETCD_ARCH=arm64 ;; \
+        x86_64)  ETCD_ARCH=amd64 ;; \
+        *) echo "ERROR: 不支持的架构 $(uname -m)"; exit 1 ;; \
+    esac; \
+    ETCD_PKG="etcd-${ETCD_VERSION}-linux-${ETCD_ARCH}"; \
+    curl -fsSL "https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/${ETCD_PKG}.tar.gz" \
+        -o /tmp/etcd.tgz; \
+    tar -xzf /tmp/etcd.tgz -C /tmp; \
+    install -m 0755 "/tmp/${ETCD_PKG}/etcd" /usr/local/bin/; \
+    install -m 0755 "/tmp/${ETCD_PKG}/etcdctl" /usr/local/bin/; \
+    rm -rf /tmp/etcd.tgz "/tmp/${ETCD_PKG}"; \
+    etcd --version; etcdctl version
+
+# 11) MindIE-Motor（PD 分离服务）：官方 wheel 打进镜像，运行期离线可用
+#     wheel 通过 build secret 传入，不依赖构建上下文里存在 offline/ 目录：
+#       docker buildx build --secret id=motor_wheel,src=<motor>.whl ...
+#     未传 secret 时按 MOTOR_REQUIRED 决定告警跳过还是失败。
+ARG MOTOR_REQUIRED=0
+RUN --mount=type=secret,id=motor_wheel \
+    set -e; \
+    if [ -f /run/secrets/motor_wheel ]; then \
+        install -m 0644 /run/secrets/motor_wheel /tmp/motor.whl; \
+        python3 -m pip install /tmp/motor.whl; \
+        rm -f /tmp/motor.whl; \
+        python3 -m pip cache purge; \
+    elif [ "${MOTOR_REQUIRED}" = "1" ]; then \
+        echo "ERROR: 未提供 MindIE-Motor wheel，请用 --secret id=motor_wheel,src=<wheel>"; \
+        exit 1; \
+    else \
+        echo "WARN: 未提供 MindIE-Motor wheel，跳过 PD 分离组件安装"; \
+    fi
 
 CMD ["/bin/bash"]
