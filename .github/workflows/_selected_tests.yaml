@@ -500,13 +500,11 @@ jobs:
       if: ${{ !cancelled() && inputs.enable-coverage }}
       needs: selected-tests
       runs-on: linux-amd64-cpu-2-hk
-      # Host python on linux-amd64-cpu-2-hk has no pip. Install packages in
-      # this image instead of get-pip.py on the shared runner (L2-ci#container-contract).
+      # Host python on linux-amd64-cpu-2-hk has no pip. Use the repo-built
+      # lint image (Dockerfile.lint) instead of get-pip.py on the shared
+      # runner (L2-ci#container-contract).
       container:
-        image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
-      defaults:
-        run:
-          shell: bash
+        image: quay.io/ascend-ci/vllm-ascend:lint
       continue-on-error: true
       env:
         OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
