@@ -76,7 +76,7 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
                 raise ValueError("Qwen4Exp GDN key and value heads must be divisible by TP * PCP")
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         if use_pcp:
-            from vllm_ascend.ops.gdn import shard_gdn_heads_over_pcp
+            from vllm_ascend.attention.gdn import shard_gdn_heads_over_pcp
 
             static_context = vllm_config.compilation_config.static_forward_context
             for layer in self.layers[self.start_layer : self.end_layer]:
