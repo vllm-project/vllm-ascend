@@ -23,6 +23,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
     AscendStoreConnector,
     create_kv_pool_worker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
+    get_attention_compute_start_gate,
+    record_attention_compute_start,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata, LoadSpec, ReqMeta
 
@@ -212,6 +216,7 @@ def metadata(worker, *, load=False, save=True):
 
 def forward_layer(worker, meta):
     worker.wait_for_layer_load()
+    record_attention_compute_start()
     worker.save_kv_layer(meta)
 
 
@@ -280,6 +285,11 @@ class TestSharedSourceLayerwise(unittest.TestCase):
 
                     def record(task, worker=worker, submitted=submitted, enqueue=enqueue):
                         submitted.append((worker.current_layer, task.layer_id))
+                        if task.layer_id == worker.current_layer:
+                            self.assertIsNone(task.attention_start_gate)
+                        else:
+                            self.assertIs(task.attention_start_gate, get_attention_compute_start_gate())
+                            self.assertFalse(task.attention_start_gate.wait(timeout=0))
                         enqueue(task)
 
                     meta = metadata(worker, load=True, save=False)
@@ -375,6 +385,30 @@ class TestSharedSourceLayerwise(unittest.TestCase):
             conn.wait_for_layer_load(name)
             conn.save_kv_layer(name, [], None)
         self.assertTrue(store.published)
+
+    def test_cache_only_gate_survives_repeated_layer_wait(self):
+        worker, _, _ = make_shared_worker(self, bounded=True)
+        save_prefix(worker)
+        conn = AscendStoreConnector.__new__(AscendStoreConnector)
+        conn.use_layerwise = conn.can_put = True
+        conn.connector_worker = worker
+        conn._mamba_state = None
+        conn.bind_connector_metadata(metadata(worker, load=True, save=False))
+        for layer in range(worker.num_layers):
+            name = f"model.layers.{layer}.v41_attn"
+            conn.wait_for_layer_load(name)
+            if layer == 2:
+                gate = get_attention_compute_start_gate()
+                self.assertFalse(gate.wait(timeout=0))
+                self.assertFalse(worker.layer_load_finished_events[8].is_set())
+                # Cache-only writes open the gate; the normal forward must reuse it.
+                record_attention_compute_start()
+                self.assertTrue(worker.layer_load_finished_events[8].wait(timeout=3))
+                conn.wait_for_layer_load(name)
+                self.assertIs(get_attention_compute_start_gate(), gate)
+                self.assertEqual(worker.current_layer, layer)
+            record_attention_compute_start()
+            conn.save_kv_layer(name, [], None)
 
     def test_failed_load_reports_request_and_disables_saves(self):
         worker, store, _ = make_shared_worker(self, bounded=True)

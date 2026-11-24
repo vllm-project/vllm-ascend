@@ -1561,11 +1561,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if not self.layer_load_tasks[layer_id] and not reuse_sources:
                 return False
             attention_start_gate = None
-            if (
-                self.layer_load_tasks[layer_id]
-                and layer_id != self.current_layer
-                and not getattr(self, "has_shared_kv", False)
-            ):
+            if self.layer_load_tasks[layer_id] and layer_id != self.current_layer:
                 attention_start_gate = get_attention_compute_start_gate()
             recv_thread.add_request(
                 LayerLoadTask(  # type: ignore[arg-type]

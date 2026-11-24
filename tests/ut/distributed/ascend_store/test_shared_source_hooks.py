@@ -5,7 +5,7 @@
 import unittest
 from types import MethodType, SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import torch
 
@@ -15,6 +15,7 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from tests.ut.attention.test_mla_layerwise_load_cpu import load
 from tests.ut.distributed.ascend_store.test_shared_source_layerwise import make_shared_worker, metadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 
 UTILS = "vllm_ascend/attention/utils.py"
 ATTENTION = "vllm_ascend/attention/dsa_v41.py"
@@ -141,6 +142,7 @@ class TestStandardConnectorHooks(unittest.TestCase):
             oproj_tp_enable=lambda: False,
             get_forward_context=lambda: ctx,
             wait_for_kv_layer_from_connector=Mock(side_effect=lambda _: events.append("wait")),
+            record_attention_compute_start=lambda: events.append("gate"),
             maybe_save_kv_layer_to_connector=Mock(side_effect=lambda *args: events.append("save")),
         )
         attn.v41_impl.forward = MethodType(load(ATTENTION, "forward", scope, "AscendDSAV41Impl"), attn.v41_impl)
@@ -149,7 +151,7 @@ class TestStandardConnectorHooks(unittest.TestCase):
         hidden = torch.ones(1)
         scope["dsa_v41_write_kv"](hidden, hidden, "cut")
         scope["dsa_v41_forward"](hidden, hidden, "cut")
-        self.assertEqual(events, ["wait", "cache-only-write", "wait", "final-write", "project", "save"])
+        self.assertEqual(events, ["wait", "cache-only-write", "gate", "wait", "final-write", "project", "save"])
         scope["maybe_save_kv_layer_to_connector"].assert_called_once_with("cut", attn.dsa_attn.swa_cache_layer.kv_cache)
 
         for num_tokens in (1, 0):
@@ -157,13 +159,41 @@ class TestStandardConnectorHooks(unittest.TestCase):
                 events.clear()
                 layer_metadata.swa.num_actual_tokens = num_tokens
                 attn.v41_impl.forward(attn, None, hidden, hidden)
-                self.assertEqual(events, ["wait", "final-write", "project", "save"])
+                expected = ["wait", "final-write"] + (["gate"] if not num_tokens else []) + ["project", "save"]
+                self.assertEqual(events, expected)
                 scope["wait_for_kv_layer_from_connector"].assert_called_with("cut")
 
         events.clear()
         ctx.attn_metadata = None
         scope["dsa_v41_forward"](hidden, hidden, "cut")
         self.assertEqual(events, [])
+
+    def test_attention_op_opens_prefetch_gate_after_metadata(self):
+        for packed, replay in ((False, False), (False, True), (True, False)):
+            with self.subTest(packed=packed, replay=replay):
+                events = []
+                operator = Mock(
+                    side_effect=lambda *args, events=events, **kwargs: events.append("attention") or (None, None)
+                )
+                attn, metadata = MagicMock(), MagicMock()
+                metadata.swa.replay_block_table = object() if replay else None
+                metadata.swa.a5_smla_plans = {0: object()}
+                scope = dict(
+                    torch=SimpleNamespace(
+                        ops=SimpleNamespace(_C_ascend=SimpleNamespace(npu_sparse_flash_mla=operator))
+                    ),
+                    DeviceMetadataStage=SimpleNamespace(ATTENTION=object()),
+                    wait_for_device_metadata=lambda *args, events=events: events.append("metadata"),
+                    record_attention_compute_start=lambda events=events: events.append("gate"),
+                    ops=SimpleNamespace(mixed_quant_sparse_flash_mla=operator),
+                    _resolve_window_indices=lambda *args, events=events: events.append("indices") or (None, None),
+                )
+                packed_forward = load("vllm_ascend/models/deepseek_v41/mixed_quant_attention.py", "qsmla", scope)
+                attn.packed_cache_ops = SimpleNamespace(qsmla=packed_forward) if packed else None
+                forward = load(ATTENTION, "_forward_attention", scope, "AscendDSAV41Impl")
+                impl = SimpleNamespace(role=SimpleNamespace(has_long_context=False, compress_ratio=0))
+                forward(impl, attn, torch.ones(1), metadata, None)
+                self.assertEqual(events, (["indices"] if packed else []) + ["metadata", "gate", "attention"])
 
     def test_standard_connector_drives_full_sparse_sequence(self):
         worker, store, _ = make_shared_worker(self, bounded=True, draft=True)
@@ -178,6 +208,7 @@ class TestStandardConnectorHooks(unittest.TestCase):
         for layer in range(worker.num_layers):
             name = f"model.layers.{layer}.v41_attn" if layer < 12 else f"model.mtp.layers.{layer - 12}.v41_attn"
             conn.wait_for_layer_load(name)
+            record_attention_compute_start()
             conn.save_kv_layer(name, [], None)
         self.assertTrue(store.published)  # the final layer hook completed the save
         conn.finish_forward()

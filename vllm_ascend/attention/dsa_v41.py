@@ -43,6 +43,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
@@ -105,6 +106,8 @@ def dsa_v41_write_kv(
     wait_for_kv_layer_from_connector(layer_name)
     hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
     attn.v41_impl._update_caches(attn, hidden_states, metadata)
+    # Cache-only replay has no attention op to release prefetched loads.
+    record_attention_compute_start()
     # The following cut-layer forward writes retained rows again. Its normal
     # save hook records the final-write event without advancing twice here.
 
@@ -753,6 +756,7 @@ class AscendDSAV41Impl:
             swa_cache = swa_cache.reshape(-1, metadata.swa.storage_block_size, 1, swa_cache.shape[-1])
             ori_block_table = metadata.swa.replay_block_table
             seq_lens = metadata.swa.replay_seq_lens
+        record_attention_compute_start()
         output, _ = torch.ops._C_ascend.npu_sparse_flash_mla(
             q,
             ori_kv=swa_cache,
@@ -826,6 +830,8 @@ class AscendDSAV41Impl:
             attention_output = self._forward_attention(attn, q, metadata, compressed_indices)
             AscendDSAV41Impl._apply_rotary(attn, attention_output, cos, sin, inverse=True)
         else:
+            # Empty PCP ranks must also release the next layer's loads.
+            record_attention_compute_start()
             heads = attn.n_local_heads
             attention_output = hidden_states.new_empty((0, heads, attn.head_dim))
         self._project_output(attn, attention_output, hidden_states, projected=output)
