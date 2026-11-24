@@ -143,7 +143,6 @@ variants:
           - '{"cpu_offload":true,"dp_shared_memory":true}'
           - '--trust-remote-code'
         extra_env:
-          VLLM_USE_V2_MODEL_RUNNER: '1'
           HCCL_OP_EXPANSION_MODE: CCU_SCHED
           HCCL_BUFFSIZE: '1600'
           HCCL_CONNECT_TIMEOUT: '1200'

@@ -373,7 +373,6 @@ hardware_overrides:
       - mp
     extra_env:
       VLLM_USE_MODELSCOPE: 'True'
-      VLLM_USE_V2_MODEL_RUNNER: '1'
       HCCL_OP_EXPANSION_MODE: AIV
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
 hardware_notes:
