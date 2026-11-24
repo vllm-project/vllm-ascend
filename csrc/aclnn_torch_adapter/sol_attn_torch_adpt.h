@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <torch_npu/csrc/core/npu/NPUGuard.h>
@@ -15,8 +16,12 @@ constexpr int64_t kBlockSize = 64;
 constexpr int64_t kGroupSize = 64;
 constexpr int64_t kHeadDim = 128;
 constexpr int64_t kQueryTile = 128;
+constexpr int64_t kQueryBlocksPerTile = kQueryTile / kBlockSize;
 constexpr int64_t kAlignment = 8;
 constexpr int64_t kMaxBlocks = std::numeric_limits<uint16_t>::max() + 1;
+constexpr int64_t kMaxFusedRouteGroups = 4;
+constexpr int64_t kRouteStatsScoreBytes = 1536 * 1024;
+constexpr int64_t kShortForwardWorkspaceReserve = 35 * 1024 * 1024;
 
 inline int64_t CeilDiv(int64_t value, int64_t divisor)
 {
@@ -28,7 +33,7 @@ struct Geometry {
         : blocks(blocks),
           groups(CeilDiv(blocks, kGroupSize)),
           paddedBlocks(groups * kGroupSize),
-          queryTiles(CeilDiv(blocks, kQueryTile / kBlockSize)),
+          queryTiles(CeilDiv(blocks, kQueryBlocksPerTile)),
           paddedQueryTiles(CeilDiv(queryTiles, kAlignment) * kAlignment)
     {
         TORCH_CHECK(blocks > 0 && blocks <= kMaxBlocks, "Sol-Attn block count is out of range");
@@ -66,6 +71,35 @@ inline void CheckScale(double scaleLog2)
     TORCH_CHECK(std::isfinite(static_cast<float>(scaleLog2)), "Sol-Attn scale_log2 must be finite");
 }
 
+inline void CheckTau(double tau)
+{
+    TORCH_CHECK(std::isfinite(static_cast<float>(tau)), "Sol-Attn tau must be finite");
+}
+
+inline void CheckSinkRange(int64_t first, int64_t last, int64_t blocks)
+{
+    TORCH_CHECK(0 <= first && first <= last && last <= blocks, "Sol-Attn sink block range is out of bounds");
+}
+
+inline void CheckQkv(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v)
+{
+    CheckInput(q, 4, "q");
+    TORCH_CHECK(q.size(-1) == kHeadDim, "Sol-Attn requires a head dimension of 128");
+    const auto device = q.device();
+    CheckTensor(q, device, q.sizes(), at::kBFloat16, "q");
+    CheckTensor(k, device, q.sizes(), at::kBFloat16, "k");
+    CheckTensor(v, device, q.sizes(), at::kBFloat16, "v");
+}
+
+inline void CheckBatchedRoutes(
+    const at::Tensor& approxMask, const at::Tensor& exactCount, const at::Tensor& exactIndex,
+    c10::Device device, int64_t batch, int64_t heads, const Geometry& geometry)
+{
+    CheckTensor(approxMask, device, {batch, heads, geometry.queryTiles, geometry.groups}, at::kUInt64, "approx_mask");
+    CheckTensor(exactCount, device, {batch, heads, geometry.paddedQueryTiles}, at::kInt, "exact_count");
+    CheckTensor(exactIndex, device, {batch, heads, geometry.queryTiles, geometry.paddedBlocks}, at::kUInt16, "exact_index");
+}
+
 }  // namespace sol_attn_detail
 
 inline void sol_attn_prepare_qkv(
@@ -75,7 +109,7 @@ inline void sol_attn_prepare_qkv(
     const at::Tensor& qSummary, const at::Tensor& tailLengths)
 {
     using namespace sol_attn_detail;
-    CheckInput(q, 4, "q");
+    CheckQkv(q, k, v);
     const auto device = q.device();
     const auto batch = q.size(0);
     const auto tokens = q.size(1);
@@ -84,9 +118,6 @@ inline void sol_attn_prepare_qkv(
     const auto paddedTokens = geometry.blocks * kBlockSize;
     const auto tailLength = tokens - (geometry.blocks - 1) * kBlockSize;
     const double invTailLength = 1.0 / tailLength;
-    CheckTensor(q, device, {batch, tokens, heads, kHeadDim}, at::kBFloat16, "q");
-    CheckTensor(k, device, q.sizes(), at::kBFloat16, "k");
-    CheckTensor(v, device, q.sizes(), at::kBFloat16, "v");
     CheckTensor(kPad, device, {batch, heads, paddedTokens, kHeadDim}, at::kBFloat16, "k_pad");
     CheckTensor(vPad, device, kPad.sizes(), at::kBFloat16, "v_pad");
     CheckTensor(kSummary, device, {batch, heads, geometry.paddedBlocks, kHeadDim}, at::kBFloat16, "k_summary");
@@ -108,7 +139,7 @@ inline void sol_attn_prepare_diag_thresh(
     using namespace sol_attn_detail;
     CheckInput(qSummary, 4, "q_summary");
     CheckScale(scaleLog2);
-    TORCH_CHECK(std::isfinite(static_cast<float>(tau)), "Sol-Attn tau must be finite");
+    CheckTau(tau);
     const auto device = qSummary.device();
     const auto batch = qSummary.size(0);
     const auto heads = qSummary.size(1);
@@ -133,8 +164,7 @@ inline void sol_attn_prepare_route_pack(
     const auto device = rawScores.device();
     const auto heads = rawScores.size(0);
     const Geometry geometry(rawScores.size(1));
-    TORCH_CHECK(0 <= sinkStartBlock && sinkStartBlock <= sinkEndBlock && sinkEndBlock <= geometry.blocks,
-                "Sol-Attn sink block range is out of bounds");
+    CheckSinkRange(sinkStartBlock, sinkEndBlock, geometry.blocks);
     CheckTensor(rawScores, device, {heads, geometry.blocks, geometry.paddedBlocks}, at::kFloat, "raw_scores");
     CheckTensor(threshold, device, {heads, geometry.blocks}, at::kFloat, "threshold");
     CheckTensor(approxMask, device, {heads, geometry.queryTiles, geometry.groups}, at::kUInt64, "approx_mask");
@@ -145,6 +175,102 @@ inline void sol_attn_prepare_route_pack(
     EXEC_NPU_CMD(aclnnSolAttnPrepareRoutePackKernel, rawScores, threshold, heads, geometry.blocks, geometry.queryTiles,
                  geometry.groups, geometry.paddedBlocks, geometry.paddedQueryTiles, kQueryTile, sinkStartBlock,
                  sinkEndBlock, scaleLog2, approxMask, exactCount, exactIndex);
+}
+
+inline void sol_attn_prepare_short(
+    const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, int64_t sinkStartBlock, int64_t sinkEndBlock,
+    double scaleLog2, double tau, const at::Tensor& kPad, const at::Tensor& vPad, const at::Tensor& kSummary,
+    const at::Tensor& vSummary, const at::Tensor& tailLengths, const at::Tensor& threshold,
+    const at::Tensor& approxMask, const at::Tensor& exactCount, const at::Tensor& exactIndex)
+{
+    using namespace sol_attn_detail;
+    CheckQkv(q, k, v);
+    CheckScale(scaleLog2);
+    CheckTau(tau);
+    const auto device = q.device();
+    const auto batch = q.size(0);
+    const auto tokens = q.size(1);
+    const auto heads = q.size(2);
+    const Geometry geometry(CeilDiv(tokens, kBlockSize));
+    TORCH_CHECK(geometry.groups == 1, "Fused Sol-Attn preparation requires one KV group");
+    CheckSinkRange(sinkStartBlock, sinkEndBlock, geometry.blocks);
+    const auto paddedTokens = geometry.blocks * kBlockSize;
+    CheckTensor(kPad, device, {batch, heads, paddedTokens, kHeadDim}, at::kBFloat16, "k_pad");
+    CheckTensor(vPad, device, kPad.sizes(), at::kBFloat16, "v_pad");
+    CheckTensor(kSummary, device, {batch, heads, geometry.paddedBlocks, kHeadDim}, at::kBFloat16, "k_summary");
+    CheckTensor(vSummary, device, kSummary.sizes(), at::kBFloat16, "v_summary");
+    CheckTensor(tailLengths, device, {kGroupSize}, at::kFloat, "tail_lengths");
+    CheckTensor(threshold, device, {batch, geometry.blocks, heads}, at::kFloat, "threshold");
+    CheckBatchedRoutes(approxMask, exactCount, exactIndex, device, batch, heads, geometry);
+
+    const double scaleSquared = scaleLog2 * scaleLog2;
+    const c10_npu::NPUGuard guard(device);
+    EXEC_NPU_CMD(aclnnSolAttnPrepareShortKernel, q, k, v, batch, tokens, heads, geometry.blocks, paddedTokens,
+                 geometry.queryTiles, geometry.paddedQueryTiles, kQueryBlocksPerTile, sinkStartBlock, sinkEndBlock,
+                 scaleLog2, scaleSquared, tau, kPad, vPad, kSummary, vSummary, tailLengths,
+                 threshold, approxMask, exactCount, exactIndex);
+}
+
+inline void sol_attn_prepare_route_stats(
+    const at::Tensor& qSummary, const at::Tensor& kSummary, int64_t sinkStartBlock, int64_t sinkEndBlock,
+    double scaleLog2, double tau, const at::Tensor& threshold, const at::Tensor& approxMask,
+    const at::Tensor& exactCount, const at::Tensor& exactIndex)
+{
+    using namespace sol_attn_detail;
+    CheckInput(qSummary, 4, "q_summary");
+    CheckScale(scaleLog2);
+    CheckTau(tau);
+    const auto device = qSummary.device();
+    const auto batch = qSummary.size(0);
+    const auto heads = qSummary.size(1);
+    const Geometry geometry(qSummary.size(2));
+    TORCH_CHECK(geometry.groups > 1 && geometry.groups <= kMaxFusedRouteGroups,
+                "Fused Sol-Attn diagonal routing requires two to four KV groups");
+    CheckSinkRange(sinkStartBlock, sinkEndBlock, geometry.blocks);
+    const auto workspaceBytes =
+        sizeof(float) * batch * heads * geometry.paddedBlocks * (kHeadDim + 1) + kRouteStatsScoreBytes;
+    TORCH_CHECK(workspaceBytes <= std::numeric_limits<int32_t>::max(), "Sol-Attn route workspace exceeds the indexing range");
+    CheckTensor(qSummary, device, {batch, heads, geometry.blocks, kHeadDim}, at::kFloat, "q_summary");
+    CheckTensor(kSummary, device, {batch, heads, geometry.paddedBlocks, kHeadDim}, at::kBFloat16, "k_summary");
+    CheckTensor(threshold, device, {batch, geometry.blocks, heads}, at::kFloat, "threshold");
+    CheckBatchedRoutes(approxMask, exactCount, exactIndex, device, batch, heads, geometry);
+
+    const double scaleSquared = scaleLog2 * scaleLog2;
+    const c10_npu::NPUGuard guard(device);
+    EXEC_NPU_CMD(aclnnSolAttnPrepareRouteStatsKernel, qSummary, kSummary, batch, heads, geometry.blocks,
+                 geometry.queryTiles, geometry.groups, geometry.paddedBlocks, geometry.paddedQueryTiles,
+                 kQueryBlocksPerTile, sinkStartBlock, sinkEndBlock, scaleLog2, scaleSquared, tau,
+                 threshold, approxMask, exactCount, exactIndex);
+}
+
+inline void sol_attn_short_fwd_m128(
+    const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, int64_t sinkStartBlock, int64_t sinkEndBlock,
+    double scaleLog2, double tau, const at::Tensor& output, const at::Tensor& lse)
+{
+    using namespace sol_attn_detail;
+    CheckQkv(q, k, v);
+    CheckScale(scaleLog2);
+    CheckTau(tau);
+    const auto device = q.device();
+    const auto batch = q.size(0);
+    const auto tokens = q.size(1);
+    const auto heads = q.size(2);
+    const Geometry geometry(CeilDiv(tokens, kBlockSize));
+    TORCH_CHECK(geometry.groups == 1, "Fused Sol-Attn forward requires one KV group");
+    CheckSinkRange(sinkStartBlock, sinkEndBlock, geometry.blocks);
+    const auto workspaceBound =
+        8 * batch * heads * std::max(tokens, kBlockSize) * kHeadDim + kShortForwardWorkspaceReserve;
+    TORCH_CHECK(workspaceBound <= std::numeric_limits<int32_t>::max(),
+                "Sol-Attn short forward workspace exceeds the indexing range");
+    const auto paddedLse = CeilDiv(tokens, kAlignment) * kAlignment;
+    CheckTensor(output, device, q.sizes(), at::kBFloat16, "output");
+    CheckTensor(lse, device, {batch, heads, paddedLse}, at::kFloat, "lse");
+
+    const double scaleSquared = scaleLog2 * scaleLog2;
+    const c10_npu::NPUGuard guard(device);
+    EXEC_NPU_CMD(aclnnSolAttnShortFwdM128Kernel, q, k, v, batch, tokens, heads, geometry.blocks, geometry.queryTiles,
+                 geometry.paddedQueryTiles, paddedLse, sinkStartBlock, sinkEndBlock, scaleLog2, scaleSquared, tau,
+                 output, lse);
 }
 
 inline void sol_attn_fwd_m128(
@@ -168,9 +294,7 @@ inline void sol_attn_fwd_m128(
     CheckTensor(vPad, device, kPad.sizes(), at::kBFloat16, "v_pad");
     CheckTensor(kSummary, device, {batch, heads, geometry.paddedBlocks, kHeadDim}, at::kBFloat16, "k_summary");
     CheckTensor(vSummary, device, kSummary.sizes(), at::kBFloat16, "v_summary");
-    CheckTensor(exactCount, device, {batch, heads, geometry.paddedQueryTiles}, at::kInt, "exact_count");
-    CheckTensor(exactIndex, device, {batch, heads, geometry.queryTiles, geometry.paddedBlocks}, at::kUInt16, "exact_index");
-    CheckTensor(approxMask, device, {batch, heads, geometry.queryTiles, geometry.groups}, at::kUInt64, "approx_mask");
+    CheckBatchedRoutes(approxMask, exactCount, exactIndex, device, batch, heads, geometry);
     CheckTensor(tailLengths, device, {kGroupSize}, at::kFloat, "tail_lengths");
     CheckTensor(output, device, q.sizes(), at::kBFloat16, "output");
     CheckTensor(lse, device, {batch, heads, paddedLse}, at::kFloat, "lse");

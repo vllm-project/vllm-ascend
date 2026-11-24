@@ -2927,6 +2927,24 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("sol_attn_fwd_m128", torch::kPrivateUse1, &vllm_ascend::sol_attn_fwd_m128);
 
     ops.def(
+        "sol_attn_prepare_short(Tensor q, Tensor k, Tensor v, int sink_start_block, int sink_end_block, "
+        "float scale_log2, float tau, Tensor(a!) k_pad, Tensor(b!) v_pad, Tensor(c!) k_summary, Tensor(d!) v_summary, "
+        "Tensor(e!) tail_lengths, Tensor(f!) threshold, Tensor(g!) approx_mask, Tensor(h!) exact_count, "
+        "Tensor(i!) exact_index) -> ()");
+    ops.impl("sol_attn_prepare_short", torch::kPrivateUse1, &vllm_ascend::sol_attn_prepare_short);
+
+    ops.def(
+        "sol_attn_prepare_route_stats(Tensor q_summary, Tensor k_summary, int sink_start_block, int sink_end_block, "
+        "float scale_log2, float tau, Tensor(a!) threshold, Tensor(b!) approx_mask, Tensor(c!) exact_count, "
+        "Tensor(d!) exact_index) -> ()");
+    ops.impl("sol_attn_prepare_route_stats", torch::kPrivateUse1, &vllm_ascend::sol_attn_prepare_route_stats);
+
+    ops.def(
+        "sol_attn_short_fwd_m128(Tensor q, Tensor k, Tensor v, int sink_start_block, int sink_end_block, "
+        "float scale_log2, float tau, Tensor(a!) output, Tensor(b!) lse) -> ()");
+    ops.impl("sol_attn_short_fwd_m128", torch::kPrivateUse1, &vllm_ascend::sol_attn_short_fwd_m128);
+
+    ops.def(
         "dequant_situ_quant(Tensor x, "
         "                   *, Tensor? weight_scale=None, "
         "                   Tensor? activation_scale=None, "

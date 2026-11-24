@@ -30,8 +30,9 @@ def _assert_relative_l2(actual, expected, tolerance):
     assert difference / torch.linalg.vector_norm(expected.float()) < tolerance
 
 
-def test_sol_attn_all_exact(npu_device):
-    q, k, v = (tensor.to(npu_device) for tensor in _inputs(1, 145, 4))
+@pytest.mark.parametrize("tokens", [145, 3073, 4097], ids=["fused-forward", "fused-prepare", "fused-route-stats"])
+def test_sol_attn_all_exact(npu_device, tokens):
+    q, k, v = (tensor.to(npu_device) for tensor in _inputs(1, tokens, 4))
     scale = q.size(-1) ** -0.5
     out, lse = sol_attn.sol_attn(q, k, v, scale=scale, tau=-100.0, return_lse=True)
     dense, _ = torch_npu.npu_fused_infer_attention_score_v2(
@@ -47,9 +48,10 @@ def test_sol_attn_all_exact(npu_device):
         next_tokens=2147483647,
     )
     _assert_relative_l2(out.cpu(), dense.cpu(), 3e-3)
-    scores = q.cpu().transpose(1, 2).float() @ k.cpu().permute(0, 2, 3, 1).float()
+    rows = torch.tensor([0, 63, 64, 127, 128, tokens - 1])
+    scores = q.cpu()[:, rows].transpose(1, 2).float() @ k.cpu().permute(0, 2, 3, 1).float()
     expected_lse = (scores * scale).logsumexp(dim=-1) * math.log2(math.e)
-    torch.testing.assert_close(lse.cpu(), expected_lse, rtol=1e-3, atol=3e-3)
+    torch.testing.assert_close(lse.cpu()[..., rows], expected_lse, rtol=1e-3, atol=3e-3)
 
 
 def _sparse_reference(q, k, v, sink_block):
@@ -78,8 +80,29 @@ def test_sol_attn_sparse_chunked_heads(npu_device, monkeypatch):
     # Exercise slice writes even for a small sequence.
     monkeypatch.setattr(sol_attn, "_SCORE_BUFFER_BYTES", 1)
     q, k, v = _inputs(2, 399, 2)
-    out = sol_attn.sol_attn(*(tensor.to(npu_device) for tensor in (q, k, v)), tau=100.0, sink_start=3, sink_tokens=17)
+    with torch.autocast(device_type=npu_device.type, dtype=torch.bfloat16):
+        out = sol_attn.sol_attn(
+            *(tensor.to(npu_device) for tensor in (q, k, v)), tau=100.0, sink_start=3, sink_tokens=17
+        )
     _assert_relative_l2(out.cpu(), _sparse_reference(q, k, v, sink_block=0), 6e-3)
+
+
+def test_sol_attn_fused_short_multistream(npu_device):
+    q, k, v = _inputs(2, 399, 2)
+    npu_inputs = tuple(tensor.to(npu_device) for tensor in (q, k, v))
+    reference = _sparse_reference(q, k, v, sink_block=0)
+    current = torch.npu.current_stream(npu_device)
+    streams = [torch.npu.Stream(npu_device) for _ in range(2)]
+    outputs = []
+    for stream in streams:
+        stream.wait_stream(current)
+        with torch.npu.stream(stream):
+            for _ in range(2):
+                outputs.append(sol_attn.sol_attn(*npu_inputs, tau=100.0, sink_start=3, sink_tokens=17, return_lse=True))
+    torch.npu.synchronize(npu_device)
+    for output, lse in outputs:
+        _assert_relative_l2(output.cpu(), reference, 6e-3)
+        torch.testing.assert_close(lse.cpu(), outputs[0][1].cpu())
 
 
 def test_sol_attn_route_pack_writes_unsigned_slice(npu_device):

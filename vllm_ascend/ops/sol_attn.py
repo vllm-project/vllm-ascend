@@ -13,7 +13,55 @@ _HEAD_DIM = 128
 _BLOCKS_PER_QUERY_TILE = 2
 _ALIGNMENT = 8
 _MAX_BLOCKS = 1 << 16
+_MAX_KERNEL_OFFSET = (1 << 31) - 1
 _SCORE_BUFFER_BYTES = 64 * 1024 * 1024
+_MAX_FUSED_ROUTE_GROUPS = 4
+_ROUTE_STATS_SCORE_BYTES = 1536 * 1024
+_SHORT_FORWARD_WORKSPACE_RESERVE = 35 * 1024 * 1024
+
+
+def _pack_routes_in_chunks(
+    ops,
+    q_summary,
+    k_summary_fp32,
+    threshold,
+    mask,
+    exact_count,
+    exact_index,
+    sink_start_block,
+    sink_end_block,
+    scale_log2,
+):
+    q_blocks = q_summary.flatten(0, 1)
+    k_blocks = k_summary_fp32.flatten(0, 1).transpose(1, 2)
+    thresholds = threshold.flatten(0, 1)
+    mask = mask.flatten(0, 1)
+    exact_count = exact_count.flatten(0, 1)
+    exact_index = exact_index.flatten(0, 1)
+    head_count, num_blocks, _ = q_blocks.shape
+    padded_blocks = k_blocks.size(-1)
+    bytes_per_head = num_blocks * padded_blocks * q_summary.element_size()
+    heads_per_chunk = min(head_count, max(1, _SCORE_BUFFER_BYTES // bytes_per_head))
+    score_buffer = torch.empty(
+        (heads_per_chunk, num_blocks, padded_blocks), device=q_summary.device, dtype=torch.float32
+    )
+
+    # Each head chunk writes its slice of the final routing buffers directly.
+    for first_head in range(0, head_count, heads_per_chunk):
+        last_head = min(head_count, first_head + heads_per_chunk)
+        chunk = slice(first_head, last_head)
+        scores = score_buffer[: last_head - first_head]
+        torch.bmm(q_blocks[chunk], k_blocks[chunk], out=scores)
+        ops.sol_attn_prepare_route_pack(
+            scores,
+            thresholds[chunk],
+            sink_start_block,
+            sink_end_block,
+            scale_log2,
+            mask[chunk].view(torch.uint64),
+            exact_count[chunk],
+            exact_index[chunk].view(torch.uint16),
+        )
 
 
 def sol_attn(
@@ -73,56 +121,97 @@ def sol_attn(
         raise RuntimeError("Sol-Attn requires the vLLM Ascend custom operators for Ascend 910B.")
     ops = torch.ops._C_ascend
     device = q.device
+    output = torch.empty_like(q)
+    lse = torch.empty((batch, heads, padded_lse), device=device, dtype=torch.float32)
+    head_count = batch * heads
+    can_fuse_diagonal = not torch.is_autocast_enabled(device.type)
+    # The short launch uses signed 32-bit workspace offsets and one
+    # preparation work item per batch-head before the grid barrier.
+    short_limit = 3072 if head_count <= 24 else (2048 if head_count <= 40 else 1280)
+    short_workspace_bound = 8 * head_count * max(tokens, _BLOCK_SIZE) * head_dim + _SHORT_FORWARD_WORKSPACE_RESERVE
+    if can_fuse_diagonal and tokens <= short_limit and short_workspace_bound <= _MAX_KERNEL_OFFSET:
+        ops.sol_attn_short_fwd_m128(q, k, v, sink_start_block, sink_end_block, scale_log2, tau, output, lse)
+        return (output, lse[..., :tokens]) if return_lse else output
+
     k_pad = torch.empty((batch, heads, padded_tokens, head_dim), device=device, dtype=q.dtype)
     v_pad = torch.empty_like(k_pad)
     k_summary = torch.empty((batch, heads, padded_blocks, head_dim), device=device, dtype=q.dtype)
     v_summary = torch.empty_like(k_summary)
-    k_summary_fp32 = torch.empty_like(k_summary, dtype=torch.float32)
-    q_summary = torch.empty((batch, heads, num_blocks, head_dim), device=device, dtype=torch.float32)
     tail_lengths = torch.empty((_GROUP_SIZE,), device=device, dtype=torch.float32)
-    threshold = torch.empty((batch, heads, num_blocks), device=device, dtype=torch.float32)
-    ops.sol_attn_prepare_qkv(q, k, v, k_pad, v_pad, k_summary, v_summary, k_summary_fp32, q_summary, tail_lengths)
-    ops.sol_attn_prepare_diag_thresh(q_summary, k_summary_fp32, scale_log2, tau, threshold)
-
-    head_count = batch * heads
-    mask = torch.empty((head_count, query_tiles, num_groups), device=device, dtype=torch.int64)
-    exact_count = torch.empty((head_count, padded_query_tiles), device=device, dtype=torch.int32)
-    exact_index = torch.empty((head_count, query_tiles, padded_blocks), device=device, dtype=torch.int16)
-    bytes_per_head = num_blocks * padded_blocks * q_summary.element_size()
-    heads_per_chunk = min(head_count, max(1, _SCORE_BUFFER_BYTES // bytes_per_head))
-    score_buffer = torch.empty((heads_per_chunk, num_blocks, padded_blocks), device=device, dtype=torch.float32)
-    q_blocks = q_summary.flatten(0, 1)
-    k_blocks = k_summary_fp32.flatten(0, 1).transpose(1, 2)
-    thresholds = threshold.flatten(0, 1)
-
-    # Each head chunk writes its slice of the final routing buffers directly.
-    for first_head in range(0, head_count, heads_per_chunk):
-        last_head = min(head_count, first_head + heads_per_chunk)
-        chunk = slice(first_head, last_head)
-        scores = score_buffer[: last_head - first_head]
-        torch.bmm(q_blocks[chunk], k_blocks[chunk], out=scores)
-        ops.sol_attn_prepare_route_pack(
-            scores,
-            thresholds[chunk],
+    mask = torch.empty((batch, heads, query_tiles, num_groups), device=device, dtype=torch.int64)
+    exact_count = torch.empty((batch, heads, padded_query_tiles), device=device, dtype=torch.int32)
+    exact_index = torch.empty((batch, heads, query_tiles, padded_blocks), device=device, dtype=torch.int16)
+    if can_fuse_diagonal and num_groups == 1 and k_pad.numel() <= _MAX_KERNEL_OFFSET:
+        threshold = torch.empty((batch, num_blocks, heads), device=device, dtype=torch.float32)
+        ops.sol_attn_prepare_short(
+            q,
+            k,
+            v,
             sink_start_block,
             sink_end_block,
             scale_log2,
-            mask[chunk].view(torch.uint64),
-            exact_count[chunk],
-            exact_index[chunk].view(torch.uint16),
+            tau,
+            k_pad,
+            v_pad,
+            k_summary,
+            v_summary,
+            tail_lengths,
+            threshold,
+            mask.view(torch.uint64),
+            exact_count,
+            exact_index.view(torch.uint16),
         )
+    else:
+        k_summary_fp32 = torch.empty_like(k_summary, dtype=torch.float32)
+        q_summary = torch.empty((batch, heads, num_blocks, head_dim), device=device, dtype=torch.float32)
+        ops.sol_attn_prepare_qkv(q, k, v, k_pad, v_pad, k_summary, v_summary, k_summary_fp32, q_summary, tail_lengths)
+        # The fused route workspace holds FP32 keys, thresholds, and two Cube score slots.
+        route_workspace_bytes = q_summary.element_size() * head_count * padded_blocks * (head_dim + 1)
+        route_workspace_bytes += _ROUTE_STATS_SCORE_BYTES
+        if (
+            can_fuse_diagonal
+            and 1 < num_groups <= _MAX_FUSED_ROUTE_GROUPS
+            and exact_index.numel() <= _MAX_KERNEL_OFFSET
+            and route_workspace_bytes <= min(_SCORE_BUFFER_BYTES, _MAX_KERNEL_OFFSET)
+        ):
+            threshold = torch.empty((batch, num_blocks, heads), device=device, dtype=torch.float32)
+            ops.sol_attn_prepare_route_stats(
+                q_summary,
+                k_summary,
+                sink_start_block,
+                sink_end_block,
+                scale_log2,
+                tau,
+                threshold,
+                mask.view(torch.uint64),
+                exact_count,
+                exact_index.view(torch.uint16),
+            )
+        else:
+            threshold = torch.empty((batch, heads, num_blocks), device=device, dtype=torch.float32)
+            ops.sol_attn_prepare_diag_thresh(q_summary, k_summary_fp32, scale_log2, tau, threshold)
+            _pack_routes_in_chunks(
+                ops,
+                q_summary,
+                k_summary_fp32,
+                threshold,
+                mask,
+                exact_count,
+                exact_index,
+                sink_start_block,
+                sink_end_block,
+                scale_log2,
+            )
 
-    output = torch.empty_like(q)
-    lse = torch.empty((batch, heads, padded_lse), device=device, dtype=torch.float32)
     ops.sol_attn_fwd_m128(
         q,
         k_pad,
         v_pad,
         k_summary,
         v_summary,
-        exact_count.view(batch, heads, padded_query_tiles),
-        exact_index.view(torch.uint16).view(batch, heads, query_tiles, padded_blocks),
-        mask.view(torch.uint64).view(batch, heads, query_tiles, num_groups),
+        exact_count,
+        exact_index.view(torch.uint16),
+        mask.view(torch.uint64),
         tail_lengths,
         scale_log2,
         output,

@@ -22,6 +22,6 @@ extern "C" __global__ __aicore__ void sol_attn_prepare_route_pack_kernel(GM_ADDR
     const int32_t sink_s1 = tiling_data.sink_s1;
     const float scale_log2 = tiling_data.scale_log2;
     if ASCEND_IS_AIV {
-        sol_attn_prepare_route_pack_kernel_vec(raw_scores, thresh_bh, group_approx_mask, flat_exact_cnt, flat_exact_idx, HC, NT, NT_Q, NG, NPAD, NT_Q_PAD8, TILE_M, sink_s0, sink_s1, scale_log2, workspace);
+        sol_attn_prepare_route_pack_kernel_vec(raw_scores, thresh_bh, group_approx_mask, flat_exact_cnt, flat_exact_idx, HC, NT, NT_Q, NG, NPAD, NT_Q_PAD8, TILE_M == 128 ? 2 : 1, sink_s0, sink_s1, scale_log2, workspace);
     }
 }

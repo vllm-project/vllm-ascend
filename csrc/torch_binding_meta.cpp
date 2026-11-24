@@ -142,6 +142,25 @@ void sol_attn_fwd_m128_meta(
 {
 }
 
+void sol_attn_prepare_short_meta(
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, int64_t, int64_t, double, double,
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&)
+{
+}
+
+void sol_attn_prepare_route_stats_meta(
+    const at::Tensor&, const at::Tensor&, int64_t, int64_t, double, double,
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&)
+{
+}
+
+void sol_attn_short_fwd_m128_meta(
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, int64_t, int64_t, double, double,
+    const at::Tensor&, const at::Tensor&)
+{
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> attn_res_fwd_meta(
     const at::Tensor& prefix, const c10::optional<at::Tensor>& addend,
     at::Tensor blocks, const at::Tensor& proj, const at::Tensor& norm,
@@ -1903,6 +1922,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("sol_attn_prepare_diag_thresh", &vllm_ascend::meta::sol_attn_prepare_diag_thresh_meta);
     ops.impl("sol_attn_prepare_route_pack", &vllm_ascend::meta::sol_attn_prepare_route_pack_meta);
     ops.impl("sol_attn_fwd_m128", &vllm_ascend::meta::sol_attn_fwd_m128_meta);
+    ops.impl("sol_attn_prepare_short", &vllm_ascend::meta::sol_attn_prepare_short_meta);
+    ops.impl("sol_attn_prepare_route_stats", &vllm_ascend::meta::sol_attn_prepare_route_stats_meta);
+    ops.impl("sol_attn_short_fwd_m128", &vllm_ascend::meta::sol_attn_short_fwd_m128_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
     ops.impl("npu_generic_block_sparse_attention_metadata",
