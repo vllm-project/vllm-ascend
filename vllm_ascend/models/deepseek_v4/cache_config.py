@@ -4,19 +4,7 @@
 
 from __future__ import annotations
 
-from types import MappingProxyType
-
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
-
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
-
-
-DEEPSEEK_V4_SPEC_REUSE_RULES = MappingProxyType(
-    {
-        AscendMLAAttentionSpec: lambda spec: spec.model_version == "deepseek_v4",
-        AscendSlidingWindowMLASpec: True,
-    }
-)
 
 
 def is_deepseek_v4_cache(groups_or_specs) -> bool:
@@ -40,17 +28,3 @@ def validate_dsv4_transfer_speculation(config) -> None:
     speculative = getattr(config, "speculative_config", None)
     if speculative is not None and speculative.method not in ("mtp", "dspark"):
         raise ValueError("DSV4 Mooncake transfer supports native MTP and DSpark speculation")
-
-
-def validate_deepseek_v4_reuse_config(config) -> None:
-    parallel = config.parallel_config
-    if any(
-        getattr(parallel, field, 1) != 1
-        for field in ("pipeline_parallel_size", "prefill_context_parallel_size", "decode_context_parallel_size")
-    ):
-        raise ValueError("DSV4 Mooncake temporal offload requires PP=PCP=DCP=1")
-    validate_dsv4_transfer_speculation(config)
-    if not config.model_config.enforce_eager:
-        raise ValueError("DSV4 Mooncake temporal offload requires enforce_eager")
-    if getattr(config.cache_config, "cache_dtype", None) == "turboquant":
-        raise ValueError("DSV4 Mooncake temporal offload does not support TurboQuant")

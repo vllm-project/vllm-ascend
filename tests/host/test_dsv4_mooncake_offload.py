@@ -124,7 +124,7 @@ def ns():
     n["LayerwiseCachePlanner"] = planning["LayerwiseCachePlanner"]
     definitions("vllm_ascend/models/deepseek_v4/cache_config.py", n)
     planner_path = STORE + "layerwise/cache_planner.py"
-    model_path = "vllm_ascend/models/deepseek_v4/cache_config.py"
+    model_path = "vllm_ascend/models/deepseek_v4/cache_reuse.py"
     from types import MappingProxyType
 
     n["MappingProxyType"] = MappingProxyType
@@ -255,28 +255,6 @@ def test_all_resident_control(ns):
     plan = ns["make_plan"](config, groups(), 1)
     assert plan.layerwise_reuse_layout is None
     assert any(len(t.layers) > 1 for t in plan.kv_cache_tensors)
-
-
-@pytest.mark.parametrize(
-    "field_name,value",
-    [("pipeline_parallel_size", 2), ("prefill_context_parallel_size", 2), ("decode_context_parallel_size", 2)],
-)
-def test_reject_unsupported_parallel(ns, field_name, value):
-    config = configuration()
-    setattr(config.parallel_config, field_name, value)
-    with pytest.raises(ValueError, match="PP=PCP=DCP"):
-        ns["make_plan"](config, groups(), 1)
-
-
-@pytest.mark.parametrize("mode", ["speculative", "graph"])
-def test_reject_unsupported_execution(ns, mode):
-    config = configuration()
-    if mode == "speculative":
-        config.speculative_config = NS(method="unsupported")
-    else:
-        config.model_config.enforce_eager = False
-    with pytest.raises(ValueError):
-        ns["make_plan"](config, groups(), 1)
 
 
 def test_mixed_batch_restores_only_shared_bytes_for_continuation(ns):
