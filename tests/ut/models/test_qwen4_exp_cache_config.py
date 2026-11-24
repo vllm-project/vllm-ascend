@@ -725,7 +725,7 @@ def test_qsa_block_alignment_reuses_vllm_for_whole_gdn_page(monkeypatch, cache_m
         cache_dtype="auto",
         block_size=128,
         mamba_cache_mode=cache_mode,
-        enable_prefix_caching=True,
+        enable_prefix_caching=cache_mode == "align",
         mamba_block_size=None,
         user_specified_mamba_block_size=False,
         mamba_page_size_padded=None,
