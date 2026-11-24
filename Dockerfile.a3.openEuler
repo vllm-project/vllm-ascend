@@ -161,8 +161,10 @@ RUN set -e; cd /tmp; \
 
 # 4) modelscope / ray（多机） / protobuf；cmake>=3.26 与 ninja 由 pip 提供
 #    （麒麟源里的 cmake 版本低于 vllm-ascend 要求，且镜像初始无 cmake）
+#    限定 cmake < 4：CMake 4 移除了对 cmake_minimum_required<3.5 的兼容，
+#    glog 0.6.0 / mooncake 0.3.12 这类旧工程会直接配置失败
 RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' \
-        'cmake>=3.26' ninja && \
+        'cmake>=3.26,<4' ninja && \
     python3 -m pip cache purge
 
 # 4b) glog：麒麟 V10 SP3 源里没有 glog/glog-devel，mooncake 依赖 libglog，源码编译
@@ -171,6 +173,7 @@ RUN git clone --depth 1 -b ${GLOG_TAG} https://github.com/google/glog.git /tmp/g
     cmake -S /tmp/glog -B /tmp/glog/build \
         -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
         -DCMAKE_INSTALL_PREFIX=/usr/local && \
     cmake --build /tmp/glog/build -j"${MAX_JOBS:-$(nproc)}" && \
     cmake --install /tmp/glog/build && ldconfig && \
