@@ -24,6 +24,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeTransferMetadataGroups,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import MooncakeMetaserverClient
+from vllm_ascend.models.deepseek_v4.cache_config import is_deepseek_v4_cache
 from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
@@ -56,6 +57,9 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: "KVCacheConfig") -> None:
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        # The component identity also identifies DSV4 after scheduler projection.
+        component_identity = getattr(kv_cache_config, "dsv4_component_identity", None)
+        self._is_dsv4 = component_identity is not None or is_deepseek_v4_cache(kv_cache_config.kv_cache_groups)
         self._metadata_thread: MooncakePushMetadataThread | None = None
         self._reqs_pending_recv: dict[str, tuple[Request, BlockIds, int]] = {}
         self._reqs_need_send_layerwise: dict[str, tuple[Request, BlockIds, int]] = {}
@@ -160,6 +164,12 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                 local_num_computed_tokens = num_computed_tokens[req_id]
                 if local_num_computed_tokens >= request.num_prompt_tokens:
                     continue
+                if self._is_dsv4:
+                    state = getattr(scheduler_output, "kv_connector_block_state", None)
+                    live_blocks = state.get_block_ids(req_id) if state is not None else None
+                    if live_blocks is None:
+                        raise RuntimeError("DSV4 Push requires current grouped block tables")
+                    block_ids = tuple(list(group) for group in live_blocks)
                 meta.add_new_push_send_req(
                     request_id=req_id,
                     # Match D's transfer table: the final Mamba block must be

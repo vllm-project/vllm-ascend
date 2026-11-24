@@ -23,6 +23,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
@@ -292,7 +293,7 @@ class DeepseekV4DSparkModel(nn.Module):
         self,
         context_states: torch.Tensor,
         context_positions: torch.Tensor,
-        context_slot_mapping: list[torch.Tensor | None] | None = None,
+        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
     ) -> None:
         if context_states.numel() == 0 or context_positions.numel() == 0:
             return
@@ -307,6 +308,24 @@ class DeepseekV4DSparkModel(nn.Module):
         )
         if context_slot_mapping is None:
             return
+
+        # The native drafter supplies one tensor when all draft layers share a group.
+        if isinstance(context_slot_mapping, torch.Tensor):
+            context_slot_mapping = [context_slot_mapping] * len(self.layers)
+
+        # Prefill may skip proposals while still writing draft context KV.
+        # Publish those writes even when no draft attention forward runs.
+        connector = None
+        transfer = self.vllm_config.kv_transfer_config
+        if transfer is not None and transfer.is_kv_producer and has_kv_transfer_group():
+            children = (transfer.kv_connector_extra_config or {}).get("connectors", ())
+            if transfer.kv_connector == "MooncakePushConnector" or (
+                transfer.kv_connector == "MultiConnector"
+                and any(child.get("kv_connector") == "MooncakePushConnector" for child in children)
+            ):
+                candidate = get_kv_transfer_group()
+                if candidate.has_connector_metadata():
+                    connector = candidate
 
         rope_layers = [layer.self_attn.rotary_emb.layername for layer in self.layers.values()]
         rope = get_cos_and_sin_dsa(
@@ -324,7 +343,12 @@ class DeepseekV4DSparkModel(nn.Module):
                 attn,
                 rope=rope,
             )
+            layer_name = attn.dsa_attn.swa_cache_layer.prefix
+            if connector is not None:
+                connector.wait_for_layer_load(layer_name)
             self._store_standard_swa_kv(shared_kv, layer_context_slot_mapping, attn)
+            if connector is not None:
+                connector.save_kv_layer(layer_name, [], None)
 
     def forward(
         self,
@@ -493,7 +517,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
         self,
         context_states: torch.Tensor,
         context_positions: torch.Tensor,
-        context_slot_mapping: list[torch.Tensor | None] | None = None,
+        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
     ) -> None:
         self.model.precompute_and_store_context_kv(
             context_states,

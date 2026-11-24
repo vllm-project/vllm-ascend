@@ -97,9 +97,12 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import KV_CACHE_BUFFER_ALIGNMENT
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     get_layerwise_gva_config,
+    get_layerwise_offload_config,
+    get_spec_reuse_rules,
     plan_layerwise_cache_reuse,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
@@ -920,6 +923,12 @@ class NPUWorker(GPUWorker):
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         if not kv_cache_groups:
             return available_memory
+        if (
+            get_layerwise_offload_config(getattr(self.vllm_config, "kv_transfer_config", None)) is not None
+            and get_spec_reuse_rules(self.vllm_config) is not None
+        ):
+            # The shared allocator makes one aligned allocation; core budgets the page bytes.
+            return max(available_memory - KV_CACHE_BUFFER_ALIGNMENT, 0)
         # Ascend's DSV4/V4.1 and GLM-Next planners already account for shared
         # physical storage across all groups. Their budgets must not take the
         # generic per-layer scale, including when the runner uses sparse SFA.
@@ -1378,6 +1387,8 @@ class NPUWorker(GPUWorker):
         # Plan from this rank's native descriptors before connectors bind to the cache.
         reuse_layout = plan_layerwise_cache_reuse(kv_cache_config, self.vllm_config)
         if reuse_layout is not None:
+            if getattr(kv_cache_config, "dsv4_shared_cache_names", None) and not self.use_v2_model_runner:
+                raise ValueError("DSV4 Mooncake temporal offload requires Model Runner V2")
             kv_cache_config = apply_layerwise_kv_cache_plan(
                 kv_cache_config, self.vllm_config.kv_transfer_config, reuse_layout
             )

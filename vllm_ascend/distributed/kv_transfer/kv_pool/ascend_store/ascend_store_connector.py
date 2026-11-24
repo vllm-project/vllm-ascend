@@ -226,6 +226,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
 
+    @property
+    def requires_full_blocks_on_update_after_alloc(self) -> bool:
+        return self.use_layerwise
+
     def configure_dspark_prefix_cache(self, vllm_config: VllmConfig) -> bool:
         """Opt the SFA DSpark producer into joint external prefix reuse.
 
@@ -289,6 +293,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         """Ignore P/D handshake metadata because AscendStore handles PP via pool keys."""
         pass
+
+    def get_local_prefix_cache_limit(self, request: "Request") -> int | None:
+        get_limit = getattr(self.connector_scheduler, "get_local_prefix_cache_limit", None)
+        return get_limit(request) if get_limit is not None else None
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None

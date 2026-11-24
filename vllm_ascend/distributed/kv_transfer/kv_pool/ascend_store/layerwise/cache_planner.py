@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, KVCacheTensor
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import get_backend_class
+from vllm_ascend.models.deepseek_v4.cache_config import build_deepseek_v4_reuse_config, is_deepseek_v4_cache
 
 from .layerwise_cache_layout import (
     LayerwiseCacheConfig,
@@ -72,12 +73,36 @@ def get_layerwise_gva_config(kv_transfer_config: Any) -> dict[str, Any] | None:
 
 def get_layerwise_offload_config(kv_transfer_config: Any) -> dict[str, Any] | None:
     """Find a layerwise store with an explicit shared-buffer count."""
-    # TODO(bowgneo): Mooncake support for shared-buffer offload is pending. Detect the
-    # request from config regardless of backend.
-    extra_config = get_layerwise_ascend_store_config(kv_transfer_config)
-    if extra_config is not None and extra_config.get("layerwise_num_shared_buffers") is not None:
-        return extra_config
-    return None
+    extra = get_layerwise_ascend_store_config(kv_transfer_config)
+    if extra is None or extra.get("layerwise_num_shared_buffers") is None:
+        return None
+    if _is_mooncake(extra):
+        _validate_mooncake_offload_connectors(kv_transfer_config, extra)
+    return extra
+
+
+def _is_mooncake(extra: dict[str, Any]) -> bool:
+    return str(extra.get("backend", "mooncake")).lower() == "mooncake"
+
+
+def _validate_mooncake_offload_connectors(kv_transfer_config: Any, extra: dict[str, Any]) -> None:
+    role = kv_transfer_config.kv_role
+    if kv_transfer_config.kv_connector == "MultiConnector":
+        children = kv_transfer_config.kv_connector_extra_config["connectors"]
+        store = next(child for child in children if child.get("kv_connector_extra_config") is extra)
+        role = store.get("kv_role", role)
+        siblings = [child for child in children if child is not store]
+        if siblings:
+            peer = siblings[0]
+            name = peer.get("kv_connector")
+            peer_extra = peer.get("kv_connector_extra_config") or {}
+            is_push = name == "MooncakePushConnector" or (
+                name == "MooncakeConnectorV2" and peer_extra.get("use_layerwise", False)
+            )
+            if len(siblings) != 1 or not is_push or peer.get("kv_role", role) != "kv_producer":
+                raise ValueError("Mooncake shared KV buffers require a standalone Store or a Mooncake Push producer")
+    if role != "kv_producer":
+        raise ValueError("Mooncake shared KV buffers require kv_role=kv_producer")
 
 
 class LayerwiseCachePlanner:
@@ -279,8 +304,26 @@ def plan_layerwise_cache_reuse(
     # An empty device pool has no byte views to reuse.
     if not kv_cache_config.kv_cache_tensors or kv_cache_config.num_blocks == 0 or not kv_cache_config.kv_cache_groups:
         return None
+    if _is_mooncake(extra_config) and is_deepseek_v4_cache(kv_cache_config.kv_cache_groups):
+        plan = build_deepseek_v4_reuse_config(
+            vllm_config, kv_cache_config.kv_cache_groups, kv_cache_config.num_blocks
+        )
+        assert plan is not None
+        for name in (
+            "dsv4_component_identity",
+            "dsv4_shared_cache_names",
+            "dsv4_window_group_ids",
+            "dsv4_nominal_windows",
+            "dsv4_continuation_windows",
+            "kv_cache_allocation_alignment",
+        ):
+            if hasattr(plan, name):
+                setattr(kv_cache_config, name, getattr(plan, name))
+        return plan.layerwise_reuse_layout if plan.layerwise_reuse_layout.has_layer_reuse else None
     rules = get_spec_reuse_rules(vllm_config)
     if rules is None:
+        if _is_mooncake(extra_config):
+            raise ValueError("Mooncake shared KV buffers require a model with registered reuse rules")
         return None
     planner = LayerwiseCachePlanner(
         kv_cache_config,
