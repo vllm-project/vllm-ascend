@@ -2,7 +2,7 @@ import argparse
 import base64
 import json
 import os
-import re
+import string
 import subprocess
 
 try:
@@ -54,7 +54,7 @@ def _walk(matrix, path):
 # Values coming from a PR-derived config are interpolated into downstream
 # matrices (runner labels, test paths); restrict them to shell-safe
 # characters and require runner labels to exist in the base-branch config.
-_SAFE_VALUE = re.compile(r"^[A-Za-z0-9_./:@+, -]+$")
+_SAFE_VALUE_CHARS = frozenset(string.ascii_letters + string.digits + "_./:@+, -")
 
 
 def _collect_runner_labels(node, labels):
@@ -74,7 +74,7 @@ def _collect_runner_labels(node, labels):
 def _values_are_safe(node):
     """True when every string leaf matches the shell-safe charset."""
     if isinstance(node, str):
-        return _SAFE_VALUE.match(node) is not None
+        return bool(node) and not (set(node) - _SAFE_VALUE_CHARS)
     if isinstance(node, dict):
         return all(_values_are_safe(value) for value in node.values())
     if isinstance(node, list):
@@ -167,12 +167,39 @@ def cmd_dispatch(_args):
         f.write(f"dispatch_a5={str(da5).lower()}\n")
 
 
+# Workflows that support PR-derived configs check the PR out under ./pr/.
+_PR_CHECKOUT_PREFIX = "./pr/"
+
+
+def _resolve_allowlist_file(matrix_file):
+    """Base-branch config that a PR-derived matrix must be checked against.
+
+    The default maps a ./pr/ checkout path to the same relative path in the
+    base-branch checkout, so every caller reading a PR-derived MATRIX_FILE is
+    covered without wiring an allowlist per workflow; MATRIX_ALLOWLIST_FILE
+    overrides it. Returns "" when no allowlist applies.
+    """
+    explicit = os.environ.get("MATRIX_ALLOWLIST_FILE", "")
+    if explicit:
+        return explicit
+    if matrix_file.startswith(_PR_CHECKOUT_PREFIX):
+        return matrix_file[len(_PR_CHECKOUT_PREFIX) :]
+    return ""
+
+
 def cmd_matrix(_args):
     """Extract matrix sections per MATRIX_OUTPUTS spec.
 
     Reads MATRIX_FILE (path to nightly_config.yaml) and MATRIX_OUTPUTS
     (JSON object {output_name: "dot.path.in.yaml"}). Writes to GITHUB_OUTPUT:
       - <output_name>=<json array>  (one entry per spec item)
+
+    A MATRIX_FILE pointing at the PR checkout (./pr/...) is validated against
+    the base-branch config at the same relative path: unknown runner labels
+    are dropped and shell metacharacters are rejected, so a crafted PR config
+    cannot retarget jobs to arbitrary runners or smuggle commands into
+    downstream run blocks. The trusted base config itself is never filtered,
+    so normal nightly runs cannot silently lose coverage.
     """
     matrix_file = os.environ.get("MATRIX_FILE", "")
     if not matrix_file:
@@ -182,9 +209,11 @@ def cmd_matrix(_args):
     with open(matrix_file) as f:
         matrix = yaml.safe_load(f) or {}
 
-    allowlist_file = os.environ.get("MATRIX_ALLOWLIST_FILE", "")
+    allowlist_file = _resolve_allowlist_file(matrix_file)
+    validate = False
     allowed_runners = set()
-    if allowlist_file:
+    if allowlist_file and os.path.realpath(allowlist_file) != os.path.realpath(matrix_file):
+        validate = True
         with open(allowlist_file) as f:
             _collect_runner_labels(yaml.safe_load(f) or {}, allowed_runners)
 
@@ -192,7 +221,7 @@ def cmd_matrix(_args):
         for name, path in spec.items():
             node = _walk(matrix, path)
             cfg = node if isinstance(node, list) else []
-            if allowlist_file:
+            if validate:
                 cfg = _validate_entries(cfg, allowed_runners)
             f.write(f"{name}={json.dumps(cfg)}\n")
 

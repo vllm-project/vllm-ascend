@@ -474,11 +474,10 @@ jobs:
         env:
           MATRIX_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != '' && './pr/.github/workflows/configs/nightly_config.yaml' || '.github/workflows/configs/nightly_config.yaml' }}
           MATRIX_OUTPUTS: '{"nightly_matrix":"a2.accuracy.nightly","pr_only_matrix":"a2.accuracy.pr_only"}'
-          # The PR-derived config is validated against the base-branch config
-          # (see resolve_nightly_tests.py): unknown runner labels are dropped
-          # and shell metacharacters are rejected, so a crafted PR config
-          # cannot retarget nightly jobs or inject commands downstream.
-          MATRIX_ALLOWLIST_FILE: '.github/workflows/configs/nightly_config.yaml'
+          # MATRIX_FILE may point at the PR checkout; resolve_nightly_tests.py
+          # validates any ./pr/-derived config against the base-branch config
+          # (unknown runner labels dropped, shell metacharacters rejected) and
+          # never filters the trusted base config itself.
         run: |
           python3 -m pip install pyyaml -q
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
