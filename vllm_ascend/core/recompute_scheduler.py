@@ -48,7 +48,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     print_scheduler_summary,
 )
 from vllm_ascend.core.scheduler_output import make_cached_request_data
-from vllm_ascend.utils import get_ascend_config, vllm_version_is
+from vllm_ascend.utils import get_ascend_config, scheduler_collects_stats, vllm_version_is
 
 if not vllm_version_is("0.34.0"):
     from vllm.v1.core.sched.output import IterationDetails
@@ -225,7 +225,7 @@ class RecomputeScheduler(Scheduler):
 
         iteration_details = None
         if not vllm_version_is("0.34.0") and (
-            (self.log_stats and self.observability_config.enable_logging_iteration_details)
+            (scheduler_collects_stats(self) and self.observability_config.enable_logging_iteration_details)
             or self.vllm_config.profiler_config.profiler is not None
         ):
             iteration_details = IterationDetails()
@@ -867,7 +867,7 @@ class RecomputeScheduler(Scheduler):
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
-                if self.log_stats:
+                if scheduler_collects_stats(self):
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
@@ -1008,7 +1008,7 @@ class RecomputeScheduler(Scheduler):
 
         if vllm_version_is("0.34.0"):
             scheduled_encoder_input_stats = None
-            if self.log_stats and self.observability_config.enable_logging_iteration_details:
+            if scheduler_collects_stats(self) and self.observability_config.enable_logging_iteration_details:
                 scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(scheduled_encoder_inputs)
             schedule_metadata["scheduled_encoder_input_stats"] = scheduled_encoder_input_stats
 

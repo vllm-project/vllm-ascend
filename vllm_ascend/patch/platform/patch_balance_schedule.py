@@ -80,7 +80,7 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.core.scheduler_output import make_cached_request_data
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import scheduler_collects_stats, vllm_version_is
 
 if not vllm_version_is("0.34.0"):
     from vllm.v1.core.sched.output import IterationDetails
@@ -117,6 +117,8 @@ class BalanceScheduler(Scheduler):
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
+        *,
+        collect_stats: bool | None = None,
     ) -> None:
         super().__init__(
             vllm_config,
@@ -126,7 +128,7 @@ class BalanceScheduler(Scheduler):
             hash_block_size,
             mm_registry,
             include_finished_set,
-            log_stats,
+            log_stats if collect_stats is None else collect_stats,
         )
         short_request_first_config = init_ascend_config(vllm_config).scheduler_config.short_request_first_config
         if short_request_first_config.enabled:
@@ -188,7 +190,7 @@ class BalanceScheduler(Scheduler):
 
         iteration_details = None
         if not vllm_version_is("0.34.0") and (
-            (self.log_stats and self.observability_config.enable_logging_iteration_details)
+            (scheduler_collects_stats(self) and self.observability_config.enable_logging_iteration_details)
             or self.vllm_config.profiler_config.profiler is not None
         ):
             iteration_details = IterationDetails()
@@ -749,7 +751,7 @@ class BalanceScheduler(Scheduler):
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
-                if self.log_stats:
+                if scheduler_collects_stats(self):
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
@@ -865,7 +867,7 @@ class BalanceScheduler(Scheduler):
 
         if vllm_version_is("0.34.0"):
             scheduled_encoder_input_stats = None
-            if self.log_stats and self.observability_config.enable_logging_iteration_details:
+            if scheduler_collects_stats(self) and self.observability_config.enable_logging_iteration_details:
                 scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(scheduled_encoder_inputs)
             schedule_metadata["scheduled_encoder_input_stats"] = scheduled_encoder_input_stats
 

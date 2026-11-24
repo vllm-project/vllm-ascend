@@ -29,6 +29,7 @@ from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
 from vllm_ascend.core.short_request_first_scheduler import (
     ShortRequestFirstRequestQueue,
 )
+from vllm_ascend.utils import vllm_version_is
 
 MODEL = "Qwen3-0.6B"
 MAX_NUM_BATCHED_TOKENS = 10000
@@ -115,7 +116,7 @@ class TestRecomputeSchedulerWithoutShortRequestFirst(TestBase):
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
             block_size=BLOCK_SIZE,
-            log_stats=True,
+            **{"log_stats" if vllm_version_is("0.33.0") else "collect_stats": True},
             structured_output_manager=MagicMock(spec=StructuredOutputManager),
         )
 

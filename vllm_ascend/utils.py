@@ -817,6 +817,12 @@ def vllm_version_is(target_vllm_version: str):
         )
 
 
+def scheduler_collects_stats(scheduler: object) -> bool:
+    """Read the stats flag shared by the scheduler and its KV cache manager."""
+    name = "log_stats" if vllm_version_is("0.33.0") else "collect_stats"
+    return bool(getattr(scheduler, name))
+
+
 def speculator_uses_target_hidden_states(config: SpeculativeConfig) -> bool:
     if vllm_version_is("0.33.0"):
         return config.use_eagle()

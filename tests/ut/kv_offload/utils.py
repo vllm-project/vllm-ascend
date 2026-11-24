@@ -168,7 +168,7 @@ def create_scheduler(
     return Scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
-        log_stats=True,
+        **{"log_stats" if vllm_version_is("0.33.0") else "collect_stats": True},
         block_size=block_size,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
