@@ -1493,6 +1493,19 @@ class AscendSFAImpl(MLAAttentionImpl):
             log_positions = getattr(self, "mistral_log_positions", None)
             if log_positions is None:
                 raise RuntimeError("Mistral Large 4 SFA query is missing log positions for SSMax.")
+            # The hook delivers the model's token-shaped buffer, which carries
+            # graph padding; q holds only the rows metadata describes. Those
+            # counts differ under PIECEWISE, where the runner hands attention
+            # the logical query length while the model runs on padded inputs.
+            # Only ever drop padding: a shorter buffer is a real misalignment
+            # and must not be silently truncated into a wrong scale.
+            if log_positions.shape[0] < q.shape[0]:
+                raise RuntimeError(
+                    f"Mistral Large 4 SFA query has {q.shape[0]} tokens but SSMax "
+                    f"was handed {log_positions.shape[0]} log positions."
+                )
+            if log_positions.shape[0] != q.shape[0]:
+                log_positions = log_positions[: q.shape[0]]
             if try_fused and use_rope and self.qk_nope_head_dim == self.qk_rope_head_dim == 64:
                 from vllm_ascend.ops.triton.mistral_mla_q import try_ssmax_split_rope
 

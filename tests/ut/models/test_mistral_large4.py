@@ -692,6 +692,39 @@ def test_ssmax_is_applied_after_wq_b_with_the_step_log_positions():
     assert seen["log_positions"] is log_positions
 
 
+def test_ssmax_drops_the_graph_padding_the_hook_delivers():
+    """Under PIECEWISE the buffer is padded while the query is not."""
+    seen = {}
+
+    def _ssmax(q, log_positions):
+        seen["log_positions"] = log_positions
+        return q
+
+    backend = ml4.AscendMistralIndexerBackend.__new__(ml4.AscendMistralIndexerBackend)
+    backend.n_head, backend.head_dim = 2, 4
+    backend.q_input_norm = lambda x: x
+    backend.wq_b = lambda x: (torch.ones(x.shape[0], 8),)
+    backend.ssmax = _ssmax
+    # Captured at 4 tokens, scheduled 3: the padded tail must not reach SSMax.
+    backend.log_positions = torch.tensor([0.0, 0.7, 1.1, 0.0])
+
+    assert backend.mistral_q(torch.zeros(3, 16)).shape == (3, 2, 4)
+    assert torch.equal(seen["log_positions"], torch.tensor([0.0, 0.7, 1.1]))
+
+
+def test_ssmax_refuses_a_buffer_shorter_than_the_query():
+    """Trimming the query to it instead would scale the wrong tokens."""
+    backend = ml4.AscendMistralIndexerBackend.__new__(ml4.AscendMistralIndexerBackend)
+    backend.n_head, backend.head_dim = 2, 4
+    backend.q_input_norm = lambda x: x
+    backend.wq_b = lambda x: (torch.ones(x.shape[0], 8),)
+    backend.ssmax = lambda q, log_pos: q
+    backend.log_positions = torch.tensor([0.0, 0.7])
+
+    with pytest.raises(RuntimeError, match="3 tokens but SSMax"):
+        backend.mistral_q(torch.zeros(3, 16))
+
+
 def test_a_model_without_ssmax_needs_no_log_positions():
     backend = ml4.AscendMistralIndexerBackend.__new__(ml4.AscendMistralIndexerBackend)
     backend.n_head, backend.head_dim = 2, 4

@@ -483,9 +483,16 @@ class AscendMistralIndexerBackend(AscendSFAIndexerBackend):
         q = self.wq_b(self.q_input_norm(hidden_states))[0]
         return self._scale_indexer_query(q.view(-1, self.n_head, self.head_dim))
 
-    def _scale_indexer_query(self, q: torch.Tensor) -> torch.Tensor:
-        if self.ssmax is None:
-            return q
+    def _step_log_positions(self, num_tokens: int) -> torch.Tensor:
+        """The step's log positions, trimmed to the rows this query holds.
+
+        The hook delivers the model's token-shaped buffer, which carries graph
+        padding. Under PIECEWISE ACL graphs the indexer sees only the logical
+        query rows, because the runner hands attention the logical query length
+        while the model itself runs on padded inputs. Only ever drop padding: a
+        buffer shorter than the query is a real misalignment, and truncating
+        the query to it would scale the wrong tokens.
+        """
         if self.log_positions is None:
             raise RuntimeError(
                 "Mistral Large 4 on Ascend: scalable softmax needs the step's "
@@ -493,7 +500,19 @@ class AscendMistralIndexerBackend(AscendSFAIndexerBackend):
                 "the indexer runs. It was not set, so the query would go "
                 "unscaled and long-context attention would flatten."
             )
-        return self.ssmax(q, self.log_positions)
+        if self.log_positions.shape[0] < num_tokens:
+            raise RuntimeError(
+                f"Mistral Large 4 indexer query has {num_tokens} tokens but SSMax "
+                f"was handed {self.log_positions.shape[0]} log positions."
+            )
+        if self.log_positions.shape[0] == num_tokens:
+            return self.log_positions
+        return self.log_positions[:num_tokens]
+
+    def _scale_indexer_query(self, q: torch.Tensor) -> torch.Tensor:
+        if self.ssmax is None:
+            return q
+        return self.ssmax(q, self._step_log_positions(q.shape[0]))
 
     def project_query(
         self,
@@ -519,7 +538,8 @@ class AscendMistralIndexerBackend(AscendSFAIndexerBackend):
         from vllm_ascend.ops.triton.mistral_indexer_q import try_fused_indexer_query
 
         q = self.wq_b(self.q_input_norm(hidden_states))[0].view(-1, self.n_head, self.head_dim)
-        fused = try_fused_indexer_query(q, weights, self.log_positions, self.ssmax.s, self.ssmax.b, cos, sin)
+        log_positions = self._step_log_positions(q.shape[0])
+        fused = try_fused_indexer_query(q, weights, log_positions, self.ssmax.s, self.ssmax.b, cos, sin)
         if fused is not None:
             return fused
         return self.apply_indexer_rope(self._scale_indexer_query(q), cos, sin), weights
