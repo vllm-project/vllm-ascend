@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from torch import nn
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
@@ -8,7 +9,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 
-class AscendGroupedTopKRouter(BaseRouter):
+class AscendGroupedTopKRouter(BaseRouter, nn.Module):
     def __init__(
         self,
         top_k: int,
@@ -23,6 +24,10 @@ class AscendGroupedTopKRouter(BaseRouter):
         num_fused_shared_experts: int = 0,
         eplb_state: EplbLayerState | None = None,
     ):
+        # vLLM 0.33.0 routers are plain objects. Register the bias so weight
+        # offload can stage it along with the other MoE parameters.
+        if not issubclass(BaseRouter, nn.Module):
+            nn.Module.__init__(self)
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,

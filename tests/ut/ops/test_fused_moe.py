@@ -640,6 +640,43 @@ def test_non_grouped_sigmoid_router_uses_unbiased_weights(renormalize, routed_sc
     torch.testing.assert_close(weights, expected_weights)
 
 
+@pytest.mark.parametrize("router_cls", [AscendGroupedTopKRouter310, AscendFusedTopKRouter])
+def test_router_uses_bias_staged_by_weight_offloader(router_cls, monkeypatch):
+    def fused_topk(logits, *, k, bias, **kwargs):
+        assert bias.dtype == logits.dtype
+        weights, ids = (logits.sigmoid() + bias).topk(k, dim=-1)
+        return weights, ids, None
+
+    monkeypatch.setattr(fused_topk_router_module.torch_npu, "npu_moe_gating_top_k", fused_topk, raising=False)
+    monkeypatch.setattr(AscendFusedTopKRouter, "_can_fuse_gating_map", lambda *args: False)
+
+    class MoE(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.e_score_correction_bias = nn.Parameter(torch.tensor([1.0, 0.0, 0.0, 0.0]))
+            self.router = router_cls(
+                top_k=1,
+                global_num_experts=4,
+                num_expert_group=None,
+                topk_group=None,
+                scoring_func="sigmoid",
+                e_score_correction_bias=self.e_score_correction_bias,
+            )
+
+        def forward(self, logits):
+            _, ids = self.router._compute_routing(torch.zeros_like(logits), logits, indices_type=None)
+            return ids
+
+    moe = MoE()
+    logits = torch.zeros(1, 4, dtype=torch.float16)
+    # The non-UVA offloader replaces the registered state for each forward.
+    staged_bias = torch.tensor([0.0, 1.0, 0.0, 0.0])
+    staged_state = dict.fromkeys(moe.state_dict(), staged_bias)
+    assert torch.func.functional_call(moe, staged_state, (logits,), tie_weights=False).item() == 1
+    assert moe.router.e_score_correction_bias is moe.e_score_correction_bias
+    assert moe(logits).item() == 0
+
+
 def test_310p_factory_selects_unbiased_sigmoid_weights(monkeypatch):
     profile = get_hardware_profile(AscendDeviceType._310P)
     monkeypatch.setattr(router_factory, "get_current_hardware_profile", lambda: profile)

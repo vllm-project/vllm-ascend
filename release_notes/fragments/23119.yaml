@@ -4,3 +4,7 @@ entries:
     text: >-
       Fixed incorrect expert weights in MoE inference when non-grouped
       sigmoid top-k routing uses an expert correction bias.
+  - category: bugfix
+    text: >-
+      Fixed a device mismatch in MoE routing with CPU weight offload and UVA
+      disabled on vLLM 0.33.0.
