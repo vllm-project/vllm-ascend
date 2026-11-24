@@ -584,6 +584,17 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         q_li = q_li.view(-1, self.n_head, self.head_dim)
         return self.apply_indexer_rope(q_li, cos, sin)
 
+    def _project_query_and_weights(
+        self,
+        q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        hidden_states: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Prepare query and scoring weights for the same Top-K call."""
+        return self.project_query(q_c, hidden_states, cos, sin), weights
+
     def apply_indexer_rope(self, states: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
         """Apply the same rotation and output layout to indexer queries and keys."""
         rope_dim = self.qk_rope_head_dim
@@ -673,15 +684,21 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         cos: torch.Tensor,
         sin: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Size | None]:
-        q_li = self.project_query(q_c, hidden_states, cos, sin)
+        weights: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Size | None, torch.Tensor]:
+        # The scoring weights go through this call and come back out so a
+        # backend can fuse them into the query projection; the base
+        # implementation hands them straight back. The Q/K overlap path keeps
+        # calling project_query directly: its query is Hadamard-transformed and
+        # quantized differently, so a fused projection has nothing to join.
+        q_li, weights = self._project_query_and_weights(q_c, hidden_states, cos, sin, weights)
         q_li_scale = None
         q_li_shape_ori = None
         if self.enable_sparse_li_quant:
             q_li_shape_ori = q_li.shape
             q_li, q_li_scale = self._quantize_li_tensor(q_li)
 
-        return q_li, q_li_scale, q_li_shape_ori
+        return q_li, q_li_scale, q_li_shape_ori, weights
 
     def _forward_qk(
         self,
@@ -824,8 +841,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             weights = kw[:, self.head_dim :]
 
         if q_result is None:
-            q_result = self._forward_q(hidden_states, q_c, cos, sin)
-        q_li, q_li_scale, q_li_shape_ori = q_result
+            q_li, q_li_scale, q_li_shape_ori, weights = self._forward_q(hidden_states, q_c, cos, sin, weights)
+        else:
+            q_li, q_li_scale, q_li_shape_ori = q_result
 
         topk_selector = getattr(indexer_metadata, "topk_selector", None)
         if topk_selector is not None:
