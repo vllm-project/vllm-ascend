@@ -75,7 +75,7 @@ RUN set -e; \
         curl -fsSL "${KYLIN_REPO_URL}" -o /etc/yum.repos.d/kylin.repo; \
     fi; \
     $PM makecache || { echo "ERROR: dnf 无可用软件源，请配置 .repo 或传 KYLIN_REPO_URL"; exit 1; }; \
-    $PM install -y git vim wget curl make patch tar gzip gcc gcc-c++ \
+    $PM install -y git vim wget curl make patch tar gzip gawk sed grep findutils gcc gcc-c++ \
         openssl-devel bzip2-devel libffi-devel zlib-devel xz-devel \
         sqlite-devel readline-devel ncurses-devel \
         numactl numactl-devel libibverbs-devel hiredis-devel libcurl-devel \
@@ -108,11 +108,17 @@ RUN set -e; cd /tmp; \
     fetch "${CANN_BASE_URL}/${CANN_TOOLKIT_PKG}"; \
     fetch "${CANN_BASE_URL}/${CANN_NNAL_PKG}"; \
     fetch "${CANN_BASE_URL}/${CANN_OPS_PKG}" || echo "WARN: ops 包下载失败，跳过"; \
+    df -h /tmp; \
+    for t in awk sed grep tar gzip md5sum; do \
+        command -v "$t" >/dev/null || echo "WARN: 缺少命令 $t"; \
+    done; \
     ls -lh /tmp/*.run; \
     chmod +x /tmp/*.run; \
-    /tmp/${CANN_TOOLKIT_PKG} --install; \
-    /tmp/${CANN_NNAL_PKG} --install; \
-    if [ -f "/tmp/${CANN_OPS_PKG}" ]; then /tmp/${CANN_OPS_PKG} --install; fi; \
+    /tmp/${CANN_TOOLKIT_PKG} --install || { rc=$?; echo "ERROR: CANN toolkit 安装失败 (exit $rc)"; exit $rc; }; \
+    /tmp/${CANN_NNAL_PKG} --install || { rc=$?; echo "ERROR: CANN nnal 安装失败 (exit $rc)"; exit $rc; }; \
+    if [ -f "/tmp/${CANN_OPS_PKG}" ]; then \
+        /tmp/${CANN_OPS_PKG} --install || { rc=$?; echo "ERROR: CANN A3-ops 安装失败 (exit $rc)"; exit $rc; }; \
+    fi; \
     rm -f /tmp/*.run
 
 # 4) modelscope / ray（多机） / protobuf；cmake>=3.26 与 ninja 由 pip 提供
