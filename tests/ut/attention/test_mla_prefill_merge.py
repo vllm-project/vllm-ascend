@@ -65,6 +65,7 @@ class TestMLAPrefillMerge(unittest.TestCase):
         impl.head_padding = int(heads == 3)
         impl.scale = 1.0
         impl.fa_quant_layer = False
+        impl.use_quant_flashmla = False
         impl.get_context_block_table = lambda meta: torch.zeros(1, 1, dtype=torch.int32)
         impl.get_context_seq_len_npu = lambda index, meta: torch.tensor([2], dtype=torch.int32)
         impl.kv_b_proj = lambda x: (torch.zeros(x.shape[0], heads * (4 + width)),)
