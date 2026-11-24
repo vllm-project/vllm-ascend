@@ -18,6 +18,21 @@
 name: Schedule Test Coverage
 
 on:
+  pull_request:
+    # `synchronize` is deliberately absent: pushing a new commit does not start
+    # E2E, so intermediate commits no longer occupy the NPU runner pool. A
+    # commit is tested on opened/reopened, when a label is added, or when a
+    # `/run` comment re-emits the `labeled` event (see pr_run_command.yml).
+    # `ci-gate` is a required check, so a commit that was never tested stays
+    # blocked rather than being merged untested.
+    types:
+      - opened
+      - reopened
+      - labeled
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
   workflow_dispatch:
     inputs:
       vllm_ascend_ref:
@@ -44,7 +59,7 @@ concurrency:
 
 jobs:
   select-full-tests:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'pull_request'
     runs-on: linux-amd64-cpu-4-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint

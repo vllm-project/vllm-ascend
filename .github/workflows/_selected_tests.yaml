@@ -637,7 +637,12 @@ jobs:
             find "${TASK_DIR}" -type f | wc -l
 
             echo "=== building test_case_map.json ==="
-            pip install regex
+            if ! python3 -c "import regex" >/dev/null 2>&1; then
+              echo "regex not found for $(python3 -V); bootstrapping pip and installing regex"
+              curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+              python3 get-pip.py --break-system-packages
+              python3 -m pip install --break-system-packages regex
+            fi
             python3 .github/workflows/scripts/test_selector.py \
               --build-map \
               --coverage-dir "${TASK_DIR}" \
@@ -686,7 +691,13 @@ jobs:
 
         - name: Upload coverage to OBS
           run: |
-            pip install esdk-obs-python --quiet
+            set -euo pipefail
+            if ! python3 -c "from obs import ObsClient" >/dev/null 2>&1; then
+              echo "esdk-obs-python not found for $(python3 -V); bootstrapping pip and installing esdk-obs-python"
+              curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+              python3 get-pip.py --break-system-packages
+              python3 -m pip install --break-system-packages esdk-obs-python --quiet
+            fi
             python3 - <<'EOF'
             import os
             from obs import ObsClient
@@ -723,9 +734,14 @@ jobs:
             set +e
             echo "pruned=false" >> "$GITHUB_OUTPUT"
             OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/${COVERAGE_OBJECT_EXTRA}"
-            if ! pip install pyyaml --quiet; then
-              echo "::warning::Failed to install pyyaml; skip prune"
-              exit 0
+            if ! python3 -c "import yaml" >/dev/null 2>&1; then
+              echo "yaml not found for $(python3 -V); bootstrapping pip and installing pyyaml"
+              curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+              python3 get-pip.py --break-system-packages
+              if ! python3 -m pip install --break-system-packages pyyaml --quiet; then
+                echo "::warning::Failed to install pyyaml; skip prune"
+                exit 0
+              fi
             fi
             http_code=$(curl -sSL --retry 3 -o extra_recommended_tests.yaml -w "%{http_code}" "${OBS_URL}" || echo "000")
             if [ "${http_code}" != "200" ] || [ ! -s extra_recommended_tests.yaml ]; then
@@ -764,7 +780,12 @@ jobs:
               echo "No pruned extra_recommended_tests.yaml to upload"
               exit 0
             fi
-            pip install esdk-obs-python --quiet
+            if ! python3 -c "from obs import ObsClient" >/dev/null 2>&1; then
+              echo "esdk-obs-python not found for $(python3 -V); bootstrapping pip and installing esdk-obs-python"
+              curl -fsSL https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+              python3 get-pip.py --break-system-packages
+              python3 -m pip install --break-system-packages esdk-obs-python --quiet
+            fi
             python3 - <<'EOF'
             import os
             from obs import ObsClient
