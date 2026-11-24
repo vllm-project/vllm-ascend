@@ -193,15 +193,23 @@ https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"; \
     CC_BIN="${CXX_BIN%g++}gcc"; \
     echo "INFO: 选用编译器 $CXX_BIN (版本 $("$CXX_BIN" -dumpversion))"; \
     mkdir -p /usr/local/bin /usr/local/lib64; \
-    ln -sf "$CXX_BIN" /usr/local/bin/g++; \
-    ln -sf "$CC_BIN" /usr/local/bin/gcc; \
-    ln -sf "$CXX_BIN" /usr/local/bin/c++; \
-    ln -sf "$CC_BIN" /usr/local/bin/cc; \
+    link_tool() { \
+        src="$1"; dst="/usr/local/bin/$2"; \
+        if [ "$(readlink -f "$src")" = "$(readlink -f "$dst")" ]; then return 0; fi; \
+        ln -sf "$src" "$dst"; \
+    }; \
+    link_tool "$CXX_BIN" g++; \
+    link_tool "$CC_BIN" gcc; \
+    link_tool "$CXX_BIN" c++; \
+    link_tool "$CC_BIN" cc; \
     STDCPP="$("$CXX_BIN" -print-file-name=libstdc++.so)"; \
     if [ -f "$STDCPP" ]; then \
         CXX_LIBDIR="$(dirname "$(readlink -f "$STDCPP")")"; \
         if [ "$CXX_LIBDIR" != "/usr/local/lib64" ]; then \
-            for f in "$CXX_LIBDIR"/libstdc++.so.6*; do ln -sf "$f" /usr/local/lib64/; done; \
+            for f in "$CXX_LIBDIR"/libstdc++.so.6*; do \
+                [ -e "$f" ] || continue; \
+                ln -sf "$f" /usr/local/lib64/; \
+            done; \
         fi; \
     fi; \
     ldconfig; \
