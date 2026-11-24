@@ -43,6 +43,7 @@ variants:
 dependencies:
   - note: "Audio extras — required for ASR input pre-processing (av, soundfile)"
     command: 'pip install av soundfile'
+    brand: Huawei
 
 guide_sections:
   ascend: |
