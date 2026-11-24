@@ -1774,8 +1774,8 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         scheduler.use_hybrid = True
         scheduler.num_speculative_blocks_by_group = {0: 1}
         scheduler._block_pool.blocks = [MagicMock() for _ in range(5)]
-        first = ReqMeta("r1", block_ids_by_group=[[1, 2]], can_save=True)
-        second = ReqMeta("r1", block_ids_by_group=[[3, 4]], can_save=True)
+        first = ReqMeta("r1", block_ids_by_group=[[1, 2]], can_save=True, boundary_puts=[BoundaryPut(0, 1, 16)])
+        second = ReqMeta("r1", block_ids_by_group=[[3, 4]], can_save=True, boundary_puts=[BoundaryPut(0, 3, 32)])
         first_uuid = UUID("ffffffff-5566-4788-99aa-bbccddeeff01")
         second_uuid = UUID("ffffffff-5566-4788-99aa-bbccddeeff02")
         with patch(
