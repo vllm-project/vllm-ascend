@@ -274,6 +274,9 @@ The control flow is:
 5. finish the weight update;
 6. resume generation only after success.
 
+After a failed update, keep generation paused and restart the affected workers
+with complete, known-good checkpoints before resuming.
+
 The repository contains runnable tests for draft weight transfer:
 
 - [`test_qwen_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/4194b1810a2ae90407a5c523d72f6ca5f9365940/tests/e2e/pull_request/two_card/rlhf/weight_transfer/hccl/test_qwen_hccl.py)
