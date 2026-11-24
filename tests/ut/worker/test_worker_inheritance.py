@@ -4,8 +4,8 @@
 import importlib
 import inspect
 import sys
-from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock, call
+from types import MethodType, ModuleType, SimpleNamespace
+from unittest.mock import MagicMock, Mock, call
 
 import pytest
 
@@ -75,16 +75,48 @@ def test_shutdown_weight_transfer_engine_is_inherited():
 
 @pytest.mark.parametrize(
     "name",
-    ("reset_mm_cache", "get_draft_model", "compute_weight_checksums", "reset_weights"),
+    ("reset_mm_cache", "compute_weight_checksums", "reset_weights"),
 )
 def test_model_accessors_are_inherited(name):
     from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 
     from vllm_ascend.worker.worker import NPUWorker
 
-    # Every supported runner exposes get_model()/get_draft_model()/reset_mm_cache(),
-    # so these worker RPCs need no Ascend override.
+    # Every supported runner exposes get_model()/reset_mm_cache(), so these
+    # worker RPCs need no Ascend override.
     assert getattr(NPUWorker, name) is getattr(GPUWorker, name)
+
+
+@pytest.mark.parametrize("drafter", ["absent", "draft-model", "other-speculator"])
+def test_get_draft_model_reports_the_runner_drafter(drafter):
+    """This RPC used to raise on Ascend; it now reports the runner's drafter.
+
+    Bind the real upstream runner implementation so both branches of its
+    isinstance() gate run: a configured DraftModelSpeculator yields its draft
+    module, while no drafter (or a non-draft speculator) yields None.
+    """
+    import torch
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+
+    from vllm_ascend.worker.worker import NPUWorker
+
+    draft_model = torch.nn.Linear(2, 2) if drafter == "draft-model" else None
+    if drafter == "draft-model":
+        speculator = MagicMock(spec=DraftModelSpeculator)
+        speculator.model = draft_model
+    elif drafter == "other-speculator":
+        speculator = object()  # e.g. a speculator that carries no draft model
+    else:
+        speculator = None
+
+    runner = SimpleNamespace(speculator=speculator)
+    runner.get_draft_model = MethodType(GPUModelRunner.get_draft_model, runner)
+
+    worker = object.__new__(NPUWorker)
+    worker.model_runner = runner
+
+    assert worker.get_draft_model() is draft_model
 
 
 @pytest.mark.parametrize("configured", [False, True])
