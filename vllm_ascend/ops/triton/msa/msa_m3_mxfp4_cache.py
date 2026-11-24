@@ -12,20 +12,20 @@ def _scatter_mxfp4_cache_kernel(
     slots,
     key_cache,
     scale_cache,
-    packed_stride: tl.constexpr,
-    scale_stride: tl.constexpr,
-    packed_width: tl.constexpr,
-    scale_width: tl.constexpr,
-    block_width: tl.constexpr,
+    PACKED_STRIDE: tl.constexpr,
+    SCALE_STRIDE: tl.constexpr,
+    PACKED_WIDTH: tl.constexpr,
+    SCALE_WIDTH: tl.constexpr,
+    BLOCK_WIDTH: tl.constexpr,
 ):
     token = tl.program_id(0)
     slot = tl.load(slots + token)
     if slot >= 0:
-        offsets = tl.arange(0, block_width)
-        key = tl.load(packed + token * packed_stride + offsets, offsets < packed_width, other=0)
-        tl.store(key_cache + slot * packed_width + offsets, key, offsets < packed_width)
-        scale = tl.load(scales + token * scale_stride + offsets, offsets < scale_width, other=0)
-        tl.store(scale_cache + slot * scale_width + offsets, scale, offsets < scale_width)
+        offsets = tl.arange(0, BLOCK_WIDTH)
+        key = tl.load(packed + token * PACKED_STRIDE + offsets, offsets < PACKED_WIDTH, other=0)
+        tl.store(key_cache + slot * PACKED_WIDTH + offsets, key, offsets < PACKED_WIDTH)
+        scale = tl.load(scales + token * SCALE_STRIDE + offsets, offsets < SCALE_WIDTH, other=0)
+        tl.store(scale_cache + slot * SCALE_WIDTH + offsets, scale, offsets < SCALE_WIDTH)
 
 
 def scatter_mxfp4_cache(
@@ -57,9 +57,9 @@ def scatter_mxfp4_cache(
         slot_mapping.reshape(-1),
         key_bytes,
         scale_bytes,
-        packed.stride(0),
-        scales.stride(0),
-        packed.shape[1],
-        scales.shape[1],
-        triton.next_power_of_2(packed.shape[1]),
+        PACKED_STRIDE=packed.stride(0),
+        SCALE_STRIDE=scales.stride(0),
+        PACKED_WIDTH=packed.shape[1],
+        SCALE_WIDTH=scales.shape[1],
+        BLOCK_WIDTH=triton.next_power_of_2(packed.shape[1]),
     )
