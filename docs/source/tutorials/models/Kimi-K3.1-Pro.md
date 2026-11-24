@@ -223,13 +223,13 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
 
     Leave `HCCL_OP_EXPANSION_MODE` unset on Prefill and set it to `AIV` on Decode. Both roles use `HCCL_BUFFSIZE=1024`. The main attention cache and indexer K cache use INT8, with a block size of `768`; Decode also uses an interleave size of `768`. The Prefill topology in the connector configuration on both roles is TP4 / PCP4 / PP4.
 
-    DSpark3 is optional. Draft TP is 4 on Prefill and 16 on Decode and must match the target TP on each role; both roles use three speculative tokens. Refer to the [Mooncake PD disaggregation guide](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md) for the general service workflow.
+    DSpark is optional. Draft TP is 4 on Prefill and 16 on Decode and must match the target TP on each role; both roles use three speculative tokens. Refer to the [Mooncake PD disaggregation guide](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md) for the general service workflow.
 
     MooncakeConnectorV2 exchanges actual layer metadata through its handshake and does not read `pp_layer_partition` from `kv_connector_extra_config`. Keep `VLLM_PP_LAYER_PARTITION=25,25,24,19` on every Prefill node for model layer partitioning; leave the environment variable unset on Decode. This applies to the basic, 1M, and pooled templates.
 
 
 
-    To enable DSpark3, replace `<YOUR_DRAFT_MODEL_PATH>` with the local directory of a draft model compatible with the A3 target model. Use the same draft checkpoint on both roles and the same directory path on every node.
+    To enable DSpark, replace `<YOUR_DRAFT_MODEL_PATH>` with the local directory of a draft model compatible with the A3 target model. Use the same draft checkpoint on both roles and the same directory path on every node.
 
     === "Prefill"
 
@@ -338,7 +338,7 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
             }'
         ```
 
-        **Optional: Enable DSpark3**
+        **Optional: Enable DSpark**
 
         Add the following option to the `vllm serve` command above, retaining a trailing backslash if it is inserted before the last line. Enable it on both roles, using the same draft checkpoint and three speculative tokens.
 
@@ -443,7 +443,7 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
             }'
         ```
 
-        **Optional: Enable DSpark3**
+        **Optional: Enable DSpark**
 
         Add the following option to the `vllm serve` command above, retaining a trailing backslash if it is inserted before the last line. Enable it on both roles, using the same draft checkpoint and three speculative tokens.
 
@@ -461,7 +461,7 @@ MegaMoE refers to the fused MoE computation path controlled by `enable_fused_mc2
 
     Prefill retains `enable_flashcomm1=true` in this section. The current TP1 configuration does not meet the TP > 1 requirement for generic MoE sequence parallelism or shared-expert DP, so the configured values do not imply that these paths are active; check startup logs for the matching version. All 950DT Products templates configure MLAPO through `--additional-config`: `enable_mlapo=false` on Prefill and `enable_mlapo=true` on Decode.
 
-    The 950DT Products basic and 1M templates enable DSpark3 with the same draft checkpoint on both roles, draft TP `1/8` on Prefill/Decode matching the target TP on each role, three speculative tokens, draft `enforce_eager=false`, and `kv_cache_dtype=auto`. The Prefill target model retains `--enforce-eager`. Replace `<YOUR_DRAFT_MODEL_PATH>` with the local directory of a draft checkpoint compatible with the target model on this platform.
+    The 950DT Products basic and 1M templates enable DSpark with the same draft checkpoint on both roles, draft TP `1/8` on Prefill/Decode matching the target TP on each role, three speculative tokens, draft `enforce_eager=false`, and `kv_cache_dtype=auto`. The Prefill target model retains `--enforce-eager`. Replace `<YOUR_DRAFT_MODEL_PATH>` with the local directory of a draft checkpoint compatible with the target model on this platform.
 
     The templates use `--tokenizer-mode kimi_k3`. For reasoning parsing and tool calling, also configure `--reasoning-parser kimi_k3`, `--tool-call-parser kimi_k3`, and `--enable-auto-tool-choice` together as described in [Section 10](#10-faq).
 
@@ -780,10 +780,10 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
     | Prefix Cache | Enabled | Enabled |
     | Model Runner | V2 | V2 |
     | KV connector | `MooncakeConnectorV2` | `MooncakeConnectorV2` |
-    | Draft TP (optional DSpark3) | `4` | `16` |
-    | Draft `enforce_eager` (optional DSpark3) | `true` | `false` |
-    | Draft KV dtype (optional DSpark3) | `bfloat16` | `bfloat16` |
-    | `num_speculative_tokens` (optional DSpark3) | `3` | `3` |
+    | Draft TP (optional DSpark) | `4` | `16` |
+    | Draft `enforce_eager` (optional DSpark) | `true` | `false` |
+    | Draft KV dtype (optional DSpark) | `bfloat16` | `bfloat16` |
+    | `num_speculative_tokens` (optional DSpark) | `3` | `3` |
 
     For 1M context, change only `--max-model-len` to `1048576` on both roles and keep all other settings unchanged. See [Section 5.2](#52-long-context).
 
@@ -873,7 +873,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
 
     The 1M limit includes both input and output tokens. Reserve space for the generated response.
 
-    To enable DSpark3, replace `<YOUR_DRAFT_MODEL_PATH>` with the local directory of a draft model compatible with the A3 target model and add the role-specific options from [Section 5.1](#51-pd-deployment). Use the same draft checkpoint on both roles and the same directory path on every node. Complete Prefill and Decode templates and launch and verification instructions are provided below.
+    To enable DSpark, replace `<YOUR_DRAFT_MODEL_PATH>` with the local directory of a draft model compatible with the A3 target model and add the role-specific options from [Section 5.1](#51-pd-deployment). Use the same draft checkpoint on both roles and the same directory path on every node. Complete Prefill and Decode templates and launch and verification instructions are provided below.
 
     === "Prefill"
 
@@ -1085,7 +1085,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
 
     The 1M limit includes both input and output tokens. Reserve space for the generated response.
 
-    The 950DT Products basic and 1M templates enable DSpark3 with the same draft checkpoint on both roles, draft TP `1/8` on Prefill/Decode matching the target TP on each role, three speculative tokens, draft `enforce_eager=false`, and `kv_cache_dtype=auto`. The Prefill target model retains `--enforce-eager`. Replace `<YOUR_DRAFT_MODEL_PATH>` with the local directory of a draft checkpoint compatible with the target model on this platform.
+    The 950DT Products basic and 1M templates enable DSpark with the same draft checkpoint on both roles, draft TP `1/8` on Prefill/Decode matching the target TP on each role, three speculative tokens, draft `enforce_eager=false`, and `kv_cache_dtype=auto`. The Prefill target model retains `--enforce-eager`. Replace `<YOUR_DRAFT_MODEL_PATH>` with the local directory of a draft checkpoint compatible with the target model on this platform.
 
     The templates use `--tokenizer-mode kimi_k3`. For reasoning parsing and tool calling, also configure `--reasoning-parser kimi_k3`, `--tool-call-parser kimi_k3`, and `--enable-auto-tool-choice` together as described in [Section 10](#10-faq).
 
@@ -1311,7 +1311,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
 
 The pooling flow differs by platform: A3 uses a separate MetaService, eight standalone MemCache providers, and zero-capacity engine clients. 950DT Products uses the same MetaService startup procedure without standalone providers. See [Section 5.3.2](#532-prepare-the-memcache-configuration-files) for configuration.
 
-The supplied A3 reference uses eight nodes with **DP1 / PP4 / PCP4 / TP4 / DCP1** on Prefill and **DP4 / PP1 / PCP1 / TP16 / DCP16** on Decode. Both roles use a maximum model length of `1048576`, INT8 attention/indexer caches, DSpark3, and non-layerwise pool transfer (`use_layerwise=false`). The pooled example uses a separate MetaService host and one 1 GiB DRAM provider per P/D node. The 950DT Products engine templates below follow [Section 5.1.1](#511-create-the-engine-templates); see [Section 5.3.5](#535-create-the-engine-templates) for their lookup identifier assignments.
+The supplied A3 reference uses eight nodes with **DP1 / PP4 / PCP4 / TP4 / DCP1** on Prefill and **DP4 / PP1 / PCP1 / TP16 / DCP16** on Decode. Both roles use a maximum model length of `1048576`, INT8 attention/indexer caches, DSpark, and non-layerwise pool transfer (`use_layerwise=false`). The pooled example uses a separate MetaService host and one 1 GiB DRAM provider per P/D node. The 950DT Products engine templates below follow [Section 5.1.1](#511-create-the-engine-templates); see [Section 5.3.5](#535-create-the-engine-templates) for their lookup identifier assignments.
 
 These are supplied deployment references. Environment readiness does not establish model-side pool hits, output correctness, or performance. Verify those on the deployed runtime as described in [Section 5.3.7](#537-verify-the-pool-and-model-service). The A3 reference retains different P/D TP sizes; the equal-TP settings in the K3 templates are not a universal pooling requirement. Do not infer support for another cache layout from this reference.
 
@@ -1406,7 +1406,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
     ock.mmc.local_service.max.dram.size = 1024GB
     ```
 
-    `world_size=256` is the LocalService communication capacity, not the number of standalone providers to start. The reference starts one provider on each of the eight P/D nodes. Its eight 1 GiB DRAM segments total `8589934592` bytes (8 GiB).
+    `world_size=256` is the LocalService communication capacity, not the number of standalone providers to start. The reference starts one provider on each of the eight P/D nodes. Its eight 1 GiB DRAM segments total 8GiB.
 
 === "950DT Products"
 
@@ -1733,7 +1733,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
 
         The 950DT Products pooled launch commands follow [Section 5.1.1](#511-create-the-engine-templates): DP1 / PP4 / PCP8 / TP1 on Prefill and DP4 / TP8 / DCP8 on Decode, with matching connector topology. Both roles use maximum length `172032`. All four PP4 Prefill nodes use `LOOKUP_RPC_PORT=0`. The four DP4 Decode nodes use `4/5/6/7` for DP ranks `0/1/2/3`, respectively, calculated as `$4 + 4` in the template. These lookup identifiers identify local IPC endpoints, not PP ranks or MemCache registration ranks.
 
-    The 950DT Products pooled templates enable DSpark3. Fill in the local directory of a draft checkpoint compatible with the 950DT Products target model. Use the same draft checkpoint on both roles, with draft TP `1/8` on Prefill/Decode matching each target TP, three speculative tokens, draft `enforce_eager=false`, and `kv_cache_dtype=auto`. The Prefill target model retains `--enforce-eager`. Model, cache, quantization, and scheduling settings follow [Section 5.1.1](#511-create-the-engine-templates); only maximum length and pool configuration change. Configure optional reasoning and tool-call flags as described in [Section 5.1.1](#511-create-the-engine-templates), using `kimi_k3` parsers.
+    The 950DT Products pooled templates enable DSpark. Fill in the local directory of a draft checkpoint compatible with the 950DT Products target model. Use the same draft checkpoint on both roles, with draft TP `1/8` on Prefill/Decode matching each target TP, three speculative tokens, draft `enforce_eager=false`, and `kv_cache_dtype=auto`. The Prefill target model retains `--enforce-eager`. Model, cache, quantization, and scheduling settings follow [Section 5.1.1](#511-create-the-engine-templates); only maximum length and pool configuration change. Configure optional reasoning and tool-call flags as described in [Section 5.1.1](#511-create-the-engine-templates), using `kimi_k3` parsers.
 
     === "Prefill"
 
@@ -2080,7 +2080,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
         | grep -E '^memcache_(segment_capacity_bytes|total_capacity_bytes)'
     ```
 
-    For the eight-provider 1 GiB reference, expect eight DRAM segments of `1073741824` bytes and a total of `8589934592` bytes. MemCache registration ranks are dynamic; do not map a segment rank directly to a model P/D rank. MetaService metrics establish provider registration and capacity, not model-side cache hits.
+    For the eight-provider 1 GiB reference, expect eight DRAM segments of 1GiB and a total of 8GiB. MemCache registration ranks are dynamic; do not map a segment rank directly to a model P/D rank. MetaService metrics establish provider registration and capacity, not model-side cache hits.
 
     After the engines and Proxy are ready, send the text and multimodal requests in [Section 6](#6-functional-verification) using `kimi-k3.1-pro`. Inspect the active engine configuration for `MultiConnector`, `backend=memcache`, `use_layerwise=false`, and the client `MMC_LOCAL_CONFIG_PATH`. Repeat a request with the same sufficiently long prefix and correlate the engine's external-cache lookup/load/save logs or metrics with the request and the returned output. Local prefix caching is also enabled; a faster repeated request alone does not prove a MemCache hit.
 

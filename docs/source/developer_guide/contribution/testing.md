@@ -33,7 +33,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
 
     # For TorchNPU dev version or x86 machine
-    export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
+    export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://repo.huaweicloud.com/ascend/repos/pypi"
 
     # src path
     export SRC_WORKSPACE=/vllm-workspace
@@ -375,7 +375,7 @@ Workflows without a cron trigger, dispatched externally via `workflow_dispatch`:
 
 ### Run doctest
 
-Doctests validate fixed, marked Quick Start and Installation code blocks, not every code block in the documentation. Quick Start covers A2 and 310P (Atlas 300I DUO), running offline and online examples sequentially. Installation covers `pip`, `uv`, and `source` on A2, followed by offline inference verification. Both support Ubuntu and openEuler.
+Doctests validate fixed, marked Quick Start and Installation code blocks, not every code block in the documentation. Quick Start covers A2 and 310P (Atlas 300I Duo), running offline and online examples sequentially. Installation covers `pip`, `uv`, and `source` on A2, followed by offline inference verification. Both support Ubuntu and openEuler.
 
 Run one of these commands from the repository root in a prepared NPU environment:
 

@@ -790,7 +790,7 @@ ock.mmc.log_level = info
 ock.mmc.local_service.world_size = 256
 ock.mmc.local_service.protocol = device_sdma
 ock.mmc.local_service.dram.size = 1GB
-ock.mmc.local_service.max.dram.size = 1024GB
+ock.mmc.local_service.max.dram.size = 1TB
 # SSD feature related parameters below
 ock.mmc.local_service.storage.enabled = false
 ubsio.disk.path = /dev/nvmexn1:/dev/nvmexn2p1:/dev/loopX
@@ -1060,7 +1060,7 @@ Steps:
 
     ```ini
     ock.mmc.local_service.dram.size = 600GB
-    ock.mmc.local_service.max.dram.size = 1024GB
+    ock.mmc.local_service.max.dram.size = 1TB
     ```
 
 3. Wait for all nodes to report successful initialization.
@@ -1068,7 +1068,7 @@ Steps:
 
     ```ini
     ock.mmc.local_service.dram.size = 0GB
-    ock.mmc.local_service.max.dram.size = 1024GB
+    ock.mmc.local_service.max.dram.size = 1TB
     ```
 
 Startup script reference: [Memcache + vLLM + A3 Separated Deployment Case](https://gitcode.com/Ascend/memcache/wiki/MemCache+vLLM+A3%E5%88%86%E7%A6%BB%E9%83%A8%E7%BD%B2%E6%A1%88%E4%BE%8B.md)
@@ -1086,7 +1086,7 @@ ock.mmc.log_level = info
 ock.mmc.local_service.world_size = 256
 ock.mmc.local_service.protocol = device_sdma
 ock.mmc.local_service.dram.size = 0GB
-ock.mmc.local_service.max.dram.size = 1024GB
+ock.mmc.local_service.max.dram.size = 1TB
 ```
 
 ##### mmc-local-standalone.conf (used by the standalone Memcache process)
@@ -1098,7 +1098,7 @@ ock.mmc.log_level = info
 ock.mmc.local_service.world_size = 256
 ock.mmc.local_service.protocol = device_sdma
 ock.mmc.local_service.dram.size = 600GB
-ock.mmc.local_service.max.dram.size = 1024GB
+ock.mmc.local_service.max.dram.size = 1TB
 # SSD feature related parameters below
 ock.mmc.local_service.storage.enabled = true
 ubsio.disk.path = /dev/nvmexn1:/dev/nvmexn2p1:/dev/loopX
@@ -1398,6 +1398,7 @@ dscli stop --coordinator_address "${COORDINATOR_ADDRESS}"
 export PYTHONHASHSEED=0
 export DS_WORKER_ADDR="${WORKER_IP}:31501"
 export DATASYSTEM_CLIENT_LOG_DIR="/var/log/yuanrong/client"
+export YR_CONFIG_PATH="<config_dir>/yuanrong.json"
 export DS_ENABLE_EXCLUSIVE_CONNECTION=0
 export DS_ENABLE_REMOTE_H2D=0
 
@@ -1420,7 +1421,7 @@ sudo chown "$(id -u):$(id -g)" "${DATASYSTEM_CLIENT_LOG_DIR}"
 
 Set `DATASYSTEM_CLIENT_LOG_DIR` before starting vLLM because the Yuanrong client reads it during logging initialization. Client SDK logs, whose base name is normally `ds_client`, are written to this directory. Use a directory separate from the worker logs.
 
-Configure `yuanrong.json` (pointed to by `YR_CONFIG_PATH`):
+Configure `yuanrong.json` and point `YR_CONFIG_PATH` to its full path:
 
 ```json
 {

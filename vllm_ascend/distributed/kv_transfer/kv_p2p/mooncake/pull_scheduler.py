@@ -409,6 +409,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             self._heartbeat_thread is not None
             and params is not None
             and params.get("do_remote_prefill")
+            and not params.get("do_virtual", False)
             and any(params.get("remote_block_ids", ()))
             and all(key in params for key in ("remote_host", "remote_port", "remote_request_id", "remote_engine_id"))
         ):
@@ -520,8 +521,9 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                         blocks.get_block_ids(),
                         num_external_tokens,
                     )
-                    self._reqs_recv_info[request.request_id] = remote
-                else:
+                    if not params.get("do_virtual", False):
+                        self._reqs_recv_info[request.request_id] = remote
+                elif not params.get("do_virtual", False):
                     if self._recving_thread is None:
                         raise RuntimeError("Producer Mooncake scheduler cannot acknowledge a receive request")
                     self._recving_thread.add_request(*remote)
@@ -564,6 +566,13 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
     ) -> tuple[bool, dict[str, Any] | None]:
         """Release unstarted consumer transfers or expose completed producer blocks."""
         params = request.kv_transfer_params
+        if params is not None and params.get("do_virtual", False) and self.kv_transfer_config.is_kv_consumer:
+            # Health probes never own remote KV blocks or a producer lease.
+            self._reqs_need_recv.pop(request.request_id, None)
+            self._reqs_recv_info.pop(request.request_id, None)
+            self._reqs_in_batch.discard(request.request_id)
+            params["do_remote_prefill"] = False
+            return False, None
         # Keep renewing in-flight READs even after client cancellation. Their
         # workers must finish before P can release the source blocks.
         if self._heartbeat_thread is not None and request.request_id not in self._reqs_recv_info:

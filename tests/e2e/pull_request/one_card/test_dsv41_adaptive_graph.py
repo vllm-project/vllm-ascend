@@ -11,8 +11,9 @@ import torch
 import torch_npu  # noqa: F401
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import CircularBufferSpec
+from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.attention.dsa_v41 import AscendDSAV41StateMetadataBuilder
+from vllm_ascend.attention.dsa_v41 import AscendDSAV41StateMetadataBuilder, DeepseekV41StateBackend
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.ops.triton.compressor.compressor_triton import _cube_core_num, compressor_from_projected
 from vllm_ascend.worker.v2.model_states import default
@@ -44,7 +45,17 @@ def test_v41_runner_full_graph_replays_variable_budgets(monkeypatch, max_query_l
     rope = torch.ones(1024, 1, 1, 64, dtype=torch.float32, device=device)
     assert builder._c2_source_cos.shape[-1] == rope.shape[-1]
     builder._c2_full_source_rope = (rope, rope)
-    groups: Any = [[SimpleNamespace(layer_names=[name], get_metadata_builder=lambda _: builder)]]
+    groups = [
+        [
+            AttentionGroup(
+                backend=DeepseekV41StateBackend,
+                layer_names=[name],
+                kv_cache_spec=spec,
+                kv_cache_group_id=0,
+                metadata_builders=[builder],
+            )
+        ]
+    ]
     cache_config: Any = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)])
     runner_state: Any = default.AscendModelState.__new__(default.AscendModelState)
     runner_state.vllm_config = config

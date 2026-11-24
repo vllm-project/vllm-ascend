@@ -16,7 +16,11 @@ from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 @pytest.mark.parametrize("pcp,dcp", [(1, 1), (2, 1), (1, 2), (2, 2)])
 def test_mla_target_and_draft_accept_target_interleave(monkeypatch, is_draft, pcp, dcp):
     draft = SimpleNamespace(
-        model_config=SimpleNamespace(runner_type="draft" if is_draft else "generate", dtype=torch.bfloat16),
+        model_config=SimpleNamespace(
+            runner_type="draft" if is_draft else "generate",
+            dtype=torch.bfloat16,
+            hf_config=SimpleNamespace(model_type="deepseek_v3"),
+        ),
         parallel_config=ParallelConfig(
             tensor_parallel_size=dcp, prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp
         ),
@@ -26,7 +30,7 @@ def test_mla_target_and_draft_accept_target_interleave(monkeypatch, is_draft, pc
     monkeypatch.setattr(mla_v1, "get_current_vllm_config", lambda: draft)
     monkeypatch.setattr(mla_v1, "get_ascend_config", lambda: SimpleNamespace(enable_kv_nz=False))
     monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: False))
-    monkeypatch.setattr(mla_v1, "enable_fa_quant", lambda *_: False)
+    monkeypatch.setattr(mla_v1, "enable_fa_quant", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(mla_v1, "enabling_mlapo", lambda *_: False)
     monkeypatch.setattr(AscendMLAImpl, "_can_use_flashmla", lambda _: False)
     impl = AscendMLAImpl(
