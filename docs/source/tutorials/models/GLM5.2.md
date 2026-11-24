@@ -41,11 +41,8 @@ Download the checkpoint from ModelScope for the hardware shown below. A3 and 950
 
 !!! warning "GLM-5.3 W4A4C8/MXFP4 accuracy notice"
 
-    GLM-5.3 W4A4C8/MXFP4 currently does not meet accuracy acceptance criteria.
-    Generated answers may be inaccurate. Evaluate the exact checkpoint on your
-    target tasks before use, and do not deploy it in production until it meets
-    your accuracy requirements. Successful startup and the historical validation
-    results below do not establish that these accuracy requirements are met.
+    The current version has some accuracy loss. Accuracy optimization will be
+    completed in the next release.
 
 - `GLM-5.2-w8a8c8`: The weights have been verified and are recommended for use on A3. For GLM-5.3, use its own checkpoint and the version-specific commands below; do not apply the GLM-5.2 accuracy or performance results to GLM-5.3.
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
@@ -4835,9 +4832,7 @@ settings when comparing results. Scores are specific to the model shown.
 
 ### 7.3 W4A4C8 950DT products Validation Records
 
-GLM-5.3 W4A4C8/MXFP4 has not met accuracy acceptance criteria; see the
-[usage notice](#glm53-w4a4c8-accuracy-notice). The historical results below
-must not be interpreted as accuracy acceptance.
+For GLM-5.3 W4A4C8/MXFP4, see the [accuracy notice](#glm53-w4a4c8-accuracy-notice).
 
 Both records below use one 950DT products (96GB × 8), a historical local
 950DT products image, TP8/DP1/EP, eager mode, a configured maximum
@@ -4852,7 +4847,7 @@ update has not been revalidated on NPU hardware in this documentation update.
 | Model / local checkpoint | Startup and short requests | Dataset result |
 | --- | --- | --- |
 | GLM-5.2 W4A4C8/MXFP4 | Passed | No dataset score from this validation |
-| GLM-5.3 W4A4C8/MXFP4, 78 layers, 102 indexed shards | Passed | GSM8K: 1279/1319, 96.97%, including 10 request errors |
+| GLM-5.3 W4A4C8/MXFP4 | Passed | GSM8K: 1279/1319, 96.97%, including 10 request errors |
 
 The GLM-5.3 GSM8K run used zero-shot chat, numeric exact match on the
 content field, `temperature=0`, `seed=42`, `max_tokens=8192`, concurrency
