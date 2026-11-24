@@ -63,8 +63,11 @@ def _make_int8_block_views(
 ) -> list[tuple[torch.Tensor, int]]:
     """Build zero-copy ``[num_blocks, page_bytes]`` views over one cache part.
 
-    Returns ``(view, copy_size_bytes)`` pairs so a caller can describe a page
-    with more than one view.
+    Returns ``(view, copy_size_bytes)`` pairs. One manager block holds
+    ``physical_blocks_per_manager_block`` physical blocks of this part; when
+    those physical blocks are adjacent in storage a single coalesced view
+    covers the whole page, otherwise each physical block position gets its own
+    view so the copy size stays at one physical block.
     """
     required_blocks = num_blocks * physical_blocks_per_manager_block
     if tensor.ndim < 1 or tensor.shape[0] < required_blocks:
@@ -92,27 +95,39 @@ def _make_int8_block_views(
             f"stride_bytes={physical_stride_bytes}, "
             f"physical_block_bytes={bytes_per_physical_block}"
         )
-    if physical_blocks_per_manager_block > 1 and physical_stride_bytes != bytes_per_physical_block:
-        raise ValueError(
-            "Cannot coalesce a non-contiguous Ascend KV cache layout: "
-            f"stride_bytes={physical_stride_bytes}, "
-            f"physical_block_bytes={bytes_per_physical_block}"
-        )
 
-    page_size_bytes = bytes_per_physical_block * physical_blocks_per_manager_block
-    manager_stride_bytes = physical_stride_bytes * physical_blocks_per_manager_block
     byte_offset = tensor.storage_offset() * element_size
+    page_stride_bytes = physical_stride_bytes * physical_blocks_per_manager_block
     raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(tensor.untyped_storage())
+    if physical_blocks_per_manager_block == 1 or physical_stride_bytes == bytes_per_physical_block:
+        return [
+            (
+                torch.as_strided(
+                    raw,
+                    (num_blocks, bytes_per_physical_block * physical_blocks_per_manager_block),
+                    (page_stride_bytes, 1),
+                    byte_offset,
+                ),
+                bytes_per_physical_block * physical_blocks_per_manager_block,
+            )
+        ]
+
+    # The physical blocks of one manager block are separated by a fixed gap that
+    # carries other data (Ascend packs the K/V counterpart or another layer into
+    # it), so a single contiguous page view would read that gap as payload.
+    # View `index` walks the `index`-th physical block of every manager block,
+    # keeping each copy at exactly one physical block.
     return [
         (
             torch.as_strided(
                 raw,
-                (num_blocks, page_size_bytes),
-                (manager_stride_bytes, 1),
-                byte_offset,
+                (num_blocks, bytes_per_physical_block),
+                (page_stride_bytes, 1),
+                byte_offset + index * physical_stride_bytes,
             ),
-            page_size_bytes,
+            bytes_per_physical_block,
         )
+        for index in range(physical_blocks_per_manager_block)
     ]
 
 
@@ -170,9 +185,9 @@ def _canonicalize_split_cache(
         try:
             views.extend(_make_int8_block_views(part, num_blocks, factor, part_bytes))
         except ValueError:
-            # Layout probe: report the measured tensor geometry before the
-            # layout is rejected, so the split-view adaptation can be designed
-            # against real shapes instead of assumptions.
+            # Report the measured tensor geometry before rejecting the layout,
+            # so a future unsupported layout can be diagnosed from one log line
+            # instead of a reproduction round trip.
             logger.warning(
                 "KV offload layout probe: layer=%s is_packed=%s num_blocks=%d "
                 "unpadded_page_size_bytes=%d blocks_per_manager_block=%d "
