@@ -341,8 +341,8 @@ templates:
       # Headless PP workers must not receive --api-server-count.
       - --headless
 
-# P/PD performance and GPQA share this service lifecycle.
-# D20 runs independently in GLM-5.3-W8A8C8-A3-D20.yaml.
+# P/PD/decode performance and GPQA share this service lifecycle.
+# Performance gates check throughput; TPOT remains a reported metric.
 # Throughput baselines use two local r138 runs on 2026-11-22.
 benchmarks:
   prefill_perf_16k_warmup:
@@ -405,7 +405,37 @@ benchmarks:
     max_out_len: 1024
     batch_size: 40
     request_rate: 1.8
-    tpot_threshold: 20
+  # Reset once before decode warmup, with no reset before formal measurement.
+  reset_before_decode_perf_16k_20ms:
+    case_type: curl_cmd
+    cmds:
+    - >-
+      python3 -c "import json; from urllib.request import Request, urlopen;
+      from tests.e2e.common.multi_node.utils import get_cluster_ips;
+      host = get_cluster_ips(4)[2];
+      response = urlopen(Request('http://' + host + ':7100/reset_prefix_cache', method='POST'), timeout=120);
+      assert json.load(response).get('success') is True, 'prefix cache reset failed'"
+  decode_perf_16k_20ms_warmup:
+    case_type: performance
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 64
+    max_out_len: 1024
+    batch_size: 32
+    request_rate: 0
+    dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+  decode_perf_16k_20ms:
+    case_type: performance
+    # Minimum of two local r138 runs on 2026-11-22, with a service restart.
+    baseline: 3241.2664
+    threshold: 0.95
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 320
+    max_out_len: 1024
+    batch_size: 80
+    request_rate: 0
+    dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
   reset_before_gpqa:
     case_type: curl_cmd
     cmds:
