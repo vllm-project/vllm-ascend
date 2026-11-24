@@ -28,6 +28,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendGDNHostMetadataBuilder
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
@@ -45,6 +46,7 @@ from vllm_ascend.ops.head_parallel import (
     get_head_parallel_size,
 )
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.ops.mega_kda import MEGA_KDA_CONV_WIDTH, MEGA_KDA_HEAD_DIM, load_mega_kda, run_mega_kda
 from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
@@ -241,6 +243,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     # Worker startup prepares this layer after KV-cache binding.
     _requires_kda_state_copy = True
     use_contiguous_conv_indices = True
+    _mega_kda_op = None
 
     def __init__(self, config, vllm_config, prefix: str = "") -> None:
         quant_config = getattr(vllm_config, "quant_config", None)
@@ -263,6 +266,20 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             merged_linear = HeadParallelMergedColumnLinear
         self.uses_mixed_projection = uses_mixed_projection
         self._ascend_kda_state_copy = None
+        mega_config = get_ascend_config().kda_backend_config
+        if mega_config.backend == "mega_kda":
+            if (
+                self.use_recoverssm
+                or not uses_mixed_projection
+                or self.pcp_size != 1
+                or self.head_dim != MEGA_KDA_HEAD_DIM
+                or self.conv_size != MEGA_KDA_CONV_WIDTH
+                or self.gate_lower_bound is None
+                or self.model_config.dtype != torch.bfloat16
+            ):
+                raise ValueError("MegaKDA requires BF16 activations, mixed KDA projection, and unsharded PCP states")
+            assert mega_config.operator_package_dir is not None
+            self._mega_kda_op = load_mega_kda(mega_config.operator_package_dir)
         if uses_mixed_projection:
             # vLLM 0.27 packs all KDA input projections into one linear.  A
             # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps B/F/G
@@ -417,7 +434,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 g2=g2,
                 beta=beta,
                 core_attn_out=core_attn_out,
-                beta_is_preprocessed=not self.use_recoverssm,
+                beta_is_preprocessed=not self.use_recoverssm and self._mega_kda_op is None,
             )
             core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
             return self.o_proj(core_attn_out)[0]
@@ -476,7 +493,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             self._fused_bfg_output_sizes,
             dim=-1,
         )
-        if not self.use_recoverssm:
+        if not self.use_recoverssm and self._mega_kda_op is None:
             beta = beta.float().sigmoid()
         beta = beta.unsqueeze(0)
         # Pack the raw gate on the auxiliary stream. This also
@@ -707,6 +724,21 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         # conv/recurrent kernels touch mamba state.
         wait_for_kv_layer_from_connector(self.prefix)
         record_attention_compute_start()
+
+        if self._mega_kda_op is not None:
+            run_mega_kda(
+                self,
+                self._mega_kda_op,
+                attn_metadata,
+                mixed_qkv,
+                g1,
+                g2,
+                beta,
+                core_attn_out,
+                self.get_parameter(_PACKED_CONV_WEIGHT_NAME),
+            )
+            maybe_save_kv_layer_to_connector("", [])
+            return
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         mixed_qkv = mixed_qkv[:num_actual_tokens]

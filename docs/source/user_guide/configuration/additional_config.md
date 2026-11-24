@@ -71,6 +71,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
 | `enable_pcp_o_proj_weight_sharding` | bool | `True` | Whether PCP shards O-projection weights across the PCP group. This option controls SFA-PCP `o_proj` and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set it to `false` at server startup to disable sharding. Other attention backends do not use this option. |
 | `enable_pcp_embedding_lmhead_weight_sharding` | bool | `True` | Whether PCP shards embedding and LM Head weights across PCP ranks inside each TP shard. This option is enabled by default, takes effect when PCP size is greater than 1, and is incompatible with batch-sharded sampling (`enable_batch_sharded_sampling`) and fine-grained TP for these modules. |
+| `kda_backend_config`               | dict | `{}`    | Optional KDA backend selection. See [MegaKDA backend](#megakda-backend). |
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
@@ -407,3 +408,34 @@ convolution allocates its output separately.
 Small prefix match units can increase checkpoint traffic.
 
 Validate correctness, quality and performance on the deployment hardware before deploying in production.
+
+
+### MegaKDA backend
+
+The Kimi K3.1 disaggregated decode engine can opt into the experimental MegaKDA
+backend on Ascend 950. It requires BF16 activations from the mixed-precision
+projection, Model Runner V2, and prefill context parallel size 1. Use
+`FULL_DECODE_ONLY` for decode graph replay. Keep ReplaySSM and
+`gdn_internal_prefill_checkpoints` disabled on the decode engine.
+
+Install an A5 `fla_npu` wheel that exports the projected
+`npu_mega_kda_projected` Stable ABI operator into a separate package directory.
+The [upstream MegaKDA draft](https://github.com/flashserve/flash-linear-attention-npu/pull/1375)
+provides the recurrence implementation. The projected operator is an additional
+wheel build requirement.
+
+Include the wheel's
+`fla_npu/opp/vendors/fla_npu_transformer` directory in
+`ASCEND_CUSTOM_OPP_PATH` before launching workers. Add the following to the
+decode engine's existing additional configuration.
+
+```json
+{
+  "kda_backend_config": {
+    "backend": "mega_kda",
+    "operator_package_dir": "/opt/mega-kda-runtime"
+  }
+}
+```
+
+The default `native` backend continues to use the existing KDA kernels.

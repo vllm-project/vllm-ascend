@@ -347,6 +347,23 @@ class EplbConfig:
 
 
 @config
+class KDABackendConfig:
+    """Select an optional kernel backend for KDA layers."""
+
+    backend: Literal["native", "mega_kda"] = "native"
+    operator_package_dir: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_package_dir(self):
+        if self.backend == "mega_kda":
+            if not self.operator_package_dir or not os.path.isabs(self.operator_package_dir):
+                raise ValueError("kda_backend_config.operator_package_dir must be absolute for MegaKDA")
+        elif self.operator_package_dir is not None:
+            raise ValueError("kda_backend_config.operator_package_dir requires the mega_kda backend")
+        return self
+
+
+@config
 class RejectionSamplerConfig:
     """Configuration for Block Verify and Entropy Verify in Rejection Sampler.
 
@@ -602,6 +619,7 @@ class AscendConfig:
                 "load_collection_phase": "all",
                 "stair_config": {}
             },
+            "kda_backend_config": {"backend": "native", "operator_package_dir": null},
             "rejection_sampler_config": {
                 "enable_entropy_verify": false,
                 "posterior_threshold": 0.95,
@@ -754,6 +772,7 @@ class AscendConfig:
     ascend_fusion_config: AscendFusionConfig = dataclasses.field(default_factory=AscendFusionConfig)
     ascend_warmup_config: AscendWarmupConfig = dataclasses.field(default_factory=AscendWarmupConfig)
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
+    kda_backend_config: KDABackendConfig = dataclasses.field(default_factory=KDABackendConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
     quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
@@ -828,6 +847,16 @@ class AscendConfig:
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
         validate_expert_offload_config(self.expert_offload_config, vc, self)
+        if self.kda_backend_config.backend == "mega_kda":
+            if not is_950():
+                raise ValueError("The MegaKDA backend requires Ascend 950")
+            hf_config = getattr(vc.model_config, "hf_config", None)
+            if getattr(hf_config, "model_type", None) != "kimi_k31" or not vc.use_v2_model_runner:
+                raise ValueError("The MegaKDA backend requires Kimi K3.1 and Model Runner V2")
+            if vc.kv_transfer_config is None or vc.kv_transfer_config.kv_role != "kv_consumer":
+                raise ValueError("The MegaKDA backend requires a disaggregated decode worker")
+            if vc.cache_config.use_replayssm or self.gdn_internal_prefill_checkpoints:
+                raise ValueError("The MegaKDA backend requires ReplaySSM and internal GDN checkpoints to be disabled")
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:
                 raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")
