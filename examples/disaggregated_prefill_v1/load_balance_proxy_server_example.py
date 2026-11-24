@@ -1257,7 +1257,7 @@ async def handle_completions_impl(api: str, request: Request):
                                 released_kv = False
                                 logger.info(
                                     "[PD-RECOMPUTE] proxy retry: request_id=%s, retry_count=%d, "
-                                    "generated_tokens=%d, max_tokens=%d->%d",
+                                    "generated_token=%s, max_tokens=%d->%d",
                                     instance_info.request_id,
                                     retry_count,
                                     generated_token,
