@@ -1240,6 +1240,13 @@ class ReqMeta:
         )
 
 
+@dataclass(frozen=True)
+class SchedulerGvaReadLease:
+    event_id: int
+    gvas_by_key: dict[str, int]
+    copy_deadline: float
+
+
 class AscendConnectorMetadata(KVConnectorMetadata):
     def __init__(
         self,
@@ -1249,6 +1256,7 @@ class AscendConnectorMetadata(KVConnectorMetadata):
         self.requests: list[ReqMeta] = []
         self.preempted_req_ids = preempted_req_ids
         self.loading_req_ids = loading_req_ids or set()
+        self.scheduler_gva_read_lease: SchedulerGvaReadLease | None = None
 
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata."""

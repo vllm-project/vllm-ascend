@@ -12,6 +12,7 @@ import numpy as np
 from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
+    LAYERWISE_READ_LEASE_TTL_MS,
     get_partial_block_index,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.base import (
@@ -28,10 +29,6 @@ if TYPE_CHECKING:
         LayerwiseKVPoolWorker,
     )
 
-# Read lease TTL (ms) for the layerwise load path. batch_add_lease acquires a
-# read lease before batch_copy(G2L); the lease must cover the asynchronous
-# multi-layer load time.
-LAYERWISE_READ_LEASE_TTL_MS = 5 * 60 * 1000
 MEMCACHE_SSD_HIT_GVA = (1 << 64) - 1
 
 # A partial snapshot can be visible to readers before the rank responsible for
@@ -306,6 +303,20 @@ class GvaDataPlane(LayerwiseDataPlane):
 
     def _prepare_load_gvas(self, requests: list[ReqMeta]) -> None:
         worker = self._worker
+        lease = getattr(worker, "_scheduler_gva_read_lease", None)
+        if (
+            lease is not None
+            and time.monotonic() < lease.copy_deadline
+            and getattr(worker.m_store.store, "supports_scheduler_read_lease", False) is True
+        ):
+            # Use one copy mode for this rank. If any key needs local lookup,
+            # rebuild the step's load requests with worker leases.
+            if (
+                self._prepare_load_gvas_for_request(requests, lease.gvas_by_key) is not False
+                and time.monotonic() < lease.copy_deadline
+            ):
+                worker._scheduler_gva_copy_deadline = lease.copy_deadline
+                return
         for request in requests:
             if self._prepare_load_gvas_for_request([request]) is False:
                 logger.error("Memcache load preparation failed for %s", request.req_id)
@@ -313,15 +324,13 @@ class GvaDataPlane(LayerwiseDataPlane):
                 if request.load_spec is not None:
                     request.load_spec.can_load = False
 
-    def _prepare_load_gvas_for_request(self, requests: list[ReqMeta]) -> bool | None:
-        """Fetch per-rank GVA and acquire read lease for the load path.
+    def _prepare_load_gvas_for_request(
+        self, requests: list[ReqMeta], scheduler_gvas: dict[str, int] | None = None
+    ) -> bool | None:
+        """Resolve per-rank GVAs under a read lease for layerwise loads.
 
-        memcache requires batch_copy (read) to find the blob in the per-process
-        gvaBlobTracker with a valid lease. The scheduler only checks existence
-        (batch_is_exist) to decide the load range; before batch_copy(G2L) the
-        worker must, for its own per-rank keys:
-          1. Rewarm SSD-only keys through the backend, then query a resident GVA.
-          2. Acquire a read lease and refresh the GVA while its allocation is pinned.
+        Scheduler addresses are already pinned. The worker route rewarms SSD-only
+        keys, acquires a local lease, and refreshes addresses under that lease.
         """
         worker = self._worker
         if not worker.use_layerwise_transfer:
@@ -451,6 +460,13 @@ class GvaDataPlane(LayerwiseDataPlane):
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
                     continue
                 has_partial_key = partial_block_index is not None
+                if scheduler_gvas is not None:
+                    if has_partial_key or private_keys or any(key not in scheduler_gvas for key in keys):
+                        return False
+                    full_gvas = np.zeros(full_len, dtype=np.int64)
+                    full_gvas[block_indices] = [scheduler_gvas[key] for key in keys]
+                    all_group_load_gvas.append(full_gvas)
+                    continue
                 key_infos = worker.m_store.batch_get_key_info(keys, for_load=True)
                 if key_infos is None or len(key_infos) != len(keys):
                     return False

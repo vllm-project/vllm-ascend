@@ -51,6 +51,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import LayerwiseKVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import get_zmq_rpc_path_lookup
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
     LoadSpec,
     ReqMeta,
@@ -2009,11 +2010,15 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
         )
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def _make_scheduler(self, mock_client_cls):
+    def _make_scheduler(self, mock_client_cls, enable_scheduler_lease=False, sdk_supports_scheduler_lease=True):
         coordinator = self._make_coordinator()
         # Layout identity is bound during construction, just as in production.
-        config = make_config(extra_config={"backend": "memcache"})
+        config = make_config(extra_config={"backend": "memcache", "use_scheduler_lookup": enable_scheduler_lease})
+        config.parallel_config.nnodes = 1
+        config.parallel_config.world_size = 2
         config.scheduler_config.disable_hybrid_kv_cache_manager = False
+        memcache = get_backend_class("memcache")
+        memcache.create_scheduler_client.return_value.store.supports_scheduler_read_lease = sdk_supports_scheduler_lease
         with patch.object(BaseKVPoolScheduler, "_build_cache_coordinator", return_value=coordinator):
             scheduler = create_kv_pool_scheduler(
                 config,
@@ -2021,6 +2026,99 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
                 kv_cache_config=SimpleNamespace(kv_cache_groups=coordinator.kv_cache_groups),
             )
         return scheduler
+
+    def test_scheduler_read_lease_is_opt_in_and_requires_supported_sdk(self):
+        for enabled, sdk_support in ((False, True), (True, False)):
+            with self.subTest(enabled=enabled, sdk_support=sdk_support):
+                scheduler = self._make_scheduler(
+                    enable_scheduler_lease=enabled, sdk_supports_scheduler_lease=sdk_support
+                )
+                meta = AscendConnectorMetadata(set())
+                with patch.object(BaseKVPoolScheduler, "build_connector_meta", return_value=meta):
+                    meta = scheduler.build_connector_meta(MagicMock())
+                self.assertIsNone(meta.scheduler_gva_read_lease)
+                scheduler.store_scheduler.batch_get_key_info.assert_not_called()
+
+    def test_scheduler_read_lease_skips_steps_with_prefill_restore(self):
+        scheduler = self._make_scheduler(enable_scheduler_lease=True)
+        scheduler.layerwise_offload = True
+        meta = AscendConnectorMetadata(set())
+        meta.add_request(
+            ReqMeta(
+                "prefix-hit",
+                token_len_chunk=32,
+                block_hashes=[b"\x01" * 32, b"\x02" * 32],
+                load_spec=LoadSpec(0, 32, True),
+            )
+        )
+        meta.add_request(
+            ReqMeta(
+                "prefill-restore",
+                token_len_chunk=17,
+                block_hashes=[b"\x03" * 32],
+                load_spec=LoadSpec(0, 17, True, layerwise_previous_step=True),
+            )
+        )
+        self.assertTrue(scheduler._scheduler_read_keys(meta))
+        with patch.object(BaseKVPoolScheduler, "build_connector_meta", return_value=meta):
+            self.assertIsNone(scheduler.build_connector_meta(MagicMock()).scheduler_gva_read_lease)
+        scheduler.store_scheduler.batch_add_lease.assert_not_called()
+        scheduler.store_scheduler.batch_get_key_info.assert_not_called()
+
+    def test_scheduler_read_lease_deduplicates_keys_and_waits_for_all_ranks(self):
+        scheduler = self._make_scheduler(enable_scheduler_lease=True)
+        self.assertTrue(scheduler.use_scheduler_lookup)
+        block_hashes = [b"\x01" * 32, b"\x02" * 32]
+        requests = [
+            ReqMeta(req_id=req_id, token_len_chunk=32, block_hashes=block_hashes, load_spec=LoadSpec(0, 32, True))
+            for req_id in ("r1", "r2")
+        ]
+        meta = AscendConnectorMetadata(set())
+        meta.requests = requests
+        expected_keys = scheduler._scheduler_read_keys(meta)
+        self.assertTrue(expected_keys)
+        single_request_meta = AscendConnectorMetadata(set())
+        single_request_meta.add_request(requests[0])
+        self.assertEqual(expected_keys, scheduler._scheduler_read_keys(single_request_meta))
+        pinned = SimpleNamespace(size=lambda: 64, gva_list=lambda: [201])
+        store = scheduler.store_scheduler
+        store.batch_get_key_info.return_value = [pinned] * len(expected_keys)
+        store.batch_add_lease.return_value = [0] * len(expected_keys)
+        store.batch_remove_lease.return_value = 0
+
+        with patch.object(BaseKVPoolScheduler, "build_connector_meta", return_value=meta):
+            self.assertIs(scheduler.build_connector_meta(MagicMock()), meta)
+        lease = meta.scheduler_gva_read_lease
+        self.assertIsNotNone(lease)
+        self.assertEqual(lease.gvas_by_key, dict.fromkeys(expected_keys, 201))
+        store.batch_add_lease.assert_called_once()
+        self.assertEqual(store.batch_add_lease.call_args.args[0], expected_keys)
+        store.batch_get_key_info.assert_called_once_with(expected_keys)
+        overlapping_meta = AscendConnectorMetadata(set())
+        overlapping_meta.add_request(
+            ReqMeta(
+                "overlap",
+                token_len_chunk=32,
+                block_hashes=[block_hashes[0], b"\x03" * 32],
+                load_spec=LoadSpec(0, 32, True),
+            )
+        )
+        overlapping_keys = set(scheduler._scheduler_read_keys(overlapping_meta))
+        self.assertTrue(overlapping_keys.intersection(expected_keys))
+        self.assertTrue(overlapping_keys.difference(expected_keys))
+        store.batch_add_lease.reset_mock()
+        store.batch_get_key_info.reset_mock()
+        self.assertIsNone(scheduler._prepare_scheduler_read_lease(overlapping_meta))
+        store.batch_add_lease.assert_not_called()
+        store.batch_get_key_info.assert_not_called()
+
+        completed = KVConnectorOutput(
+            kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata({lease.event_id: 1})
+        )
+        scheduler.update_connector_output(completed)
+        store.batch_remove_lease.assert_not_called()
+        scheduler.update_connector_output(completed)
+        store.batch_remove_lease.assert_called_once_with(expected_keys)
 
     def _stub_pool(self, scheduler, num_blocks: int, pool_layout: dict[int, list[int]]):
         """Mock readability so a block exists iff it is in pool_layout.

@@ -61,7 +61,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes import make_data_plane
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
+    AscendStoreKVConnectorWorkerMetadata,
     ReqMeta,
+    SchedulerGvaReadLease,
     block_hash_to_str,
     get_block_hashes,
     get_group_block_size,
@@ -113,6 +115,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.use_layerwise_transfer = self.layerwise_data_plane == "gva"
         self.has_shared_kv = self.use_layerwise_transfer and has_shared_kv_sources(vllm_config)
         self._step_load_keys: set[str] = set()
+        self._scheduler_gva_read_lease: SchedulerGvaReadLease | None = None
+        self._scheduler_gva_copy_deadline: float | None = None
+        self._last_scheduler_lease_completion = -1
+        self._completed_scheduler_read_leases: dict[int, int] = {}
         # Request ID -> cache group ID -> request block index -> private pool key.
         self._snapshot_keys: dict[str, dict[int, dict[int, str]]] = {}
         super()._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
@@ -609,16 +615,27 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if self._snapshot_keys:
             for req_id in finished_req_ids | meta.preempted_req_ids:
                 self._snapshot_keys.pop(req_id, None)
+        if (self._step_load_keys or self._scheduler_gva_copy_deadline is not None) and self.kv_recv_thread is not None:
+            self._drain_attention_transfers(full=True)
         if self._step_load_keys:
-            if self.kv_recv_thread is not None:
-                self._drain_attention_transfers(full=True)
             keys, self._step_load_keys = list(self._step_load_keys), set()
             result = self.m_store.batch_remove_lease(keys)
             if result != 0:
                 logger.error("AscendStore lease cleanup returned %s; backend TTL will reclaim leases", result)
         if self.use_block_key_layerwise:
             self._release_layerwise_requests_terminal(finished_req_ids | meta.preempted_req_ids)
+        lease = meta.scheduler_gva_read_lease
+        if lease is not None and lease.event_id > self._last_scheduler_lease_completion:
+            self._completed_scheduler_read_leases[lease.event_id] = 1
+            self._last_scheduler_lease_completion = lease.event_id
         return super().get_finished(finished_req_ids, meta)
+
+    def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
+        if self._completed_scheduler_read_leases:
+            completed = self._completed_scheduler_read_leases
+            self._completed_scheduler_read_leases = {}
+            return AscendStoreKVConnectorWorkerMetadata(completed)
+        return super().build_connector_worker_meta()
 
     def _build_lookup_keys(
         self,
@@ -665,6 +682,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._save_disabled.clear()
         if self.kv_recv_thread is not None:
             self.kv_recv_thread.load_disabled.clear()
+        self._scheduler_gva_read_lease = getattr(metadata, "scheduler_gva_read_lease", None)
+        self._scheduler_gva_copy_deadline = None
         self.process_layer_data(metadata.requests)
 
     def _is_layerwise_save_leader(self) -> bool:
@@ -1573,6 +1592,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     transfer_tasks=self.layer_load_tasks[layer_id],
                     layer_id=layer_id,
                     attention_start_gate=attention_start_gate,
+                    scheduler_gva_copy_deadline=self._scheduler_gva_copy_deadline,
                 )
             )
             return True

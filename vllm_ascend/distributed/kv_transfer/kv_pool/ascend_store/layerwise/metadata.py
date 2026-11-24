@@ -11,6 +11,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
 )
 
+# The lease must cover the asynchronous multi-layer transfer.
+LAYERWISE_READ_LEASE_TTL_MS = 5 * 60 * 1000
+
 
 @dataclass(order=True)
 class LayerPoolKey(PoolKey):
@@ -173,3 +176,4 @@ class LayerLoadTask:
     transfer_tasks: list[LayerTransferTask]
     layer_id: int
     attention_start_gate: AttentionComputeStartGate | None = None
+    scheduler_gva_copy_deadline: float | None = None

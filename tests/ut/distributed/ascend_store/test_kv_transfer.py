@@ -16,6 +16,7 @@
 #
 
 import threading
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -147,6 +148,24 @@ class TestKVTransferThread(unittest.TestCase):
             name="test",
         )
         return t, store
+
+    def test_layerwise_copy_accepts_scheduler_lease_only_before_deadline(self):
+        transfer, store = self._make_thread()
+        store.store = MagicMock()
+        store.store.batch_copy.return_value = 0
+        arrays = (np.array([101]), np.array([201]), np.array([64]))
+        self.assertEqual(transfer._batch_copy_with_limits(*arrays, 1, 0, 0), 0)
+        store.store.batch_copy.assert_called_once_with([101], [201], [64], 1)
+
+        store.store.batch_copy.reset_mock()
+        result = transfer._batch_copy_with_limits(*arrays, 1, 0, 0, scheduler_gva_copy_deadline=time.monotonic() + 30)
+        self.assertEqual(result, 0)
+        store.store.batch_copy.assert_called_once_with([101], [201], [64], 1, 1)
+
+        store.store.batch_copy.reset_mock()
+        result = transfer._batch_copy_with_limits(*arrays, 1, 0, 0, scheduler_gva_copy_deadline=time.monotonic() - 1)
+        self.assertNotEqual(result, 0)
+        store.store.batch_copy.assert_not_called()
 
     def test_queue_lifecycle(self):
         t, _ = self._make_thread()
