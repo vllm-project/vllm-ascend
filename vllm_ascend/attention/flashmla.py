@@ -11,6 +11,7 @@ in preflight tests: the decode hot path must not copy lengths or tables to the C
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from math import ceil
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
@@ -494,6 +495,27 @@ class FlashMLAMetadataBuilder:
             raise ValueError("QuantFlashMLA requires a positive per-request decode query capacity")
         self.buffers: dict[tuple, FlashMLADecode] = {}
         self.attn_mask = attn_mask
+        self.uniform_graph_tokens: set[int] = set()
+
+    def configure_graph_rows(self, descriptors) -> None:
+        """Keep the original row capacity only for exclusively uniform FULL buckets."""
+        widths: dict[int, set[int | None]] = {}
+        for desc in descriptors:
+            width = desc.uniform_token_count
+            if (
+                width is None
+                or not 0 < width <= self.quant_max_query_len
+                or desc.num_reqs is None
+                or desc.num_reqs > self.max_num_reqs
+                or desc.num_tokens != desc.num_reqs * width
+            ):
+                width = None
+            widths.setdefault(desc.num_tokens, set()).add(width)
+        # The upstream capture callback exposes the token bucket but not its
+        # descriptor. If different descriptors can alias it, use the larger buffer.
+        self.uniform_graph_tokens = {
+            tokens for tokens, values in widths.items() if len(values) == 1 and None not in values
+        }
 
     def _metadata_bounds(self, *, current: bool = False) -> dict[str, int]:
         max_cache_len = self.quant_max_cache_len
@@ -572,17 +594,16 @@ class FlashMLAMetadataBuilder:
     def build(
         self, common, num_decodes: int, num_decode_tokens: int, has_prefill: bool, *, retain_for_graph: bool = False
     ) -> FlashMLADecode:
-        if self.quant_max_query_len is not None:
+        max_query_len = self.quant_max_query_len
+        if max_query_len is not None:
             # Use only decode rows: a mixed batch's global max_query_len may
             # belong to FIA prefill. CPU boundaries also exclude graph padding.
             decode_cu = common.query_start_loc_cpu[: num_decodes + 1].clamp_max(num_decode_tokens)
             query_lengths = decode_cu[1:] - decode_cu[:-1]
-            if query_lengths.numel() and (
-                int(query_lengths.min()) < 0 or int(query_lengths.max()) > self.quant_max_query_len
-            ):
+            if query_lengths.numel() and (int(query_lengths.min()) < 0 or int(query_lengths.max()) > max_query_len):
                 raise ValueError(
                     "QuantFlashMLA decode query length exceeds configured per-request capacity "
-                    f"{self.quant_max_query_len}: {query_lengths.tolist()}"
+                    f"{max_query_len}: {query_lengths.tolist()}"
                 )
         # Mixed batches run outside FULL graph. Do not retain every prefill
         # shape. Retain only explicitly captured decode capacities: retaining
@@ -590,8 +611,15 @@ class FlashMLAMetadataBuilder:
         # Replay (and eager with that capacity) reuses the captured addresses.
         tokens = num_decode_tokens if has_prefill else max(common.num_actual_tokens, common.num_input_tokens)
         rows = num_decodes + 1 if has_prefill else max(num_decodes, min(tokens, self.max_num_reqs)) + 1
+        padding_tokens = tokens - num_decode_tokens
+        padding_rows = ceil(padding_tokens / max_query_len) if max_query_len is not None else 0
+        if max_query_len is not None and num_decodes + padding_rows > FLASHMLA_MAX_BATCH_SIZE:
+            raise ValueError("QuantFlashMLA decode and padding rows exceed the metadata batch limit")
         columns = common.block_table_tensor.shape[1]
-        key = tokens, rows, columns, common.causal
+        # An eager build at the same token count can have more live rows
+        # than a uniform graph. It must not overwrite the smaller capture.
+        uniform_graph = tokens in self.uniform_graph_tokens and num_decodes + padding_rows <= rows
+        key = tokens, rows, columns, common.causal, uniform_graph
         if has_prefill:
             if retain_for_graph:
                 raise ValueError("FlashMLA graph buffers require a decode-only batch")
@@ -599,6 +627,11 @@ class FlashMLAMetadataBuilder:
         else:
             cached_flash = self.buffers.get(key)
             if cached_flash is None:
+                if max_query_len is not None:
+                    if retain_for_graph and not uniform_graph:
+                        # Replay can have fewer live tokens than capture, even an empty rank.
+                        rows += max(0, ceil(tokens / max_query_len) - 1)
+                    rows = min(FLASHMLA_MAX_BATCH_SIZE, max(rows, num_decodes + padding_rows))
                 flash = self._allocate(tokens, rows, columns, common.causal)
                 if retain_for_graph:
                     self.buffers[key] = flash
@@ -606,9 +639,17 @@ class FlashMLAMetadataBuilder:
                 flash = cached_flash
 
         def refresh():
-            # The extra zero-used request owns physical graph/SP padding.
             flash.cu.fill_(tokens)
             flash.cu[: num_decodes + 1].copy_(common.query_start_loc[: num_decodes + 1].clamp_max(num_decode_tokens))
+            if padding_rows > 1:
+                # QuantFlashMLA can inspect padded spans even when their used Q is zero.
+                width = ceil(padding_tokens / padding_rows)
+                torch.arange(
+                    num_decode_tokens + width,
+                    tokens,
+                    width,
+                    out=flash.cu[num_decodes + 1 : num_decodes + padding_rows],
+                )
             flash.used_q.zero_()
             flash.used_q[:num_decodes].copy_(flash.cu[1 : num_decodes + 1] - flash.cu[:num_decodes])
             flash.used_q[:num_decodes].masked_fill_(common.seq_lens[:num_decodes] <= 0, 0)

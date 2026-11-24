@@ -788,7 +788,8 @@ def test_quant_metadata_uses_request_capacity_not_padded_batch(runtime, causal):
     flash = builder.build(inputs, 64, 256, False, retain_for_graph=True)
     original_addresses = addresses(flash)
     torch.testing.assert_close(inputs.query_start_loc_cpu, cu_before)
-    assert flash.used_q.tolist() == [4] * 64 + [0]
+    assert flash.used_q[:64].tolist() == [4] * 64
+    assert not flash.used_q[64:].any()
     for call in runtime.metadata_op.call_args_list:
         assert call.kwargs["max_seqlen_q"] == 4
         assert call.kwargs["max_seqlen_kv"] in (4, 140000)
@@ -797,12 +798,53 @@ def test_quant_metadata_uses_request_capacity_not_padded_batch(runtime, causal):
     shorter = common([3] * 64, [3] * 64, tokens=256, causal=causal)
     replay = builder.build(shorter, 64, 192, False)
     assert replay is flash and addresses(replay) == original_addresses
-    assert replay.used_q.tolist() == [3] * 64 + [0]
+    assert replay.used_q[:64].tolist() == [3] * 64
+    assert not replay.used_q[64:].any()
+    assert replay.cu[-1].item() == 256 and replay.cu.diff().max().item() == 4
     if causal:
         assert not replay.cache_lens.any()
         assert replay.current is not None
     empty = builder.build(common([0] * 64, [0] * 64, tokens=256, causal=causal), 64, 0, False)
     assert empty is flash and not empty.used_q.any() and not empty.cache_lens.any()
+    assert empty.cu[-1].item() == 256 and empty.cu.diff().max().item() == 4
+
+
+@pytest.mark.parametrize("dcp_size", [1, 8])
+def test_quant_metadata_splits_dspark7_graph_padding_on_replay(runtime, dcp_size):
+    builder = runtime.builder(size=dcp_size, quantized=True, query_capacity=8)
+    full = builder.build(common([32] * 4, [7] * 4, tokens=28), 4, 28, False, retain_for_graph=True)
+    original_addresses = addresses(full)
+
+    inputs = common([32], [7], tokens=28)
+    inputs.slot_mapping.copy_(torch.arange(25, 32))
+    sparse = builder.build(inputs, 1, 7, False)
+
+    assert sparse is full and addresses(sparse) == original_addresses
+    assert sparse.cu[:5].tolist() == [0, 7, 14, 21, 28]
+    assert torch.all(sparse.cu[4:] == 28)
+    assert sparse.used_q[0].item() == 7 and not sparse.used_q[1:].any()
+    assert not sparse.cache_lens[1:].any()
+    torch.testing.assert_close(sparse.slots[:7], inputs.slot_mapping)
+    assert torch.all(sparse.slots[7:] == -1)
+    torch.testing.assert_close(sparse.schedule, torch.cat((sparse.cache_lens, sparse.cu, sparse.used_q)))
+    if sparse.current is not None:
+        assert torch.all(sparse.current.slots[7:] == -1)
+        torch.testing.assert_close(sparse.current.schedule, torch.cat((sparse.used_q, sparse.cu, sparse.used_q)))
+
+
+def test_quant_metadata_respects_batch_limit_when_reserving_padding_rows(runtime, monkeypatch):
+    builder = runtime.builder(size=1, quantized=True, query_capacity=2, max_requests=8)
+    monkeypatch.setitem(builder.build.__func__.__globals__, "FLASHMLA_MAX_BATCH_SIZE", 9)
+    captured = builder.build(common([32] * 8, [2] * 8), 8, 16, False, retain_for_graph=True)
+    assert captured.used_q.numel() == 9
+
+    replay = builder.build(common([32] * 4, [2] * 4, tokens=16), 4, 8, False)
+    assert replay is captured and replay.cu.diff().max().item() == 2
+    replay_cu = replay.cu.clone()
+
+    with pytest.raises(ValueError, match="metadata batch limit"):
+        builder.build(common([32] * 8, [1] * 8, tokens=16), 8, 8, False)
+    torch.testing.assert_close(captured.cu, replay_cu)
 
 
 def test_quant_metadata_excludes_mixed_prefill_and_padding(runtime):
@@ -867,3 +909,25 @@ def test_quant_adapter_class_constraints_and_native_abi(runtime, heads):
     assert output.shape == (heads, 2, 512) and lse.shape == (heads, 2)
     assert operation.call_args.args[6] == 1
     assert operation.call_args.kwargs["return_softmax_lse"]
+
+
+@pytest.mark.parametrize("causal", [False, True])
+def test_quant_graph_row_budget_from_descriptors(runtime, causal):
+    builder = runtime.builder(size=8, quantized=True, query_capacity=8, max_requests=4)
+    fixed = SimpleNamespace(num_tokens=28, num_reqs=4, uniform_token_count=7)
+    variable = SimpleNamespace(num_tokens=28, num_reqs=4, uniform_token_count=None)
+
+    def build(queries, capture=False):
+        inputs = common([32] * len(queries), queries, tokens=28, causal=causal)
+        return builder.build(inputs, len(queries), sum(queries), False, retain_for_graph=capture)
+
+    builder.configure_graph_rows([fixed])
+    compact = build([7] * 4, True)
+    assert compact.used_q.numel() == 5
+    assert build([7]) is compact
+    assert compact.cu.tolist() == [0, 7, 14, 21, 28, 28]
+    assert build([1] * 4) is not compact  # A variable eager request with the same token count.
+    builder.configure_graph_rows([variable, fixed])
+    large = build([7] * 4, True)
+    assert large.used_q.numel() == 8 and large.cu.data_ptr() != compact.cu.data_ptr()
+    assert build([1] * 4) is large and large.cu.diff().max() <= 8
