@@ -15,6 +15,7 @@ from torch.nn import functional as F
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SituAndMul
 
+from vllm_ascend._310p.fused_moe.grouped_topk_router import AscendGroupedTopKRouter310
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
@@ -36,6 +37,7 @@ from vllm_ascend.ops.fused_moe.routed_experts import (
     use_multistage_eplb_load,
 )
 from vllm_ascend.ops.fused_moe.router import fused_topk_router as fused_topk_router_module
+from vllm_ascend.ops.fused_moe.router import router_factory
 from vllm_ascend.ops.fused_moe.router.fused_topk_router import (
     DEEPSEEK_V4_IMAGE_SENTINEL_COUNT,
     AscendFusedTopKRouter,
@@ -596,6 +598,146 @@ def test_grouped_topk_router_preserves_routing_weight_dtype():
 
     assert topk_weights.dtype == router_logits.dtype
     assert topk_ids.dtype == torch.int32
+
+
+@pytest.mark.parametrize("renormalize", [False, True])
+@pytest.mark.parametrize("routed_scaling_factor", [1.0, 2.5])
+@pytest.mark.parametrize(
+    ("logits_dtype", "bias_dtype"),
+    [
+        (torch.float32, torch.float32),
+        (torch.float16, torch.float32),
+        (torch.bfloat16, torch.float32),
+        (torch.float16, torch.float16),
+        (torch.bfloat16, torch.bfloat16),
+    ],
+)
+def test_non_grouped_sigmoid_router_uses_unbiased_weights(renormalize, routed_scaling_factor, logits_dtype, bias_dtype):
+    router_logits = torch.tensor([[2.0, 0.0, -1.0, -2.0], [2.0, -2.0, 3.0, -1.0]], dtype=logits_dtype)
+    bias = torch.tensor([-0.05, 0.0, 0.8, 0.1], dtype=bias_dtype)
+    router = AscendGroupedTopKRouter(
+        top_k=2,
+        global_num_experts=4,
+        num_expert_group=None,
+        topk_group=None,
+        scoring_func="sigmoid",
+        renormalize=renormalize,
+        routed_scaling_factor=routed_scaling_factor,
+        e_score_correction_bias=bias,
+    )
+
+    weights, ids = router._compute_routing(torch.zeros_like(router_logits), router_logits, indices_type=None)
+
+    scores = 1.0 / (1.0 + torch.exp(-router_logits.float()))
+    expected_ids = (scores + bias.float()).argsort(dim=-1, descending=True)[:, :2]
+    # Bias changes the first token's top-k and leaves the second token's ranking intact.
+    torch.testing.assert_close(expected_ids, torch.tensor([[2, 0], [2, 0]]))
+    expected_weights = torch.take_along_dim(scores, expected_ids, dim=-1)
+    if renormalize:
+        expected_weights /= expected_weights.sum(dim=-1, keepdim=True)
+    expected_weights = (expected_weights * routed_scaling_factor).to(torch.promote_types(logits_dtype, bias_dtype))
+    torch.testing.assert_close(ids, expected_ids.to(torch.int32))
+    torch.testing.assert_close(weights, expected_weights)
+
+
+def test_310p_factory_selects_unbiased_sigmoid_weights(monkeypatch):
+    profile = get_hardware_profile(AscendDeviceType._310P)
+    monkeypatch.setattr(router_factory, "get_current_hardware_profile", lambda: profile)
+    router = router_factory.create_ascend_fused_moe_router(
+        top_k=2,
+        global_num_experts=4,
+        scoring_func="sigmoid",
+        renormalize=False,
+        e_score_correction_bias=torch.tensor([0.0, 0.0, 0.8, 0.0]),
+    )
+    assert isinstance(router, AscendGroupedTopKRouter310)
+    router_logits = torch.tensor([[2.0, 0.0, -1.0, -2.0]])
+
+    weights, ids = router._select_experts(torch.zeros_like(router_logits), router_logits)
+
+    torch.testing.assert_close(ids, torch.tensor([[2, 0]], dtype=torch.int32))
+    torch.testing.assert_close(weights, torch.sigmoid(torch.tensor([[-1.0, 2.0]])))
+
+
+@pytest.mark.parametrize("renormalize", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_non_grouped_sigmoid_router_handles_small_and_zero_weights(dtype, renormalize):
+    router_logits = torch.tensor([[-20.0, -19.0, -18.0, -17.0], [-1000.0] * 4], dtype=dtype)
+    router = AscendGroupedTopKRouter(
+        top_k=2,
+        global_num_experts=4,
+        num_expert_group=None,
+        topk_group=None,
+        scoring_func="sigmoid",
+        renormalize=renormalize,
+        e_score_correction_bias=torch.tensor([0.3, 0.2, 0.1, 0.0]),
+    )
+
+    weights, ids = router._compute_routing(torch.zeros_like(router_logits), router_logits, indices_type=None)
+
+    expected = 1.0 / (1.0 + torch.exp(torch.tensor([20.0, 19.0])))
+    if renormalize:
+        expected /= expected.sum()
+    torch.testing.assert_close(ids, torch.tensor([[0, 1], [0, 1]], dtype=torch.int32))
+    torch.testing.assert_close(weights[0], expected, atol=0, rtol=1e-6)
+    torch.testing.assert_close(weights[1], torch.zeros(2), atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_non_grouped_sigmoid_router_ranks_before_rounding(dtype):
+    router_logits = torch.tensor([[10.0, 11.0, 12.0, 13.0]], dtype=dtype)
+    router = AscendGroupedTopKRouter(
+        top_k=2,
+        global_num_experts=4,
+        num_expert_group=None,
+        topk_group=None,
+        scoring_func="sigmoid",
+        renormalize=False,
+        e_score_correction_bias=torch.tensor([1e-5, 2e-6, 1e-6, 0.0]),
+    )
+
+    _, ids = router._compute_routing(torch.zeros_like(router_logits), router_logits, indices_type=None)
+
+    torch.testing.assert_close(ids, torch.tensor([[3, 2]], dtype=torch.int32))
+
+
+def test_grouped_sigmoid_router_keeps_unbiased_weights_in_selected_group():
+    router_logits = torch.tensor([[2.0, 0.0, -1.0, -2.0]], dtype=torch.bfloat16)
+    router = AscendGroupedTopKRouter(
+        top_k=2,
+        global_num_experts=4,
+        num_expert_group=2,
+        topk_group=1,
+        use_grouped_topk=True,
+        scoring_func="sigmoid",
+        e_score_correction_bias=torch.tensor([-0.05, 0.0, 0.8, 0.1]),
+    )
+
+    weights, ids = router._compute_routing(torch.zeros_like(router_logits), router_logits, indices_type=None)
+
+    # The chosen group contains experts 2 and 3 even though expert 0 also scores highly.
+    sorted_ids, order = ids.sort(dim=-1)
+    expected = router_logits[:, 2:].sigmoid()
+    torch.testing.assert_close(sorted_ids, torch.tensor([[2, 3]], dtype=torch.int32))
+    torch.testing.assert_close(weights.gather(1, order), expected / expected.sum(dim=-1, keepdim=True))
+
+
+def test_non_grouped_softmax_router_keeps_biased_weights():
+    router_logits = torch.tensor([[2.0, 0.0, -1.0, -2.0]])
+    bias = torch.tensor([0.0, 0.0, 0.8, 0.0])
+    router = AscendGroupedTopKRouter(
+        top_k=2,
+        global_num_experts=4,
+        num_expert_group=None,
+        topk_group=None,
+        e_score_correction_bias=bias,
+    )
+
+    weights, ids = router._compute_routing(torch.zeros_like(router_logits), router_logits, indices_type=None)
+
+    expected = (router_logits.softmax(dim=-1) + bias)[:, [2, 0]]
+    torch.testing.assert_close(ids, torch.tensor([[2, 0]], dtype=torch.int32))
+    torch.testing.assert_close(weights, expected / expected.sum(dim=-1, keepdim=True))
 
 
 def _build_routing_replay_experts(router, log2phy):

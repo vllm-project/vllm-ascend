@@ -84,6 +84,18 @@ class AscendGroupedTopKRouter(BaseRouter):
         *,
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        bias = self.e_score_correction_bias
+        if not self.use_grouped_topk and self.scoring_func == "sigmoid" and bias is not None:
+            # Rank experts with the bias and combine their outputs with unbiased scores.
+            scores = router_logits.float().sigmoid()
+            topk_ids = (scores + bias).topk(self.top_k, dim=-1).indices
+            topk_weights = scores.gather(1, topk_ids)
+            if self.renormalize:
+                weight_sum = topk_weights.sum(dim=-1, keepdim=True)
+                topk_weights = topk_weights / weight_sum.masked_fill(weight_sum == 0, 1.0)
+            weight_dtype = torch.result_type(router_logits, bias)
+            return (topk_weights * self.routed_scaling_factor).to(weight_dtype), topk_ids.to(torch.int32)
+
         if self.scoring_func == "softmax":
             topk_weights = router_logits.softmax(dim=-1)
         elif self.scoring_func == "sigmoid":
