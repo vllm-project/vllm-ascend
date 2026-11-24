@@ -436,8 +436,8 @@ def mark_kimi_k31_gqa_draft_specs(
 ) -> dict[str, KVCacheSpec]:
     """Preserve GQA cache roles when the MRv2 worker sends specs to the engine."""
     parallel_config = vllm_config.parallel_config
-    if parallel_config.prefill_context_parallel_size != 1 or parallel_config.decode_context_parallel_size != 1:
-        raise ValueError("Kimi K3.1 GQA DSpark requires PCP=1 and DCP=1.")
+    if parallel_config.prefill_context_parallel_size != 1:
+        raise ValueError("Kimi K3.1 GQA DSpark requires PCP=1.")
     if not draft_layer_names or set(draft_layer_names) - kv_cache_specs.keys():
         raise ValueError("Kimi K3.1 GQA DSpark must publish a cache spec for every draft attention layer.")
 

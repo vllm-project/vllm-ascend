@@ -70,7 +70,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendFlashMLABackend, AscendMLABackend, all_mla_use_flashmla
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, uses_kimi_k31_gqa_draft
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
@@ -401,14 +401,7 @@ class NPUModelRunner(GPUModelRunner):
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         kv_cache_spec = super().get_kv_cache_spec()
 
-        spec_config = self.vllm_config.speculative_config
-        if (
-            self.speculator is not None
-            and getattr(self.vllm_config.model_config.hf_config, "model_type", None) == "kimi_k31"
-            and spec_config is not None
-            and spec_config.method == "dspark"
-            and "Qwen3DSparkModel" in spec_config.draft_model_config.architectures
-        ):
+        if self.speculator is not None and uses_kimi_k31_gqa_draft(self.vllm_config):
             kv_cache_spec = mark_kimi_k31_gqa_draft_specs(
                 self.vllm_config, kv_cache_spec, sorted(self.speculator.draft_attn_layer_names)
             )

@@ -496,6 +496,37 @@ def test_get_num_new_matched_tokens_records_local_prefix() -> None:
     assert request.kv_transfer_params["num_computed_tokens"] == 16
 
 
+@pytest.mark.parametrize(("prompt_len", "remote_len", "expected"), [(1, 1, 0), (34, 31, 31), (34, 33, 33), (34, 34, 0)])
+def test_kimi_k31_bf16_uses_one_transfer_end(prompt_len: int, remote_len: int, expected: int) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler.need_truncate = True
+    scheduler._kimi_k31_bf16 = True
+    request = make_request(
+        prompt_token_ids=None,
+        num_prompt_tokens=prompt_len,
+        kv_transfer_params={"do_remote_prefill": True, "remote_num_prompt_tokens": remote_len},
+    )
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (expected, bool(expected))
+
+
+def test_kimi_k31_bf16_publishes_the_positioned_aligned_checkpoint() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._kimi_k31_bf16 = True
+    scheduler.dcp_size = 8
+    scheduler.group_block_size = [768, 768]
+    scheduler.group_unique_specs = [
+        [make_full_spec(768)],
+        [replace(make_mamba_spec(768), mamba_cache_mode="align")],
+    ]
+    ids = ([10, 11, 12], [0, 20, 21, 22])
+
+    assert scheduler._get_transfer_block_ids(ids, prompt_len=1536) == ([10], [20])
+    assert scheduler._get_transfer_block_ids(ids, prompt_len=1537) == ([10], [21])
+    with pytest.raises(RuntimeError, match="checkpoint is missing"):
+        scheduler._get_transfer_block_ids(ids, prompt_len=768)
+
+
 def test_update_after_alloc_and_build_metadata() -> None:
     scheduler = make_pull_scheduler()
     request = make_request(
@@ -1051,6 +1082,18 @@ def test_sending_thread_aligns_indexer_replication_sizes_by_layer(sizes) -> None
     thread = make_sending_thread({0: first, 1: second}, tp_size=2)
     decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
     assert decoded.metadata_by_pp_rank[0].indexer_replication_sizes == sizes
+
+
+def test_sending_thread_serializes_kimi_k31_bf16_geometry() -> None:
+    geometry = [(("torch.bfloat16", (128, 1, 128), (128, 128, 1)),)]
+    metadata = replace(make_transfer_metadata(), kimi_k31_bf16_geometry=geometry)
+    thread = make_sending_thread({0: metadata, 1: metadata}, tp_size=2)
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+    assert decoded.metadata_by_pp_rank[0].kimi_k31_bf16_geometry == geometry
+
+    incompatible = replace(metadata, kimi_k31_bf16_geometry=[(("torch.float16", (128, 1, 128), (128, 128, 1)),)])
+    with pytest.raises(ValueError, match="kimi_k31_bf16_geometry"):
+        make_sending_thread({0: metadata, 1: incompatible}, tp_size=2)
 
 
 @pytest.mark.parametrize("other_sizes", [[1], [8]])

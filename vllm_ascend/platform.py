@@ -537,6 +537,8 @@ class NPUPlatform(Platform):
         # (fused MC2 exclusivity + scheduler extension policies)
         # ascend_config is only used for verification, this object must NOT be modified here
         ascend_config = init_ascend_config(vllm_config)
+        if _validate_kimi_k31_bf16_dcp(vllm_config):
+            _configure_kimi_k31_bf16_dcp_eager(vllm_config)
         _validate_deepseek_v4_tp_config(vllm_config, ascend_config)
         _check_ascend_config(vllm_config, ascend_config)
 
@@ -1811,6 +1813,48 @@ def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig, ascend_config: Any)
         raise ValueError(f"DeepSeek {variant} supports at most TP{max_tp_size}. Got tp_size={tp_size}.")
 
 
+def _validate_kimi_k31_bf16_dcp(vllm_config: VllmConfig) -> bool:
+    model_config = getattr(vllm_config, "model_config", None)
+    if getattr(getattr(model_config, "hf_config", None), "model_type", None) != "kimi_k31":
+        return False
+    parallel = vllm_config.parallel_config
+    if parallel.decode_context_parallel_size <= 1:
+        return False
+    if vllm_config.attention_config.indexer_kv_dtype not in ("auto", "bf16"):
+        return False
+
+    cache_mode = str((vllm_config.additional_config or {}).get("mla_cache_mode", "C16")).strip().upper()
+    if (
+        model_config.dtype != torch.bfloat16
+        or vllm_config.cache_config.cache_dtype not in ("auto", "bfloat16")
+        or cache_mode != "C16"
+    ):
+        raise ValueError(
+            "Kimi K3.1 BF16 indexer with DCP requires BF16 activations and main KV with mla_cache_mode=C16. "
+            "Use --dtype bfloat16 --kv-cache-dtype bfloat16 --attention-config.indexer_kv_dtype bf16."
+        )
+    if (
+        not vllm_config.use_v2_model_runner
+        or parallel.prefill_context_parallel_size != 1
+        or parallel.pipeline_parallel_size != 1
+        or parallel.tensor_parallel_size != 8
+        or parallel.decode_context_parallel_size != 8
+    ):
+        raise ValueError("Kimi K3.1 BF16 indexer with DCP requires RunnerV2, TP8, DCP8, PCP1 and PP1.")
+    return True
+
+
+def _configure_kimi_k31_bf16_dcp_eager(vllm_config: VllmConfig) -> None:
+    from vllm.config.compilation import CUDAGraphMode
+
+    # The paged BF16 indexer uses an eager host bound for its compute tiles.
+    logger.info_once("Kimi K3.1 sharded BF16 indexer uses eager execution for target and draft.")
+    vllm_config.model_config.enforce_eager = True
+    vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    if vllm_config.speculative_config is not None:
+        vllm_config.speculative_config.enforce_eager = True
+
+
 def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> None:
     speculative_config = vllm_config.speculative_config
     if speculative_config is None:
@@ -1839,10 +1883,6 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
         return
 
     pcp_size = parallel_config.prefill_context_parallel_size
-    if pcp_size > 1:
-        _validate_model_pcp_dcp_config(draft_model_config, pcp_size, decode_context_parallel_size)
-        return
-
     draft_parallel_config = speculative_config.draft_parallel_config
     if draft_parallel_config is not None:
         draft_tensor_parallel_size = draft_parallel_config.tensor_parallel_size
@@ -1850,6 +1890,22 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
         draft_tensor_parallel_size = speculative_config.draft_tensor_parallel_size
     else:
         draft_tensor_parallel_size = parallel_config.tensor_parallel_size
+
+    from vllm_ascend.core.kv_cache_interface import uses_kimi_k31_gqa_draft
+
+    if uses_kimi_k31_gqa_draft(vllm_config):
+        if not _validate_kimi_k31_bf16_dcp(vllm_config) or draft_tensor_parallel_size != 8:
+            raise ValueError(
+                "Kimi K3.1 GQA DSpark with target DCP requires the RunnerV2 BF16 TP8/DCP8/PCP1/PP1 path "
+                "and a TP8 draft."
+            )
+        # This draft retains its TP KV head shards across the entire token axis.
+        # Its effective DCP size is 1.
+        return
+
+    if pcp_size > 1:
+        _validate_model_pcp_dcp_config(draft_model_config, pcp_size, decode_context_parallel_size)
+        return
 
     total_num_attention_heads = draft_model_config.model_arch_config.total_num_attention_heads
     total_num_kv_heads = draft_model_config.get_total_num_kv_heads()

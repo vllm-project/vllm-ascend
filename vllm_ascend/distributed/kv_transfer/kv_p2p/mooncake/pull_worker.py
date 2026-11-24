@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.ascend_config import is_kimi_c8_config
 from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
+    get_kv_cache_dcp_size,
     is_circular_kv_cache_spec,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
@@ -46,6 +47,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     ensure_zmq_recv,
     ensure_zmq_send,
     group_concurrent_contiguous,
+    uses_kimi_k31_bf16_cache,
     zmq_ctx,
 )
 
@@ -84,6 +86,7 @@ class MooncakePullRecvingThread(threading.Thread):
         self.engine = engine
         self.vllm_config = vllm_config
         self._kimi_c8_enabled = is_kimi_c8_config(vllm_config)
+        self._kimi_k31_bf16 = uses_kimi_k31_bf16_cache(vllm_config)
         self.model_config = vllm_config.model_config
         self.kv_cache_config = kv_cache_config
         self.kv_cache_specs = kv_cache_specs
@@ -269,6 +272,18 @@ class MooncakePullRecvingThread(threading.Thread):
                 if remote_layer_index is None:
                     continue
 
+                local_geometry = self.local_metadata.kimi_k31_bf16_geometry
+                remote_geometry = pp_metadata.kimi_k31_bf16_geometry
+                if local_geometry or remote_geometry:
+                    if (
+                        len(local_geometry) != len(self.layer_names)
+                        or len(remote_geometry) != len(pp_metadata.layer_names)
+                        or local_geometry[local_layer_index] != remote_geometry[remote_layer_index]
+                    ):
+                        raise ValueError(
+                            f"Mooncake P/D Kimi K3.1 BF16 cache geometry mismatch for layer {layer_name!r}"
+                        )
+
                 layer_pair = (local_layer_index, remote_layer_index)
                 layer_index_pairs.append(layer_pair)
                 matched_local_layer_indices.add(local_layer_index)
@@ -400,12 +415,14 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_dcp_size: int,
     ) -> tuple[int, int]:
         """Use TP head shards for multi-head FA when PCP is disabled."""
+        local_size = get_kv_cache_dcp_size(spec, self.dcp_size)
+        remote_size = get_kv_cache_dcp_size(spec, remote_dcp_size)
         if isinstance(spec, MLAAttentionSpec):
-            return self.dcp_size, remote_dcp_size
+            return local_size, remote_size
         local_heads = self.block_shapes[local_layer_index][0][0]
         remote_heads = remote_metadata.block_shapes[remote_layer_index][0][0]
-        local_size = 1 if self.pcp_size == 1 and local_heads > 1 else self.dcp_size
-        remote_size = 1 if remote_pcp_size == 1 and remote_heads > 1 else remote_dcp_size
+        local_size = 1 if self.pcp_size == 1 and local_heads > 1 else local_size
+        remote_size = 1 if remote_pcp_size == 1 and remote_heads > 1 else remote_size
         return local_size, remote_size
 
     def _get_mamba_remote_tp_rank_groups(
@@ -646,6 +663,9 @@ class MooncakePullRecvingThread(threading.Thread):
         # transfer entry in the bucket.
         request_ids_by_remote_rank: dict[tuple[int, int], set[str]] = {}
         for selection_index, (request_id, request_metadata) in enumerate(requests.items()):
+            transfer_end = None
+            if getattr(self, "_kimi_k31_bf16", False):
+                transfer_end = request_metadata.num_computed_tokens + request_metadata.num_external_tokens
             request_block_ids_by_spec = transfer_block_ids_by_spec.setdefault(request_id, {})
             for local_layer_index, remote_layer_index in layer_pairs:
                 spec_index = self.spec_indices[local_layer_index]
@@ -712,6 +732,7 @@ class MooncakePullRecvingThread(threading.Thread):
                         remote_metadata.cp_kv_cache_interleave_size,
                         local_dcp_size,
                         remote_metadata.indexer_replication_sizes[remote_layer_index],
+                        transfer_end=transfer_end,
                     )
                     request_block_ids_by_spec[cache_key] = transfer_block_ids
 
@@ -762,8 +783,12 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_interleave_size: int,
         local_dcp_size: int | None = None,
         remote_indexer_replication_size: int = 1,
+        *,
+        transfer_end: int | None = None,
     ) -> list[tuple[int, list[int], list[int]]]:
         """Pair remote TP ranks with local and remote kernel block IDs."""
+        if transfer_end is not None and transfer_end <= num_computed_tokens:
+            return []
         if local_dcp_size is None:
             local_dcp_size = self.dcp_size
         local_dcp_rank = self.dcp_rank if local_dcp_size > 1 else 0
@@ -803,11 +828,26 @@ class MooncakePullRecvingThread(threading.Thread):
                 )
         elif isinstance(spec, SlidingWindowSpec):
             assert local_block_size == remote_block_size, "Mooncake SWA requires the same P/D logical block size."
-            local_unhashed_start_idx = len(local_full_group_block_ids) - len(local_group_block_ids)
-            local_kernel_block_ids = self._expand_block_ids(local_group_block_ids, local_block_size_scale)
-            remote_kernel_block_ids = self._expand_block_ids(
-                remote_group_block_ids[local_unhashed_start_idx:], remote_block_size_scale
-            )
+            if transfer_end is None:
+                local_unhashed_start_idx = len(local_full_group_block_ids) - len(local_group_block_ids)
+                local_kernel_block_ids = self._expand_block_ids(local_group_block_ids, local_block_size_scale)
+                remote_kernel_block_ids = self._expand_block_ids(
+                    remote_group_block_ids[local_unhashed_start_idx:], remote_block_size_scale
+                )
+            else:
+                # Transfer only the live suffix needed for the next query.
+                # Both full tables preserve absolute positions and null IDs.
+                first_live_token = max(0, transfer_end - spec.sliding_window + 1 - spec.extra_retained_tokens)
+                num_computed_tokens = max(num_computed_tokens, first_live_token)
+                local_kernel_block_ids, remote_kernel_block_ids = self._get_kimi_k31_attention_blocks(
+                    local_block_size,
+                    local_block_size_scale,
+                    remote_block_size_scale,
+                    local_full_group_block_ids,
+                    remote_group_block_ids,
+                    num_computed_tokens,
+                    transfer_end,
+                )
         elif isinstance(spec, FullAttentionSpec):
             if is_dcp_transfer:
                 local_kernel_block_size = local_block_size // local_block_size_scale
@@ -846,10 +886,12 @@ class MooncakePullRecvingThread(threading.Thread):
                             f"interleave={interleave}, page_size={page_size}"
                         )
 
-                end_token = min(
-                    local_num_prompt_tokens - (0 if getattr(self, "_kimi_c8_enabled", False) else 1),
-                    remote_num_prompt_tokens,
-                )
+                end_token = transfer_end
+                if end_token is None:
+                    end_token = min(
+                        local_num_prompt_tokens - (0 if getattr(self, "_kimi_c8_enabled", False) else 1),
+                        remote_num_prompt_tokens,
+                    )
                 if end_token <= num_computed_tokens:
                     return []
                 start_token = num_computed_tokens // kernel_block_size * kernel_block_size
@@ -877,6 +919,10 @@ class MooncakePullRecvingThread(threading.Thread):
                             raise ValueError(
                                 "Mooncake DCP block tables do not cover the requested transfer token range"
                             )
+                        if transfer_end is not None and (
+                            local_full_group_block_ids[local_page] <= 0 or remote_group_block_ids[remote_page] <= 0
+                        ):
+                            raise ValueError("Mooncake Kimi K3.1 DCP transfer references a null block")
                         local_ids, remote_ids = block_ids_by_remote_dcp_rank.setdefault(remote_dcp_rank, ([], []))
                         local_ids.append(
                             local_full_group_block_ids[local_page] * local_block_size_scale
@@ -905,13 +951,34 @@ class MooncakePullRecvingThread(threading.Thread):
                         for rank, (local_ids, remote_ids) in block_ids_by_remote_dcp_rank.items()
                     )
                 return transfer_block_ids
-            local_kernel_block_ids = self._expand_block_ids(local_group_block_ids, local_block_size_scale)
-            remote_kernel_block_ids = self._expand_block_ids(remote_group_block_ids, remote_block_size_scale)
-            kernel_block_size = local_block_size // local_block_size_scale
-            remote_start_block_idx = num_computed_tokens // kernel_block_size
-            remote_kernel_block_ids = remote_kernel_block_ids[remote_start_block_idx:]
+            if transfer_end is not None:
+                local_kernel_block_ids, remote_kernel_block_ids = self._get_kimi_k31_attention_blocks(
+                    local_block_size,
+                    local_block_size_scale,
+                    remote_block_size_scale,
+                    local_full_group_block_ids,
+                    remote_group_block_ids,
+                    num_computed_tokens,
+                    transfer_end,
+                )
+            else:
+                local_kernel_block_ids = self._expand_block_ids(local_group_block_ids, local_block_size_scale)
+                remote_kernel_block_ids = self._expand_block_ids(remote_group_block_ids, remote_block_size_scale)
+                kernel_block_size = local_block_size // local_block_size_scale
+                remote_start_block_idx = num_computed_tokens // kernel_block_size
+                remote_kernel_block_ids = remote_kernel_block_ids[remote_start_block_idx:]
         elif isinstance(spec, MambaSpec):
-            if not getattr(self, "_kimi_c8_enabled", False):
+            if transfer_end is not None and spec.mamba_cache_mode == "align":
+                checkpoint_idx = (transfer_end - 1) // local_block_size
+                if (
+                    not 0 <= checkpoint_idx < len(local_full_group_block_ids)
+                    or local_full_group_block_ids[checkpoint_idx] <= 0
+                    or len(remote_group_block_ids) != 1
+                    or remote_group_block_ids[0] <= 0
+                ):
+                    raise ValueError(f"Mooncake Kimi K3.1 checkpoint is missing at transfer end {transfer_end}")
+                local_kernel_block_ids = [local_full_group_block_ids[checkpoint_idx]]
+            elif not getattr(self, "_kimi_c8_enabled", False):
                 local_kernel_block_ids = [local_group_block_ids[-spec.num_speculative_blocks - 1]]
             elif spec.mamba_cache_mode == "align":
                 # The producer publishes one normalized state block in aligned
@@ -938,6 +1005,35 @@ class MooncakePullRecvingThread(threading.Thread):
             )
             for candidate_tp_ranks in remote_tp_rank_groups
         ]
+
+    def _get_kimi_k31_attention_blocks(
+        self,
+        local_block_size: int,
+        local_block_size_scale: int,
+        remote_block_size_scale: int,
+        local_full_group_block_ids: list[int],
+        remote_group_block_ids: list[int],
+        transfer_start: int,
+        transfer_end: int,
+    ) -> tuple[list[int], list[int]]:
+        """Pair physical pages covering a non-sharded K3.1 token range."""
+        if transfer_start >= transfer_end:
+            return [], []
+        kernel_block_size = local_block_size // local_block_size_scale
+        first_block = transfer_start // kernel_block_size
+        past_last_block = (transfer_end + kernel_block_size - 1) // kernel_block_size
+        local_blocks = self._expand_block_ids(local_full_group_block_ids, local_block_size_scale)
+        remote_blocks = self._expand_block_ids(remote_group_block_ids, remote_block_size_scale)
+        local_ids = local_blocks[first_block:past_last_block]
+        remote_ids = remote_blocks[first_block:past_last_block]
+        if (
+            len(local_ids) != past_last_block - first_block
+            or len(remote_ids) != len(local_ids)
+            or min(local_ids) < local_block_size_scale
+            or min(remote_ids) < remote_block_size_scale
+        ):
+            raise ValueError("Mooncake block tables do not cover the requested Kimi K3.1 token range")
+        return local_ids, remote_ids
 
     def _append_mamba_transfer_addresses(
         self,

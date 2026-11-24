@@ -12,6 +12,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
 
+# Dtype, physical block dimensions, and within-block strides in elements.
+CacheTensorGeometry = tuple[str, tuple[int, ...], tuple[int, ...]]
+
 
 @dataclass(frozen=True)
 class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
@@ -41,6 +44,7 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     local_ip: str = ""
     handshake_port: int = 0
     kimi_c8_contracts: list[tuple[str, float] | None] = field(default_factory=list)
+    kimi_k31_bf16_geometry: list[tuple[CacheTensorGeometry, ...]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.cp_kv_cache_interleave_size <= 0:
@@ -52,6 +56,8 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
             raise ValueError("Invalid per-layer indexer replication sizes.")
         if self.kimi_c8_contracts and len(self.kimi_c8_contracts) != num_layers:
             raise ValueError("Mooncake kimi_c8_contracts must contain one contract per layer")
+        if self.kimi_k31_bf16_geometry and len(self.kimi_k31_bf16_geometry) != num_layers:
+            raise ValueError("Mooncake Kimi K3.1 BF16 geometry must contain one entry per layer")
         per_layer_fields: tuple[tuple[str, Sequence[object]], ...] = (
             ("layer_block_sizes", self.layer_block_sizes),
             ("group_indices", self.group_indices),
@@ -123,6 +129,7 @@ class MooncakePPTransferMetadata:
     metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata]
     indexer_replication_sizes: list[int]
     kimi_c8_contracts: list[tuple[str, float] | None] = field(default_factory=list)
+    kimi_k31_bf16_geometry: list[tuple[CacheTensorGeometry, ...]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

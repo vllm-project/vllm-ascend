@@ -27,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
+    CacheTensorGeometry,
     MooncakeConnectorMetadata,
     MooncakePCPTransferMetadata,
     MooncakePPTransferMetadata,
@@ -236,6 +237,9 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                             worker_metadata.kimi_c8_contracts[local_layer_index]
                             if worker_metadata.kimi_c8_contracts
                             else None,
+                            worker_metadata.kimi_k31_bf16_geometry[local_layer_index]
+                            if worker_metadata.kimi_k31_bf16_geometry
+                            else (),
                         )
                         previous_signature = layer_signature_by_name.get(layer_name)
                         if previous_signature is not None and previous_signature != layer_signature:
@@ -248,6 +252,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                                 "block_size_scales",
                                 "indexer_replication_sizes",
                                 "kimi_c8_contracts",
+                                "kimi_k31_bf16_geometry",
                             )
                             mismatched_layer_fields = [
                                 field_name
@@ -272,6 +277,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             block_size_scales: list[list[int]] = []
             indexer_replication_sizes: list[int] = []
             kimi_c8_contracts: list[tuple[str, float] | None] = []
+            kimi_k31_bf16_geometry: list[tuple[CacheTensorGeometry, ...]] = []
             for layer_name in layer_names:
                 worker_metadata, local_layer_index = layer_source_by_name[layer_name]
                 layer_block_sizes.append(worker_metadata.layer_block_sizes[local_layer_index])
@@ -283,6 +289,11 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 indexer_replication_sizes.append(worker_metadata.indexer_replication_sizes[local_layer_index])
                 kimi_c8_contracts.append(
                     worker_metadata.kimi_c8_contracts[local_layer_index] if worker_metadata.kimi_c8_contracts else None
+                )
+                kimi_k31_bf16_geometry.append(
+                    worker_metadata.kimi_k31_bf16_geometry[local_layer_index]
+                    if worker_metadata.kimi_k31_bf16_geometry
+                    else ()
                 )
 
             layer_index_by_name = {layer_name: layer_index for layer_index, layer_name in enumerate(layer_names)}
@@ -322,6 +333,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 metadata_by_pcp_rank=metadata_by_pcp_rank,
                 indexer_replication_sizes=indexer_replication_sizes,
                 kimi_c8_contracts=kimi_c8_contracts,
+                kimi_k31_bf16_geometry=kimi_k31_bf16_geometry if any(kimi_k31_bf16_geometry) else [],
             )
         return merged
 
@@ -602,14 +614,21 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
 
         if params is not None and params.get("do_remote_prefill"):
             token_ids = request.prompt_token_ids or []
-            actual = self._state_prefill_token_count(len(token_ids))
+            kimi_k31_bf16 = getattr(self, "_kimi_k31_bf16", False)
+            prompt_len = request.num_prompt_tokens if kimi_k31_bf16 else len(token_ids)
+            actual = self._state_prefill_token_count(prompt_len)
             remote_tokens = params.get("remote_num_prompt_tokens")
-            if getattr(self, "_kimi_c8_enabled", False) and remote_tokens is not None:
+            if (getattr(self, "_kimi_c8_enabled", False) or kimi_k31_bf16) and remote_tokens is not None:
                 if not isinstance(remote_tokens, int) or remote_tokens < 0:
                     raise ValueError("Mooncake remote_num_prompt_tokens must be a non-negative integer")
                 # A consumer must never claim positions absent from the
                 # published producer state, including mixed-version handoffs.
-                actual = min(actual, remote_tokens)
+                if kimi_k31_bf16 and self.need_truncate and remote_tokens > actual:
+                    # The recurrent checkpoint contains the state after the
+                    # advertised producer token. It cannot be cropped.
+                    actual = 0
+                else:
+                    actual = min(actual, remote_tokens)
             params["num_computed_tokens"] = num_computed_tokens
             count = max(actual - num_computed_tokens, 0)
             if count > 0:
@@ -732,7 +751,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             return False, None
 
         prompt_token_ids = request.prompt_token_ids or []
-        prompt_len = len(prompt_token_ids)
+        prompt_len = request.num_prompt_tokens if getattr(self, "_kimi_k31_bf16", False) else len(prompt_token_ids)
         computed_block_ids = self._get_transfer_block_ids(block_ids, prompt_len)
         num_computed_blocks = sum(len(group_block_ids) for group_block_ids in computed_block_ids)
         delay_free_blocks = num_computed_blocks > 0

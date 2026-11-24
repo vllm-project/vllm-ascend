@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
+from copy import copy
 from dataclasses import dataclass, field, replace
 
 import torch
@@ -29,12 +30,63 @@ class AscendGQADraftFullAttentionSpec(FullAttentionSpec):
 
     is_draft: bool = field(default=True, init=False)
 
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        return cdiv(max_len, self.block_size)
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        return cdiv(vllm_config.model_config.max_model_len, self.block_size) * self.page_size_bytes
+
 
 @dataclass(frozen=True, kw_only=True)
 class AscendGQADraftSlidingWindowSpec(SlidingWindowSpec):
     """Sliding-window GQA cache owned by the Kimi K3.1 DSpark draft."""
 
     is_draft: bool = field(default=True, init=False)
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        return cdiv(max_len, self.block_size)
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        return (
+            self.max_admission_blocks_per_request(
+                max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+                max_model_len=vllm_config.model_config.max_model_len,
+            )
+            * self.page_size_bytes
+        )
+
+
+def uses_kimi_k31_gqa_draft(vllm_config: VllmConfig) -> bool:
+    """Select the K3.1 draft that keeps its TP-sharded heads on every token."""
+    model_config = getattr(vllm_config, "model_config", None)
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    draft = getattr(speculative_config, "draft_model_config", None)
+    return (
+        getattr(getattr(model_config, "hf_config", None), "model_type", None) == "kimi_k31"
+        and getattr(speculative_config, "method", None) == "dspark"
+        and "Qwen3DSparkModel" in (getattr(draft, "architectures", None) or ())
+    )
+
+
+def get_kv_cache_dcp_size(spec: KVCacheSpec, process_dcp_size: int) -> int:
+    """Use the process DCP size for sharded cache groups and 1 for the GQA draft."""
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        spec = spec.first_spec
+    if isinstance(spec, (AscendGQADraftFullAttentionSpec, AscendGQADraftSlidingWindowSpec)):
+        return 1
+    return process_dcp_size
+
+
+def with_kimi_k31_gqa_draft_dcp_config(vllm_config: VllmConfig) -> VllmConfig:
+    """Retain TP and the shared forward context while configuring draft attention."""
+    if not uses_kimi_k31_gqa_draft(vllm_config) or vllm_config.parallel_config.decode_context_parallel_size == 1:
+        return vllm_config
+    draft_config = copy(vllm_config)
+    draft_config.parallel_config = copy(vllm_config.parallel_config)
+    draft_config.parallel_config.decode_context_parallel_size = 1
+    draft_config.parallel_config.cp_kv_cache_interleave_size = 1
+    draft_config.cache_config = copy(vllm_config.cache_config)
+    return draft_config
 
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:

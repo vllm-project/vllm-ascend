@@ -264,12 +264,12 @@ def test_gqa_dspark_uses_private_contiguous_kv_planes(vllm_config, monkeypatch, 
 
 
 def test_kimi_k31_gqa_draft_spec_rejects_context_parallelism(vllm_config):
-    vllm_config.parallel_config.prefill_context_parallel_size = 1
-    vllm_config.parallel_config.decode_context_parallel_size = 2
+    vllm_config.parallel_config.prefill_context_parallel_size = 2
+    vllm_config.parallel_config.decode_context_parallel_size = 8
     spec = SlidingWindowSpec(
         block_size=BLOCK_SIZE, num_kv_heads=2, head_size=64, dtype=torch.bfloat16, sliding_window=2048
     )
-    with pytest.raises(ValueError, match="requires PCP=1 and DCP=1"):
+    with pytest.raises(ValueError, match="requires PCP=1"):
         attn_utils.mark_kimi_k31_gqa_draft_specs(vllm_config, {"draft": spec}, ["draft"])
 
 

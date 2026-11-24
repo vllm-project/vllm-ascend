@@ -23,7 +23,7 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 )
 
 
-def prepare_dflash_inputs_factory(kv_cache_block_size: int) -> Callable[..., None]:
+def prepare_dflash_inputs_factory(kv_cache_block_size: int | None) -> Callable[..., None]:
     # Upstream uses the attention kernel block size for DCP ownership, which is
     # incorrect when physical KV blocks are larger than kernel blocks. Bind the
     # physical size so ownership uses KV cache blocks while slot lookup uses the
@@ -215,7 +215,7 @@ def prepare_dflash_inputs(
     max_model_len: int,
     sample_from_anchor: bool = False,
     *,
-    kv_cache_block_size: int,
+    kv_cache_block_size: int | None,
 ) -> None:
     prepare_dflash_inputs_triton(
         input_buffers,
@@ -246,5 +246,5 @@ def prepare_dflash_inputs(
         max_num_tokens,
         max_model_len,
         sample_from_anchor,
-        kv_cache_block_size=kv_cache_block_size,
+        kv_cache_block_size=block_size if kv_cache_block_size is None else kv_cache_block_size,
     )

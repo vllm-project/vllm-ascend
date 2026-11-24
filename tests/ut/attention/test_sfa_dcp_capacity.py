@@ -53,6 +53,7 @@ def _create_builder(spec, config, indexer):
         ),
         patch("vllm_ascend.attention.indexer.enable_sfa_dcp_replicated_indexer", return_value=True),
         patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=False),
+        patch("vllm_ascend.attention.indexer.enable_dsa_cp", return_value=False),
     ):
         group.create_metadata_builders(config, torch.device("cpu"), kernel_block_size=128)
     return group.get_metadata_builder()

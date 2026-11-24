@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.config import VllmConfig
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config, get_kv_cache_configs
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
@@ -30,6 +31,7 @@ from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
     paired_sfa_pool_bytes,
 )
 from vllm_ascend.patch.platform import patch_kv_cache_utils
+from vllm_ascend.patch.platform.patch_kv_cache_coordinator import get_kv_cache_coordinator
 
 
 def make_specs(block_size=1536):
@@ -123,23 +125,37 @@ def test_paired_sfa_rejects_unknown_untagged_gqa_layer():
         paired_sfa_cache_groups(make_config(), {**make_specs(), "model.layers.93.attn": spec})
 
 
-def test_gqa_dspark_engine_cache_admission_and_scheduler_alignment():
+@pytest.mark.parametrize(("dcp_size", "target_block_size"), [(1, 1664), (8, 768)])
+def test_gqa_dspark_engine_cache_admission_and_scheduler_alignment(dcp_size, target_block_size):
     register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
     config = make_config()
     config.model_config.original_max_model_len = config.model_config.max_model_len
-    config.parallel_config = SimpleNamespace(decode_context_parallel_size=1)
+    config.parallel_config = SimpleNamespace(
+        decode_context_parallel_size=dcp_size, cp_kv_cache_interleave_size=target_block_size
+    )
+    config.scheduler_config.disable_chunked_mm_input = False
+    config.device_config = SimpleNamespace(device_type="cpu")
     config.attention_config = SimpleNamespace(hisparse_config=None)
     config.speculative_config = SimpleNamespace(method="dspark", use_multi_module_mtp=lambda: False)
     config.kv_transfer_config = None
     config.cache_config.enable_prefix_caching = True
     config.cache_config.prefix_match_unit = None
-    config.cache_config.block_size = 1664
+    config.cache_config.block_size = target_block_size
     config.max_in_flight_tokens = 16384
     native = dict(num_kv_heads=2, head_size=64, dtype=torch.bfloat16)
+    target = make_specs(block_size=target_block_size)
+    if dcp_size > 1:
+        for name, spec in target.items():
+            if isinstance(spec, AscendMLAAttentionSpec):
+                target[name] = replace(spec, dtype=torch.bfloat16, head_size=576, cache_sparse_sfa_c8=False)
+            elif isinstance(spec, AscendSFAIndexerCacheSpec):
+                target[name] = replace(spec, dtype=torch.bfloat16, scale_dim=0, cache_sparse_li_c8=False)
+            else:
+                target[name] = replace(spec, page_size_padded=target_block_size * 576 * 2)
     specs = {
-        **make_specs(block_size=1664),
-        "model.layers.93.self_attn.attn": AscendGQADraftFullAttentionSpec(block_size=1664, **native),
+        **target,
+        "model.layers.93.self_attn.attn": AscendGQADraftFullAttentionSpec(block_size=target_block_size, **native),
         "model.layers.94.self_attn.attn": AscendGQADraftSlidingWindowSpec(
             block_size=128, sliding_window=2048, **native
         ),
@@ -153,8 +169,27 @@ def test_gqa_dspark_engine_cache_admission_and_scheduler_alignment():
     scheduler = generate_scheduler_kv_cache_config(plans)
     config.cache_config.block_size = min(group.kv_cache_spec.block_size for group in scheduler.kv_cache_groups)
     assert config.cache_config.block_size == 128
-    assert patch_kv_cache_utils._ascend_resolve_kv_cache_block_sizes(scheduler, config) == (1664, 128)
+    patch_kv_cache_utils._update_engine_kv_cache_capacity(config, scheduler)
+    VllmConfig.validate_block_size(config)
+    assert config.cache_config.block_size == (target_block_size if dcp_size > 1 else 128)
+    scheduler_block_size, hash_block_size = patch_kv_cache_utils._ascend_resolve_kv_cache_block_sizes(scheduler, config)
+    assert (scheduler_block_size, hash_block_size) == (target_block_size * dcp_size, 128)
     assert scheduler.dspark_draft_only_group_ids == (len(groups) - 2, len(groups) - 1)
+    coordinator = get_kv_cache_coordinator(
+        scheduler,
+        max_model_len=config.model_config.max_model_len,
+        use_eagle=False,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=dcp_size,
+        pcp_world_size=1,
+        hash_block_size=hash_block_size,
+        scheduler_block_size=scheduler_block_size,
+    )
+    assert coordinator.single_type_managers[0].block_size == target_block_size * dcp_size
+    assert coordinator.single_type_managers[-2].block_size == target_block_size
+    assert coordinator.single_type_managers[-1].block_size == 128
+    assert coordinator.find_longest_cache_hit_per_group([], 0)[1] == (0,) * len(groups)
 
 
 def test_token_blocks_unchanged_and_components_share_ids():

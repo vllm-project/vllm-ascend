@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole, KVConnectorTransferResults
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import connector as connector_module
@@ -76,6 +77,20 @@ def test_facade_delegates_scheduler_methods() -> None:
 
     connector.connector_scheduler.update_state_after_alloc.assert_called_once_with(request, blocks, 8)
     connector.connector_scheduler.request_finished.assert_called_once_with(request, ([1, 2],))
+
+
+def test_kimi_k31_bf16_gqa_draft_uses_a_common_local_prefix() -> None:
+    connector = make_facade()
+    connector._vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=SimpleNamespace(model_type="kimi_k31")),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        speculative_config=SimpleNamespace(
+            method="dspark", draft_model_config=SimpleNamespace(architectures=["Qwen3DSparkModel"])
+        ),
+    )
+    assert not connector.supports_divergent_local_hybrid_hits
+    connector._vllm_config.speculative_config = None
+    assert connector.supports_divergent_local_hybrid_hits
 
 
 def test_facade_delegates_worker_methods_and_metadata() -> None:

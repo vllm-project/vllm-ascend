@@ -46,6 +46,7 @@ from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sha
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.ops.bf16_sharded_indexer import bf16_paged_indexer_candidates
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
@@ -80,6 +81,16 @@ def _indexer_qk_stream() -> torch.npu.Stream:
 # tuple (the scale slot exists only when LI C8 is enabled).
 INDEXER_K_CACHE_SLOT = 0
 INDEXER_SCALE_CACHE_SLOT = 1
+
+
+def _uses_kimi_k31_bf16_indexer(vllm_config: VllmConfig) -> bool:
+    model_config = vllm_config.model_config
+    hf_config = getattr(model_config, "hf_config", None)
+    return (
+        (getattr(hf_config, "model_type", None) == "kimi_k31" or getattr(type(hf_config), "is_kimi_k31", False))
+        and model_config.dtype == torch.bfloat16
+        and vllm_config.attention_config.indexer_kv_dtype in ("auto", "bf16")
+    )
 
 
 @dataclass
@@ -122,6 +133,10 @@ class AscendSFAIndexerMetadata:
     # ``q_li_scale`` is set only when LI C8 has already quantized ``q_li``.
     topk_selector: Any | None = None
     local_visible_lengths: torch.Tensor | None = None
+    first_valid_indexer_page: int = 1
+    # Host upper bound in local kernel pages. MRv2 graph capture supplies
+    # the model's maximum length so replay always covers the live context.
+    max_local_indexer_pages: int | None = None
     # Shared verbatim by the A5 metadata producer and QLI consumer.
     qli_dcp_args: dict[str, Any] | None = None
     # Includes the leading zero; shared by every layer in this metadata group.
@@ -267,6 +282,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         )
         self._pcp_active = self.use_pcp
         self._sharded_dcp = enable_sfa_dcp_sharded_indexer()
+        self._sharded_bf16 = self._sharded_dcp and _uses_kimi_k31_bf16_indexer(get_current_vllm_config())
         self._local_topk = False
         self._dcp_interleave = parallel_config.cp_kv_cache_interleave_size
         if self._sharded_dcp:
@@ -284,6 +300,11 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             expected_heads = getattr(text_config, "index_n_heads", getattr(text_config, "index_num_heads", self.n_head))
             if self.n_head != expected_heads:
                 raise ValueError("Sharded QLI requires complete replicated indexer heads on every DCP rank.")
+            if not self._sharded_bf16 and (not self.enable_sparse_li_c8 or self.enable_sparse_li_c4):
+                raise ValueError(
+                    f"Sharded Kimi indexer layer {self.k_cache.prefix} requires native C8 QLI "
+                    "or Kimi K3.1 with a BF16 model and indexer_kv_dtype=bf16."
+                )
 
         # The LI C8 Hadamard matrices are created while the sleep-mode weights
         # mem-pool is active and are read by every forward, so they must survive
@@ -858,8 +879,26 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         if self._sharded_dcp:
             from vllm_ascend.attention.context_parallel.sharded_indexer import distributed_topk
 
-            if not self.enable_sparse_li_c8 or self.enable_sparse_li_c4:
-                raise NotImplementedError("Sharded Kimi indexer requires the native C8 QLI path.")
+            if self._sharded_bf16:
+                assert indexer_metadata.local_visible_lengths is not None
+                indices, scores = bf16_paged_indexer_candidates(
+                    q_li,
+                    weights,
+                    self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
+                    indexer_metadata.block_table[:, : indexer_metadata.max_local_indexer_pages],
+                    indexer_metadata.actual_seq_lengths_query,
+                    indexer_metadata.local_visible_lengths,
+                    self.topk_tokens,
+                    first_valid_page=indexer_metadata.first_valid_indexer_page,
+                )
+                return distributed_topk(
+                    indices,
+                    scores,
+                    get_dcp_group(),
+                    self.topk_tokens,
+                    self._dcp_interleave,
+                    return_local=self._local_topk,
+                )
             cu_seqlens_q, seqused_k, qli_metadata = self._get_local_qli_inputs(indexer_metadata)
             if indexer_metadata.qli_dcp_args is not None:
                 indices, scores = DeviceOperator.indexer_select_dcp_candidates(
@@ -1009,14 +1048,18 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                     max_num_reqs * (spec_tokens + 1) + 1,
                 )
         self.use_sharded_dcp = enable_sfa_dcp_sharded_indexer(vllm_config)
-        self.use_native_dcp_qli = self.use_sharded_dcp and DeviceOperator.native_dcp_indexer
+        self.use_sharded_bf16 = self.use_sharded_dcp and _uses_kimi_k31_bf16_indexer(vllm_config)
+        physical_block_size = getattr(kv_cache_spec, "block_table_block_size", None) or kv_cache_spec.block_size
+        self.first_valid_indexer_page = physical_block_size // self.kernel_block_size
+        self.use_native_dcp_qli = (
+            self.use_sharded_dcp and not self.use_sharded_bf16 and DeviceOperator.native_dcp_indexer
+        )
         self.use_dcp = enable_sfa_dcp_replicated_indexer(vllm_config) and not self.use_sharded_dcp
         if not self.use_dcp:
             return
 
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.replicated_view_block_size = self.kernel_block_size
-        physical_block_size = getattr(kv_cache_spec, "block_table_block_size", None) or kv_cache_spec.block_size
         if physical_block_size % self.replicated_view_block_size != 0:
             raise RuntimeError(
                 "SFA replicated indexer metadata requires the physical block "
@@ -1049,6 +1092,11 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
+        if enable_sfa_dcp_sharded_indexer(vllm_config) and _uses_kimi_k31_bf16_indexer(vllm_config):
+            # The bounded PyTorch scorer loops over an eager host length
+            # bound. Capturing model-length tiles for every layer would turn
+            # long-context profiles into excessively large graphs.
+            return AttentionCGSupport.NEVER
         speculative_config = vllm_config.speculative_config
         if (
             speculative_config is not None
@@ -1361,7 +1409,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
     def defer_device_metadata(self, *, in_graph: bool = False):
         """Opt in only inside V2's target build scope, never its draft builders."""
         was_enabled = self._device_metadata_enabled
-        self._device_metadata_enabled = self.use_sharded_dcp
+        self._device_metadata_enabled = self.use_sharded_dcp and not self.use_sharded_bf16
         try:
             yield
         finally:
@@ -1589,12 +1637,20 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         actual_seq_lengths_key = seq_lens
         query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
         local_visible = None
+        max_local_indexer_pages = None
         qli_dcp_args = None
         if self.use_sharded_dcp:
             from vllm_ascend.ops.triton.sharded_indexer import build_local_key_lengths, build_local_lengths
 
             group = get_dcp_group()
             interleave = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+            if self.use_sharded_bf16:
+                upper_bound = common_attn_metadata.max_seq_len
+                complete_cycles, tail = divmod(upper_bound, group.world_size * interleave)
+                local_upper_bound = complete_cycles * interleave + min(
+                    max(tail - group.rank_in_group * interleave, 0), interleave
+                )
+                max_local_indexer_pages = (local_upper_bound + block_size - 1) // block_size
             buffers = self._sharded_seq_buffers.get(buffer_key)
             if buffers is None:
                 buffers = (
@@ -1620,7 +1676,9 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                     cp_rank=group.rank_in_group,
                     cp_interleave=interleave,
                 )
-            elif get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE):
+            elif not self.use_sharded_bf16 and get_current_hardware_profile().supports(
+                HardwareCapability.NATIVE_INT8_SPARSE
+            ):
                 build_local_key_lengths(
                     seq_lens, actual_seq_lengths_key, group.world_size, group.rank_in_group, interleave
                 )
@@ -1687,6 +1745,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             num_decode_tokens=num_decode_tokens,
             uses_pcp_sharded_layout=is_pcp_sharded,
             local_visible_lengths=local_visible,
+            first_valid_indexer_page=self.first_valid_indexer_page,
+            max_local_indexer_pages=max_local_indexer_pages,
             qli_dcp_args=qli_dcp_args,
             query_start_loc=query_start_loc,
         )

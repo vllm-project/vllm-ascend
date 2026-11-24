@@ -282,8 +282,8 @@ def test_shared_page_handles_mixed_dtype_views() -> None:
 
 
 def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(monkeypatch) -> None:
-    spec = MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.float16)
-    raw_cache = torch.empty(4 * 128 * 576, dtype=torch.float16)
+    spec = MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16)
+    raw_cache = torch.empty(4 * 128 * 576, dtype=torch.bfloat16)
     slot_elems = 128 * 576
     nope_cache = torch.as_strided(
         raw_cache,
@@ -310,7 +310,11 @@ def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(mon
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
-    worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16))
+    worker.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=SimpleNamespace(model_type="kimi_k31")),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16),
+    )
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
     worker.kv_cache_config = config
@@ -334,6 +338,9 @@ def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(mon
     assert metadata.indexer_replication_sizes == [0]
     assert metadata.cp_kv_cache_interleave_size == 16
     assert metadata.block_size_scales == [[1]]
+    assert metadata.kimi_k31_bf16_geometry == [
+        (("torch.bfloat16", (128, 1, 512), (512, 512, 1)), ("torch.bfloat16", (128, 1, 64), (64, 64, 1)))
+    ]
 
 
 def test_component_major_mla_binding_rejects_token_interleaved_parent() -> None:

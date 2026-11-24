@@ -8,6 +8,8 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 import torch
+from vllm.config import get_current_vllm_config, set_current_vllm_config
+from vllm.config.attention import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
@@ -15,6 +17,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dflash.aclgraph as aclgraph_module
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as speculator_module
+from vllm_ascend.attention.attention_v1 import AscendKimiK31GQADraftAttentionBackend
 from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
@@ -63,11 +66,64 @@ def test_set_attn_preserves_cache_group_order(monkeypatch):
     speculator = _speculator(vllm_config=vllm_config, draft_attn_layer_names={"draft.2", "draft.0"})
     cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["draft.2", "target.0", "draft.0"])])
 
-    speculator.set_attn(None, cache, None, None, None)
+    speculator.set_attn(None, cache, SimpleNamespace(cp_size=1), None, None)
 
     assert list(speculator.attn_backends) == ["draft.2", "draft.0"]
     assert speculator._context_slot_mappings.dtype == torch.int32
     assert active_context == []
+
+
+def test_set_attn_shares_buffers_with_dcp8_target_using_local_draft_slots(monkeypatch):
+    target_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=8, cp_kv_cache_interleave_size=1664),
+        attention_config=AttentionConfig(use_non_causal=False),
+        cache_config=SimpleNamespace(block_size=1664),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k31")),
+        speculative_config=SimpleNamespace(
+            method="dspark", draft_model_config=SimpleNamespace(architectures=["Qwen3DSparkModel"])
+        ),
+    )
+    speculator = _speculator(vllm_config=target_config, requires_non_causal=False, draft_attn_layer_names={"draft.swa"})
+    speculator._init_dcp()
+    assert not speculator.use_dcp and speculator.dcp_manager is None
+    tables = SimpleNamespace(
+        cp_size=8,
+        cp_rank=6,
+        cp_interleave=1664,
+        slot_mappings=torch.zeros((2, 8), dtype=torch.int32),
+        input_block_tables=(object(), object()),
+    )
+    backend = AscendKimiK31GQADraftAttentionBackend
+
+    def parent_set_attn(self, model_state, config, block_tables, *args):
+        assert get_current_vllm_config().parallel_config.decode_context_parallel_size == 1
+        assert (block_tables.cp_size, block_tables.cp_rank, block_tables.cp_interleave) == (1, 0, 1)
+        assert block_tables.slot_mappings is tables.slot_mappings
+        assert block_tables.input_block_tables is tables.input_block_tables
+        self._context_slot_mappings = torch.zeros(8, dtype=torch.int64)
+        self.attn_groups = [[], [SimpleNamespace(backend=backend)]]
+
+    monkeypatch.setattr(speculator_module.DSparkSpeculator, "set_attn", parent_set_attn)
+    monkeypatch.setattr(
+        speculator_module,
+        "get_layers_from_vllm_config",
+        lambda cfg, kind, names: {name: SimpleNamespace(get_attn_backend=lambda: backend) for name in names},
+    )
+    prepare = MagicMock()
+    monkeypatch.setattr("vllm_ascend.worker.v2.spec_decode.dflash.speculator.prepare_dflash_inputs_triton", prepare)
+    monkeypatch.setattr(speculator_module.dflash_speculator, "prepare_dflash_inputs", None)
+    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["target.0", "draft.swa"])])
+    with set_current_vllm_config(target_config):
+        speculator.set_attn(None, cache, tables, None, None)
+        assert get_current_vllm_config() is target_config
+    assert (tables.cp_size, tables.cp_rank, tables.cp_interleave) == (8, 6, 1664)
+    assert speculator.attn_architecture == "GQA"
+    assert speculator._context_slot_mappings.dtype == torch.int32
+
+    prepare_inputs = speculator_module.dflash_speculator.prepare_dflash_inputs
+    prepare_inputs(*([None] * 16), object(), 128, 0, 1, 1, 0, 3, 3, 1, 8, 4096)
+    assert prepare.call_args.args[17:21] == (128, 0, 1, 1)
+    assert prepare.call_args.kwargs["kv_cache_block_size"] == 128
 
 
 @pytest.mark.parametrize("architecture", ["GQA", "MLA"])

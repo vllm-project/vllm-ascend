@@ -32,7 +32,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_dcp_size, is_prefix_cacheable
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
@@ -179,7 +179,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
                 dcp_world_size=(
-                    1 if isinstance(_manager_spec(kv_cache_group.kv_cache_spec), MambaSpec) else dcp_world_size
+                    1
+                    if isinstance(_manager_spec(kv_cache_group.kv_cache_spec), MambaSpec)
+                    else get_kv_cache_dcp_size(kv_cache_group.kv_cache_spec, dcp_world_size)
                 ),
                 pcp_world_size=1,
                 max_in_flight_tokens=token_budget,
@@ -266,9 +268,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         block_size = kv_cache_spec.block_size
         if isinstance(kv_cache_spec, MambaSpec):
             return block_size
-        if self.dcp_world_size > 1:
-            block_size *= self.dcp_world_size
-        return block_size
+        return block_size * get_kv_cache_dcp_size(kv_cache_spec, self.dcp_world_size)
 
     def verify_and_split_kv_cache_groups(self) -> None:
         """
@@ -433,7 +433,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
-                    dcp_world_size=self.dcp_world_size,
+                    dcp_world_size=get_kv_cache_dcp_size(spec, self.dcp_world_size),
                     pcp_world_size=1,
                 )
                 hit_blocks, _new_hit_length = hit_result
@@ -495,7 +495,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 kv_cache_spec=spec,
                 drop_eagle_block=use_eagle and not self.skips_eagle_block_drop,
                 alignment_tokens=self._cache_hit_alignment_tokens,
-                dcp_world_size=self.dcp_world_size,
+                dcp_world_size=get_kv_cache_dcp_size(spec, self.dcp_world_size),
                 pcp_world_size=1,
             )
             for gid, blks in zip(group_ids, blocks):
@@ -545,7 +545,11 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     # their independent manager geometry when prefix caching is disabled too.
     num_cacheable_groups = sum(is_prefix_cacheable(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
     has_private_groups = 0 < num_cacheable_groups < len(kv_cache_config.kv_cache_groups)
-    if _is_deepseek_v4_kv_cache_config(kv_cache_config) or has_private_groups:
+    has_local_draft_groups = any(
+        get_kv_cache_dcp_size(group.kv_cache_spec, dcp_world_size) != dcp_world_size
+        for group in kv_cache_config.kv_cache_groups
+    )
+    if _is_deepseek_v4_kv_cache_config(kv_cache_config) or has_private_groups or has_local_draft_groups:
         return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
     if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:

@@ -1,9 +1,30 @@
 import torch
 import torch.nn.functional as F
+from vllm.config import get_current_vllm_config_or_none
+from vllm.distributed import get_dcp_group
+from vllm.model_executor.models import qwen3_dflash
 from vllm.model_executor.models.qwen3_dflash import (
     DFlashQwen3ForCausalLM,
     DFlashQwen3Model,
 )
+
+from vllm_ascend.attention.attention_v1 import AscendKimiK31GQADraftAttentionBackend
+from vllm_ascend.core.kv_cache_interface import uses_kimi_k31_gqa_draft
+
+_original_dflash_attention = qwen3_dflash.Attention
+
+
+def _create_dflash_attention(*args, **kwargs):
+    # Bind the CP1 backend at construction. The target's cache initialization
+    # later asks this same backend class for the draft layer's metadata builder.
+    config = get_current_vllm_config_or_none()
+    if config is not None and uses_kimi_k31_gqa_draft(config):
+        if config.parallel_config.decode_context_parallel_size == 1 and get_dcp_group().world_size > 1:
+            kwargs["attn_backend"] = AscendKimiK31GQADraftAttentionBackend
+    return _original_dflash_attention(*args, **kwargs)
+
+
+qwen3_dflash.Attention = _create_dflash_attention
 
 
 def precompute_and_store_context_kv(

@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import (
     AscendGQADraftFullAttentionSpec,
     AscendGQADraftSlidingWindowSpec,
+    get_kv_cache_dcp_size,
     is_prefix_cacheable,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
@@ -131,6 +132,23 @@ def _ascend_resolve_kv_cache_block_sizes(
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
+    if any(get_kv_cache_dcp_size(group.kv_cache_spec, dcp) != dcp for group in groups):
+        group_spans = [
+            group.kv_cache_spec.block_size
+            * (1 if isinstance(group.kv_cache_spec, MambaSpec) else get_kv_cache_dcp_size(group.kv_cache_spec, dcp))
+            for group in groups
+        ]
+        scheduler_block_size = math.lcm(*group_spans)
+        if not (cache_config.enable_prefix_caching or vllm_config.kv_transfer_config is not None) or any(
+            isinstance(group.kv_cache_spec, MambaSpec) and group.kv_cache_spec.mamba_cache_mode != "align"
+            for group in groups
+        ):
+            return scheduler_block_size, scheduler_block_size
+        hashing_spans = [span for group, span in zip(groups, group_spans) if is_prefix_cacheable(group.kv_cache_spec)]
+        hash_block_size = cache_config.prefix_match_unit or math.gcd(*hashing_spans)
+        if any(span % hash_block_size for span in hashing_spans):
+            raise ValueError(f"Invalid prefix_match_unit={hash_block_size} for KV cache group spans {hashing_spans}.")
+        return scheduler_block_size, hash_block_size
     cacheable_groups = [group for group in groups if is_prefix_cacheable(group.kv_cache_spec)]
     filtered_private_groups = bool(cacheable_groups) and len(cacheable_groups) != len(groups)
     if filtered_private_groups and not is_deepseek_v41_cache(groups):
@@ -738,6 +756,26 @@ vllm.v1.core.kv_cache_utils.validate_kv_cache_layout = _validate_kv_cache_layout
 import vllm.v1.engine.core  # noqa: E402
 
 vllm.v1.engine.core.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
+_orig_update_engine_kv_cache_capacity = vllm.v1.engine.core.update_kv_cache_capacity
+
+
+def _update_engine_kv_cache_capacity(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> None:
+    dcp = vllm_config.parallel_config.decode_context_parallel_size
+    groups = kv_cache_config.kv_cache_groups
+    if any(get_kv_cache_dcp_size(group.kv_cache_spec, dcp) != dcp for group in groups):
+        # EngineCore picks the smallest physical block across all groups.
+        # Its subsequent interleave validation must use the sharded target
+        # block, not a smaller local draft page.
+        vllm_config.cache_config.block_size = min(
+            group.kv_cache_spec.block_size
+            for group in groups
+            if isinstance(group.kv_cache_spec, FullAttentionSpec)
+            and get_kv_cache_dcp_size(group.kv_cache_spec, dcp) == dcp
+        )
+    _orig_update_engine_kv_cache_capacity(vllm_config, kv_cache_config)
+
+
+vllm.v1.engine.core.update_kv_cache_capacity = _update_engine_kv_cache_capacity
 
 
 def _uses_paired_sfa_groups(groups: list[KVCacheGroupSpec]) -> bool:

@@ -38,6 +38,7 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
+    CacheTensorGeometry,
     MooncakeConnectorMetadata,
     MooncakeTransferMetadata,
 )
@@ -47,6 +48,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     as_kv_cache_tensors,
     collect_configured_register_regions,
+    uses_kimi_k31_bf16_cache,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
     global_te,
@@ -286,6 +288,8 @@ class MooncakeBaseConnectorWorker:
         indexer_replication_sizes: list[int] = []
         configured_layer_names: set[str] = set()
         kimi_c8_contracts: list[tuple[str, float] | None] = []
+        kimi_k31_bf16_geometry: list[tuple[CacheTensorGeometry, ...]] = []
+        kimi_k31_bf16 = uses_kimi_k31_bf16_cache(self.vllm_config)
 
         for tensor_config in self.kv_cache_config.kv_cache_tensors:
             for layer_name in get_kv_cache_tensor_layers(tensor_config):
@@ -314,6 +318,10 @@ class MooncakeBaseConnectorWorker:
                 spec_index = self.layer_name_to_spec_index[layer_name]
                 spec = self.kv_cache_specs[spec_index]
                 caches = as_kv_cache_tensors(cache_or_caches)
+                if kimi_k31_bf16:
+                    kimi_k31_bf16_geometry.append(
+                        tuple((str(cache.dtype), tuple(cache.shape[1:]), cache.stride()[1:]) for cache in caches)
+                    )
                 if isinstance(spec, (AscendGQADraftFullAttentionSpec, AscendGQADraftSlidingWindowSpec)):
                     self._validate_gqa_draft_cache(layer_name, spec, caches)
                 contract = None
@@ -423,6 +431,7 @@ class MooncakeBaseConnectorWorker:
             local_ip=self.side_channel_host,
             handshake_port=self.handshake_port,
             kimi_c8_contracts=kimi_c8_contracts,
+            kimi_k31_bf16_geometry=kimi_k31_bf16_geometry,
         )
         self.transfer_metadata = transfer_metadata
         self.xfer_handshake_metadata = transfer_metadata

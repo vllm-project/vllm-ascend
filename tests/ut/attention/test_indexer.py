@@ -16,6 +16,7 @@ from vllm_ascend.attention.indexer import (
     AscendSFAIndexerBackend,
     AscendSFAIndexerMetadata,
     AscendSFAIndexerMetadataBuilder,
+    _uses_kimi_k31_bf16_indexer,
 )
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.device_op import A5DeviceAdaptor
@@ -247,6 +248,61 @@ def test_sharded_indexer_pcp_request_capacity(mock_cos_sin, native, rows):
         else:
             metadata = builder.build(0, common)
             torch.testing.assert_close(metadata.actual_seq_lengths_key, expected_lengths)
+
+
+@pytest.mark.parametrize(
+    "target,model_dtype,indexer_dtype,enabled",
+    [
+        ("kimi_k31", torch.bfloat16, "bf16", True),
+        ("kimi_k31", torch.bfloat16, "auto", True),
+        ("kimi_k31", torch.bfloat16, "fp8", False),
+        ("kimi_k31", torch.float16, "bf16", False),
+        ("kimi_k3", torch.bfloat16, "bf16", False),
+    ],
+)
+def test_kimi_k31_bf16_sharded_indexer_and_graph_policy(target, model_dtype, indexer_dtype, enabled):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=target), dtype=model_dtype),
+        attention_config=SimpleNamespace(indexer_kv_dtype=indexer_dtype),
+        speculative_config=None,
+    )
+    assert _uses_kimi_k31_bf16_indexer(config) is enabled
+    with patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=True):
+        expected = AttentionCGSupport.NEVER if enabled else AttentionCGSupport.UNIFORM_BATCH
+        assert AscendSFAIndexerMetadataBuilder.get_cudagraph_support(config, MagicMock()) is expected
+
+
+@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
+def test_bf16_sharded_builder_uses_causal_lengths_instead_of_native_qli(mock_cos_sin):
+    builder = _make_builder(dcp_size=8, physical_block_size=768)
+    builder.use_dcp = False
+    builder.use_sharded_dcp = True
+    builder.use_sharded_bf16 = True
+    builder.vllm_config.parallel_config.cp_kv_cache_interleave_size = 768
+    mock_cos_sin.return_value = (torch.zeros(4, 1, 1, 8), torch.zeros(4, 1, 1, 8))
+    common = _make_common_metadata()
+    common.max_seq_len = 8 * 768 + 768 + 130
+    common.block_table_tensor = torch.arange(24, dtype=torch.int32).view(3, 8)
+
+    ops: Any = ModuleType("vllm_ascend.ops.triton.sharded_indexer")
+    ops.build_local_key_lengths = Mock()
+    ops.build_local_lengths = Mock()
+    group = SimpleNamespace(world_size=8, rank_in_group=1)
+    with (
+        patch.dict("sys.modules", {ops.__name__: ops}),
+        patch("vllm_ascend.attention.indexer.get_dcp_group", return_value=group),
+        builder.defer_device_metadata(),
+    ):
+        metadata = builder.build(0, common)
+
+    ops.build_local_lengths.assert_called_once()
+    assert ops.build_local_lengths.call_args.args[-3:] == (8, 1, 768)
+    ops.build_local_key_lengths.assert_not_called()
+    assert metadata.local_visible_lengths.shape == (4, 1)
+    assert metadata.qli_dcp_args is None
+    assert builder.take_device_metadata_tasks() == ()
+    assert metadata.first_valid_indexer_page == 6
+    assert metadata.max_local_indexer_pages == 8
 
 
 @patch("vllm_ascend.attention.indexer.get_ascend_config")

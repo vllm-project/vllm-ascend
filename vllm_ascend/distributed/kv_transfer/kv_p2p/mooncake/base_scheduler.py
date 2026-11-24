@@ -27,7 +27,8 @@ from vllm_ascend.ascend_config import (
     init_ascend_config,
     is_kimi_c8_config,
 )
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_dcp_size, is_circular_kv_cache_spec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import uses_kimi_k31_bf16_cache
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -48,6 +49,7 @@ class MooncakeBaseConnectorScheduler:
 
         self.vllm_config = vllm_config
         self._kimi_c8_enabled = is_kimi_c8_config(vllm_config)
+        self._kimi_k31_bf16 = uses_kimi_k31_bf16_cache(vllm_config)
         self.kv_transfer_config = vllm_config.kv_transfer_config
         if self.kv_transfer_config.is_kv_consumer == self.kv_transfer_config.is_kv_producer:
             raise ValueError(
@@ -137,7 +139,7 @@ class MooncakeBaseConnectorScheduler:
                 transfer_block_ids.append(blocks)
             elif any(isinstance(spec, MambaSpec) for spec in group_specs):
                 mamba_spec = next(spec for spec in group_specs if isinstance(spec, MambaSpec))
-                if not getattr(self, "_kimi_c8_enabled", False):
+                if not (getattr(self, "_kimi_c8_enabled", False) or getattr(self, "_kimi_k31_bf16", False)):
                     tail_blocks = mamba_spec.num_speculative_blocks
                     transfer_block_ids.append(blocks[:-tail_blocks] if tail_blocks else blocks)
                     continue
@@ -153,16 +155,22 @@ class MooncakeBaseConnectorScheduler:
                             f"prompt_len={prompt_len}, block_size={block_size}, "
                             f"required_block_count={state_blocks}, available_block_count={len(blocks)}"
                         )
-                    transfer_block_ids.append(blocks[state_blocks - 1 : state_blocks])
+                    state_block = blocks[state_blocks - 1]
+                    if getattr(self, "_kimi_k31_bf16", False) and state_block <= 0:
+                        raise RuntimeError(f"Mooncake Kimi K3.1 checkpoint is missing at prompt length {prompt_len}")
+                    transfer_block_ids.append([state_block])
                 elif mamba_spec.num_speculative_blocks > 0:
                     transfer_block_ids.append(blocks[: -mamba_spec.num_speculative_blocks])
                 else:
                     transfer_block_ids.append(blocks)
             else:
-                # SWA remains TP-sharded/replicated and keeps its original
-                # logical block size even when FullAttention uses DCP.
-                cp_size = (
-                    1 if all(isinstance(spec, SlidingWindowSpec) for spec in group_specs) else max(1, self.dcp_size)
+                # SWA and GQA draft caches retain TP-local block geometry.
+                cp_size = max(
+                    (
+                        1 if isinstance(spec, SlidingWindowSpec) else get_kv_cache_dcp_size(spec, self.dcp_size)
+                        for spec in group_specs
+                    ),
+                    default=1,
                 )
                 num_prompt_blocks = cdiv(prompt_len, block_size * cp_size)
                 transfer_block_ids.append(blocks[:num_prompt_blocks])
@@ -170,8 +178,8 @@ class MooncakeBaseConnectorScheduler:
 
     def _state_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """Return the prompt token count transferred for stateful models."""
-        if self.need_truncate and num_prompt_tokens > 1:
-            return num_prompt_tokens - 1
+        if self.need_truncate and (num_prompt_tokens > 1 or getattr(self, "_kimi_k31_bf16", False)):
+            return max(0, num_prompt_tokens - 1)
         return num_prompt_tokens
 
     def _truncate_request_for_prefill(self, request: "Request") -> None:

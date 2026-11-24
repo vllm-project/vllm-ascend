@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Mapping, Sequence
+from copy import copy
 from typing import Any, cast
 
 import numpy as np
@@ -35,6 +36,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_lay
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, all_mla_use_flashmla
+from vllm_ascend.core.kv_cache_interface import uses_kimi_k31_gqa_draft, with_kimi_k31_gqa_draft_dcp_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextChunk,
     initialize_draft_context_chunk,
@@ -87,6 +89,10 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             vllm_config=self.attn_vllm_config,
             use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
         )
+
+    @property
+    def attn_vllm_config(self) -> VllmConfig:
+        return with_kimi_k31_gqa_draft_dcp_config(super().attn_vllm_config)
 
     def load_draft_model(
         self,
@@ -220,12 +226,21 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         target_input_buffers: Any,
         target_attn_groups: Any,
     ) -> None:
-        # Initialize the draft attention backend with its PCP=1 config.
-        with set_current_vllm_config(self.attn_vllm_config):
+        draft_config = self.attn_vllm_config
+        draft_block_tables = block_tables
+        uses_local_draft = block_tables.cp_size > 1 and uses_kimi_k31_gqa_draft(self.vllm_config)
+        if uses_local_draft:
+            # Share the same block IDs and graph-stable tensors. Only the
+            # token-to-slot geometry differs for this draft's own groups.
+            draft_block_tables = copy(block_tables)
+            draft_block_tables.cp_size = 1
+            draft_block_tables.cp_rank = 0
+            draft_block_tables.cp_interleave = 1
+        with set_current_vllm_config(draft_config):
             super().set_attn(
                 model_state,
                 kv_cache_config,
-                block_tables,
+                draft_block_tables,
                 target_input_buffers,
                 target_attn_groups,
             )
@@ -257,7 +272,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             # Read each draft MLA layer's final backend selection.
             self._draft_mla_uses_device_lengths = self.attn_architecture == "MLA" and all_mla_use_flashmla(self.model)
             dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(
-                self.vllm_config.cache_config.block_size
+                None if uses_local_draft else self.vllm_config.cache_config.block_size
             )
 
     def _prepare_draft_dcp_metadata_inputs(

@@ -16,10 +16,12 @@ from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_pro
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import (
     NPUPlatform,
+    _configure_kimi_k31_bf16_dcp_eager,
     _setup_compile_backend,
     _validate_deepseek_v4_tp_config,
     _validate_draft_decode_context_parallel_config,
     _validate_eplb_config,
+    _validate_kimi_k31_bf16_dcp,
     _validate_parallel_config,
     _validate_pcp_dcp_config,
     _validate_routing_replay_config,
@@ -281,6 +283,66 @@ def test_eagle3_gqa_pcp_dcp_skips_tp_only_head_limit():
     )
 
     _validate_draft_decode_context_parallel_config(vllm_config)
+
+
+def _make_kimi_k31_bf16_dcp_config():
+    return SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k31"), dtype=torch.bfloat16),
+        use_v2_model_runner=True,
+        cache_config=SimpleNamespace(cache_dtype="bfloat16"),
+        additional_config={"mla_cache_mode": "C16"},
+        attention_config=SimpleNamespace(indexer_kv_dtype="bf16"),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=8,
+            prefill_context_parallel_size=1,
+            pipeline_parallel_size=1,
+            tensor_parallel_size=8,
+        ),
+        speculative_config=SimpleNamespace(
+            method="dspark",
+            num_speculative_tokens_per_batch_size=None,
+            draft_parallel_config=None,
+            draft_tensor_parallel_size=8,
+            draft_model_config=SimpleNamespace(
+                use_mla=False,
+                architectures=["Qwen3DSparkModel"],
+                model_arch_config=SimpleNamespace(total_num_attention_heads=96),
+                get_total_num_kv_heads=lambda: 16,
+            ),
+        ),
+    )
+
+
+def test_kimi_k31_bf16_dcp_accepts_gqa_draft_with_tp_heads():
+    config = _make_kimi_k31_bf16_dcp_config()
+    assert _validate_kimi_k31_bf16_dcp(config)
+    _validate_draft_decode_context_parallel_config(config)
+    assert config.parallel_config.decode_context_parallel_size == 8
+
+
+def test_kimi_k31_bf16_dcp_disables_target_and_draft_graphs():
+    config = _make_kimi_k31_bf16_dcp_config()
+    config.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
+    _configure_kimi_k31_bf16_dcp_eager(config)
+    assert config.model_config.enforce_eager
+    assert config.speculative_config.enforce_eager
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+
+
+@pytest.mark.parametrize("cache_dtype", ["fp8", "int8"])
+def test_kimi_k31_bf16_dcp_rejects_other_main_cache_formats(cache_dtype):
+    config = _make_kimi_k31_bf16_dcp_config()
+    config.cache_config.cache_dtype = cache_dtype
+    with pytest.raises(ValueError, match="BF16 activations and main KV"):
+        _validate_kimi_k31_bf16_dcp(config)
+
+
+@pytest.mark.parametrize("field,value", [("draft_tensor_parallel_size", 1), ("method", "eagle3")])
+def test_kimi_k31_dcp_keeps_tp_validation_for_other_drafts(field, value):
+    config = _make_kimi_k31_bf16_dcp_config()
+    setattr(config.speculative_config, field, value)
+    with pytest.raises(ValueError, match="draft model parallel config|a TP8 draft"):
+        _validate_draft_decode_context_parallel_config(config)
 
 
 @pytest.mark.parametrize("model_role", ["target", "draft", "alias", "non_speculative"])

@@ -34,6 +34,7 @@ from vllm.logger import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
+from vllm_ascend.core.kv_cache_interface import uses_kimi_k31_gqa_draft
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
 )
@@ -53,6 +54,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import (
     MooncakeKVConnectorStats,
     MooncakePromMetrics,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import uses_kimi_k31_bf16_cache
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
@@ -67,7 +69,9 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
-        return True
+        # The request exposes one local token count. It cannot represent a
+        # shorter local hit for either of the independent GQA draft groups.
+        return not (uses_kimi_k31_bf16_cache(self._vllm_config) and uses_kimi_k31_gqa_draft(self._vllm_config))
 
     def __init__(
         self,
@@ -102,13 +106,7 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         if model_config.use_mla:
             # A pure MLA cache has no separate head dimension. Kimi K3.1 can
             # also have a GQA DSpark draft whose KV transfer is head-strided.
-            speculative = getattr(vllm_config, "speculative_config", None)
-            draft = getattr(speculative, "draft_model_config", None)
-            if not (
-                getattr(getattr(model_config, "hf_config", None), "model_type", None) == "kimi_k31"
-                and getattr(speculative, "method", None) == "dspark"
-                and "Qwen3DSparkModel" in getattr(draft, "architectures", ())
-            ):
+            if not uses_kimi_k31_gqa_draft(vllm_config):
                 return None
 
         logger.info_once("MooncakeConnector is setting the KV cache layout to HND for direct D2D transfer.")

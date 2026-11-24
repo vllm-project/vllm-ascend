@@ -20,6 +20,7 @@ from vllm_ascend.ascend_forward_context import (
     use_cann_megamoe,
 )
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_dcp_size
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 from vllm_ascend.worker.v2.moe_utils import (
     V2MoEPhaseMetadata,
@@ -158,7 +159,11 @@ def initialize_kv_cache(
         spec = kv_cache_group.kv_cache_spec
         block_sizes.append(spec.block_size)
         layer_spec = spec.first_spec if isinstance(spec, upstream.UniformTypeKVCacheSpecs) else spec
-        slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
+        # Local DSpark writes its slots during propose, using the same table
+        # with its own CP geometry. Target DCP must never index that row.
+        slot_mapping_enabled.append(
+            layer_spec.uses_slot_mapping and get_kv_cache_dcp_size(spec, self.dcp_size) == self.dcp_size
+        )
         # Let each cache type account for CP. Attention KV is DCP-sharded,
         # while Mamba/GDN recurrent state is replicated across DCP ranks.
         max_num_blocks = spec.max_num_blocks_per_req(self.vllm_config, block_table_max_model_len)

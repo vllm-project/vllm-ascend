@@ -151,6 +151,18 @@ class AscendAttentionBackend(AttentionBackend):
         return [128]
 
 
+class AscendKimiK31GQADraftAttentionBackend(AscendAttentionBackend):
+    """GQA heads are TP-sharded and their sequences are local on every rank."""
+
+    @staticmethod
+    def get_impl_cls() -> type["AscendAttentionBackendImpl"]:
+        return AscendKimiK31GQADraftAttentionImpl
+
+    @staticmethod
+    def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
+        return AscendAttentionMetadataBuilder
+
+
 class AscendAttentionState(Enum):
     PrefillNoCache = 0
     PrefillCacheHit = 1
@@ -1337,6 +1349,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
         output[:num_tokens] = attn_output[:num_tokens]
         return output
+
+
+class AscendKimiK31GQADraftAttentionImpl(AscendAttentionBackendImpl):
+    """Local sequence attention inside a process with a sharded target."""
+
+    def __new__(cls, *args, **kwargs):
+        impl = super().__new__(cls, *args, **kwargs)
+        impl.dcp_world_size = impl.total_cp_world_size = 1
+        impl.dcp_rank = impl.total_cp_rank = 0
+        return impl
 
 
 class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):

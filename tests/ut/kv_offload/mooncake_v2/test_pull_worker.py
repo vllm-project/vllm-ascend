@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import ctypes
 import queue
 import threading
 from concurrent.futures import Future
@@ -367,6 +368,24 @@ def test_build_remote_layout_matches_layers_across_pp_ranks() -> None:
     assert thread._get_layer_remote_tp_rank_groups.call_count == 1
 
 
+def test_kimi_k31_bf16_handshake_validates_dtypes_and_inner_strides() -> None:
+    geometry = [(("torch.bfloat16", (128, 1, 128), (128, 128, 1)),)]
+    thread = make_thread()
+    thread.local_metadata = replace(thread.local_metadata, kimi_k31_bf16_geometry=geometry)
+    peer = replace(make_pp_metadata(), kimi_k31_bf16_geometry=geometry)
+    groups = make_metadata_groups(pp_metadata=peer)
+    assert thread._build_remote_transfer_layout(groups)[1] == {0: [(0, 0)]}
+
+    for peer_geometry in (
+        [],
+        [(("torch.float16", (128, 1, 128), (128, 128, 1)),)],
+        [(("torch.bfloat16", (128, 1, 128), (144, 128, 1)),)],
+    ):
+        incompatible = replace(peer, kimi_k31_bf16_geometry=peer_geometry)
+        with pytest.raises(ValueError, match="Kimi K3.1 BF16 cache geometry mismatch"):
+            thread._build_remote_transfer_layout(make_metadata_groups(pp_metadata=incompatible))
+
+
 def test_build_remote_layout_filters_kv_parallel_owners_and_keeps_mtp_replicas() -> None:
     thread = make_thread(
         layer_names=["layer.0", "layer.1", "layer.2", "layer.3", "mtp.layer"],
@@ -578,6 +597,165 @@ def test_dcp8_sharded_indexer_pd_uses_interleave_not_kernel_multiplier(rank, com
     assert result == ([(0, expected_local, expected_remote)] if tokens else [])
 
 
+@pytest.mark.parametrize("remote_dcp", [1, 8])
+@pytest.mark.parametrize("end", [768, 769, 6144, 6145])
+def test_kimi_k31_bf16_sparse_pages_follow_the_agreed_interval(remote_dcp: int, end: int) -> None:
+    page_size = 768
+    kernel_size = 128
+    scale = page_size // kernel_size
+    remote_table = list(range(100, 110))
+    local_table = [10, 11]
+    for rank in range(8):
+        thread = make_thread(tp_size=8, tp_rank=rank, dcp_size=8, dcp_rank=rank, _kimi_k31_bf16=True)
+        thread.vllm_config.parallel_config.cp_kv_cache_interleave_size = page_size
+        spec = make_sfa_indexer_spec(block_size=page_size, replication_size=1)
+        rank_groups = thread._get_layer_remote_tp_rank_groups(0, 0, spec, make_pp_metadata(), 1, 8, remote_dcp)
+        transfers = thread._compute_group_block_ids(
+            "request",
+            rank_groups,
+            remote_dcp,
+            0,
+            page_size,
+            page_size,
+            local_table,
+            local_table,
+            remote_table,
+            end + 1,
+            end,
+            0,
+            scale,
+            scale,
+            spec,
+            0,
+            page_size,
+            transfer_end=end,
+        )
+        tokens = [token for token in range(0, end, kernel_size) if token // page_size % 8 == rank]
+        expected_local = [local_table[t // (8 * page_size)] * scale + t % page_size // kernel_size for t in tokens]
+        expected_remote = [
+            remote_table[t // (remote_dcp * page_size)] * scale + t % page_size // kernel_size for t in tokens
+        ]
+        assert transfers == ([(rank if remote_dcp == 8 else 0, expected_local, expected_remote)] if tokens else [])
+
+
+def test_kimi_k31_bf16_transfers_checkpoint_from_absolute_d_table() -> None:
+    thread = make_thread(tp_size=8, tp_rank=3, dcp_size=8, dcp_rank=3)
+    spec = replace(make_mamba_spec(768), mamba_cache_mode="align", num_speculative_blocks=2)
+    assert thread._get_mamba_remote_tp_rank_groups(1, 8) == [[3]]
+    result = thread._compute_group_block_ids(
+        "request",
+        [[3]],
+        1,
+        0,
+        768,
+        768,
+        [11, 13, 14],
+        [0, 11, 13, 14],
+        [29],
+        1537,
+        1536,
+        768,
+        1,
+        1,
+        spec,
+        0,
+        768,
+        transfer_end=1536,
+    )
+    assert result == [(3, [11], [29])]
+
+
+@pytest.mark.parametrize("remote_dcp", [1, 8])
+def test_kimi_k31_bf16_copies_sparse_and_recurrent_bytes(remote_dcp: int) -> None:
+    """Read real BF16 MLA/indexer fragments and both KDA tensors into D pages."""
+    page_size, scale, rank = 768, 6, 3
+    shapes = [[(128 * 576,)], [(128, 1, 128)], [(3, 16), (2, 4, 4)]]
+    block_lens = [[128 * 576 * 2], [128 * 128 * 2], [96, 128]]
+    local_caches = [[torch.full((12, size), 255, dtype=torch.uint8) for size in layer] for layer in block_lens]
+    remote_caches = [
+        [
+            torch.arange(36 * size, dtype=torch.int32)
+            .reshape(36, size)
+            .div(size, rounding_mode="floor")
+            .to(torch.uint8)
+            + 15 * layer_index
+            + component
+            for component, size in enumerate(layer)
+        ]
+        for layer_index, layer in enumerate(block_lens)
+    ]
+    local_bases = [[cache.data_ptr() for cache in layer] for layer in local_caches]
+    remote_bases = [[cache.data_ptr() for cache in layer] for layer in remote_caches]
+    spec_mla = MLAAttentionSpec(block_size=page_size, num_kv_heads=1, head_size=576, dtype=torch.bfloat16)
+    spec_idx = make_sfa_indexer_spec(block_size=page_size, replication_size=1)
+    spec_kda = replace(make_mamba_spec(page_size), mamba_cache_mode="align", dtypes=(torch.bfloat16, torch.float32))
+    geometry = dict(
+        layer_names=["layer.0.mla", "layer.0.indexer", "layer.1.kda"],
+        layer_block_sizes=[page_size] * 3,
+        block_lens=block_lens,
+        block_strides=block_lens,
+        block_shapes=shapes,
+        block_size_scales=[[scale], [scale], [1, 1]],
+    )
+    thread = make_thread(
+        tp_size=8,
+        tp_rank=rank,
+        dcp_size=8,
+        dcp_rank=rank,
+        kv_cache_specs=[spec_mla, spec_idx, spec_kda],
+        spec_indices=[0, 1, 2],
+        group_indices=[0, 0, 1],
+        kv_caches_base_addr=local_bases,
+        local_metadata=make_transfer_metadata(base_addrs=local_bases, **geometry),
+        _kimi_k31_bf16=True,
+        **geometry,
+    )
+    thread.vllm_config.parallel_config.cp_kv_cache_interleave_size = page_size
+    peer = replace(
+        make_pp_metadata(tp_base_addrs={tp: remote_bases for tp in range(8)}, **geometry),
+        cp_kv_cache_interleave_size=page_size,
+        group_indices=[0, 0, 1],
+        indexer_replication_sizes=[0, 1, 0],
+    )
+    groups = replace(make_metadata_groups(tp_size=8, pp_metadata=peer), dcp_size=remote_dcp)
+    ranks, layer_pairs = thread._build_remote_transfer_layout(groups)
+    # Up to a half-page into rank 3, after a locally cached prefix.
+    end = 3 * page_size + 256
+    remote_table = [2, 3, 4, 5] if remote_dcp == 1 else [2]
+    request = replace(
+        make_req_meta(),
+        local_block_ids=([1], [4, 5]),
+        local_full_block_ids=([1], [0, 0, 0, 4, 5]),
+        remote_block_ids=(remote_table, [3]),
+        local_num_prompt_tokens=end + 1,
+        remote_num_prompt_tokens=end,
+        num_computed_tokens=page_size,
+        num_external_tokens=end - page_size,
+    )
+    buckets, _ = thread._build_transfer_block_buckets(peer, layer_pairs[0], ranks[0], 1, remote_dcp, {"r": request}, {})
+
+    def read(_session, destinations, sources, lengths):
+        for dst, src, size in zip(destinations, sources, lengths):
+            ctypes.memmove(dst, src, size)
+        return 0
+
+    thread.engine = MagicMock()
+    thread.engine.batch_transfer_sync_read.side_effect = read
+    for (pcp_rank, tp_rank), entries in buckets.items():
+        thread._execute_tp_transfer_bucket(0, pcp_rank, tp_rank, 1, 8, remote_dcp, peer, entries)
+
+    remote_sparse_page = remote_table[-1] * scale
+    for layer in range(2):
+        torch.testing.assert_close(
+            local_caches[layer][0][scale : scale + 2],
+            remote_caches[layer][0][remote_sparse_page : remote_sparse_page + 2],
+        )
+        assert local_caches[layer][0][scale + 2].eq(255).all()
+    for local, remote in zip(local_caches[2], remote_caches[2]):
+        torch.testing.assert_close(local[4], remote[3])
+        assert local[5].eq(255).all()
+
+
 def test_explicit_sharded_handshake_does_not_confuse_12_kernel_blocks_with_replicas():
     thread = make_thread(tp_size=8, tp_rank=3, dcp_size=8, dcp_rank=3)
     remote = replace(make_pp_metadata(block_size_scales=[[12]]), indexer_replication_sizes=[1])
@@ -748,15 +926,16 @@ def test_compute_sliding_window_blocks_uses_unhashed_suffix() -> None:
 
 
 @pytest.mark.parametrize("sliding", [False, True])
-def test_gqa_draft_pull_selects_pages_and_copies_both_hnd_planes(sliding: bool) -> None:
+@pytest.mark.parametrize("target_dcp", [1, 8])
+def test_gqa_draft_pull_selects_pages_and_copies_both_hnd_planes(sliding: bool, target_dcp: int) -> None:
     name = "model.layers.93.self_attn.attn"
-    kwargs = {"block_size": 256, "num_kv_heads": 2, "head_size": 8, "dtype": torch.bfloat16}
+    kwargs = {"block_size": 256, "num_kv_heads": 1, "head_size": 8, "dtype": torch.bfloat16}
     spec = (
         AscendGQADraftSlidingWindowSpec(**kwargs, sliding_window=512)
         if sliding
         else AscendGQADraftFullAttentionSpec(**kwargs)
     )
-    block_bytes = 4096
+    block_bytes = 2048
     local_bases = [100_000, 300_000]
     remote_bases = [500_000, 700_000]
     metadata_kwargs = dict(
@@ -764,14 +943,20 @@ def test_gqa_draft_pull_selects_pages_and_copies_both_hnd_planes(sliding: bool) 
         layer_block_sizes=[256],
         block_lens=[[block_bytes, block_bytes]],
         block_strides=[[block_bytes, block_bytes]],
-        block_shapes=[[(2, 128, 8), (2, 128, 8)]],
+        block_shapes=[[(1, 128, 8), (1, 128, 8)]],
         block_size_scales=[[2, 2]],
     )
     remote = make_pp_metadata(**metadata_kwargs, tp_base_addrs={3: [remote_bases]})
     thread = make_thread(
-        tp_rank=3, tp_size=8, kv_cache_specs=[spec], kv_caches_base_addr=[local_bases], **metadata_kwargs
+        tp_rank=3,
+        tp_size=8,
+        dcp_size=target_dcp,
+        dcp_rank=3 if target_dcp > 1 else 0,
+        kv_cache_specs=[spec],
+        kv_caches_base_addr=[local_bases],
+        **metadata_kwargs,
     )
-    rank_groups = thread._get_layer_remote_tp_rank_groups(0, 0, spec, remote, 1, 8, 1)
+    rank_groups = thread._get_layer_remote_tp_rank_groups(0, 0, spec, remote, 1, 8, target_dcp)
     assert rank_groups == [[3]]
 
     local_table = [0, 0, 11, 12] if sliding else [9, 10, 11, 12]
@@ -795,6 +980,8 @@ def test_gqa_draft_pull_selects_pages_and_copies_both_hnd_planes(sliding: bool) 
         spec,
         0,
         remote_interleave_size=128,
+        local_dcp_size=1,
+        transfer_end=1023 if target_dcp == 8 else None,
     )
     expected = (22, 44, 4) if sliding else (20, 42, 6)
     local_start, remote_start, count = expected
@@ -812,7 +999,7 @@ def test_gqa_draft_pull_selects_pages_and_copies_both_hnd_planes(sliding: bool) 
         rank,
         1,
         8,
-        1,
+        target_dcp,
         {(0, 0): [("request", local_ids, remote_ids)]},
         remote,
         local_addresses,
@@ -1101,8 +1288,9 @@ def test_transfer_bucket_separates_same_spec_layers_with_different_tp_owners() -
         request_id: str,
         remote_tp_rank_groups: list[list[int]],
         *args: object,
+        transfer_end: int | None = None,
     ) -> list[tuple[int, list[int], list[int]]]:
-        del request_id, args
+        del request_id, args, transfer_end
         return [(remote_tp_rank_groups[0][0], [10], [20])]
 
     thread._compute_group_block_ids = MagicMock(side_effect=compute_block_ids)  # type: ignore[method-assign]
