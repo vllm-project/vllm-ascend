@@ -29,6 +29,16 @@ KV Cache supports the following three external storage backends, choose the stor
 | Model | `kv_load_failure_policy=recompute` does not yet support hybrid attention models (e.g., DeepSeekV4, Qwen 3.5). |
 | Feature Mutex | On Mooncake and Memcache, `use_layerwise` on Decode requires `save_decode_cache=true`; otherwise, `use_layerwise` is supported only on Prefill. |
 
+DeepSeek V4.1 shared-source pooling supports `backend: "mooncake"` with
+`use_layerwise: true` on the Prefill node. Use Model Runner V2 and eager
+execution (`--enforce-eager`). Loads follow `kv_source_layer_ids`, preserving
+the intervening layers and their SWA tasks when bounded replay is disabled.
+With bounded replay enabled, the pool restores the prefix-cacheable resources
+and the model rebuilds SWA. The replay cut layer saves after its normal forward
+finishes writing. Mooncake uses block-key range sessions and commits completed
+objects. When composing with `MooncakeConnectorV2`, configure `use_layerwise`
+in each connector's own extra config; the V2 option selects the P/D Push protocol.
+
 **Backend-specific**
 
 === "Mooncake backend"

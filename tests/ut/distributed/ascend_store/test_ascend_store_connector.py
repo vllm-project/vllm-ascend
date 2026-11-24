@@ -17,6 +17,7 @@
 
 import types
 import unittest
+from itertools import product
 from unittest.mock import MagicMock, patch
 
 # isort: off
@@ -221,6 +222,19 @@ class TestLookupKeyServer(unittest.TestCase):
 
 
 class TestAscendStoreConnector(unittest.TestCase):
+    def test_shared_mooncake_accepts_composite_boundaries_only_when_layerwise(self):
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
+        for shared, layerwise in product((False, True), repeat=2):
+            with self.subTest(shared=shared, layerwise=layerwise):
+                config = self._make_vllm_config(extra_config={"backend": "mooncake", "use_layerwise": layerwise})
+                config.model_config.hf_text_config = types.SimpleNamespace(
+                    num_hidden_layers=40, kv_source_layer_ids=[2, 8, 14, 20] if shared else list(range(40))
+                )
+                with patch(f"{module}.create_kv_pool_worker"), patch(f"{module}.LookupKeyServer"):
+                    connector = AscendStoreConnector(config, KVConnectorRole.WORKER, None)
+                self.assertEqual(connector.supports_composite_kv_loads, shared and layerwise)
+                self.assertEqual(connector.supports_composite_kv_saves, shared and layerwise)
+
     def test_hybrid_failures_use_request_results(self):
         for layerwise in (False, True):
             with self.subTest(layerwise=layerwise):
