@@ -67,6 +67,23 @@ class AscendPCPAttentionContext:
     # Local request order, including dual-chunk duplicates and graph padding.
     local_request_state_indices: torch.Tensor | None = None
 
+    def gather_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Restore the current step's real tokens in global request order."""
+        if tokens.shape[0] != self.local_num_tokens:
+            raise ValueError("PCP gather input must include the rank-local padding")
+        gathered = get_pcp_group().all_gather(tokens.contiguous(), dim=0)
+        return gathered.index_select(0, self.hidden_restore_idx[: self.global_batch.num_tokens])
+
+    def scatter_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Return global results in padded rank-local model order."""
+        assert self.local_token_indices is not None and self.local_num_tokens is not None
+        local = tokens.index_select(0, self.local_token_indices)
+        if local.shape[0] == self.local_num_tokens:
+            return local
+        padded = tokens.new_zeros((self.local_num_tokens, *tokens.shape[1:]))
+        padded[: local.shape[0]].copy_(local)
+        return padded
+
     # Shared across steps, with storage isolated from the local Group mapping.
     _kernel_block_table_groups: dict[int, tuple[AttentionGroup, torch.Tensor | None]] = field(
         default_factory=dict, repr=False, compare=False

@@ -875,6 +875,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
         for group_id in req_meta.kv_cache_group_ids or [0]:
+            if not self.token_database.has_local_kv_group(group_id):
+                logger.debug("Skipping KV pool put for PP-local empty group: request=%s group=%d", req_id, group_id)
+                continue
             group_block_size = self._get_block_size(group_id)
 
             group_store_mask = (
@@ -1112,6 +1115,11 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             group_ids = req_meta.kv_cache_group_ids or [0]
             load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
             for group_id in group_ids:
+                if not self.token_database.has_local_kv_group(group_id):
+                    logger.debug(
+                        "Skipping KV pool async get for PP-local empty group: request=%s group=%d", req_id, group_id
+                    )
+                    continue
                 block_ids = req_meta.block_ids_by_group[group_id]
                 group_block_size = self._get_block_size(group_id)
                 mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size
@@ -1136,6 +1144,13 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                         kv_cache_group_id=group_id,
                         block_id=block_id,
                     )
+                    if not addr or len(addr) != len(size):
+                        logger.error(
+                            "Invalid KV pool async get descriptors: request=%s group=%d key=%s", req_id, group_id, key
+                        )
+                        self._mark_failed_requests([req_meta])
+                        self.set_finished_request(req_id)
+                        return
                     key_list.append(key)
                     addr_list.append(addr)
                     size_list.append(size)

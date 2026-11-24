@@ -54,13 +54,12 @@
 # --------------------------------
 # * platform/patch_replayssm_config.py:
 #   Target: VllmConfig.validate_mamba_cached_kernel and its Pydantic validator.
-#   Why: Ascend's GLM and Kimi KDA RecoverSSM paths have platform-specific
-#        cache and parallelism restrictions, and upstream does not recognize
-#        all Kimi K3.1 architecture aliases. Ascend also implements it for GLM-Next and Qwen GDN.
-#   How: Select the request-indexed KDA path from its text-config contract,
-#        validate its execution constraints and derive use_kda_recoverssm from
-#        use_replayssm. Other models and disabled configurations retain the
-#        upstream validator.
+#   Why: Ascend's GLM, Kimi KDA and Qwen GDN RecoverSSM paths have
+#        platform-specific cache and parallelism restrictions, and upstream
+#        does not recognize every supported architecture alias.
+#   How: Select the model-specific Ascend validation contract, derive
+#        use_kda_recoverssm from use_replayssm, and retain the upstream
+#        validator for other models and disabled configurations.
 #   Related PR: No upstream platform-specific ReplaySSM selector exists yet.
 #   Future plan: Remove when upstream supports the Ascend KDA configuration contract.
 # --------------------------------
@@ -68,7 +67,7 @@
 #   Target: QwenGatedDeltaNetAttention descriptors/forward and Qwen3.5/Qwen3-Next text model descriptors.
 #   Why: Qwen GDN has scalar gates and grouped Q/K heads, unlike KDA.
 #   How: Select AscendGDNRecoverSSMAttentionBackend and three paged views
-#   (conv, checkpoint, FP32 replay) only when enabled.
+#        (conv, checkpoint, FP32 replay) only when enabled.
 #        Keep use_kda_recoverssm as the paired upstream's generic lifecycle flag;
 #        the GDN builder creates its own context without patching Kimi's kernels.
 #        Text model entrypoints delegate to shared model-side config helpers,

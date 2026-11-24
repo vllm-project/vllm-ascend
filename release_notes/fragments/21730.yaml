@@ -1,0 +1,4 @@
+pr: 21730
+entries:
+  - category: bugfix
+    text: Preserved staged low-precision PLE residual rounding in native Ascend convolution kernels.

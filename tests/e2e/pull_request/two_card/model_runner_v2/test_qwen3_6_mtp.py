@@ -47,7 +47,7 @@ def _read_mtp_counters(metrics: list[Metric]) -> tuple[int, int]:
     return num_drafts, num_accepted_tokens
 
 
-def _run_mtp_case(model_name: str, is_moe: bool, use_replayssm: bool) -> tuple[int, int]:
+def _run_mtp_case(model_name: str, is_moe: bool, use_replayssm: bool) -> tuple[list[list[int]], int, int]:
     with VllmRunner(
         model_name,
         dtype="bfloat16",
@@ -98,7 +98,13 @@ def _run_mtp_case(model_name: str, is_moe: bool, use_replayssm: bool) -> tuple[i
         after = _read_mtp_counters(model.get_metrics())
 
     assert_valid_generation_outputs(outputs, len(prompt_ids), vocab_size)
-    return after[0] - before[0], after[1] - before[1]
+    token_ids = [list(output.outputs[0].token_ids) for output in outputs]
+    return token_ids, after[0] - before[0], after[1] - before[1]
+
+
+@pytest.fixture(scope="module")
+def baseline_token_ids_by_model() -> dict[str, list[list[int]]]:
+    return {}
 
 
 @pytest.mark.parametrize(
@@ -161,12 +167,20 @@ def test_qwen3_6_mtp_acceptance_tp2(
     is_moe: bool,
     expected_acceptance_length: float,
     use_replayssm: bool,
+    baseline_token_ids_by_model: dict[str, list[list[int]]],
 ) -> None:
-    num_drafts, num_accepted_tokens = _run_mtp_case(model_name, is_moe, use_replayssm)
+    # Parametrized cases can be selected or scheduled independently. Generate
+    # the disabled baseline on demand before the enabled case when necessary.
+    if use_replayssm and model_name not in baseline_token_ids_by_model:
+        baseline_token_ids, _, _ = _run_mtp_case(model_name, is_moe, use_replayssm=False)
+        baseline_token_ids_by_model[model_name] = baseline_token_ids
+
+    token_ids, num_drafts, num_accepted_tokens = _run_mtp_case(model_name, is_moe, use_replayssm)
     assert num_drafts > 0, f"{model_name}, use_replayssm={use_replayssm}: no draft activity"
     assert num_accepted_tokens > 0, f"{model_name}, use_replayssm={use_replayssm}: no accepted drafts"
 
     if not use_replayssm:
+        baseline_token_ids_by_model[model_name] = token_ids
         acceptance_length = 1 + num_accepted_tokens / num_drafts
         relative_error = abs(acceptance_length - expected_acceptance_length) / expected_acceptance_length
         assert relative_error <= ACCEPTANCE_LENGTH_RTOL, (
@@ -176,3 +190,5 @@ def test_qwen3_6_mtp_acceptance_tp2(
             f"num_drafts={num_drafts}\n"
             f"num_accepted_tokens={num_accepted_tokens}"
         )
+    else:
+        assert token_ids == baseline_token_ids_by_model[model_name]

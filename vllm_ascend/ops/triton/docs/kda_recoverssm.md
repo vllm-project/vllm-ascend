@@ -58,6 +58,14 @@
   RecoverSSM feature guide; low-level align arguments alone do not establish
   model support.
 
+KDA keeps its verify and commit implementation in
+[`kda/recoverssm.py`](../kda/recoverssm.py). GDN uses separate
+[`verify`](../gdn/gdn_recoverssm_verify.py) and
+[`commit`](../gdn/gdn_recoverssm_commit.py) kernels with its framework
+[`commit context`](../../../attention/recoverssm_gdn.py). Both paths share
+[`prepare_commit_plan`](../mamba/prepare_commit_plan.py) and
+[`compact_conv_state`](../mamba/compact_conv_state.py).
+
 ## Parameters
 
 Notation: `B` speculative requests, `T` flattened tokens, `H` local heads,

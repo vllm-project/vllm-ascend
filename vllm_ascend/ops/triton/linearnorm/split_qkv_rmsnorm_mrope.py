@@ -56,6 +56,12 @@ def split_qkv_rmsnorm_mrope_kernel(
     half_rope_dim: tl.constexpr,
     IS_PARTIAL_ROPE: tl.constexpr,
     gate_size: tl.constexpr,
+    positions_ptr=None,
+    position_stride_axis: tl.constexpr = 0,
+    position_stride_token: tl.constexpr = 0,
+    cache_stride: tl.constexpr = 0,
+    cache_rows: tl.constexpr = 0,
+    GATHER_CACHE: tl.constexpr = False,
 ):
     block_idx = tl.program_id(0)
 
@@ -121,13 +127,21 @@ def split_qkv_rmsnorm_mrope_kernel(
                 cos_offsets < mrope_section_t + mrope_section_h + mrope_section_w
             )
 
-        t_cos_offset = cos_sin_ptr + (block_offset + index) * rope_dim
-        h_cos_offset = t_cos_offset + num_tokens * rope_dim
-        w_cos_offset = h_cos_offset + num_tokens * rope_dim
-
-        t_sin_offset = cos_sin_ptr + (block_offset + index) * rope_dim + half_rope_dim
-        h_sin_offset = t_sin_offset + num_tokens * rope_dim
-        w_sin_offset = h_sin_offset + num_tokens * rope_dim
+        if GATHER_CACHE:
+            position_row = positions_ptr + (block_offset + index) * position_stride_token
+            t_pos = tl.minimum(tl.maximum(tl.load(position_row), 0), cache_rows - 1)
+            h_pos = tl.minimum(tl.maximum(tl.load(position_row + position_stride_axis), 0), cache_rows - 1)
+            w_pos = tl.minimum(tl.maximum(tl.load(position_row + 2 * position_stride_axis), 0), cache_rows - 1)
+            t_cos_offset = cos_sin_ptr + t_pos.to(tl.int64) * cache_stride
+            h_cos_offset = cos_sin_ptr + h_pos.to(tl.int64) * cache_stride
+            w_cos_offset = cos_sin_ptr + w_pos.to(tl.int64) * cache_stride
+        else:
+            t_cos_offset = cos_sin_ptr + (block_offset + index) * rope_dim
+            h_cos_offset = t_cos_offset + num_tokens * rope_dim
+            w_cos_offset = h_cos_offset + num_tokens * rope_dim
+        t_sin_offset = t_cos_offset + half_rope_dim
+        h_sin_offset = h_cos_offset + half_rope_dim
+        w_sin_offset = w_cos_offset + half_rope_dim
 
         t_cos_tensor = tl.load(t_cos_offset + cos_offsets, mask=t_mask, other=0)
         h_cos_tensor = tl.load(h_cos_offset + cos_offsets, mask=h_mask, other=0)
@@ -361,6 +375,12 @@ def triton_split_qkv_rmsnorm_mrope(
         rope_dim // 2,
         IS_PARTIAL_ROPE,
         gate_size,
+        positions_ptr=positions,
+        position_stride_axis=positions.stride(0) if positions is not None and positions.ndim == 2 else 0,
+        position_stride_token=positions.stride(-1) if positions is not None else 0,
+        cache_stride=cos_sin.stride(0),
+        cache_rows=cos_sin.shape[0],
+        GATHER_CACHE=positions is not None,
     )
 
     return q_output, k_output, v_output, gate_output

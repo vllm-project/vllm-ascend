@@ -193,13 +193,6 @@ class HostUvaBuffer:
                 dtype=torch.int64,
                 device=device,
             )
-            # Own the address table on the owning module: it is a device tensor
-            # built while the sleep-mode weights mem-pool is active, and
-            # level-2 sleep backs up nothing while restoring only
-            # ``named_buffers()``, so an unregistered table comes back empty and
-            # the gather kernel then dereferences garbage.  Registering here
-            # rather than at the call site keeps every construction covered.
-            module.register_buffer(f"{buffer_name}_ptrs", self.ptrs, persistent=False)
         except Exception as initialization_error:
             try:
                 self.close()
@@ -208,7 +201,6 @@ class HostUvaBuffer:
                 # this allocation on the exception rather than lose the only
                 # handle capable of retrying unregister/free.
                 raise HostUvaBufferCleanupError(self, initialization_error, cleanup_error) from cleanup_error
-            raise
             raise
 
     def close(self):

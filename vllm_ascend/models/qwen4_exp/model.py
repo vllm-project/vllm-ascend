@@ -14,13 +14,22 @@
 
 """Ascend wrappers for the upstream Qwen4Exp model implementation."""
 
+import torch
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
+from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
 from vllm.model_executor.models.qwen3_vl import Qwen3VLDummyInputsBuilder
 from vllm.models.qwen4_exp.amd import (
     hyperconnection as upstream_hc,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_reduce_scatter,
+    sp_shard,
+)
 from vllm_ascend.models.qwen3_5_vl import (
     AscendQwen3_5VLProcessor,
     _AscendProcessorMixin,
@@ -52,19 +61,54 @@ upstream_hc.hc_silu = hc_silu
 patch_upstream_ple_short_conv()
 
 from vllm.models.qwen4_exp.amd import model as upstream_model  # noqa: E402
-from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer  # noqa: E402
+from vllm.models.qwen4_exp.amd import ple_layer as upstream_ple  # noqa: E402
 
 from .qsa import AscendQwen4ExpQSAAttention  # noqa: E402
 
+# vLLM owns Qwen4Exp PP, HC and SP control flow. Bind only the
+# device-specific collectives and operators used by that implementation.
+upstream_model.sp_all_gather = sp_all_gather
+upstream_model.sp_reduce_scatter = sp_reduce_scatter
+upstream_model.sp_shard = sp_shard
+upstream_ple.sp_all_gather = sp_all_gather
+upstream_ple.sp_reduce_scatter = sp_reduce_scatter
+upstream_ple.sp_shard = sp_shard
 upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
 
 
-def _build_ascend_ple(config, vllm_config: VllmConfig, **kwargs) -> Qwen4ExpPLELayer:
+class AscendQwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
+    """Keep Ascend MoE outputs local to the existing SP token shard."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        reduce_results: bool = True,
+        **_: object,
+    ) -> None:
+        super().__init__(
+            vllm_config=vllm_config,
+            prefix=prefix,
+            reduce_results=reduce_results,
+        )
+        if self.replicate_shared_expert and not self.is_sequence_parallel:
+            # Match the current upstream Qwen4Exp contract: routed outputs are
+            # reduced before the replicated shared-expert output is added.
+            self.experts.moe_config.skip_final_all_reduce = False
+        config = vllm_config.model_config.hf_text_config
+        self.n_shared_experts = int(config.shared_expert_intermediate_size > 0)
+
+
+# The upstream decoder resolves this module global when constructing its MoE.
+upstream_model.Qwen4ExpSparseMoeBlock = AscendQwen4ExpSparseMoeBlock
+
+
+def _build_ascend_ple(config, vllm_config: VllmConfig, **kwargs) -> upstream_ple.Qwen4ExpPLELayer:
     # Choose the backend before PLE allocates its host table and registers
     # the layer in the static forward context.
     if vllm_config.parallel_config.prefill_context_parallel_size > 1:
         return AscendPCPPLELayer(config, vllm_config=vllm_config, **kwargs)
-    return Qwen4ExpPLELayer(config, vllm_config=vllm_config, **kwargs)
+    return upstream_ple.Qwen4ExpPLELayer(config, vllm_config=vllm_config, **kwargs)
 
 
 # The upstream decoder resolves this module global when it creates each PLE.
@@ -103,6 +147,36 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
                 name: dims for name, dims in dynamic_arg_dims.items() if name != "query_start_loc"
             }
 
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor | IntermediateTensors:
+        """Adapt the upstream PP boundary to Ascend's full-token transport."""
+        pp_group = get_pp_group()
+        if not pp_group.is_first_rank and self.use_hc_sequence_parallel and intermediate_tensors is not None:
+            hidden_states = intermediate_tensors["hidden_states"]
+            if hidden_states.shape[0] == positions.shape[-1]:
+                intermediate_tensors = IntermediateTensors(
+                    {**intermediate_tensors.tensors, "hidden_states": sp_shard(hidden_states)}
+                )
+
+        output = super().forward(
+            input_ids,
+            positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            **kwargs,
+        )
+        if not pp_group.is_last_rank and self.use_hc_sequence_parallel:
+            assert isinstance(output, IntermediateTensors)
+            hidden_states = sp_all_gather(output["hidden_states"])
+            output = IntermediateTensors({**output.tensors, "hidden_states": hidden_states[: positions.shape[-1]]})
+        return output
+
 
 # Qwen4ExpForCausalLM resolves this module global when it creates the backbone.
 upstream_model.Qwen4ExpModel = AscendQwen4ExpModel
@@ -110,6 +184,8 @@ upstream_model.Qwen4ExpModel = AscendQwen4ExpModel
 
 class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
     """Qwen3.8-Flash-Next text model using Ascend platform operators."""
+
+    pp_intermediate_tensors_are_full_tokens = True
 
     @classmethod
     def get_gdn_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
@@ -147,6 +223,8 @@ class AscendQwen4ExpProcessingInfo(_AscendProcessorMixin, upstream_model.Qwen4Ex
 class AscendQwen4ExpForConditionalGeneration(_AscendVLPreprocessMixin, upstream_model.Qwen4ExpForConditionalGeneration):
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
 
+    pp_intermediate_tensors_are_full_tokens = True
+
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
         return AscendQwen4ExpForCausalLM.get_mamba_state_shape_from_config(vllm_config)
@@ -166,4 +244,5 @@ __all__ = [
     "AscendQwen4ExpForCausalLM",
     "AscendQwen4ExpForConditionalGeneration",
     "AscendQwen4ExpModel",
+    "AscendQwen4ExpSparseMoeBlock",
 ]

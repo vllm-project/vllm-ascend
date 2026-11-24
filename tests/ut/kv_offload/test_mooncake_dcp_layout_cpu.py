@@ -77,6 +77,8 @@ def worker(request):
     w.block_size_scale = [[6], [6]]
     w.tp_size = w._prefill_tp_size = 2
     w._prefill_pp_size = 1
+    w._decode_pp_size = 1
+    w.kv_role = "kv_consumer"
     w.side_channel_port = 4000
     w.spec = {
         "kv_cache_spec_type": request.param,

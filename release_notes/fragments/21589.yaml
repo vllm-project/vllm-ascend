@@ -1,0 +1,4 @@
+pr: 21589
+entries:
+  - category: performance
+    text: Eliminated per-decode-step CPU sequence-length synchronization bubbles for Qwen3.8-Flash-Next QSA speculative decoding on Ascend.

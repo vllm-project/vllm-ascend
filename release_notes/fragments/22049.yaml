@@ -1,0 +1,4 @@
+pr: 22049
+entries:
+  - category: bugfix
+    text: Fixed AscendStore bulk KV cache pooling for pipeline-parallel hybrid-cache models whose cache groups are distributed unevenly across stages.

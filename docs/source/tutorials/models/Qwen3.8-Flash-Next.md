@@ -20,6 +20,11 @@ Qwen3.8-Flash-Next (experimental) was first supported in `vllm-ascend:v0.26.0rc`
 
 ## 2 Supported Features
 
+Prefill context parallelism (PCP) uses Model Runner V2
+(`VLLM_USE_V2_MODEL_RUNNER=1`). Set `--prefill-context-parallel-size` to the
+desired size and `--decode-context-parallel-size 1`. Both the GDN key head count
+and value head count must be divisible by `TP × PCP`.
+
 See [supported features](../../user_guide/support_matrix/supported_features.md) for feature availability and the [Feature Guide](../../user_guide/feature_guide/index.md) for configuration details.
 
 ## 3 Prerequisites
@@ -35,6 +40,8 @@ See [supported features](../../user_guide/support_matrix/supported_features.md) 
 The examples use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`. Both PD roles must load the same checkpoint.
 
 ## 4 Installation
+
+On `main`, QSA uses the upstream `cann_ops_transformer` Torch interfaces for LightningIndexerV2 and its scheduling metadata. Install the [ops-transformer Torch extension](https://gitcode.com/cann/ops-transformer/tree/master/attention/lightning_indexer_v2) and the matching CANN transformer operator library in each serving environment. Both `torch.ops.cann_ops_transformer.lightning_indexer.default` and `torch.ops.cann_ops_transformer.lightning_indexer_metadata.default` must be available. This path does not require vLLM-Ascend C++ bindings for LightningIndexerV2.
 
 ### 4.1 Docker Image Installation
 

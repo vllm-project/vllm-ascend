@@ -10,6 +10,11 @@ enforce this check, so Ascend advertises support in both lanes.
 """
 
 import pytest
+from vllm_ascend.ops.gdn_attn_builder import (
+    AscendGDNAttentionBackend,
+    AscendGDNFusedAttentionBackend,
+    AscendGDNHostMetadataBackend,
+)
 
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
 from vllm_ascend.attention.attention_c8_mxfp import AscendC8MXFPAttentionBackend

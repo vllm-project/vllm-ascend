@@ -10,6 +10,8 @@ from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.attention.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendGDNHostMetadataBuilder
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.attention.backend import AttentionMetadataBuilder as _RecurrentMetadataBuilder

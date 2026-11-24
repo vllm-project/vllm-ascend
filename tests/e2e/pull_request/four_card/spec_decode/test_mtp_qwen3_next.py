@@ -76,14 +76,20 @@ def _run_mtp_case(model_name, use_replayssm, example_prompts, max_tokens):
         after = _read_mtp_counters(model.get_metrics())
 
     assert_valid_generation_outputs(outputs, len(example_prompts), vocab_size)
+    token_ids = [list(output.outputs[0].token_ids) for output in outputs]
     num_drafts = after[0] - before[0]
     num_accepted_tokens_per_pos = [after_count - before_count for before_count, after_count in zip(before[1], after[1])]
-    return num_drafts, num_accepted_tokens_per_pos
+    return token_ids, num_drafts, num_accepted_tokens_per_pos
+
+
+@pytest.fixture(scope="module")
+def baseline_token_ids_by_model():
+    return {}
 
 
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize("use_replayssm", [False, True], ids=["replayssm_off", "replayssm_on"])
-def test_qwen3_next_mtp_acceptance_tp4(model_name, use_replayssm, monkeypatch):
+def test_qwen3_next_mtp_acceptance_tp4(model_name, use_replayssm, monkeypatch, baseline_token_ids_by_model):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     golden = [0.85, 0.46, 0.19]
 
@@ -96,15 +102,25 @@ def test_qwen3_next_mtp_acceptance_tp4(model_name, use_replayssm, monkeypatch):
 
     max_tokens = 1024
 
-    num_drafts, num_accepted_tokens_per_pos = _run_mtp_case(model_name, use_replayssm, example_prompts, max_tokens)
+    # Parametrized cases can be selected or scheduled independently. Generate
+    # the disabled baseline on demand before the enabled case when necessary.
+    if use_replayssm and model_name not in baseline_token_ids_by_model:
+        baseline_token_ids, _, _ = _run_mtp_case(model_name, False, example_prompts, max_tokens)
+        baseline_token_ids_by_model[model_name] = baseline_token_ids
+
+    token_ids, num_drafts, num_accepted_tokens_per_pos = _run_mtp_case(
+        model_name, use_replayssm, example_prompts, max_tokens
+    )
     assert num_drafts > 0, f"{model_name}, use_replayssm={use_replayssm}: no draft activity"
     assert sum(num_accepted_tokens_per_pos) > 0, f"{model_name}, use_replayssm={use_replayssm}: no accepted drafts"
 
     if not use_replayssm:
+        baseline_token_ids_by_model[model_name] = token_ids
         acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
         match = all((a >= b) or (b - a < 0.06) for a, b in zip(acceptance_per_pos, golden))
         assert match, (
             f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden} (num_drafts={num_drafts})"
         )
-
+    else:
+        assert token_ids == baseline_token_ids_by_model[model_name]
     cleanup_dist_env_and_memory()

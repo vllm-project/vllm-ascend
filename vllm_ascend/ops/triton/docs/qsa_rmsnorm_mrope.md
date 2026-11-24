@@ -71,6 +71,22 @@ The device test compares the Triton output with an independent CPU fp32 PyTorch 
 
 Both cases passed on A3 and A5 using the Qwen3.8-Next 2026-11-02 validation images.
 
+Those historical results cover the original operator, not the direct-position
+extension in PR #22086. New direct-position tests compare with legacy gathered
+inputs using `rtol=0, atol=0`, including empty rows, strided positions, clamping,
+and NPUGraph replay. The new tests currently select A3 only; execution on the
+final PR revision and compatibility on other applicable devices remain pending.
+
+Direct-gather coverage is in [test_qsa_direct_rope.py](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_direct_rope.py):
+`test_direct_rope_matches_gathered_cache` covers both shared wrappers, while
+`test_direct_rope_replay_uses_updated_positions` checks changed positions during
+graph replay. Legacy coverage is in
+[test_qsa_rmsnorm_mrope.py](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope.py).
+
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_direct_rope.py
 ```
+
+See [QSA preparation validation and specialization](qsa_preparation_validation.md)
+for the coverage matrix, remaining evidence and JIT analysis.

@@ -154,7 +154,8 @@ configuration rather than the runner input or sampling interface.
 | [qwen4_exp/fia.py](qwen4_exp/fia.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/gbsa.py](qwen4_exp/gbsa.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/hc.py](qwen4_exp/hc.py) | HyperConnection glue operators; row-block `gate_mix` is documented in [qwen4_exp_hc_gate_mix.md](docs/qwen4_exp_hc_gate_mix.md). |
-| [qwen4_exp/qsa.py](qwen4_exp/qsa.py) | Model/attention primitive or shared utility |
+| [qwen4_exp/lightning_prepare.py](qwen4_exp/lightning_prepare.py) | QSA Indexer input preparation; [operator documentation](docs/lightning_prepare.md) |
+| [qwen4_exp/qsa.py](qwen4_exp/qsa.py) | Model/attention primitive; [compressed-key preparation](docs/qsa_compress_groups_with_ratio.md) |
 | [rms_norm.py](rms_norm.py) | Model/attention primitive or shared utility |
 | [rope.py](rope.py) | Model/attention primitive or shared utility |
 | [sfa_indexer_store.py](sfa_indexer_store.py) | Indexer cache publication; see [operator documentation](docs/sfa_indexer_store.md). |

@@ -25,7 +25,11 @@ from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
-from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer, Qwen3_5ForCausalLM, Qwen3_5MoeForCausalLM
+from vllm.model_executor.models.qwen3_5 import (
+    Qwen3_5DecoderLayer,
+    Qwen3_5ForCausalLM,
+    Qwen3_5MoeForCausalLM,
+)
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention, Qwen3NextSparseMoeBlock
 
 try:
@@ -387,17 +391,14 @@ def _patch_gdn_model_state_classmethods(target):
 
 # Apply this module's patches only where the standard worker patches load:
 # patch/worker/__init__.py imports this module exclusively under
-# STANDARD_WORKER_PATCHES, and utils.enable_sp reaches enable_dense_sp
-# through a lazy import, so the guard keeps that import side-effect-free on
-# devices that exclude this patch (310P wires its GDN stack through
-# patch_idex_310 instead).
+# STANDARD_WORKER_PATCHES, and utils.enable_sp reaches enable_dense_sp through
+# a lazy import, so the guard keeps that import side-effect-free on devices
+# that exclude this patch (310P wires its GDN stack through patch_idex_310).
 if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
     if Qwen3_5MultiTokenPredictor is not None:
         Qwen3_5MultiTokenPredictor.forward = qwen3_5_mtp_forward
 
     Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
-    # Sequence-parallel decoder layout (upstream SP-MoE contract plus the dense
-    # Qwen3.5-family FlashComm SP extension) and the dense-SP layer wiring.
     Qwen3_5DecoderLayer.__init__ = _qwen3_5_decoder_layer_init_with_dense_sp
     Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
 
@@ -408,10 +409,6 @@ if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PA
     _GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
     _GDN_PATCH_TARGET.get_state_dtype = AscendGatedDeltaNetAttention.get_state_dtype
     _GDN_PATCH_TARGET.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
-    # STANDARD_WORKER_PATCHES hardware never carries the 310P-only
-    # GDN_COMPATIBILITY capability, so the former 310P branch of the GDN
-    # wiring was dead under this guard and is gone; 310P GDN is wired by
-    # patch_idex_310.py.
     _GDN_PATCH_TARGET._pack_conv_weights = AscendGatedDeltaNetAttention._pack_conv_weights
 
     @wraps(_GDN_ORIGINAL_INIT)

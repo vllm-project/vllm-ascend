@@ -25,7 +25,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
-from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
@@ -34,13 +33,11 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
 )
 from vllm.v1.worker.mamba_utils import (
     MambaSpecDecodeGPUContext,
-    get_mamba_groups,
     preprocess_mamba_align_fused_kernel,
-    validate_mamba_state_copy_funcs,
 )
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer, vllm_version_is
+from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -215,34 +212,19 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         mamba_group_ids: list[int],
         block_tables: tuple[torch.Tensor, ...],
     ) -> MambaSpecDecodeGPUContext:
-        if self._mamba_ctx is None:
-            if self._mamba_state_copy_funcs is None:
-                mamba_groups = get_mamba_groups(kv_cache_config)
-                mamba_types = {spec.mamba_type for spec in mamba_groups}
-                copy_funcs = self.model.get_mamba_state_copy_funcs(mamba_types)
-                validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
-                self._mamba_state_copy_funcs = copy_funcs
-            # vLLM #55688 counts state tensors from each layer's bindings.
-            # v0.33 still uses the constructor without forward_context.
-            context_kwargs: dict[str, Any] = {}
-            if vllm_version_is("0.33.0"):
-                context_kwargs["make_buffer"] = lambda n, dtype: CpuGpuBuffer(n, dtype=dtype, device=self.device)
-            else:
-                context_kwargs["forward_context"] = self.vllm_config.compilation_config.static_forward_context
-            self._mamba_ctx = MambaSpecDecodeGPUContext.create(
-                max_num_reqs=self.max_num_reqs,
-                kv_cache_config=kv_cache_config,
-                copy_funcs=self._mamba_state_copy_funcs,
-                device=self.device,
-                **context_kwargs,
-            )
+        """Keep the upstream request-slot block-table binding authoritative.
+
+        ``block_tables`` contains batch-ordered views. Recreating the context
+        from those views would violate the state-copy kernels' request-slot
+        contract when ``input_batch.idx_mapping`` is not an identity mapping.
+        Profiling teardown is followed by a real ``initialize_kv_cache`` call
+        before request preprocessing, which must rebuild the context instead.
+        """
         ctx = self._mamba_ctx
-        if not ctx.is_initialized:
-            ctx.initialize_from_forward_context(
-                kv_cache_config,
-                self.vllm_config.compilation_config.static_forward_context,
-                self._mamba_state_copy_funcs,
-                [block_tables[gid] for gid in mamba_group_ids],
+        if ctx is None or not ctx.is_initialized:
+            raise RuntimeError(
+                "Mamba align context must be initialized with persistent request-slot "
+                "block tables by initialize_kv_cache before preprocessing requests."
             )
         return ctx
 

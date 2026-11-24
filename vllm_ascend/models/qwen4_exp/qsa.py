@@ -145,6 +145,18 @@ def _compress_qsa_groups(
     )
 
 
+class QSAIndexerMetadataProtocol(Protocol):
+    """Metadata fields consumed by the Ascend sparse QSA implementation."""
+
+    num_actual_tokens: int
+    block_table: torch.Tensor
+    slot_mapping: torch.Tensor
+    token_to_req: torch.Tensor
+    logical_positions: torch.Tensor
+    query_start_loc: torch.Tensor
+    seq_lens: torch.Tensor
+
+
 def _qsa_cache_is_bound(kv_cache: QSAKVCache) -> bool:
     return isinstance(kv_cache, tuple) and all(cache.numel() for cache in kv_cache)
 
