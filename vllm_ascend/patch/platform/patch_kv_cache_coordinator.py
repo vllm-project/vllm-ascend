@@ -35,8 +35,6 @@ from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
 if vllm_version_is("0.34.0"):
     from vllm.v1.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
-else:
-    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
 if vllm_version_is("0.34.0"):
     from vllm.v1.kv_cache_interface import (
@@ -616,66 +614,6 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
 class _NativeHybridKVCacheCoordinator(upstream.HybridKVCacheCoordinator):
     """Use native cache managers with Ascend's prefix lookup policy."""
 
-    def __init__(
-        self,
-        kv_cache_config,
-        max_model_len,
-        max_in_flight_tokens,
-        use_eagle,
-        enable_caching,
-        enable_kv_cache_events,
-        dcp_world_size,
-        pcp_world_size,
-        scheduler_block_size,
-        hash_block_size,
-        metrics_collector=None,
-        num_hash_lookahead_tokens=0,
-        num_prefill_lookahead=0,
-        allow_partial_hash_hits=True,
-    ):
-        # Draft models have no Mamba layers. Preserve the full-attention-only
-        # fallback without reconstructing Core's manager instances or groups.
-        if use_eagle and not any(group.is_eagle_group for group in kv_cache_config.kv_cache_groups):
-            kv_cache_config = copy(kv_cache_config)
-            kv_cache_config.kv_cache_groups = [
-                replace(group, is_eagle_group=issubclass(group.manager_cls, FullAttentionManager))
-                for group in kv_cache_config.kv_cache_groups
-            ]
-        self.skips_eagle_block_drop = _skips_eagle_block_drop(getattr(kv_cache_config, "kv_transfer_config", None))
-        super().__init__(
-            kv_cache_config,
-            max_model_len,
-            max_in_flight_tokens,
-            use_eagle,
-            enable_caching,
-            enable_kv_cache_events,
-            dcp_world_size,
-            pcp_world_size,
-            scheduler_block_size,
-            hash_block_size,
-            metrics_collector,
-            num_hash_lookahead_tokens,
-            num_prefill_lookahead,
-            allow_partial_hash_hits,
-        )
-        if self.skips_eagle_block_drop:
-            self.drop_eagle_group_ids = set()
-        for group_id, manager in enumerate(self.single_type_managers):
-            if isinstance(manager, MambaManager):
-                manager.drop_eagle_checkpoint_block = (
-                    use_eagle and not self.skips_eagle_block_drop and group_id in self.eagle_group_ids
-                )
-
-    def verify_and_split_kv_cache_groups(self) -> None:
-        # Hybrid connector lookups still honor draft group flags for DSpark.
-        # Keep the scheduler's use_eagle value for Core's cache-write accounting.
-        write_drop_group_ids = self.drop_eagle_group_ids
-        self.drop_eagle_group_ids = set() if self.skips_eagle_block_drop else self.eagle_group_ids
-        try:
-            super().verify_and_split_kv_cache_groups()
-        finally:
-            self.drop_eagle_group_ids = write_drop_group_ids
-
     @property
     def _cache_hit_alignment_tokens(self) -> int:
         tail_alignment = lcm(
@@ -694,7 +632,6 @@ def _get_native_kv_cache_coordinator(
     kv_cache_config,
     max_model_len,
     max_in_flight_tokens,
-    use_eagle,
     enable_caching,
     enable_kv_cache_events,
     dcp_world_size,
@@ -703,7 +640,6 @@ def _get_native_kv_cache_coordinator(
     hash_block_size,
     metrics_collector=None,
     num_hash_lookahead_tokens=0,
-    num_prefill_lookahead=0,
     allow_partial_hash_hits=True,
 ):
     # Bounded-replay SWA can allocate private pages without caching a prefix.
@@ -712,7 +648,6 @@ def _get_native_kv_cache_coordinator(
         kv_cache_config,
         max_model_len,
         max_in_flight_tokens,
-        use_eagle,
         enable_caching and has_cacheable_groups,
         enable_kv_cache_events,
         dcp_world_size,
@@ -721,7 +656,6 @@ def _get_native_kv_cache_coordinator(
         hash_block_size,
         metrics_collector,
         num_hash_lookahead_tokens,
-        num_prefill_lookahead,
         allow_partial_hash_hits,
     )
 

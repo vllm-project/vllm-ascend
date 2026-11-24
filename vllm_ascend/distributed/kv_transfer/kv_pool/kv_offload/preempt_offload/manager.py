@@ -35,7 +35,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.meta
     PreemptOffloadMetadata,
     PreemptOffloadWorkerMetadata,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -113,7 +113,11 @@ class PreemptOffloadScheduler:
             kv_cache_config=self.cpu_kv_cache_config,
             max_model_len=vllm_config.model_config.max_model_len,
             max_in_flight_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
-            use_eagle=False,
+            **(
+                {"use_eagle": False}
+                if vllm_version_is("0.33.0")
+                else {"num_hash_lookahead_tokens": vllm_config.num_hash_lookahead_tokens}
+            ),
             enable_caching=self.enable_offload_prefix_caching,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=dcp_world_size,

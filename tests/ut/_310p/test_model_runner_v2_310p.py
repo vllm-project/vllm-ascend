@@ -116,6 +116,8 @@ def test_kv_zeroing_uses_narrow_310p_gate(
         SimpleNamespace(
             num_speculative_tokens=num_spec_tokens,
             use_eagle_block_drop=lambda: uses_eagle_block_drop,
+            uses_target_hidden_states=uses_eagle_block_drop,
+            method="eagle",
         )
         if num_spec_tokens
         else None

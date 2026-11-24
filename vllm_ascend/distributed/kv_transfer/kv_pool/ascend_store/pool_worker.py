@@ -88,6 +88,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
+from vllm_ascend.utils import vllm_version_is
 
 SAVE_BATCH_FAILURE_POLL_INTERVAL_S = 1.0
 DRAIN_QUEUED_SAVES_TIMEOUT_S = 60.0
@@ -229,8 +230,10 @@ class BaseKVPoolWorker(ABC):
         self._attention_saved_layers: set[int] = set()
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
         speculative_config = getattr(vllm_config, "speculative_config", None)
-        use_eagle_fn = getattr(speculative_config, "use_eagle", None)
-        self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
+        self.use_eagle = False
+        if vllm_version_is("0.33.0"):
+            use_eagle_fn = getattr(speculative_config, "use_eagle", None)
+            self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
@@ -466,6 +469,7 @@ class BaseKVPoolWorker(ABC):
             use_eagle=self.use_eagle,
             retention_interval=retention_interval,
             enable_partial_hash_hits=self.enable_partial_hash_hits,
+            num_hash_lookahead_tokens=0 if vllm_version_is("0.34.0") else vllm_config.num_hash_lookahead_tokens,
         )
 
     def _infer_group_uses_align_state(self) -> list[bool]:

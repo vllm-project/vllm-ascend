@@ -534,7 +534,9 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                     request.num_computed_tokens,
                     num_new_tokens,
                     encoder_compute_budget,
-                    shift_computed_tokens=1 if self.use_eagle else 0,
+                    shift_computed_tokens=(1 if self.use_eagle else 0)
+                    if vllm_version_is("0.33.0")
+                    else self.num_prefill_lookahead,
                 )
 
             if self.need_mamba_block_aligned_split:
@@ -926,7 +928,9 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                             num_computed_tokens,
                             num_new_tokens,
                             encoder_compute_budget,
-                            shift_computed_tokens=1 if self.use_eagle else 0,
+                            shift_computed_tokens=(1 if self.use_eagle else 0)
+                            if vllm_version_is("0.33.0")
+                            else self.num_prefill_lookahead,
                         )
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.

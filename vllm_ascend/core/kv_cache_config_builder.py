@@ -199,7 +199,6 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         return [
             KVCacheGroup.from_layers(
                 {name: replace(configs[name], spec=layout) for name, layout in get_group_layer_layouts(group).items()},
-                is_eagle_group=group.is_eagle_group or any(configs[name].is_draft for name in group.layer_names),
                 host_resident=group.host_resident,
                 enable_kv_transfer=group.enable_kv_transfer,
                 role=group.role,

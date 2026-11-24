@@ -7,7 +7,7 @@ from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule_checkpoint
-from vllm_ascend.utils import get_mamba_cache_mode
+from vllm_ascend.utils import get_mamba_cache_mode, vllm_version_is
 
 GDN_CHECKPOINT_ALIGNMENT = 64
 
@@ -18,6 +18,8 @@ def _supports_checkpoint_boundary_policy(config) -> bool:
     # Never advertise a cache page whose token boundary we cannot reproduce.
     if config.kv_transfer_config is not None:
         return False
+    if not vllm_version_is("0.33.0"):
+        return True
     spec = config.speculative_config
     return spec is None or bool(getattr(config, "num_hash_lookahead_tokens", 0)) or not spec.use_eagle_block_drop()
 

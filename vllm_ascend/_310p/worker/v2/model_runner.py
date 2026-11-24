@@ -896,9 +896,13 @@ class NPUModelRunner310V2(NPUModelRunner):
         spec_config = self.speculative_config
         if spec_config is None:
             return False
-        uses_eagle_block_drop = spec_config.use_eagle_block_drop()
+        uses_eagle_speculator = (
+            spec_config.use_eagle_block_drop()
+            if vllm_version_is("0.33.0")
+            else spec_config.uses_target_hidden_states and spec_config.method not in ("dflash", "dspark")
+        )
         return bool(
-            kv_cache_config.has_mamba_layers and uses_eagle_block_drop and spec_config.num_speculative_tokens > 1
+            kv_cache_config.has_mamba_layers and uses_eagle_speculator and spec_config.num_speculative_tokens > 1
         )
 
     def _adjust_kernel_block_sizes(self, kv_cache_config: KVCacheConfig) -> None:

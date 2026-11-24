@@ -503,7 +503,6 @@ def legacy_group_view(group) -> KVCacheGroupSpec:
     return KVCacheGroupSpec(
         layer_names=group.layer_names,
         kv_cache_spec=get_group_layout(group),
-        is_eagle_group=group.is_eagle_group,
         host_resident=group.host_resident,
         enable_kv_transfer=group.enable_kv_transfer,
         role=group.role,
