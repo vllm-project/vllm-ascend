@@ -63,6 +63,16 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
+from vllm_ascend.distributed.kv_transfer.utils.owner_transfer import (
+    OWNER_STAGE_ACK,
+    OWNER_STAGE_FAIL,
+    OWNER_STAGE_MSG,
+    OwnerBlockStageBuffer,
+    OwnerP2PStageController,
+    owner_backed_tensor,
+    owner_stage_keys,
+    owner_stage_slot_map,
+)
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
     RegisterRegions,
@@ -120,6 +130,13 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_strides: list[list[int]]
     local_ip: str = ""
     handshake_port: int = 0
+    # Set when this worker runs an owner-sharded PCP cache. The decode side
+    # pulls complete logical blocks from these registered staging regions
+    # instead of the VMM range, which contains peer-mapped pages.
+    owner_staging: bool = False
+    owner_staging_bases: list[list[int]] = msgspec.field(default_factory=list)
+    owner_staging_strides: list[list[int]] = msgspec.field(default_factory=list)
+    owner_staging_slot_bytes: int = 0
 
 
 @dataclass
@@ -277,6 +294,7 @@ class KVCacheSendingThread(threading.Thread):
         ready_event: threading.Event,
         kv_caches: dict[str, Any],
         pcp_rank: int,
+        owner_stage_controller: OwnerP2PStageController | None = None,
     ):
         super().__init__(daemon=True, name="KVCacheSendingThread")
         self.tp_rank = tp_rank
@@ -292,6 +310,7 @@ class KVCacheSendingThread(threading.Thread):
         self.ready_event = ready_event
         self.kv_caches = kv_caches
         self.pcp_rank = pcp_rank
+        self.owner_stage_controller = owner_stage_controller
         self.port_send_num: dict[str, int] = {}
 
         self.task_tracker = KVCacheTaskTracker()
@@ -381,10 +400,26 @@ class KVCacheSendingThread(threading.Thread):
                 msg = decoder.decode(payload[0])
                 if msg[0] == GET_META_MSG:
                     sock.send_multipart((identity, b"", encoded_data))
+                elif msg[0] == OWNER_STAGE_MSG:
+                    request_id = msg[1]
+                    group_blocks = msg[2]
+                    try:
+                        if self.owner_stage_controller is None:
+                            raise RuntimeError("this prefill worker did not allocate an owner staging buffer")
+                        first_slot, slot_count = self.owner_stage_controller.stage_request(request_id, group_blocks)
+                        reply = encoder.encode((OWNER_STAGE_ACK, int(first_slot), int(slot_count)))
+                    except Exception as error:
+                        logger.exception("Owner staging failed for request %s", request_id)
+                        reply = encoder.encode((OWNER_STAGE_FAIL, f"{type(error).__name__}: {error}"))
+                    sock.send_multipart((identity, b"", reply))
                 elif msg[0] == DONE_RECVING_MSG:
                     logger.debug("Got DONE_RECVING_MSG for request %s", msg[1])
                     request_id = msg[1]
                     remote_port_send_num = msg[2]
+                    if self.owner_stage_controller is not None:
+                        # The decode side read the staged copy before sending
+                        # this signal, so the slots are free again.
+                        self.owner_stage_controller.release_request(request_id)
                     if remote_port_send_num:
                         if request_id not in self.port_send_num:
                             self.port_send_num[request_id] = 0
@@ -409,7 +444,7 @@ class KVCacheSendingThread(threading.Thread):
                 else:
                     logger.error(
                         "Connection listener received unexpected message type. "
-                        "Expected: GET_META_MSG or DONE_RECVING_MSG. "
+                        "Expected: GET_META_MSG, OWNER_STAGE_MSG or DONE_RECVING_MSG. "
                         "Actual: %s. "
                         "Full message: %s. "
                         "Check: Verify message protocol implementation.",
@@ -483,6 +518,9 @@ class KVCacheRecvingThread(threading.Thread):
                         break
             self.group_compress_ratios[group_id] = compress_ratio
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
+        # Whether the prefill worker advertises registered owner-staging
+        # regions for complete logical blocks.
+        self.remote_owner_staging: dict[str, dict[int, bool]] = SizedDict()
         self.remote_block_size_scale: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_block_stride_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_kv_group2layeridx: dict[str, dict[int, dict[int, tuple[dict[str, Any], list[int]]]]] = SizedDict()
@@ -516,6 +554,7 @@ class KVCacheRecvingThread(threading.Thread):
 
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
+        self.stage_decoder = msgspec.msgpack.Decoder(type=tuple)
         self.remote_sockets_lock = threading.Lock()
         self.remote_sockets: dict[  # type: ignore
             str, deque[zmq.Socket]
@@ -897,6 +936,42 @@ class KVCacheRecvingThread(threading.Thread):
                 remote_layer_name_to_idx,
             )
 
+        with self.remote_metadata_lock:
+            owner_staging = bool(
+                getattr(self, "remote_owner_staging", {}).get(remote_engine_id, {}).get(remote_handshake_port, False)
+            )
+        owner_slot_of: dict[tuple[int, int], int] | None = None
+        if owner_staging:
+            owner_group_blocks: list[tuple[int, list[int]]] = []
+            for group_pull in group_pulls:
+                group_idx = group_pull.group_id
+                group_spec, layer_indices = self.kv_group2layeridx[group_idx]
+                if not pp_layer_indices(layer_indices, group_pull.prefill_pp_rank, group_spec):
+                    continue
+                if group_spec["kv_cache_spec_type"] == "MambaSpec":
+                    raise RuntimeError("owner-sharded KV transfer does not support Mamba KV cache groups")
+                if group_pull.num_group_pulls != 1 or group_pull.remote_tp_offset != 0:
+                    raise RuntimeError("owner-sharded KV transfer requires one complete-block pull per KV group")
+                block_id_idx = (
+                    group_idx if use_transfer_group_block_ids else group_spec.get("kv_cache_group_id", group_idx)
+                )
+                owner_group_blocks.append((group_idx, list(remote_block_ids[block_id_idx])))
+            if has_replicate_k_blocks:
+                sfa_groups = [
+                    group_id
+                    for group_id, (spec, _) in self.kv_group2layeridx.items()
+                    if spec.get("kv_cache_spec_type") == "AscendSFAIndexerCacheSpec"
+                ]
+                if len(sfa_groups) != 1:
+                    raise RuntimeError("owner-sharded SFA replicate-K transfer needs exactly one indexer group")
+                owner_group_blocks.append((sfa_groups[0], list(remote_block_ids_replicate_k[0])))
+            owner_slot_of = self._request_owner_staging(
+                remote_request_id,
+                remote_host,
+                remote_handshake_port,
+                owner_group_blocks,
+            )
+
         for group_pull in group_pulls:
             group_idx = group_pull.group_id
             group_spec, layer_indices = self.kv_group2layeridx[group_idx]
@@ -1034,7 +1109,11 @@ class KVCacheRecvingThread(threading.Thread):
                         )
                     for remote_block_id, local_block_id in zip(transfer_remote_block_ids, transfer_local_block_ids):
                         src = src_layer_base_addr + local_block_id[0] * block_stride + inner_offset * inner_block_len
-                        dst = dst_layer_base_addr + remote_block_id[0] * remote_block_stride
+                        if owner_slot_of is not None:
+                            remote_slot = owner_slot_of[(group_idx, remote_block_id[0])]
+                        else:
+                            remote_slot = remote_block_id[0]
+                        dst = dst_layer_base_addr + remote_slot * remote_block_stride
                         length = inner_block_len * len(local_block_id)
                         src_list.append(src)
                         dst_list.append(dst)
@@ -1505,10 +1584,21 @@ class KVCacheRecvingThread(threading.Thread):
                 )
             with self.remote_metadata_lock:
                 self.remote_kv_group2layeridx[engine_id][remote_handshake_port] = agent_meta.kv_group2layeridx
-                self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
+                owner_staging = bool(agent_meta.owner_staging)
+                self.remote_owner_staging[engine_id][remote_handshake_port] = owner_staging
+                if owner_staging:
+                    # The VMM range contains peer-mapped pages. Address the
+                    # registered staging regions instead; block ids are
+                    # rewritten to slot ids before the transfer is built.
+                    self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.owner_staging_bases
+                    self.remote_block_stride_per_addr[engine_id][remote_handshake_port] = (
+                        agent_meta.owner_staging_strides
+                    )
+                else:
+                    self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
+                    self.remote_block_stride_per_addr[engine_id][remote_handshake_port] = agent_meta.block_strides
                 self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
                 self.remote_block_size_scale[engine_id][remote_handshake_port] = agent_meta.block_size_scale
-                self.remote_block_stride_per_addr[engine_id][remote_handshake_port] = agent_meta.block_strides
         except Exception:
             if isinstance(sock, zmq.Socket):  # type: ignore
                 sock.close()
@@ -1518,6 +1608,42 @@ class KVCacheRecvingThread(threading.Thread):
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
                 logger.debug("Returned socket to pool for %s:%d", remote_host, remote_handshake_port)
+
+    def _request_owner_staging(
+        self,
+        request_id: str,
+        remote_host: str,
+        remote_handshake_port: int,
+        group_blocks: list[tuple[int, list[int]]],
+    ) -> dict[tuple[int, int], int]:
+        """Ask the prefill worker to stage complete logical blocks.
+
+        The prefill worker copies every requested block of every group into
+        its registered staging buffer and answers with the first slot. The
+        decode side then rewrites block ids to slots, so the transport reads
+        the complete logical block instead of a peer-mapped VMM range.
+        """
+        keys = owner_stage_keys(group_blocks)
+        sock: zmq.Socket | None = None  # type: ignore
+        path = f"{remote_host}:{remote_handshake_port}"
+        try:
+            sock = self._get_remote_socket(remote_host, remote_handshake_port)
+            stage_blocks = [[int(group), [int(block) for block in blocks]] for group, blocks in group_blocks]
+            payload = self.encoder.encode((OWNER_STAGE_MSG, request_id, stage_blocks))
+            ensure_zmq_send(sock, payload, path)
+            reply = self.stage_decoder.decode(ensure_zmq_recv(sock, path))
+            if not reply or reply[0] != OWNER_STAGE_ACK:
+                detail = reply[1] if len(reply) > 1 else "malformed reply"
+                raise RuntimeError(f"prefill worker could not stage owner KV for request {request_id}: {detail}")
+            first_slot, slot_count = int(reply[1]), int(reply[2])
+            if slot_count != len(keys):
+                raise RuntimeError(
+                    f"prefill worker staged {slot_count} owner blocks for request {request_id}, expected {len(keys)}"
+                )
+            return owner_stage_slot_map(first_slot, keys)
+        finally:
+            if sock is not None:
+                self._return_remote_socket(sock, remote_host, remote_handshake_port)
 
     def _send_done_recv_signal(
         self,
@@ -2707,34 +2833,89 @@ class MooncakeConnectorWorker:
                 self.block_size_scale[layer_idx].append(block_size_scale)
                 self.kv_caches_base_addr[layer_idx].append(single_kv_cache.data_ptr())
 
-        if has_mamba_group:
-            ptrs, lengths = self._get_registered_kv_tensor_buffers(kv_caches)
-            register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
-        elif self.use_hybrid:
-            ptrs, lengths = self._get_registered_kv_tensor_buffers_hybrid(kv_caches)
-            register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
+        # An owner-sharded prefill cache maps the complete logical range but
+        # only owns ``1 / pcp_size`` of its 2 MiB chunks. The transfer engine
+        # cannot register that range, so expose a registered staging buffer
+        # and let the decode side pull complete logical blocks from it.
+        owner_stage_controller: OwnerP2PStageController | None = None
+        owner_stager: OwnerBlockStageBuffer | None = None
+        owner_staging_bases: list[list[int]] = []
+        owner_staging_strides: list[list[int]] = []
+        owner_staging_slot_bytes = 0
+        owner_tensor = owner_backed_tensor(kv_caches) if getattr(self, "kv_role", None) == "kv_producer" else None
+        if owner_tensor is not None:
+            fields: list[tuple[object, int]] = []
+            field_sources: dict[object, tuple[int, int]] = {}
+            for layer_idx, bases in enumerate(self.kv_caches_base_addr):
+                for cache_idx in range(len(bases)):
+                    key = (layer_idx, cache_idx)
+                    fields.append((key, self.block_len_per_addr[layer_idx][cache_idx]))
+                    field_sources[key] = (
+                        self.kv_caches_base_addr[layer_idx][cache_idx],
+                        self.block_stride_per_addr[layer_idx][cache_idx],
+                    )
+            group_fields: dict[int, list[object]] = {}
+            for group_idx, (_group_spec, layer_indices) in self.kv_group2layeridx.items():
+                group_keys = [
+                    (layer_idx, cache_idx)
+                    for layer_idx in layer_indices
+                    if layer_idx < len(self.kv_caches_base_addr)
+                    for cache_idx in range(len(self.kv_caches_base_addr[layer_idx]))
+                ]
+                if group_keys:
+                    group_fields[group_idx] = group_keys
+            owner_stager = OwnerBlockStageBuffer(owner_tensor.device, fields)
+            owner_stage_controller = OwnerP2PStageController(owner_stager, group_fields, field_sources)
+            owner_staging_bases = [
+                [owner_stager.field_ptr((layer_idx, cache_idx)) for cache_idx in range(len(bases))]
+                for layer_idx, bases in enumerate(self.kv_caches_base_addr)
+            ]
+            owner_staging_strides = [
+                [owner_stager.field_block_bytes((layer_idx, cache_idx)) for cache_idx in range(len(bases))]
+                for layer_idx, bases in enumerate(self.kv_caches_base_addr)
+            ]
+            owner_staging_slot_bytes = owner_stager.slot_bytes
+            logger.info_once(
+                "Owner-sharded PCP KV detected: staging complete blocks through a "
+                "%.1f MiB transport-registered buffer (%d slots x %d bytes).",
+                owner_stager.capacity / (1 << 20),
+                owner_stager.slot_count,
+                owner_stager.slot_bytes,
+            )
+
+        if owner_stager is not None:
+            # Register only the staging buffer. The owner VMM range must never
+            # reach the engine, and every transferable cache field is staged.
+            global_te.add_buffer([owner_stager.ptr], [owner_stager.capacity])
         else:
-            # For normal attention / sparse-c8 KV cache, keep metadata at the
-            # logical tensor level but merge registration ranges by underlying
-            # storage to avoid exceeding the HCCL per-process region limit.
-            register_regions = collect_storage_merged_register_regions(kv_caches)
+            if has_mamba_group:
+                ptrs, lengths = self._get_registered_kv_tensor_buffers(kv_caches)
+                register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
+            elif self.use_hybrid:
+                ptrs, lengths = self._get_registered_kv_tensor_buffers_hybrid(kv_caches)
+                register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
+            else:
+                # For normal attention / sparse-c8 KV cache, keep metadata at the
+                # logical tensor level but merge registration ranges by underlying
+                # storage to avoid exceeding the HCCL per-process region limit.
+                register_regions = collect_storage_merged_register_regions(kv_caches)
 
-        validate_register_region_count(register_regions)
-        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+            validate_register_region_count(register_regions)
+            global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
 
-        logger.debug(
-            "Mooncake register kv caches metadata: kv_group2layeridx=%s, kv_caches_base_addr=%s, "
-            "block_len_per_addr=%s, block_stride_per_addr=%s, block_shape_per_addr=%s, "
-            "block_size_scale=%s, ptrs=%s, lengths=%s",
-            self.kv_group2layeridx,
-            self.kv_caches_base_addr,
-            self.block_len_per_addr,
-            self.block_stride_per_addr,
-            self.block_shape_per_addr,
-            self.block_size_scale,
-            register_regions.ptrs,
-            register_regions.lengths,
-        )
+            logger.debug(
+                "Mooncake register kv caches metadata: kv_group2layeridx=%s, kv_caches_base_addr=%s, "
+                "block_len_per_addr=%s, block_stride_per_addr=%s, block_shape_per_addr=%s, "
+                "block_size_scale=%s, ptrs=%s, lengths=%s",
+                self.kv_group2layeridx,
+                self.kv_caches_base_addr,
+                self.block_len_per_addr,
+                self.block_stride_per_addr,
+                self.block_shape_per_addr,
+                self.block_size_scale,
+                register_regions.ptrs,
+                register_regions.lengths,
+            )
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(
             engine_id=self.engine_id,
@@ -2748,6 +2929,10 @@ class MooncakeConnectorWorker:
             block_strides=self.block_stride_per_addr,
             local_ip=get_ip(),
             handshake_port=self.handshake_port,
+            owner_staging=owner_stage_controller is not None,
+            owner_staging_bases=owner_staging_bases,
+            owner_staging_strides=owner_staging_strides,
+            owner_staging_slot_bytes=owner_staging_slot_bytes,
         )
         self.xfer_handshake_metadata = metadata
 
@@ -2764,6 +2949,7 @@ class MooncakeConnectorWorker:
                 ready_event,
                 self.kv_caches,
                 self.pcp_rank,
+                owner_stage_controller=owner_stage_controller,
             )
             self.kv_send_thread.start()
         else:

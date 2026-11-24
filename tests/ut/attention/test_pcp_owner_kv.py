@@ -85,16 +85,24 @@ def test_owner_connector_gate_accepts_multi_connector_store_children():
     assert owner_kv.validate_owner_connector(_config(kv_transfer=multi)) == (True, "")
 
 
-def test_owner_connector_gate_rejects_unvalidated_connectors():
+def test_owner_connector_gate_accepts_staged_direct_p2p_connectors():
     direct = _kv_transfer("MooncakeConnectorV1", {})
-    supported, reason = owner_kv.validate_owner_connector(_config(kv_transfer=direct))
-    assert supported is False
-    assert "not owner-aware" in reason
+    assert owner_kv.validate_owner_connector(_config(kv_transfer=direct)) == (True, "")
+    assert owner_kv.validate_owner_sharing(_config(kv_transfer=direct))[0] is True
 
-    layerwise = _kv_transfer("AscendStoreConnector", {"use_layerwise": True})
-    supported, reason = owner_kv.validate_owner_connector(_config(kv_transfer=layerwise))
-    assert supported is False
-    assert "layerwise" in reason
+    hybrid = _kv_transfer("MooncakeHybridConnector", {"backend": "mooncake"})
+    assert owner_kv.validate_owner_connector(_config(kv_transfer=hybrid)) == (True, "")
+
+    multi = _kv_transfer(
+        "MultiConnector",
+        {
+            "connectors": [
+                {"kv_connector": "AscendStoreConnector", "kv_connector_extra_config": {}},
+                {"kv_connector": "MooncakeConnectorV1", "kv_connector_extra_config": {}},
+            ]
+        },
+    )
+    assert owner_kv.validate_owner_connector(_config(kv_transfer=multi)) == (True, "")
 
     mixed = _kv_transfer(
         "MultiConnector",
@@ -105,9 +113,57 @@ def test_owner_connector_gate_rejects_unvalidated_connectors():
             ]
         },
     )
-    supported, reason = owner_kv.validate_owner_connector(_config(kv_transfer=mixed))
+    assert owner_kv.validate_owner_connector(_config(kv_transfer=mixed)) == (True, "")
+
+
+def test_owner_connector_gate_rejects_layerwise_direct_p2p():
+    for name in ("MooncakeConnectorV1", "MooncakeHybridConnector"):
+        layerwise = _kv_transfer(name, {"use_layerwise": True})
+        supported, reason = owner_kv.validate_owner_connector(_config(kv_transfer=layerwise))
+        assert supported is False
+        assert "layerwise" in reason
+
+    # Options are not normalized across connector groups; a nested truthy
+    # layerwise switch must also fail closed.
+    nested = _kv_transfer(
+        "MultiConnector",
+        {
+            "connectors": [
+                {
+                    "kv_connector": "MooncakeConnectorV1",
+                    "kv_connector_extra_config": {"transfer": {"use_layerwise": True}},
+                }
+            ]
+        },
+    )
+    supported, reason = owner_kv.validate_owner_connector(_config(kv_transfer=nested))
     assert supported is False
-    assert "MooncakeHybridConnector" in reason
+    assert "layerwise" in reason
+
+    top_level = _kv_transfer(
+        "MultiConnector",
+        {
+            "use_layerwise": True,
+            "connectors": [
+                {"kv_connector": "MooncakeHybridConnector", "kv_connector_extra_config": {}},
+            ],
+        },
+    )
+    supported, reason = owner_kv.validate_owner_connector(_config(kv_transfer=top_level))
+    assert supported is False
+    assert "layerwise" in reason
+
+
+def test_owner_connector_gate_rejects_unvalidated_connectors():
+    layerwise = _kv_transfer("AscendStoreConnector", {"use_layerwise": True})
+    supported, reason = owner_kv.validate_owner_connector(_config(kv_transfer=layerwise))
+    assert supported is False
+    assert "layerwise" in reason
+
+    unsupported = _kv_transfer("MooncakeD2RHConnectorV1", {})
+    supported, reason = owner_kv.validate_owner_connector(_config(kv_transfer=unsupported))
+    assert supported is False
+    assert "not owner-aware" in reason
 
     unnamed = _kv_transfer("MultiConnector", {"connectors": [{"kv_role": "kv_producer"}]})
     assert owner_kv.validate_owner_connector(_config(kv_transfer=unnamed))[0] is False

@@ -45,17 +45,36 @@ class GlobalTE:
                     self.transfer_engine = engine
         return self.transfer_engine
 
+    def _register_missing_locked(self, ptrs: list[int], sizes: list[int]) -> None:
+        """Register regions that are not already published to the engine."""
+        assert self.transfer_engine is not None, "Transfer engine must be initialized"
+        known = {ptr for ptr, _ in self.registered_buffers}
+        for ptr, size in zip(ptrs, sizes, strict=True):
+            if self.is_register_buffer and ptr in known:
+                continue
+            ret_value = self.transfer_engine.register_memory(ptr, size)
+            if ret_value != 0:
+                raise RuntimeError(f"Mooncake memory registration failed for ptr={ptr:#x}, ret_value={ret_value}")
+            if ptr not in known:
+                self.registered_buffers.append((ptr, size))
+                known.add(ptr)
+        self.is_register_buffer = True
+
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
+        """Register this connector's regions.
+
+        A single connector used to own all registration, so repeated calls were
+        no-ops.  Under a ``MultiConnector`` every child registers its own view;
+        regions already published by an earlier child are skipped, and new
+        regions (for example an owner-staging buffer) are added.
+        """
         with self.register_buffer_lock:
-            assert self.transfer_engine is not None, "Transfer engine must be initialized"
-            if self.is_register_buffer:
-                return
-            for ptr, size in zip(ptrs, sizes):
-                ret_value = self.transfer_engine.register_memory(ptr, size)
-                if ret_value != 0:
-                    raise RuntimeError("Mooncake memory registration failed.")
-            self.registered_buffers = list(zip(ptrs, sizes))
-            self.is_register_buffer = True
+            self._register_missing_locked(ptrs, sizes)
+
+    def add_buffer(self, ptrs: list[int], sizes: list[int]):
+        """Register additional regions without replacing earlier ones."""
+        with self.register_buffer_lock:
+            self._register_missing_locked(ptrs, sizes)
 
     def unregister_buffer(self):
         with self.register_buffer_lock:

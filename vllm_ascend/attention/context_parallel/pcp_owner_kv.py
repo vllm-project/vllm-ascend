@@ -31,12 +31,17 @@ OWNER_COMPATIBLE_KV_CONNECTORS = frozenset(
     {
         "AscendStoreConnector",
         "MooncakeConnectorStoreV1",
+        # Direct P2P connectors. The prefill worker cannot register the owner
+        # VMM range (peer-mapped pages), so it stages each requested complete
+        # logical block through its registered HBM buffer and the decode side
+        # pulls from those slots. See owner_transfer.OwnerP2PStageController.
+        "MooncakeConnectorV1",
+        "MooncakeHybridConnector",
     }
 )
-# Direct P2P connectors read the same complete logical block, but their
-# transfer thread has not been wired to the owner staging buffer yet. Adding a
-# name here requires a PD equality run first; until then they fall back
-# collectively to the replicated cache.
+# Direct P2P connectors are accepted only when their complete-block staging
+# path is active. Layerwise transfer hands the engine per-layer slices while
+# layers are still live; that path bypasses staging, so it stays rejected.
 
 # Layerwise transfer hands the engine per-layer slices while the layers are
 # still live. That path has not been validated against the owner slab, so it
@@ -90,6 +95,22 @@ def _iter_connector_specs(name: str | None, extra) -> list[tuple[str, dict]]:
     return leaves
 
 
+def _iter_config_nodes(value):
+    """Yield every mapping nested under a connector extra-config value."""
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _iter_config_nodes(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            yield from _iter_config_nodes(child)
+
+
+def _has_truthy_option(config, key: str) -> bool:
+    """Find a truthy option anywhere in a connector extra-config tree."""
+    return any(bool(node.get(key, False)) for node in _iter_config_nodes(config))
+
+
 def validate_owner_connector(vllm_config) -> tuple[bool, str]:
     """Check whether the configured KV-transfer connector can carry owner KV.
 
@@ -108,6 +129,11 @@ def validate_owner_connector(vllm_config) -> tuple[bool, str]:
     leaves = _iter_connector_specs(name, extra)
     if not leaves or any(not leaf_name for leaf_name, _ in leaves):
         return False, "KV-transfer configuration does not name every connector"
+    if _has_truthy_option(extra, "use_layerwise"):
+        return (
+            False,
+            f"connector {name} layerwise transfer has not been validated with owner-sharded KV",
+        )
     for leaf_name, leaf_extra in leaves:
         if leaf_name not in OWNER_COMPATIBLE_KV_CONNECTORS:
             supported = ", ".join(sorted(OWNER_COMPATIBLE_KV_CONNECTORS))
@@ -115,7 +141,7 @@ def validate_owner_connector(vllm_config) -> tuple[bool, str]:
                 False,
                 f"connector {leaf_name} is not owner-aware (supported: {supported})",
             )
-        if leaf_name in _PCP_TRANSFER_CONNECTORS and leaf_extra.get("use_layerwise", False):
+        if leaf_name in _PCP_TRANSFER_CONNECTORS and _has_truthy_option(leaf_extra, "use_layerwise"):
             return (
                 False,
                 f"connector {leaf_name} layerwise transfer has not been validated with owner-sharded KV",
