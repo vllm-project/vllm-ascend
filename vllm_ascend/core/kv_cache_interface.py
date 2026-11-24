@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 
 import torch
 from typing_extensions import Self
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
@@ -56,13 +56,18 @@ class AscendGQADraftSlidingWindowSpec(SlidingWindowSpec):
         )
 
 
+def is_kimi_k31_model_config(model_config: ModelConfig | None) -> bool:
+    """Recognize both the K3.1 wrapper and its typed text configuration."""
+    hf_config = getattr(model_config, "hf_config", None)
+    return getattr(hf_config, "model_type", None) == "kimi_k31" or getattr(type(hf_config), "is_kimi_k31", False)
+
+
 def uses_kimi_k31_gqa_draft(vllm_config: VllmConfig) -> bool:
     """Select the K3.1 draft that keeps its TP-sharded heads on every token."""
-    model_config = getattr(vllm_config, "model_config", None)
     speculative_config = getattr(vllm_config, "speculative_config", None)
     draft = getattr(speculative_config, "draft_model_config", None)
     return (
-        getattr(getattr(model_config, "hf_config", None), "model_type", None) == "kimi_k31"
+        is_kimi_k31_model_config(getattr(vllm_config, "model_config", None))
         and getattr(speculative_config, "method", None) == "dspark"
         and "Qwen3DSparkModel" in (getattr(draft, "architectures", None) or ())
     )

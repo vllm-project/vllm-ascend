@@ -1,3 +1,6 @@
+from collections.abc import Iterable, Iterator
+from copy import copy
+
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
@@ -5,6 +8,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, 
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
 
+from vllm_ascend.core.kv_cache_interface import is_kimi_k31_model_config
 from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
 from vllm_ascend.utils import (
     get_rotation_matrix,
@@ -76,10 +80,58 @@ def align_draft_weights(model, projection, vllm_config):
 
 class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        self._is_kimi_k31_target = is_kimi_k31_model_config(vllm_config.model_config)
+        if self._is_kimi_k31_target:
+            vllm_config = self._with_target_hidden_size(vllm_config)
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         config = self.config
         self.enable_confidence_head = bool(getattr(config, "enable_confidence_head", False))
+
+    @staticmethod
+    def _with_target_hidden_size(vllm_config: VllmConfig) -> VllmConfig:
+        speculative = vllm_config.speculative_config
+        draft_model = speculative.draft_model_config
+        draft = draft_model.hf_config
+        target_width = vllm_config.model_config.hf_text_config.hidden_size
+        declared_width = getattr(draft, "target_hidden_size", None)
+        if declared_width is not None and declared_width != target_width:
+            raise ValueError(
+                f"Kimi K3.1 GQA DSpark declares target_hidden_size={declared_width}, "
+                f"but the target hidden size is {target_width}. Use a draft trained for this target."
+            )
+        if declared_width is not None or draft.hidden_size == target_width:
+            return vllm_config
+
+        # Legacy speculator configs can omit the verifier width. Allocate the
+        # projection using the verifier's features and check the saved weight
+        # as it is loaded. Keep the shared HF configuration intact.
+        runtime = copy(vllm_config)
+        runtime.speculative_config = copy(speculative)
+        runtime.speculative_config.draft_model_config = copy(draft_model)
+        draft_config = copy(draft)
+        draft_config.target_hidden_size = target_width
+        runtime.speculative_config.draft_model_config.hf_config = draft_config
+        return runtime
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        if self._is_kimi_k31_target and self.model.quant_config is None:
+            weights = self._validate_projection_weights(weights)
+        return super().load_weights(weights)
+
+    def _validate_projection_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        projection = getattr(self.model, "fc", None)
+        for name, weight in weights:
+            if projection is not None and name in ("fc.weight", "encoder.fc.weight"):
+                expected = (self.config.hidden_size, projection.input_size)
+                if tuple(weight.shape) != expected:
+                    raise ValueError(
+                        f"Kimi K3.1 GQA DSpark {name} has shape {tuple(weight.shape)}, "
+                        f"expected {expected}. Use a draft trained for this target."
+                    )
+            yield name, weight
 
     def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
         """Per-position acceptance probability for each drafted token."""
@@ -99,7 +151,7 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
             set_capture_mode(True)
 
     def post_process(self, vllm_config: VllmConfig) -> None:
-        if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+        if is_kimi_k31_model_config(vllm_config.model_config):
             if not all(self.get_draft_attn_causal()):
                 raise ValueError("Kimi K3.1 DSpark on Ascend requires causal attention in every GQA draft layer.")
             target_width = vllm_config.model_config.hf_text_config.hidden_size

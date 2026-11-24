@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -7,17 +8,29 @@ import pytest
 import torch
 from torch import nn
 from transformers import LlamaConfig
-from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config, set_current_vllm_config
+from vllm.config import (
+    AttentionConfig,
+    CacheConfig,
+    ModelConfig,
+    ParallelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+    get_current_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.model_executor.model_loader import utils as loader_utils
 from vllm.model_executor.models.utils import init_vllm_registered_model
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, PreprocessType
+from vllm_ascend.core.kv_cache_interface import uses_kimi_k31_gqa_draft
 from vllm_ascend.models import register_model
 from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiMLAAttention
 from vllm_ascend.ops import rotary_embedding
 from vllm_ascend.patch.platform.patch_kimi_k31_config import KimiK31Config, KimiK31TextConfig
+from vllm_ascend.platform import _validate_draft_decode_context_parallel_config
 from vllm_ascend.quantization.methods import AscendW8A8MXFP8DynamicLinearMethod
 
 
@@ -52,6 +65,94 @@ def test_nested_dsa_config_roundtrip_and_layer_numbering():
     restored = KimiK31Config(**config.to_dict())
     assert restored.text_config.dsa_config == text.dsa_config
     assert restored.text_config.is_dsa_layer(4)
+
+
+def test_k31_dcp8_validates_legacy_dspark_after_text_model_handoff(tmp_path, monkeypatch):
+    register_model()
+    monkeypatch.setattr("vllm.model_executor.models.registry._run_in_subprocess", lambda fn: fn())
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    monkeypatch.setattr(VllmConfig, "use_v2_model_runner", property(lambda self: True))
+    monkeypatch.setattr(
+        type(current_platform),
+        "check_and_update_config",
+        staticmethod(_validate_draft_decode_context_parallel_config),
+    )
+
+    target_path = tmp_path / "target"
+    KimiK31Config(
+        architectures=["KimiK31ForConditionalGeneration"],
+        text_config=KimiK31TextConfig(
+            kv_lora_rank=512,
+            num_hidden_layers=93,
+            num_attention_heads=96,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        ),
+    ).save_pretrained(target_path)
+    draft_path = tmp_path / "draft"
+    draft_path.mkdir()
+    (draft_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["DSparkDraftModel"],
+                "speculators_model_type": "dspark",
+                "speculators_config": {
+                    "proposal_methods": [{"proposal_type": "greedy", "speculative_tokens": 8}],
+                    "verifier": {"name_or_path": "moonshotai/Kimi-K3"},
+                },
+                "block_size": 8,
+                "aux_hidden_state_layer_ids": [24, 48, 72, 88, 92],
+                "mask_token_id": 163837,
+                "target_hidden_size": None,
+                "transformer_layer_config": {
+                    "model_type": "qwen3",
+                    "hidden_size": 7168,
+                    "head_dim": 64,
+                    "num_attention_heads": 96,
+                    "num_key_value_heads": 16,
+                    "num_hidden_layers": 5,
+                    "vocab_size": 163840,
+                    "sliding_window": 2048,
+                    "layer_types": ["sliding_attention"] * 5,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    model = ModelConfig(model=str(target_path), tokenizer_mode="kimi_k3", dtype="bfloat16", max_model_len=4096)
+    parallel = ParallelConfig(tensor_parallel_size=8, decode_context_parallel_size=8, cp_kv_cache_interleave_size=768)
+    speculative = SpeculativeConfig(
+        method="dspark",
+        model=str(draft_path),
+        num_speculative_tokens=3,
+        target_model_config=model,
+        target_parallel_config=parallel,
+        draft_tensor_parallel_size=8,
+        kv_cache_dtype="bfloat16",
+        enforce_eager=True,
+    )
+    assert speculative.draft_model_config.architectures == ["Qwen3DSparkModel"]
+    assert speculative.draft_model_config.get_total_num_kv_heads() == 16
+    target = VllmConfig(
+        model_config=model,
+        parallel_config=parallel,
+        speculative_config=speculative,
+        attention_config=AttentionConfig(indexer_kv_dtype="bf16"),
+        cache_config=CacheConfig(cache_dtype="bfloat16", block_size=768),
+        additional_config={"mla_cache_mode": "C16"},
+    )
+
+    text_config = model.hf_config.text_config
+    inner = target.with_hf_config(text_config, architectures=["KimiLinearForCausalLM"])
+    assert inner.model_config.hf_config.model_type == "kimi_linear"
+    assert uses_kimi_k31_gqa_draft(inner)
+    assert inner.parallel_config.decode_context_parallel_size == 8
+
+    plain_kimi_linear = KimiLinearConfig(**text_config.to_dict())
+    plain_kimi_linear.is_kimi_k31 = True
+    with pytest.raises(ValueError, match="tensor parallel size 8 must be greater than total num kv heads 16"):
+        target.with_hf_config(plain_kimi_linear, architectures=["KimiLinearForCausalLM"])
 
 
 @pytest.mark.parametrize("inner_kind", ["k31_nope", "k31_rope", "kimi_linear", "llama"])

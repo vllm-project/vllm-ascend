@@ -34,6 +34,7 @@ it upstream to ``load_dspark_model``.
 """
 
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
@@ -110,7 +111,13 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
         if spec_pp_support is not None:
             partition_mask = patch.object(vllm_envs, "VLLM_PP_LAYER_PARTITION", None)
         with partition_mask, bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support):
-            return _original_load_dspark_model(target_model, with_kimi_k31_gqa_draft_dcp_config(vllm_config))
+            draft_config = with_kimi_k31_gqa_draft_dcp_config(vllm_config)
+            if draft_config is not vllm_config and draft_config.parallel_config.enable_eplb:
+                # Upstream rebuilds this dataclass to disable EPLB for the
+                # draft. Keep Ascend's auto-selection metadata on the target.
+                draft_parallel = draft_config.parallel_config
+                draft_parallel.eplb_config = replace(draft_parallel.eplb_config)
+            return _original_load_dspark_model(target_model, draft_config)
     finally:
         eagle_utils.maybe_share_target_embed = _original_maybe_share_target_embed
         if inherits_target_quant:

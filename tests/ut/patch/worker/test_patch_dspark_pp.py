@@ -4,8 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 from vllm.config import get_current_vllm_config, set_current_vllm_config
+from vllm.config.parallel import EPLBConfig
+from vllm.config.utils import replace
 
 from vllm_ascend.attention.attention_v1 import AscendKimiK31GQADraftAttentionBackend
+from vllm_ascend.patch.platform.patch_eplb import _AUTO_SELECTED_ATTRIBUTE, _mark_auto_selected
 from vllm_ascend.patch.worker import patch_qwen3_dflash
 from vllm_ascend.patch.worker.patch_v2 import patch_dspark
 from vllm_ascend.worker.v2 import pp_transport
@@ -63,12 +66,16 @@ def test_dspark_draft_partition_isolation(monkeypatch, legacy, pp_size, fail):
 
 
 def test_kimi_k31_dcp8_loads_gqa_draft_with_its_own_parallel_config(monkeypatch):
+    eplb_config = EPLBConfig(num_redundant_experts=8, communicator="torch_gloo")
+    _mark_auto_selected(eplb_config)
     target_config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=1,
             tensor_parallel_size=8,
             decode_context_parallel_size=8,
             cp_kv_cache_interleave_size=1664,
+            enable_eplb=True,
+            eplb_config=eplb_config,
         ),
         model_config=SimpleNamespace(
             model="target",
@@ -91,6 +98,9 @@ def test_kimi_k31_dcp8_loads_gqa_draft_with_its_own_parallel_config(monkeypatch)
         assert draft_config.parallel_config.cp_kv_cache_interleave_size == 1
         assert draft_config.compilation_config is target_config.compilation_config
         assert draft_config.cache_config is not target_config.cache_config
+        draft_eplb = draft_config.parallel_config.eplb_config
+        assert not hasattr(draft_eplb, _AUTO_SELECTED_ATTRIBUTE)
+        assert replace(draft_eplb, num_redundant_experts=0).num_redundant_experts == 0
         with set_current_vllm_config(draft_config):
             return patch_qwen3_dflash.qwen3_dflash.Attention()
 
@@ -103,3 +113,6 @@ def test_kimi_k31_dcp8_loads_gqa_draft_with_its_own_parallel_config(monkeypatch)
         assert get_current_vllm_config() is target_config
         assert target_config.parallel_config.decode_context_parallel_size == 8
         assert target_config.parallel_config.cp_kv_cache_interleave_size == 1664
+        assert target_config.parallel_config.enable_eplb
+        assert target_config.parallel_config.eplb_config is eplb_config
+        assert getattr(eplb_config, _AUTO_SELECTED_ATTRIBUTE)

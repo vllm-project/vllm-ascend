@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from vllm.model_executor.models.qwen3_dflash import _get_dflash_fc_input_size
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.models import qwen3_dflash2, qwen3_dspark
@@ -184,6 +185,41 @@ def test_kimi_k31_validates_gqa_draft_inputs(monkeypatch, target_type, causal_by
         align.assert_not_called()
     else:
         align.assert_called_once_with(draft, projection, config)
+
+
+@pytest.mark.parametrize("saved_input_width", [8, 12])
+def test_kimi_k31_legacy_draft_projection_uses_target_width(monkeypatch, saved_input_width):
+    draft_hf_config = SimpleNamespace(target_hidden_size=None, hidden_size=6, target_layer_ids=[23, 47])
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="kimi_k31"),
+            hf_text_config=SimpleNamespace(hidden_size=4),
+        ),
+        speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace(hf_config=draft_hf_config)),
+    )
+
+    def build_model(self, *, vllm_config, prefix):
+        torch.nn.Module.__init__(self)
+        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        self.model = SimpleNamespace(
+            fc=SimpleNamespace(input_size=_get_dflash_fc_input_size(vllm_config)),
+            quant_config=None,
+        )
+
+    base = qwen3_dspark.Qwen3DSparkForCausalLM
+    monkeypatch.setattr(base, "__init__", build_model)
+    monkeypatch.setattr(base, "load_weights", lambda self, weights: {name for name, _ in weights})
+    draft = AscendQwen3DSparkForCausalLM(vllm_config=config)
+    assert draft.config.target_hidden_size == 4
+    assert draft_hf_config.target_hidden_size is None
+    assert draft.model.fc.input_size == 8
+
+    weights = [("fc.weight", torch.zeros(6, saved_input_width))]
+    if saved_input_width == 8:
+        assert draft.load_weights(weights) == {"fc.weight"}
+    else:
+        with pytest.raises(ValueError, match=r"fc.weight has shape \(6, 12\), expected \(6, 8\)"):
+            draft.load_weights(weights)
 
 
 @pytest.mark.parametrize("rotated", [False, True])

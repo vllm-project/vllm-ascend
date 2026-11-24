@@ -1814,8 +1814,10 @@ def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig, ascend_config: Any)
 
 
 def _validate_kimi_k31_bf16_dcp(vllm_config: VllmConfig) -> bool:
+    from vllm_ascend.core.kv_cache_interface import is_kimi_k31_model_config
+
     model_config = getattr(vllm_config, "model_config", None)
-    if getattr(getattr(model_config, "hf_config", None), "model_type", None) != "kimi_k31":
+    if not is_kimi_k31_model_config(model_config):
         return False
     parallel = vllm_config.parallel_config
     if parallel.decode_context_parallel_size <= 1:
