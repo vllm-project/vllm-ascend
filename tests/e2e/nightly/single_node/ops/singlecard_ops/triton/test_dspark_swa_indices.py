@@ -21,6 +21,7 @@ graph-mode specifics that the integration review called out:
 import pytest
 import torch
 
+from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.dspark_swa_indices import (
@@ -755,6 +756,71 @@ def test_gate_rejects_non_pow2_block_size(bad_block_size):
 )
 def test_gate_accepts_valid_config():
     assert dspark_swa_indices_supported(128, 64)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+def test_logical_indices_triton_rejects_unsupported_output_views():
+    """Same-shape strided views must be rejected before launch.
+
+    The kernel stores indices with a fixed row stride of index_width and
+    lengths with unit stride, so a strided view passed as either output
+    would be written with the wrong layout; the wrapper must fail loudly
+    instead, including when reached through the shared builder that the
+    V4.1 draft metadata builder calls.
+    """
+    num_speculative_tokens = 4
+    window_size = 944
+    num_query_per_req = num_speculative_tokens + 1
+    num_reqs = 2
+    num_tokens = num_reqs * num_query_per_req
+    index_width = ((window_size + num_speculative_tokens + 127) // 128) * 128
+    qsl = torch.tensor([0, 5, 10], dtype=torch.int64, device=DEVICE)
+    seq_lens = torch.tensor([600, 800], dtype=torch.int64, device=DEVICE)
+
+    strided_indices = torch.empty(
+        (num_tokens, 1, index_width * 2), dtype=torch.int32, device=DEVICE
+    )[:, :, :index_width]
+    assert strided_indices.shape == (num_tokens, 1, index_width)
+    assert not strided_indices.is_contiguous()
+    with pytest.raises(ValueError, match="contiguous"):
+        build_dspark_swa_indices_triton(
+            qsl, seq_lens, num_tokens, index_width, window_size, indices_output=strided_indices
+        )
+
+    strided_lengths = torch.empty((1, num_tokens), dtype=torch.int32, device=DEVICE).t()
+    assert strided_lengths.shape == (num_tokens, 1)
+    assert not strided_lengths.is_contiguous()
+    with pytest.raises(ValueError, match="contiguous"):
+        build_dspark_swa_indices_triton(
+            qsl, seq_lens, num_tokens, index_width, window_size, lengths_output=strided_lengths
+        )
+
+    with pytest.raises(ValueError, match="int32"):
+        build_dspark_swa_indices_triton(
+            qsl,
+            seq_lens,
+            num_tokens,
+            index_width,
+            window_size,
+            lengths_output=torch.empty((num_tokens, 1), dtype=torch.int64, device=DEVICE),
+        )
+
+    with pytest.raises(ValueError, match="contiguous"):
+        build_dspark_swa_indices(
+            torch.tensor([[1, 2]], dtype=torch.int32, device=DEVICE),
+            num_speculative_tokens,
+            window_size,
+            128,
+            qsl,
+            seq_lens,
+            num_tokens,
+            index_width=index_width,
+            indices_output=strided_indices,
+            use_logical_indices=True,
+        )
 
 
 def _logical_ref(qsl, seq_lens, num_tokens, index_width, window_size):

@@ -44,6 +44,30 @@ def _build_dspark_swa_indices_kernel(
     tl.store(lengths_ptr + token_idx, visible_len, mask=col_block == 0)
 
 
+def _validate_dspark_swa_output(
+    output: torch.Tensor,
+    expected_shape: tuple[int, ...],
+    name: str,
+    device: torch.device,
+) -> None:
+    """Reject output buffers the kernel cannot fill with the documented layout.
+
+    The kernel stores indices with a fixed row stride of ``index_width`` and
+    lengths with unit stride, so a same-shape strided view would be written
+    with the wrong layout; fail loudly before launch instead.
+    """
+    if output.shape != torch.Size(expected_shape):
+        raise ValueError(
+            f"DSpark SWA {name} output must have shape {expected_shape}, got {tuple(output.shape)}"
+        )
+    if output.dtype != torch.int32:
+        raise ValueError(f"DSpark SWA {name} output must be int32, got {output.dtype}")
+    if output.device != device:
+        raise ValueError(f"DSpark SWA {name} output must be on {device}, got {output.device}")
+    if not output.is_contiguous():
+        raise ValueError(f"DSpark SWA {name} output must be contiguous, got a strided view")
+
+
 def build_dspark_swa_indices_triton(
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -57,7 +81,9 @@ def build_dspark_swa_indices_triton(
 
     ``indices_output``/``lengths_output`` accept persistent buffer views so
     that ACL-graph capture keeps stable addresses and per-step rebuilds write
-    in place instead of copying freshly allocated temporaries.
+    in place instead of copying freshly allocated temporaries. Supplied
+    buffers must be contiguous int32 tensors on the inputs' device with the
+    documented shapes; unsupported layouts are rejected before launch.
     """
     indices = indices_output
     lengths = lengths_output
@@ -67,12 +93,18 @@ def build_dspark_swa_indices_triton(
             dtype=torch.int32,
             device=query_start_loc.device,
         )
+    else:
+        _validate_dspark_swa_output(
+            indices, (num_tokens, 1, index_width), "indices", query_start_loc.device
+        )
     if lengths is None:
         lengths = torch.empty(
             (num_tokens, 1),
             dtype=torch.int32,
             device=query_start_loc.device,
         )
+    else:
+        _validate_dspark_swa_output(lengths, (num_tokens, 1), "lengths", query_start_loc.device)
     if num_tokens == 0:
         return indices, lengths
 
