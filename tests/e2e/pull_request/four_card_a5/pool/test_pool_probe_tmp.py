@@ -1,11 +1,9 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-"""Temporary probe: host-side memcache protocols plus the HAL symbol check.
+"""Temporary probe: memcache init with MF_HYBM_ENABLE_4K_PAGE=1.
 
-Device protocols block after SMEM inside the HYBM GVA path, whose precheck
-reports a missing ``drvNotifyIdAddrOffset`` in libascend_hal.so. Test the two
-host protocols and print the exported-symbol result plus the head of the log.
-Delete this file once the cause is known.
+MemFabric documents that machines without hugepages must export
+MF_HYBM_ENABLE_4K_PAGE=1 or smem_bm_create fails. The pod reports 0 hugepages.
 """
 
 import os
@@ -20,17 +18,14 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
 from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
 
-CASES = ["host_rdma", "host_urma"]
 PROBE_TIMEOUT_SECONDS = 120
 PROBE_DRAM_SIZE = "1GB"
 PROBE_ENVS = {
+    "MF_HYBM_ENABLE_4K_PAGE": "1",
     "MF_GROUP_JOIN_MAX_TIMEOUT": "60",
-    "MF_QP_READY_CHECK_TIMEOUT_BASE": "30",
     "ASCEND_CONNECT_TIMEOUT": "60000",
     "ASCEND_TRANSFER_TIMEOUT": "60000",
 }
-HEAD_CHARS = 1500
-TAIL_CHARS = 1500
 
 PROBE_SCRIPT = """
 import subprocess
@@ -39,6 +34,8 @@ import torch
 import torch_npu
 from memcache_hybrid import DistributedObjectStore
 
+hp = subprocess.run(["bash", "-lc", "grep -E 'HugePages_Total|Hugepagesize' /proc/meminfo"], capture_output=True, text=True)
+print(f"probe: hugepages {hp.stdout.strip()!r}", flush=True)
 hal = "/usr/local/Ascend/driver/lib64/driver/libascend_hal.so"
 cmd = "nm -D " + hal + " | grep -i drvNotifyIdAddrOffset"
 nm = subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True)
@@ -53,7 +50,7 @@ print("probe: done", flush=True)
 """
 
 
-def _build_config(protocol: str) -> MemcacheKVPoolConfig:
+def _build_config() -> MemcacheKVPoolConfig:
     return MemcacheKVPoolConfig(
         meta_service_port=get_open_port(),
         config_store_port=get_open_port(),
@@ -65,17 +62,16 @@ def _build_config(protocol: str) -> MemcacheKVPoolConfig:
             "local": {
                 "ock.mmc.log_level": "info",
                 "ock.mmc.local_service.world_size": 1,
-                "ock.mmc.local_service.protocol": protocol,
+                "ock.mmc.local_service.protocol": "device_urma",
                 "ock.mmc.local_service.dram.size": PROBE_DRAM_SIZE,
             },
         },
     )
 
 
-@pytest.mark.parametrize("protocol", CASES)
-def test_memcache_host_protocol_probe(protocol: str) -> None:
+def test_memcache_4k_page_probe() -> None:
     started = time.perf_counter()
-    with SingleNodeMemcacheManager(_build_config(protocol), f"probe_host_{protocol}") as pool:
+    with SingleNodeMemcacheManager(_build_config(), "probe_4k") as pool:
         with patch.dict(os.environ, {**pool.server_envs, **PROBE_ENVS}):
             try:
                 completed = subprocess.run(
@@ -94,7 +90,7 @@ def test_memcache_host_protocol_probe(protocol: str) -> None:
                 outcome = "TIMEOUT"
             elapsed = time.perf_counter() - started
             print(
-                f"[pool_probe] protocol={protocol} {outcome} elapsed={elapsed:.1f}s "
-                f"head={text[:HEAD_CHARS]!r} tail={text[-TAIL_CHARS:]!r}",
+                f"[pool_probe] 4k_page {outcome} elapsed={elapsed:.1f}s "
+                f"head={text[:1200]!r} tail={text[-1200:]!r}",
                 flush=True,
             )
