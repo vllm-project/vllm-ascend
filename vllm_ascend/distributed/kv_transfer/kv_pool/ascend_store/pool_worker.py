@@ -69,6 +69,8 @@ from vllm_ascend.distributed.utils import (
 )
 
 SAVE_BATCH_FAILURE_POLL_INTERVAL_S = 1.0
+DRAIN_QUEUED_SAVES_TIMEOUT_S = 60.0
+DRAIN_QUEUED_SAVES_POLL_INTERVAL_S = 1.0
 
 
 class BaseKVPoolWorker(ABC):
@@ -1526,24 +1528,36 @@ class KVPoolWorker(BaseKVPoolWorker):
 
         self._previous_save_batch = send_thread.add_save_batch(requests)
 
-    def drain_queued_saves(self) -> None:
+    def drain_queued_saves(self, timeout: float = DRAIN_QUEUED_SAVES_TIMEOUT_S) -> None:
         """Wait until queued puts on this rank have left execute().
 
-        Called once before peer disconnect. A failed send thread that already
-        acknowledged its queue is logged so sleep can still release memory.
-        A dead thread that left items unacknowledged raises.
+        Called once before peer disconnect. ``DRAIN_QUEUED_SAVES_POLL_INTERVAL_S``
+        only rechecks the thread; ``timeout`` is the total deadline. A failed
+        send thread that already acknowledged its queue is logged so sleep can
+        still release memory. A dead thread that left items unacknowledged
+        raises. A live thread still blocked in the SDK send at the deadline
+        also raises, so disconnect is skipped and registrations stay intact.
         """
         send_thread = self.kv_send_thread
         if not isinstance(send_thread, KVCacheStoreSendingThread):
             return
         queue = send_thread.request_queue
+        deadline = time.monotonic() + timeout
         with queue.all_tasks_done:
             while queue.unfinished_tasks:
                 send_thread.raise_if_failed()
                 if not send_thread.is_alive():
                     break
-                queue.all_tasks_done.wait(timeout=0.1)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                queue.all_tasks_done.wait(timeout=min(DRAIN_QUEUED_SAVES_POLL_INTERVAL_S, remaining))
         if queue.unfinished_tasks:
+            if send_thread.is_alive():
+                raise RuntimeError(
+                    f"{send_thread.name} still blocked with {queue.unfinished_tasks} unfinished saves "
+                    f"after {timeout:g}s; leaving memory registrations intact"
+                )
             raise RuntimeError(f"{send_thread.name} exited with {queue.unfinished_tasks} unfinished saves")
         if send_thread._fatal_error is not None:
             logger.error(
