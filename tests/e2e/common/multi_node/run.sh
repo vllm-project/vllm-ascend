@@ -216,7 +216,7 @@ check_and_config() {
     git config --global http.lowSpeedTime 30
     pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
     pip config set global.trusted-host mirrors.huaweicloud.com
-    export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
+    export PIP_EXTRA_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi"
     pip config set global.timeout 120
 }
 

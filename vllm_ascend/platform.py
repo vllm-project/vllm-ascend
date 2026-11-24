@@ -650,6 +650,8 @@ class NPUPlatform(Platform):
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
 
+        _normalize_sleep_backend(vllm_config.model_config)
+
         # vLLM #61392 folds `compress_ratios` into `layer_types`/`compress_rates`.
         # Restore the legacy field before any runner/model/cache component reads
         # it (e.g. NPUModelRunner.__init__ setting `use_compress`).
@@ -897,6 +899,19 @@ def _configure_minimax_m3_a5_mixed_kv_cache(vllm_config: VllmConfig) -> None:
         ", ".join(gqa_layer_ids),
         cache_config.cache_dtype,
     )
+
+
+def _normalize_sleep_backend(model_config) -> None:
+    if not model_config.enable_sleep_mode:
+        return
+
+    if model_config.sleep_mode_backend == "cumem":
+        model_config.sleep_mode_backend = "camem"
+        logger.info_once("Using Ascend sleep-mode backend 'camem' for the default 'cumem' name.")
+    elif model_config.sleep_mode_backend != "camem":
+        raise ValueError(
+            "Only the in-tree camem backend is supported on Ascend; third-party backends are not supported yet."
+        )
 
 
 def _fix_incompatible_config(vllm_config: VllmConfig) -> None:

@@ -42,15 +42,15 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     pip install \
         --extra-index-url https://download.pytorch.org/whl/cpu/ \
-        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+        --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi \
         "vllm-ascend=={{ release_vllm_ascend_version }}"
     ```
 
     ??? tip "If pip cannot verify the Huawei Cloud mirror certificate"
 
-        The Huawei Cloud package index uses HTTPS, so `--trusted-host` is not normally required. If pip reports an SSL certificate verification or untrusted-host error for `mirrors.huaweicloud.com`, first update pip and the operating system CA certificates, or configure the CA bundle required by your network.
+        The Huawei Cloud package index uses HTTPS, so `--trusted-host` is not normally required. If pip reports an SSL certificate verification or untrusted-host error for `repo.huaweicloud.com`, first update pip and the operating system CA certificates, or configure the CA bundle required by your network.
 
-        As a temporary workaround on a trusted network, retry the vLLM Ascend installation command with `--trusted-host mirrors.huaweicloud.com`.
+        As a temporary workaround on a trusted network, retry the vLLM Ascend installation command with `--trusted-host repo.huaweicloud.com`.
 
         This option tells pip to trust the host even when HTTPS validation fails, which weakens protection against man-in-the-middle attacks. Use it only when you trust the network and cannot fix the certificate configuration.
 
@@ -87,9 +87,9 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     # Install vllm-project/vllm-ascend from wheelnext index.
     uv pip install --system \
-        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant \
+        --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi/variant \
         --index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
-        --find-links https://mirrors.huaweicloud.com/ascend/repos/pypi/triton-ascend/ \
+        --find-links https://repo.huaweicloud.com/ascend/repos/pypi/triton-ascend/ \
         "vllm-ascend=={{ release_vllm_ascend_version }}"
     ```
 
@@ -132,8 +132,8 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
     # git submodule update --init --recursive
     pip install -e . \
         --extra-index-url https://download.pytorch.org/whl/cpu/ \
-        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly
+        --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi \
+        --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi/nightly
     cd ..
     ```
 
@@ -153,8 +153,8 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
         # Rebuild custom kernels and reinstall vLLM Ascend.
         pip install -e . \
             --extra-index-url https://download.pytorch.org/whl/cpu/ \
-            --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-            --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly
+            --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi \
+            --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi/nightly
         ```
 
         **Note:** If `VLLM_ASCEND_BUILD_CACHE_DIR` is set, the build cache
@@ -175,11 +175,11 @@ After completing any of the three installation methods, install the kernel packa
     pip uninstall -y triton triton-ascend
 
     pip install \
-        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+        --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi \
         "triton-ascend==={{ release_triton_ascend_version }}"
 
     pip install --no-deps \
-        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+        --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi \
         "flash-linear-attention-npu-a2=={{ release_fla_npu_version }}"
     ```
 
