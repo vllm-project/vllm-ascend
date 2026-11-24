@@ -94,12 +94,6 @@ BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
 
-def _uses_unpadded_drafter_batch(speculative_config) -> bool:
-    # The optional unpadded drafter was removed in native #63373 and is absent
-    # from v0.34.0 as well, so no supported vLLM lane sets it.
-    return False
-
-
 # Exclusive batch * K limit of the fused op with perm_x1=(1, 0, 2).
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
 
@@ -814,10 +808,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         if build_metadata_step == BUILD_METADATA_STEP_PREFILL:
             # If graph_pad_size > -1, mean is running in fullgraph mode.
             # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
-            if self.graph_pad_size > common_attn_metadata.num_reqs and _uses_unpadded_drafter_batch(
-                self.speculative_config
-            ):
-                return self.graph_pad_size
             return common_attn_metadata.num_reqs
         return self.num_decodes
 
@@ -884,49 +874,32 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         # NOTE: MTP full graph is incompatible with context parallelism.
         # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
-        if self.graph_pad_size > self.num_decodes and _uses_unpadded_drafter_batch(self.speculative_config):
-            self.block_table = self.block_table[: self.graph_pad_size, ...]
         seq_lens_list = self.seq_lens.tolist()
 
         if self.graph_pad_size > num_reqs:
-            if _uses_unpadded_drafter_batch(self.speculative_config):
-                num_reqs_pad_size = self.graph_pad_size - num_reqs
-                actual_seq_lengths_q = self.pad_actual_seq_len_q_mtp_disable_pad(
-                    num_reqs_pad_size, num_reqs, actual_seq_lengths_q
-                )
-                seq_lens_list = seq_lens_list + [0] * (self.graph_pad_size - self.num_decodes)
-                num_block_pad_size = self.graph_pad_size - self.block_table.shape[0]
-                if num_block_pad_size > 0:
-                    block_table_padding = torch.zeros(
-                        (num_block_pad_size,) + self.block_table.shape[1:],
-                        dtype=self.block_table.dtype,
-                        device=self.block_table.device,
-                    )
-                    self.block_table = torch.cat([self.block_table, block_table_padding], dim=0)
-            else:
-                num_token_pad_size = self.graph_pad_size - self.num_decode_tokens
-                num_reqs_pad_size = self.graph_pad_size // common_attn_metadata.decode_token_per_req - num_reqs
-                num_block_table_pad_size = (
-                    self.graph_pad_size // common_attn_metadata.decode_token_per_req - self.num_decodes
-                )
-                seq_lens_list = self.seq_lens.tolist() + [0] * num_reqs_pad_size
-                slot_padding = torch.full(
-                    (num_token_pad_size,), PAD_SLOT_ID, dtype=self.slot_mapping.dtype, device=self.slot_mapping.device
-                )
-                self.slot_mapping = torch.cat([self.slot_mapping, slot_padding])
-                block_table_padding = torch.zeros(
-                    (num_block_table_pad_size,) + self.block_table.shape[1:],
-                    dtype=self.block_table.dtype,
-                    device=self.block_table.device,
-                )
-                self.block_table = torch.cat([self.block_table, block_table_padding], dim=0)
-                position_padding = torch.zeros(
-                    num_token_pad_size, dtype=input_positions.dtype, device=input_positions.device
-                )
-                input_positions = torch.cat([input_positions, position_padding])
-                actual_seq_lengths_q = self.pad_actual_seq_len_q_mtp_enable_pad(
-                    num_reqs_pad_size, num_reqs, actual_seq_lengths_q, common_attn_metadata
-                )
+            num_token_pad_size = self.graph_pad_size - self.num_decode_tokens
+            num_reqs_pad_size = self.graph_pad_size // common_attn_metadata.decode_token_per_req - num_reqs
+            num_block_table_pad_size = (
+                self.graph_pad_size // common_attn_metadata.decode_token_per_req - self.num_decodes
+            )
+            seq_lens_list = self.seq_lens.tolist() + [0] * num_reqs_pad_size
+            slot_padding = torch.full(
+                (num_token_pad_size,), PAD_SLOT_ID, dtype=self.slot_mapping.dtype, device=self.slot_mapping.device
+            )
+            self.slot_mapping = torch.cat([self.slot_mapping, slot_padding])
+            block_table_padding = torch.zeros(
+                (num_block_table_pad_size,) + self.block_table.shape[1:],
+                dtype=self.block_table.dtype,
+                device=self.block_table.device,
+            )
+            self.block_table = torch.cat([self.block_table, block_table_padding], dim=0)
+            position_padding = torch.zeros(
+                num_token_pad_size, dtype=input_positions.dtype, device=input_positions.device
+            )
+            input_positions = torch.cat([input_positions, position_padding])
+            actual_seq_lengths_q = self.pad_actual_seq_len_q_mtp_enable_pad(
+                num_reqs_pad_size, num_reqs, actual_seq_lengths_q, common_attn_metadata
+            )
 
         if self.use_mla_rope:
             cos, sin = get_cos_and_sin_mla(input_positions, use_cache=True)
@@ -3073,7 +3046,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                 num_tokens=num_tokens,
                 is_draft_model=is_draft_model,
                 eagle_spec_multiple=eagle_spec_multiple,
-                disable_padded_batch=(is_draft_model and _uses_unpadded_drafter_batch(self.speculative_config)),
             )
             register_task(torch_npu.npu_fused_infer_attention_score_v2.out, operation_kwargs, provider)
         else:
