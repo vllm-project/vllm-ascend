@@ -227,7 +227,7 @@ When using static kernel compilation during graph warmup, keep graph memory prof
 
 Both compilation paths use the torch_npu helper's default `./static_kernel_compile_outputs/` directory, relative to the worker's current working directory. Cache reuse depends on the CANN version, device type, operator descriptions, SuperKernel options, and deterministic mode. After changing torch_npu or custom operator implementations, clear this cache before restarting or rebuild with `VLLM_DISABLE_COMPILE_CACHE=1`.
 
-On shutdown, workers release their graphs before the node's installation owner removes the instance's packages. The build cache remains available for subsequent starts.
+On shutdown, workers release their graphs before the node's installation owner removes the instance's packages. If workers cannot confirm graph release, the packages stay installed. Once all workers in the instance have exited, remove its `static_kernel_install/<timestamp>_<pid>/` directory from the worker's working directory. The build cache remains available for subsequent starts.
 
 ### Verifying static kernel usage
 

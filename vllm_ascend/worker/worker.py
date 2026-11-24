@@ -22,6 +22,7 @@ import gc
 import logging
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
 from threading import RLock
 from types import NoneType
@@ -124,6 +125,9 @@ from vllm_ascend.utils import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+
+
+_STATIC_KERNEL_SHUTDOWN_TIMEOUT = timedelta(seconds=3)
 
 
 # Both supported versions resolve grouping through the platform's builder.
@@ -513,12 +517,28 @@ class NPUWorker(GPUWorker):
             if callable(shutdown_fn):
                 shutdown_fn()
         if self._static_kernel_runtime_initialized:
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier(group=get_world_group().cpu_group)
-            release_static_kernels()
-            self._static_kernel_runtime_initialized = False
+            self._release_static_kernel_runtime()
         if engram_error is not None:
             raise engram_error
+
+    def _release_static_kernel_runtime(self) -> None:
+        world_group = get_world_group()
+        try:
+            # Bound the collective itself so group teardown can finish after the local wait times out.
+            work = world_group.cpu_group.barrier(timeout=_STATIC_KERNEL_SHUTDOWN_TIMEOUT)
+            work.wait(timeout=_STATIC_KERNEL_SHUTDOWN_TIMEOUT)
+        except RuntimeError as exc:
+            logger.warning(
+                "Rank %d could not confirm graph release. Static kernel packages may remain under "
+                "static_kernel_install/ in the worker's working directory. After all workers in this instance "
+                "have exited, remove only its <timestamp>_<pid> subdirectory. Gloo reported: %s",
+                world_group.rank,
+                exc,
+            )
+            return
+
+        release_static_kernels()
+        self._static_kernel_runtime_initialized = False
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
