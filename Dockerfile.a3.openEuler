@@ -21,9 +21,19 @@ WORKDIR /workspace
 
 SHELL ["/bin/bash", "-c"]
 
-# Install clang-15 (for triton-ascend)
+# Install clang-15 (for triton-ascend).
+# mfcli kernel install cross-compiles the AICPU acc_offload kernel with bisheng
+# cce for cortex-a55. __x86_64__ is not defined for that target, so the host
+# glibc features.h takes the 32-bit stubs branch and asks for gnu/stubs-32.h
+# even though this is an LP64 cross-compile. Ship an empty stub header (it only
+# carries __stub_* macro declarations). x86_64-only: on aarch64 the same target
+# is built natively and no 32-bit stubs header is looked up.
 RUN yum update -y && \
     yum install -y git vim wget curl protobuf protobuf-compiler protobuf-devel net-tools gcc gcc-c++ make cmake numactl numactl-devel libibverbs-devel hiredis-devel clang patch && \
+    if [ "$(uname -m)" = "x86_64" ]; then \
+        mkdir -p /usr/include/gnu && \
+        touch /usr/include/gnu/stubs-32.h; \
+    fi && \
     rm -rf /var/cache/yum/*
 
 # Install modelscope (for fast download) and ray (for multinode)
