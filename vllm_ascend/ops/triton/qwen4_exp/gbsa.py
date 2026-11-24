@@ -138,3 +138,105 @@ def prepare_qsa_gbsa_inputs(
         num_warps=1,
     )
     return sparse_idx, sparse_count, visible, cu_query, row_table
+
+
+@triton.jit
+def _pack_resident_gbsa_tiles(
+    resident,
+    selected,
+    counts,
+    visible,
+    resident_table,
+    key_out,
+    value_out,
+    packed_indices,
+    packed_lengths,
+    packed_table,
+    ROWS: tl.constexpr,
+    GROUPS: tl.constexpr,
+    SOURCE_PAGES: tl.constexpr,
+    PAGES: tl.constexpr,
+    PAGE_STRIDE: tl.constexpr,
+    TOKEN_STRIDE: tl.constexpr,
+    KV_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    CHANNELS: tl.constexpr,
+    CHANNEL_BLOCK: tl.constexpr,
+    GROUP_BLOCK: tl.constexpr,
+    PAGE_BLOCK: tl.constexpr,
+    TILE_TOKENS: tl.constexpr,
+):
+    row = tl.program_id(0)
+    tile = tl.program_id(1)
+    token = tile * TILE_TOKENS + tl.arange(0, TILE_TOKENS)
+    group_count = tl.load(counts + row)
+    tail = tl.load(visible + row) % 4
+    length = (group_count - (tail != 0).to(tl.int32)) * 4 + tail
+    live = token < length
+    group = tl.load(selected + row * GROUPS + token // 4, live, other=0)
+    logical = group * 4 + token % 4
+    page = tl.load(resident_table + row * SOURCE_PAGES + logical // 128, live, other=0)
+    head_channel = tl.arange(0, CHANNEL_BLOCK)
+    channel_valid = head_channel < CHANNELS
+    source_channel = head_channel // HEAD_DIM * (2 * HEAD_DIM) + head_channel % HEAD_DIM
+    source = page.to(tl.int64) * PAGE_STRIDE + (logical % 128) * TOKEN_STRIDE
+    mask = live[:, None] & channel_valid[None, :]
+    keys = tl.load(resident + source[:, None] + source_channel[None, :], mask, other=0)
+    values = tl.load(resident + source[:, None] + source_channel[None, :] + HEAD_DIM, mask, other=0)
+    dest = ((row * PAGES * 128 + token) * CHANNELS)[:, None] + head_channel[None, :]
+    tl.store(key_out + dest, keys, channel_valid[None, :])
+    tl.store(value_out + dest, values, channel_valid[None, :])
+
+    if tile == 0:
+        groups = tl.arange(0, GROUP_BLOCK)
+        for head in tl.static_range(KV_HEADS):
+            tl.store(packed_indices + (head * ROWS + row) * GROUPS + groups, groups, groups < GROUPS)
+        pages = tl.arange(0, PAGE_BLOCK)
+        tl.store(packed_table + row * PAGES + pages, row * PAGES + pages, pages < PAGES)
+        tl.store(packed_lengths + row, length)
+
+
+def pack_resident_gbsa_inputs(
+    resident: torch.Tensor,
+    selected: torch.Tensor,
+    counts: torch.Tensor,
+    visible: torch.Tensor,
+    resident_table: torch.Tensor,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Stage selected groups from resident pages without resolving individual tokens."""
+    heads, rows, groups = selected.shape
+    pages = triton.cdiv(groups * 4, 128)
+    keys = torch.empty((rows * pages, 128, heads, head_dim), device=resident.device, dtype=resident.dtype)
+    values = torch.empty_like(keys)
+    packed_indices = torch.empty_like(selected)
+    packed_lengths = torch.empty_like(visible)
+    packed_table = resident_table.new_empty((rows, pages))
+    tile_tokens = 16
+    _pack_resident_gbsa_tiles[(rows, pages * 128 // tile_tokens)](
+        resident,
+        selected,
+        counts,
+        visible,
+        resident_table,
+        keys,
+        values,
+        packed_indices,
+        packed_lengths,
+        packed_table,
+        rows,
+        groups,
+        resident_table.shape[1],
+        pages,
+        resident.stride(0),
+        resident.stride(1),
+        heads,
+        head_dim,
+        heads * head_dim,
+        triton.next_power_of_2(heads * head_dim),
+        triton.next_power_of_2(groups),
+        triton.next_power_of_2(pages),
+        tile_tokens,
+        num_warps=1,
+    )
+    return keys, values, packed_indices, packed_lengths, packed_table

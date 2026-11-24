@@ -8,7 +8,7 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.models.qwen4_exp.gbsa import qsa_gbsa_attention
+from vllm_ascend.models.qwen4_exp.gbsa import qsa_gbsa_attention, qsa_resident_gbsa_attention
 from vllm_ascend.utils import bootstrap_custom_op_env, vllm_version_is
 
 bootstrap_custom_op_env(include_vendor_lib=True)
@@ -164,3 +164,50 @@ def test_qwen4_exp_gbsa_npugraph_replays_updated_input() -> None:
     graph.replay()
     torch.npu.synchronize()
     torch.testing.assert_close(captured_output.float(), expected_replay, rtol=RTOL, atol=ATOL)
+
+
+@torch.inference_mode()
+def test_qwen4_exp_resident_gbsa_matches_paged_attention() -> None:
+    torch.manual_seed(20261009)
+    lengths = torch.tensor([8192, 8201, 8226, 8231], dtype=torch.int32, device="npu")
+    rows = len(lengths)
+    pages_per_request = 65
+    num_pages = rows * pages_per_request
+    head_dim = 256
+    packed_width = 2 * head_dim
+    # Other cache owners leave gaps between pages in the shared device pool.
+    storage = torch.randn((num_pages, PAGE_SIZE, 2 * packed_width), dtype=torch.bfloat16, device="npu")
+    resident = storage.flatten(1)[:, : PAGE_SIZE * packed_width].view(num_pages, PAGE_SIZE, packed_width)
+    key, value = resident.unsqueeze(2).split(head_dim, dim=-1)
+    table = torch.randperm(num_pages, dtype=torch.int32).view(rows, pages_per_request).npu()
+    query = torch.randn((rows, 6, head_dim), dtype=torch.bfloat16, device="npu")
+    compact = torch.full((rows, 515), -1, dtype=torch.int32)
+    for row, length in enumerate(lengths.tolist()):
+        compact[row, :512] = torch.randperm(length // 4, dtype=torch.int32)[:512]
+    compact[2, 1] = -1
+    compact = compact.npu()
+    request_ids = torch.arange(rows, dtype=torch.int32, device="npu")
+    positions = (lengths - 1).long()
+
+    expected = qsa_gbsa_attention(
+        query,
+        key.contiguous(),
+        value.contiguous(),
+        compact,
+        table,
+        request_ids,
+        positions,
+        lengths,
+        torch.empty_like(query),
+    )
+    actual = qsa_resident_gbsa_attention(
+        query,
+        resident,
+        compact,
+        table,
+        request_ids,
+        positions,
+        lengths,
+        torch.empty_like(query),
+    )
+    torch.testing.assert_close(actual.float(), expected.float(), rtol=0.025, atol=5e-4)

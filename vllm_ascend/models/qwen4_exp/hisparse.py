@@ -21,6 +21,7 @@ from .gbsa import (
     GBSA_RESIDUAL_TOKENS,
     expand_qsa_selected_tokens,
     qsa_gbsa_attention,
+    qsa_resident_gbsa_attention,
 )
 from .qsa import AscendQSABackend, _store_qsa_cache_rows
 
@@ -175,6 +176,23 @@ def run_qsa_hisparse(layer, meta, side, selected, query, key, value, output):
     width = layer.indexer.token_topk // layer.indexer.compress_ratio + GBSA_RESIDUAL_TOKENS
     compact = selected[:n, :width]
     d = meta.num_decode_tokens
+    if d and cache.decode_batch and cache.all_context_pages_resident and resident.shape[1] == GBSA_PAGE_SIZE:
+        # The connector has already proved every logical page is resident.
+        # Its page table is indexed by persistent state slots, not batch rows.
+        states = cache.runtime.request_state_indices
+        assert states is not None and cache.block_table is not None
+        table = cache.block_table.index_select(0, states[: meta.num_reqs])
+        qsa_resident_gbsa_attention(
+            query[:d],
+            resident,
+            compact[:d],
+            table,
+            side.token_to_req[:d],
+            side.logical_positions[:d],
+            side.seq_lens[: meta.num_reqs],
+            output[:d],
+        )
+        return
     if d:
         requests = side.token_to_req[:d].long()
         visible = torch.minimum(side.logical_positions[:d] + 1, side.seq_lens[requests])

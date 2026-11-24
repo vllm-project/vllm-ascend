@@ -7,7 +7,7 @@ from vllm_ascend.ops.gbsa import (
     generic_block_sparse_attention,
     generic_block_sparse_attention_metadata,
 )
-from vllm_ascend.ops.triton.qwen4_exp.gbsa import prepare_qsa_gbsa_inputs
+from vllm_ascend.ops.triton.qwen4_exp.gbsa import pack_resident_gbsa_inputs, prepare_qsa_gbsa_inputs
 
 GBSA_COMPRESS_RATIO = 4
 GBSA_RESIDUAL_TOKENS = GBSA_COMPRESS_RATIO - 1
@@ -97,6 +97,57 @@ def qsa_gbsa_attention(
     sparse_idx, sparse_count, row_visible_lens, cu_q, row_block_table = prepare_qsa_gbsa_inputs(
         compact_indices, logical_positions, seq_lens, token_to_req, block_table, num_kv_heads
     )
+    return _run_prepared_gbsa(
+        query,
+        key_cache,
+        value_cache,
+        output,
+        sparse_idx,
+        sparse_count,
+        row_visible_lens,
+        cu_q,
+        row_block_table,
+        logical_max_seqlen_kv,
+        prepared_metadata,
+    )
+
+
+def qsa_resident_gbsa_attention(
+    query: torch.Tensor,
+    resident: torch.Tensor,
+    compact_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    logical_positions: torch.Tensor,
+    seq_lens: torch.Tensor,
+    output: torch.Tensor,
+) -> torch.Tensor:
+    head_dim = query.shape[-1]
+    num_kv_heads = resident.shape[-1] // (2 * head_dim)
+    selected, counts, visible, cu_q, row_table = prepare_qsa_gbsa_inputs(
+        compact_indices, logical_positions, seq_lens, token_to_req, block_table, num_kv_heads
+    )
+    keys, values, indices, lengths, pages = pack_resident_gbsa_inputs(
+        resident, selected, counts, visible, row_table, head_dim
+    )
+    return _run_prepared_gbsa(
+        query, keys, values, output, indices, counts, lengths, cu_q, pages, pages.shape[1] * GBSA_PAGE_SIZE
+    )
+
+
+def _run_prepared_gbsa(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    output: torch.Tensor,
+    sparse_idx: torch.Tensor,
+    sparse_count: torch.Tensor,
+    row_visible_lens: torch.Tensor,
+    cu_q: torch.Tensor,
+    row_block_table: torch.Tensor,
+    logical_max_seqlen_kv: int,
+    prepared_metadata: torch.Tensor | None = None,
+) -> torch.Tensor:
     common = dict(
         cu_seqlens_q=cu_q,
         seqused_kv=row_visible_lens,
@@ -115,7 +166,7 @@ def qsa_gbsa_attention(
             sparse_idx,
             sparse_count,
             query.shape[1],
-            num_kv_heads,
+            key_cache.shape[2],
             query.shape[-1],
             [1, GBSA_COMPRESS_RATIO],
             max_seqlen_q=1,
@@ -138,4 +189,4 @@ def qsa_gbsa_attention(
     return output
 
 
-__all__ = ["qsa_gbsa_attention"]
+__all__ = ["qsa_gbsa_attention", "qsa_resident_gbsa_attention"]
