@@ -1,0 +1,4 @@
+pr: 23098
+entries:
+  - category: hardware
+    text: Added a vLLM-Ascend hardware overlay for deepseek-v4-1-flash-1017 — measured launch configuration (launch arguments, environment, image pin) captured from a live deployment via the platform collection flow.
