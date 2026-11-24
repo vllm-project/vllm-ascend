@@ -39,7 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
     DSparkContextChunk,
     initialize_draft_context_chunk,
 )
-from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits
+from vllm_ascend.utils import is_deepseek_v41, lmhead_tp_enable, lmhead_tp_max_num_logits
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -98,6 +98,29 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         model = super().load_draft_model(target_model, target_attn_layer_names)
+        draft_hf = getattr(getattr(self, "draft_model_config", None), "hf_config", None)
+        if (
+            getattr(draft_hf, "architectures", None) == ["DeepseekV41DSparkModel"]
+            and not getattr(self, "context_kv_only", False)
+            and is_deepseek_v41(self.vllm_config.model_config.hf_config)
+        ):
+            from vllm_ascend.ascend_forward_context import MoECommType, select_moe_comm_method, use_cann_megamoe
+            from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
+            if (
+                get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+                and use_cann_megamoe(self.vllm_config)
+                and select_moe_comm_method(1, self.vllm_config) is MoECommType.FUSED_MC2
+            ):
+                from vllm_ascend.distributed.parallel_state import get_mc2_group
+                from vllm_ascend.ops.fused_moe.mega_moe_context import fused_layouts, try_share_mega_moe_buffer
+
+                try_share_mega_moe_buffer(
+                    fused_layouts(target_model),
+                    fused_layouts(model),
+                    get_mc2_group(),
+                    not self.vllm_config.parallel_config.use_ubatching,
+                )
         if hasattr(model, "post_process"):
             model.post_process(self.vllm_config)
         if hasattr(model, "configure_target_aux_hidden_capture"):
