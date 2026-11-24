@@ -35,6 +35,15 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
+    get_layerwise_offload_config,
+    get_spec_reuse_rules,
+    plan_layerwise_cache_reuse,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    LAYERWISE_REUSE_BACKING_BYTES,
+    get_layerwise_reuse_backing_bytes,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -126,12 +135,11 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         """Materialize the Ascend layouts for exactly ``num_blocks`` blocks.
 
         The default implementation derives the pool size from a one-block
-        placement, which the shared-slot layouts here violate. Converting the
-        block count with ``_get_pool_bytes_per_block`` reproduces the memory
-        budget the model planners consume exactly, so the cell split, offsets,
-        and page strides stay identical to the block-count-based sizing.
+        placement, which the shared-slot layouts here violate. Use the native
+        pool cost so the model planners materialize exactly the requested block
+        count before layerwise reuse is planned.
         """
-        bytes_per_block = self._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
+        bytes_per_block = self._get_native_pool_bytes_per_block(vllm_config, kv_cache_groups)
         if bytes_per_block is None:
             return _attach_transfer_and_speculation_metadata(
                 vllm_config,
@@ -147,14 +155,22 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         self,
         vllm_config: VllmConfig,
         kv_cache_groups: list[KVCacheGroupSpec],
-    ) -> int:
-        """One global block ID consumes sum(page sizes) x layer tuples.
+    ) -> int | None:
+        """Return the device memory cost per global block ID."""
+        extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
+        if extra_config is not None and kv_cache_groups and get_spec_reuse_rules(vllm_config) is not None:
+            probe = self.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)
+            backing_bytes = get_layerwise_reuse_backing_bytes(probe)
+            if backing_bytes is not None:
+                return backing_bytes
+        return self._get_native_pool_bytes_per_block(vllm_config, kv_cache_groups)
 
-        The default implementation materializes a one-block pool and requires a
-        single device backing size, which the DSV4 shared-tuple, the TurboQuant
-        packed, the DSV4.1, the GLM-Next, and the Step5 per-page-size layouts
-        all violate.
-        """
+    def _get_native_pool_bytes_per_block(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_groups: list[KVCacheGroupSpec],
+    ) -> int | None:
+        """Return the pool cost used to build the native descriptors."""
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_pool_bytes(kv_cache_groups)
         pools = _get_replicated_draft_pools(kv_cache_groups)
@@ -558,7 +574,8 @@ def _attach_transfer_and_speculation_metadata(
     used for external cache loads, so the upstream default materializer's
     result carries it too.
     """
-    kv_cache_config.kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    kv_cache_config.kv_transfer_config = kv_transfer_config
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is not None and speculative_config.method == "dspark":
         from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import resident_mla_context_group_ids
@@ -571,4 +588,15 @@ def _attach_transfer_and_speculation_metadata(
         # Remove these snapshots once upstream preserves per-layer ownership.
         kv_cache_config.dspark_context_group_ids = resident_mla_context_group_ids(kv_cache_config.kv_cache_groups)
         kv_cache_config.dspark_draft_only_group_ids = draft_only_group_ids(kv_cache_config.kv_cache_groups)
+    reuse_layout = plan_layerwise_cache_reuse(kv_cache_config, vllm_config)
+    if reuse_layout is not None:
+        assert kv_transfer_config is not None
+        # Core budgets these bytes and the scheduler uses the value to detect reuse.
+        kv_cache_config.kv_transfer_config = replace(
+            kv_transfer_config,
+            kv_connector_extra_config={
+                **kv_transfer_config.kv_connector_extra_config,
+                LAYERWISE_REUSE_BACKING_BYTES: reuse_layout.kv_cache_tensors[0].size,
+            },
+        )
     return kv_cache_config

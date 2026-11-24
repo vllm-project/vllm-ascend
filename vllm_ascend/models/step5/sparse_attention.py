@@ -366,7 +366,7 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
         max_query_len: int,
         *,
         path: str,
-        graph_shape: bool,
+        use_graph_shape: bool,
     ) -> torch.Tensor:
         """One AICPU scheduling pass per step for these query positions.
 
@@ -393,7 +393,7 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
             max_pages=int(block_table.shape[1]),
             page_size=self.gbsa_block_size,
         )
-        if not graph_shape:
+        if not use_graph_shape:
             return metadata
         buffer_key = (
             path,
@@ -423,13 +423,13 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
         num_input_tokens = (
             getattr(common_attn_metadata, "num_input_tokens", 0) or common_attn_metadata.num_actual_tokens
         )
-        graph_shape = num_input_tokens in self.capture_sizes
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.reorder_batch_threshold,
             require_uniform=True,
         )
+        use_graph_shape = num_input_tokens in self.capture_sizes and num_prefills == 0
 
         prefill_metadata: AscendStep5DSAPrefillMetadata | None = None
         active_prefills = 0
@@ -479,7 +479,7 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
                 block_table,
                 prefill_metadata.max_query_len,
                 path="prefill",
-                graph_shape=False,
+                use_graph_shape=False,
             )
 
         decode_metadata: AscendStep5DSADecodeMetadata | None = None
@@ -491,9 +491,9 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
             gbsa_metadata = None
             if active_decodes > 0:
                 decode_seq_lens = seq_lens[:active_decodes]
-                if graph_shape:
+                if use_graph_shape:
                     rows = num_input_tokens // decode_query_len
-                    gbsa_seq_lens = seq_lens[:rows].clamp_min(1)
+                    gbsa_seq_lens = seq_lens[:rows]
                     total = rows * decode_query_len
                     row_base = (gbsa_seq_lens.to(torch.int64) - decode_query_len).clamp_min(0)
                     positions = row_base.repeat_interleave(decode_query_len) + (
@@ -530,7 +530,7 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
                     block_table,
                     max_query_len,
                     path="decode",
-                    graph_shape=graph_shape,
+                    use_graph_shape=use_graph_shape,
                 )
             decode_metadata = AscendStep5DSADecodeMetadata(
                 seq_lens=seq_lens[:active_decodes],

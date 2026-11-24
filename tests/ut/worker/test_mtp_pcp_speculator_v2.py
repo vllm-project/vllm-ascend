@@ -4,7 +4,7 @@
 
 import json
 from contextlib import ExitStack, nullcontext
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import replace as dataclass_replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -31,6 +31,7 @@ from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as target_speculator_module
 
 from vllm_ascend.attention.mla_v1 import AscendMLADecodeMetadata, AscendMLAMetadata
+from vllm_ascend.patch.worker import patch_dspark
 from vllm_ascend.platform import _validate_eplb_config
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
@@ -232,6 +233,45 @@ def test_dspark_draft_config_leaves_dcp_to_upstream(eplb_worker_config):
     assert draft.parallel_config.decode_context_parallel_size == 2
     assert not draft.parallel_config.enable_eplb
     assert config.parallel_config.enable_eplb
+
+
+def test_dspark_loader_reconstructs_physical_topology_then_exposes_query_view(eplb_worker_config, monkeypatch):
+    parallel = replace(
+        eplb_worker_config.parallel_config,
+        decode_context_parallel_size=8,
+        cp_kv_cache_interleave_size=4,
+        dcp_kv_cache_interleave_size=4,
+        enable_eplb=False,
+        eplb_config=dataclass_replace(eplb_worker_config.parallel_config.eplb_config, num_redundant_experts=0),
+    )
+    config = replace(eplb_worker_config, parallel_config=parallel)
+    spec = config.speculative_config
+    spec.method = "dspark"
+    spec.draft_model_config.hf_config.model_type = "k3_dspark"
+    spec.target_parallel_config = parallel
+    assert spec.draft_parallel_config.prefill_context_parallel_size == 1
+    assert spec.draft_parallel_config.decode_context_parallel_size == 1
+
+    # The loader receives the PCP=1 query view created by DFlash's constructor.
+    config.parallel_config = copy(parallel)
+    config.parallel_config.prefill_context_parallel_size = 1
+    if vllm_version_is("0.33.0"):
+        monkeypatch.setattr(spec_utils, "get_pp_group", lambda: SimpleNamespace(world_size=1))
+    with (
+        patch(
+            "vllm.model_executor.model_loader.get_model", side_effect=RuntimeError("reached model construction")
+        ) as get_model,
+        pytest.raises(RuntimeError, match="reached model construction"),
+    ):
+        patch_dspark.speculator_module.load_dspark_model(torch.nn.Module(), config)
+
+    loaded = get_model.call_args.kwargs["vllm_config"].parallel_config
+    assert loaded.pipeline_parallel_size == loaded.prefill_context_parallel_size == 1
+    assert loaded.decode_context_parallel_size == 8
+    assert loaded.cp_kv_cache_interleave_size == loaded.dcp_kv_cache_interleave_size == 4
+    assert parallel.prefill_context_parallel_size == parallel.decode_context_parallel_size == 8
+    with pytest.raises(ValueError, match="must be divisible"):
+        patch_dspark.dspark_utils.replace(parallel, prefill_context_parallel_size=1)
 
 
 def test_mtp_draft_config_keeps_target_pcp_topology(eplb_worker_config):

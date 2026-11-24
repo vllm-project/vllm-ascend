@@ -43,13 +43,6 @@ def chunk_gated_delta_rule_fwd(
     use_triton_recurrence: bool = False,
     checkpoint_state_dtype: torch.dtype = torch.float32,
 ):
-    forward_context = get_forward_context()
-    num_decodes = 0
-    attn_metadata = forward_context.attn_metadata
-    if attn_metadata is not None and isinstance(attn_metadata, dict):
-        attn_metadata = next(iter(attn_metadata.values()), None)
-    if attn_metadata is not None:
-        num_decodes = attn_metadata.num_decodes
     chunk_size = 64
     block_indices_cumsum = None if prebuilt_meta is None else prebuilt_meta.block_indices_cumsum
     cu_seqlens_host = None if prebuilt_meta is None else prebuilt_meta.cu_seqlens_host
@@ -162,12 +155,16 @@ def chunk_gated_delta_rule_fwd(
             _fs_full[keep_meta] = final_state
             final_state = _fs_full
 
-    if get_pcp_group().world_size > 1:
+    # Head-sharded PCP already processes the full token sequence on each rank.
+    if not getattr(prebuilt_meta, "head_sharded_pcp", False) and get_pcp_group().world_size > 1:
         # When integrating mtp, since `mix_qkv` has been split, `num_decode`
         # cannot be directly obtained from the metadata and needs to be recalculated.
         actual_num_decodes = getattr(prebuilt_meta, "num_decodes", None)
         if actual_num_decodes is None:
-            actual_num_decodes = num_decodes
+            attn_metadata = get_forward_context().attn_metadata
+            if isinstance(attn_metadata, dict):
+                attn_metadata = next(iter(attn_metadata.values()), None)
+            actual_num_decodes = 0 if attn_metadata is None else attn_metadata.num_decodes
         h_update = chunk_gated_delta_rule_fwd_hupdate(
             k=k,
             w=w,
