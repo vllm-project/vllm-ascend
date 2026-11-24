@@ -169,6 +169,45 @@ def test_stage_cache_serves_mixed_rows_from_local_scratch():
         assert torch.equal(staged_source[slot], source[original])
 
 
+def test_swa_chunk_staging_supports_replay_visible_lengths():
+    # Bounded replay stamps ori_topk_length, a right-edge visible count.  It is
+    # shift invariant, so replay rows are stageable; explicit index lists are
+    # not, because staging rebases their coordinates.
+    assert stage.swa_chunk_staging_supported(None, None, 128, 127) is True
+    assert stage.swa_chunk_staging_supported(None, torch.ones(4, 1, dtype=torch.int32), 128, 127) is True
+    assert stage.swa_chunk_staging_supported(torch.zeros(4, 8, dtype=torch.int32), None, 128, 127) is False
+    assert stage.swa_chunk_staging_supported(None, None, 0, 127) is False
+    assert stage.swa_chunk_staging_supported(None, None, 128, -1) is False
+
+
+def test_replay_visible_count_is_shift_invariant():
+    # A replayed prefill of 5000 tokens keeps its last 128; the staged plan
+    # starts at block-aligned 4736, so positions and the replay floor shift by
+    # that offset.  The visible count (distance from the token's right edge)
+    # must not change, otherwise the staged view would mask different KV.
+    window, seq_len, staged_start = 128, 5000, 4736
+    floor = seq_len - window
+    assert staged_start <= floor
+
+    def visible(pos, low):
+        return pos - max(pos - window + 1, low) + 1
+
+    assert visible(seq_len, floor) == window
+    assert visible(seq_len, floor) == visible(seq_len - staged_start, floor - staged_start)
+    # A token in the middle of the kept chunk must also keep its count.
+    assert visible(4950, floor) == visible(4950 - staged_start, floor - staged_start)
+
+
+def test_swa_chunk_plan_covers_replay_floor():
+    # A replayed prefill keeps its last window: query_start_loc says 128 kept
+    # rows, seq_lens says the chunk ends at 5000, so the logical floor is 4872.
+    segments = stage.plan_swa_chunk_segments([0, 128], [5000], 1, 128, 128)
+    assert segments is not None
+    segment = segments[0]
+    assert segment.replay_start <= 5000 - 128
+    assert segment.replay_start + segment.replay_seq_len == 5000
+
+
 def test_stage_enabled_uses_the_typed_config():
     from vllm_ascend.ascend_config import PcpConfig
 

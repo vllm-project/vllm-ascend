@@ -905,9 +905,10 @@ class AscendDSAV41Impl:
         if swa_metadata.ori_sparse_indices is not None:
             _pcp_stage_count("swa", "skipped_sparse")
             return
-        if swa_metadata.ori_topk_length is not None:
-            _pcp_stage_count("swa", "skipped_topk")
-            return
+        # ``ori_topk_length`` (a bounded-replay right-edge count) no longer
+        # rules staging out: the count is shift invariant, so the same window
+        # can still be copied to local scratch.  See
+        # ``pcp_owner_stage.swa_chunk_staging_supported``.
         if not swa_metadata.storage_block_size or swa_metadata.ori_win_left < 0:
             _pcp_stage_count("swa", "skipped_window")
             return
@@ -1602,23 +1603,26 @@ class AscendDSAV41Impl:
                 sync_host_started = time.perf_counter()
                 fallback_stage_cache = getattr(metadata, "swa_stage_cache", None)
                 _pcp_stage_touch(fallback_stage_cache)
+                from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
+                    get_swa_chunk_stage_cache,
+                    swa_chunk_staging_supported,
+                )
+
                 eligible = (
                     # A negative from the overlapped path means this step's
                     # plan/metadata/overflow already failed; retrying the same
                     # device work per layer would only add latency.
                     _pcp_stage_negative(fallback_stage_cache) is None
-                    # Mixed and pure-decode rows replay one bounded window.
-                    and metadata.swa.ori_sparse_indices is None
-                    # A per-token visible-length floor (bounded replay) is tied
-                    # to the unbounded coordinate system; keep that path untouched.
-                    and metadata.swa.ori_topk_length is None
-                    and metadata.swa.storage_block_size
-                    and metadata.swa.ori_win_left >= 0
+                    # Mixed, pure-decode and bounded-replay rows all replay one
+                    # window; only explicit index lists rule staging out.
+                    and swa_chunk_staging_supported(
+                        metadata.swa.ori_sparse_indices,
+                        metadata.swa.ori_topk_length,
+                        metadata.swa.storage_block_size,
+                        metadata.swa.ori_win_left,
+                    )
                 )
                 if eligible:
-                    from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
-                        get_swa_chunk_stage_cache,
-                    )
                     from vllm_ascend.attention.context_parallel.pcp_owner_vmm import (
                         owner_slab_for_tensor,
                     )

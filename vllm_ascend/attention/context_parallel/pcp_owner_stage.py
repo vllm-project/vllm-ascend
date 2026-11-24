@@ -62,6 +62,27 @@ def owner_stage_swa_chunk_enabled(pcp_config: PcpConfig | None = None) -> bool:
     return _pcp_config(pcp_config).owner_stage_swa_chunk
 
 
+def swa_chunk_staging_supported(
+    ori_sparse_indices, ori_topk_length, storage_block_size: int, ori_win_left: int
+) -> bool:
+    """Whether the bounded SWA chunk view can serve this step.
+
+    ``ori_sparse_indices`` is an explicit per-token KV index list, so staging
+    the window into scratch and rebasing the block table would invalidate it.
+
+    ``ori_topk_length`` is not an index list: it is the number of visible KV
+    entries counted back from each token's right edge (bounded replay writes it
+    from ``build_replay_swa_visible_lens``).  Shifting the whole staged range
+    leaves that count unchanged, and the chunk plan always starts at
+    ``chunk_start - window``, which is at or before the replay floor
+    ``seq_len - window``.  Replay rows can therefore be staged like any other
+    bounded window; refusing them sent every replay layer back to direct peer
+    reads in the attention kernel.
+    """
+    del ori_topk_length  # a right-edge count: shift invariant, see above
+    return ori_sparse_indices is None and bool(storage_block_size) and ori_win_left >= 0
+
+
 def owner_stage_reserve_bytes(pcp_config: PcpConfig | None = None) -> int:
     """Scratch the enabled staging paths may allocate after the KV pool is sized.
 
