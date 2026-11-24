@@ -199,8 +199,8 @@ def _kda_recoverssm_verify_kernel(
         if record_row < 0:
             return
 
-    offs_k = tl.arange(0, BK)
-    offs_v = pid_v * BV + tl.arange(0, BV)
+    offs_k = tl.max_contiguous(tl.multiple_of(tl.arange(0, BK), BK), BK)
+    offs_v = pid_v * BV + tl.max_contiguous(tl.multiple_of(tl.arange(0, BV), BV), BV)
     # Provably-full tiles (K a power of two, BV dividing V) drop their
     # predication masks entirely; ragged shapes keep the original masks.
     if K == BK:
@@ -809,8 +809,8 @@ def _commit_kda_state_kernel(
     kg_cache_ptr = kg_cache_base_addr.to(tl.pointer_type(kg_cache_ref_ptr.dtype.element_ty))
     kg_cache_ptr += record_row * kg_cache_block_stride + pid_h * stride_kg_cache_head
 
-    offs_k = tl.arange(0, BK)
-    offs_v = pid_v * BV + tl.arange(0, BV)
+    offs_k = tl.max_contiguous(tl.multiple_of(tl.arange(0, BK), BK), BK)
+    offs_v = pid_v * BV + tl.max_contiguous(tl.multiple_of(tl.arange(0, BV), BV), BV)
     mask_k = None if K == BK else offs_k < K
     mask_v = None if V % BV == 0 else offs_v < V
     if K == BK and V % BV == 0:
@@ -1023,8 +1023,8 @@ def _commit_kda_state_grouped_kernel(
     kg_cache_block_stride = tl.load(kg_cache_block_strides_ptr + pid_l)
     kg_cache_ptr = kg_cache_base_addr.to(tl.pointer_type(kg_cache_ref_ptr.dtype.element_ty))
     kg_cache_ptr += record_row * kg_cache_block_stride + pid_h * stride_kg_cache_head
-    offs_k = tl.arange(0, BK)
-    offs_v = pid_v * BV + tl.arange(0, BV)
+    offs_k = tl.max_contiguous(tl.multiple_of(tl.arange(0, BK), BK), BK)
+    offs_v = pid_v * BV + tl.max_contiguous(tl.multiple_of(tl.arange(0, BV), BV), BV)
     mask_k = None if K == BK else offs_k < K
     mask_v = None if V % BV == 0 else offs_v < V
     if K == BK and V % BV == 0:
