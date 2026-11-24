@@ -20,7 +20,7 @@ def pair(monkeypatch):
     monkeypatch.setattr(comms, "_MoECommMethods", {})
     scope = SimpleNamespace(device_group=object())
     calls = []
-    allocated = set()
+    allocated: set[object] = set()
 
     def factory(
         group,
@@ -136,8 +136,10 @@ def test_peer_restore_failure_stops_before_next_collective(
     scope.device_group = object()
     peer_results = iter([None] * successful_steps + ["injected failure"])
 
-    def agree(scope, local):
-        return [local, local if isinstance(local, tuple) else next(peer_results)]
+    def agree(scope: object, local: object) -> list[object]:
+        if isinstance(local, tuple):
+            return [local, local]
+        return [local, next(peer_results)]
 
     monkeypatch.setattr(context, "_agree", agree)
     barrier = Mock()
