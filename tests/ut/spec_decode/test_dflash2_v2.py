@@ -23,6 +23,7 @@ from dataclasses import make_dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -517,9 +518,12 @@ def test_greedy_walk_contract_reference():
 @pytest.mark.parametrize("num_reqs_padded", [2, 4])
 def test_dflash_metadata_spans_padded_queries(monkeypatch, num_reqs_padded):
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
+    speculator.attn_architecture = "GQA"
+    speculator.use_flashmla = False
     speculator.attn_backends = {name: AscendAttentionBackend for name in ("draft.0", "draft.1")}
     speculator.input_batch = SimpleNamespace(num_reqs=2)
     speculator.num_query_per_req = 3
+    speculator.arange_np = np.arange(2 * 3 + 1, dtype=np.int32)
     speculator._group_causal = {0: False}
     seq_lens = torch.tensor([10, 20])
     metadata = {
@@ -532,12 +536,13 @@ def test_dflash_metadata_spans_padded_queries(monkeypatch, num_reqs_padded):
         )
         for name in ("draft.0", "draft.1")
     }
-    speculator._build_uniform_attn_metadata = MagicMock(return_value=metadata)
+    build = MagicMock(return_value=metadata)
+    monkeypatch.setattr(DFlashSpeculator, "_build_attn_metadata", build)
     monkeypatch.setattr(dflash_module, "build_attn_metadata_wrapper", nullcontext)
 
     assert speculator.build_draft_attn_metadatas(num_reqs_padded, seq_lens) == [metadata]
 
-    kwargs = speculator._build_uniform_attn_metadata.call_args.kwargs
+    kwargs = build.call_args.kwargs
     assert kwargs["num_reqs"] == 2
     assert kwargs["seq_lens_cpu_upper_bound"] is seq_lens
     assert kwargs["causal"] is speculator._group_causal
@@ -560,6 +565,8 @@ def test_dflash_dummy_metadata_fits_draft_graph(monkeypatch, num_reqs_padded):
 
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
     speculator.attn_backends = {"draft": AscendAttentionBackend}
+    speculator.attn_architecture = "GQA"
+    speculator.use_flashmla = False
     speculator.input_batch = SimpleNamespace(num_reqs=8)
     speculator.num_query_per_req = 8
     speculator._group_causal = {0: False}

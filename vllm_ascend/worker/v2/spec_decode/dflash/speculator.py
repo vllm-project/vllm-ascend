@@ -221,41 +221,30 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         """Build Ascend draft metadata through the upstream attention hook.
 
         Eager propose() reaches the builder through this hook with only
-        ``build_attn_metadata_wrapper()`` outside, so the MLA factory context
-        (``attn_state=ChunkedPrefill`` plus the rejection-adjusted host
-        lengths) must live here; ``build_draft_attn_metadatas`` alone only
-        covers FULL-graph replay.
+        ``build_attn_metadata_wrapper()`` outside, so the FIA factory
+        context must live here; ``build_draft_attn_metadatas`` alone only
+        covers FULL-graph replay. Only FIA-backed MLA drafts enter the
+        factory (``attn_state=ChunkedPrefill`` plus the rejection-adjusted
+        host lengths); GQA and FlashMLA drafts keep the upstream builder
+        inputs and consume the device lengths directly.
         """
-        if self.attn_architecture != "MLA" or self.use_flashmla:
-            # GQA and FlashMLA DFlash drafts keep the upstream path and
-            # consume the device lengths directly.
-            return super()._build_attn_metadata(
-                num_reqs=num_reqs,
-                batch_desc=batch_desc,
-                query_start_loc_np=query_start_loc_np,
-                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                step=step,
-                causal=causal,
-                dcp_local_seq_lens=dcp_local_seq_lens,
-            )
-
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         # The draft forward may process padded inputs outside FULL graphs, but
         # attention only consumes the tokens owned by real requests there.
         num_tokens = (
             batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
         )
-        with (
-            build_attn_metadata_wrapper(),
-            build_attn_metadata_factory(
+        metadata_context = nullcontext()
+        if self.attn_architecture == "MLA" and not self.use_flashmla:
+            metadata_context = build_attn_metadata_factory(
                 self.input_buffers.positions,
                 num_tokens,
                 is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool, device="cpu"),
                 seq_lens_cpu=prepare_draft_host_lengths(self, num_reqs, num_reqs_padded, step),
                 attn_state=AscendAttentionState.ChunkedPrefill,
                 parallel_config=self.attn_vllm_config.parallel_config,
-            ),
-        ):
+            )
+        with build_attn_metadata_wrapper(), metadata_context:
             attn_metadata = super()._build_attn_metadata(
                 num_reqs=num_reqs,
                 batch_desc=batch_desc,
@@ -267,7 +256,8 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             )
         if batch_desc.cg_mode == CUDAGraphMode.FULL and attn_metadata is not None:
             # FULL replay uses the captured padded Q, so FIA needs cumulative
-            # query lengths through every padded request slot.
+            # query lengths through every padded request slot. This covers
+            # FIA-backed GQA and MLA drafts alike, as in DSpark.
             self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
         return attn_metadata
 
