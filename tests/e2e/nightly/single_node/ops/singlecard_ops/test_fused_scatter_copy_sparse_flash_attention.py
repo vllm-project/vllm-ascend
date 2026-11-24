@@ -594,11 +594,18 @@ def common(ends, lengths, pools=(1, 0), active=(True, True)):
         copy_sfa_restore_tails=True,
         req_topk_buffer_slots=torch.tensor(pools, dtype=torch.int32),
         req_topk_buffer_active=torch.tensor(active, dtype=torch.bool),
-        # Runner-owned stable prefixes (retired full blocks); the fixture aligns
-        # them to seq_lens rounded down to complete 128-token blocks. Callers
-        # that change seq_lens in place must refresh this tensor too.
+        # Runner-owned stable prefixes: full blocks whose D2H has completed.
+        # The fixture derives them from computed tokens (seq_len minus the
+        # request's query width) rounded down to complete 128-token blocks, so
+        # the prefix never runs ahead of computed history. Callers that change
+        # seq_lens in place must refresh this tensor too.
         req_topk_buffer_stable_prefixes=torch.tensor(
-            [length // 128 * 128 for length in lengths], dtype=torch.int32, device="npu"
+            [
+                max(length - end + prev_end, 0) // 128 * 128
+                for length, end, prev_end in zip(lengths, ends, (0, *ends[:-1]))
+            ],
+            dtype=torch.int32,
+            device="npu",
         ),
         block_table_tensor=torch.arange(count * 128, dtype=torch.int32, device="npu").reshape(count, 128),
         slot_mapping=torch.arange(16, dtype=torch.int64, device="npu") + 128,
@@ -650,28 +657,28 @@ def test_device_lengths_tail_geometry_and_rejection():
     builder = make_builder()
     cm = common([4, 5], [10371, 8321])
     metadata = populate(builder, cm)
-    # [S-Q] are 10367 and 8320. Prefixes come from the runner's stable
-    # prefixes: seq_lens rounded down to complete 128-token blocks.
-    assert metadata.copy_sfa_prefix_lens.cpu().tolist() == [10368, 8320]
+    # [S-Q] are 10367 and 8316. Prefixes are the runner's stable prefixes:
+    # computed tokens rounded down to complete 128-token blocks.
+    assert metadata.copy_sfa_prefix_lens.cpu().tolist() == [10240, 8192]
     assert metadata.copy_sfa_cache_tokens.cpu().tolist() == [8192, 8192]
-    assert metadata.copy_sfa_logical_lens.cpu().tolist() == [8195, 8193]
+    assert metadata.copy_sfa_logical_lens.cpu().tolist() == [8323, 8321]
     # Current query KV is scattered locally: descriptors still describe prior KV
     # so prefix rollback can eager-restore. PD decode skips the graph H2D.
-    assert metadata.copy_sfa_tail_lengths.cpu().tolist() == [[0, 0], [0, 0]]
+    assert metadata.copy_sfa_tail_lengths.cpu().tolist() == [[127, 0], [124, 0]]
     assert metadata.copy_sfa_copy_count.item() == 8
-    assert metadata.copy_sfa_copy_lengths.cpu().tolist() == [0] * 8
-    assert metadata.copy_sfa_tail_src.cpu().tolist() == [[10368, 10496], [24704, 24832]]
-    assert metadata.copy_sfa_hbm_block_table[:, 64:66].cpu().tolist() == [[131, 130], [65, 64]]
+    assert metadata.copy_sfa_copy_lengths.cpu().tolist() == [127 * 1024, 0, 124 * 1024, 0, 127 * 128, 0, 124 * 128, 0]
+    assert metadata.copy_sfa_tail_src.cpu().tolist() == [[10240, 10368], [24576, 24704]]
+    assert metadata.copy_sfa_hbm_block_table[:, 64:66].cpu().tolist() == [[130, 131], [64, 65]]
     stride = 8192 + 256
     assert metadata.copy_sfa_device_slots.cpu().tolist() == [
         stride + 8192 + pos % 256 for pos in range(10367, 10371)
     ] + [8192 + 8320 % 256]
     address = metadata.copy_sfa_prefix_lens.data_ptr()
     cm.seq_lens.copy_(torch.tensor([10243, 8321], dtype=torch.int32, device="npu"))
-    cm.req_topk_buffer_stable_prefixes.copy_(torch.tensor([10240, 8320], dtype=torch.int32, device="npu"))
+    cm.req_topk_buffer_stable_prefixes.copy_(torch.tensor([10112, 8192], dtype=torch.int32, device="npu"))
     revised = populate(builder, cm)
     assert revised.copy_sfa_prefix_lens.data_ptr() == address
-    assert revised.copy_sfa_prefix_lens.cpu().tolist() == [10240, 8320]
+    assert revised.copy_sfa_prefix_lens.cpu().tolist() == [10112, 8192]
 
 
 def test_slot_invalidation_compaction_and_prefix_rollback_reset():
@@ -687,7 +694,7 @@ def test_slot_invalidation_compaction_and_prefix_rollback_reset():
     # Slot invalidation and rollback independently force cold fill.
     builder.lim_last_cache[:, [0]] = -1
     cm.seq_lens[1] = 10243
-    cm.req_topk_buffer_stable_prefixes[1] = 10240
+    cm.req_topk_buffer_stable_prefixes[1] = 10112
     assert populate(builder, cm).lim_request_state.cpu().tolist() == [-2, -2]
 
 
@@ -760,7 +767,7 @@ def test_target_and_draft_history_are_separate_and_reuse_does_not_advance_it():
     # Later Q1 steps cross a block boundary, but skip LIM entirely.
     populate(builder, common([1], [10380], pools=(1,), active=(True,)), draft_index=1, reuse_topk=True)
     populate(builder, common([1], [10381], pools=(1,), active=(True,)), draft_index=2, reuse_topk=True)
-    assert builder.lim_last_prefix[1, 1].item() == 10368
+    assert builder.lim_last_prefix[1, 1].item() == 10240
     assert draft.lim_request_state.cpu().tolist() == [-2]
     next_draft = populate(builder, common([4], [10371], pools=(1,), active=(True,)), draft_index=0)
     assert next_draft.lim_request_state.cpu().tolist() == [-1]
@@ -823,7 +830,7 @@ def test_lim_consumes_shared_state_without_modifying_it(draft_index):
     assert builder.lim_last_cache[bank, 1].item() == 8192
     if draft_index == 0:
         assert impl.lim_reuse_request_count == 3
-        assert impl.copy_sfa_reuse_logical_lens.cpu().tolist() == [8195, 500, 0]
+        assert impl.copy_sfa_reuse_logical_lens.cpu().tolist() == [8323, 500, 0]
         assert impl.copy_sfa_reuse_cache_tokens.cpu().tolist() == [8192, 0, 2048]
     else:
         assert impl.lim_reuse_request_count == 0
@@ -841,7 +848,7 @@ def test_reuse_extent_is_prepared_once_per_draft_round():
     assert (storage == -999).all().item()
 
     first = populate(builder, cm, draft_index=0)
-    assert first.copy_sfa_reuse_logical_lens.cpu().tolist() == [500, 8195, 0]
+    assert first.copy_sfa_reuse_logical_lens.cpu().tolist() == [500, 8323, 0]
     address = first.copy_sfa_reuse_logical_lens.data_ptr()
     saved = storage.clone()
     for step in (1, 2):
@@ -871,11 +878,11 @@ def test_short_row_dense_geometry_in_mixed_batch():
     # Row 0: short (aligned prefix 4992 < hot 8192), row 1: long.
     cm = common([4, 8], [5000, 10371])
     metadata = populate(builder, cm)
-    assert metadata.copy_sfa_prefix_lens.cpu().tolist() == [4992, 10368]
+    assert metadata.copy_sfa_prefix_lens.cpu().tolist() == [4992, 10240]
     # Short rows run copy-SFA's dense mode (C == 0) and see the whole
     # sequence; long rows keep the full hot budget.
     assert metadata.copy_sfa_cache_tokens.cpu().tolist() == [0, 8192]
-    assert metadata.copy_sfa_logical_lens.cpu().tolist() == [5000, 8195]
+    assert metadata.copy_sfa_logical_lens.cpu().tolist() == [5000, 8323]
     assert metadata.copy_sfa_reuse_logical_lens is None
     # Short row: identity block table for every stride block, zero tail, and
     # front-to-back device slots (token p -> row slot p).
@@ -886,10 +893,10 @@ def test_short_row_dense_geometry_in_mixed_batch():
     # Long row keeps the ring-tail geometry.
     long_ring = metadata.copy_sfa_hbm_block_table[1, 64:66].cpu().tolist()
     assert long_ring == [
-        stride_blocks - 2 + (10368 // 128 + 64 - 64) % 2,
-        stride_blocks - 2 + (10368 // 128 + 65 - 64) % 2,
+        stride_blocks - 2 + (10240 // 128 + 64 - 64) % 2,
+        stride_blocks - 2 + (10240 // 128 + 65 - 64) % 2,
     ]
-    assert metadata.copy_sfa_tail_lengths[1].cpu().tolist() == [0, 0]
+    assert metadata.copy_sfa_tail_lengths[1].cpu().tolist() == [127, 0]
     assert metadata.copy_sfa_device_slots[4:].cpu().tolist() == [8192 + (10367 + p) % 256 for p in range(4)]
 
 
@@ -954,19 +961,19 @@ def test_inactive_capture_becomes_active_on_graph_replay(draft_index):
     assert observed.cpu().tolist() == [[-3, -3], [0, 0], [0, 0]]
     assert observed_slots.cpu().tolist() == [-1] * 8
     cm.seq_lens.copy_(torch.tensor([10371, 0], dtype=torch.int32, device="npu"))
-    cm.req_topk_buffer_stable_prefixes.copy_(torch.tensor([10368, 0], dtype=torch.int32, device="npu"))
+    cm.req_topk_buffer_stable_prefixes.copy_(torch.tensor([10240, 0], dtype=torch.int32, device="npu"))
     cm.req_topk_buffer_active[0] = True
     cm.req_topk_buffer_slots[0] = 1
     # Real scheduling regenerates mappings before metadata preparation.
     cm.slot_mapping.copy_(torch.arange(16, dtype=torch.int64, device="npu") + 256)
     populate(builder, cm, draft_index=draft_index)
     graph.replay()
-    reuse = [8195, 0] if draft_index == 0 else [0, 0]
-    assert observed.cpu().tolist() == [[-2, -3], [8195, 0], reuse]
+    reuse = [8323, 0] if draft_index == 0 else [0, 0]
+    assert observed.cpu().tolist() == [[-2, -3], [8323, 0], reuse]
     assert observed_slots.cpu().tolist() == [256, 257, 258, 259, -1, -1, -1, -1]
     populate(builder, cm, draft_index=draft_index)
     graph.replay()
-    assert observed.cpu().tolist() == [[-1, -3], [8195, 0], reuse]
+    assert observed.cpu().tolist() == [[-1, -3], [8323, 0], reuse]
     cm.req_topk_buffer_active.fill_(False)
     populate(builder, cm, draft_index=draft_index)
     graph.replay()
@@ -1114,11 +1121,11 @@ def test_normal_decode_skips_restore_descriptors_and_reuses_block_table():
     md = populate(builder, cm)
     assert md.copy_sfa_copy_src_offsets is None
     assert md.copy_sfa_source_block_table.data_ptr() == cm.block_table_tensor.data_ptr()
-    assert md.copy_sfa_logical_lens.cpu().tolist() == [8195]
+    assert md.copy_sfa_logical_lens.cpu().tolist() == [8323]
     cm.copy_sfa_restore_tails = True
     restored = populate(builder, cm)
     assert restored.copy_sfa_copy_src_offsets is not None
-    assert restored.copy_sfa_tail_lengths.cpu().tolist() == [[0, 0]]
+    assert restored.copy_sfa_tail_lengths.cpu().tolist() == [[127, 0]]
     cm.copy_sfa_restore_tails = False
     assert populate(builder, cm).copy_sfa_copy_src_offsets is None
 
@@ -1135,8 +1142,8 @@ def test_host_buffers_are_persistent_and_device_lengths_are_authoritative():
     cm.seq_lens.fill_(10368)
     changed = populate(builder, cm)
     assert changed.copy_sfa_seq_lens.cpu().tolist() == [10368]
-    assert changed.copy_sfa_prefix_lens.cpu().tolist() == [10368]
-    assert changed.copy_sfa_logical_lens.cpu().tolist() == [8192]
+    assert changed.copy_sfa_prefix_lens.cpu().tolist() == [10240]
+    assert changed.copy_sfa_logical_lens.cpu().tolist() == [8320]
     assert changed.copy_sfa_device_slots.cpu().tolist() == [8448 + 8192 + p % 256 for p in range(10364, 10368)]
     assert changed.copy_sfa_query_ends.data_ptr() == md.copy_sfa_query_ends.data_ptr()
     assert addresses == {
