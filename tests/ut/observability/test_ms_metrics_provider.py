@@ -79,15 +79,21 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert provider.owned_symbol_prefixes == ("vllm_ascend.",)
     assert provider.handler_module_prefixes == ("vllm_ascend.observability.ms_metrics.",)
     assert provider.config_paths == tuple(sorted(provider.config_paths))
-    assert [Path(path).name for path in provider.config_paths] == [
+    packaged_configs = {Path(path).name for path in provider.config_paths}
+    assert {
         "base_metrics.yaml",
         "eplb_metrics.yaml",
         "runtime_guard_metrics.yaml",
         "schedule_execute_metrics.yaml",
-    ]
+    } <= packaged_configs
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
-    assert len(config) == 13
+    # Assert per-file and namespace invariants instead of exact totals: every
+    # packaged yaml declares metrics, and every symbol stays inside the owned
+    # namespace. Exact counts make each provider branch collide with every
+    # other branch on the same line.
+    for config_path in provider.config_paths:
+        assert _load_all_provider_configs([config_path]), f"Empty metric config: {config_path}"
     assert all(item["symbol"].startswith("vllm_ascend.") for item in config)
     assert all("id" not in item for item in config)
     assert all(
@@ -171,7 +177,7 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
 
 def test_provider_yaml_symbols_exist_in_current_vllm_ascend_source():
     config_paths = sorted((_PACKAGE_ROOT / "config").glob("*.yaml"))
-    assert len(config_paths) == 4
+    assert config_paths
     config = _load_all_provider_configs(config_paths)
 
     for item in config:
