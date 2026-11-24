@@ -68,7 +68,6 @@ ENV SOC_VERSION=$SOC_VERSION \
 COPY . /vllm-workspace/vllm-ascend/
 
 ARG ASCEND_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi https://repo.huaweicloud.com/ascend/repos/pypi/nightly"
-    https://repo.huaweicloud.com/ascend/repos/pypi/nightly"
 ARG COMPILE_CUSTOM_KERNELS=1
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
