@@ -1,0 +1,35 @@
+# Overlay for Qwen/Qwen3-ASR-1.7B on Huawei Ascend.
+# Ascend Atlas 300I DUO (310P) verification; renderer has no dedicated 310P
+# hardware profile yet, so evidence is recorded in guide_sections.ascend.
+meta:
+  date_updated: 2026-10-19
+
+guide_sections:
+  ascend: |
+    ### Ascend Atlas 300I DUO (310P)
+
+    Verified end-to-end on one Atlas 300I DUO die (310P3, about 44 GB HBM) with
+    vLLM 0.23.0 and vLLM Ascend 0.23.0 (`quay.io/ascend/vllm-ascend:v0.23.0-310p`
+    or the matching 310P wheel). Install audio extras (`pip install av soundfile`)
+    before serving.
+
+    ```bash
+    export ASCEND_RT_VISIBLE_DEVICES=0
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    vllm serve Qwen/Qwen3-ASR-1.7B \
+      --served-model-name qwen3-asr \
+      --tensor-parallel-size 1 \
+      --dtype float16 \
+      --max-model-len 4096 \
+      --gpu-memory-utilization 0.9 \
+      --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false,"enable_npu_graph_ex":false}}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4]}' \
+      --port 8000
+    ```
+
+    The tutorial sample `asr_en.wav` returned HTTP 200 with an English transcription
+    and `finish_reason: stop`. On 310P, `No module named 'triton'` is expected.
+    Always set `--max-model-len` explicitly to avoid an oversized attention mask.
+
+    Downstream Ascend recipes mirror (merged):
+    https://github.com/vllm-ascend/vllm-ascend-recipes/pull/116
