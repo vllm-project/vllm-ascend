@@ -16,14 +16,17 @@ MAX_HCCL_REGISTER_REGIONS = 256
 REGISTER_MERGE_GAP_BYTES = 4096
 
 QOS_KEY = "comm_resource_config.qos"
-PD_QOS_DEFAULT = 1
-QOS_MAX = 4
+QOS_MAX = 7
+QOS_WARNING_THRESHOLD = 4
 
 
-def inject_qos(qos: int) -> None:
+def inject_qos(extra_config: dict[str, Any]) -> None:
     """Merge P/D QoS before engine initialization, preserving all other fields."""
+    if "qos_priority" not in extra_config:
+        return
+    qos = extra_config["qos_priority"]
     if type(qos) is not int or not 0 <= qos <= QOS_MAX:
-        raise ValueError("kv_connector_extra_config.qos_priority must be an integer in [0, 4]")
+        raise ValueError(f"kv_connector_extra_config.qos_priority must be an integer in [0, {QOS_MAX}]")
     raw = os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG", "")
     try:
         config = json.loads(raw) if raw else {}
@@ -34,15 +37,21 @@ def inject_qos(qos: int) -> None:
     if QOS_KEY in config:
         logger.warning(
             "Overriding comm_resource_config.qos=%s from ASCEND_GLOBAL_RESOURCE_CONFIG "
-            "with qos=%s from kv_connector_extra_config (or the P/D default).",
+            "with qos=%s from kv_connector_extra_config.",
             config[QOS_KEY],
             qos,
+        )
+    if qos > QOS_WARNING_THRESHOLD:
+        logger.warning(
+            "QoS %d in kv_connector_extra_config.qos_priority exceeds %d. "
+            "Verify that the transfer backend and switch are configured for this priority.",
+            qos,
+            QOS_WARNING_THRESHOLD,
         )
     config[QOS_KEY] = qos
     os.environ["ASCEND_GLOBAL_RESOURCE_CONFIG"] = json.dumps(config)
     logger.info(
-        "Injected comm_resource_config.qos=%d from kv_connector_extra_config "
-        "(or the P/D default) into ASCEND_GLOBAL_RESOURCE_CONFIG.",
+        "Injected comm_resource_config.qos=%d from kv_connector_extra_config into ASCEND_GLOBAL_RESOURCE_CONFIG.",
         qos,
     )
 
