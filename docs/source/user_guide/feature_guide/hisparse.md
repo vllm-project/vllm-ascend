@@ -27,6 +27,10 @@ and native C8 (E4M3FN values with FP32 scales), with independent Main and
 Indexer KV dtype selection. The A2/A3 extension does not add a BF16 HiSparse
 serving path or change the existing non-HiSparse BF16 path.
 
+On a single Ascend 950 node with colocated Prefill and Decode, you can
+[combine HiSparse with AscendStore](#combining-hisparse-with-ascendstore)
+to offload historical KV to local DDR and reuse complete prefixes across requests.
+
 ### Constraints and Limitations
 
 | Category | Constraint |
@@ -86,15 +90,12 @@ the private Host allocator. Omitting it uses native ACL Host-memory registration
 
 ### Combining HiSparse with AscendStore
 
-Use the whole-block AscendStore pool on a single Ascend 950 node with
-colocated Prefill and Decode. HiSparse continues to own the Host Source and the NPU Resident
-and Hot buffers. AscendStore saves and restores the transferable Host Source
-and NPU Indexer pages; Resident and Hot pages stay in HiSparse.
+AscendStore saves and restores Host Source and NPU Indexer pages. HiSparse
+manages the Host Source, Resident, and Hot buffers.
 
-Use a vLLM Core build with Ascend HiSparse backend support. Stock vLLM v0.33.0
-limits HiSparse to CUDA and rejects HiSparse on Ascend during configuration.
-
-Keep the attention options above and replace the transfer configuration with:
+Use a vLLM Core build with Ascend HiSparse support. Stock vLLM v0.33.0
+supports HiSparse on CUDA only. Keep the attention options above and pass the
+following JSON to `--kv-transfer-config`.
 
 ```json
 {
@@ -117,19 +118,10 @@ Keep the attention options above and replace the transfer configuration with:
 }
 ```
 
-See [KV Cache Pool](kv_cache_pool_ascend_store.md) for MemCache setup.
-Use the `host_tcp` protocol in its local configuration and keep
-`load_async=true` and `discard_partial_chunks=true` (the default).
-This combination supports only MemCache whole-block
-transfers and excludes external PD transport. Startup rejects Mooncake
-because a timed-out write can overwrite another pool object
-([Mooncake #4491](https://github.com/kvcache-ai/Mooncake/issues/4491)).
-Use exactly one HiSparseConnector and one AscendStoreConnector, with
-`prefill_context_parallel_size=1`. Set `eager_host_mirror=true` even for
-Prefill-only saves. A single-token chunk can follow the Decode path before
-a later Prefill chunk publishes the full block from Host memory.
-With `kv_load_failure_policy=recompute`, a failed external import resumes
-from local compute and skips further external lookups for that request.
+See [KV Cache Pool](kv_cache_pool_ascend_store.md) for MemCache setup and
+[AscendStore settings](#ascendstore-settings) for the required options.
+Mooncake support is deferred pending a fix for
+[PUT timeout data corruption](https://github.com/kvcache-ai/Mooncake/issues/4491).
 
 AscendStore keys for HiSparse use the `hisparse-ascendstore-v1` namespace.
 This version identifies the external pool key format. The keys include the
@@ -186,3 +178,16 @@ enabled, and `kv_load_failure_policy=fail`. Add
 | `host_pool_gib` | Host pool size in GiB per tensor-parallel rank. Size it for the planned context lengths and concurrency; the example reserves 4 GiB per rank. |
 | `device_buffer_size` | Per-request Hot capacity in KV rows. It must hold the deduplicated union of rows selected during speculative verification and fit the resolver's on-chip UB budget. |
 | `kv_cache_dtype` / `indexer_kv_dtype` | Select main and Indexer KV formats independently from model-weight quantization. |
+
+### AscendStore settings
+
+| Where to set it | Setting |
+| --- | --- |
+| `--kv-transfer-config` | Use `MultiConnector` with one `HiSparseConnector` and one `AscendStoreConnector`. Set `kv_role=kv_both` on the parent and both children. |
+| AscendStore child's `kv_connector_extra_config` | Set `backend=memcache` and `load_async=true`. Keep `use_layerwise=false` and `discard_partial_chunks=true` for whole-block transfers. |
+| MemCache local configuration | Set `protocol` to `host_tcp`. |
+| `--attention-config` | Set `hisparse_config.eager_host_mirror=true`, including for Prefill-only saves. |
+| Parallel configuration | Keep `prefill_context_parallel_size=1`. |
+
+To fall back to local computation after an external load fails, set
+`kv_load_failure_policy=recompute` in `--kv-transfer-config`.
