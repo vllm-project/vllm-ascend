@@ -1148,8 +1148,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _supports_flashmla(self, supported_q_heads: frozenset[int]) -> bool:
         return (
-            bool(getattr(self.vllm_config, "use_v2_model_runner", False))
-            and get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
+            get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
             and self.num_heads in supported_q_heads
             and self.num_kv_heads == FLASHMLA_NUM_KV_HEADS
             and self.kv_lora_rank == FLASHMLA_V_DIM

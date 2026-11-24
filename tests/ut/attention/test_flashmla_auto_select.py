@@ -118,9 +118,8 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
     assert not AscendMLAImpl._can_use_flashmla(impl)
 
 
-def test_quant_flashmla_selection_is_k3_dspark_c8_mrv2_only(monkeypatch):
+def test_quant_flashmla_selection_is_k3_dspark_c8(monkeypatch):
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         speculative_config=None,
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=SimpleNamespace(model_type="kimi_linear")),
@@ -149,9 +148,6 @@ def test_quant_flashmla_selection_is_k3_dspark_c8_mrv2_only(monkeypatch):
     config.speculative_config = SimpleNamespace(method="dspark")
     impl._is_k3_dspark_draft = True
     assert AscendMLAImpl._can_use_quant_flashmla(impl)
-    config.use_v2_model_runner = False
-    assert not AscendMLAImpl._can_use_quant_flashmla(impl)
-    config.use_v2_model_runner = True
     impl.fa_quant_layer = False
     assert not AscendMLAImpl._can_use_quant_flashmla(impl)
     impl.fa_quant_layer = True
@@ -167,7 +163,6 @@ def test_quant_flashmla_selection_is_k3_dspark_c8_mrv2_only(monkeypatch):
 
 def test_quant_flashmla_selection_supports_k31_dspark_draft_c8(monkeypatch):
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         speculative_config=SimpleNamespace(method="dspark"),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=SimpleNamespace(model_type="kimi_k31")),
