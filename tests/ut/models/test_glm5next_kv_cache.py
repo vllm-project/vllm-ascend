@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+from vllm.config import ParallelConfig
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
@@ -117,7 +118,7 @@ def test_tail_uses_one_full_precision_page(capacity):
     assert spec.is_circular
     context_parallel_config = SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=1024),
-        parallel_config=SimpleNamespace(
+        parallel_config=ParallelConfig(
             decode_context_parallel_size=2,
             prefill_context_parallel_size=2,
         ),
@@ -222,15 +223,17 @@ def test_invalid_pool_geometry_is_rejected(ratio):
 
 
 @pytest.mark.parametrize("storage_block_size", [8, 24, 144, 1536, 2048])
-def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
+@pytest.mark.parametrize("split_kernel_pages", [False, True])
+def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size, split_kernel_pages):
     pool_size = 16
     logical_size = storage_block_size * pool_size
-    split = logical_size // 128
+    kernel_block_size = 128 if split_kernel_pages else logical_size
+    split = logical_size // kernel_block_size
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=logical_size),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4, max_num_seqs=1),
         model_config=SimpleNamespace(max_model_len=logical_size * 3),
-        parallel_config=SimpleNamespace(
+        parallel_config=ParallelConfig(
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
         ),
@@ -243,8 +246,10 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
         tokens_per_state=pool_size,
         model_version="glm5_next",
     )
+    # Match the copied spec supplied by AttentionGroup.create_metadata_builders().
+    kernel_spec = spec.copy_with_new_block_size(kernel_block_size)
     builders = [
-        AscendIndexerKPoolMetadataBuilder(spec, ["layer.indexer.k_cache"], config, torch.device("cpu"))
+        AscendIndexerKPoolMetadataBuilder(kernel_spec, ["layer.indexer.k_cache"], config, torch.device("cpu"))
         for _ in range(2)
     ]
     pages = torch.tensor([[7, 2, -1]], dtype=torch.int32)
@@ -266,10 +271,8 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
         block_table_tensor=expanded,
     )
     first, draft = [builder.build(0, common) for builder in builders]
-    # Kernel-granularity blocks: the metadata reports the natural kernel rows
-    # (128 tokens / pool ratio) and passes the common expanded table through
-    # as a view, so both builders observe the same persistent buffer.
-    assert first.block_size == 128 // pool_size
+    # Metadata uses the selected kernel rows and preserves the mapped table.
+    assert first.block_size == kernel_block_size // pool_size
     torch.testing.assert_close(first.block_table, expanded)
     assert first.slot_mapping.shape == (4,)
     assert first.seq_lens.shape == (1,)
@@ -286,7 +289,7 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
 @pytest.mark.parametrize("lookahead", [0, 5])
 def test_model_cache_layers_publish_source_compatible_specs(dtype, lookahead):
     current_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(pipeline_parallel_size=2),
+        parallel_config=ParallelConfig(pipeline_parallel_size=2),
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
     cache_config = SimpleNamespace(block_size=256)
@@ -339,7 +342,7 @@ def test_model_cache_layers_publish_source_compatible_specs(dtype, lookahead):
 
 
 def test_indexer_cache_rejects_unsupported_dtype():
-    with pytest.raises(ValueError, match="BF16 or FP8"):
+    with pytest.raises(ValueError, match="BF16, FP8 or INT8"):
         Glm5NextIndexerCache(
             head_dim=128,
             dtype=torch.float16,
@@ -358,7 +361,7 @@ def test_indexer_metadata_preserves_raw_request_boundaries(keypool_kernels):
             max_num_seqs=2,
         ),
         model_config=SimpleNamespace(max_model_len=512),
-        parallel_config=SimpleNamespace(
+        parallel_config=ParallelConfig(
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
         ),
@@ -409,7 +412,7 @@ def test_pcp_kpool_metadata_writes_global_token_order(keypool_kernels, capture, 
         cache_config=SimpleNamespace(block_size=128),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8, max_num_seqs=2),
         model_config=SimpleNamespace(max_model_len=512),
-        parallel_config=SimpleNamespace(
+        parallel_config=ParallelConfig(
             decode_context_parallel_size=1,
             prefill_context_parallel_size=2,
         ),
@@ -453,15 +456,17 @@ def test_pcp_kpool_metadata_writes_global_token_order(keypool_kernels, capture, 
             seq_lens=torch.tensor([8], dtype=torch.int32),
             positions=global_positions,
             is_prefilling_np=np.array([True]),
+            has_prefill=True,
         ),
         global_block_tables=(torch.tensor([[5, 6]], dtype=torch.int32),),
         global_slot_mappings=global_slots.unsqueeze(0),
         hidden_restore_idx=restore,
         padded_gather_idx=torch.arange(8),
+        local_num_tokens=4,
     )
 
     if invalid == "layout":
-        pcp_context.padded_gather_idx = None
+        pcp_context.local_num_tokens = None
     elif invalid == "capacity":
         builder._max_num_write_tokens = 4
 
@@ -474,7 +479,7 @@ def test_pcp_kpool_metadata_writes_global_token_order(keypool_kernels, capture, 
         return builder.build(0, local_common)
 
     if invalid is not None:
-        match = {"group": "cache-group index", "layout": "gathered-token layout", "capacity": "buffer capacity"}
+        match = {"group": "cache-group index", "layout": "padded local token count", "capacity": "buffer capacity"}
         with pytest.raises(RuntimeError, match=match[invalid]):
             build()
         return
@@ -527,6 +532,113 @@ def test_pcp_kpool_metadata_writes_global_token_order(keypool_kernels, capture, 
     torch.testing.assert_close(tail_common.slot_mapping, global_slots)
 
 
+@pytest.mark.parametrize(
+    "rank,query_len,num_requests,graph_padding,short_seq_lens",
+    [
+        pytest.param(0, 1, 3, False, False, id="single-token-decode"),
+        pytest.param(1, 1, 1, True, False, id="padded-empty-rank"),
+        pytest.param(1, 6, 3, True, True, id="verification-short-seq-lens"),
+    ],
+)
+def test_pcp_decode_kpool_and_tail_route_global_write_metadata(
+    keypool_kernels, rank, query_len, num_requests, graph_padding, short_seq_lens
+):
+    """Route global write metadata and local queries; cache kernels are mocked."""
+    global_reqs = 4 if graph_padding else num_requests
+    local_capacity = (global_reqs + 1) // 2
+    global_tokens = global_reqs * query_len
+    local_tokens = local_capacity * query_len
+    global_query = torch.arange(global_reqs + 1, dtype=torch.int32) * query_len
+    global_seq_lens = torch.zeros(global_reqs, dtype=torch.int32)
+    global_seq_lens[:num_requests] = torch.arange(1, num_requests + 1) * 16 + query_len
+    global_positions = torch.zeros(global_tokens, dtype=torch.int64)
+    global_slots = torch.full((global_tokens,), -1, dtype=torch.int64)
+    restore = torch.zeros(global_tokens, dtype=torch.int64)
+    mapping = torch.zeros(2 * local_tokens, dtype=torch.int64)
+    for req in range(num_requests):
+        rows = slice(req * query_len, (req + 1) * query_len)
+        positions = (req + 1) * 16 + torch.arange(query_len)
+        global_positions[rows] = positions
+        global_slots[rows] = (req + 5) * 128 + positions
+        start = (req % 2) * local_tokens + (req // 2) * query_len
+        restore[rows] = torch.arange(start, start + query_len)
+        mapping[start : start + query_len] = torch.arange(req * query_len, (req + 1) * query_len)
+    global_tables = torch.arange(5, 5 + global_reqs, dtype=torch.int32)[:, None]
+    global_tables[num_requests:] = 0
+    local_reqs = list(range(rank, num_requests, 2))
+    local_indices = mapping[rank * local_tokens : (rank + 1) * local_tokens]
+    local_actual_tokens = len(local_reqs) * query_len
+    local_slots = global_slots[local_indices].clone()
+    local_slots[local_actual_tokens:] = -1
+    common = AscendCommonAttentionMetadata(
+        query_start_loc=torch.arange(local_capacity + 1, dtype=torch.int32) * query_len,
+        query_start_loc_cpu=torch.arange(local_capacity + 1, dtype=torch.int32) * query_len,
+        seq_lens=torch.zeros(local_capacity, dtype=torch.int32),
+        num_reqs=local_capacity,
+        num_actual_tokens=local_actual_tokens,
+        max_query_len=query_len,
+        num_input_tokens=local_tokens,
+        max_seq_len=128,
+        block_table_tensor=torch.zeros(local_capacity, 1, dtype=torch.int32),
+        slot_mapping=local_slots,
+        positions=global_positions[local_indices],
+    )
+    common.pcp_cache_group_idx = 0
+    common.pcp_context = SimpleNamespace(
+        global_batch=SimpleNamespace(
+            num_reqs=num_requests,
+            num_reqs_after_padding=global_reqs,
+            num_tokens=num_requests * query_len,
+            num_tokens_after_padding=global_tokens,
+            query_start_loc=global_query,
+            query_start_loc_np=global_query.numpy(),
+            seq_lens=global_seq_lens[:num_requests] if short_seq_lens else global_seq_lens,
+            positions=global_positions,
+            is_prefilling_np=np.zeros(num_requests, dtype=np.bool_),
+            has_prefill=False,
+        ),
+        global_block_tables=(global_tables,),
+        global_slot_mappings=global_slots[None],
+        hidden_restore_idx=restore,
+        padded_gather_idx=mapping,
+        local_num_tokens=local_tokens,
+    )
+    builder = AscendIndexerKPoolMetadataBuilder.__new__(AscendIndexerKPoolMetadataBuilder)
+    builder.pcp_size = 2
+    builder.is_pcp_decode_sharded = True
+    local_metadata, write_metadata = SimpleNamespace(), SimpleNamespace()
+    builder._build_metadata = MagicMock(side_effect=[local_metadata, write_metadata])
+    builder._build_indexer_row_shard = MagicMock(return_value=None)
+    metadata = builder.build(0, common, _graph_capture=graph_padding)
+    assert metadata is local_metadata
+    assert metadata.write_metadata is write_metadata
+    global_common = builder._build_metadata.call_args_list[1].args[0]
+    assert global_common.num_reqs == global_reqs
+    assert global_common.num_input_tokens == global_tokens
+    assert global_common.num_actual_tokens == num_requests * query_len
+    assert global_common.max_query_len == query_len
+    torch.testing.assert_close(global_common.slot_mapping, global_slots)
+    torch.testing.assert_close(global_common.seq_lens, global_seq_lens)
+    torch.testing.assert_close(metadata.pcp_hidden_restore_indices, restore)
+    assert metadata.pcp_local_token_count == local_tokens
+
+    tail = AscendIndexerKPoolTailMetadataBuilder.__new__(AscendIndexerKPoolTailMetadataBuilder)
+    tail.device = torch.device("cpu")
+    tail.is_pcp_decode_sharded = True
+    tail.block_size = tail._pool_size = tail._page_rows = 4
+    tail._max_num_metadata_reqs = global_reqs
+    tail._lookahead = False
+    tail._tail_inputs = {}
+    tail_metadata = tail.build(0, common)
+    tail_common = keypool_kernels.build_tail_inputs.call_args.args[0]
+    assert tail_common.num_reqs == global_reqs
+    assert tail_common.num_input_tokens == global_tokens
+    torch.testing.assert_close(tail_metadata.write_block_table, global_tables)
+    torch.testing.assert_close(tail_metadata.write_slot_mapping, global_slots)
+    # Query addressing stays local even when this rank only updates caches.
+    torch.testing.assert_close(tail_metadata.slot_mapping, local_slots)
+
+
 def test_indexer_metadata_request_buffers_cover_graph_token_padding():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=256),
@@ -535,7 +647,7 @@ def test_indexer_metadata_request_buffers_cover_graph_token_padding():
             max_num_seqs=2,
         ),
         model_config=SimpleNamespace(max_model_len=512),
-        parallel_config=SimpleNamespace(
+        parallel_config=ParallelConfig(
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
         ),
@@ -583,7 +695,7 @@ def test_indexer_metadata_buffers_are_stable_per_draft_step():
             max_num_seqs=2,
         ),
         model_config=SimpleNamespace(max_model_len=512),
-        parallel_config=SimpleNamespace(
+        parallel_config=ParallelConfig(
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
         ),
@@ -664,7 +776,7 @@ def test_indexer_metadata_buffers_are_stable_per_draft_step():
 
 def _config():
     return SimpleNamespace(
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        parallel_config=ParallelConfig(prefill_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=128),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=16, max_num_seqs=2),
         model_config=SimpleNamespace(max_model_len=8192),

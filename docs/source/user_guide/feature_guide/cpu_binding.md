@@ -115,7 +115,7 @@ written by this feature.
 device type. When UVB polling threads are found and bound, the log also reports
 their thread IDs and CPU pool:
 
-```text
+```output
 Ascend 950 NPU0: worker=[...]
 [cpu_bind_ascend_950] uvb_poll_window_thread tids=[...] cpus=[...]
 ```

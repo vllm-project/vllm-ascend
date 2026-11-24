@@ -15,8 +15,8 @@
 # limitations under the License.
 """CODEOWNERS merge gate.
 
-Two subcommands used by the ``codeowner-approval`` job inside the ci-gate
-workflow (``.github/workflows/pr_test.yaml``):
+Two subcommands used by the CODEOWNERS gate steps of the ``ci-gate`` job in
+``.github/workflows/pr_test.yaml``:
 
 ``check-approvals --pr N``
     Every file changed by the PR must have at least one CODEOWNERS owner whose

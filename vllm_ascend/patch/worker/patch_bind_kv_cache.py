@@ -7,6 +7,7 @@ from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
+from vllm_ascend.models.step5.sparse_attention import AscendStep5CSATailRing, AscendStep5SparseSummaryCacheLayer
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -75,9 +76,10 @@ def bind_kv_cache_to_layers(
     allocates per-layer (k, v) tuples, so assign the raw allocation directly,
     matching the Ascend bind_kv_cache patch above.
     """
+    unpacking_layers = (DeepseekV41CacheLayer, AscendStep5CSATailRing, AscendStep5SparseSummaryCacheLayer)
     for layer_name, kv_cache in kv_caches.items():
         layer = forward_context[layer_name]
-        if isinstance(layer, DeepseekV41CacheLayer):
+        if isinstance(layer, unpacking_layers):
             layer.bind_kv_cache(kv_cache)
         else:
             layer.kv_cache = kv_cache

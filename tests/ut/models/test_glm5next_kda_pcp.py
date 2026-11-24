@@ -167,6 +167,7 @@ def test_kda_projection_and_state_sharding_follow_tp_times_pcp(
             prefill_context_parallel_size=pcp_size,
             pipeline_parallel_size=1,
             decode_context_parallel_size=1,
+            pcp_shard_decode_requests=pcp_size > 1,
         ),
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=config, hf_text_config=config),
         cache_config=SimpleNamespace(
@@ -229,10 +230,10 @@ def test_kda_projection_and_state_sharding_follow_tp_times_pcp(
         layer.use_pcp_head_sharding or input_proj_tp_size > 1
     )
     assert isinstance(layer.o_proj, model_kda.PCPRowParallelLinear) == layer.use_pcp_head_sharding
-    for name in ("f_b_proj", "g_b_proj", "q_conv1d", "k_conv1d", "v_conv1d"):
+    for name in ("f_b_proj", "g_b_proj", "conv1d"):
         projection = getattr(layer, name)
         assert isinstance(projection, model_kda.PCPColumnParallelLinear) == layer.use_pcp_head_sharding
-        assert projection.weight.shape[0] == 1024 // size
+        assert projection.weight.shape[0] == (3 if name == "conv1d" else 1) * 1024 // size
     projection_size = input_proj_tp_size if input_proj_tp_size > 1 else size
     assert layer.in_proj_qkvbfg_a.weight.shape[0] == 3 * 1024 // projection_size + 8 // projection_size + 2 * 128
     assert layer.o_proj.weight.shape == (16, 1024 // size)

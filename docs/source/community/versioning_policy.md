@@ -93,14 +93,19 @@ Using `--no-build-isolation` can bypass build-environment resolution, so run
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
+| 2026.11.10 | Release candidates, v0.32.0rc1            |
+| 2026.10.29 | v0.30.0 Final release, v0.30.0            |
+| 2026.10.13 | Release candidates, v0.30.0rc2            |
 | 2026.10.11 | Release candidates, v0.30.0rc1            |
-| 2026.09.21 | v0.23.0 post release, v0.23.0.post1  |
+| 2026.09.29 | Release candidates, v0.27.1rc1            |
+| 2026.09.21 | v0.23.0 post release, v0.23.0.post1       |
 | 2026.09.03 | Release candidates, v0.26.0rc1            |
 | 2026.08.16 | v0.23.0 Final release, v0.23.0            |
 | 2026.07.20 | Release candidates, v0.23.0rc1            |
 | 2026.06.30 | Release candidates, v0.22.1rc1            |
 | 2026.06.16 | Release candidates, v0.21.0rc1            |
 | 2026.06.03 | Release candidates, v0.20.2rc1            |
+| 2026.04.30 | v0.18.0 Final release, v0.18.0            |
 | 2026.04.30 | Release candidates, v0.19.1rc1            |
 | 2026.04.24 | Release candidates, v0.13.0rc3            |
 | 2026.04.01 | Release candidates, v0.18.0rc1            |

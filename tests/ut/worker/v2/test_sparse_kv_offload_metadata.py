@@ -12,8 +12,10 @@ from vllm.v1 import utils as v1_utils
 
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    d2h_retire,
     update_sparse_kv_offload_metadata,
 )
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState, DefaultModelState
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import sparse_kv_offload
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.sparse_kv_offload import SparseKVOffloadMetadata
@@ -45,9 +47,20 @@ def _state(*, pool=True):
         return SimpleNamespace(_offload_pool_slots=None, _offload_pool_active=None, _offload_request_identity=registry)
     slots = v1_utils.CpuGpuBuffer(4, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False)
     active = v1_utils.CpuGpuBuffer(4, dtype=torch.bool, device=torch.device("cpu"), pin_memory=False)
+    stable = v1_utils.CpuGpuBuffer(4, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False)
     slots.cpu.copy_(torch.tensor([7, 8, 9, 10]))
     active.cpu.copy_(torch.tensor([True, False, True, False]))
-    return SimpleNamespace(_offload_pool_slots=slots, _offload_pool_active=active, _offload_request_identity=registry)
+    # Distinct settled prefixes per request: live-a settled one block (128),
+    # live-b settled two (256); padding rows keep 0 so any leak from them is
+    # visible in the assertions below.
+    stable.cpu.copy_(torch.tensor([128, 256, 0, 0]))
+    stable.copy_to_gpu(4)
+    return SimpleNamespace(
+        _offload_pool_slots=slots,
+        _offload_pool_active=active,
+        _offload_stable_prefixes=stable,
+        _offload_request_identity=registry,
+    )
 
 
 def _descriptor(mode=CUDAGraphMode.FULL, *, num_reqs=4):
@@ -114,6 +127,7 @@ def test_full_graph_metadata_preserves_live_ids_pool_cpu_views_and_step(monkeypa
         "token_to_req",
         "req_topk_buffer_slots",
         "req_topk_buffer_active",
+        "req_topk_buffer_stable_prefixes",
         "copy_sfa_draft_index",
         "offload_dummy",
     }
@@ -123,6 +137,10 @@ def test_full_graph_metadata_preserves_live_ids_pool_cpu_views_and_step(monkeypa
     assert kwargs["req_topk_buffer_slots"].tolist() == [7, 8, 9, 10]
     assert kwargs["req_topk_buffer_active"].data_ptr() == state._offload_pool_active.cpu.data_ptr()
     assert kwargs["copy_sfa_draft_index"] == 1
+    # Draft steps must consume the same settled stable prefixes as the
+    # target: distinct per-request values, padded rows keep their 0.
+    assert kwargs["req_topk_buffer_stable_prefixes"] is not None
+    assert kwargs["req_topk_buffer_stable_prefixes"].tolist() == [128, 256, 0, 0]
     assert kwargs["offload_dummy"] is False
 
 
@@ -268,3 +286,45 @@ def test_model_state_removal_ends_owner_incarnation_after_upstream_removal(monke
     state._offload_request_states.remove_request.assert_called_once_with("finished")
     assert state._offload_request_identity.get_or_create("finished") > retained_owner
     assert state._offload_request_identity.get_or_create("temporarily-unscheduled") == retained_owner
+
+
+def test_d2h_retire_drains_before_resetting_preempted_rows():
+    calls: list[object] = []
+    manager = MagicMock()
+
+    def _retire() -> int:
+        calls.append("retire")
+        return 2
+
+    def _release(slots):
+        calls.append(("release", list(slots)))
+
+    manager.retire_d2h.side_effect = _retire
+    manager.release_d2h_slots.side_effect = _release
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.sparse_kv_offload_manager = manager
+    runner.model_state = SimpleNamespace(
+        _offload_pool_generations=object(),
+        _offload_pool_slots=SimpleNamespace(np=np.array([3, 5])),
+    )
+    runner.input_batch = SimpleNamespace(
+        num_reqs=2,
+        req_ids=["req-a", "req-b"],
+        num_computed_tokens_np=np.array([100, 200]),
+    )
+
+    # Preemption must not raise: the previous batch drains first, then the
+    # preempted request's ledger row is released for re-adoption.
+    assert d2h_retire(runner, {"req-b"}) == 2
+    assert calls == ["retire", ("release", [5])]
+
+    # Ids absent from the batch, or dummy batches, still retire (one entry
+    # per call) but release nothing further.
+    def release_count():
+        return sum(1 for entry in calls if isinstance(entry, tuple))
+
+    assert d2h_retire(runner, {"req-gone"}) == 2
+    assert release_count() == 1
+    runner.input_batch.is_dummy = True
+    assert d2h_retire(runner, {"req-a"}) == 2
+    assert release_count() == 1

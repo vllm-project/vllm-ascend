@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.v1.core import kv_cache_planning as planning
 from vllm.v1.core.kv_cache_utils import get_max_concurrency_for_kv_cache_config
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
@@ -19,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache
 
 
@@ -165,8 +167,9 @@ def test_common_stride_uses_largest_group_without_page_bin_fragmentation():
 @pytest.mark.parametrize("max_model_len", [131072, 1048576])
 def test_mixed_cache_capacity_and_normalization(block_size, max_model_len):
     config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=max_model_len),
+        model_config=SimpleNamespace(max_model_len=max_model_len, hf_config=SimpleNamespace(model_type="deepseek_v4")),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        attention_config=SimpleNamespace(hisparse_config=None),
         cache_config=SimpleNamespace(num_gpu_blocks_override=None),
         max_in_flight_tokens=8192,
     )
@@ -205,7 +208,9 @@ def test_mixed_cache_capacity_and_normalization(block_size, max_model_len):
         blocks_per_request = sum(group.kv_cache_spec.max_memory_usage_pages(config) for group in groups)
         assert capacities[-1] == num_blocks / blocks_per_request
         if tq:
-            assert cache.max_memory_usage(config, groups) == divisor * blocks_per_request
+            assert planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), config, groups) == (
+                divisor * blocks_per_request
+            )
             # Compare the physical pool with identical groups and non-C4
             # specs, restoring only the C4 main cache to BF16. This isolates
             # quantization from changes to state padding or group counts.

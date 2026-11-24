@@ -424,6 +424,7 @@ def _categorical_sample_main(
     use_fp64: bool = False,
     logits_cache_source: torch.Tensor | None = None,
     logits_cache_row_mapping: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # 0.33.0 has `logits_cache_source` (only watermarking supplies a separate
     # source); main adds the per-row mapping for batch-sharded caches. The NPU
@@ -432,6 +433,11 @@ def _categorical_sample_main(
         raise NotImplementedError("Batch-sharded draft logits are not supported on NPU.")
     if logits_cache_source is not None:
         raise NotImplementedError("A separate draft-logits cache source is not supported on NPU.")
+    if bias is not None:
+        # DSpark main (#64476) may defer its Markov bias to the sampler. Match
+        # the upstream logits-dtype rounding before temperature, sampling and
+        # draft-cache writes; keep the caller's logits unchanged.
+        logits = (logits.float() + bias.float()).to(logits.dtype)
     return _categorical_sample(
         logits,
         expanded_idx_mapping,

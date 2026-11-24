@@ -13,6 +13,7 @@ from vllm.config import CUDAGraphMode
 import vllm_ascend.attention.mla_v1 as mla_v1
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
+from vllm_ascend.models import quarot_utils
 from vllm_ascend.models.kimi_k3 import kimi_k3, kimi_k3_dspark
 from vllm_ascend.models.kimi_k3.kimi_k3 import (
     AscendKimiK3MultiModalProjector,
@@ -329,6 +330,21 @@ def test_k3_dspark_context_writer_splits_fused_mla_cache(monkeypatch):
     torch.testing.assert_close(cache[1], fused_cache[..., 4:])
 
 
+def test_k3_dspark_profiles_context_projection_before_kv_allocation(monkeypatch):
+    projection = MagicMock(return_value=(torch.zeros(32, 8),))
+    attn = SimpleNamespace(
+        fused_qkv_a_proj=projection,
+        q_lora_rank=2,
+        impl=SimpleNamespace(kv_lora_rank=4, exec_kv_prefill=MagicMock()),
+    )
+    model = SimpleNamespace(layers=[SimpleNamespace(self_attn=attn)])
+    context = torch.ones(32, 4)
+    monkeypatch.setattr(kimi_k3_dspark, "get_cos_and_sin_mla", lambda positions: (None, None))
+    AscendK3DSparkModel.precompute_and_store_context_kv(model, context, torch.arange(32))
+    projection.assert_called_once_with(context)
+    attn.impl.exec_kv_prefill.assert_not_called()
+
+
 def _make_component_major_strided_cache() -> tuple[torch.Tensor, torch.Tensor]:
     backing = torch.empty(14, dtype=torch.float32)
     nope = torch.as_strided(backing, size=(2, 2, 1, 2), stride=(6, 2, 2, 1), storage_offset=0)
@@ -480,6 +496,7 @@ def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
     model.config = SimpleNamespace(
         is_moe=False,
         is_linear_attn=True,
+        dsa_config=None,
         linear_attn_config={},
         q_lora_rank=None,
         num_hidden_layers=1,
@@ -800,7 +817,9 @@ def test_projector_applies_optional_modelslim_rotation():
         torch.testing.assert_close(projector(image_features), image_features)
 
 
-def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_path, monkeypatch):
+@pytest.mark.parametrize("lmhead_tp", [False, True])
+def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_path, monkeypatch, lmhead_tp):
+    monkeypatch.setattr(quarot_utils, "lmhead_tp_enable", lambda: lmhead_tp)
     model = AscendK3DSparkForCausalLM.__new__(AscendK3DSparkForCausalLM)
     nn.Module.__init__(model)
     model._owns_embed_tokens = False
@@ -839,7 +858,10 @@ def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_pat
 
     torch.testing.assert_close(model.model.context_proj.weight, projection)
 
-    def vocab_layer(vocab_size, hidden_size, params_dtype):
+    prefixes = []
+
+    def vocab_layer(vocab_size, hidden_size, params_dtype, *, prefix):
+        prefixes.append(prefix)
         layer = nn.Linear(hidden_size, vocab_size, bias=False, dtype=params_dtype)
         layer.quant_method = SimpleNamespace(process_weights_after_loading=lambda layer: None)
         return layer
@@ -853,6 +875,7 @@ def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_pat
         ),
     )
     model.post_process(config)
+    assert prefixes == ["", "lm_head" if lmhead_tp else ""]
 
     torch.testing.assert_close(
         model.model.context_proj.weight,
