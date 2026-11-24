@@ -244,6 +244,20 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         if getattr(layer, "_mxfp8_transformed", False):
             return
 
+        if getattr(layer, "_prepare_localtp8_kda", False):
+            if (
+                layer.weight.shape != (4608, 7168)
+                or layer.weight_scale.shape != (4608, 224)
+                or layer.weight.dtype != torch.float8_e4m3fn
+                or layer.weight_scale.dtype != torch.uint8
+            ):
+                raise ValueError("Unexpected localTP8 QKV shard dimensions")
+            for name, tensor in (("_localtp8_qkv", layer.weight), ("_localtp8_scale", layer.weight_scale)):
+                if hasattr(layer, name):
+                    getattr(layer, name).copy_(tensor)
+                else:
+                    layer.register_buffer(name, tensor.detach().contiguous(), persistent=False)
+
         if getattr(layer, "_full_kda_prepare", False):
             from vllm_ascend.ops.full_kda import unpack_mx_qkv
 

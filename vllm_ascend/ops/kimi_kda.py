@@ -311,6 +311,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     _mega_kda_op = None
     _mega_kda_mix = False
     _full_kda_op = None
+    _localtp8_verify = None
 
     def __init__(self, config, vllm_config, prefix: str = "") -> None:
         quant_config = getattr(vllm_config, "quant_config", None)
@@ -340,11 +341,28 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         qkv_size = int(fine_tp.get("qkv_iproj_tensor_parallel_size", 1))
         gate_size = int(fine_tp.get("gproj_tensor_parallel_size", 1))
         mega_config = get_ascend_config().kda_backend_config
-        self._mega_kda_mix = mega_config.backend == "mega_recurrent_kda_mx"
-        full_kda = mega_config.backend == "mega_recurrent_kda"
-        if mega_config.backend != "native":
-            if max(qkv_size, gate_size, int(fine_tp.get("oproj_tensor_parallel_size", 1))) > 1:
-                raise ValueError("MegaKDA requires ordinary QKV, gate, and output projections.")
+        output_size = int(fine_tp.get("oproj_tensor_parallel_size", 1))
+        backend = mega_config.projection_backend(qkv_size, gate_size, output_size)
+        self._mega_kda_mix = backend == "mega_recurrent_kda_mx"
+        full_kda = backend == "mega_recurrent_kda"
+        localtp8 = backend == "mega_kda_localtp8"
+        if localtp8:
+            if (qkv_size, gate_size, output_size) != (8, 8, 8) or self.tp_size != 1 or self.pcp_size != 1:
+                raise ValueError("LocalTP8 MegaKDA requires model TP1, PCP1 and QKV/G/O localTP8")
+            if (
+                not self.use_recoverssm
+                or not uses_mixed_projection
+                or self.hidden_size != 7168
+                or self.num_heads != 96
+                or self.head_dim != 128
+                or self.conv_size != 4
+                or self.gate_lower_bound is None
+                or self.model_config.dtype != torch.bfloat16
+                or vllm_config.num_speculative_tokens != 7
+                or vllm_config.scheduler_config.max_num_seqs != 4
+            ):
+                raise ValueError("LocalTP8 MegaKDA requires K3.1 MXFP8, ReplaySSM, DSpark7 and four requests per rank")
+        elif backend != "native":
             if (
                 (not self._mega_kda_mix and self.use_recoverssm != full_kda)
                 or not uses_mixed_projection
@@ -428,6 +446,24 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             )
             self.qkv_layout = KDAInputProjectionTPLayout(qkv_group, self.num_heads, self.head_dim)
             self.gate_layout = KDAInputProjectionTPLayout(gate_group, self.num_heads, self.head_dim)
+            if localtp8:
+                from vllm_ascend.ops.mega_kda_localtp8 import LocalTP8Verify
+
+                quant = self.in_proj_qkvgfab.quant_method
+                inner = getattr(quant, "quant_method", quant)
+                if (
+                    not isinstance(inner, AscendW8A8MXFP8DynamicLinearMethod)
+                    or inner.group_size != 32
+                    or int(inner.dynamic_mx_quant_scale_alg) != 0
+                ):
+                    raise ValueError(
+                        "LocalTP8 MegaKDA requires E4M3FN QKV with group-32 E8M0 and max-exponent activation scaling"
+                    )
+                self.in_proj_qkvgfab._prepare_localtp8_kda = True
+                for linear in (self.b_proj, self.g_proj, self.o_proj, self.f_a_proj, self.f_b_proj):
+                    linear.skip_weight_nz_conversion = True
+                self._localtp8_verify = LocalTP8Verify(mega_config.operator_package_dir)
+
         elif uses_mixed_projection:
             # vLLM 0.27 packs all KDA input projections into one linear.  A
             # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps B/F/G
@@ -503,6 +539,16 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         def process_weights_and_pack(*args, **kwargs):
             result = original_process_weights(*args, **kwargs)
             self._pack_conv_weights()
+            if self._localtp8_verify is not None:
+                bg = torch.cat((self.b_proj.weight, self.g_proj.weight, self.b_proj.weight.new_zeros((4, 7168))))
+                if hasattr(self, "_localtp8_bg_weight"):
+                    self._localtp8_bg_weight.copy_(bg)
+                    self._localtp8_gamma.copy_(self.o_norm.weight)
+                else:
+                    self.register_buffer("_localtp8_bg_weight", bg, persistent=False)
+                    self.register_buffer("_localtp8_gamma", self.o_norm.weight.float().contiguous(), persistent=False)
+                self.b_proj.weight.data = self._localtp8_bg_weight[:12]
+                self.g_proj.weight.data = self._localtp8_bg_weight[12:1548]
             if self._mega_kda_mix:
                 self._mega_output_norm_weight.copy_(self.o_norm.weight.detach())
             return result
@@ -584,6 +630,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        if self._localtp8_verify is not None:
+            output = torch.empty_like(hidden_states)
+            torch.ops.vllm.kimi_localtp8_kda_forward(hidden_states, output, self.prefix)
+            return output
         if self._full_kda_op is not None:
             return self._forward_full_kda(hidden_states, positions)
         if self.qkv_layout is not None:
@@ -594,6 +644,12 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         if self.pcp_size > 1:
             output = torch.ops.vllm.pcp_scatter_tokens(output, self.pcp_size, self.prefix)
         return output
+
+    def _run_localtp8_mega(self, hidden, metadata, output):
+        wait_for_kv_layer_from_connector(self.prefix)
+        record_attention_compute_start()
+        self._localtp8_verify(self, hidden, metadata, output)
+        maybe_save_kv_layer_to_connector("", [])
 
     @eager_break_during_capture
     def _forward_full_kda(self, hidden: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:

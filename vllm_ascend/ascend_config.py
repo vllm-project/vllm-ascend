@@ -350,8 +350,15 @@ class EplbConfig:
 class KDABackendConfig:
     """Select an optional kernel backend for KDA layers."""
 
-    backend: Literal["native", "mega_kda", "mega_recurrent_kda_mx", "mega_recurrent_kda"] = "native"
+    backend: Literal["native", "mega_kda", "mega_recurrent_kda_mx", "mega_recurrent_kda", "mega_kda_localtp8"] = (
+        "native"
+    )
     operator_package_dir: str | None = None
+
+    def projection_backend(self, qkv_size: int, gate_size: int, output_size: int) -> str:
+        if self.backend != "native" and max(qkv_size, gate_size, output_size) > 1:
+            return "mega_kda_localtp8"
+        return self.backend
 
     @model_validator(mode="after")
     def _validate_package_dir(self):
@@ -847,7 +854,13 @@ class AscendConfig:
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
         validate_expert_offload_config(self.expert_offload_config, vc, self)
-        if self.kda_backend_config.backend != "native":
+        fine_tp = self.finegrained_tp_config
+        kda_backend = self.kda_backend_config.projection_backend(
+            fine_tp.qkv_iproj_tensor_parallel_size,
+            fine_tp.gproj_tensor_parallel_size,
+            fine_tp.oproj_tensor_parallel_size,
+        )
+        if kda_backend != "native":
             if not is_950():
                 raise ValueError("The MegaKDA backend requires Ascend 950")
             hf_config = getattr(vc.model_config, "hf_config", None)
@@ -857,9 +870,9 @@ class AscendConfig:
                 raise ValueError("The MegaKDA backend requires a disaggregated decode worker")
             if self.gdn_internal_prefill_checkpoints:
                 raise ValueError("The MegaKDA backend requires internal GDN checkpoints to be disabled")
-            if self.kda_backend_config.backend == "mega_kda" and vc.cache_config.use_replayssm:
+            if kda_backend == "mega_kda" and vc.cache_config.use_replayssm:
                 raise ValueError("The projected MegaKDA backend requires ReplaySSM to be disabled")
-            if self.kda_backend_config.backend == "mega_recurrent_kda" and not vc.cache_config.use_replayssm:
+            if kda_backend in ("mega_recurrent_kda", "mega_kda_localtp8") and not vc.cache_config.use_replayssm:
                 raise ValueError("Full MegaRecurrentKda requires ReplaySSM")
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:

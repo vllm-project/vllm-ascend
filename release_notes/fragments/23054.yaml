@@ -6,6 +6,11 @@ entries:
       MegaRecurrentKda adapter with ReplaySSM and TP1, or the external
       TileLang MegaDSA package for eligible unsharded decode layers.
       Both paths are opt-in.
+  - category: feature
+    text: >-
+      Ascend 950 Kimi K3.1 decode workers can select mega_kda_localtp8
+      with model TP1 and eight-way local QKV/Beta, G and O projections
+      for four-request DSpark7 verification with ReplaySSM.
   - category: performance
     text: >-
       Kimi DSpark C8 decode on Ascend 950 can write local FP8 KV pages in NZ

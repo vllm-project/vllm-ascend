@@ -2,6 +2,26 @@
 
 Additional configuration is a mechanism provided by vLLM to allow plugins to control internal behavior by themselves. VLLM Ascend uses this mechanism to make the project more flexible.
 
+## Kimi K3.1 localTP8 MegaKDA
+
+On Ascend 950 decode workers using ReplaySSM, enabling MegaKDA with QKV/Beta, G and O at localTP8 selects `refownerflowbatchpeer`. Existing MegaKDA backend names select this path automatically. You can also request it explicitly with `mega_kda_localtp8`. Set `operator_package_dir` to an absolute directory containing the serving adapter library `libmega_kda_localtp8_verify.so` (entry point `run_MegaKdaLocalTp8Verify`). This is the serving ABI for the `refownerflowbatchpeer` implementation. The standalone benchmark library has a different ABI.
+
+```json
+{
+  "kda_backend_config": {
+    "backend": "mega_recurrent_kda",
+    "operator_package_dir": "/path/to/megakda-serving"
+  },
+  "finegrained_tp_config": {
+    "qkv_iproj_tensor_parallel_size": 8,
+    "gproj_tensor_parallel_size": 8,
+    "oproj_tensor_parallel_size": 8
+  }
+}
+```
+
+Use model TP1, PCP1, a node-local eight-rank projection group, four requests per DP rank and seven draft tokens. QKV and Beta share the input projection group. G and O must have the same ordered ranks. The fused verify path handles a 32-row input with four staged speculative request rows and packed query offsets. Other input shapes and mixed batches follow the native localTP path. The stock ReplaySSM commit consumes the verification records after sampling. The default backend is `native`.
+
 ## Migration Guide
 
 Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064), vLLM Ascend is migrating supported environment variables to `--additional-config`.

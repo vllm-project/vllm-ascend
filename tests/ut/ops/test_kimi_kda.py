@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 import vllm_ascend.ops.kimi_kda as projection_module
+from vllm_ascend.ascend_config import KDABackendConfig
 from vllm_ascend.ascend_forward_context import override_mrv2_in_profile_run
 from vllm_ascend.models.glm5next import kda_input_projection_tp as common_projection
 from vllm_ascend.ops.kimi_kda import (
@@ -134,7 +135,7 @@ def test_kda_output_norm_uses_checkpoint_epsilon():
         patch("vllm_ascend.ops.kimi_kda.KimiK3DeltaAttention.__init__", new=fake_upstream_init),
         patch(
             "vllm_ascend.ops.kimi_kda.get_ascend_config",
-            return_value=SimpleNamespace(kda_backend_config=SimpleNamespace(backend="native")),
+            return_value=SimpleNamespace(kda_backend_config=KDABackendConfig()),
         ),
     ):
         attention = AscendKimiK3DeltaAttention(config, vllm_config)
@@ -950,6 +951,7 @@ def test_local_tp_projection_stream_order(monkeypatch, groups, mode, comm_mode, 
     ):
         monkeypatch.setattr(projection_module, name, MagicMock())
     layer = SimpleNamespace(
+        _localtp8_verify=None,
         _full_kda_op=None,
         _mega_kda_op=None,
         recoverssm_decay_cache=None,
@@ -1092,7 +1094,7 @@ def test_kimi_projection_checks_its_own_head_contract(qkv_size, gate_size, heads
         patch.object(
             projection_module,
             "get_ascend_config",
-            return_value=SimpleNamespace(kda_backend_config=SimpleNamespace(backend="native")),
+            return_value=SimpleNamespace(kda_backend_config=KDABackendConfig()),
         ),
         pytest.raises(ValueError, match=error),
     ):
