@@ -13,7 +13,7 @@ from vllm_ascend.utils import vllm_version_is
 def _make_indexer() -> ascend_qsa.AscendQSAIndexer:
     indexer = object.__new__(ascend_qsa.AscendQSAIndexer)
     torch.nn.Module.__init__(indexer)
-    indexer.compressed_key_cache = SimpleNamespace(kv_cache=torch.zeros(1))
+    indexer.compressed_key_cache = SimpleNamespace(kv_cache=torch.zeros(2, 128, 1, 128, dtype=torch.bfloat16))
     indexer.token_topk = 2048
     indexer.compress_ratio = 4
     return indexer
