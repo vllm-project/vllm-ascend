@@ -33,7 +33,7 @@ docker info --format 'default={{.DefaultRuntime}}'
 
 {% endraw %}
 
-The output must be `default=ascend`. If it prints `runc`, install or repair the runtime as described in [Use Ascend Docker Runtime](installation.md#installation-ascend-docker-runtime); a container started without it has no NPU inside. If the host cannot install it, keep the explicit device and driver flags from [Manual device mapping without Ascend Docker Runtime](installation.md#installation-container-without-runtime) instead of `-e ASCEND_VISIBLE_DEVICES`.
+The output must be `default=ascend`. If it prints `runc`, install or repair the runtime as described in [Use Ascend Docker Runtime](installation.md#installation-ascend-docker-runtime); a container started without it has no NPU inside. If the host cannot install it, use the device and driver flags in [Manual device mapping without Ascend Docker Runtime](installation.md#installation-container-without-runtime).
 
 {% include "getting_started/quick_start/ascend_image/atlas-a2.inc.md" %}
 

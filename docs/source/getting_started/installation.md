@@ -77,7 +77,7 @@ The host Linux distribution and kernel must be supported by the selected Ascend 
 
 ### Set up the software environment {: #installation-software-environment }
 
-Choose one complete path based on your requirements. Container-based paths require Docker; see the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) if needed. Those paths also need Ascend Docker Runtime on the host. [Use Ascend Docker Runtime](#installation-ascend-docker-runtime) introduces the runtime and gives the installation steps. If the host cannot install it, the other steps stay the same and only the Docker device mapping changes: use the flags in [Manual device mapping without Ascend Docker Runtime](#installation-container-without-runtime) instead of `-e ASCEND_VISIBLE_DEVICES`.
+Choose one complete path based on your requirements. Container-based paths require Docker; see the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) if needed. Those paths also need Ascend Docker Runtime on the host. [Use Ascend Docker Runtime](#installation-ascend-docker-runtime) introduces the runtime and gives the installation steps. If the host cannot install it, the other steps stay the same and only the Docker device mapping changes: use the flags in [Manual device mapping without Ascend Docker Runtime](#installation-container-without-runtime).
 
 | Requirement | Recommended method | Intended users |
 | --- | --- | --- |
@@ -105,8 +105,6 @@ Choose one complete path based on your requirements. Container-based paths requi
 #### Use Ascend Docker Runtime {: #installation-ascend-docker-runtime }
 
 Both container-based paths — the prebuilt image and the CANN environment — need Ascend Docker Runtime on the **host**. The runtime mounts the NPU devices and driver paths of the host into the container.
-
-If you cannot install the runtime on the host, keep the explicit device and driver flags of your hardware; [Manual device mapping without Ascend Docker Runtime](#installation-container-without-runtime) lists the device nodes and driver mounts for each hardware type.
 
 Download the run package from the [MindCluster releases](https://gitcode.com/Ascend/mind-cluster/releases): in `Ascend-docker-runtime_<version>_linux-<arch>.run`, `<version>` is the release you select and `<arch>` is `x86_64` or `aarch64`. Choose a release that supports the Ascend HDK version of the node, then install it as `root` on every node that runs containers:
 
