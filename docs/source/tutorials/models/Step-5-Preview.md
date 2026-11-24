@@ -1,5 +1,3 @@
-{% set vllm_ascend_version = "v0.33.0rc1" %}
-
 # Step-5-Preview
 
 ## 1 Introduction
@@ -23,17 +21,12 @@ tuning, and FAQs.
 
 This guide covers two deployment scenarios on 950DT products:
 
-- **Mixed Prefill/Decode deployment**: two nodes, with Prefill and Decode
+- **Multi-node co-located deployment**: two nodes, with Prefill and Decode
   running in one DP group, targeting the full 1M-token context.
 - **Prefill-Decode (PD) separation deployment**: six nodes (2 Prefill + 4
   Decode), with an optional KV cache pool for prefix reuse.
 
-The deployment configurations covered in this guide are given in [Section 5](#5-online-service-deployment); [Section 3.1](#31-model-weight) only lists the checkpoint to download. Treat the 2P4D parallelism and the context, sequence, and batch-token limits in [Section 5.2](#52-multi-node-pd-separation-deployment-2p4d) as reference targets until they are validated end to end on 950DT products.
-
-Step-5-Preview is supported in **vLLM-Ascend v0.33.0rc1 and later**. The examples
-below follow vLLM-Ascend `main`. For source builds, use the upstream vLLM
-revision recorded in `.github/vllm-main-verified.commit` at the selected
-vLLM-Ascend commit.
+Step-5-Preview is supported in **vLLM-Ascend v0.34.0rc1 and later**. The examples below follow vLLM-Ascend `main`.
 
 ## 2 Supported Features
 
@@ -68,19 +61,15 @@ mount path, not as a download source.
 
 | Checkpoint | Hardware | Deployment | Download | Notes |
 | --- | --- | --- | --- | --- |
-| `Step-5-Preview-w8a8-mxfp8` | 950DT products (96GB × 8 per node) | 2 nodes for mixed Prefill/Decode deployment; 6 nodes for PD deployment; KV cache pool optional | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Step-5-Preview-w8a8-mxfp8) | Ascend-adapted W8A8-MXFP8 weights; required for all validated configurations. |
-
-Both the checkpoint directory and the tokenizer directory must be available at
-the same path on every serving node.
+| `Step-5-Preview-w8a8-mxfp8` | 950DT products (96GB × 8 per node) | 2 nodes for multi-node co-located deployment; 6 nodes for PD deployment; KV cache pool optional | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Step-5-Preview-w8a8-mxfp8) | Ascend-adapted W8A8-MXFP8 weights; required for all validated configurations. |
 
 It is recommended to download the weights to a shared directory across nodes,
 such as `/root/.cache/`, so that every serving node loads the same path.
 
-> **Path description**: Download the model weights to a directory of your choice and record it. Use the same directory on every node and ensure that the model path in the subsequent deployment commands matches this directory. If the weights are outside the mounted directory, add a mount for them when starting the container.
-
+> **Path description**: Download the model weights to a directory of your choice and record it. Use the same directory on every node and ensure that the model path in the subsequent deployment commands matches this directory.
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If you deploy a multi-node environment, verify multi-node communication as described in [Verify inter-node connectivity](../../getting_started/installation.md#installation-multi-node-interconnect).
+For multi-node deployment, verify the communication environment by following [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
@@ -100,7 +89,7 @@ Use the following command to create the container.
 
 ```bash
 # Set the vLLM Ascend image name.
-export IMAGE=quay.io/ascend/vllm-ascend:nightly-releases-v0.33.0rc-a5
+export IMAGE=quay.io/ascend/vllm-ascend:nightly-releases-v0.34.0rc-a5
 export CONTAINER_NAME=step5
 
 # 950DT products have 8 NPUs and use Device UB.
@@ -124,7 +113,7 @@ The container runs with `--privileged=true`, so the URMA device nodes (`/dev/urm
 
 Use the same image and absolute checkpoint path on every participating node. Reserve enough host memory and shared memory for Engram CPU offload and local DP sharing.
 
-The KV cache pool in [Section 5.3](#53-pd-separation-with-kv-cache-pool) uses the MemCache backend over the `device_urma` transport on 950DT products. This path does not need extra pool-specific host files or mounts: the pool is configured inside the container with configuration files and environment variables only. The `urma_admin` bind mount above is for the driver tooling, not for the pool configuration.
+The KV cache pool in [Section 5.3](#53-pd-separation-with-kv-cache-pool) uses the MemCache backend over the `device_urma` transport on 950DT products. This path does not need extra pool-specific host files or mounts: the pool is configured inside the container with configuration files and environment variables only.
 
 ### 4.2 Source Code Installation
 
@@ -132,15 +121,15 @@ To build from source, follow the [software environment installation guide](../..
 
 ## 5 Online Service Deployment
 
-This chapter covers the two supported topologies: mixed Prefill/Decode
+This chapter covers the two supported topologies: multi-node co-located
 deployment and multi-node PD separation, the latter with an optional KV cache
 pool. Set the model path as described in [Section 3.1](#31-model-weight), and
 use the values of the selected role script. Hardware-specific and role-specific
 values are not interchangeable between Prefill and Decode.
 
-### 5.1 Mixed Prefill/Decode Deployment
+### 5.1 Multi-Node Co-located Deployment
 
-The validated mixed deployment uses two 950DT product nodes with eight devices
+The validated co-located deployment uses two 950DT product nodes with eight devices
 per node. vLLM data parallelism spans the two nodes with two DP ranks per node,
 and tensor parallelism uses four devices in each rank, so the resulting topology
 is DP4/TP4/EP16. Prefill and Decode share the same engine and the same DP group,
@@ -180,18 +169,12 @@ Run the following script on each node. Select the tab for the node:
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=0
     export HCCL_BUFFSIZE=1024
-    export HCCL_EXEC_TIMEOUT=240
-    export VLLM_VERSION=0.33.0
     export HCCL_OP_EXPANSION_MODE=CCU_MS
 
     export GLOO_SOCKET_IFNAME="${NIC_NAME}"
     export TP_SOCKET_IFNAME="${NIC_NAME}"
     export HCCL_SOCKET_IFNAME="${NIC_NAME}"
     export VLLM_HOST_IP="${HCCL_IF_IP}"
-
-    # Step-5 custom operators shipped with the image.
-    export ASCEND_CUSTOM_OPP_PATH=$ASCEND_OPP_PATH/vendors/step5_ops_transformer
-    export LD_LIBRARY_PATH=$ASCEND_OPP_PATH/vendors/step5_ops_transformer/op_api/lib/:${LD_LIBRARY_PATH}
 
     vllm serve "${MODEL_PATH}" \
         --host "${LOCAL_IP}" \
@@ -207,7 +190,7 @@ Run the following script on each node. Select the tab for the node:
         --data-parallel-address "${NODE0_IP}" \
         --data-parallel-rpc-port 13389 \
         --enable-expert-parallel \
-        --gpu-memory-utilization 0.96 \
+        --gpu-memory-utilization 0.9 \
         --distributed-executor-backend "mp" \
         --api-server-count=1 \
         --allowed-local-media-path / \
@@ -236,18 +219,12 @@ Run the following script on each node. Select the tab for the node:
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=0
     export HCCL_BUFFSIZE=1024
-    export HCCL_EXEC_TIMEOUT=240
-    export VLLM_VERSION=0.33.0
     export HCCL_OP_EXPANSION_MODE=CCU_MS
 
     export GLOO_SOCKET_IFNAME="${NIC_NAME}"
     export TP_SOCKET_IFNAME="${NIC_NAME}"
     export HCCL_SOCKET_IFNAME="${NIC_NAME}"
     export VLLM_HOST_IP="${HCCL_IF_IP}"
-
-    # Step-5 custom operators shipped with the image.
-    export ASCEND_CUSTOM_OPP_PATH=$ASCEND_OPP_PATH/vendors/step5_ops_transformer
-    export LD_LIBRARY_PATH=$ASCEND_OPP_PATH/vendors/step5_ops_transformer/op_api/lib/:${LD_LIBRARY_PATH}
 
     vllm serve "${MODEL_PATH}" \
         --host "${LOCAL_IP}" \
@@ -265,7 +242,7 @@ Run the following script on each node. Select the tab for the node:
         --data-parallel-start-rank 2 \
         --data-parallel-rpc-port 13389 \
         --enable-expert-parallel \
-        --gpu-memory-utilization 0.96 \
+        --gpu-memory-utilization 0.9 \
         --distributed-executor-backend "mp" \
         --allowed-local-media-path / \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -276,7 +253,6 @@ Run the following script on each node. Select the tab for the node:
         --reasoning-parser step5
     ```
 
-The values above follow the reference multi-node serving script. Benchmark variants of that script also add `--profiler-config` and `--no-enable-prefix-caching`; both are omitted here. Keep prefix caching at its default state unless you are reproducing a measurement run.
 
 The following values differ between the master and the worker node:
 
@@ -289,7 +265,7 @@ The following values differ between the master and the worker node:
 | `--data-parallel-start-rank` | `0` (default) | `2` | First global rank owned by the node; every node needs a unique value. |
 | `--api-server-count` | `1` | Not set | Only the master runs the API server. |
 
-Key mixed Prefill/Decode deployment parameters:
+Key multi-node co-located deployment parameters:
 
 | Parameter | Description |
 | --- | --- |
@@ -305,21 +281,7 @@ Key mixed Prefill/Decode deployment parameters:
 | `--enable-auto-tool-choice`, `--tool-call-parser step5` | Enables tool calling and parses Step-5's native tool-call format into standard `tool_calls`; without them `tools` requests are ignored. |
 | `--reasoning-parser step5` | Splits the output at Step-5's thinking markers, returning the chain of thought in `reasoning_content` instead of mixing it into `content`. |
 
-Because the weights are large, the load time is related to the disk read speed, and the first load usually takes about 10 minutes. After both nodes have joined and node 0 reports `Application startup complete`, verify the service with a real request from a client that can reach node 0:
-
-```bash
-# Replace <NODE0_IP> with the node 0 service IP used above.
-curl --noproxy '*' -sS -X POST "http://<NODE0_IP>:7778/v1/chat/completions" \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "step",
-        "messages": [{"role": "user", "content": "Who are you?"}],
-        "max_tokens": 64,
-        "temperature": 0
-    }'
-```
-
-A normal result is HTTP `200` with a non-empty `choices[0].message.content` and populated `usage` fields; [Section 6.1](#61-text-requests) shows the response shape. If the request fails instead, read the Node 0 API log for the request line and the engine log for out-of-memory or collective communication errors, then follow [Section 10](#10-faq) or the [Public FAQs](../../faqs.md).
+Because the weights are large, the load time is related to the disk read speed, and the first load usually takes about 10 minutes. After both nodes have joined and node 0 reports `Application startup complete`, the service is ready; see [Section 6](#6-functional-verification) for verification. 
 
 ### 5.2 Multi-Node PD Separation Deployment (2P4D)
 
@@ -332,9 +294,7 @@ both roles.
 The parallelism layout, `--max-model-len`, and the scheduler limits in this
 section come from the validated Prefill and Decode scripts. Both roles use
 `--max-model-len 1048576` and `--max-num-seqs 256`; Prefill uses
-`--max-num-batched-tokens 16384` and Decode uses `2048`. The six-node
-combination itself has not been validated end to end, so confirm these limits
-against the real KV cache budget before relying on them.
+`--max-num-batched-tokens 16384` and Decode uses `2048`. 
 
 Before starting the service:
 
@@ -383,7 +343,7 @@ Select the tab for the role:
 
     Prefill is one DP1/TP4/PP4 engine spanning P0–P1 and the KV producer. P0 is the
     pipeline master and exposes the HTTP API; P1 joins as a headless worker.
-    `KV_PORT` is a base address: each engine rank listens on `KV_PORT + rank`, so
+    `kv_port` is a base address: each engine rank listens on `kv_port + rank`, so
     the 16 Prefill ranks need 16 consecutive ports and the 32 Decode ranks need
     32. Keep both base ports outside the Mooncake-reserved `20000–27999` range;
     the examples use `48100` and `48200`, which keeps the two ranges disjoint.
@@ -395,12 +355,6 @@ Select the tab for the role:
     export HCCL_IF_IP=<P0_NIC_IP>   # communication IP owned by NIC_NAME
     export NIC_NAME=<P0_NIC>
     export MASTER_ADDR=<P0_IP>
-    export KV_PORT=48100
-    export ENGINE_ID=<P0_ENGINE_ID>
-
-    # Step-5 custom operators shipped with the image.
-    export ASCEND_CUSTOM_OPP_PATH=$ASCEND_OPP_PATH/vendors/step5_ops_transformer
-    export LD_LIBRARY_PATH=$ASCEND_OPP_PATH/vendors/step5_ops_transformer/op_api/lib/:${LD_LIBRARY_PATH}
 
     # Each Prefill node exports its own IP and NIC; do not copy one node's values to the other.
     unset http_proxy https_proxy ftp_proxy all_proxy
@@ -410,38 +364,18 @@ Select the tab for the role:
     export GLOO_SOCKET_IFNAME="${NIC_NAME}"
     export TP_SOCKET_IFNAME="${NIC_NAME}"
     export HCCL_SOCKET_IFNAME="${NIC_NAME}"
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=0
-    export PYTHONHASHSEED=0
 
     # 950DT products communication settings.
     export HCCL_BUFFSIZE=1024
-    export HCCL_EXEC_TIMEOUT=240
     export HCCL_CONNECT_TIMEOUT=240
     export HCCL_IF_BASE_PORT=55000
-    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-    export PYTHONUNBUFFERED=1
     export HCCL_OP_EXPANSION_MODE=CCU_MS
-    export VLLM_USE_FASTOKENS=1
-    export VLLM_VERSION=0.33.0
 
     # Layer distribution across the four pipeline stages; the first stage also holds the MTP draft.
     export VLLM_PP_LAYER_PARTITION="24,25,25,18"
 
-    KV_CONFIG=$(cat <<EOF
-    {
-      "kv_connector": "MooncakeConnectorV2",
-      "kv_role": "kv_producer",
-      "kv_buffer_device": "npu",
-      "kv_port": ${KV_PORT},
-      "engine_id": "${ENGINE_ID}"
-    }
-    EOF
-    )
-    ```
-
-    ```bash
     vllm serve "${MODEL_PATH}" \
         --host "${LOCAL_IP}" \
         --port 7778 \
@@ -457,25 +391,40 @@ Select the tab for the role:
         --tensor-parallel-size 4 \
         --pipeline-parallel-size 4 \
         --enable-expert-parallel \
-        --gpu-memory-utilization 0.96 \
+        --gpu-memory-utilization 0.9 \
         --distributed-executor-backend "mp" \
         --api-server-count=1 \
         --allowed-local-media-path / \
         --enforce-eager \
-        --seed 1024 \
-        --no-enable-prefix-caching \
-        --prefix-cache-retention-interval 2048 \
         --async-scheduling \
-        --no-disable-hybrid-kv-cache-manager \
         --additional-config '{"enable_flashcomm1": true, "enable_shared_expert_dp": true, "multistream_overlap_shared_expert": true}' \
         --speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
-        --kv-transfer-config "${KV_CONFIG}"
+        --kv-transfer-config '{
+          "kv_connector": "MooncakeConnectorV2",
+          "kv_role": "kv_producer",
+          "kv_buffer_device": "npu",
+          "kv_port": 48100,
+          "engine_id": "<P0_ENGINE_ID>",
+          "kv_connector_extra_config": {
+            "prefill": {
+              "dp_size": 1,
+              "tp_size": 4,
+              "pp_size": 4,
+              "pp_layer_partition": "24,25,25,18"
+            },
+            "decode": {
+              "dp_size": 8,
+              "tp_size": 4,
+              "pp_size": 1
+            }
+          }
+        }'
     ```
 
     On P1, set `LOCAL_IP`, `HCCL_IF_IP`, and `NIC_NAME` to that node, change
-    `--node-rank` to `1`, remove `--api-server-count=1`, and add `--headless`.
-    Keep `MASTER_ADDR` pointing at P0. Every other value, including
-    `VLLM_PP_LAYER_PARTITION`, must stay identical.
+    `--node-rank` to `1`, remove `--api-server-count=1`, add `--headless`, and
+    use a unique `engine_id`. Keep `MASTER_ADDR` pointing at P0. Every other
+    value, including `VLLM_PP_LAYER_PARTITION`, must stay identical.
 
 === "Decode"
 
@@ -490,12 +439,6 @@ Select the tab for the role:
     export HCCL_IF_IP=<D0_NIC_IP>   # communication IP owned by NIC_NAME
     export NIC_NAME=<D0_NIC>
     export DP_ADDRESS=<D0_IP>
-    export KV_PORT=48200
-    export ENGINE_ID=<D0_ENGINE_ID>
-
-    # Step-5 custom operators shipped with the image.
-    export ASCEND_CUSTOM_OPP_PATH=$ASCEND_OPP_PATH/vendors/step5_ops_transformer
-    export LD_LIBRARY_PATH=$ASCEND_OPP_PATH/vendors/step5_ops_transformer/op_api/lib/:${LD_LIBRARY_PATH}
 
     # Each Decode node exports its own IP and NIC; only the DP address is shared.
     unset http_proxy https_proxy ftp_proxy all_proxy
@@ -505,35 +448,15 @@ Select the tab for the role:
     export GLOO_SOCKET_IFNAME="${NIC_NAME}"
     export TP_SOCKET_IFNAME="${NIC_NAME}"
     export HCCL_SOCKET_IFNAME="${NIC_NAME}"
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=0
-    export PYTHONHASHSEED=0
 
     # 950DT products communication settings.
     export HCCL_BUFFSIZE=1024
-    export HCCL_EXEC_TIMEOUT=240
     export HCCL_CONNECT_TIMEOUT=240
     export HCCL_IF_BASE_PORT=56000
-    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-    export PYTHONUNBUFFERED=1
     export HCCL_OP_EXPANSION_MODE=CCU_MS
-    export VLLM_USE_FASTOKENS=1
-    export VLLM_VERSION=0.33.0
 
-    KV_CONFIG=$(cat <<EOF
-    {
-      "kv_connector": "MooncakeConnectorV2",
-      "kv_role": "kv_consumer",
-      "kv_buffer_device": "npu",
-      "kv_port": ${KV_PORT},
-      "engine_id": "${ENGINE_ID}"
-    }
-    EOF
-    )
-    ```
-
-    ```bash
     vllm serve "${MODEL_PATH}" \
         --host "${LOCAL_IP}" \
         --port 7778 \
@@ -548,25 +471,40 @@ Select the tab for the role:
         --data-parallel-address "${DP_ADDRESS}" \
         --data-parallel-rpc-port 13389 \
         --enable-expert-parallel \
-        --gpu-memory-utilization 0.96 \
+        --gpu-memory-utilization 0.9 \
         --distributed-executor-backend "mp" \
         --api-server-count=1 \
         --allowed-local-media-path / \
-        --seed 1024 \
-        --no-enable-prefix-caching \
-        --prefix-cache-retention-interval 2048 \
         --async-scheduling \
-        --no-disable-hybrid-kv-cache-manager \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_flashcomm1": true, "enable_shared_expert_dp": true, "multistream_overlap_shared_expert": true}' \
         --speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
-        --kv-transfer-config "${KV_CONFIG}"
+        --kv-transfer-config '{
+          "kv_connector": "MooncakeConnectorV2",
+          "kv_role": "kv_consumer",
+          "kv_buffer_device": "npu",
+          "kv_port": 48200,
+          "engine_id": "<D0_ENGINE_ID>",
+          "kv_connector_extra_config": {
+            "prefill": {
+              "dp_size": 1,
+              "tp_size": 4,
+              "pp_size": 4,
+              "pp_layer_partition": "24,25,25,18"
+            },
+            "decode": {
+              "dp_size": 8,
+              "tp_size": 4,
+              "pp_size": 1
+            }
+          }
+        }'
     ```
 
     On D1–D3, set `LOCAL_IP`, `HCCL_IF_IP`, and `NIC_NAME` to that node, add
     `--data-parallel-start-rank` `2`, `4`, or `6`, remove `--api-server-count=1`,
-    and add `--headless`. Keep `DP_ADDRESS`, the DP RPC port, and `KV_PORT`
-    identical on every Decode node.
+    add `--headless`, and use a unique `engine_id`. Keep `DP_ADDRESS`, the DP RPC
+    port, and `kv_port` identical on every Decode node.
 
 #### 5.2.2 Start the Engines {: #522-start-the-engines }
 
@@ -593,10 +531,12 @@ fails, read the P0 and D0 logs and follow [Section 10](#10-faq).
 
 #### 5.2.3 Proxy {: #523-proxy }
 
-Start the Proxy after P0 and the Decode API endpoints are ready. The general multi-node PD workflow, including the Mooncake prerequisites and endpoint mapping, is described in [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md#start-the-service). Run the command from the `examples/disaggregated_prefill_v1` directory of the vLLM Ascend source tree.
+Start the Proxy after P0 and the Decode API endpoints are ready. The general multi-node PD workflow, including the Mooncake prerequisites and endpoint mapping, is described in [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md#start-the-service).
+
+The Proxy script ships with the vLLM Ascend image; no separate download or checkout is needed. Run it by absolute path from any working directory. If you installed from source ([Section 4.2](#42-source-code-installation)), use the same relative path under your checkout.
 
 ```bash
-python load_balance_proxy_server_example.py \
+python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
     --host 0.0.0.0 \
     --port "${PROXY_PORT}" \
     --workers 1 \
@@ -618,16 +558,12 @@ Register only P0 as the Prefill backend and only D0 as the Decode backend; P1 an
 | `--max-model-len` | 1048576 | 1048576 |
 | `--max-num-seqs` | 256 | 256 |
 | `--max-num-batched-tokens` | 16384 | 2048 |
-| `--gpu-memory-utilization` | 0.96 | 0.96 |
+| `--gpu-memory-utilization` | 0.9 | 0.9 |
 | Graph mode | Disabled (`--enforce-eager`) | `FULL_DECODE_ONLY` |
 | MTP | 3 speculative tokens | 3 speculative tokens |
 | `--kv-cache-dtype` | Default (not set) | Default (not set) |
 | `VLLM_PP_LAYER_PARTITION` | `24,25,25,18` | Omitted |
-| DCP (`--decode-context-parallel-size`) | Default (`1`) | Default (`1`) |
-| Prefix cache | Disabled (`--no-enable-prefix-caching`) | Disabled (`--no-enable-prefix-caching`) |
-| `--prefix-cache-retention-interval` | `2048` | `2048` |
 | `--async-scheduling` | Enabled | Enabled |
-| `--seed` | `1024` | `1024` |
 | `enable_flashcomm1` | `true` | `true` |
 | `enable_shared_expert_dp` | `true` | `true` |
 | `multistream_overlap_shared_expert` | `true` | `true` |
@@ -635,23 +571,20 @@ Register only P0 as the Prefill backend and only D0 as the Decode backend; P1 an
 | `HCCL_OP_EXPANSION_MODE` | `CCU_MS` | `CCU_MS` |
 | KV connector | `MooncakeConnectorV2` (`kv_producer`) | `MooncakeConnectorV2` (`kv_consumer`) |
 | KV transfer port | `48100` | `48200` |
+| `kv_connector_extra_config` | `prefill`: DP1/TP4/PP4 with the layer partition, `decode`: DP8/TP4 | Same block as Prefill |
 | `engine_id` | Unique per node | Unique per node |
+
+Both roles declare `kv_connector_extra_config` with the **global** Prefill and Decode topology, not the local node: Prefill is one DP1/TP4/PP4 engine and Decode is one DP8/TP4 group. The `prefill.pp_layer_partition` must match `VLLM_PP_LAYER_PARTITION`, because the consumer uses it to map each layer to the Prefill pipeline stage that holds it. Keep the same block on every node of a group.
 
 Prefill prioritizes TTFT, so it uses a larger batch-token budget and no graph capture; Decode prioritizes TPOT, so it captures the decode graph and uses a smaller batch-token budget. Keep `HCCL_BUFFSIZE` and `HCCL_OP_EXPANSION_MODE` identical on every node of the group; a different expansion mode changes the communication path and fails the process group setup.
 
-The Prefill shape comes from the validated two-node Prefill script (`TP4 × PP4` over two nodes), the Decode shape from the validated four-node Decode script (`DP8 × TP4`, two local ranks per node), and the KV transfer, prefix-cache, and scheduling settings from the validated 1P1D PD scripts. The six-node combination itself has not been validated end to end; treat the `--max-model-len`, `--max-num-seqs`, and batch-token values as targets until you reproduce them.
-
-!!! note
-
-    The `1048576` context limit is the value both validated role scripts use. On the Prefill side the two-node engine has been measured at this scale; the four-node Decode group has not, so treat Decode's `1048576` as a target and check the `Available KV cache memory` line in the Decode log before relying on it.
-
-Tool calling and reasoning output are parsed inside the API server that returns the response (D0 here; P0 for symmetry). Add `--enable-auto-tool-choice --tool-call-parser step5 --reasoning-parser step5` to those two commands as in [Section 5.1](#51-mixed-prefilldecode-deployment) when clients send `tools` or expect a separate `reasoning_content`.
+Tool calling and reasoning output are parsed inside the API server that returns the response (D0 here; P0 for symmetry). Add `--enable-auto-tool-choice --tool-call-parser step5 --reasoning-parser step5` to those two commands as in [Section 5.1](#51-multi-node-co-located-deployment) when clients send `tools` or expect a separate `reasoning_content`.
 
 ### 5.3 PD Separation with KV Cache Pool
 
 This section adds a KV cache pool to the 2P4D deployment in [Section 5.2](#52-multi-node-pd-separation-deployment-2p4d). MemCache backs `AscendStoreConnector`, and `MultiConnector` runs two connectors in every engine: `MooncakeConnectorV2` transfers KV cache directly from Prefill to Decode, while `AscendStoreConnector` reads and writes cached prefixes in the pool, so a repeated prefix is computed only once by Prefill.
 
-Every pool-connected engine rank registers its own DRAM slice with the pool, so both roles contribute capacity: with `dram.size = 64GB` on all six nodes, the pool has 48 ranks × 64GB = 3 TiB. The data flow is one-directional — Prefill writes new prefixes, Decode reads them — and the pool has no HBM tier. For backend installation, sizing, and eviction options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
+Every pool-connected engine rank registers its own DRAM slice with the pool, so both roles contribute capacity: with `dram.size = 64GB` on all six nodes, the pool has 48 ranks × 64GB = 3 TiB. The data flow is one-directional — Prefill writes new prefixes, Decode reads them — and the pool itself holds DRAM only: each engine keeps its local HBM prefix cache as the first tier and queries the pool only for the blocks that miss locally. For backend installation, sizing, and eviction options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
 
 Before starting the service:
 
@@ -671,7 +604,7 @@ Before starting the service:
 
 !!! note
 
-    The base PD commands already set `--no-enable-prefix-caching` and `--prefix-cache-retention-interval 2048`, so prefix lookup is served by the pool instead of local HBM. Keep both flags in this deployment.
+    The pool commands in [Section 5.3.4](#534-extend-the-engine-commands) keep `--enable-prefix-caching` on both roles: each engine serves prefix hits from its local HBM cache first and only queries the pool for the blocks that miss in HBM, so HBM and the DRAM pool form a two-tier cache instead of the pool replacing HBM.
 
 #### 5.3.1 Prepare the Pool Components
 
@@ -722,24 +655,79 @@ ock.mmc.local_service.hcom_url = tcp://<HCCL_IF_IP>:27000
 
 > Note: `hcom_url` must use the real IP of the node. The default `tcp://127.0.0.1:7000` makes cross-host ranks unreachable and fails with `hybm_transport_connect failed: -6`. The port base plus the local rank selects the port, so eight ranks on one host use `27000–27007`. A single generic file without `hcom_url`, or with one shared `127.0.0.1`, only works for a one-node pool — do not reuse it for a multi-node deployment.
 
-The `tcp://` scheme on `meta_service_url`, `config_store_url`, and `hcom_url` is correct and unrelated to `protocol`: those three are control-plane endpoints (MetaService RPC, configuration store, and the OOB bootstrap channel), while `local_service.protocol = device_urma` selects only the data-plane transport for the KV cache blocks stored in the DRAM pool. Keep the control-plane endpoints on `tcp://` even when the data plane runs over URMA.
-
 Both roles start the pool client inside the engine through `MMC_LOCAL_CONFIG_PATH`; no separate pool worker process is started.
 
 #### 5.3.4 Extend the Engine Commands {: #534-extend-the-engine-commands }
 
-The pool changes the `--kv-transfer-config` argument and adds `MMC_LOCAL_CONFIG_PATH`; the prefix-cache and scheduling flags from [Section 5.2.1](#521-create-the-engine-templates) are already the pool-compatible values. Export the `LD_LIBRARY_PATH` from [Section 5.3.1](#531-prepare-the-pool-components) in the same shell that starts the engine, otherwise `AscendStoreConnector` cannot load the bundled MemCache libraries and pool initialization fails. Select the tab for the role:
+Starting from the engine templates in [Section 5.2.1](#521-create-the-engine-templates), the pool makes four changes:
+
+- `--kv-transfer-config` becomes a `MultiConnector` with two children: `MooncakeConnectorV2` for direct Prefill-to-Decode transfer and `AscendStoreConnector` for the pool.
+- `MMC_LOCAL_CONFIG_PATH` points at that node's pool-client file from [Section 5.3.3](#533-configure-the-pool-client-on-every-engine-host).
+- `--enable-prefix-caching` stays on in both roles: each engine serves prefix hits from its local HBM cache first and only queries the pool for the blocks that miss in HBM, so HBM and the DRAM pool form a two-tier cache. `enable_lookup: true` on both `AscendStoreConnector` children turns that pool fallback on.
+- The `LD_LIBRARY_PATH` from [Section 5.3.1](#531-prepare-the-pool-components) must be exported in the same shell that starts the engine, otherwise `AscendStoreConnector` cannot load the bundled MemCache libraries and pool initialization fails.
+
+The `MooncakeConnectorV2` child keeps the `prefill`/`decode` topology block from [Section 5.2.4](#524-key-pd-settings), because it is a separate connector with its own extra configuration. The commands below are complete; copy one per node and change only the per-node values called out after each tab.
 
 === "Prefill"
 
-    Add `export MMC_LOCAL_CONFIG_PATH=/mnt/share/<USER>/memcache/mmc-local-p0.conf`
-    (or `-p1`) to the Prefill environment in
-    [Section 5.2.1](#521-create-the-engine-templates), then replace the
-    `--kv-transfer-config` argument with:
-
     ```bash
-        --kv-transfer-config \
-        '{
+    # Values that must be adapted to the target environment.
+    export MODEL_PATH=<MODEL_PATH>
+    export LOCAL_IP=<P0_IP>         # service IP bound by --host
+    export HCCL_IF_IP=<P0_NIC_IP>   # communication IP owned by NIC_NAME
+    export NIC_NAME=<P0_NIC>
+    export MASTER_ADDR=<P0_IP>
+    export MMC_LOCAL_CONFIG_PATH=/mnt/share/<USER>/memcache/mmc-local-p0.conf
+
+    # Each Prefill node exports its own IP, NIC, and pool-client file; do not copy one node's values to the other.
+    unset http_proxy https_proxy ftp_proxy all_proxy
+    unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
+
+    # AscendStoreConnector loads the bundled MemCache libraries from here.
+    PYLIB=$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+    export LD_LIBRARY_PATH=${PYLIB}/memfabric_hybrid/lib:${PYLIB}/memcache_hybrid/lib:${LD_LIBRARY_PATH}
+
+    export VLLM_HOST_IP="${HCCL_IF_IP}"
+    export GLOO_SOCKET_IFNAME="${NIC_NAME}"
+    export TP_SOCKET_IFNAME="${NIC_NAME}"
+    export HCCL_SOCKET_IFNAME="${NIC_NAME}"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export TASK_QUEUE_ENABLE=0
+
+    # 950DT products communication settings.
+    export HCCL_BUFFSIZE=1024
+    export HCCL_CONNECT_TIMEOUT=240
+    export HCCL_IF_BASE_PORT=55000
+    export HCCL_OP_EXPANSION_MODE=CCU_MS
+
+    # Layer distribution across the four pipeline stages; the first stage also holds the MTP draft.
+    export VLLM_PP_LAYER_PARTITION="24,25,25,18"
+
+    vllm serve "${MODEL_PATH}" \
+        --host "${LOCAL_IP}" \
+        --port 7778 \
+        --served-model-name step \
+        --trust-remote-code \
+        --max-num-seqs 256 \
+        --max-num-batched-tokens 16384 \
+        --max-model-len 1048576 \
+        --nnodes 2 \
+        --node-rank 0 \
+        --master-addr "${MASTER_ADDR}" \
+        --master-port 7060 \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 4 \
+        --enable-expert-parallel \
+        --gpu-memory-utilization 0.9 \
+        --distributed-executor-backend "mp" \
+        --api-server-count=1 \
+        --allowed-local-media-path / \
+        --enforce-eager \
+        --async-scheduling \
+        --enable-prefix-caching \
+        --additional-config '{"enable_flashcomm1": true, "enable_shared_expert_dp": true, "multistream_overlap_shared_expert": true}' \
+        --speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
+        --kv-transfer-config '{
           "kv_connector": "MultiConnector",
           "kv_role": "kv_producer",
           "engine_id": "<P0_ENGINE_ID>",
@@ -749,7 +737,20 @@ The pool changes the `--kv-transfer-config` argument and adds `MMC_LOCAL_CONFIG_
                 "kv_connector": "MooncakeConnectorV2",
                 "kv_role": "kv_producer",
                 "kv_buffer_device": "npu",
-                "kv_port": "48100"
+                "kv_port": "48100",
+                "kv_connector_extra_config": {
+                  "prefill": {
+                    "dp_size": 1,
+                    "tp_size": 4,
+                    "pp_size": 4,
+                    "pp_layer_partition": "24,25,25,18"
+                  },
+                  "decode": {
+                    "dp_size": 8,
+                    "tp_size": 4,
+                    "pp_size": 1
+                  }
+                }
               },
               {
                 "kv_connector": "AscendStoreConnector",
@@ -757,8 +758,8 @@ The pool changes the `--kv-transfer-config` argument and adds `MMC_LOCAL_CONFIG_
                 "kv_connector_extra_config": {
                   "backend": "memcache",
                   "lookup_rpc_port": "0",
-                  "use_layerwise": true,
-                  "load_async": false
+                  "enable_lookup": true,
+                  "use_layerwise": true
                 }
               }
             ]
@@ -766,20 +767,71 @@ The pool changes the `--kv-transfer-config` argument and adds `MMC_LOCAL_CONFIG_
         }'
     ```
 
-    Keep `engine_id` at the top level and use a unique value on each node, for
-    example `<P0_ENGINE_ID>` and `<P1_ENGINE_ID>`. A child-level value fails with
+    On P1, set `LOCAL_IP`, `HCCL_IF_IP`, and `NIC_NAME` to that node, point
+    `MMC_LOCAL_CONFIG_PATH` at `/mnt/share/<USER>/memcache/mmc-local-p1.conf`,
+    change `--node-rank` to `1`,
+    remove `--api-server-count=1`, add `--headless`, and use a unique
+    `engine_id`. Keep `MASTER_ADDR` pointing at P0. Every other value, including
+    `VLLM_PP_LAYER_PARTITION`, must stay identical. Keep `engine_id` at the top
+    level; a child-level value fails with
     `KVTransferConfig() got multiple values for keyword argument 'engine_id'`.
 
 === "Decode"
 
-    Add `export MMC_LOCAL_CONFIG_PATH=/mnt/share/<USER>/memcache/mmc-local-d0.conf`
-    (or the matching `-d1`…`-d3` file) to the Decode environment in the Decode tab
-    of [Section 5.2.1](#521-create-the-engine-templates), then replace the
-    `--kv-transfer-config` argument with the consumer variant:
-
     ```bash
-        --kv-transfer-config \
-        '{
+    # Values that must be adapted to the target environment.
+    export MODEL_PATH=<MODEL_PATH>
+    export LOCAL_IP=<D0_IP>         # service IP bound by --host
+    export HCCL_IF_IP=<D0_NIC_IP>   # communication IP owned by NIC_NAME
+    export NIC_NAME=<D0_NIC>
+    export DP_ADDRESS=<D0_IP>
+    export MMC_LOCAL_CONFIG_PATH=/mnt/share/<USER>/memcache/mmc-local-d0.conf
+
+    # Each Decode node exports its own IP, NIC, and pool-client file; only the DP address is shared.
+    unset http_proxy https_proxy ftp_proxy all_proxy
+    unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
+
+    # AscendStoreConnector loads the bundled MemCache libraries from here.
+    PYLIB=$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+    export LD_LIBRARY_PATH=${PYLIB}/memfabric_hybrid/lib:${PYLIB}/memcache_hybrid/lib:${LD_LIBRARY_PATH}
+
+    export VLLM_HOST_IP="${HCCL_IF_IP}"
+    export GLOO_SOCKET_IFNAME="${NIC_NAME}"
+    export TP_SOCKET_IFNAME="${NIC_NAME}"
+    export HCCL_SOCKET_IFNAME="${NIC_NAME}"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export TASK_QUEUE_ENABLE=0
+
+    # 950DT products communication settings.
+    export HCCL_BUFFSIZE=1024
+    export HCCL_CONNECT_TIMEOUT=240
+    export HCCL_IF_BASE_PORT=56000
+    export HCCL_OP_EXPANSION_MODE=CCU_MS
+
+    vllm serve "${MODEL_PATH}" \
+        --host "${LOCAL_IP}" \
+        --port 7778 \
+        --served-model-name step \
+        --trust-remote-code \
+        --max-num-seqs 256 \
+        --max-num-batched-tokens 2048 \
+        --max-model-len 1048576 \
+        --tensor-parallel-size 4 \
+        --data-parallel-size 8 \
+        --data-parallel-size-local 2 \
+        --data-parallel-address "${DP_ADDRESS}" \
+        --data-parallel-rpc-port 13389 \
+        --enable-expert-parallel \
+        --gpu-memory-utilization 0.9 \
+        --distributed-executor-backend "mp" \
+        --api-server-count=1 \
+        --allowed-local-media-path / \
+        --async-scheduling \
+        --enable-prefix-caching \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_flashcomm1": true, "enable_shared_expert_dp": true, "multistream_overlap_shared_expert": true}' \
+        --speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
+        --kv-transfer-config '{
           "kv_connector": "MultiConnector",
           "kv_role": "kv_consumer",
           "engine_id": "<D0_ENGINE_ID>",
@@ -789,7 +841,20 @@ The pool changes the `--kv-transfer-config` argument and adds `MMC_LOCAL_CONFIG_
                 "kv_connector": "MooncakeConnectorV2",
                 "kv_role": "kv_consumer",
                 "kv_buffer_device": "npu",
-                "kv_port": "48200"
+                "kv_port": "48200",
+                "kv_connector_extra_config": {
+                  "prefill": {
+                    "dp_size": 1,
+                    "tp_size": 4,
+                    "pp_size": 4,
+                    "pp_layer_partition": "24,25,25,18"
+                  },
+                  "decode": {
+                    "dp_size": 8,
+                    "tp_size": 4,
+                    "pp_size": 1
+                  }
+                }
               },
               {
                 "kv_connector": "AscendStoreConnector",
@@ -797,8 +862,8 @@ The pool changes the `--kv-transfer-config` argument and adds `MMC_LOCAL_CONFIG_
                 "kv_connector_extra_config": {
                   "backend": "memcache",
                   "lookup_rpc_port": "1",
-                  "use_layerwise": true,
-                  "load_async": false
+                  "enable_lookup": true,
+                  "use_layerwise": true
                 }
               }
             ]
@@ -806,11 +871,16 @@ The pool changes the `--kv-transfer-config` argument and adds `MMC_LOCAL_CONFIG_
         }'
     ```
 
-    Use a unique `engine_id` on D0–D3. If a Decode node reports
+    On D1–D3, set `LOCAL_IP`, `HCCL_IF_IP`, and `NIC_NAME` to that node, point
+    `MMC_LOCAL_CONFIG_PATH` at the matching
+    `/mnt/share/<USER>/memcache/mmc-local-d1.conf`…`mmc-local-d3.conf`,
+    add `--data-parallel-start-rank` `2`, `4`, or `6`, remove
+    `--api-server-count=1`, add `--headless`, and use a unique `engine_id`. Keep
+    `DP_ADDRESS`, the DP RPC port, `kv_port`, and `lookup_rpc_port` identical on
+    every Decode node. If a Decode node reports
     `No available memory for the cache blocks` with `--data-parallel-size-local 2`,
     keep the four-node DP8 × TP4 group and lower `--max-model-len` first, then
-    `--max-num-batched-tokens`, until the KV cache allocation succeeds. Keep the
-    same `--data-parallel-*` values and Proxy registration on every Decode node.
+    `--max-num-batched-tokens`, until the KV cache allocation succeeds.
 
 #### 5.3.5 Start Order and Verification {: #535-start-order-and-verification }
 
@@ -865,17 +935,16 @@ interchangeable between Prefill and Decode.
 | Parameter | Meaning and constraints |
 | --- | --- |
 | `--tensor-parallel-size`, `--pipeline-parallel-size` | TP partitions each model engine across devices; PP splits it into pipeline stages. Prefill uses TP4 × PP4, and Decode uses TP4 with PP1. |
-| `--data-parallel-size`, `--data-parallel-size-local` | Number of DP ranks in the group and the number of ranks started on the current node. The mixed Prefill/Decode deployment uses DP4 with two local ranks per node; the 2P4D Decode role uses DP8 with two local ranks per node. |
+| `--data-parallel-size`, `--data-parallel-size-local` | Number of DP ranks in the group and the number of ranks started on the current node. The multi-node co-located deployment uses DP4 with two local ranks per node; the 2P4D Decode role uses DP8 with two local ranks per node. |
 | `--data-parallel-address`, `--data-parallel-rpc-port`, `--data-parallel-start-rank` | DP coordinator address, RPC port, and the first rank of the current node. Every node in a group uses the same address and port; only headless nodes set the start rank. |
-| `--enable-expert-parallel` | Shards MoE experts across devices. Combined with DP and TP, EP covers the full group: EP16 for the two-node mixed Prefill/Decode deployment and EP32 for the four Decode nodes. |
+| `--enable-expert-parallel` | Shards MoE experts across devices. Combined with DP and TP, EP covers the full group: EP16 for the two-node multi-node co-located deployment and EP32 for the four Decode nodes. |
 | `--max-model-len` | Maximum total sequence length in tokens, including input and generated output. Requests must fit this limit and the available KV cache capacity. |
 | `--max-num-seqs`, `--max-num-batched-tokens` | Per-engine scheduler limits for concurrent sequences and for tokens processed in one iteration. Prefill uses a larger token budget to reduce time to first token; Decode uses a smaller one to bound per-step latency. |
-| `--gpu-memory-utilization` | Fraction of device memory budgeted to the model executor. Despite the flag name, it also applies to the NPU backend. Leave room for communication buffers; the examples use `0.96`. |
+| `--gpu-memory-utilization` | Fraction of device memory budgeted to the model executor. Despite the flag name, it also applies to the NPU backend. Leave room for communication buffers; the examples use `0.9`. |
 | `--speculative-config` | Native MTP decoding. All examples use three speculative tokens with `"method": "mtp"`. |
 | `--compilation-config` | Decode graph capture. The examples use `{"cudagraph_mode": "FULL_DECODE_ONLY"}` on Decode and eager execution on Prefill. |
 | `--additional-config` | Enables FlashComm1, shared-expert data parallelism, and shared-expert overlap: `{"enable_flashcomm1": true, "enable_shared_expert_dp": true, "multistream_overlap_shared_expert": true}`. |
 | `--kv-transfer-config` | PD KV transfer. [Section 5.2](#52-multi-node-pd-separation-deployment-2p4d) uses `MooncakeConnectorV2`; [Section 5.3](#53-pd-separation-with-kv-cache-pool) wraps it with `AscendStoreConnector` in `MultiConnector`. |
-| `--decode-context-parallel-size` | Optional decode context parallelism, unset (`1`) in every example. The value cannot exceed the engine TP size. |
 | `VLLM_PP_LAYER_PARTITION` | Number of model layers per pipeline stage on Prefill (`24,25,25,18`). Set it on every Prefill node and leave it unset on Decode. |
 | `HCCL_BUFFSIZE`, `HCCL_OP_EXPANSION_MODE` | CANN/HCCL communication buffer size in MB and the collective expansion mode. Both change the communication path and device-memory footprint; keep the same values on every node of a group. |
 
@@ -883,7 +952,7 @@ interchangeable between Prefill and Decode.
 
 ### 6.1 Text Requests
 
-Send an inference request to the endpoint of the deployment you started. For the mixed deployment in [Section 5.1](#51-mixed-prefilldecode-deployment), use `<NODE0_IP>:7778`; for the PD deployment in [Section 5.2](#52-multi-node-pd-separation-deployment-2p4d), use `<PROXY_IP>:<PROXY_PORT>`. The engine binds to the node's service IP (`LOCAL_IP`), so a request to `127.0.0.1` works only if the service also listens on loopback.
+Send an inference request to the endpoint of the deployment you started. For the co-located deployment in [Section 5.1](#51-multi-node-co-located-deployment), use `<NODE0_IP>:7778`; for the PD deployment in [Section 5.2](#52-multi-node-pd-separation-deployment-2p4d), use `<PROXY_IP>:<PROXY_PORT>`. The engine binds to the node's service IP (`LOCAL_IP`), so a request to `127.0.0.1` works only if the service also listens on loopback.
 
 ```bash
 # Replace <ENDPOINT_HOST> and <ENDPOINT_PORT> with the endpoint selected above.
@@ -958,29 +1027,28 @@ Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) f
 
 ### 7.2 Accuracy Results
 
-The following table shows the results of `Step-5-Preview`. Requests were sent to the mixed Prefill/Decode deployment described in [Section 5.1](#51-mixed-prefilldecode-deployment).
+The following table shows the results of `Step-5-Preview`. Requests were sent to the multi-node co-located deployment described in [Section 5.1](#51-multi-node-co-located-deployment).
 
 | dataset | model | hardware | metric | mode | vllm-api-general-chat |
 | ----- | ----- | ----- | ----- | ----- | ----- |
 | GPQA Diamond | Step-5-Preview-w8a8-mxfp8 | 950DT products | accuracy | gen | 93.43 |
 | MMMU-Pro | Step-5-Preview-w8a8-mxfp8 | 950DT products | accuracy | gen | 76.13 |
-| deepswe | Step-5-Preview-w8a8-mxfp8 | 950DT products | accuracy | gen | 67.26 |
+| Deepswe | Step-5-Preview-w8a8-mxfp8 | 950DT products | accuracy | gen | 67.26 |
 
-## 8 Performance Evaluation
 ## 8 Performance Evaluation
 
 ### 8.1 Using AISBench
 
 For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation).
 
-Configure `vllm_api_stream_chat` for the service started in [Section 5.1](#51-mixed-prefilldecode-deployment) or the Proxy started in [Section 5.2](#52-multi-node-pd-separation-deployment-2p4d). Set `stream=True` and `ignore_eos=True` for streaming performance testing, and update the following fields for your environment:
+Configure `vllm_api_stream_chat` for the service started in [Section 5.1](#51-multi-node-co-located-deployment) or the Proxy started in [Section 5.2](#52-multi-node-pd-separation-deployment-2p4d). Set `stream=True` and `ignore_eos=True` for streaming performance testing, and update the following fields for your environment:
 
 | Field | Value |
 | --- | --- |
 | `path` | The checkpoint directory recorded in [Section 3.1](#31-model-weight), accessible to the benchmark client |
 | `model` | `step`, matching `--served-model-name` |
-| `host_ip` | The service IP of node 0 (`NODE0_IP`) for mixed Prefill/Decode deployment, or the Proxy IP for PD deployment |
-| `host_port` | `7778` for mixed Prefill/Decode deployment, or the Proxy port for PD deployment |
+| `host_ip` | The service IP of node 0 (`NODE0_IP`) for multi-node co-located deployment, or the Proxy IP for PD deployment |
+| `host_port` | `7778` for multi-node co-located deployment, or the Proxy port for PD deployment |
 
 **Run the performance evaluation using the GSM8K dataset as an example:**
 
@@ -1015,38 +1083,13 @@ Refer to the [performance tuning guide](../../developer_guide/performance_and_de
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md). This chapter only covers `Step-5-Preview`-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md). 
 
-### 10.1 Service Startup or Out-of-Memory Failures
-
-**Symptom:** The service fails during startup or reports an out-of-memory error soon after accepting requests.
-
-**Cause:** The default scheduler limits, context length, or graph capture do not fit the available device memory for the selected topology.
-
-**Resolution:** Reduce `--max-num-seqs` or `--max-num-batched-tokens` first, then lower `--max-model-len` or `--gpu-memory-utilization` if memory is still insufficient. On the two-node mixed Prefill/Decode deployment, verify that the headless node uses `--data-parallel-start-rank 2` and that all nodes have the same `HCCL_BUFFSIZE`.
-
-### 10.2 The Pool Never Initializes
-
-**Symptom:** Prefill repeats `Trying to connect to <ip>:6000` and `init bm success` never reaches every rank, or the process aborts in `KVCacheStoreLayerSendingThread ... aclrtSynchronizeEvent 507001`.
-
-**Cause:** MetaService is not running, the engines started before it and retried with stale rank registrations, or the node has no URMA support while `protocol = device_urma`.
-
-**Resolution:** Start in this order: kill the engines, start MetaService (confirm ports 5000, 6000, and 8000 are listening; this normally takes under 20 seconds), start Prefill, start Decode, start the Proxy. Restarting MetaService clears old registrations; starting the engines first leaves them retrying against a pool that will never accept them. A healthy engine logs one `init bm success` line per rank (eight per node in these topologies); if the count stops short, the remaining ranks are still waiting for peers. MetaService has no supervisor: if it runs inside a container, killing that container also kills the pool service, and it must be started again before the engines. The local pool client is not a separate process — it is initialized inside `vllm serve` from `MMC_LOCAL_CONFIG_PATH`. On a node without `/dev/urma*`, `device_urma` cannot work: use a URMA-capable cluster or switch to `host_tcp`. Keep `dram.size` at 64GB per rank — 8GB per rank evicts entries while writing long sequences, and 128GB per rank (1 TiB per node) was followed by both nodes restarting right after pool registration.
-
-### 10.3 Low KV Cache Pool Hit Rate
-
-**Symptom:** The pool reports few or no hits, and TTFT does not improve after enabling the pool.
-
-**Cause:** The prefix is not reused across requests, it ends in the middle of a block, or the pool connector is not configured on both roles.
-
-**Resolution:** Confirm that both templates use the same pool endpoint and connector and that Decode is a pure consumer. Align the shared prefix to the engine block size: the reference runs use multiples of 4096 tokens, and a prefix that ends mid-block is never stored. Restart the engines between two identical measurements — a second run against the same service hits the engine-local path and hides the pool. Read the hit rate from the per-request metrics rather than a cumulative total, because a single early hit inflates the counter.
-
-If the reported hit rate is plausible but no capacity is used, separate the write path from the metadata service: when MetaService reports registered ranks (`mount_success=16`) while its allocation and key counters stay at zero, the metadata service is healthy and the engine-side write path is not reaching it. Check the pool save events in the Prefill log instead of the MetaService log. Size the pool for the workload: a single 16k-token prefix occupies roughly 3.75 GiB in the pool with the per-rank amplification of this checkpoint, so long shared prefixes need `dram.size` sized per rank, not per node.
-
-### 10.4 The Proxy Hangs or Stops Forwarding
-
-**Symptom:** The Proxy log shows `Streaming from decoder ... was cancelled`, then every request stalls even though Prefill and Decode still answer `200` on their own ports.
-
-**Cause:** A single-worker Proxy is blocked by one streaming handler that never finished.
-
-**Resolution:** Kill the stalled client and restart the Proxy, and use non-streaming requests for load tests. Restart the Proxy whenever either engine restarts: it opens backend connections at startup and keeps forwarding to sockets that no longer exist. A `JSONDecodeError: Expecting value` in the Proxy log means a backend returned an empty body or an HTML error page, so check the Prefill and Decode endpoints directly before looking at the Proxy.
+- **Q: The service fails to start, or reports an out-of-memory error soon after accepting requests.**
+A: The scheduler limits, context length, or graph capture do not fit device memory. Lower `--max-num-seqs` or `--max-num-batched-tokens` first, then `--max-model-len` or `--gpu-memory-utilization`. On Decode, DP8 × TP4 can report `No available memory for the cache blocks`; keep the four-node group and cut the context or batch-token budget first, or fall back to TP8.
+- **Q: The pool hit rate is low or TTFT does not improve.**
+A: Shared prefixes must be block-aligned (the reference runs use multiples of 4096 tokens); a prefix that ends mid-block is never stored. Restart the engines between two identical measurements and read per-request metrics, not the cumulative counter. A 16k-token prefix occupies about 3.75 GiB per rank, so size `dram.size` per rank.
+- **Q: With the pool enabled, are prefix hits still served from local HBM?**
+A: Yes. `--enable-prefix-caching` stays on and `enable_lookup: true` makes each engine query the pool only for the blocks that miss in local HBM, so HBM is the first tier and the DRAM pool the second.
+- **Q: The Proxy hangs or stops forwarding.**
+A: A single-worker Proxy is blocked by one unfinished streaming handler. Restart the Proxy after any engine restart, and use non-streaming requests for load tests. A `JSONDecodeError` in the Proxy log means a backend returned an empty body or an HTML error page.
