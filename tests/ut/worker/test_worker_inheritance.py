@@ -102,9 +102,14 @@ def test_get_draft_model_reports_the_runner_drafter(drafter):
     from vllm_ascend.worker.worker import NPUWorker
 
     draft_model = torch.nn.Linear(2, 2) if drafter == "draft-model" else None
+    # The runner only reads isinstance()/attribute state from this slot, so the
+    # parameterization mixes a mock with plain objects on purpose. Annotate the
+    # union up front so mypy does not pin it to the first MagicMock branch.
+    speculator: object | None
     if drafter == "draft-model":
-        speculator = MagicMock(spec=DraftModelSpeculator)
-        speculator.model = draft_model
+        mock_speculator = MagicMock(spec=DraftModelSpeculator)
+        mock_speculator.model = draft_model
+        speculator = mock_speculator
     elif drafter == "other-speculator":
         speculator = object()  # e.g. a speculator that carries no draft model
     else:
