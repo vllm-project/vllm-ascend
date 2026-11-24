@@ -14,7 +14,6 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.config import VllmConfig, get_current_vllm_config_or_none
@@ -33,6 +32,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec
 
+from vllm_ascend.attention.utils import KVCacheRuntimeShapesAndDtypes
 from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
 from vllm_ascend.ops.triton.fla.utils import (
@@ -42,9 +42,6 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets,
 )
 from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
-
-if TYPE_CHECKING:
-    from vllm_ascend.attention.utils import KVCacheRuntimeShapesAndDtypes
 
 _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
@@ -1122,7 +1119,7 @@ class AscendGDNAttentionBackend(GDNAttentionBackend):
         spec: MambaSpec,
         num_blocks: int,
         kernel_block_size: int | None = None,
-    ) -> "KVCacheRuntimeShapesAndDtypes":
+    ) -> KVCacheRuntimeShapesAndDtypes:
         # The leading state dimension indexes manager blocks.
         return tuple((num_blocks, *shape) for shape in spec.shapes), spec.dtypes
 
