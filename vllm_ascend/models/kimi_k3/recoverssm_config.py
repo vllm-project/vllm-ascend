@@ -45,7 +45,7 @@ def validate_request_indexed_kda_recoverssm(vllm_config: VllmConfig) -> None:
     if vllm_config.mamba_config.enable_stochastic_rounding:
         raise ValueError("Kimi RecoverSSM does not support stochastic rounding")
     cache = vllm_config.cache_config
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         expected_cache_mode = "align" if cache.enable_prefix_caching else "none"
         if cache.mamba_cache_mode != expected_cache_mode:
             raise ValueError(

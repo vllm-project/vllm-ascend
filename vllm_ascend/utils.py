@@ -819,19 +819,19 @@ def vllm_version_is(target_vllm_version: str):
 
 def scheduler_collects_stats(scheduler: object) -> bool:
     """Read the stats flag shared by the scheduler and its KV cache manager."""
-    name = "log_stats" if vllm_version_is("0.33.0") else "collect_stats"
+    name = "log_stats" if vllm_version_is("0.34.0") else "collect_stats"
     return bool(getattr(scheduler, name))
 
 
 def speculator_uses_target_hidden_states(config: SpeculativeConfig) -> bool:
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         return config.use_eagle()
     return config.uses_target_hidden_states
 
 
 def get_mamba_cache_mode(cache_config: CacheConfig) -> str:
     """Expose the legacy mode to Ascend layout consumers."""
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         return cache_config.mamba_cache_mode
     return "align" if cache_config.enable_prefix_caching else "none"
 

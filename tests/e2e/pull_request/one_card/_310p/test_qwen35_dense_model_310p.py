@@ -41,7 +41,7 @@ def _generate_qwen3_5_prefix_mamba_outputs(enable_prefix_caching: bool) -> list[
     outputs: list[tuple[list[int], str]] = []
 
     if enable_prefix_caching:
-        mamba_options: dict[str, Any] = {"mamba_cache_mode": "align"} if vllm_version_is("0.33.0") else {}
+        mamba_options: dict[str, Any] = {"mamba_cache_mode": "align"} if vllm_version_is("0.34.0") else {}
         with VllmRunner(
             "Qwen/Qwen3.5-4B",
             tensor_parallel_size=1,

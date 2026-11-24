@@ -129,7 +129,7 @@ def replace_dspark_config(config: Any, **changes: Any) -> Any:
     return replace(config, **changes)
 
 
-if not vllm_version_is("0.33.0"):
+if not vllm_version_is("0.34.0"):
     _original_apply_draft_overrides = SpeculativeConfig.apply_draft_overrides
 
     @wraps(_original_apply_draft_overrides)

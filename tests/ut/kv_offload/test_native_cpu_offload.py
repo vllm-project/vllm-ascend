@@ -38,7 +38,7 @@ from vllm_ascend.utils import vllm_version_is
 
 
 def _make_config(extra_config: dict[str, object]) -> OffloadingConfig:
-    parallel_kwargs = {} if vllm_version_is("0.33.0") else {"local_world_size": 2}
+    parallel_kwargs = {} if vllm_version_is("0.34.0") else {"local_world_size": 2}
     return OffloadingConfig(
         groups=(
             OffloadingGroupConfig(

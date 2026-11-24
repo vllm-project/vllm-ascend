@@ -917,7 +917,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             and spec_config is not None
             and (
                 speculator_uses_target_hidden_states(spec_config)
-                or (vllm_version_is("0.33.0") and spec_config.uses_draft_model())
+                or (vllm_version_is("0.34.0") and spec_config.uses_draft_model())
             )
         ):
             # Bind the buffer before compilation: lazy allocation in forward

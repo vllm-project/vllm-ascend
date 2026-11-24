@@ -30,6 +30,7 @@ from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
 from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
+from vllm_ascend.utils import vllm_version_is
 
 EOS_TOKEN_ID = 50256
 
@@ -168,7 +169,7 @@ def create_scheduler(
     return Scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
-        **{"log_stats" if vllm_version_is("0.33.0") else "collect_stats": True},
+        **{"log_stats" if vllm_version_is("0.34.0") else "collect_stats": True},
         block_size=block_size,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )

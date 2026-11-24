@@ -231,7 +231,7 @@ class BaseKVPoolWorker(ABC):
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
         speculative_config = getattr(vllm_config, "speculative_config", None)
         self.use_eagle = False
-        if vllm_version_is("0.33.0"):
+        if vllm_version_is("0.34.0"):
             use_eagle_fn = getattr(speculative_config, "use_eagle", None)
             self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.num_hash_lookahead_tokens = 0 if vllm_version_is("0.34.0") else vllm_config.num_hash_lookahead_tokens

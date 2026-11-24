@@ -189,7 +189,7 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
 @pytest.fixture
 def cpu_manager_resources(monkeypatch):
     # Replace only device resources so the real manager and budget logic still run.
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         monkeypatch.setattr(torch.cuda, "Stream", Mock())
         monkeypatch.setattr(torch.cuda, "Event", Mock())
         monkeypatch.setattr(torch.cuda, "current_stream", Mock())

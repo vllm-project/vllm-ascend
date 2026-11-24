@@ -113,7 +113,7 @@ def test_mrv2_ngram_kernel_matches_reference(max_model_len, k, staged_history):
 @pytest.mark.parametrize("enforce_eager", [False, True])
 def test_mrv2_ngram_greedy_accuracy(test_prompts, model_name, async_scheduling, enforce_eager, monkeypatch):
     """Compare target token IDs, including chunked prefill and request slot reuse."""
-    if not vllm_version_is("0.33.0"):
+    if not vllm_version_is("0.34.0"):
         # vLLM #66547 uses the Transformers backend for top-level Llama.
         # With speculation the verifier sees different batch shapes.
         monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")

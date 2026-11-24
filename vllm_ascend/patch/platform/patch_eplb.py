@@ -294,7 +294,7 @@ def _patch_eplb_policy_config() -> None:
     if get_args(policy_field.type) == _ASCEND_EPLB_POLICIES and policy_field.default == "stair":
         return
 
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         decorators = getattr(config_cls, "__pydantic_decorators__", None)
         validator = None if decorators is None else decorators.model_validators.get("_validate_eplb_config")
         if validator is None:
@@ -905,7 +905,7 @@ def _wrap_move_to_workspace(original_move, model_state_parameter: str = "model_s
 
 
 def _patch_async_move_to_workspace() -> None:
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         original_move = _eplb_state._move_to_workspace
         if not getattr(original_move, _PATCH_MARKER, False):
             _eplb_state._move_to_workspace = _wrap_move_to_workspace(original_move)

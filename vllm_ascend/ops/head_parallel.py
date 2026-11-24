@@ -88,7 +88,9 @@ class HeadParallelMergedColumnLinear(MergedColumnParallelLinear, HeadParallelCol
                     param.data[-padding_size:].zero_()
                 else:
                     self._zero_output_padding(param)
-                    set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel(), "fill_on_reload": True})
+                    set_weight_attrs(
+                        param, {"weight_loader_numel": param[:-padding_size].numel(), "fill_on_reload": True}
+                    )
 
 
 class HeadParallelRowLinear(RowParallelLinear):

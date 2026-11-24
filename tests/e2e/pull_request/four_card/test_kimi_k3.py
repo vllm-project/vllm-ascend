@@ -344,7 +344,7 @@ def _engine_args(models: dict[str, str], variant: str, tp: int = 4) -> dict:
         "gpu_memory_utilization": 0.8,
         "enable_prefix_caching": True,
         "enable_chunked_prefill": True,
-        **({"mamba_cache_mode": "align"} if vllm_version_is("0.33.0") else {}),
+        **({"mamba_cache_mode": "align"} if vllm_version_is("0.34.0") else {}),
         "async_scheduling": True,
         "disable_log_stats": False,
         "seed": 0,

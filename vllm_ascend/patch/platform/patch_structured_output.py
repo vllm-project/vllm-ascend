@@ -119,7 +119,7 @@ def _patch_structured_output_manager() -> None:
 
         initialized_backend = getattr(self, _BACKEND_ATTR, None)
         if initialized_backend is None:
-            if vllm_version_is("0.33.0"):
+            if vllm_version_is("0.34.0"):
                 initialized_backend = _backend_name_from_instance(self.backend)
             else:
                 initialized_backend = next(iter(self.backends), None)
@@ -130,7 +130,7 @@ def _patch_structured_output_manager() -> None:
             _raise_mixed_backend(initialized_backend, request_backend)
 
         result = original_grammar_init(self, request)
-        if vllm_version_is("0.33.0"):
+        if vllm_version_is("0.34.0"):
             initialized = self.backend is not None
         else:
             initialized = request_backend in self.backends

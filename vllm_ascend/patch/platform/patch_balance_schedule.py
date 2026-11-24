@@ -277,7 +277,7 @@ class BalanceScheduler(Scheduler):
                     num_new_tokens,
                     encoder_compute_budget,
                     shift_computed_tokens=(1 if self.use_eagle else 0)
-                    if vllm_version_is("0.33.0")
+                    if vllm_version_is("0.34.0")
                     else self.num_prefill_lookahead,
                 )
 
@@ -614,7 +614,7 @@ class BalanceScheduler(Scheduler):
                             num_new_tokens,
                             encoder_compute_budget,
                             shift_computed_tokens=(1 if self.use_eagle else 0)
-                            if vllm_version_is("0.33.0")
+                            if vllm_version_is("0.34.0")
                             else self.num_prefill_lookahead,
                         )
                         if num_new_tokens == 0:
@@ -638,7 +638,7 @@ class BalanceScheduler(Scheduler):
                 # creates a mismatch between the number
                 # of local and remote blocks.
                 limit_lookahead_tokens = load_kv_async and (
-                    self.use_eagle if vllm_version_is("0.33.0") else self.num_lookahead_tokens > 0
+                    self.use_eagle if vllm_version_is("0.34.0") else self.num_lookahead_tokens > 0
                 )
                 effective_lookahead_tokens = 0 if limit_lookahead_tokens else self.num_lookahead_tokens
 

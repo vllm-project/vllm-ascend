@@ -53,7 +53,7 @@ def _read_mtp_counters(metrics):
 
 
 def _run_mtp_case(model_name, use_replayssm, example_prompts, max_tokens):
-    mamba_options: dict[str, Any] = {"mamba_cache_mode": "none"} if vllm_version_is("0.33.0") else {}
+    mamba_options: dict[str, Any] = {"mamba_cache_mode": "none"} if vllm_version_is("0.34.0") else {}
     with VllmRunner(
         model_name,
         dtype="bfloat16",

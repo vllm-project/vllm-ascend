@@ -87,7 +87,7 @@ def validate_qwen_gdn_recoverssm(config: "VllmConfig") -> None:
     transfer = config.kv_transfer_config
     if transfer is not None and transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector"):
         raise ValueError("Qwen GDN RecoverSSM KV transfer requires MooncakeConnectorV2 or MooncakePullConnector")
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         expected_cache_mode = "align" if cache.enable_prefix_caching else "none"
         if cache.mamba_cache_mode != expected_cache_mode:
             raise ValueError(

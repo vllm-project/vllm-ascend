@@ -145,7 +145,7 @@ class AscendStoreCoordinator:
         self.kv_cache_groups = kv_cache_groups
         self.hash_block_size = hash_block_size
         self.lcm_block_size = scheduler_block_size
-        self.use_eagle = vllm_version_is("0.33.0") and use_eagle
+        self.use_eagle = vllm_version_is("0.34.0") and use_eagle
         self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         self.retention_interval = retention_interval
         # Internal capability resolved from Core's cache plan, never an extra
@@ -168,7 +168,7 @@ class AscendStoreCoordinator:
             )
 
         self.eagle_group_ids: set[int] = set()
-        if vllm_version_is("0.33.0"):
+        if vllm_version_is("0.34.0"):
             self.eagle_group_ids = {i for i, group in enumerate(kv_cache_groups) if group.is_eagle_group}
         if self.use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = set(range(len(kv_cache_groups)))
@@ -327,7 +327,7 @@ class AscendStoreCoordinator:
                 end_block=num_chunks,
                 alignment_tokens=self.lcm_block_size,
                 **self._manager_layout_args(group_id, spec),
-                **({"use_eagle": group_id in self.eagle_reachable_group_ids} if vllm_version_is("0.33.0") else {}),
+                **({"use_eagle": group_id in self.eagle_reachable_group_ids} if vllm_version_is("0.34.0") else {}),
                 retention_interval=retention_interval,
                 num_prompt_tokens=num_prompt_tokens,
                 reachable_boundaries=reachable_boundaries,

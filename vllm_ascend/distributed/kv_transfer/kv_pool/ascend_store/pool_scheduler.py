@@ -256,7 +256,7 @@ class BaseKVPoolScheduler(ABC):
         return num_mamba_speculative_blocks_by_group
 
     def _max_pool_prefix_tokens(self, num_prompt_tokens: int) -> int:
-        if vllm_version_is("0.33.0"):
+        if vllm_version_is("0.34.0"):
             return num_prompt_tokens
         # The lookup may read the final complete stored page and reuse a
         # partial prefix. Reserve the final logit token after the page is found.

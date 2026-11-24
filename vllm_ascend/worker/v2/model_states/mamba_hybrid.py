@@ -123,7 +123,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
 
     @property
     def mamba_prefix_caching(self) -> bool:
-        if vllm_version_is("0.33.0"):
+        if vllm_version_is("0.34.0"):
             return self._align_mode
         return self.prefix_caching
 

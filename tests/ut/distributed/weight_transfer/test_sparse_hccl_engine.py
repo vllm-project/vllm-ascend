@@ -90,7 +90,7 @@ def test_upstream_broadcast_filters_empty_patches_and_syncs_npu(empty_only):
     else:
         wrapper.assert_called_once()
         update = dict(names=[full.name], dtype_names=["float32"], shapes=[[4, 4]], num_updates_list=[2])
-        if not vllm_version_is("0.33.0"):
+        if not vllm_version_is("0.34.0"):
             update["wire_batch_bytes"] = sparse_nccl_engine._WIRE_BATCH_BYTES
         engine.client.update_weights.assert_called_once_with(update)
         assert engine.model_update_group.broadcast.call_count == 2

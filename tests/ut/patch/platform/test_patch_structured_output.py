@@ -52,7 +52,7 @@ class FakeGuidanceBackend(FakeBackend):
 
 def make_manager() -> StructuredOutputManager:
     manager = object.__new__(StructuredOutputManager)
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         manager.backend = None
         manager.backend_name = None
     else:
@@ -64,7 +64,7 @@ def make_manager() -> StructuredOutputManager:
 
 
 def manager_backend(manager: StructuredOutputManager, name: str):
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         return manager.backend
     return manager.backends.get(name)
 
@@ -213,7 +213,7 @@ def test_manager_rejects_mixed_backend_after_subclassed_backend_is_initialized()
         manager.tokenizer,
         manager.vllm_config.model_config.get_vocab_size(),
     )
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         manager.backend = backend
     else:
         manager.backends["xgrammar"] = backend

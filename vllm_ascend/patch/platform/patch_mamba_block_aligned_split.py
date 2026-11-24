@@ -41,7 +41,7 @@ from vllm.v1.request import Request
 
 from vllm_ascend.utils import vllm_version_is
 
-if not vllm_version_is("0.33.0"):
+if not vllm_version_is("0.34.0"):
     from vllm.v1.kv_cache_interface import get_reusable_prefix_length
 
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
@@ -127,7 +127,7 @@ def _mamba_block_aligned_split(
             request.num_tokens - 1,
         ):
             block_size = self.block_size
-            if vllm_version_is("0.33.0"):
+            if vllm_version_is("0.34.0"):
                 last_cache_position = request.num_tokens - request.num_tokens % block_size
                 if self.use_eagle and not _skips_eagle_block_drop(kv_transfer_config):
                     last_cache_position = max(last_cache_position - block_size, 0)
@@ -144,7 +144,7 @@ def _mamba_block_aligned_split(
                 num_new_tokens = last_cache_position - num_computed_tokens
         return num_new_tokens
 
-    if not vllm_version_is("0.33.0") or not _skips_eagle_block_drop(kv_transfer_config):
+    if not vllm_version_is("0.34.0") or not _skips_eagle_block_drop(kv_transfer_config):
         return _original_mamba_block_aligned_split(
             self,
             request,

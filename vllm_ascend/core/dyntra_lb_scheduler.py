@@ -535,7 +535,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                     num_new_tokens,
                     encoder_compute_budget,
                     shift_computed_tokens=(1 if self.use_eagle else 0)
-                    if vllm_version_is("0.33.0")
+                    if vllm_version_is("0.34.0")
                     else self.num_prefill_lookahead,
                 )
 
@@ -929,7 +929,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                             num_new_tokens,
                             encoder_compute_budget,
                             shift_computed_tokens=(1 if self.use_eagle else 0)
-                            if vllm_version_is("0.33.0")
+                            if vllm_version_is("0.34.0")
                             else self.num_prefill_lookahead,
                         )
                         if num_new_tokens == 0:

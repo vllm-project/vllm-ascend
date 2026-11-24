@@ -131,7 +131,7 @@ def test_kv_both_cold_prefill_retains_mamba_boundary_split():
     )
 
     # Release drops one verifier block. Native lookup uses the hash boundary.
-    assert result == (4224 if vllm_version_is("0.33.0") else 4608)
+    assert result == (4224 if vllm_version_is("0.34.0") else 4608)
 
 
 def test_producer_splits_window_after_external_cache_hit():
@@ -193,7 +193,7 @@ def test_sparse_index_kpool_stops_at_last_cacheable_boundary():
         num_new_tokens=100,
     )
 
-    assert result == (36 if vllm_version_is("0.33.0") else 100)
+    assert result == (36 if vllm_version_is("0.34.0") else 100)
 
 
 def test_sparse_index_kpool_does_not_round_small_chunk_to_zero():

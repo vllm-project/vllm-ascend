@@ -38,7 +38,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
     DSparkContextChunk,
     initialize_draft_context_chunk,
 )
-from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable, lmhead_tp_max_num_logits
+from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable, lmhead_tp_max_num_logits, vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
@@ -264,7 +264,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
 
             self.attn_backends = attn_backends
             self.attn_architecture, self.use_flashmla, self.use_a3_mla_sink = detect_draft_attn_architecture(
-                self.attn_groups, inspect_mla_builders=vllm_version_is("0.33.0") or not self.context_kv_only
+                self.attn_groups, inspect_mla_builders=vllm_version_is("0.34.0") or not self.context_kv_only
             )
             install_ascend_dflash_input_preparation()
 

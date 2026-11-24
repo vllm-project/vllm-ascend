@@ -27,7 +27,6 @@ from vllm_ascend.utils import vllm_version_is
 # These patches operate on the old spec-based planning and scheduler APIs.
 if vllm_version_is("0.34.0"):
     import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
-    import vllm_ascend.patch.platform.patch_swa_bounded_replay  # noqa
 
 if get_current_hardware_profile().supports(HardwareCapability.STANDARD_MAMBA_PATCH):
     import vllm_ascend.patch.platform.patch_mamba_config  # noqa

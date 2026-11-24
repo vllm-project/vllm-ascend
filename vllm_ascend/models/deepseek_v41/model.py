@@ -1214,7 +1214,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             and not spec_config.use_dspark()
             and (
                 speculator_uses_target_hidden_states(spec_config)
-                or (vllm_version_is("0.33.0") and spec_config.uses_draft_model())
+                or (vllm_version_is("0.34.0") and spec_config.uses_draft_model())
             )
         )
         self._mtp_hidden_buffer = (

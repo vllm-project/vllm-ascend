@@ -37,6 +37,7 @@ from vllm_ascend.distributed.eplb.tensor_ops import (
     count_allgather_tokens,
     make_allgather_mask,
 )
+from vllm_ascend.utils import vllm_version_is
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 _EPLB_CLOSE_TIMEOUT_SECONDS = 300
@@ -55,7 +56,7 @@ def _configured_upstream_policy(name: str, policy: AbstractEplbPolicy | None) ->
     if policy is None or name in policies:
         yield
         return
-    policies[name] = policy if vllm_version_is("0.33.0") else lambda: policy
+    policies[name] = policy if vllm_version_is("0.34.0") else lambda: policy
     try:
         yield
     finally:

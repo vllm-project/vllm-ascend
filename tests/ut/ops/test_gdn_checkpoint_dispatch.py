@@ -113,7 +113,7 @@ def test_boundary_policy(transfer, drop, lookahead, expected):
         num_hash_lookahead_tokens=lookahead,
     )
     assert gdn_checkpoint._supports_checkpoint_boundary_policy(config) is (
-        expected if vllm_version_is("0.33.0") else not transfer
+        expected if vllm_version_is("0.34.0") else not transfer
     )
 
 

@@ -105,7 +105,7 @@ def _config(
 
 
 def _run(config):
-    native_verify = None if vllm_version_is("0.33.0") else MambaModelConfig.verify_and_update_config
+    native_verify = None if vllm_version_is("0.34.0") else MambaModelConfig.verify_and_update_config
     with patch.object(MambaModelConfig, "verify_and_update_config", wraps=native_verify) as upstream:
         HybridAttentionMambaModelConfig.verify_and_update_config(config)
     upstream.assert_called_once_with(config)
@@ -200,7 +200,7 @@ def test_backend_alignment_preserves_kpool_c8_page_geometry(cache_dtype, prefix_
         get_supported_kernel_block_sizes=lambda: [128],
     )
 
-    native_verify = None if vllm_version_is("0.33.0") else MambaModelConfig.verify_and_update_config
+    native_verify = None if vllm_version_is("0.34.0") else MambaModelConfig.verify_and_update_config
     with (
         patch.object(MambaModelConfig, "verify_and_update_config", wraps=native_verify),
         patch("vllm.model_executor.models.ModelRegistry.resolve_model_cls", return_value=(model_cls, None)),
@@ -341,7 +341,7 @@ def test_kv_store_aligns_mamba_cache_for_prefix_caching():
 
     _run(config)
 
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         assert config.cache_config.mamba_cache_mode == "align"
     else:
         assert config.cache_config.enable_prefix_caching
@@ -357,7 +357,7 @@ def test_disabled_hybrid_manager_does_not_force_align_mode():
 
     _run(config)
 
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         assert config.cache_config.mamba_cache_mode == "none"
         assert config.cache_config.mamba_block_size == config.model_config.max_model_len
     else:
@@ -374,7 +374,7 @@ def test_extract_hidden_states_does_not_force_align_mode():
 
     _run(config)
 
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         assert config.cache_config.mamba_cache_mode == "none"
         assert config.cache_config.mamba_block_size == config.model_config.max_model_len
     else:

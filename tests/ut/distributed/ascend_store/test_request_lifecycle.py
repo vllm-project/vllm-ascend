@@ -261,7 +261,7 @@ def test_raw_sequence_lifecycle(
     assert isinstance(pool.kv_recv_thread, KVCacheStoreRecvingThread) == load_async
     assert pool.hash_block_size == hash_size == (prefix_unit or 128)
     assert pool.cache_transfer_granularity == 128
-    assert pool.use_eagle == (vllm_version_is("0.33.0") and speculative_method is not None)
+    assert pool.use_eagle == (vllm_version_is("0.34.0") and speculative_method is not None)
     scheduler = Scheduler(
         config,
         plan,
@@ -270,7 +270,7 @@ def test_raw_sequence_lifecycle(
         hash_block_size=hash_size,
     )
     assert config.num_hash_lookahead_tokens == scheduler.num_hash_lookahead_tokens
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         assert config.num_hash_lookahead_tokens == 0
         assert scheduler.use_eagle_block_drop == (speculative_method == "mtp")
     else:
@@ -405,7 +405,7 @@ def test_raw_sequence_lifecycle(
         # available after prefill, when its lookahead token is known.
         saved_prefix = len(producer_tokens) if save_decode_cache else (len(producer_tokens) - lookahead) // 128 * 128
         can_reuse_partial_page = not has_private_state and (
-            not speculative_method or (speculative_method == "dspark" and not vllm_version_is("0.33.0"))
+            not speculative_method or (speculative_method == "dspark" and not vllm_version_is("0.34.0"))
         )
         saved = dict(MemoryBackend.payloads)
         assert saved
@@ -463,7 +463,7 @@ def test_raw_sequence_lifecycle(
         # layouts as well as the pure full-attention layout.
         only_full_attention = isinstance(plan.kv_cache_groups[0].kv_cache_spec, FullAttentionSpec)
         mixed_local = 128
-        if speculative_method == "dspark" and (only_full_attention or not vllm_version_is("0.33.0")):
+        if speculative_method == "dspark" and (only_full_attention or not vllm_version_is("0.34.0")):
             mixed_local = 256
         run_request("mixed-local-remote", matching_long_prompt, saved_prefix, expected_local=mixed_local)
         assert scheduler.reset_prefix_cache()

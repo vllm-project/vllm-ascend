@@ -28,7 +28,7 @@ def validate_glm_recoverssm(vllm_config: VllmConfig) -> None:
     # TODO: FP16 KV cache with RecoverSSM has not been validated.
     if vllm_config.mamba_config.enable_stochastic_rounding:
         raise ValueError("GLM RecoverSSM does not support stochastic rounding")
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         expected_cache_mode = "align" if cache.enable_prefix_caching else "none"
         if cache.mamba_cache_mode != expected_cache_mode:
             raise ValueError(

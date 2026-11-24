@@ -116,7 +116,7 @@ class TestRecomputeSchedulerWithoutShortRequestFirst(TestBase):
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
             block_size=BLOCK_SIZE,
-            **{"log_stats" if vllm_version_is("0.33.0") else "collect_stats": True},
+            **{"log_stats" if vllm_version_is("0.34.0") else "collect_stats": True},
             structured_output_manager=MagicMock(spec=StructuredOutputManager),
         )
 

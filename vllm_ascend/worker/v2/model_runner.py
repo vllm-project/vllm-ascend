@@ -1318,7 +1318,7 @@ class NPUModelRunner(GPUModelRunner):
         )
         logits = self.model.compute_logits(hidden_states[sample_indices])
         logits = logits[:num_logits]
-        if not vllm_version_is("0.33.0") and self.masked_token_ids is not None:
+        if not vllm_version_is("0.34.0") and self.masked_token_ids is not None:
             logits.index_fill_(-1, self.masked_token_ids, float("-inf"))
 
         # A diffusion prefill has no logit rows even when a bitmask row arrived.

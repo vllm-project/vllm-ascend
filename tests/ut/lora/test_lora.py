@@ -100,7 +100,7 @@ def test_build_lora_context_propagates_ep_flag() -> None:
     context = MoELoRAContext(**{field.name: Mock() for field in fields(MoELoRAContext) if field.init})
     with patch.object(FusedMoEWithLoRA, "_build_lora_context", return_value=context):
         out = wrapper._build_lora_context()
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         assert out is context
     else:
         assert isinstance(out, MoELoRAContext)

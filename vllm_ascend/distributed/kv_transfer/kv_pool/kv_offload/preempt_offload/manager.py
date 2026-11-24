@@ -115,7 +115,7 @@ class PreemptOffloadScheduler:
             max_in_flight_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
             **(
                 {"use_eagle": False}
-                if vllm_version_is("0.33.0")
+                if vllm_version_is("0.34.0")
                 else {"num_hash_lookahead_tokens": vllm_config.num_hash_lookahead_tokens}
             ),
             enable_caching=self.enable_offload_prefix_caching,

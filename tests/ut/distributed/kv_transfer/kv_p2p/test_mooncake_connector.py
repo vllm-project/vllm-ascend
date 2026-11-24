@@ -18,9 +18,6 @@ import torch
 import zmq
 from vllm.config import KVTransferConfig
 from vllm.utils.network_utils import make_zmq_path
-
-# vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on
-# main; the v0.34.0 lane still ships them in `kv_cache_utils`.
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 from vllm.v1.request import RequestStatus

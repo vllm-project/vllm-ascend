@@ -183,7 +183,7 @@ def test_kimi_recoverssm_tp4(k3_models, k31_models, family, graph, prefix_cachin
         worker_extension_cls=f"{__name__}.KimiRecoverSSMWorker",
         use_replayssm=True,
         enable_prefix_caching=prefix_caching,
-        **({"mamba_cache_mode": "align" if prefix_caching else "none"} if vllm_version_is("0.33.0") else {}),
+        **({"mamba_cache_mode": "align" if prefix_caching else "none"} if vllm_version_is("0.34.0") else {}),
         enforce_eager=not graph,
     )
     if prefix_caching:

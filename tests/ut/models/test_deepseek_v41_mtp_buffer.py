@@ -45,7 +45,8 @@ def test_target_hc_buffer_allocation(method, last_pp_rank):
     }
     exec(compile(ast.Module(body=allocation, type_ignores=[]), str(source), "exec"), namespace)
     buffer = state._mtp_hidden_buffer
-    if method in (None, "dspark") or not last_pp_rank:
+    needs_buffer = method not in (None, "dspark") and (method != "draft_model" or vllm_version_is("0.34.0"))
+    if not needs_buffer or not last_pp_rank:
         assert buffer is None
     else:
         assert buffer.shape == (16, 32)

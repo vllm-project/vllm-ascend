@@ -369,7 +369,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
 
     def _build_lora_context(self):
         lora_context = super()._build_lora_context()
-        if vllm_version_is("0.33.0"):
+        if vllm_version_is("0.34.0"):
             lora_context.use_ep = self.use_ep
             return lora_context
         upstream_fields = {field.name: getattr(lora_context, field.name) for field in fields(MoELoRAContext)}

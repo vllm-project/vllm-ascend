@@ -108,7 +108,7 @@ class TestAscendEPLBController(unittest.TestCase):
                 )
                 draft_config = SimpleNamespace(model="draft", is_moe=True)
                 speculative_config = SimpleNamespace(draft_model_config=draft_config)
-                if not vllm_version_is("0.33.0"):
+                if not vllm_version_is("0.34.0"):
                     from vllm.v1.worker.gpu.spec_decode.eagle.config import EagleSpeculatorConfig
 
                     speculative_config.speculator_config = object.__new__(EagleSpeculatorConfig)

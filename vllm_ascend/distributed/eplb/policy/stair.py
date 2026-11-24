@@ -25,7 +25,7 @@ from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.distributed.eplb.policy._stair_process import receive_planner_response, send_planner_request
 from vllm_ascend.utils import vllm_version_is
 
-if TYPE_CHECKING or not vllm_version_is("0.33.0"):
+if TYPE_CHECKING or not vllm_version_is("0.34.0"):
     from vllm.distributed.eplb.policy import EplbStats
 
 _MEAN_RATIO_TIE_TOLERANCE = 1e-9
@@ -225,7 +225,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         rank_node_ids: np.ndarray | None = None,
     ) -> torch.Tensor:
         """Plan from upstream EPLB stats or Ascend's prepared load samples."""
-        if not vllm_version_is("0.33.0") and isinstance(stats, EplbStats):
+        if not vllm_version_is("0.34.0") and isinstance(stats, EplbStats):
             if old_global_expert_indices is None:
                 assert num_replicas is None or isinstance(num_replicas, torch.Tensor)
                 old_global_expert_indices = num_replicas

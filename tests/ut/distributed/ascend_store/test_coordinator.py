@@ -425,7 +425,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         ):
             masks = coord.store_mask(512)
 
-        expected_drop = True if vllm_version_is("0.33.0") else None
+        expected_drop = True if vllm_version_is("0.34.0") else None
         self.assertEqual(calls, [(expected_drop, (512,)), (expected_drop, (512,))])
         self.assertEqual(masks, ([True, False, True, False], [True, False, True, False]))
 

@@ -155,7 +155,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
                 "Padding mamba page size by %.2f%% to align the sparse indexer and recurrent-state cache pages.",
                 mamba_padding_pct,
             )
-    if not vllm_version_is("0.33.0"):
+    if not vllm_version_is("0.34.0"):
         if cache_config.enable_prefix_caching and explicit_mamba_block_size is None:
             cache_config.mamba_block_size = cache_config.block_size
         return

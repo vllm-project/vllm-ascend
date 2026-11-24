@@ -39,11 +39,13 @@ def _get_ascend_sfa_indexer_backend(self):
 
 _map_packed_kv_caches = v1_worker_utils.map_kv_caches_to_kernel_blocks
 
+
 def _map_ascend_kv_caches_to_kernel_blocks(kv_caches, attn_groups):
     # Ascend's tuple and descriptor views are shaped for kernel blocks by
     # its allocator. Only upstream tensor views need packed-cache mapping.
     tensor_caches = {name: value for name, value in kv_caches.items() if isinstance(value, torch.Tensor)}
     return {**kv_caches, **_map_packed_kv_caches(tensor_caches, attn_groups)}
+
 
 vllm.v1.worker.gpu.attn_utils.map_kv_caches_to_kernel_blocks = _map_ascend_kv_caches_to_kernel_blocks
 

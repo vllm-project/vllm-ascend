@@ -166,7 +166,7 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, pre
         block_size=128,
         enable_chunked_prefill=True,
         enable_prefix_caching=prefix_caching,
-        **({"mamba_cache_mode": "align" if prefix_caching else "none"} if vllm_version_is("0.33.0") else {}),
+        **({"mamba_cache_mode": "align" if prefix_caching else "none"} if vllm_version_is("0.34.0") else {}),
         gpu_memory_utilization=0.8,
         seed=1024,
         enforce_eager=enforce_eager,

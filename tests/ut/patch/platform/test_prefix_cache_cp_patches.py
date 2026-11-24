@@ -131,7 +131,7 @@ def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
     coordinator = get_kv_cache_coordinator(
         cfg,
         max_model_len=1024,
-        **({"use_eagle": False} if vllm_version_is("0.33.0") else {}),
+        **({"use_eagle": False} if vllm_version_is("0.34.0") else {}),
         enable_caching=False,
         scheduler_block_size=32,
         hash_block_size=32,
@@ -185,7 +185,7 @@ def test_swa_only_replay_keeps_private_blocks_without_prefix_hits(group_count, w
         manager.allocate_new_blocks("request", 16, 16)
     assert coordinator.block_pool.get_num_free_blocks() == free_blocks - group_count
     request = SimpleNamespace(request_id="request")
-    coordinator.free(request.request_id if vllm_version_is("0.33.0") else request)
+    coordinator.free(request.request_id if vllm_version_is("0.34.0") else request)
     assert coordinator.block_pool.get_num_free_blocks() == free_blocks
     assert coordinator.find_longest_cache_hit([b"a" * 32], 16) == (tuple([] for _ in groups), 0, 0)
     assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) == wrapped for group in cfg.kv_cache_groups)
@@ -248,7 +248,7 @@ def test_disabled_prefix_cache_preserves_private_tail_allocation(with_private_ta
         coordinator.cache_blocks(request, full.block_size)
         for manager in coordinator.single_type_managers:
             assert manager.req_to_blocks[request_id][0].block_hash is None
-        coordinator.free(request_id if vllm_version_is("0.33.0") else request)
+        coordinator.free(request_id if vllm_version_is("0.34.0") else request)
         assert pool.get_num_free_blocks() == free_blocks
         hit_blocks, hit_tokens, uncached_tokens = coordinator.find_longest_cache_hit(hashes, full.block_size)
         assert hit_blocks == tuple([] for _ in groups)
@@ -286,7 +286,7 @@ def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrappe
     coordinator = AscendHybridKVCacheCoordinator(
         cfg,
         max_model_len=4096,
-        **({"use_eagle": False} if vllm_version_is("0.33.0") else {}),
+        **({"use_eagle": False} if vllm_version_is("0.34.0") else {}),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
@@ -353,7 +353,7 @@ def test_glm_speculative_tail_preserves_main_and_mamba_scheduler_boundaries(dcp)
     coordinator = AscendHybridKVCacheCoordinator(
         cfg,
         max_model_len=131072,
-        **({"use_eagle": False} if vllm_version_is("0.33.0") else {}),
+        **({"use_eagle": False} if vllm_version_is("0.34.0") else {}),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=dcp,
@@ -390,7 +390,7 @@ def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
     coordinator = AscendHybridKVCacheCoordinator(
         cfg,
         max_model_len=4096,
-        **({"use_eagle": False} if vllm_version_is("0.33.0") else {}),
+        **({"use_eagle": False} if vllm_version_is("0.34.0") else {}),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
@@ -410,7 +410,7 @@ def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
         manager.allocate_new_blocks(request.request_id, 128, 128)
     coordinator.cache_blocks(request, 128)
     assert coordinator.single_type_managers[-1].req_to_blocks[request.request_id][0].block_hash is None
-    coordinator.free(request.request_id if vllm_version_is("0.33.0") else request)
+    coordinator.free(request.request_id if vllm_version_is("0.34.0") else request)
     hit = coordinator.find_longest_cache_hit(hashes, 128)
     assert hit[1] == 128
     assert len(hit[0][0]) == 4
@@ -423,7 +423,7 @@ def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
         kv_cache_group_ids=[2],
         block_pool=coordinator.block_pool,
         **cache_lookup_params(specs[2]),
-        **({"drop_eagle_block": False} if vllm_version_is("0.33.0") else {}),
+        **({"drop_eagle_block": False} if vllm_version_is("0.34.0") else {}),
         alignment_tokens=16,
         dcp_world_size=1,
         pcp_world_size=1,
@@ -1463,7 +1463,7 @@ def test_get_kv_cache_coordinator_delegates_single_group(monkeypatch) -> None:
         single_group_config,
         max_model_len=1024,
         max_in_flight_tokens=1024,
-        **({"use_eagle": False} if vllm_version_is("0.33.0") else {}),
+        **({"use_eagle": False} if vllm_version_is("0.34.0") else {}),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
@@ -1492,7 +1492,7 @@ def test_get_kv_cache_coordinator_delegates_hybrid_without_caching(monkeypatch) 
         kv_cache_config,
         max_model_len=1024,
         max_in_flight_tokens=1024,
-        **({"use_eagle": False} if vllm_version_is("0.33.0") else {}),
+        **({"use_eagle": False} if vllm_version_is("0.34.0") else {}),
         enable_caching=False,
         enable_kv_cache_events=False,
         dcp_world_size=2,
@@ -1532,7 +1532,7 @@ def test_get_kv_cache_coordinator_uses_ascend_for_deepseek_v4(monkeypatch) -> No
         kv_cache_config,
         max_model_len=1024,
         max_in_flight_tokens=1024,
-        **({"use_eagle": False} if vllm_version_is("0.33.0") else {}),
+        **({"use_eagle": False} if vllm_version_is("0.34.0") else {}),
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
@@ -1596,7 +1596,7 @@ def test_verify_and_split_propagates_eagle_to_managers() -> None:
 
     coordinator.verify_and_split_kv_cache_groups()
 
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         assert coordinator.single_type_managers[1].use_eagle is True
         assert coordinator.single_type_managers[0].use_eagle is False
     else:
@@ -1644,7 +1644,7 @@ def test_verify_and_split_propagates_eagle_to_merged_spec_siblings() -> None:
     coordinator.verify_and_split_kv_cache_groups()
 
     # Both gid 1 and gid 2 share the c128 spec and merge, so both must be eagle.
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         assert coordinator.single_type_managers[1].use_eagle is True
         assert coordinator.single_type_managers[2].use_eagle is True
         assert coordinator.single_type_managers[0].use_eagle is False
@@ -1723,7 +1723,7 @@ def test_ascend_mamba_cache_lookup_ignores_dcp_sharding() -> None:
             alignment_tokens=16,
             dcp_world_size=8,
             pcp_world_size=1,
-            **({"drop_eagle_block": False} if vllm_version_is("0.33.0") else {}),
+            **({"drop_eagle_block": False} if vllm_version_is("0.34.0") else {}),
         )
 
     assert find_cache_hit.call_args.kwargs["dcp_world_size"] == 1
@@ -1755,7 +1755,7 @@ def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
         end_block=256,  # 256 × 32 = 8192 tokens (2 × alignment_tokens)
         alignment_tokens=alignment_tokens,
         **cache_lookup_params(spec),
-        **({"use_eagle": False} if vllm_version_is("0.33.0") else {}),
+        **({"use_eagle": False} if vllm_version_is("0.34.0") else {}),
         retention_interval=None,
     )
 
