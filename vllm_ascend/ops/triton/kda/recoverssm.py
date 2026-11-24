@@ -997,6 +997,11 @@ class KDARecoverSSMCommitContext:
         decay_caches = tuple(getattr(layer, "recoverssm_decay_cache", None) for layer in layers)
         normalized_key_caches = tuple(getattr(layer, "recoverssm_normalized_key_cache", None) for layer in layers)
 
+        if any(getattr(layer, "_mega_kda_mix", False) is True for layer in layers) and any(
+            key is None or decay is None for key, decay in zip(normalized_key_caches, decay_caches)
+        ):
+            raise ValueError("MegaRecurrentKda requires normalized key and decay records for each committed layer")
+
         if any(key is not None and decay is None for key, decay in zip(normalized_key_caches, decay_caches)):
             raise ValueError("RecoverSSM normalized keys require the decay record")
 
