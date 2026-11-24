@@ -240,8 +240,18 @@ if [ "$INCREMENTAL" = true ]; then
     fi
   done < "$FIRST_BY_EMAIL"
 
+  # Deduplicate by GitHub login (same login may appear via multiple commit emails)
+  # NEW_CONTRIBUTORS is in time order (oldest first), so keep the earliest commit
+  TOTAL_BEFORE_DEDUP=$(wc -l < "$NEW_CONTRIBUTORS" | tr -d ' ')
+  DEDUPED_NEW=$(mktemp)
+  awk -F'|' '!seen[$1]++' "$NEW_CONTRIBUTORS" > "$DEDUPED_NEW"
+  mv "$DEDUPED_NEW" "$NEW_CONTRIBUTORS"
+
   NEW_COUNT=$(wc -l < "$NEW_CONTRIBUTORS" | tr -d ' ')
   echo "Found ${NEW_COUNT} new contributors"
+  if [ "$TOTAL_BEFORE_DEDUP" -gt "$NEW_COUNT" ]; then
+    echo "Deduplicated $((TOTAL_BEFORE_DEDUP - NEW_COUNT)) rows sharing a GitHub login with an earlier commit"
+  fi
   if [ "$skipped" -gt 0 ]; then
     echo "Skipped ${skipped} duplicate contributors"
   fi

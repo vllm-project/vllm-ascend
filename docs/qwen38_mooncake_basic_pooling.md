@@ -20,7 +20,7 @@ a restorable common boundary. With transfer granularity 1536, a 9216-token
 prompt queries at 7680, while 9217 can query at 9216. Layouts whose necessary
 state is all externally cacheable retain the existing lookup behavior.
 
-MTP defers save finalization until after draft generation.
+In addition, MTP defers save finalization until after draft generation.
 `MambaCopyKVConnector.finalize_step()` forwards to the wrapped connector so
 that deferred saves complete and metadata is cleared.
 
@@ -82,7 +82,7 @@ source/destination bytes and whole-backing sentinels. Scheduler tests cover
 restoration boundaries; model and wrapper tests cover load/update/save order,
 shared-layer deduplication, per-owner state rows and deferred MTP finalization.
 
-CPU mocks do not establish native cross-process transfer correctness or
+Core mocks do not establish native cross-process transfer correctness or
 model-level restoration. Those checks require deployment-specific hardware
 validation; this PR does not add a standalone NPU E2E test.
 
@@ -92,5 +92,5 @@ Earlier model results used a previous dependency/layout stack. They do not
 validate the current packed-page layout. Report hardware and GPQA results
 against the exact tested source revision and runtime in the PR. Distinguish
 external restoration from recomputation using zero local hits, actual backend
-reads and matching output. For SSD, require SSD hits and rewarm bytes after
-eviction; configuration or SSD writes alone do not prove a readback.
+reads and matching output. For NVMe, require NVMe hits and rewarm bytes after
+eviction; configuration or NVMe writes alone do not prove a readback.

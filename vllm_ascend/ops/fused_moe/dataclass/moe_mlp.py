@@ -53,6 +53,8 @@ class MoEMlpComputeInput:
     activation_situ_beta: float | None = None
     activation_situ_linear_beta: float | None = None
     swiglu_limit: float = 0.0
+    # SWIGLUSTEP's post-SiLU limit: the executing layer's own, 7.0 when unset or zero.
+    swiglustep_limit: float = 7.0
     swiglu_alpha: float = 1.0
     swiglu_beta: float = 0.0
     expanded_row_idx: torch.Tensor | None = None
@@ -75,10 +77,13 @@ def build_mlp_compute_input(
     activation = fused_experts_input.activation
     activation_situ_beta = None if moe_config is None else moe_config.activation_situ_beta
     activation_situ_linear_beta = None if moe_config is None else moe_config.activation_situ_linear_beta
-    # Prefer the per-layer swiglu params threaded through the fused-experts
-    # input when no moe_config is available (direct callers/tests); with a
-    # moe_config, upstream keeps reading the values from it.
-    swiglu_limit = 0.0 if moe_config is None else getattr(moe_config, "swiglu_limit", 0.0) or 0.0
+    # moe_config belongs to a communication object that same-shaped layers share,
+    # so the limits come from the executing layer's own config when it has one.
+    layer_config = getattr(fused_experts_input.layer, "moe_config", None)
+    limit_config = moe_config if layer_config is None else layer_config
+    swiglu_limit = 0.0 if limit_config is None else getattr(limit_config, "swiglu_limit", 0.0) or 0.0
+    layer_limit = getattr(layer_config, "swiglu_limit", None)
+    swiglustep_limit = 7.0 if layer_limit is None or layer_limit == 0.0 else layer_limit
     swiglu_alpha = 1.0 if moe_config is None else getattr(moe_config, "swiglu_alpha", 1.0) or 1.0
     swiglu_beta = 0.0 if moe_config is None else getattr(moe_config, "swiglu_beta", 0.0) or 0.0
     fusion_enabled = enable_fusion_gmmswigluquant() if use_fusion_ops is None else use_fusion_ops
@@ -108,6 +113,7 @@ def build_mlp_compute_input(
         activation_situ_beta=activation_situ_beta,
         activation_situ_linear_beta=activation_situ_linear_beta,
         swiglu_limit=swiglu_limit,
+        swiglustep_limit=swiglustep_limit,
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
         expanded_row_idx=expanded_row_idx,

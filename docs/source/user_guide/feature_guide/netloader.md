@@ -8,8 +8,8 @@ This guide provides instructions for using **Netloader** as a weight-loader plug
 
 Netloader leverages high-bandwidth peer-to-peer (P2P) transfers between NPU cards to load model weights. It is implemented as a plugin (via the `register_model_loader` API added in vLLM 0.10). The workflow is:
 
-1. A **server** preloads a model.  
-2. A new **client** instance requests weight transfer.  
+1. A **server** preloads a model.
+2. A new **client** instance requests weight transfer.
 3. After validating that the model and partitioning match, the client uses HCCL collective communication (send/recv) to receive weights in the same order as stored in the model.
 
 The server runs alongside normal inference tasks via sub-threads and via `stateless_init_torch_distributed_process_group` in vLLM. The client thus takes over weight initialization without needing to load from storage.
@@ -24,9 +24,9 @@ The server runs alongside normal inference tasks via sub-threads and via `statel
 
 ### Application Scenarios
 
-- **Reduce startup latency**: By reusing already loaded weights and transferring them directly between NPU cards, Netloader cuts down model loading time versus conventional remote/local pull strategies.  
-- **Relieve network & storage load**: Avoid repeated downloads of weight files from remote repositories, thus reducing pressure on central storage and network traffic.  
-- **Improve resource utilization & lower cost**: Faster loading allows less reliance on standby compute nodes; resources can be scaled up/down more flexibly.  
+- **Reduce startup latency**: By reusing already loaded weights and transferring them directly between NPU cards, Netloader cuts down model loading time versus conventional remote/local pull strategies.
+- **Relieve network & storage load**: Avoid repeated downloads of weight files from remote repositories, thus reducing pressure on central storage and network traffic.
+- **Improve resource utilization & lower cost**: Faster loading allows less reliance on standby compute nodes; resources can be scaled up/down more flexibly.
 - **Enhance business continuity & high availability**: In failure recovery, new instances can quickly take over without long downtime, improving system reliability and user experience.
 
 ---
@@ -49,7 +49,7 @@ To enable Netloader, pass `--load-format=netloader` and provide configuration vi
 
 ## Example Commands & Placeholders
 
-> Replace parts in `` `<...>` `` before running.
+> Replace parts in `` `<…>` `` before running.
 
 ### Server
 
@@ -79,12 +79,12 @@ VLLM_SLEEP_WHEN_IDLE=1 ASCEND_RT_VISIBLE_DEVICES=<device_id_diff_from_server> \
 
 #### Placeholder Descriptions
 
-- `<model_file>`: Path to the model file  
-- `<model_name>`: Model name (must match between server & client)  
-- `<port>`: Base listening port on server  
-- `<server_IP>` + `<server_Port>`: IP and port of the Netloader server (from server log)  
-- `<device_id_diff_from_server>`: Client device ID (must differ from server’s)  
-- `<client_port>`: Port on which client listens  
+- `<model_file>`: Path to the model file
+- `<model_name>`: Model name (must match between server & client)
+- `<port>`: Base listening port on server
+- `<server_IP>` + `<server_Port>`: IP and port of the Netloader server (from server log)
+- `<device_id_diff_from_server>`: Client device ID (must differ from server’s)
+- `<client_port>`: Port on which client listens
 
 After startup, you can test consistency by issuing inference requests with temperature = 0 and comparing outputs.
 
@@ -92,7 +92,7 @@ After startup, you can test consistency by issuing inference requests with tempe
 
 ## Note & Caveats
 
-- If Netloader is used, **each worker process** must bind a listening port. That port may be user-specified or assigned randomly. If user-specified, ensure it is available.  
-- Netloader requires extra on-chip memory to establish HCCL connections (i.e. `HCCL_BUFFERSIZE`, default ~200 MB). Users should reserve sufficient capacity (e.g. via `--gpu-memory-utilization`).  
+- If Netloader is used, **each worker process** must bind a listening port. That port may be user-specified or assigned randomly. If user-specified, ensure it is available.
+- Netloader requires extra on-chip memory to establish HCCL connections (i.e. `HCCL_BUFFERSIZE`, default ~200 MB). Users should reserve sufficient capacity (e.g. via `--gpu-memory-utilization`).
 - It is recommended to set `VLLM_SLEEP_WHEN_IDLE=1` to mitigate unstable or slow connections/transmissions. Related info: [vLLM Issue #16660](https://github.com/vllm-project/vllm/issues/16660), [vLLM PR #16226](https://github.com/vllm-project/vllm/pull/16226).
 - Tested models: DeepSeek-V3.1-w8a8-mtp, Deepseekv4-flash-w8a8-mtp, DeepSeek-V4-Pro-w4a8, GLM-5.1-w4a8, GLM-5.1-w8a8.

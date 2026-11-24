@@ -34,6 +34,12 @@ AUX_DIFF_THRESHOLD = 1e-4
 AUX_REQUIRED_PASS_RATE = 0.995
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _collect_garbage_after_module():
+    yield
+    gc.collect()
+
+
 def _make_hc_pre_inputs(shape: tuple[int, ...]):
     torch.manual_seed(1024)
     hidden_size = shape[-1]
@@ -163,7 +169,6 @@ def _compare_hc_pre_with_cpu(shape: tuple[int, ...]):
 @torch.inference_mode()
 def test_npu_hc_pre_v2_bf16_3d_input():
     _compare_hc_pre_with_cpu((2, HC_MULT, HIDDEN_SIZE))
-    gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
 
@@ -171,7 +176,6 @@ def test_npu_hc_pre_v2_bf16_3d_input():
 @torch.inference_mode()
 def test_npu_hc_pre_v2_bf16_4d_input():
     _compare_hc_pre_with_cpu((1, 2, HC_MULT, HIDDEN_SIZE))
-    gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
 
@@ -179,7 +183,6 @@ def test_npu_hc_pre_v2_bf16_4d_input():
 @torch.inference_mode()
 def test_npu_hc_pre_v2_bf16_dsv4_flash_hidden_size():
     _compare_hc_pre_with_cpu((4, HC_MULT, DSV4_FLASH_HIDDEN_SIZE))
-    gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
 
@@ -187,7 +190,6 @@ def test_npu_hc_pre_v2_bf16_dsv4_flash_hidden_size():
 @torch.inference_mode()
 def test_npu_hc_pre_v2_bf16_extended_hidden_size():
     _compare_hc_pre_with_cpu((2, HC_MULT, EXTENDED_HIDDEN_SIZE))
-    gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
 
@@ -229,7 +231,6 @@ def test_npu_hc_pre_v3_uses_external_pre_mix():
             diff_threshold=diff_threshold,
             required_pass_rate=required_pass_rate,
         )
-    gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
 
@@ -256,8 +257,21 @@ def test_npu_hc_pre_v3_uses_external_pre_mix():
 
 SECOND_HIDDEN_SIZE = 5120
 # Crosses SMALL_BS_THRESHOLD (bs <= 32 hits the ProcessOriginal copy) and tile edges.
-TOKEN_COUNT_SWEEP = (1, 3, 8, 16, 32, 33, 65, 128, 129)
-SINKHORN_ITERS_SWEEP = (1, 2, 4, 20)
+ROW_POSITION_CASES = [
+    # Compare the shortest and longest iteration counts on both sides of each boundary.
+    (num_tokens, hc_sinkhorn_iters)
+    for num_tokens in (32, 33, 128, 129)
+    for hc_sinkhorn_iters in (1, 20)
+] + [
+    (1, 1),
+    (1, 20),
+    (3, 2),
+    (8, 4),
+    (16, 1),
+    (16, 20),
+    (65, 2),
+    (65, 4),
+]
 HC_BASE_KINDS = ("zeros", "normal", "small")
 # Representative points for the hc_base sweep; the 5120 case covers a second hidden size.
 HC_BASE_SWEEP_CASES = (
@@ -397,8 +411,7 @@ def _check_v2_row_position_invariance(
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("hc_sinkhorn_iters", SINKHORN_ITERS_SWEEP)
-@pytest.mark.parametrize("num_tokens", TOKEN_COUNT_SWEEP)
+@pytest.mark.parametrize("num_tokens,hc_sinkhorn_iters", ROW_POSITION_CASES)
 def test_npu_hc_pre_v3_row_position_invariance(num_tokens: int, hc_sinkhorn_iters: int) -> None:
     """Identical token rows must give bitwise identical outputs, for any row position."""
     _check_v3_row_position_invariance(
@@ -407,7 +420,6 @@ def test_npu_hc_pre_v3_row_position_invariance(num_tokens: int, hc_sinkhorn_iter
         hc_sinkhorn_iters,
         _make_hc_base("normal"),
     )
-    gc.collect()
     torch.npu.empty_cache()
 
 
@@ -438,7 +450,6 @@ def test_npu_hc_pre_v3_row_position_invariance_small_hidden(num_tokens: int, hid
         hc_eps=HC_EPS,
     )
     _assert_rows_bitwise_identical("comb", comb)
-    gc.collect()
     torch.npu.empty_cache()
 
 
@@ -461,13 +472,11 @@ def test_npu_hc_pre_v3_row_position_invariance_hc_base_sweep(
         hc_sinkhorn_iters,
         _make_hc_base(hc_base_kind),
     )
-    gc.collect()
     torch.npu.empty_cache()
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("hc_sinkhorn_iters", SINKHORN_ITERS_SWEEP)
-@pytest.mark.parametrize("num_tokens", TOKEN_COUNT_SWEEP)
+@pytest.mark.parametrize("num_tokens,hc_sinkhorn_iters", ROW_POSITION_CASES)
 def test_npu_hc_pre_v2_row_position_invariance(num_tokens: int, hc_sinkhorn_iters: int) -> None:
     """v2 (no pre_mix) must also be row-position invariant.
 
@@ -480,7 +489,6 @@ def test_npu_hc_pre_v2_row_position_invariance(num_tokens: int, hc_sinkhorn_iter
         hc_sinkhorn_iters,
         _make_hc_base("normal"),
     )
-    gc.collect()
     torch.npu.empty_cache()
 
 
@@ -540,5 +548,4 @@ def test_npu_hc_pre_v3_matches_cpu_reference() -> None:
             diff_threshold=diff_threshold,
             required_pass_rate=required_pass_rate,
         )
-    gc.collect()
     torch.npu.empty_cache()

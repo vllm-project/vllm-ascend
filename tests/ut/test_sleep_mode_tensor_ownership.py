@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 from torch import nn
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.ops import rope_dsv4, rotary_embedding
@@ -63,6 +64,10 @@ def _make_vllm_indexer() -> MagicMock:
     mock_indexer.softmax_scale = 0.123
     mock_indexer.k_cache = MagicMock()
     mock_indexer.k_cache.prefix = "model.layers.0.indexer"
+    mock_indexer.k_cache.head_dim = 132
+    mock_indexer.k_cache.get_kv_cache_spec.return_value = MLAAttentionSpec(
+        block_size=128, num_kv_heads=1, head_size=132, dtype=torch.uint8
+    )
     return mock_indexer
 
 
@@ -79,6 +84,9 @@ def _make_indexer(
     # resolve without every level having to be spelled out.
     mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
     mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
+    mock_get_vllm_config.return_value.parallel_config.decode_context_parallel_size = 1
+    mock_get_vllm_config.return_value.cache_config.cache_dtype = "auto"
+    mock_get_vllm_config.return_value.model_config.dtype = torch.bfloat16
     mock_get_vllm_config.return_value.attention_config.indexer_kv_dtype = "int8"
     with patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=False):
         indexer = AscendSFAIndexerBackend(_make_vllm_indexer(), qk_rope_head_dim=64)

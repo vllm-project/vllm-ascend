@@ -5,7 +5,7 @@ comment command, without running the PR-selected test suite.
 
 ## Background
 
-The `E2E` workflow ([`pr_test.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) runs a PR-selected set of tests when a PR has one of the `ready-precise`, `ready-all`, `ready-a5`, or `main2main` labels. `main2main` runs the full suite twice, once against the verified vLLM main commit and once against the matched vLLM release tag. On release branches (`releases/v*`) the workflow tests only the matched vLLM release tag, because those branches are matched to a released upstream version.
+The `E2E` workflow ([`pr_test.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) runs a PR-selected set of tests when a PR has one of the `ready-precise`, `ready-a5`, or `main2main` labels. `main2main` runs the full suite twice, once against the verified vLLM main commit and once against the matched vLLM release tag. On release branches (`releases/v*`) the workflow tests only the matched vLLM release tag, because those branches are matched to a released upstream version.
 This is expensive in CI resources and time.
 
 Authorized users can trigger only the specific test files they care about by posting a
@@ -79,10 +79,10 @@ tests/e2e/pull_request/four_card/_310p/  # 310P four card
 
 ## Comparison with PR-Selected Tests
 
-| Aspect | PR-selected tests (`ready-precise` / `ready-all`) | Per-test comment trigger |
+| Aspect | PR-selected tests (`ready-precise`) | Per-test comment trigger |
 |---|---|---|
 | Trigger | Label | `/e2e` comment |
-| Scope | Tests recommended by the precision-testing pipeline (coverage + AST based), or the full suite under `ready-all` | Only specified test paths |
+| Scope | Tests recommended by the precision-testing pipeline (coverage + AST based) | Only specified test paths |
 | Who can trigger | Anyone who can add labels | PR author or write/admin collaborator |
 | Use case | Pre-merge validation | Iterative debugging of specific tests |
 

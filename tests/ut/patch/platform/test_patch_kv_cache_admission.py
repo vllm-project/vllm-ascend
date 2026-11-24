@@ -205,6 +205,7 @@ def test_uncached_inflight_prefill_reserves_only_remaining_capacity(kind):
     scheduler.kv_cache_manager = cache
     scheduler.max_model_len = max_model_len
     scheduler.num_spec_tokens = 0
+    scheduler._parked_reserved_blocks = 0
     scheduler._inflight_prefills = {request}
     scheduler._parked_reserved_blocks = 0
     expected = manager.max_admission_blocks_per_request - len(blocks)
@@ -256,6 +257,7 @@ def test_async_remote_admission_leaves_capacity_to_resume_prefill():
     scheduler.kv_cache_manager = cache
     scheduler.max_model_len = 200000
     scheduler.num_spec_tokens = 0
+    scheduler._parked_reserved_blocks = 0
     scheduler._inflight_prefills = set()
     scheduler._parked_reserved_blocks = 0
     admitted = []

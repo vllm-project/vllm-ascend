@@ -4,8 +4,9 @@
 
 HiSparse keeps a Host mirror of sparse MLA KV rows and refills only the missing
 rows selected by attention. This reduces the NPU cache capacity needed for long
-contexts. The experimental Ascend backend requires a SIMT-capable CANN 9.2
-toolchain on Ascend 950.
+contexts. The experimental Ascend backend supports A2/A3 through the arch22
+resolver and 950PR&950DT Products through the SIMT resolver. 950PR&950DT Products require a SIMT-capable CANN 9.2
+toolchain; build the custom operators for the target architecture.
 
 ### Working Principle
 
@@ -20,16 +21,19 @@ together before evicting Hot rows.
 ### Usage Scenarios
 
 Use HiSparse with Model Runner V2 for sparse RoPE MLA/SFA models serving long
-contexts. BF16 KV and native Ascend 950 C8 (E4M3FN values with FP32 scales) are
-supported, with independent Main and Indexer KV dtype selection.
+contexts. A2/A3 support INT8 C8 KV: Main KV stores INT8 values, BF16 RoPE and
+FP32 scales; Indexer KV stores INT8 values with FP16 scales. 950PR&950DT Products retain BF16 KV
+and native C8 (E4M3FN values with FP32 scales), with independent Main and
+Indexer KV dtype selection. The A2/A3 extension does not add a BF16 HiSparse
+serving path or change the existing non-HiSparse BF16 path.
 
 ### Constraints and Limitations
 
 | Category | Constraint |
 | --- | --- |
-| Hardware and software | Ascend 950 with a SIMT-capable CANN 9.2 toolchain. |
-| Cache formats | C4, TurboQuant and INT8-format C8 are outside the current support scope. |
-| Parallelism and transport | Context parallelism and external P/D transport are outside the current support scope. |
+| Hardware and software | A2/A3 with the arch22 custom operators, or 950PR&950DT Products with a SIMT-capable CANN 9.2 toolchain. |
+| Cache formats | A2/A3: INT8 C8. 950PR&950DT Products: BF16 or native E4M3FN C8. C4 and TurboQuant are outside the current support scope. |
+| Parallelism and transport | Supports PCP (prefill and decode request sharding). DCP and external P/D transport are outside the current support scope. |
 | Host storage | Use private Host pools per tensor-parallel rank and Core eager Host mirroring. |
 | TopK | The existing SFA requirement of divisibility by 128 applies. |
 | Feature mutual exclusion | HiSparse and `additional_config.sparse_kv_offload_config.enabled` cannot be enabled together. |
@@ -39,7 +43,7 @@ supported, with independent Main and Indexer KV dtype selection.
 ### Usage Example
 
 Set `MODEL_PATH` to a compatible sparse MLA model and start the server with
-Model Runner V2:
+Model Runner V2. The following example uses BF16 KV on 950PR&950DT Products:
 
 ```bash
 VLLM_USE_V2_MODEL_RUNNER=1 vllm serve "$MODEL_PATH" \
@@ -49,12 +53,36 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve "$MODEL_PATH" \
 --kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":4}}'
 ```
 
-For native A5 C8, replace the two dtype options with:
+For native C8 on 950PR&950DT Products, replace the two dtype options with:
 
 ```bash
 --kv-cache-dtype fp8 \
 --attention-config '{"indexer_kv_dtype":"fp8","hisparse_config":{"eager_host_mirror":true}}'
 ```
+
+For A2/A3 INT8 C8, use a compatible INT8 KV model and replace the two dtype
+options with:
+
+```bash
+--kv-cache-dtype int8 \
+--attention-config '{"indexer_kv_dtype":"int8","hisparse_config":{"eager_host_mirror":true}}'
+```
+
+These options select KV-cache quantization independently of model-weight
+quantization; keep the weight-quantization options required by the model.
+
+On A3 with HDK 25.5.1, select MemFabric in the HiSparse connector to provide
+AIV Host-memory mapping. The SDK must include the A3 AccOffload extension.
+If the extension is missing, source the CANN environment and build it with
+`mfcli kernel install --soc-version A3`.
+
+```bash
+--kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":4,"transfer_backend":"memfabric"}}'
+```
+
+For a `MultiConnector` configuration, put `transfer_backend` in the
+`HiSparseConnector` child's extra configuration. This setting selects
+the private Host allocator. Omitting it uses native ACL Host-memory registration.
 
 ### Verifying the Feature
 

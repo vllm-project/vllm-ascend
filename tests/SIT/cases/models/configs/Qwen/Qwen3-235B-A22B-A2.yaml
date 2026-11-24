@@ -30,7 +30,7 @@ deployment:
         --max-num-batched-tokens 2048
         --trust-remote-code
         --gpu-memory-utilization 0.9
-        --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true}}'
+        --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":false, "enable_static_kernel":false}}'
   -
     envs:
       <<: *env_common
@@ -50,7 +50,7 @@ deployment:
         --enable-expert-parallel
         --trust-remote-code
         --gpu-memory-utilization 0.9
-        --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true}}'
+        --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":false, "enable_static_kernel":false}}'
 benchmarks:
   perf:
     case_type: performance

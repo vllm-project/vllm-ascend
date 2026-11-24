@@ -90,13 +90,6 @@ msgstr ""
 msgid "DyntraLB cannot be combined with:"
 msgstr "DyntraLB 不能与以下配置组合使用："
 
-msgid ""
-"- `scheduler_config.enable_balance_scheduling`\n"
-"- `scheduler_config.profiling_chunk_config.enabled`"
-msgstr ""
-"- `scheduler_config.enable_balance_scheduling`\n"
-"- `scheduler_config.profiling_chunk_config.enabled`"
-
 msgid "The service rejects these unsupported combinations during startup."
 msgstr "服务会在启动期间拒绝这些不支持的组合。"
 
@@ -358,3 +351,6 @@ msgid ""
 msgstr ""
 "有关完整的`additional_config`模式，请参阅\n"
 "[附加配置](../configuration/additional_config.md)。"
+
+msgid "- `scheduler_config.enable_balance_scheduling`"
+msgstr "- `scheduler_config.enable_balance_scheduling`"

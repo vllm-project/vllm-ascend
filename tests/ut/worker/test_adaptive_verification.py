@@ -57,6 +57,7 @@ def test_adaptive_verification_backend_capabilities(
             enable_adaptive_verification=adaptive,
             num_speculative_tokens=num_speculative_tokens,
             parallel_drafting=method in ("dflash2", "dspark"),
+            max_num_new_slots_for_drafting=0,
         )
     )
     config = SimpleNamespace(speculative_config=speculative_config, use_v2_model_runner=True)
@@ -125,6 +126,8 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
         seq_lens_cpu_upper_bound=torch.ones(batch_reqs, dtype=torch.int32),
     )
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.context_kv_only = False
+    spec.attn_groups = [[SimpleNamespace(kernel_block_stride=0, kernel_block_size=32)]]
     spec.pcp_manager = None
     spec.use_dcp = False
     spec.enable_adaptive_verification = True
@@ -220,7 +223,9 @@ def _adaptive_manager_kwargs(groups, enabled=True, steps=3):
     )
     config = SimpleNamespace(
         use_v2_model_runner=True,
-        speculative_config=SimpleNamespace(num_speculative_tokens=3, parallel_drafting=False),
+        speculative_config=SimpleNamespace(
+            method="mtp", num_speculative_tokens=3, parallel_drafting=False, max_num_new_slots_for_drafting=0
+        ),
     )
     return dict(
         enable_adaptive_verification=enabled,
@@ -299,6 +304,7 @@ def test_adaptive_verification_manager_initialization(cpu_manager_resources, mon
         max_num_tokens=16,
         dcp_size=1,
         dcp_rank=0,
+        batch_sharder=None,
     )
     upstream = patch_model_runner.upstream
     monkeypatch.setattr(
@@ -321,6 +327,7 @@ def test_adaptive_verification_manager_initialization(cpu_manager_resources, mon
         patch_model_runner.initialize_kv_cache(runner, cache_config)
     manager_call.assert_called_once()
     assert manager_call.call_args.kwargs["enable_adaptive_verification"] is enabled
+    assert manager_call.call_args.kwargs["copy_admitted_drafts_to_host"] is False
     assert manager_call.call_args.kwargs["target_layer_names"] == {"target"}
     assert (runner.adaptive_verification is not None) is enabled
     if enabled:
@@ -342,6 +349,7 @@ def test_adaptive_verification_estimator_lifecycle(monkeypatch, speculator_cls, 
             enable_adaptive_verification=enabled,
             num_speculative_tokens=3,
             draft_model_config=draft_config,
+            draft_decode_context_parallel_size=1,
             use_local_argmax_reduction=False,
             draft_sample_method="greedy",
         ),

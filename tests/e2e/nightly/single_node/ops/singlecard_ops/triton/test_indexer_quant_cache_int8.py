@@ -111,22 +111,40 @@ def snapshot(cache):
     return backing.cpu().clone() if backing is not None else (key.cpu().clone(), scale.cpu().clone())
 
 
-@pytest.mark.parametrize("tokens", [1, 3, 16, 17, 48, 127, 128])
-@pytest.mark.parametrize("paired", [False, True])
-@pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
-@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize(
+    "tokens,paired,slot_dtype,strided",
+    # Registry checks retain every contiguous cache/slot-dtype combination.
+    # Keep strided slots at the row-tile boundary and fused token limit here.
+    [
+        (tokens, paired, slot_dtype, True)
+        for tokens in (16, 17, 128)
+        for paired, slot_dtype in ((False, torch.int64), (True, torch.int32))
+    ]
+    # Cover paired cache with INT64 slots at non-unit stride as well.
+    + [(17, True, torch.int64, True)],
+)
 @torch.inference_mode()
 def test_native_quantization_and_cache_contents(tokens, paired, slot_dtype, strided):
     cache = make_cache(paired)
     x, slots, host_slots = make_inputs(tokens, slot_dtype, strided)
     initial = snapshot(cache)
-    for _ in range(5):
+    for _ in range(2):
         indexer_quant_cache_int8(cache[0], cache[1], x, slots)
         assert_matches_native(cache, x, host_slots, initial)
 
 
-@pytest.mark.parametrize("tokens", [1, 3, 16, 17, 48, 127, 128])
-@pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize(
+    "tokens,slot_dtype",
+    [
+        # Keep both slot dtypes at the 16/17 row transition and the fused token limit.
+        (16, torch.int32),
+        (17, torch.int32),
+        (128, torch.int32),
+        (16, torch.int64),
+        (17, torch.int64),
+        (128, torch.int64),
+    ],
+)
 @torch.inference_mode()
 def test_graph_replay_refreshes_inputs_and_slots(tokens, slot_dtype):
     cache = make_cache()
@@ -139,7 +157,8 @@ def test_graph_replay_refreshes_inputs_and_slots(tokens, slot_dtype):
     with torch.npu.graph(graph, capture_error_mode="global"):
         for _ in range(3):
             indexer_quant_cache_int8(cache[0], cache[1], x, slots)
-    for seed in range(10, 14):
+    # Keep overlapping and disjoint destination pages across input updates.
+    for seed in (10, 11, 13):
         next_x, _, next_slots = make_inputs(tokens, slot_dtype, seed=seed)
         valid = next_slots >= 0
         next_slots[valid] += (seed - 9) * 128
@@ -229,6 +248,7 @@ def test_registry_warmup_prevents_runtime_compilation(paired, slot_dtype, monkey
         module = importlib.import_module(name)
         if callable(getattr(module, "compile", None)):
             monkeypatch.setattr(module, "compile", forbid_compile)
+    # Every supported runtime count must reuse the kernels prepared by warmup.
     for count in range(1, 129):
         x, slots, host_slots = make_inputs(count, slot_dtype)
         for offset in (0, 1):

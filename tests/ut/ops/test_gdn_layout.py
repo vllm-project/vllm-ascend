@@ -5,8 +5,8 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 
 
 @pytest.mark.parametrize("kind", ["head_first", "sequence_first", "mixed_slice"])
@@ -63,15 +63,22 @@ def test_head_first_l2norm_fallback_accepts_multiple_heads(backend, sliced):
         meta = SimpleNamespace(cu_seqlens_host=(0, count), chunk_indices_chunk64_host=((0, 0),), keep_meta=None)
 
         def fused(q, k, v, *args, **kwargs):
-            assert kwargs["layout"] == "BNSD"
-            for got, original in zip((q, k), qkv[:2]):
-                expected = torch.nn.functional.normalize(original, dim=-1).transpose(1, 2)
-                torch.testing.assert_close(got, expected)
-            torch.testing.assert_close(v, qkv[2].transpose(1, 2))
-            return output, state.transpose(-1, -2).contiguous()
+            # q/k normalization happens inside the fused kernel, so the adaptor
+            # forwards the tensors untouched and only picks the layout by
+            # contiguity: a sliced head-first view cannot stay contiguous.
+            assert kwargs["use_qk_l2norm_in_kernel"] is True
+            if sliced:
+                assert kwargs["layout"] == "BSND"
+                expected = [x.contiguous() for x in qkv]
+            else:
+                assert kwargs["layout"] == "BNSD"
+                expected = [x.transpose(1, 2) for x in qkv]
+            for got, want in zip((q, k, v), expected):
+                assert got.is_contiguous()
+                torch.testing.assert_close(got, want)
+            return output, state
 
-        with patch("vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd", side_effect=norm):
-            actual, _ = BaseDeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
+        actual, _ = BaseDeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
     else:
 
         def fused(q, k, v, *args, **kwargs):
@@ -81,8 +88,8 @@ def test_head_first_l2norm_fallback_accepts_multiple_heads(backend, sliced):
             return output.squeeze(0), kwargs["initial_state"]
 
         with (
-            patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=norm),
-            patch("vllm_ascend.ops.gdn.torch_npu.npu_chunk_gated_delta_rule", side_effect=fused, create=True),
+            patch("vllm_ascend.attention.gdn.l2norm_fwd", side_effect=norm),
+            patch("vllm_ascend.attention.gdn.torch_npu.npu_chunk_gated_delta_rule", side_effect=fused, create=True),
         ):
             actual, _ = AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
                 *qkv, gate, gate, state, torch.tensor([0, count], dtype=torch.int32), dim**-0.5

@@ -2,7 +2,7 @@
 
 ## Getting Started
 
-vLLM-Ascend now supports PD-colocated deployment with Mooncake features.
+vllm-ascend now supports PD-colocated deployment with Mooncake features.
 This guide provides step-by-step instructions to test these features with
 constrained resources.
 
@@ -67,7 +67,7 @@ such as IP addresses according to your actual environment.
     for i in {0..7}; do hccn_tool -i $i -ping -g x.x.x.x; done
     ```
 
-5. Check NPU TLS Configuration
+5. Check NPU TLS Configuration:
 
     ```bash
     # The tls settings should be consistent across all nodes.
@@ -115,7 +115,7 @@ Mooncake is pre-installed and functional in the {{vllm_ascend_version}} image.
 The following installation steps are optional.
 
 Mooncake is the serving platform for Kimi, a leading LLM service provided by
-Moonshot AI. Installation and compilation guide:[Installation and compilation guide](https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries).
+Moonshot AI. Installation and compilation guide: [Installation and compilation guide](https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries).
 
 First, obtain the Mooncake project using the following command:
 
@@ -151,9 +151,12 @@ After installation, verify that Mooncake is installed correctly:
 
 ```bash
 python -c "import mooncake; print(mooncake.__file__)"
-# Expected output path:
-# /usr/local/Ascend/ascend-toolkit/latest/python/
-# site-packages/mooncake/__init__.py
+```
+
+Expected output path:
+
+```text
+/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake/__init__.py
 ```
 
 ## Start Mooncake Master Service
@@ -193,7 +196,7 @@ The template for the mooncake.json file is as follows:
 | --------------| ------------------------| -----------------------------------|
 | metadata_server | P2PHANDSHAKE              | Point-to-point handshake mode  |
 | protocol              | ascend              | Ascend proprietary protocol    |
-| master_server_address | 90.90.100.188:50088(for example) | Master server address|
+| master_server_address | 90.90.100.188:50088 (for example) | Master server address|
 | global_segment_size   | 107374182400    | Size per segment (100GB)      |
 
 ## vLLM Instance Deployment
@@ -254,12 +257,12 @@ configuration.
 | load_async        | true                 | Enable asynchronous loading      |
 | register_buffer   | true                 | Required for PD-colocated mode   |
 
-**Note on use_layerwise:**
+**Note on use_layerwise**:
 
 - `false`: Transfer entire KV Cache (suitable for cross-node with sufficient
-  bandwidth)
+  bandwidth).
 - `true`: Layer-by-layer transfer (suitable for single-node memory
-  constraints)
+  constraints).
 
 ## Benchmark
 
@@ -334,6 +337,6 @@ ais_bench --models vllm_api_stream_chat \
 
 ### Test Results
 
-| Requests | Concur | TTFT1 (ms) | TTFT2 (ms) | TTFT3 (ms) |
+| Requests | Concurrency | TTFT1 (ms) | TTFT2 (ms) | TTFT3 (ms) |
 | -------- | ------ | ---------- | ---------- | ---------- |
 | 100      | 25     | 2322       | 739        | 948        |

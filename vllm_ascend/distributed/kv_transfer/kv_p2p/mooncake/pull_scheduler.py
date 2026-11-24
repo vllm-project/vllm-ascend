@@ -86,6 +86,8 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
                 self.delayed_free_requests[request_id] = time.monotonic() + self.kv_lease_duration
 
     def _handle_heartbeat(self, request_ids: Sequence[str]) -> None:
+        extended = unchanged = unknown = 0
+        expired: list[tuple[str, float]] = []
         with self.state_lock:
             now = time.monotonic()
             for request_id in request_ids:
@@ -93,19 +95,36 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
                 if expiry is None:
                     expiry = self.renewed_requests.get(request_id)
                 if expiry is None:
+                    unknown += 1
                     continue
                 if now >= expiry:
                     self._mark_finished_locked(request_id)
-                    logger.error("Force freed expired Mooncake request %s after KV lease expired", request_id)
+                    expired.append((request_id, now - expiry))
                 elif now + self.lease_extension > expiry:
                     self.delayed_free_requests.pop(request_id, None)
                     self.renewed_requests[request_id] = now + self.lease_extension
                     self.renewed_requests.move_to_end(request_id)
+                    extended += 1
+                else:
+                    unchanged += 1
+        logger.debug(
+            "MooncakeHeartbeat event=process engine_id=%s received=%d extended=%d unchanged=%d expired=%d unknown=%d",
+            self.engine_id,
+            len(request_ids),
+            extended,
+            unchanged,
+            len(expired),
+            unknown,
+        )
+        for request_id, expired_by in expired:
+            self._log_lease_finish(request_id, expired_by)
 
     def get_and_clear_finished_requests(self) -> set[str]:
         finished: set[str] = set()
         with self.state_lock:
-            self._retrieve_expired_requests_locked()
+            expired = self._retrieve_expired_requests_locked()
+        for request_id, expired_by in expired:
+            self._log_lease_finish(request_id, expired_by)
         while True:
             try:
                 finished.add(self.finished_requests.get_nowait())
@@ -168,24 +187,48 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
 
     def _handle_finished_request(self, request_id: str) -> None:
         with self.state_lock:
-            self._mark_finished_locked(request_id)
-
-    def _mark_finished_locked(self, request_id: str) -> None:
-        # request_finished registers the request before exposing its transfer
-        # parameters to D. Unknown IDs are therefore stale or duplicate DONEs;
-        # the control loop still ACKs them so D can stop retrying.
-        if request_id not in self.delayed_free_requests and request_id not in self.renewed_requests:
+            finished = self._mark_finished_locked(request_id)
+        if finished:
+            self._log_lease_finish(request_id)
+        else:
             logger.warning(
                 "Received Mooncake DONE for request %s with no pending delayed free; ignoring completion",
                 request_id,
             )
-            return
+
+    def _mark_finished_locked(self, request_id: str) -> bool:
+        # request_finished registers the request before exposing its transfer
+        # parameters to D. Unknown IDs are therefore stale or duplicate DONEs;
+        # the control loop still ACKs them so D can stop retrying.
+        if request_id not in self.delayed_free_requests and request_id not in self.renewed_requests:
+            return False
         self.delayed_free_requests.pop(request_id, None)
         self.renewed_requests.pop(request_id, None)
         self.finished_requests.put(request_id)
+        return True
 
-    def _retrieve_expired_requests_locked(self) -> None:
+    def _log_lease_finish(self, request_id: str, expired_by: float | None = None) -> None:
+        # Call only after releasing state_lock; logging must not hold up lease updates.
+        if expired_by is None:
+            logger.debug(
+                "MooncakeHeartbeat event=lease_finish engine_id=%s request_id=%s reason=done action=queued_for_release",
+                self.engine_id,
+                request_id,
+            )
+        else:
+            logger.error(
+                "Force freed expired Mooncake request %s after KV lease expired; "
+                "MooncakeHeartbeat event=lease_finish engine_id=%s request_id=%s "
+                "reason=expired expired_by_s=%.3f action=queued_for_release",
+                request_id,
+                self.engine_id,
+                request_id,
+                expired_by,
+            )
+
+    def _retrieve_expired_requests_locked(self) -> list[tuple[str, float]]:
         now = time.monotonic()
+        expired: list[tuple[str, float]] = []
         # Each queue has one fixed duration. Renewals only move to the tail
         # when the deadline increases, keeping both queues expiry-ordered.
         for requests in (self.delayed_free_requests, self.renewed_requests):
@@ -194,7 +237,8 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
                 if now < expiry:
                     break
                 self._mark_finished_locked(request_id)
-                logger.error("Force freed expired Mooncake request %s after KV lease expired", request_id)
+                expired.append((request_id, now - expiry))
+        return expired
 
 
 class MooncakeSchedulerRecvingThread(threading.Thread):
@@ -339,6 +383,16 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         if type(self._kv_lease_duration) is not int or self._kv_lease_duration < 6:
             raise ValueError("Mooncake kv_lease_duration must be an integer of at least 6 seconds")
 
+        logger.debug(
+            "MooncakeHeartbeat event=config engine_id=%s kv_role=%s "
+            "initial_lease_s=%d renewal_window_s=%d heartbeat_interval_s=%d",
+            self.engine_id,
+            self.kv_transfer_config.kv_role,
+            self._kv_lease_duration,
+            self._kv_lease_duration * 2 // 3,
+            self._kv_lease_duration // 6,
+        )
+
         if self.kv_transfer_config.is_kv_consumer:
             recving_ready_event = threading.Event()
             self._recving_thread = MooncakeSchedulerRecvingThread(recving_ready_event)
@@ -355,6 +409,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             self._heartbeat_thread is not None
             and params is not None
             and params.get("do_remote_prefill")
+            and not params.get("do_virtual", False)
             and any(params.get("remote_block_ids", ()))
             and all(key in params for key in ("remote_host", "remote_port", "remote_request_id", "remote_engine_id"))
         ):
@@ -466,8 +521,9 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                         blocks.get_block_ids(),
                         num_external_tokens,
                     )
-                    self._reqs_recv_info[request.request_id] = remote
-                else:
+                    if not params.get("do_virtual", False):
+                        self._reqs_recv_info[request.request_id] = remote
+                elif not params.get("do_virtual", False):
                     if self._recving_thread is None:
                         raise RuntimeError("Producer Mooncake scheduler cannot acknowledge a receive request")
                     self._recving_thread.add_request(*remote)
@@ -510,6 +566,13 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
     ) -> tuple[bool, dict[str, Any] | None]:
         """Release unstarted consumer transfers or expose completed producer blocks."""
         params = request.kv_transfer_params
+        if params is not None and params.get("do_virtual", False) and self.kv_transfer_config.is_kv_consumer:
+            # Health probes never own remote KV blocks or a producer lease.
+            self._reqs_need_recv.pop(request.request_id, None)
+            self._reqs_recv_info.pop(request.request_id, None)
+            self._reqs_in_batch.discard(request.request_id)
+            params["do_remote_prefill"] = False
+            return False, None
         # Keep renewing in-flight READs even after client cancellation. Their
         # workers must finish before P can release the source blocks.
         if self._heartbeat_thread is not None and request.request_id not in self._reqs_recv_info:

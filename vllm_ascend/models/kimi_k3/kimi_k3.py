@@ -91,7 +91,7 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.ops.kda_parallel import KDARowParallelLinear, get_kda_state_shape
+from vllm_ascend.ops.head_parallel import HeadParallelRowLinear, get_head_sharded_state_shape
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
 )
@@ -101,7 +101,7 @@ from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimCon
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from vllm_ascend.utils import get_rotation_path, is_950
+from vllm_ascend.utils import get_rotation_path, is_950, vllm_version_is
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
@@ -801,7 +801,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             return False
         o_proj = self.self_attn.o_proj
         # PCP KDA owns combined TP/PCP head shards and its own reductions.
-        if isinstance(o_proj, KDARowParallelLinear):
+        if isinstance(o_proj, HeadParallelRowLinear):
             return False
         if KimiOProjMMReduceScatterOp.unsupported_reason(o_proj) is not None:
             return False
@@ -1050,8 +1050,23 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             # A materialized state at start_layer belongs to this stage,
             # unlike the raw state emitted by the preceding stage.
             self._aux_slot_base_cached = bisect_left(self.aux_hidden_state_layers, self.start_layer)
-        if pp.is_last_rank:
+        if vllm_version_is("0.33.0") and pp.is_last_rank:
             self._aux_upstream_total_cached = self._aux_slot_base_cached
+
+    if not vllm_version_is("0.33.0"):
+
+        def aux_hidden_state_slot_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+            if self.config.attn_res_block_size is None or not self.dspark_aux_capture_materialized:
+                return super().aux_hidden_state_slot_keys()
+            pp = get_pp_group()
+            if pp.world_size < 2:
+                return (), ()
+            # Materialized DSpark captures before layer L. A cut at L belongs
+            # to the receiving stage, unlike raw post-layer capture.
+            base = self._aux_slot_base_cached
+            end = base if pp.is_last_rank else bisect_left(self.aux_hidden_state_layers, self.end_layer)
+            key = self.AUX_HIDDEN_STATE_KEY
+            return tuple(f"{key}{i}" for i in range(base)), tuple(f"{key}{i}" for i in range(base, end))
 
     def make_empty_intermediate_tensors(
         self,
@@ -1149,7 +1164,13 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             residual = intermediate_tensors["residual"]
 
         materialized_aux = self.dspark_aux_capture_materialized
-        aux_hidden_states = get_pp_transport_tensors(intermediate_tensors, PPTransportDataType.AUX_HIDDEN_STATES)
+        # Main's runner relays upstream slots and merges them once on the last
+        # stage. The release model still carries the cumulative payload.
+        aux_hidden_states = (
+            get_pp_transport_tensors(intermediate_tensors, PPTransportDataType.AUX_HIDDEN_STATES)
+            if vllm_version_is("0.33.0")
+            else []
+        )
         if self.use_sequence_parallel:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
@@ -1232,8 +1253,11 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
                 residual = sp_all_gather(residual)[:full_num_tokens]
                 aux_hidden_states = [sp_all_gather(aux)[:full_num_tokens] for aux in aux_hidden_states]
+            output = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+            if not vllm_version_is("0.33.0"):
+                return IntermediateTensors({**output.tensors, **self.pack_local_aux_hidden_states(aux_hidden_states)})
             return add_pp_transport_tensors(
-                IntermediateTensors({"hidden_states": hidden_states, "residual": residual}),
+                output,
                 PPTransportDataType.AUX_HIDDEN_STATES,
                 aux_hidden_states,
             )
@@ -1325,7 +1349,7 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config):
-        return get_kda_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
+        return get_head_sharded_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
@@ -1426,8 +1450,16 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
     supports_replayssm: ClassVar[Literal[True]] = True
 
     @classmethod
+    def get_packed_hybrid_block_size(cls, vllm_config, attn_page_size_1_token, mamba_page_size, alignment) -> None:
+        # #66037 lets the native Kimi hook size a whole BLHNC row, including
+        # indexer and draft pages. Ascend overlays each recurrent checkpoint
+        # on one MLA page and keeps the other components in separate regions.
+        # Request native per-page alignment and padding for that layout.
+        return None
+
+    @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config):
-        return get_kda_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
+        return get_head_sharded_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)

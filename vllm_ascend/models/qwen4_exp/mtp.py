@@ -20,14 +20,54 @@ import regex as re
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.model_executor.models.config import _strip_qwen4_exp_mrope
 from vllm.models.qwen4_exp.amd import mtp as upstream_mtp
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import iter_rope_parameters
 
 # Import the target wrapper first so the upstream decoder resolves Ascend QSA
 # and HyperConnection components before the MTP module is initialized.
 from . import model as _model  # noqa: F401
 
 _MTP_LAYER_PREFIX = re.compile(r"^mtp\.layers\.(\d+)(?=\.)")
+
+
+def _align_qwen4_exp_mtp_position_cache(vllm_config: VllmConfig) -> None:
+    """Size Qwen4Exp's MTP RoPE cache for the target position space."""
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None:
+        return
+
+    draft_model_config = speculative_config.draft_model_config
+    target_model_config = speculative_config.target_model_config
+    if draft_model_config is None or target_model_config is None:
+        return
+
+    architectures = set(draft_model_config.architectures or ())
+    if "Qwen4ExpMTP" not in architectures:
+        return
+
+    draft_text_config = draft_model_config.hf_text_config
+    draft_max_position_embeddings = getattr(
+        draft_text_config,
+        "max_position_embeddings",
+        None,
+    )
+    target_max_model_len = target_model_config.max_model_len
+    if draft_max_position_embeddings is None or draft_max_position_embeddings >= target_max_model_len:
+        return
+
+    # Dict-style target HF overrides are not applied to the nested MTP draft.
+    # Only grow Qwen4Exp's plain RoPE cache; copying target YaRN parameters would
+    # change the draft's rotary frequencies rather than just its cache capacity.
+    if not all(params.get("rope_type", "default") == "default" for params in iter_rope_parameters(draft_text_config)):
+        return
+
+    draft_text_config.max_position_embeddings = target_max_model_len
+    draft_model_config.max_model_len = max(
+        draft_model_config.max_model_len,
+        target_max_model_len,
+    )
 
 
 def _remap_modelslim_mtp_layer_ids(
@@ -66,19 +106,55 @@ def _remap_modelslim_mtp_layer_ids(
 _upstream_make_draft_vllm_config = upstream_mtp._make_draft_vllm_config
 
 
+def _align_draft_rope_with_target(vllm_config: VllmConfig) -> None:
+    """Keep the Qwen4Exp MTP draft on the target's actual RoPE contract.
+
+    vLLM rebuilds the draft ``ModelConfig`` without propagating the target's
+    ``language_model_only`` option.  By this point the target has already had
+    M-RoPE removed, so mirror that canonical transformation onto the draft.
+    """
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None or speculative_config.draft_model_config is None:
+        return
+
+    target_model_config = getattr(speculative_config, "target_model_config", None)
+    if target_model_config is None:
+        target_model_config = vllm_config.model_config
+    draft_model_config = speculative_config.draft_model_config
+    if (
+        getattr(target_model_config, "uses_mrope", None) is False
+        and getattr(draft_model_config, "uses_mrope", None) is True
+    ):
+        _strip_qwen4_exp_mrope(draft_model_config)
+
+
 def _make_draft_vllm_config(
     vllm_config: VllmConfig,
     mtp_start_layer_idx: int,
+    num_mtp_layers: int | None = None,
 ) -> VllmConfig:
-    draft_vllm_config = _upstream_make_draft_vllm_config(
-        vllm_config,
-        mtp_start_layer_idx,
-    )
-    num_mtp_layers = getattr(
-        vllm_config.model_config.hf_text_config,
-        "mtp_num_hidden_layers",
-        1,
-    )
+    # Align the speculator-owned config before upstream derives the runtime
+    # draft config and its QSA cache specs from it.
+    _align_draft_rope_with_target(vllm_config)
+    # Run before the Qwen4Exp MTP layers construct their rotary embeddings so
+    # graph capture cannot retain an undersized cache.
+    _align_qwen4_exp_mtp_position_cache(vllm_config)
+    if num_mtp_layers is None:
+        draft_vllm_config = _upstream_make_draft_vllm_config(
+            vllm_config,
+            mtp_start_layer_idx,
+        )
+        num_mtp_layers = getattr(
+            vllm_config.model_config.hf_text_config,
+            "mtp_num_hidden_layers",
+            1,
+        )
+    else:
+        draft_vllm_config = _upstream_make_draft_vllm_config(
+            vllm_config,
+            mtp_start_layer_idx,
+            num_mtp_layers,
+        )
     _remap_modelslim_mtp_layer_ids(
         draft_vllm_config.quant_config,
         mtp_start_layer_idx,
