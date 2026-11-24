@@ -3,7 +3,7 @@
 
 import ast
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -46,6 +46,7 @@ def load_class(filename, name, methods, dependencies=None):
         math=math,
         prod=math.prod,
         dataclass=dataclass,
+        field=field,
         is_circular_kv_cache_spec=lambda spec: False,
         cdiv=lambda a, b: -(-a // b),
     )

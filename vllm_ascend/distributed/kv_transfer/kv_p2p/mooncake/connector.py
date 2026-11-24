@@ -335,6 +335,13 @@ class MooncakeConnectorV2(MooncakeBaseConnector):
     @staticmethod
     def _get_connector_cls(transfer: KVTransferConfig, *, use_hisparse: bool = False) -> type[MooncakeBaseConnector]:
         extra_config = transfer.kv_connector_extra_config or {}
+        dsa_offload = extra_config.get("dsa_pd_offload", False)
+        if not isinstance(dsa_offload, bool):
+            raise ValueError("dsa_pd_offload must be bool")
+        if dsa_offload:
+            from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_dsa import MooncakeDsaConnector
+
+            return MooncakeDsaConnector
         if extra_config.get("use_layerwise", False):
             return MooncakePushConnector
         if use_hisparse:

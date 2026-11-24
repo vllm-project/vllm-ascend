@@ -1,0 +1,9 @@
+pr: 23222
+entries:
+  - category: feature
+    text: >-
+      Added opt-in MooncakeConnectorV2 Pull for sparse KV offload. Set
+      dsa_pd_offload=true on both P and D, and enable Mooncake Host offload
+      with fused overlap on D. Decode receives target Main and ordinary MTP KV once into a TP-shared
+      Host pool while each rank receives its Indexer KV in device memory.
+      Decode requires PCP=DCP=1. This path is disabled by default.
