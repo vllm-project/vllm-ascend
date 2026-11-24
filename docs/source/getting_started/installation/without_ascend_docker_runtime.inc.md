@@ -1,8 +1,8 @@
-The commands below list, for each hardware type, the device nodes and driver mounts that Ascend Docker Runtime would otherwise provide. They are a reference for manual mapping, not a replacement for a model tutorial's container command: keep the image, the weight and cache mounts, the ports, the HCCL and network settings, and any extra devices from the tutorial page.
+The commands below select the same devices as [Quick Start](quick_start.md#quick-start-installation): one NPU, which is `/dev/davinci0`, or `/dev/davinci0` and `/dev/davinci1` on Atlas A3. They also pass the management devices and driver mounts that Ascend Docker Runtime would otherwise provide. Add one `--device /dev/davinciN` line for each extra device. They are a reference for manual mapping, not a replacement for a model tutorial's container command: keep the image, the weight and cache mounts, the ports, the HCCL and network settings, and any extra devices from the tutorial page.
 
 === "Atlas A2 inference products"
 
-    Eight NPUs expose `/dev/davinci0` to `/dev/davinci7`.
+    Quick Start selects one NPU, `/dev/davinci0`. A machine with eight NPUs exposes `/dev/davinci0` to `/dev/davinci7`; add one `--device` line for each extra NPU.
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
@@ -13,13 +13,6 @@ The commands below list, for each hardware type, the device nodes and driver mou
         --shm-size=1g \
         --net=host \
         --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
         --device /dev/davinci_manager \
         --device /dev/devmm_svm \
         --device /dev/hisi_hdc \
@@ -32,11 +25,11 @@ The commands below list, for each hardware type, the device nodes and driver mou
         -it $IMAGE bash
     ```
 
-    For a multi-node deployment, add `-v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool`. On a shared machine, pass only the devices of the NPUs you use.
+    For a multi-node deployment, add `-v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool`.
 
 === "Atlas A3 inference products"
 
-    Eight NPUs with a dual-die design expose sixteen DIE devices, `/dev/davinci0` to `/dev/davinci15`. On a shared machine, pass the devices of the NPUs you use: NPU 0 and NPU 1 are `/dev/davinci0` to `/dev/davinci3`, and so on.
+    Quick Start selects one NPU. A3 uses a dual-DIE design, so that NPU is `/dev/davinci0` and `/dev/davinci1`. A machine with eight NPUs exposes `/dev/davinci0` to `/dev/davinci15`; NPU 0 and NPU 1 are `/dev/davinci0` to `/dev/davinci3`, and so on.
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
@@ -48,20 +41,6 @@ The commands below list, for each hardware type, the device nodes and driver mou
         --net=host \
         --device /dev/davinci0 \
         --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci8 \
-        --device /dev/davinci9 \
-        --device /dev/davinci10 \
-        --device /dev/davinci11 \
-        --device /dev/davinci12 \
-        --device /dev/davinci13 \
-        --device /dev/davinci14 \
-        --device /dev/davinci15 \
         --device /dev/davinci_manager \
         --device /dev/devmm_svm \
         --device /dev/hisi_hdc \
@@ -78,7 +57,7 @@ The commands below list, for each hardware type, the device nodes and driver mou
 
 === "950DT products"
 
-    Eight NPUs. The UB device nodes `/dev/ummu` and `/dev/uburma` are not part of the driver library set, so pass them explicitly as well.
+    Quick Start selects one NPU, `/dev/davinci0`. A machine with eight NPUs exposes `/dev/davinci0` to `/dev/davinci7`. The UB device nodes `/dev/ummu` and `/dev/uburma` are not part of the driver library set, so pass them explicitly as well.
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
@@ -89,13 +68,6 @@ The commands below list, for each hardware type, the device nodes and driver mou
         --shm-size=1g \
         --net=host \
         --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
         --device /dev/davinci_manager \
         --device /dev/hisi_hdc \
         --device /dev/ummu \
@@ -113,7 +85,7 @@ The commands below list, for each hardware type, the device nodes and driver mou
 
 === "Atlas 300I Duo"
 
-    The card exposes two chips, so the number of `--device /dev/davinciN` lines follows the chips on the host: a machine with two cards has `/dev/davinci0` to `/dev/davinci3`.
+    Quick Start selects one chip, `/dev/davinci0`. The card exposes two chips, so a machine with two cards has `/dev/davinci0` to `/dev/davinci3`; add one `--device` line for each extra chip.
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
@@ -123,9 +95,6 @@ The commands below list, for each hardware type, the device nodes and driver mou
         --name ${CONTAINER_NAME} \
         --shm-size=1g \
         --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
         --device /dev/davinci_manager \
         --device /dev/devmm_svm \
         --device /dev/hisi_hdc \
