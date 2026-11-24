@@ -11,6 +11,7 @@ from copy import copy
 from typing import Any
 
 from vllm.config.utils import hash_config
+from vllm.distributed.utils import get_pp_indices
 from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.ascend_config import KVPPConfig
@@ -48,9 +49,14 @@ def layerwise_topology_namespace(vllm_config: Any, kv_cache_config: Any = None) 
     partitions = []
     previous_end = 0
     for stage in range(parallel.pipeline_parallel_size):
-        stage_config = copy(parallel)
-        stage_config.rank = stage * parallel.tensor_parallel_size
-        start, end = model.get_layers_start_end_indices(stage_config)
+        if kvpp_size > 1 and parallel.prefill_context_parallel_size > 1:
+            # Match the pool worker's PP partition across vLLM versions whose
+            # model-config APIs differ on whether rank includes a PCP axis.
+            start, end = get_pp_indices(model.get_total_num_hidden_layers(), stage, parallel.pipeline_parallel_size)
+        else:
+            stage_config = copy(parallel)
+            stage_config.rank = stage * parallel.tensor_parallel_size
+            start, end = model.get_layers_start_end_indices(stage_config)
         if start != previous_end or end <= start:
             raise ValueError("Mooncake PP requires contiguous, nonempty model layer partitions")
         partitions.append((start, end))

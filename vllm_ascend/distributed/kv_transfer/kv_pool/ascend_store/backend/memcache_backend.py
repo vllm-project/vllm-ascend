@@ -9,6 +9,7 @@ import torch
 from vllm.config import ParallelConfig
 from vllm.logger import logger
 
+from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
@@ -202,6 +203,17 @@ class MemcacheBackend(Backend):
         def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
             return make_full_key(model_name, group, block_hash, head, num_groups, stage, pp_size)
 
+        if getattr(vllm_config, "additional_config", None):
+            kvpp_size = KVPPConfig.from_vllm_config(vllm_config).size
+            if kvpp_size > 1:
+                from .mooncake_layerwise import layerwise_topology_namespace
+
+                return LayerwiseKeyBuilder(
+                    make_key,
+                    pp_size,
+                    kvpp_size=kvpp_size,
+                    layout_namespace=layerwise_topology_namespace(vllm_config, kv_cache_config),
+                )
         return LayerwiseKeyBuilder(make_key, pp_size, pcp_size, pcp_sharded_group_ids)
 
     def __init__(

@@ -15,6 +15,8 @@ class LayerwiseKeyBuilder:
     pcp_size: int = 1
     pcp_sharded_group_ids: set[int] = field(default_factory=set)
     dcp_size: int = 1
+    kvpp_size: int = 1
+    layout_namespace: str = ""
 
     def make_full_key(
         self,
@@ -26,6 +28,8 @@ class LayerwiseKeyBuilder:
         dcp_rank: int | None = None,
     ) -> str:
         key = self.make_base_key(group_id, block_hash, rank, stage)
+        if self.layout_namespace:
+            key = f"{key}@{self.layout_namespace}"
         if self.pcp_size > 1 and group_id in self.pcp_sharded_group_ids:
             # State head partitions depend on the PCP topology.
             key = f"{key}@pcp_size:{self.pcp_size}@pcp_rank:{pcp_rank}"
@@ -37,6 +41,9 @@ class LayerwiseKeyBuilder:
 
     def make_hit_check_keys(self, group_id: int, block_hash: str, num_ranks: int) -> list[str]:
         """Require every distinct shard on every PP stage."""
+        if self.kvpp_size > 1:
+            # KVPP folds PCP and TP into one owner index in the wire key.
+            num_ranks = self.kvpp_size
         pcp_size = self.pcp_size if group_id in self.pcp_sharded_group_ids else 1
         return [
             self.make_full_key(group_id, block_hash, rank, stage, pcp_rank, dcp_rank)
@@ -65,4 +72,6 @@ class LayerwiseKeyBuilder:
         drift from the scheduler's full-key format.
         """
         pp_tag = f"@pp{pp_rank}" if self.pp_size > 1 else ""
+        if self.layout_namespace:
+            model_name = f"{model_name}@{self.layout_namespace}"
         return f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}{pp_tag}@{head_or_tp_rank}"

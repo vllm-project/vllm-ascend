@@ -709,6 +709,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if not is_kv_save_role(self.kv_role, self.save_decode_cache):
             return False
 
+        if getattr(self, "use_kvpp", False) and self.use_layerwise_transfer:
+            # Registration already filtered out target layers held in scratch.
+            # Each remaining owner writes its own (PP stage, KVPP rank) object.
+            return self.group_num_layers.get(group_id, 0) > 0
+
         # Each rank must save its own Mamba state shard.
         if group_id in self.sharded_mamba_group_ids:
             return True
@@ -720,14 +725,20 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         return self._is_layerwise_save_leader() or self.group_uses_align_state[group_id]
 
     def _groups_for_layerwise_transfer(self, local_layer: int) -> list[tuple[int, int]]:
+        if getattr(self, "use_kvpp", False):
+            return [
+                entry
+                for entry in self.physical_layer_to_group_layers.get(local_layer, ())
+                if entry[0] in self.cacheable_group_ids
+            ]
         if self.use_block_key_layerwise:
             # The map and buffer builders both use stage-local physical layer
             # indices. A group's dense layer index is a third, distinct axis.
-            if self.num_kv_cache_groups == 1 and not getattr(self, "use_kvpp", False):
+            if self.num_kv_cache_groups == 1:
                 return [(0, local_layer)]
             groups = self.physical_layer_to_group_layers.get(local_layer)
             if groups is None:
-                if getattr(self, "use_kvpp", False) or getattr(self, "has_shared_kv", False):
+                if getattr(self, "has_shared_kv", False):
                     return []
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
             return [(group_id, layer_idx) for group_id, layer_idx in groups if group_id in self.cacheable_group_ids]
@@ -1526,6 +1537,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
         self._masked_runs_cache.clear()
+        if getattr(self, "use_kvpp", False) and self.use_layerwise_transfer:
+            self._current_layerwise_last_chunk_req_ids.clear()
         # Keep this method safe for direct callers as well as metadata binding.
         # Worker threads may still own the lists from the preceding step.
         self.layer_save_tasks = [[] for _ in range(self.num_layers)]
@@ -1805,9 +1818,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         # KVPP can observe completion after attention; reset at the next bind.
         if not self.use_kvpp:
             self.layer_load_finished_events[self.current_layer].clear()
-        if (
-            getattr(self, "block_key_hybrid", False) or (self.use_kvpp and self.use_block_key_layerwise)
-        ) and self.current_layer == self.num_layers - 1:
+        if (getattr(self, "block_key_hybrid", False) or self.use_kvpp) and self.current_layer == self.num_layers - 1:
             # The final model layer can have no reachable load rows. Completion
             # belongs to the whole request, not whichever group happens to end here.
             for req_id in self._current_layerwise_last_chunk_req_ids:
