@@ -334,6 +334,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 ):
                     continue
                 self._reqs_recv_state[recv_request.request_id] = _ReceiveState(request_id, time.monotonic())
+                if recv_request.do_virtual:
+                    self._pending_completions.pop(recv_request.request_id, None)
+                    self._result_queue.put(("virtual", recv_request.request_id, None))
+                    continue
                 for completion in self._pending_completions.pop(recv_request.request_id, {}).values():
                     self._result_queue.put(("done", recv_request.request_id, completion))
             for request_id, not_dispatched in metadata.push_failed_requests.items():
@@ -981,9 +985,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     )
                     pending[source_key] = payload
                     continue
-                if kind == "failed":
+                if kind in ("failed", "virtual"):
                     results.finished_recving.add(state.request_id)
-                    results.failed_recving.add(state.request_id)
+                    if kind == "failed":
+                        results.failed_recving.add(state.request_id)
                     self._finished_requests[request_id] = True
                     del self._reqs_recv_state[request_id]
                     continue
