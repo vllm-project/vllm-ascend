@@ -425,7 +425,7 @@ class AscendSFABackend(AttentionBackend):
             if spec.kv_lora_rank is None or spec.qk_rope_head_dim is None:
                 raise ValueError("SFA runtime views require component dimensions in the cache spec.")
             widths = (spec.kv_lora_rank, spec.qk_rope_head_dim)
-        shapes = tuple(cls.get_kv_cache_shape(runtime_blocks, block_size, spec.num_kv_heads, width) for width in widths)
+        shapes = tuple((runtime_blocks, block_size, spec.num_kv_heads, width) for width in widths)
         return shapes, (spec.dtype,) * len(widths)
 
     @staticmethod

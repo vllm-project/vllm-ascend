@@ -361,11 +361,12 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         if block_size <= 0 or spec.block_size % block_size:
             raise ValueError("Indexer kernel block size must divide the manager block size.")
         runtime_blocks = num_blocks * (spec.block_size // block_size) * spec.sfa_dcp_replicated_indexer_size
-        key_shape = cls.get_kv_cache_shape(runtime_blocks, block_size, spec.num_kv_heads, spec.head_size)
+        prefix = (runtime_blocks, block_size, spec.num_kv_heads)
+        key_shape = (*prefix, spec.head_size)
         if not spec.scale_dim:
             return (key_shape,), (spec.dtype,)
 
-        scale_shape = cls.get_kv_cache_shape(runtime_blocks, block_size, spec.num_kv_heads, spec.scale_dim)
+        scale_shape = (*prefix, spec.scale_dim)
         if spec.cache_sparse_li_c4:
             scale_shape = (*scale_shape[:-1], spec.scale_dim // 2, 2)
         return (key_shape, scale_shape), (spec.dtype, spec.scale_dtype)

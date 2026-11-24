@@ -131,7 +131,11 @@ class AscendAttentionBackend(AttentionBackend):
         if block_size <= 0 or spec.block_size % block_size:
             raise ValueError("Attention kernel block size must divide the manager block size.")
         runtime_blocks = num_blocks * (spec.block_size // block_size)
-        key_shape = cls.get_kv_cache_shape(runtime_blocks, block_size, spec.num_kv_heads, spec.head_size)[1:]
+        if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
+            prefix = (runtime_blocks, spec.num_kv_heads, block_size)
+        else:
+            prefix = (runtime_blocks, block_size, spec.num_kv_heads)
+        key_shape = (*prefix, spec.head_size)
         value_shape = (*key_shape[:-1], spec.head_size_v)
         return (key_shape, value_shape), (spec.dtype, spec.dtype)
 
