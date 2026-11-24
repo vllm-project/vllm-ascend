@@ -1,0 +1,4 @@
+pr: 23056
+entries:
+  - category: performance
+    text: On Ascend A3 with Model Runner V2, EPLB load recording for supported W8A8, W4A8, and BF16 fused MC2 MoE paths now runs within the fused operator, removing a separate Record operator launch. No configuration change is needed; other paths retain their existing recording behavior.

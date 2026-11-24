@@ -44,9 +44,11 @@ enum NnopbaseHcclServerType {
 extern aclnnStatus aclnnInnerDispatchFFNCombineGetWorkspaceSize(const aclTensor* x, const aclTensorList* weight1, const aclTensorList* weight2,
                                                          const aclTensor* expertId, const aclTensorList* scale1, const aclTensorList* scale2,
                                                          const aclTensor* probs, const aclTensor* xActiveMask,
+                                                         aclTensor* expertLoad, const aclTensor* recordEnabled,
                                                          const char* group, int64_t maxOutputSize,
-                                                         bool transB, bool weightNz, double swigluLimit, int64_t worldSize,
+                                                         bool transB, bool weightNz, double swigluLimit, int64_t worldSize, int64_t localExpertStart,
                                                          const aclTensor* out, const aclTensor* expertTokenNums,
+                                                         const aclTensor* expertLoadOut,
                                                          uint64_t* workspaceSize, aclOpExecutor** executor);
 extern aclnnStatus aclnnInnerDispatchFFNCombine(void *workspace, uint64_t workspaceSize,
                                             aclOpExecutor *executor, aclrtStream stream);
@@ -59,14 +61,16 @@ aclnnStatus aclnnDispatchFFNCombineGetWorkspaceSize(const aclTensor* x, const ac
                                                     const aclTensor* probs, const aclTensor* xActiveMask,
                                                     const char* group, int64_t maxOutputSize, double swigluLimit, int64_t worldSize,
                                                     const aclTensor* out, const aclTensor* expertTokenNums,
+                                                    aclTensor* expertLoad, const aclTensor* recordEnabled, int64_t localExpertStart,
                                                     uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     bool transB = false;
     bool weightNz = true;
 
-    aclnnStatus ret = aclnnInnerDispatchFFNCombineGetWorkspaceSize(x, weight1, weight2, expertId, scale1, scale2, probs, xActiveMask, group,
-                                                                    maxOutputSize, transB, weightNz, swigluLimit, worldSize,
-                                                                    out, expertTokenNums, workspaceSize, executor);
+    aclnnStatus ret = aclnnInnerDispatchFFNCombineGetWorkspaceSize(x, weight1, weight2, expertId, scale1, scale2, probs, xActiveMask,
+                                                                    expertLoad, recordEnabled, group,
+                                                                    maxOutputSize, transB, weightNz, swigluLimit, worldSize, localExpertStart,
+                                                                    out, expertTokenNums, expertLoad, workspaceSize, executor);
     return ret;
 }
 

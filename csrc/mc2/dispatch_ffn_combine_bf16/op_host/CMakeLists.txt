@@ -25,6 +25,7 @@ add_ops_compile_options(
         -Wno-deprecated-declarations
         -DHCCL_COMM
         -DCATLASS_ARCH=2201
+        -I${CMAKE_SOURCE_DIR}/mc2/common
         ${_DISPATCH_FFN_INC_OPTS}
 )
 

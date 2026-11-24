@@ -29,6 +29,7 @@ struct DispatchFFNCombineW4A8Info {
     uint32_t totalUbSize;
     uint32_t topK;
     uint32_t worldSize;
+    uint32_t localExpertStart;
     uint32_t listLen;
     float swigluLimit;
 };

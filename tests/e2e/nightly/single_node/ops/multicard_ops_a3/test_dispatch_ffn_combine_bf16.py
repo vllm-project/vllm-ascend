@@ -6,6 +6,7 @@ import torch.multiprocessing as mp
 import torch_npu
 from torch.distributed.distributed_c10d import _get_default_group
 
+from vllm_ascend.ops.fused_moe.eplb import record_expert_tokens
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -119,15 +120,15 @@ class TestDispatchFFNCombine:
         out = self.generate_random_tensor((m, k), dtype=torch.bfloat16).npu()
         expert_token_nums = self.generate_random_tensor((1, e), dtype=torch.int32).npu()
 
-        torch.ops._C_ascend.dispatch_ffn_combine(
+        op_kwargs = dict(
             x=x,
             weight1=weight1_nz_npu,
             weight2=weight2_nz_npu,
             expert_idx=expert_idx,
             scale1=scale1_npu,
             scale2=scale2_npu,
-            bias1=torch.tensor([]),
-            bias2=torch.tensor([]),
+            bias1=[],
+            bias2=[],
             probs=probs,
             group=self.hcomm_info,
             max_output_size=512,
@@ -135,6 +136,23 @@ class TestDispatchFFNCombine:
             out=out,
             expert_token_nums=expert_token_nums,
         )
+        torch.ops._C_ascend.dispatch_ffn_combine(**op_kwargs)
+        baseline_counts = expert_token_nums.clone().view(-1)
+        baseline_out = out.clone()
+        load = torch.full((e + 4,), 7, dtype=torch.int32, device="npu")
+        standalone_load = load.clone()
+        enabled = torch.tensor(True, dtype=torch.bool, device="npu")
+        record_expert_tokens(baseline_counts, standalone_load, enabled, 1, 2)
+        torch.ops._C_ascend.dispatch_ffn_combine(
+            **op_kwargs, expert_load_view=load, record_enabled=enabled, local_expert_start=2
+        )
+        torch.npu.synchronize()
+        assert torch.equal(load, standalone_load), "fused Record differs from standalone Record"
+        expected_load = torch.full_like(load, 7)
+        expected_load[2 : 2 + e].add_(baseline_counts)
+        assert torch.equal(load, expected_load)
+        assert torch.equal(out, baseline_out)
+        assert torch.equal(expert_token_nums.view(-1), baseline_counts)
         return True
 
     def run_normal(self) -> bool:
@@ -178,8 +196,8 @@ class TestDispatchFFNCombine:
             expert_idx=expert_idx,
             scale1=scale1_npu,
             scale2=scale2_npu,
-            bias1=torch.tensor([]),
-            bias2=torch.tensor([]),
+            bias1=[],
+            bias2=[],
             probs=probs,
             group=self.hcomm_info,
             max_output_size=512,

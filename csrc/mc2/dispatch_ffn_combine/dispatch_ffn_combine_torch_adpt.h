@@ -33,8 +33,27 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
     at::Tensor& expert_token_nums,
     const c10::optional<at::Tensor>& x_active_mask,
     double swiglu_limit,
-    int64_t world_size
+    int64_t world_size,
+    const c10::optional<at::Tensor>& expert_load_view,
+    const c10::optional<at::Tensor>& record_enabled,
+    int64_t local_expert_start
 ) {
+    TORCH_CHECK(expert_load_view.has_value() == record_enabled.has_value(),
+                "expert_load_view and record_enabled must be passed together");
+    if (expert_load_view.has_value()) {
+        TORCH_CHECK(expert_load_view->dim() == 1 && expert_load_view->scalar_type() == at::kInt &&
+                        expert_load_view->is_contiguous() && expert_load_view->device().is_privateuseone(),
+                    "expert_load_view must be a contiguous NPU int32 vector");
+        TORCH_CHECK(record_enabled->dim() == 0 && record_enabled->scalar_type() == at::kBool &&
+                        record_enabled->device() == expert_load_view->device(),
+                    "record_enabled must be a NPU bool scalar");
+        TORCH_CHECK(expert_token_nums.scalar_type() == at::kInt && expert_token_nums.is_contiguous() &&
+                        expert_token_nums.device() == expert_load_view->device(),
+                    "expert_token_nums must be a contiguous int32 tensor on the load device");
+        TORCH_CHECK(local_expert_start >= 0 &&
+                        local_expert_start + expert_token_nums.numel() <= expert_load_view->numel(),
+                    "local expert range is outside expert_load_view");
+    }
     char *group_ep_ptr = const_cast<char *>(group.data());
     bool is_int8 = weight1[0].dtype() == at::kChar;
     bool is_int4 = weight1[0].dtype() == at::kInt;
@@ -53,7 +72,10 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  swiglu_limit,
                  world_size,
                  out,
-                 expert_token_nums);
+                 expert_token_nums,
+                 expert_load_view,
+                 record_enabled,
+                 local_expert_start);
     } else if (is_int4){
         EXEC_NPU_CMD(aclnnDispatchFFNCombineW4A8,
                  x,
@@ -71,7 +93,10 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  swiglu_limit,
                  world_size,
                  out,
-                 expert_token_nums);
+                 expert_token_nums,
+                 expert_load_view,
+                 record_enabled,
+                 local_expert_start);
     } else {
         EXEC_NPU_CMD(aclnnDispatchFFNCombineBF16,
                  x,
@@ -85,7 +110,10 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  max_output_size,
                  world_size,
                  out,
-                 expert_token_nums);
+                 expert_token_nums,
+                 expert_load_view,
+                 record_enabled,
+                 local_expert_start);
     }    
     return {out, expert_token_nums};
 }
