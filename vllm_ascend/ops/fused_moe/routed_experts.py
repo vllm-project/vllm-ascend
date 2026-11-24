@@ -33,7 +33,11 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, is_draft_vllm_config,
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.expert_transfer.expert_offload_utils import expert_offload_weights
 from vllm_ascend.lora.fused_moe import sync_lora_context
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import (
+    MoEWeights,
+    build_fused_experts_input,
+    shared_moe_weight_kwargs,
+)
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.eplb import use_allgather_eplb
@@ -223,7 +227,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         """Normalized weight payload for the FUSED_MC2 comm path."""
         w13_weight_list = getattr(layer, "w13_weight_list", None)
         w2_weight_list = getattr(layer, "w2_weight_list", None)
-        if _EXTRA_CTX.use_mega_moe:
+        use_mega_moe = _EXTRA_CTX.use_mega_moe
+        if use_mega_moe:
             w13_weight_list = getattr(layer, "cann_mega_moe_w13_weight_list", None) or w13_weight_list
             w2_weight_list = getattr(layer, "cann_mega_moe_w2_weight_list", None) or w2_weight_list
             w1_scale = None
@@ -247,6 +252,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_scale=w2_scale,
             w1_scale_bias=w1_scale_bias,
             w2_scale_bias=w2_scale_bias,
+            **(shared_moe_weight_kwargs(layer) if use_mega_moe else {}),
         )
 
     def get_mlp_weights(self, layer):
@@ -640,6 +646,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        skip_megamoe_shared: bool = False,
     ):
         forward_context = get_forward_context()
         # When static kernels are enabled, the forward pass runs twice
@@ -681,6 +688,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         )
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
+        if skip_megamoe_shared:
+            self.ascend_skip_megamoe_shared = True
         try:
             fused_experts_results: FusedExpertsResult = self.quant_method.apply(
                 layer=self,
@@ -693,6 +702,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         finally:
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
+            if skip_megamoe_shared:
+                self.ascend_skip_megamoe_shared = False
 
         eplb_state = self.router.eplb_state
         if eplb_state is not None:

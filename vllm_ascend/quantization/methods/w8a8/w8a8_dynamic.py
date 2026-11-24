@@ -28,7 +28,11 @@ from vllm.triton_utils import HAS_TRITON
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import (
+    MoEWeights,
+    build_fused_experts_input,
+    shared_moe_weight_kwargs,
+)
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import (
     _custom_gmm_swiglu_enabled,
@@ -74,6 +78,10 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         WeightSwitchGatherSpec("weight_offset"),
     )
     supports_weight_switch = True
+
+    @property
+    def quant_type(self) -> "QuantType":
+        return QuantType.W8A8 if self.act_quant_type == torch.int8 else QuantType.NONE
 
     def __init__(self):
         pass
@@ -369,8 +377,6 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         use_mega_moe = is_fused_mc2 and _EXTRA_CTX.use_mega_moe
         if self.use_expert_weight_list:
             if use_mega_moe:
-                shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None)
-                shared = shared_fusion.weights if shared_fusion is not None else None
                 return MoEWeights(
                     w1=layer.w13_weight_list,
                     w2=layer.w2_weight_list,
@@ -378,10 +384,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                     w2_scale=[scale.reshape(-1) for scale in layer.fused_w2_scale_list],
                     w1_scale_bias=None,
                     w2_scale_bias=None,
-                    shared_w1=shared.w1 if shared else None,
-                    shared_w2=shared.w2 if shared else None,
-                    shared_w1_scale=shared.w1_scale if shared else None,
-                    shared_w2_scale=shared.w2_scale if shared else None,
+                    **shared_moe_weight_kwargs(layer),
                 )
             else:
                 return MoEWeights(
@@ -393,13 +396,6 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                     w2_scale_bias=layer.fused_w2_scale_bias if fused_scale_flag else None,
                 )
         elif use_mega_moe:
-            # MegaMoe shared-expert fusion (enable_fused_mc2=3): forward the
-            # shared weights rebuilt by the shared-expert executor so the
-            # operator computes routed + shared together. Without them the
-            # operator runs routed experts only while the runner skips the
-            # separate shared forward, silently dropping the shared GMM.
-            shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None)
-            shared = shared_fusion.weights if shared_fusion is not None else None
             return MoEWeights(
                 w1=layer.cann_mega_moe_w13_weight_list,
                 w2=layer.cann_mega_moe_w2_weight_list,
@@ -407,10 +403,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=layer.cann_mega_moe_fused_w2_scale_list,
                 w1_scale_bias=None,
                 w2_scale_bias=None,
-                shared_w1=shared.w1 if shared else None,
-                shared_w2=shared.w2 if shared else None,
-                shared_w1_scale=shared.w1_scale if shared else None,
-                shared_w2_scale=shared.w2_scale if shared else None,
+                **shared_moe_weight_kwargs(layer),
             )
         return MoEWeights(
             w1=[layer.w13_weight],

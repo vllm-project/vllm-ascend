@@ -196,6 +196,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self.moe_config,
                 self.quant_type,
                 self._quant_method,
+                allow_megamoe_fusion=self.routed_input_transform is None and self.routed_output_transform is None,
             )
             # Weight loading runs after construction, so the shared expert
             # hands out a live payload that it fills in once both shared
@@ -229,6 +230,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if hasattr(MoERunner, "process_weights_after_loading"):
             super().process_weights_after_loading()
         self.routed_experts.refresh_megamoe_weights()
+        if self.ascend_shared_experts is not None:
+            was_ready = self.ascend_shared_experts.megamoe_shared_weights_ready
+            self.ascend_shared_experts.refresh_megamoe_shared_weights()
+            if was_ready:
+                self._shared_reloaded_in_post_load = True
 
     def forward(
         self,
@@ -394,7 +400,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         """True when this step's routed experts run the shared expert inside MegaMoe."""
         return (
             self._megamoe_shared_expert_armed
-            and not getattr(self.ascend_shared_experts, "_megamoe_shared_fusion_disabled", False)
             and _EXTRA_CTX.moe_comm_type is MoECommType.FUSED_MC2
             and bool(_EXTRA_CTX.use_mega_moe)
         )
@@ -617,6 +622,18 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     router_logits=router_logits,
                     input_ids=input_ids,
                 )
+
+            mega_moe = self._megamoe_shared_expert_fused
+            if mega_moe and (shared_hidden_states is hidden_states or shared_hidden_states.is_set_to(hidden_states)):
+                if self.is_internal_router:
+                    router_logits = self._compute_router_logits(hidden_states, router_logits)
+                routed_out, _ = self.routed_experts.forward_impl(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                    input_ids=input_ids,
+                )
+                return routed_out
+
             shared_input_is_gathered = self._can_overlap_sp_shared_with(self.routed_input_transform)
             defer_shared_output_wait = self._can_overlap_sp_shared_with(self.routed_output_transform)
             prepared_shared_input = (
@@ -635,6 +652,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 input_ids=input_ids,
+                **({"skip_megamoe_shared": True} if mega_moe else {}),
             )
             assert isinstance(milestones, RoutedMoEMilestones)
             milestones.shared_input_ready = shared_input_ready
@@ -642,13 +660,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if prepared_shared_input.is_gathered:
                 milestones.routed_finalize_done = torch.npu.current_stream().record_event()
 
-            if self._megamoe_shared_expert_fused:
-                # The shared expert GMM1 + activation + GMM2 runs inside the
-                # MegaMoe operator on the routed stream, so its contribution
-                # is already contained in routed_out. Skip the standalone
-                # forward to avoid computing it twice.
-                shared_out = None
-            elif submitted_gate_up is None:
+            if submitted_gate_up is None:
                 shared_out = self.ascend_shared_experts.forward(
                     prepared_shared_input,
                     milestones,

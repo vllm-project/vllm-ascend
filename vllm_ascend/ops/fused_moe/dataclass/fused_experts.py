@@ -30,26 +30,27 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 @dataclass(frozen=True, slots=True)
 class MegamoeSharedWeights:
-    """Shared-expert weights rebuilt for the A5 MegaMoe operator.
+    """Shared-expert weights rebuilt for the CANN MegaMoe operator.
 
     Produced by ``AscendSharedExperts`` after weight loading and carried by
     ``MegamoeSharedExpertFusion`` on the routed-expert layer; quant methods
     forward it into ``MoEWeights.shared_*`` for the operator call.
-    Field names mirror the ``MoEWeights.shared_*`` fields: one tensor per
-    shared expert, w1 (2*intermediate, hidden) + scale
-    (2*intermediate, k//2, 2), w2 (hidden, intermediate) + scale
-    (hidden, k//2, 2).
+    Field names mirror the ``MoEWeights.shared_*`` fields. The scale lists
+    are absent for unquantized BF16 shared experts.
     """
 
     w1: list[torch.Tensor]
     w2: list[torch.Tensor]
-    w1_scale: list[torch.Tensor]
-    w2_scale: list[torch.Tensor]
+    w1_scale: list[torch.Tensor] | None = None
+    w2_scale: list[torch.Tensor] | None = None
+
+    def operands(self) -> tuple[torch.Tensor, ...]:
+        return (*self.w1, *self.w2, *(self.w1_scale or ()), *(self.w2_scale or ()))
 
 
 @dataclass(slots=True)
 class MegamoeSharedExpertFusion:
-    """Live handle for the shared expert fused into the A5 MegaMoe operator.
+    """Live handle for the shared expert fused into the CANN MegaMoe operator.
 
     ``AscendSharedExperts.megamoe_shared_fusion()`` returns one instance and
     ``AscendMoERunner`` installs it on the routed-expert layer at
@@ -61,6 +62,19 @@ class MegamoeSharedExpertFusion:
     weights: MegamoeSharedWeights | None = None
     quant_out_dtype: int | None = None
     weight_type: int | None = None
+
+
+def shared_moe_weight_kwargs(layer: torch.nn.Module) -> dict[str, list[torch.Tensor] | None]:
+    fusion = getattr(layer, "ascend_megamoe_shared_fusion", None)
+    if fusion is None or fusion.weights is None:
+        return {}
+    weights = fusion.weights
+    return {
+        "shared_w1": weights.w1,
+        "shared_w2": weights.w2,
+        "shared_w1_scale": weights.w1_scale,
+        "shared_w2_scale": weights.w2_scale,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,10 +91,7 @@ class MoEWeights:
     w2_scale_bias: torch.Tensor | list[torch.Tensor] | None = None
     w1_offset: torch.Tensor | None = None
     w2_offset: torch.Tensor | None = None
-    # Shared-expert weights in the A5 MegaMoe layout, one tensor per shared
-    # expert: w1 (2*intermediate, hidden) + scale (2*intermediate, k//2, 2),
-    # w2 (hidden, intermediate) + scale (hidden, k//2, 2). Populated only when
-    # shared-expert fusion into the MegaMoe operator is active.
+    # Shared-expert operands in the selected CANN MegaMoe layout.
     shared_w1: list[torch.Tensor] | None = None
     shared_w2: list[torch.Tensor] | None = None
     shared_w1_scale: list[torch.Tensor] | None = None

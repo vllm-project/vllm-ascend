@@ -1,0 +1,10 @@
+pr: 22658
+entries:
+  - category: feature
+    text: >-
+      On Ascend A3, `additional_config.enable_fused_mc2=3` now fuses TP-sharded
+      shared experts (`TP > 1` with `enable_shared_expert_dp=false`) via load-time
+      AllGather and adds BF16 routed/shared fusion on compatible CANN builds.
+      Compatible weight reloads refill fused shared-expert weights and scales in
+      place so captured ACLGraphs retain valid storage across replays.
+    hardware: [A3]

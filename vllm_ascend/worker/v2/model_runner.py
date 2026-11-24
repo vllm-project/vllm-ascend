@@ -392,15 +392,23 @@ class NPUModelRunner(GPUModelRunner):
         if hasattr(super(), "reset_lora_state"):
             super().reset_lora_state()
         if vllm_version_is("0.34.0") and getattr(self.vllm_config, "lora_config", None) is None:
-            # v0.34.0 signals both reload and trainer completion here.
-            # Main already runs the MoE post-load hook after copy-back.
+            # v0.34.0 already runs on_target_weights_replaced() before
+            # reset_lora_state(); only refresh routed views here so shared
+            # experts are not gathered twice.
             for module in self.get_model().modules():
                 if isinstance(module, AscendMoERunner):
-                    module.process_weights_after_loading()
+                    module.routed_experts.refresh_megamoe_weights()
             self._refresh_linear_weight_scales()
 
     def on_target_weights_replaced(self) -> None:
         super().on_target_weights_replaced()
+        if getattr(getattr(self, "ascend_config", None), "megamoe_shared_expert_fusion", False):
+            with set_current_vllm_config(self.vllm_config):
+                for module in self.get_model().modules():
+                    if isinstance(module, AscendMoERunner) and module.ascend_shared_experts is not None:
+                        if not getattr(module, "_shared_reloaded_in_post_load", False):
+                            module.ascend_shared_experts.refresh_megamoe_shared_weights()
+                        module._shared_reloaded_in_post_load = False
         self._refresh_linear_weight_scales()
 
     @torch.inference_mode()

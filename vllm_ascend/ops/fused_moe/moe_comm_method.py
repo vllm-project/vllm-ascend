@@ -15,8 +15,10 @@
 # This file is a part of the vllm-ascend project.
 from __future__ import annotations
 
+import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import cast
 
 import torch
@@ -308,9 +310,7 @@ class FusedMC2CommImpl(MoECommMethod):
             # shared_weight1_type/shared_weight2_type) that older operator builds
             # reject outright. Snapshot the accepted kwarg names once so the
             # forward path can filter the shared-expert payload per ABI.
-            import inspect as _inspect
-
-            self._mega_moe_supported_kwargs = frozenset(_inspect.signature(self.mega_moe).parameters)
+            self._mega_moe_supported_kwargs = frozenset(inspect.signature(self.mega_moe).parameters)
             # Resolve the Python ABI once, before the first collective/capture.
             # The activation and its scalar parameters belong to FusedMoEConfig.
             self.mega_moe_activation_kwargs = moe_utils.select_mega_moe_activation_kwargs(
@@ -556,7 +556,8 @@ class FusedMC2CommImpl(MoECommMethod):
         x_active_mask = None
         # Ascend 950 (A5) MegaMoe only support a null x_active_mask, and it
         # must be passed as None. But on A2/A3 it must be valid.
-        if get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+        is_mxfp = get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+        if is_mxfp:
             x_active_mask = None
         else:
             if self.token_dispatcher.global_bs == 0 and fused_experts_input.routing.mc2_mask is not None:
@@ -588,45 +589,43 @@ class FusedMC2CommImpl(MoECommMethod):
         # Live payload installed by AscendMoERunner; its fields are filled in
         # when the shared linears finish loading.
         shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None)
-        if weights.shared_w1 is not None:
+        shared_w1 = None if getattr(layer, "ascend_skip_megamoe_shared", False) else weights.shared_w1
+        if shared_w1 is not None:
             # The shared expert may be quantized differently from the routed
             # experts (W4A4C8: MXFP4 routed + MXFP8 shared). The quant settings
             # below live in the same payload as the fused shared weights, so no
             # fallback mirroring of the routed activation dtype is needed here.
             shared_kwargs = dict(
-                shared_l1_weights=weights.shared_w1,
+                shared_l1_weights=shared_w1,
                 shared_l2_weights=weights.shared_w2,
                 shared_l1_weights_sf=weights.shared_w1_scale,
                 shared_l2_weights_sf=weights.shared_w2_scale,
                 shared_expert_quant_out_dtype=getattr(shared_fusion, "quant_out_dtype", None),
             )
-            # Mixed quantization: declare the shared weight dtype explicitly,
-            # otherwise the operator inherits the routed weight type for the
-            # shared descriptors and resolves the wrong shared GMM mode. The
-            # payload carries the descriptor family resolved from the shared
-            # linear's own quant type when its weights were rebuilt.
+            # A3 W4A8 and W8A8 both use int8 carriers. Explicit shared weight
+            # types distinguish the two interpretations for the kernel.
             shared_weight_type = getattr(shared_fusion, "weight_type", None)
             if shared_weight_type is not None:
                 shared_kwargs["shared_weight1_type"] = shared_weight_type
                 shared_kwargs["shared_weight2_type"] = shared_weight_type
-        # Older CANN MegaMoe ABI lacks the shared-quant-out-dtype /
-        # shared-weight-type knobs; dropping them is safe on such builds
-        # because the operator infers the shared GMM mode from the shared
-        # weight dtypes themselves.
-        # TODO(ZT-AIA): This ABI filter is retired together with
-        # _mega_moe_supported_kwargs once all CANN builds accept the knobs
-        # (expected by end of November 2026).
-        dropped = [k for k in shared_kwargs if k not in self._mega_moe_supported_kwargs]
-        if dropped:
-            # warning_once caches on *args (must be hashable); format up front.
-            logger.warning_once(
-                "CANN MegaMoe op does not accept shared-expert knobs %s; skipping them.",
-                ",".join(sorted(dropped)),
-            )
-            shared_kwargs = {k: v for k, v in shared_kwargs.items() if k in self._mega_moe_supported_kwargs}
+            dropped = shared_kwargs.keys() - self._mega_moe_supported_kwargs
+            if dropped:
+                required = {"shared_l1_weights", "shared_l2_weights"}
+                if weights.shared_w1_scale is not None:
+                    required.update(("shared_l1_weights_sf", "shared_l2_weights_sf"))
+                if shared_weight_type != weight_type and (not is_mxfp or shared_w1[0].dtype == weight1[0].dtype):
+                    required.update(("shared_weight1_type", "shared_weight2_type"))
+                if shared_kwargs["shared_expert_quant_out_dtype"] not in (None, dispatch_quant_out_dtype):
+                    required.add("shared_expert_quant_out_dtype")
+                if missing := sorted(dropped & required):
+                    raise RuntimeError(
+                        f"Installed CANN MegaMoe lacks required shared-expert arguments {missing}. "
+                        "Upgrade cann_ops_transformer or set enable_fused_mc2=2."
+                    )
+                shared_kwargs = {k: v for k, v in shared_kwargs.items() if k not in dropped}
 
         topk_weights = fused_experts_input.topk_weights.to(torch.float32)
-        if weights.shared_w1 is not None:
+        if shared_w1 is not None:
             # When the shared expert runs inside MegaMoe, the operator output
             # contains routed + shared combined. The runner's output-side
             # routed_scaling_factor would scale the shared contribution too,
@@ -642,13 +641,25 @@ class FusedMC2CommImpl(MoECommMethod):
                 routed_scaling_factor = getattr(layer, "routed_scaling_factor", None)
             if routed_scaling_factor is not None and routed_scaling_factor != 1.0:
                 topk_weights = topk_weights * routed_scaling_factor
+        symm_buffer = self.mega_moe_symm_buffer
+        combine_mode = getattr(symm_buffer, "combine_comm_mode", 0)
+        if (
+            not is_mxfp
+            and isinstance(combine_mode, int)
+            and combine_mode != 0
+            and (shared_w1 is not None or fused_experts_input.quant.quant_type != QuantType.W4A8)
+        ):
+            # Arch22 shared experts require the ordinary combine mode. Keep
+            # the target-owned context and override only this call's metadata.
+            symm_buffer = SimpleNamespace(**vars(symm_buffer))
+            symm_buffer.combine_comm_mode = 0
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             fused_experts_input.topk_ids.to(torch.int32),
             topk_weights,
             weight1,
             weight2,
-            self.mega_moe_symm_buffer,
+            symm_buffer,
             l1_weights_sf=weight_scales1,
             l2_weights_sf=weight_scales2,
             l1_bias=l1_bias,
