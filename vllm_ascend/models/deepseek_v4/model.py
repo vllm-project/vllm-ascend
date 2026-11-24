@@ -1094,6 +1094,10 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 ".w2": ".down_proj",
                 ".w3": ".up_proj",
             },
+            orig_to_new_prefix={
+                "layers.": "model.layers.",
+                "embed_tokens.": "model.embed_tokens.",
+            },
         )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

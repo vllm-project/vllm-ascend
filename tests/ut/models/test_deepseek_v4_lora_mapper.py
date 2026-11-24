@@ -8,6 +8,7 @@ without an error, so the rename rule is covered directly here.
 """
 
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -414,3 +415,189 @@ def test_dsv4_compressor_projections_are_unwrapped_and_rejected_on_load() -> Non
         assert set(registered.keys()) == {1}
     finally:
         upstream_lora_utils._all_lora_classes = original_classes
+
+
+def test_causallm_bare_layers_and_embed_prefixes_map_to_model_tree() -> None:
+    mapper = _rename_mapper()
+    cases = [
+        (
+            "base_model.model.layers.5.attn.wq_a.lora_A.weight",
+            "model.layers.5.self_attn.wq_a",
+            True,
+        ),
+        (
+            "layers.5.ffn.experts.3.w1.lora_B.weight",
+            "model.layers.5.mlp.experts.3.gate_proj",
+            False,
+        ),
+        (
+            "embed_tokens.lora_A.weight",
+            "model.embed_tokens",
+            True,
+        ),
+        (
+            "model.embed_tokens.lora_B.weight",
+            "model.embed_tokens",
+            False,
+        ),
+    ]
+    for raw_key, expected_module, expected_is_a in cases:
+        module_name, is_lora_a = parse_fine_tuned_lora_name(raw_key, mapper)
+        assert module_name == expected_module
+        assert is_lora_a is expected_is_a
+
+
+def test_dsv4_indexer_wq_b_lora_bypasses_multistream_and_w8a8_direct_matmul() -> None:
+    from vllm.lora.layers.base import BaseLayerWithLoRA
+
+    from vllm_ascend.models.deepseek_v4.indexer import (
+        AscendIndexerMetadata,
+        DeepseekV4Indexer,
+        IndexerOverlapPlan,
+    )
+    from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
+
+    class _StubIndexerWqBLoRA(BaseLayerWithLoRA):
+        calls: int = 0
+
+        def __call__(self, x: torch.Tensor) -> torch.Tensor:
+            self.calls += 1
+            return x + 2.0
+
+    class _StubCompressor:
+        rotate: bool = False
+
+        def __call__(self, **_: object) -> tuple[torch.Tensor, torch.Tensor]:
+            return torch.zeros((0, 4), dtype=torch.bfloat16), torch.zeros((0,), dtype=torch.int32)
+
+    wq_b_wrapper = object.__new__(_StubIndexerWqBLoRA)
+    torch.nn.Module.__init__(wq_b_wrapper)
+    wq_b_wrapper.calls = 0
+    cast(Any, wq_b_wrapper).quant_method = SimpleNamespace(
+        quant_method=object.__new__(AscendW8A8DynamicLinearMethod),
+    )
+
+    indexer = object.__new__(DeepseekV4Indexer)
+    torch.nn.Module.__init__(indexer)
+    indexer.wq_b = wq_b_wrapper
+    indexer_any = cast(Any, indexer)
+    indexer_any.cv_wq_b = SimpleNamespace(
+        matmul=lambda *_: (_ for _ in ()).throw(AssertionError("must not call cv_wq_b")),
+    )
+    indexer.n_heads = 2
+    indexer.head_dim = 4
+    indexer.rope_head_dim = 2
+    indexer.softmax_scale = 0.5
+    indexer.skip_topk = False
+    indexer.use_index_cache = False
+    indexer.topk_indices_buffer = None
+    indexer_any.compressor = SimpleNamespace()
+    indexer_any.weights_proj = lambda hs: torch.ones((hs.shape[0], 2), dtype=hs.dtype)
+
+    seen_calls: list[str] = []
+
+    def _select_topk(*_: Any) -> torch.Tensor:
+        seen_calls.append("select_topk")
+        return torch.zeros((2, 1), dtype=torch.int32)
+
+    def _quant_select(*_: Any) -> torch.Tensor:
+        seen_calls.append("quant_select")
+        return torch.ones((2, 1), dtype=torch.int32)
+
+    indexer_any.ops = SimpleNamespace(
+        unpack_dsa_indexer_kv_cache=lambda kv: ("k", "s", "sc", "f"),
+        quantize_query=lambda q: (q, "qs"),
+        select_topk=_select_topk,
+    )
+
+    cos = torch.ones((2, 2), dtype=torch.bfloat16)
+    sin = torch.zeros((2, 2), dtype=torch.bfloat16)
+    metadata = AscendIndexerMetadata(
+        compressor=cast(
+            Any,
+            SimpleNamespace(
+                cache=SimpleNamespace(
+                    req_metadata=SimpleNamespace(cos={"layer0": cos}, sin={"layer0": sin}),
+                    hadamard=torch.eye(4, dtype=torch.bfloat16),
+                ),
+            ),
+        ),
+    )
+    hidden_states = torch.ones((2, 8), dtype=torch.bfloat16)
+    qr = torch.ones((2, 8), dtype=torch.bfloat16)
+
+    fake_c_ascend = SimpleNamespace(inplace_partial_rotary_mul=lambda *_, **__: None)
+    with (
+        patch.object(torch.ops, "_C_ascend", fake_c_ascend, create=True),
+        patch(
+            "vllm_ascend.models.deepseek_v4.indexer.torch_npu.npu_quant_matmul",
+            side_effect=AssertionError("must not bypass wq_b LoRA wrapper via npu_quant_matmul"),
+        ),
+        patch("vllm_ascend.models.deepseek_v4.indexer.rotate_activation", side_effect=lambda q, *_: q),
+        patch.object(
+            indexer,
+            "_cv_compute_query_and_update_cache_multistream",
+            side_effect=AssertionError("must bypass multistream when indexer.wq_b is LoRA-wrapped"),
+        ),
+    ):
+        q, *_ = indexer._indexer_qkv_prepare(
+            hidden_states,
+            qr,
+            kv_cache=(),
+            metadata=metadata,
+            cos=cos,
+            sin=sin,
+            qr_pertoken_scale=torch.ones((2, 1), dtype=torch.float32),
+            write_cache=False,
+        )
+        assert wq_b_wrapper.calls == 1
+        assert torch.all(q == 3.0)
+
+        overlap_calls: list[str] = []
+
+        def _compute_ckv() -> tuple[str, str]:
+            overlap_calls.append("compute")
+            return ("ckv", "slot")
+
+        def _scatter_ckv(ckv: str, slot: str) -> None:
+            overlap_calls.append(f"scatter:{ckv}:{slot}")
+
+        plan = IndexerOverlapPlan(
+            compute_attention_compressed_kv=_compute_ckv,
+            scatter_attention_compressed_kv=cast(Any, _scatter_ckv),
+            aux_stream=object(),
+        )
+        out = indexer.forward(
+            "layer0",
+            hidden_states,
+            qr,
+            kv_cache=(),
+            metadata=metadata,
+            overlap_plan=plan,
+            qr_pertoken_scale=torch.ones((2, 1), dtype=torch.float32),
+            write_cache=False,
+        )
+        assert wq_b_wrapper.calls == 2
+        assert seen_calls == ["select_topk"]
+        assert torch.equal(out, torch.zeros((2, 1), dtype=torch.int32))
+
+        plan_write = IndexerOverlapPlan(
+            compute_attention_compressed_kv=_compute_ckv,
+            scatter_attention_compressed_kv=cast(Any, _scatter_ckv),
+            aux_stream=object(),
+        )
+        indexer_any.compressor = _StubCompressor()
+        indexer_any.ops.quantize_update_cache_and_select_topk = _quant_select
+        out_write = indexer.forward(
+            "layer0",
+            hidden_states,
+            qr,
+            kv_cache=(),
+            metadata=metadata,
+            overlap_plan=plan_write,
+            qr_pertoken_scale=None,
+            write_cache=True,
+        )
+        assert wq_b_wrapper.calls == 3
+        assert overlap_calls == ["compute", "scatter:ckv:slot"]
+        assert torch.equal(out_write, torch.ones((2, 1), dtype=torch.int32))
