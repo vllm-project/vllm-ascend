@@ -5,7 +5,11 @@ import pytest
 import torch
 
 from vllm_ascend.distributed.eplb.tensor_ops import EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS
-from vllm_ascend.ops.fused_moe.eplb import map_to_physical_for_ascend, record_expert_tokens
+from vllm_ascend.ops.fused_moe.eplb import (
+    map_to_physical_for_ascend,
+    record_expert_tokens,
+    record_source_routes,
+)
 
 
 @pytest.mark.parametrize(
@@ -88,4 +92,55 @@ def test_record_expert_blocks(count, group_list_type, count_dtype, load_dtype):
     torch.testing.assert_close(load.cpu(), expected, rtol=0, atol=0)
     enabled.fill_(False)
     record_expert_tokens(tokens, load, enabled, group_list_type, start)
+    torch.testing.assert_close(load.cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "tokens,experts,topk,dtype",
+    [
+        (1, 128, 8, torch.int32),
+        (33, 128, 8, torch.int64),
+        (1025, 384, 8, torch.int32),
+        (65536, 896, 16, torch.int64),
+    ],
+)
+def test_record_source_routes(tokens, experts, topk, dtype):
+    # The IDs span negative, valid and out-of-range values.
+    ids = (torch.arange(tokens * topk).reshape(tokens, topk) * 7 % (experts + 8) - 4).to(dtype)
+    mask = torch.arange(tokens) % 3 != 1
+    initial = torch.arange(experts, dtype=torch.int32) * 3
+    expected = initial.clone()
+    valid = mask[:, None] & (ids >= 0) & (ids < experts)
+    expected += torch.bincount(ids[valid].long(), minlength=experts).to(torch.int32)
+    load = initial.npu()
+    enabled = torch.tensor(True, device="npu")
+
+    record_source_routes(ids.npu(), mask.npu(), load, enabled)
+    torch.testing.assert_close(load.cpu(), expected, rtol=0, atol=0)
+    enabled.fill_(False)
+    record_source_routes(ids.npu(), mask.npu(), load, enabled)
+    torch.testing.assert_close(load.cpu(), expected, rtol=0, atol=0)
+
+
+def test_record_source_routes_mutable_state_graph_replay():
+    ids = torch.tensor([[1, 0], [0, 3], [3, 1]], dtype=torch.int64, device="npu")
+    mask = torch.tensor([True, False, True], dtype=torch.bool, device="npu")
+    load = torch.arange(4, dtype=torch.int32, device="npu")
+    enabled = torch.tensor(True, device="npu")
+    # Compile the kernel before capture.
+    record_source_routes(ids, mask, load, enabled)
+    torch.npu.synchronize()
+    initial = load.cpu()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        record_source_routes(ids, mask, load, enabled)
+    load.copy_(initial)
+    graph.replay()
+    expected = initial.clone()
+    expected[1] += 2
+    expected[3] += 1
+    torch.testing.assert_close(load.cpu(), expected, rtol=0, atol=0)
+
+    enabled.fill_(False)
+    graph.replay()
     torch.testing.assert_close(load.cpu(), expected, rtol=0, atol=0)

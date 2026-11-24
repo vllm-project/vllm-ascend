@@ -18,6 +18,7 @@ from vllm.model_executor.layers.activation import SituAndMul
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
+from vllm_ascend.distributed.eplb import eplb_state as eplb_state_module
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops import register_custom_ops as custom_ops
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
@@ -948,6 +949,7 @@ def test_routed_experts_forward_impl_runs_current_flow(
     if state is not None:
         state.expert_load_view = expert_load
         state.should_record_tensor = torch.tensor(False)
+        state.num_unpadded_tokens_tensors = [torch.tensor(2)]
         state.local_expert_count = 2
         state.local_expert_start = 2
     routed_experts.router = SimpleNamespace(
@@ -1002,9 +1004,14 @@ def test_routed_experts_forward_impl_runs_current_flow(
     monkeypatch.setattr(routed_experts_module, "get_current_vllm_config", lambda: None)
     monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 3)
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
-    record_expert_tokens = MagicMock()
+    record_source_routes = MagicMock()
     monkeypatch.setattr(routed_experts_module, "use_allgather_eplb", lambda: False)
-    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
+    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_source_routes", record_source_routes)
+    # Without a comm-method mask, the MC2 path derives its source mask.
+    eplb_context = SimpleNamespace(is_padding=None, additional_kwargs={})
+    monkeypatch.setattr(eplb_state_module, "get_forward_context", lambda: eplb_context)
+    monkeypatch.setattr(eplb_state_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(eplb_state_module, "get_tensor_model_parallel_rank", lambda: 0)
 
     result = routed_experts.forward_impl(
         hidden_states=hidden_states,
@@ -1046,7 +1053,7 @@ def test_routed_experts_forward_impl_runs_current_flow(
     )
     expected_load = torch.zeros_like(expert_load)
     torch.testing.assert_close(expert_load, expected_load)
-    assert record_expert_tokens.call_count == int(v2_eplb)
+    assert record_source_routes.call_count == int(v2_eplb)
     moe_comm_method.finalize.assert_called_once_with(
         hidden_states=routed_out,
         reduce_results=False,

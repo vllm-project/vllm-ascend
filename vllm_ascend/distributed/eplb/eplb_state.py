@@ -49,6 +49,9 @@ EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar("vllm_ascend_expert_mapping
 # mask per micro-batch. Read directly rather than through _EXTRA_CTX: the
 # proxy cannot create the list atomically, which DBO needs.
 _ALLGATHER_SOURCE_MASK_SLOTS = "eplb_allgather_source_mask_slots"
+# ForwardContext.additional_kwargs key holding the derived source masks of
+# dispatching paths, one per micro-batch and row count.
+_DISPATCH_SOURCE_MASK_KEY = "eplb_dispatch_source_mask"
 
 
 @contextmanager
@@ -127,49 +130,55 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         num_source_tokens: int,
         is_sequence_parallel: bool = False,
         all_gather_mask: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        dispatch_mask: torch.Tensor | None = None,
     ) -> None:
-        """Record MRV2 load, constructing and gathering source eligibility when needed."""
-        local_load = None
-        if all_gather_mask is not None:
-            assert self.num_unpadded_tokens_tensors is not None and self.should_record_tensor is not None
-            num_unpadded_tokens = self.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
-            # Every MoE layer of this model derives the same mask from the same
-            # per-forward inputs, so gathering it in each one repeats a
-            # collective as many times as the model has MoE layers. Hold it on
-            # the forward context, which lives exactly as long as the mask is
-            # valid: warmup, graph capture and draft forwards each enter their
-            # own, and none of them passes through the EPLB controller.
-            # ``setdefault`` because DBO runs its micro-batches on two threads
-            # that share one context, and a lost list would leave the ranks
-            # gathering a different number of times.
-            ubatch = dbo_current_ubatch_id()
-            forward_context = get_forward_context()
-            slots = forward_context.additional_kwargs.setdefault(
-                _ALLGATHER_SOURCE_MASK_SLOTS,
-                [None] * len(self.num_unpadded_tokens_tensors),
+        """Record MRV2 load, constructing and gathering source eligibility when needed.
+
+        AllGather passes ``all_gather_mask``. The other MoE comm paths pass the
+        row mask their ``prepare`` left on the routed rows when they have one.
+        """
+        if all_gather_mask is None:
+            self._record_source_routes(topk_ids, is_sequence_parallel, dispatch_mask)
+            return
+        assert self.num_unpadded_tokens_tensors is not None and self.should_record_tensor is not None
+        num_unpadded_tokens = self.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
+        # Every MoE layer of this model derives the same mask from the same
+        # per-forward inputs, so gathering it in each one repeats a
+        # collective as many times as the model has MoE layers. Hold it on
+        # the forward context, which lives exactly as long as the mask is
+        # valid: warmup, graph capture and draft forwards each enter their
+        # own, and none of them passes through the EPLB controller.
+        # ``setdefault`` because DBO runs its micro-batches on two threads
+        # that share one context, and a lost list would leave the ranks
+        # gathering a different number of times.
+        ubatch = dbo_current_ubatch_id()
+        forward_context = get_forward_context()
+        slots = forward_context.additional_kwargs.setdefault(
+            _ALLGATHER_SOURCE_MASK_SLOTS,
+            [None] * len(self.num_unpadded_tokens_tensors),
+        )
+        token_mask = slots[ubatch]
+        if token_mask is None:
+            is_padding = self.allgather_source_is_padding
+            if is_padding is None:
+                is_padding = getattr(forward_context, "is_padding", None)
+            token_mask = make_allgather_mask(
+                num_source_tokens,
+                num_unpadded_tokens,
+                self.should_record_tensor,
+                is_padding=is_padding,
+                tp_size=get_tensor_model_parallel_world_size() if is_sequence_parallel else 1,
+                tp_rank=get_tensor_model_parallel_rank() if is_sequence_parallel else 0,
             )
-            token_mask = slots[ubatch]
-            if token_mask is None:
-                is_padding = self.allgather_source_is_padding
-                if is_padding is None:
-                    is_padding = getattr(forward_context, "is_padding", None)
-                token_mask = make_allgather_mask(
-                    num_source_tokens,
-                    num_unpadded_tokens,
-                    self.should_record_tensor,
-                    is_padding=is_padding,
-                    tp_size=get_tensor_model_parallel_world_size() if is_sequence_parallel else 1,
-                    tp_rank=get_tensor_model_parallel_rank() if is_sequence_parallel else 0,
-                )
-                token_mask = all_gather_mask(token_mask)
-                slots[ubatch] = token_mask
-            local_load = count_allgather_tokens(topk_ids, token_mask, self.local_expert_start, self.local_expert_count)
-            assert self.allgather_record_tensor is not None
-            torch.maximum(
-                self.allgather_record_tensor,
-                token_mask.any().to(torch.int32),
-                out=self.allgather_record_tensor,
-            )
+            token_mask = all_gather_mask(token_mask)
+            slots[ubatch] = token_mask
+        local_load = count_allgather_tokens(topk_ids, token_mask, self.local_expert_start, self.local_expert_count)
+        assert self.allgather_record_tensor is not None
+        torch.maximum(
+            self.allgather_record_tensor,
+            token_mask.any().to(torch.int32),
+            out=self.allgather_record_tensor,
+        )
         if expert_tokens is None:
             raise RuntimeError("MRV2 EPLB requires operator-provided expert counts")
         expert_load_view = self.expert_load_view
@@ -193,6 +202,76 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
             group_list_type,
             self.local_expert_start,
         )
+
+    def _record_source_routes(
+        self,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool,
+        dispatch_mask: torch.Tensor | None,
+    ) -> None:
+        """Count this rank's eligible routes for every physical expert.
+
+        AllGather gathers every source before routing, so owners count their own
+        experts. The dispatching paths only see what arrived at them, which
+        mixes the tokens of every DP rank, so each source counts its own routes
+        instead and the cross-EP sum restores the executed load.
+        """
+        expert_load_view = self.expert_load_view
+        if expert_load_view is None or self.should_record_tensor is None or self.num_unpadded_tokens_tensors is None:
+            raise RuntimeError("MRV2 EPLB load-recording state is not initialized")
+        if dispatch_mask is None:
+            dispatch_mask = self._derive_dispatch_mask(topk_ids, is_sequence_parallel)
+        torch.ops.vllm.ascend_eplb_record_source_routes(
+            topk_ids,
+            dispatch_mask,
+            expert_load_view,
+            self.should_record_tensor,
+        )
+
+    def _derive_dispatch_mask(
+        self,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool,
+    ) -> torch.Tensor:
+        """Derive the source rows of ``topk_ids`` when the comm method has no mask.
+
+        Dispatching paths route the rows left by ``prepare``, which pads them to
+        the DP-wide length and, without sequence parallelism, takes this rank's
+        TP chunk. Every MoE layer derives the same mask from the same
+        per-forward inputs, so hold it on the forward context for the forward.
+        """
+        ubatch = dbo_current_ubatch_id()
+        forward_context = get_forward_context()
+        cache = forward_context.additional_kwargs.setdefault(_DISPATCH_SOURCE_MASK_KEY, {})
+        num_tokens = topk_ids.shape[0]
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        key = (ubatch, is_sequence_parallel, num_tokens)
+        if key not in cache:
+            # A draft model tracks its own padding.
+            is_padding = self.allgather_source_is_padding
+            if is_padding is None:
+                is_padding = getattr(forward_context, "is_padding", None)
+            if is_sequence_parallel:
+                cache[key] = make_allgather_mask(
+                    num_tokens,
+                    self.num_unpadded_tokens_tensors[ubatch],
+                    self.should_record_tensor,
+                    is_padding=is_padding,
+                    tp_size=tp_size,
+                    tp_rank=tp_rank,
+                )
+            else:
+                # ``prepare`` padded the rows to a TP multiple before it split
+                # them: mask the padded rows, then take this rank's chunk.
+                padded_mask = make_allgather_mask(
+                    num_tokens * tp_size,
+                    self.num_unpadded_tokens_tensors[ubatch],
+                    self.should_record_tensor,
+                    is_padding=is_padding,
+                )
+                cache[key] = padded_mask[tp_rank * num_tokens : (tp_rank + 1) * num_tokens]
+        return cache[key]
 
     def refresh_expert_replica_routing_table(self) -> None:
         logical_to_physical_map = self.logical_to_physical_map

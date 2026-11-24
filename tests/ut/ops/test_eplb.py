@@ -1,6 +1,7 @@
 # SPDX-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+import pytest
 import torch
 
 from vllm_ascend.distributed.eplb.tensor_ops import (
@@ -11,6 +12,7 @@ from vllm_ascend.ops.fused_moe.eplb import (
     map_to_physical,
     map_to_physical_for_ascend,
     record_expert_tokens,
+    record_source_routes,
 )
 
 
@@ -95,3 +97,28 @@ def test_map_and_record_operator_counts():
     torch.testing.assert_close(expert_load, counts * 2)
     record_expert_tokens(counts, expert_load, torch.tensor(False), 1, 0)
     torch.testing.assert_close(expert_load, counts * 2)
+
+
+def test_record_source_routes_operator():
+    topk_ids = torch.tensor([[0, 3], [-1, 4], [2, 2]])
+    expert_load = torch.zeros(4, dtype=torch.int32)
+
+    record_source_routes(topk_ids, torch.tensor([True, False, True]), expert_load, torch.tensor(True))
+
+    torch.testing.assert_close(expert_load, torch.tensor([1, 0, 2, 1], dtype=torch.int32))
+    # An int8 mask is accepted, and a disabled flag leaves the load unchanged.
+    record_source_routes(topk_ids, torch.ones(3, dtype=torch.int8), expert_load, torch.tensor(False))
+    torch.testing.assert_close(expert_load, torch.tensor([1, 0, 2, 1], dtype=torch.int32))
+
+
+@pytest.mark.parametrize(
+    "topk_ids,source_mask",
+    [
+        (torch.zeros(3, 2, dtype=torch.int64), torch.ones(2, dtype=torch.bool)),
+        (torch.zeros(3, 2, dtype=torch.int64), torch.ones(3, dtype=torch.int32)),
+        (torch.zeros(2, 2, 2, dtype=torch.int64), torch.ones(2, dtype=torch.bool)),
+    ],
+)
+def test_record_source_routes_rejects_mismatched_masks(topk_ids, source_mask):
+    with pytest.raises(ValueError):
+        record_source_routes(topk_ids, source_mask, torch.zeros(4, dtype=torch.int32), torch.tensor(True))

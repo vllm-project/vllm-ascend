@@ -120,9 +120,11 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
                 controller.state = state
                 controller.set_batch_phase(batch_has_prefill=batch_has_prefill)
 
-                controller.prepare_forward(object(), 7)
+                model_config = object()
+                controller.prepare_forward(model_config, 7)
 
-                state.prepare_forward.assert_not_called()
+                # The source masks read the token counts on every policy.
+                state.prepare_forward.assert_called_once_with(model_config, 7, None)
                 state._should_record_current_step.assert_called_once_with(log_stats=False)
                 self.assertIs(bool(state.should_record_tensor), expected_record)
                 self.assertTrue(state._is_load_sampling_step)

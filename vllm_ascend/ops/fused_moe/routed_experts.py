@@ -774,6 +774,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                     num_source_tokens=num_source_tokens,
                     is_sequence_parallel=self.moe_config.is_sequence_parallel,
                     all_gather_mask=all_gather_mask,
+                    dispatch_mask=mc2_mask,
                 )
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:

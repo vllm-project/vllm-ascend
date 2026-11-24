@@ -35,6 +35,40 @@ class TestAscendEPLBController(unittest.TestCase):
         assert state.allgather_record_tensor.item() == -1
         assert not state._has_fresh_recorded_load
 
+    def test_a3_stair_policy_prepares_unpadded_count_and_sampling(self):
+        # The dispatching paths derive their source mask from the token counts.
+        controller = self._make_controller()
+        state = MagicMock()
+        state.uses_custom_load_stats = True
+        state.should_record_tensor = torch.tensor(False)
+        state._has_fresh_recorded_load = False
+        state._should_record_current_step.return_value = True
+        controller.state = state
+        config = SimpleNamespace()
+        with patch(
+            "vllm_ascend.worker.v2.eplb.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A3),
+        ):
+            controller.prepare_forward(config, 3)
+        state.prepare_forward.assert_called_once_with(config, 3, None)
+        assert state.should_record_tensor.item()
+        assert state._has_fresh_recorded_load
+
+    def test_a3_default_policy_leaves_the_recording_flag_to_upstream(self):
+        controller = self._make_controller(policy="default")
+        state = MagicMock()
+        state.uses_custom_load_stats = False
+        state.should_record_tensor = torch.tensor(True)
+        controller.state = state
+        with patch(
+            "vllm_ascend.worker.v2.eplb.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A3),
+        ):
+            controller.prepare_forward(SimpleNamespace(), 3)
+        state.prepare_forward.assert_called_once()
+        state._should_record_current_step.assert_not_called()
+        assert state.should_record_tensor.item()
+
     @staticmethod
     def _make_controller(*, enable_eplb=True, log_balancedness=False, policy="stair"):
         parallel_config = SimpleNamespace(

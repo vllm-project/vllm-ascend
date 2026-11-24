@@ -18,6 +18,8 @@ _SMALL_TILE = 64
 _MEDIUM_TILE = 128
 _LARGE_TILE = 1024
 _MAX_RECORD_BLOCK_SIZE = 256
+# Routes per program of the source histogram, capped like the recording block.
+_SOURCE_ROUTE_BLOCK_SIZE = 256
 
 
 def _mapping_block_size(numel: int) -> int:
@@ -196,4 +198,53 @@ def record_expert_tokens_triton(
         local_expert_start,
         group_list_type=group_list_type,
         BLOCK_SIZE=block_size,
+    )
+
+
+@triton.jit(
+    do_not_specialize=["topk", "num_experts", "numel"],
+    # Comm-method masks are chunks of a shared buffer, so their address
+    # alignment changes with the batch shape.
+    do_not_specialize_on_alignment=["source_mask_ptr"],
+)
+def _record_source_routes_kernel(
+    topk_ids_ptr,
+    source_mask_ptr,
+    record_enabled_ptr,
+    expert_load_ptr,
+    topk,
+    num_experts,
+    numel,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    if tl.load(record_enabled_ptr) != 0:
+        mask = offsets < numel
+        expert_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=-1)
+        source_valid = tl.load(source_mask_ptr + offsets // topk, mask=mask, other=0) != 0
+        valid = mask & source_valid & (expert_id >= 0) & (expert_id < num_experts)
+        # A masked lane still forms an address; keep it in range.
+        safe_expert_id = tl.where(valid, expert_id, 0)
+        tl.atomic_add(expert_load_ptr + safe_expert_id, 1, mask=valid)
+
+
+def record_source_routes_triton(
+    topk_ids: torch.Tensor,
+    source_mask: torch.Tensor,
+    expert_load_view: torch.Tensor,
+    record_enabled: torch.Tensor,
+) -> None:
+    """Accumulate the eligible routes of each physical expert when collection is enabled."""
+    numel = topk_ids.numel()
+    if numel == 0:
+        return
+    _record_source_routes_kernel[(triton.cdiv(numel, _SOURCE_ROUTE_BLOCK_SIZE),)](
+        topk_ids,
+        source_mask,
+        record_enabled,
+        expert_load_view,
+        topk_ids.shape[1],
+        expert_load_view.numel(),
+        numel,
+        BLOCK_SIZE=_SOURCE_ROUTE_BLOCK_SIZE,
     )

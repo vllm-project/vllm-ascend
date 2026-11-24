@@ -110,6 +110,37 @@ def record_expert_tokens(
     )
 
 
+def record_source_routes(
+    topk_ids: torch.Tensor,
+    source_mask: torch.Tensor,
+    expert_load_view: torch.Tensor,
+    record_enabled: torch.Tensor,
+) -> None:
+    """Accumulate the routes of eligible source tokens into physical expert load.
+
+    ``topk_ids`` holds global physical expert IDs, one row per source token of
+    this rank, and ``source_mask`` selects the rows to count.
+    """
+    if topk_ids.ndim != 2 or source_mask.shape != topk_ids.shape[:1]:
+        raise ValueError("source_mask must be 1D with one entry per topk_ids row")
+    if source_mask.dtype not in (torch.bool, torch.int8):
+        raise ValueError("source_mask must be bool or int8")
+    if expert_load_view.ndim != 1:
+        raise ValueError("expert_load_view must be 1D")
+    if topk_ids.device.type != "cpu":
+        from vllm_ascend.ops.triton.eplb import record_source_routes_triton
+
+        # The kernel reads the row mask as int8; both dtypes are one byte.
+        mask = source_mask.view(torch.int8)
+        record_source_routes_triton(topk_ids.contiguous(), mask, expert_load_view, record_enabled)
+        return
+
+    num_experts = expert_load_view.numel()
+    eligible = (source_mask != 0)[:, None] & (topk_ids >= 0) & (topk_ids < num_experts)
+    counts = torch.bincount(topk_ids[eligible].to(torch.int64), minlength=num_experts)
+    expert_load_view.add_(counts.to(expert_load_view.dtype) * record_enabled.to(expert_load_view.dtype))
+
+
 def _map_to_physical_fake(
     topk_ids: torch.Tensor,
     expert_replica_routing_table: torch.Tensor,
@@ -127,6 +158,15 @@ def _record_expert_tokens_fake(
     return None
 
 
+def _record_source_routes_fake(
+    topk_ids: torch.Tensor,
+    source_mask: torch.Tensor,
+    expert_load_view: torch.Tensor,
+    record_enabled: torch.Tensor,
+) -> None:
+    return None
+
+
 direct_register_custom_op(
     op_name="ascend_eplb_map_to_physical",
     op_func=map_to_physical_for_ascend,
@@ -140,5 +180,13 @@ direct_register_custom_op(
     op_func=record_expert_tokens,
     mutates_args=["expert_load_view"],
     fake_impl=_record_expert_tokens_fake,
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="ascend_eplb_record_source_routes",
+    op_func=record_source_routes,
+    mutates_args=["expert_load_view"],
+    fake_impl=_record_source_routes_fake,
     dispatch_key="PrivateUse1",
 )
