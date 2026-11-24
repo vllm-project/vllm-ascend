@@ -33,6 +33,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
 
+from vllm_ascend.ascend_config import draft_config_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
@@ -64,6 +65,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     # override, upstream sampling logic untouched).
     _lmhead_tp_sample_draft_supported = True
 
+    @draft_config_context()
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
@@ -87,6 +89,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
         )
 
+    @draft_config_context()
     def load_draft_model(
         self,
         target_model: torch.nn.Module,

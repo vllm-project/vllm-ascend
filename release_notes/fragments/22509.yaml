@@ -1,0 +1,6 @@
+pr: 22509
+entries:
+  - category: feature
+    text: DeepSeek-V4.1-Flash W4A8 prefill on A2 (910B3) can now route routed experts through the CANN MegaMoe operator. Set `enable_fused_mc2=2` in additional config on a DP1/TP1/PCP8/EP8 eager BF16 KV-producer deployment with the W4A8_DYNAMIC routed-expert recipe; configurations outside the validated envelope log a warning and fall back to the ordinary MC2/GMM MoE path, an oversized local batch falls back per step at the 16384 per-rank token limit, and the nested PCP=1 DSpark draft always keeps its ordinary route.
+    model: deepseek-v4.1-flash
+    hardware: [A2]

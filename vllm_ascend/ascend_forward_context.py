@@ -98,12 +98,32 @@ def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
 
 
+def is_draft_model(vllm_config: VllmConfig) -> bool:
+    """Identify a draft layer when routing an eligible PCP8 A2 MegaMoe target."""
+    model_config = vllm_config.model_config
+    if model_config is None:
+        return False
+    architectures = getattr(model_config, "architectures", None)
+    if not isinstance(architectures, (list, tuple)):
+        architectures = [getattr(model_config, "architecture", None)]
+    # During reconstruction the draft can still carry the target architecture.
+    return (
+        getattr(model_config, "runner_type", None) == "draft"
+        or "DeepseekV41DSparkModel" in architectures
+        or getattr(vllm_config.parallel_config, "prefill_context_parallel_size", None) == 1
+    )
+
+
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
     return (
         is_mega_moe_supported()
         and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE)
         and get_ascend_config().enable_fused_mc2 == 1
+        and not (
+            get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY
+            and is_draft_model(vllm_config)
+        )
         and is_moe_model(vllm_config)
         and vllm_config.parallel_config.enable_expert_parallel
         and 1 < get_ep_group().world_size <= 64
@@ -316,6 +336,16 @@ def _select_capacity_and_expert_density_moe_comm_method(
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
+    if not is_draft_model and use_cann_megamoe(vllm_config):
+        if num_tokens is not None and num_tokens > _MEGA_MOE_TOKENS_PER_RANK_LIMIT:
+            logger.warning_once(
+                "MegaMoe per-rank token capacity (%d) exceeded by the local batch "
+                "(%d tokens); falling back to ALLGATHER for this step.",
+                _MEGA_MOE_TOKENS_PER_RANK_LIMIT,
+                num_tokens,
+            )
+            return MoECommType.ALLGATHER
+        return MoECommType.FUSED_MC2
     num_experts = vllm_config.model_config.get_num_experts()
     ep_world_size = (
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size

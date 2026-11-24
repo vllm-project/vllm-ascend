@@ -30,8 +30,17 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, select_moe_comm_method, use_cann_megamoe
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ascend_forward_context import (
+    _EXTRA_CTX,
+    is_draft_model,
+    select_moe_comm_method,
+    use_cann_megamoe,
+)
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    MoECommPolicy,
+    get_current_hardware_profile,
+)
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
@@ -698,7 +707,20 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         lora_context = getattr(self, "_ascend_moe_lora_context", None)
         comm_type = _EXTRA_CTX.moe_comm_type
+        # rc1 stores the construction config on each layer, including the
+        # replicated PCP=1 draft that can inherit the target forward context.
         if (
+            getattr(_EXTRA_CTX, "use_mega_moe", False)
+            and get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY
+            and is_draft_model(self._vllm_config)
+        ):
+            comm_type = select_moe_comm_method(
+                _EXTRA_CTX.max_tokens_across_dp,
+                self._vllm_config,
+                is_draft_model=True,
+                draft_moe_quant_type=self.quant_type,
+            )
+        elif (
             getattr(_EXTRA_CTX, "use_mega_moe", False)
             and self._vllm_config.model_config.runner_type == "draft"
             and self.quant_type == QuantType.NONE

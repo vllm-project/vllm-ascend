@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
@@ -321,6 +322,10 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             "w2_scale_bias",
         )
         use_mega_moe = use_cann_megamoe(get_current_vllm_config())
+        # Once EP is initialized, choose a single layout for both MegaMoe
+        # and the ordinary GMM used by oversized A2 prefill batches.
+        if use_mega_moe and get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY:
+            self.use_expert_weight_list = True
         if self.use_expert_weight_list:
             for tensor_name in tensor_names:
                 tensor = getattr(layer, tensor_name)

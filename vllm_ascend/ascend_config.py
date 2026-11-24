@@ -20,6 +20,9 @@ import importlib.util
 import json
 import math
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -30,13 +33,23 @@ from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
 from vllm_ascend.device.device_config import is_950
-from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import (
+    DeviceAdaptorFamily,
+    HardwareCapability,
+    MoECommPolicy,
+    get_current_hardware_profile,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 _KVPP_SUPPORTED_CONNECTORS = ("MooncakeConnectorV2", "AscendStoreConnector")
 _MEGA_MOE_SUPPORTED = None
+# CANN MegaMoe routing bounds for the A2 predicate: routed experts must split
+# evenly across EP ranks and never exceed the gating kernel's MAX_EXPERT_COUNT.
+_MEGA_MOE_MAX_EXPERTS = 2048
+# Only the Ascend W4A8 dynamic routed-expert weight layout is validated on A2.
+_A2_MEGA_MOE_MODEL_QUANT_TYPE = "W4A8_DYNAMIC"
 
 
 def is_mega_moe_supported() -> bool:
@@ -44,8 +57,8 @@ def is_mega_moe_supported() -> bool:
 
     Always read _MEGA_MOE_SUPPORTED through this accessor instead of
     ``from ascend_config import _MEGA_MOE_SUPPORTED``: the global is rebound
-    during config init (AscendConfig._validate_user_input_ranges rolls back
-    megamoe), and a direct import binds a stale snapshot for the bool.
+    when the worker config is published, and a direct import binds a stale
+    snapshot for the bool.
     """
     global _MEGA_MOE_SUPPORTED
     if _MEGA_MOE_SUPPORTED is None:
@@ -653,6 +666,7 @@ class AscendConfig:
     num_head_replica: int = 1
 
     # ---- private derived state (init=False) ----
+    _megamoe_supported: bool = dataclasses.field(default=False, init=False, repr=False)
     _sparse_li_c8_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c8_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c4_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
@@ -670,13 +684,18 @@ class AscendConfig:
         # We will first roll back the megamoe internally and keep `enable_fused_mc2=2`
         # to enable the megamoe for testing capabilities.
         # These codes will be removed after megamoe is ready.
-        global _MEGA_MOE_SUPPORTED
         if self.enable_fused_mc2 in (0, 1):
             # When enable_fused_mc2=1, roll back to dispatch_ffn_combine.
-            _MEGA_MOE_SUPPORTED = False
+            self._megamoe_supported = False
         elif self.enable_fused_mc2 == 2:
-            _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
-            self.enable_fused_mc2 = 1
+            self._megamoe_supported = importlib.util.find_spec("cann_ops_transformer") is not None
+            if not self._megamoe_supported and (
+                get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY
+            ):
+                logger.warning_once("A2 MegaMoe requires cann_ops_transformer; setting enable_fused_mc2 to 0.")
+                self.enable_fused_mc2 = 0
+            else:
+                self.enable_fused_mc2 = 1
         return self
 
     # ---- derivations + cross-config downgrades/mutex ----
@@ -804,7 +823,7 @@ class AscendConfig:
         is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
         # dispatch_ffn_combine (enable_fused_mc2=1 after MegaMoe rollback) does not
         # support MiniMax M3 SwiGLU-OAI. MegaMoe (enable_fused_mc2=2) is allowed.
-        assert not (self.enable_fused_mc2 == 1 and is_minimax_m3 and not is_mega_moe_supported()), (
+        assert not (self.enable_fused_mc2 == 1 and is_minimax_m3 and not self._megamoe_supported), (
             "MiniMax M3 does not support enable_fused_mc2=1 (dispatch_ffn_combine). "
             "Set additional_config.enable_fused_mc2 to 2 to enable MegaMoe, or 0 to disable fused MC2."
         )
@@ -814,11 +833,23 @@ class AscendConfig:
                 "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
-        if self.enable_fused_mc2 == 1 and is_mega_moe_supported() and not self._is_megamoe_supported_by_config(vc):
-            self.enable_fused_mc2 = 0
-            logger.warning_once(
-                "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
+        # A2 keeps additional AscendConfig-level preconditions that cannot be
+        # expressed in the static VllmConfig eligibility predicate.
+        a2_policy = get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY
+        if self.enable_fused_mc2 == 1 and self._megamoe_supported:
+            a2_extra_ok = (
+                self.weight_nz_mode != 0
+                and not self.mix_placement
+                and not self.eplb_config.dynamic_eplb
+                and self.eplb_config.num_redundant_experts == 0
+                and self.eplb_config.expert_map_path is None
             )
+            if not (self._is_megamoe_supported_by_config(vc) and (not a2_policy or a2_extra_ok)):
+                self.enable_fused_mc2 = 0
+                logger.warning_once(
+                    "MegaMoe is not supported for this model config; "
+                    "additional_config.enable_fused_mc2 will be set to 0."
+                )
 
         # mlapo_keep_prefill_weights preconditions: the prefill weights are only
         # freed by MLAPO in the MLA attention path, so the keep switch is only
@@ -1018,13 +1049,64 @@ class AscendConfig:
                 raise ValueError("Mix placement is not supported with shared expert DP or multistream overlap.")
 
     @staticmethod
-    def _is_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
-        """Unified MegaMoe config eligibility check for A3 and A5.
+    def _is_a2_megamoe_supported_by_config(vllm_config: VllmConfig, model_architectures: list[str]) -> bool:
+        """Eligibility for the A2 (910B3) MegaMoe operator.
 
-        The A3 and A5 MegaMoe operators are converging on the same supported
-        ranges, so this check intentionally uses one set of bounds for both
-        platforms. Where the operators currently differ, the stricter bound is
-        applied and the per-platform actuals are documented inline.
+        The A2 MegaMoe kernel is validated only on the DeepSeek-V4.1-Flash W4A8
+        prefill topology. Configurations outside this envelope return False so
+        the caller downgrades ``enable_fused_mc2`` to the ordinary MoE path,
+        matching the A3/A5 eligibility handling.
+        """
+        if "DeepseekV41ForCausalLM" not in model_architectures:
+            return False
+        parallel = vllm_config.parallel_config
+        if (
+            not parallel.enable_expert_parallel
+            or (
+                parallel.data_parallel_size,
+                parallel.tensor_parallel_size,
+                parallel.prefill_context_parallel_size,
+            )
+            != (1, 1, 8)
+            or parallel.pipeline_parallel_size != 1
+            or parallel.decode_context_parallel_size != 1
+            or parallel.use_ubatching
+            or parallel.expert_placement_strategy != "linear"
+        ):
+            return False
+        if vllm_config.kv_transfer_config is None or vllm_config.kv_transfer_config.kv_role != "kv_producer":
+            return False
+        model_config = vllm_config.model_config
+        if not model_config.enforce_eager or not vllm_config.use_v2_model_runner:
+            return False
+        if str(model_config.dtype) != "torch.bfloat16":
+            return False
+        text = model_config.hf_text_config
+        if (text.hidden_size, text.moe_intermediate_size, text.num_experts_per_tok) != (5120, 2304, 6):
+            return False
+        num_experts = int(model_config.get_num_experts())
+        ep_world_size = parallel.world_size_across_dp // parallel.pipeline_parallel_size
+        if (
+            ep_world_size != 8
+            or not (ep_world_size <= num_experts <= _MEGA_MOE_MAX_EXPERTS)
+            or num_experts % ep_world_size
+        ):
+            return False
+        quant_config = getattr(vllm_config.quant_config, "quant_description", None)
+        if not isinstance(quant_config, dict) or quant_config.get("model_quant_type") != _A2_MEGA_MOE_MODEL_QUANT_TYPE:
+            return False
+        return vllm_config.lora_config is None and not parallel.enable_eplb
+
+    @staticmethod
+    def _is_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
+        """Unified MegaMoe config eligibility check for A2, A3 and A5.
+
+        A3 and A5 MegaMoe operators are converging on the same supported
+        ranges, so they intentionally share one set of bounds; where the
+        operators currently differ, the stricter bound is applied and the
+        per-platform actuals are documented inline. A2 (910B3) is validated
+        only on the DeepSeek-V4.1-Flash W4A8 prefill envelope, handled by a
+        dedicated predicate.
         """
         # Guard against early-init phases where model_config is still None
         # (derive_and_validate may run before it is populated; other validators
@@ -1035,6 +1117,8 @@ class AscendConfig:
         if model_config is None:
             return False
         model_architectures = getattr(model_config, "architectures", None) or []
+        if get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY:
+            return AscendConfig._is_a2_megamoe_supported_by_config(vllm_config, model_architectures)
         # MiniMax-family configs (MiniMaxM2/M3/...) have no moe_intermediate_size
         # field; their intermediate_size IS the MoE expert FFN width (the dense
         # layers use a separate dense_intermediate_size field). For every other
@@ -1759,6 +1843,17 @@ _ASCEND_CONFIG: AscendConfig | None = None
 # ``getattr(_ASCEND_CONFIG, "vllm_config", None) is vllm_config`` check, now
 # that vllm_config is no longer a member of AscendConfig.
 _INIT_VLLM_CONFIG: Any = None
+_DRAFT_CONFIG_CONTEXT: ContextVar[bool] = ContextVar("ascend_draft_config", default=False)
+
+
+@contextmanager
+def draft_config_context() -> Iterator[None]:
+    """Validate a nested draft without publishing over the target worker config."""
+    token = _DRAFT_CONFIG_CONTEXT.set(True)
+    try:
+        yield
+    finally:
+        _DRAFT_CONFIG_CONTEXT.reset(token)
 
 
 def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
@@ -1806,9 +1901,11 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # Do not reuse a cached config: let AscendConfig's normal nested
         # pydantic validation report the invalid sub-config input below.
         refresh = True
-    global _ASCEND_CONFIG, _INIT_VLLM_CONFIG
+    global _ASCEND_CONFIG, _INIT_VLLM_CONFIG, _MEGA_MOE_SUPPORTED
+    is_draft = _DRAFT_CONFIG_CONTEXT.get()
     if (
-        _ASCEND_CONFIG is not None
+        not is_draft
+        and _ASCEND_CONFIG is not None
         and not refresh
         and _is_ascend_config_initialized(_ASCEND_CONFIG)
         and _INIT_VLLM_CONFIG is vllm_config
@@ -1916,9 +2013,12 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     new_config.rl_config.apply(new_config)
     new_config.finegrained_tp_config._validate_preconditions(vllm_config)
     new_config.xlite_graph_config._validate_preconditions(vllm_config)
+    if is_draft:
+        return new_config
     if _is_ascend_config_initialized(new_config):
         _ASCEND_CONFIG = new_config
         _INIT_VLLM_CONFIG = vllm_config
+        _MEGA_MOE_SUPPORTED = new_config._megamoe_supported
         # Publish the fully validated singleton before invalidating derived
         # process caches. The next runtime read rebuilds them from new_config;
         # failed construction leaves the previous singleton/cache untouched.

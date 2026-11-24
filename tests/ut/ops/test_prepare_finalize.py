@@ -85,6 +85,25 @@ class TestPrepareAndFinalize(unittest.TestCase):
         result = layer.finalize(h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape)
         self.assertEqual(result.shape[0], 3)
 
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=1)
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)
+    def test_megamoe_pcp_mask_excludes_internal_and_trailing_padding(self, _rank, _size):
+        context = MagicMock(
+            mc2_mask=torch.tensor([True, True, True, False]),
+            padded_num_tokens=4,
+            max_tokens_across_pcp=3,
+            is_padding=torch.tensor([False, True, False]),
+            use_mega_moe=True,
+        )
+        with (
+            patch("vllm_ascend.ascend_forward_context.get_forward_context", return_value=context),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.is_forward_context_available", return_value=True),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context", return_value=context),
+        ):
+            layer = PrepareAndFinalizeWithMC2(self.moe_config)
+            prepared = layer.prepare(torch.randn(3, 8), torch.randn(3, 2))
+        self.assertEqual(prepared.mc2_mask.tolist(), [True, False, True, False])
+
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=4)
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")

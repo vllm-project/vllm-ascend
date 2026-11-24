@@ -19,12 +19,14 @@ import math
 import os
 import subprocess
 import sys
+from copy import copy
 from importlib.util import find_spec as real_find_spec
 from statistics import NormalDist
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, PropertyMock, patch
 
+import torch
 from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -48,6 +50,7 @@ from vllm_ascend.ascend_config import (
     ShortRequestFirstConfig,
     SparseKVOffloadConfig,
     clear_ascend_config,
+    draft_config_context,
     get_ascend_config,
     init_ascend_config,
     is_mega_moe_supported,
@@ -1564,7 +1567,53 @@ class TestUpstreamConfigCompatibility(TestBase):
                 with self.subTest(field="hidden_size", value=3584), patch.object(text_config, "hidden_size", 3584):
                     self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
 
-    def test_megamoe_model_config_constraints(self):
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A2),
+    )
+    def test_a2_megamoe_uses_modelslim_recipe_and_ep_topology(self, _profile):
+        config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                architectures=["DeepseekV41ForCausalLM"],
+                enforce_eager=True,
+                dtype=torch.bfloat16,
+                hf_text_config=SimpleNamespace(hidden_size=5120, moe_intermediate_size=2304, num_experts_per_tok=6),
+                get_num_experts=lambda: 384,
+            ),
+            parallel_config=SimpleNamespace(
+                data_parallel_size=1,
+                tensor_parallel_size=1,
+                decode_context_parallel_size=1,
+                pipeline_parallel_size=1,
+                prefill_context_parallel_size=8,
+                world_size_across_dp=8,
+                enable_expert_parallel=True,
+                enable_eplb=False,
+                use_ubatching=False,
+                expert_placement_strategy="linear",
+            ),
+            use_v2_model_runner=True,
+            kv_transfer_config=SimpleNamespace(kv_role="kv_producer"),
+            quant_config=SimpleNamespace(quant_description={"model_quant_type": "W4A8_DYNAMIC"}),
+            lora_config=None,
+        )
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(config))
+        for obj, field, value in (
+            (config, "quant_config", None),
+            (config.quant_config, "quant_description", {"model_quant_type": "W8A8"}),
+            (config.model_config, "get_num_experts", lambda: 383),
+            (config.model_config, "get_num_experts", lambda: 2056),
+            (config.parallel_config, "prefill_context_parallel_size", 1),
+            (config, "lora_config", object()),
+        ):
+            with self.subTest(field=field), patch.object(obj, field, value):
+                self.assertFalse(AscendConfig._is_megamoe_supported_by_config(config))
+
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_megamoe_model_config_constraints(self, _mock_profile):
         supported = SimpleNamespace(
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(
@@ -1603,7 +1652,11 @@ class TestUpstreamConfigCompatibility(TestBase):
         )
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(minimax_m3))
 
-    def test_kimi_k3_megamoe_uses_routed_expert_dimensions(self):
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_kimi_k3_megamoe_uses_routed_expert_dimensions(self, _mock_profile):
         kimi_k3 = SimpleNamespace(
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(
@@ -1818,8 +1871,12 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             init_ascend_config(vc)
 
     @_clean_up
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_minimax_m3_allows_fused_mc2_mode_2_megamoe(self, mock_fix):
+    def test_minimax_m3_allows_fused_mc2_mode_2_megamoe(self, mock_fix, _mock_profile):
         def _fake_find_spec(name, *args, **kwargs):
             if name == "cann_ops_transformer":
                 return object()
@@ -1844,30 +1901,33 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_minimax_m3_derivation_initializes_unknown_megamoe_support(self, mock_fix):
+    def test_minimax_m3_draft_validates_its_own_mc2_mode(self, mock_fix):
         vc = VllmConfig()
         vc.model_config.architectures = ["MiniMaxM3SparseForCausalLM"]
-        config = init_ascend_config(vc)
-        # Exercise a custom entry point with normalized MC2 mode and an
-        # uninitialized capability cache, outside the usual factory ordering.
-        config.enable_fused_mc2 = 1
+        vc.parallel_config.world_size = 8
+        vc.additional_config = {"enable_fused_mc2": 2}
+
         with (
-            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", None),
             patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=object()),
             patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=True),
+            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", None),
         ):
-            config.derive_and_validate(vc)
-            self.assertEqual(config.enable_fused_mc2, 1)
+            target = init_ascend_config(vc)
             self.assertTrue(is_mega_moe_supported())
+            draft_vc = copy(vc)
+            draft_vc.additional_config = {"enable_fused_mc2": 1}
 
-        # An explicitly disabled cache must stay disabled even with CANN
-        # installed: MiniMax cannot use dispatch_ffn_combine.
-        with (
-            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", False),
-            patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=object()),
-            self.assertRaisesRegex(AssertionError, "MiniMax M3 does not support enable_fused_mc2=1"),
-        ):
-            config.derive_and_validate(vc)
+            with (
+                draft_config_context(),
+                self.assertRaisesRegex(AssertionError, "MiniMax M3 does not support enable_fused_mc2=1"),
+            ):
+                init_ascend_config(draft_vc)
+
+            draft_vc.additional_config = {"enable_fused_mc2": 0}
+            with draft_config_context():
+                self.assertEqual(init_ascend_config(draft_vc).enable_fused_mc2, 0)
+            self.assertIs(get_ascend_config(), target)
+            self.assertTrue(is_mega_moe_supported())
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

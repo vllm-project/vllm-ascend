@@ -315,6 +315,23 @@ def test_select_moe_comm_method_a2_uses_mc2_within_capacity(monkeypatch, num_tok
 
 
 @pytest.mark.parametrize(
+    ("tokens", "pcp", "draft", "route"),
+    [
+        (16384, 8, False, MoECommType.FUSED_MC2),
+        (16385, 8, False, MoECommType.ALLGATHER),
+        (128, 1, False, MoECommType.ALLGATHER),
+        (128, 8, True, MoECommType.ALLGATHER),
+    ],
+)
+def test_a2_megamoe_target_and_draft_routes(monkeypatch, tokens, pcp, draft, route):
+    _patch_select_moe_comm_method_deps(monkeypatch, device_type=AscendDeviceType.A2, enable_fused_mc2=1)
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    config = _make_vllm_config(world_size=8, num_experts=384)
+    config.parallel_config.prefill_context_parallel_size = pcp
+    assert afc.select_moe_comm_method(tokens, config, is_draft_model=draft) == route
+
+
+@pytest.mark.parametrize(
     ("num_tokens", "ep_world_size", "expected"),
     [
         (128, 8, MoECommType.FUSED_MC2),
