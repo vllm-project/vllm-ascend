@@ -99,12 +99,16 @@ ENV PATH=/usr/local/bin:$PATH \
 
 # 3) 下载并安装 CANN 9.1.0（toolkit 必装；nnal、A3-ops 存在则装；驱动由宿主机提供）
 RUN set -e; cd /tmp; \
-    wget -q --header="Referer: https://www.hiascend.com/" \
-        "${CANN_BASE_URL}/${CANN_TOOLKIT_PKG}"; \
-    wget -q --header="Referer: https://www.hiascend.com/" \
-        "${CANN_BASE_URL}/${CANN_NNAL_PKG}"; \
-    wget -q --header="Referer: https://www.hiascend.com/" \
-        "${CANN_BASE_URL}/${CANN_OPS_PKG}" || echo "WARN: ops 包下载失败，跳过"; \
+    fetch() { \
+        echo "INFO: downloading $1"; \
+        curl -fL --retry 3 --retry-delay 5 --connect-timeout 30 \
+            -H "Referer: https://www.hiascend.com/" \
+            -o "$(basename "$1")" "$1"; \
+    }; \
+    fetch "${CANN_BASE_URL}/${CANN_TOOLKIT_PKG}"; \
+    fetch "${CANN_BASE_URL}/${CANN_NNAL_PKG}"; \
+    fetch "${CANN_BASE_URL}/${CANN_OPS_PKG}" || echo "WARN: ops 包下载失败，跳过"; \
+    ls -lh /tmp/*.run; \
     chmod +x /tmp/*.run; \
     /tmp/${CANN_TOOLKIT_PKG} --install; \
     /tmp/${CANN_NNAL_PKG} --install; \
