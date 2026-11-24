@@ -6,6 +6,7 @@ import vllm.v1.worker.utils as v1_worker_utils
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, AttentionInterface
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.v1.attention.backend import CommonAttentionMetadata
 
 from vllm_ascend.attention.indexer import AscendHiSparseIndexerBackend, AscendSFAIndexerBackend
 from vllm_ascend.patch.worker.patch_bind_kv_cache import (
@@ -108,3 +109,19 @@ v1_worker_utils.bind_kv_cache = bind_kv_cache
 v1_worker_utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
 
 vllm.v1.worker.gpu.model_runner.get_kv_cache_spec = get_kv_cache_spec
+
+
+if hasattr(v1_worker_utils.AttentionGroup, "_with_kernel_block_table"):
+    _original_with_kernel_block_table = v1_worker_utils.AttentionGroup._with_kernel_block_table
+
+    def _with_kernel_block_table(
+        self: v1_worker_utils.AttentionGroup,
+        common_attn_metadata: CommonAttentionMetadata,
+        ubatch_idx: int = 0,
+    ) -> CommonAttentionMetadata:
+        # 310P supplies kernel block IDs to the metadata builder already.
+        if getattr(self, "block_table_is_kernel_granular", False):
+            return common_attn_metadata
+        return _original_with_kernel_block_table(self, common_attn_metadata, ubatch_idx)
+
+    v1_worker_utils.AttentionGroup._with_kernel_block_table = _with_kernel_block_table  # type: ignore[method-assign]

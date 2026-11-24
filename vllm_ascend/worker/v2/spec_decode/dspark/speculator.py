@@ -28,7 +28,6 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
@@ -50,11 +49,12 @@ from vllm_ascend.worker.v2.attn_utils import (
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
     draft_metadata_request_count,
-    prepare_dflash_inputs_factory,
+    install_ascend_dflash_input_preparation,
 )
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     build_dspark_draft_config,
+    prepare_replicated_draft_profile_inputs,
 )
 
 
@@ -270,10 +270,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 self.attn_architecture = "GQA"
             else:
                 self.attn_architecture = None
-            dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(  # type: ignore[call-arg]
-                self.vllm_config.cache_config.block_size,
-                block_tables,
-            )
+            install_ascend_dflash_input_preparation()
 
     @contextmanager
     def _proposal_metadata(self, num_reqs: int) -> Iterator[None]:
@@ -443,8 +440,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
-        self.input_batch = input_batch
-        assert self.input_batch is not None
         # PCP restores global requests for the replicated draft, whereas the
         # target DP sync describes its rank-local batch. Negotiate draft
         # capacity independently for PCP.
@@ -453,9 +448,14 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             # Profiling runs the draft with its own query token count, which
             # can differ from the target batch. Let forward_context coordinate
             # the actual draft counts instead of reusing the target DP state.
-            # TODO: Remove this guard once main2main includes upstream vLLM
+            # TODO: Drop the sync_state reset once main2main includes upstream vLLM
             # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
+            input_batch, last_hidden_states, aux_hidden_states = prepare_replicated_draft_profile_inputs(
+                input_batch, last_hidden_states, aux_hidden_states, self.input_buffers
+            )
+        self.input_batch = input_batch
+        assert self.input_batch is not None
         # Upstream trims DP dummy draft requests before selecting its graph,
         # while input_batch still describes the padded target batch. Replay
         # metadata must use the same count without mutating the target batch.

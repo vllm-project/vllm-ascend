@@ -24,13 +24,13 @@ vLLM Ascend is an open-source project under the vLLM community, where the author
 
     **Responsibility:** Develop the project's vision and mission. Maintainers are responsible for shaping the technical direction of the project and ensuring its long-term success. With code merge permissions, they lead roadmap planning, review community contributions, make ongoing code improvements, and actively participate in community engagement—such as regular meetings and events.
 
-    **Requirements:** Deep understanding of ‌vLLM‌ and ‌vLLM Ascend‌ code bases, with a commitment to sustained code contributions and competency in ‌design, development, and PR review workflows‌.
+    **Requirements:** Deep understanding of vLLM and vLLM Ascend code bases, with a commitment to sustained code contributions and competency in design, development, and PR review workflows.
 
-    - **Review quality‌:** Actively participate in community code reviews, ensuring high-quality code integration.
+    - **Review quality:** Actively participate in community code reviews, ensuring high-quality code integration.
     - **Quality contribution‌:** Successfully develop and deliver at least one major feature while maintaining consistent high-quality contributions.
     - **Community involvement‌:** Actively address issues, respond to forum inquiries, participate in discussions, and engage in community-driven tasks.
 
-The approval from existing Maintainers is required. The vLLM community has the final decision-making authority.
+Appointment of a maintainer requires approval from existing maintainers. The vLLM community has the final decision-making authority.
 Maintainers will be granted write access to the [vllm-project/vllm-ascend](https://github.com/vllm-project/vllm-ascend) GitHub repo. This includes permission to read, clone, and push to the repository, as well as manage issues and pull requests.
 
 ## Nominating and Removing Maintainers

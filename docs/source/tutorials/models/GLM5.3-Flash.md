@@ -30,6 +30,13 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
+The deployment commands on this page use MTP for speculative decoding. On
+A3, GLM-5.3-Flash also supports DFlash2 speculative decoding with
+Model Runner V2: configure `"method": "dflash"` and use a matching
+`DFlash2DraftModel` checkpoint. See
+the [speculative decoding guide](../../user_guide/feature_guide/speculative_decoding.md)
+for details.
+
 All deployment examples on this page use Model Runner V2 with
 `VLLM_USE_V2_MODEL_RUNNER=1`. Every PD Prefill role uses PCP8 with TP1;
 Decode keeps PCP1.
@@ -1569,8 +1576,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
                   "kv_connector_extra_config": {
                     "backend": "memcache",
                     "use_layerwise": false,
-                    "consumer_is_to_load": false,
-                    "consumer_is_to_put": false,
+                    "enable_lookup": false,
                     "lookup_rpc_port": '"$((37100 + $4))"'
                   }
                 }
@@ -1753,8 +1759,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
               "kv_connector_extra_config": {
                 "backend": "memcache",
                 "use_layerwise": false,
-                "consumer_is_to_load": false,
-                "consumer_is_to_put": false,
+                "enable_lookup": false,
                 "lookup_rpc_port": '"$((37100 + $4))"'
               }
             }
