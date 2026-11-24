@@ -24,9 +24,9 @@ import pytest
 import torch
 import vllm  # noqa: F401 - Initialize vLLM before Ascend adaptors.
 
+from vllm_ascend.attention.gdn_attn_builder import _build_non_spec_chunked_prefill_metadata
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
-from vllm_ascend.ops.gdn_attn_builder import _build_non_spec_chunked_prefill_metadata
 
 
 class NoIterationTuple(tuple):
@@ -69,7 +69,7 @@ def test_fla_kernel_contract_isolated_by_device_and_chunk_size(
     expected_output = v.clone()
     fused = Mock(side_effect=lambda *args, **kw: (expected_output, kw["initial_state"] + 1000))
     with (
-        patch("vllm_ascend.ops.gdn_attn_builder.get_current_hardware_profile", return_value=profile),
+        patch("vllm_ascend.attention.gdn_attn_builder.get_current_hardware_profile", return_value=profile),
         patch("vllm_ascend.device.device_op.get_current_hardware_profile", return_value=profile),
         patch(
             "vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd",
@@ -115,7 +115,7 @@ class TestChunk32Prebuilt(TestCase):
     def setUp(self):
         # Metadata and adaptor look up the profile in their own modules.
         # Patch both so chunk32 tests do not depend on the host device family.
-        for module in ("vllm_ascend.ops.gdn_attn_builder", "vllm_ascend.device.device_op"):
+        for module in ("vllm_ascend.attention.gdn_attn_builder", "vllm_ascend.device.device_op"):
             profile_patch = patch(
                 f"{module}.get_current_hardware_profile",
                 return_value=get_hardware_profile(AscendDeviceType.A5),
@@ -124,7 +124,7 @@ class TestChunk32Prebuilt(TestCase):
             self.addCleanup(profile_patch.stop)
 
     def test_non_a5_preserves_chunk64_without_building_chunk32(self):
-        from vllm_ascend.ops import gdn_attn_builder
+        from vllm_ascend.attention import gdn_attn_builder
 
         original = gdn_attn_builder.prepare_chunk_indices
 
@@ -136,10 +136,10 @@ class TestChunk32Prebuilt(TestCase):
             with (
                 self.subTest(device_type=device_type),
                 patch(
-                    "vllm_ascend.ops.gdn_attn_builder.get_current_hardware_profile",
+                    "vllm_ascend.attention.gdn_attn_builder.get_current_hardware_profile",
                     return_value=get_hardware_profile(device_type),
                 ),
-                patch("vllm_ascend.ops.gdn_attn_builder.prepare_chunk_indices", side_effect=reject_chunk32),
+                patch("vllm_ascend.attention.gdn_attn_builder.prepare_chunk_indices", side_effect=reject_chunk32),
             ):
                 metadata = self.build([0, 64, 128])
                 self.assertIsNone(metadata.chunk_indices_chunk32_host)

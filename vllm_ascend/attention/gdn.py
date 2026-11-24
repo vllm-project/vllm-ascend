@@ -992,7 +992,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta_fla = beta_non_spec
                 if get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32):
                     beta_fla = b.unsqueeze(0)
-                    if spec_sequence_masks is not None:
+                    if has_spec_decode:
                         beta_fla = beta_fla.index_select(1, non_spec_token_indx)
                     if split_non_spec:
                         beta_fla = beta_fla[:, num_decode_tokens:]

@@ -11,8 +11,6 @@ from torch import nn
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
-from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.attention.gdn import (
     AscendGatedDeltaNetAttention,
     _get_fla_gdn_prefill_op,
@@ -26,6 +24,8 @@ from vllm_ascend.attention.gdn_attn_builder import (
     GDNSpecCausalConv1dMetadata,
     GDNSpecDecodeMetadata,
 )
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 
 
 @pytest.mark.parametrize("batch_kind", ["prefill", "mixed", "spec"])
@@ -97,7 +97,7 @@ def test_chunk32_raw_beta_routing(batch_kind, backend):
     with ExitStack() as stack:
         stack.enter_context(
             patch(
-                "vllm_ascend.ops.gdn.get_current_hardware_profile",
+                "vllm_ascend.attention.gdn.get_current_hardware_profile",
                 return_value=get_hardware_profile(device_type),
             )
         )
@@ -128,7 +128,7 @@ def test_chunk32_raw_beta_routing(batch_kind, backend):
             "maybe_save_kv_layer_to_connector": {},
         }
         for name, kwargs in replacements.items():
-            mocks[name] = stack.enter_context(patch(f"vllm_ascend.ops.gdn.{name}", **kwargs))
+            mocks[name] = stack.enter_context(patch(f"vllm_ascend.attention.gdn.{name}", **kwargs))
         AscendGatedDeltaNetAttention._forward_core(layer, packed, b, a, output)
 
     use_fla = backend in ("a5", "a2", "a3")

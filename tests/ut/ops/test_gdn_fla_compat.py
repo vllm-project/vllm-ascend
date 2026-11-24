@@ -6,9 +6,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention, _get_fla_gdn_prefill_op
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, _get_fla_gdn_prefill_op
 
 
 @pytest.fixture(autouse=True)
@@ -25,7 +25,7 @@ def test_fla_prefill_does_not_require_version(device):
     module.__dict__["chunk_gated_delta_rule_fwd"] = fla_op
     with (
         patch.dict(sys.modules, {module.__name__: module}),
-        patch("vllm_ascend.ops.gdn.get_current_hardware_profile", return_value=get_hardware_profile(device)),
+        patch("vllm_ascend.attention.gdn.get_current_hardware_profile", return_value=get_hardware_profile(device)),
         patch("importlib.metadata.version", side_effect=AssertionError("FLA version must not be queried")),
     ):
         op = _get_fla_gdn_prefill_op()
@@ -45,7 +45,8 @@ def test_fla_supports_host_only_metadata(fused_available):
     with (
         patch.dict(sys.modules, {module.__name__: module}),
         patch(
-            "vllm_ascend.ops.gdn.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A5)
+            "vllm_ascend.attention.gdn.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A5),
         ),
         patch("importlib.metadata.version", side_effect=AssertionError("FLA version must not be queried")),
         patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=fused_available),
