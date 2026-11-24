@@ -1404,7 +1404,7 @@ def test_packed_consumer_does_not_retry_receive_when_loader_raises_stop_iteratio
 @pytest.mark.parametrize("num_buffers", [1, 3])
 def test_packed_normal_path_drains_every_slot_stream(producer, num_buffers):
     streams = [_FakeNpuStream() for _ in range(num_buffers)]
-    before_drain = []
+    before_drain: list[int] = []
 
     def last_work(*args, **kwargs):
         before_drain[:] = [stream.sync_calls for stream in streams]

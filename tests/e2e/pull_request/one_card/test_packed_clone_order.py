@@ -31,7 +31,8 @@ def test_retained_layer_clone_is_ready_and_alive(lifetime_only, num_buffers):
     scratch = torch.empty_like(matrix)
     torch.mm(matrix, matrix, out=scratch)
     torch.npu.synchronize()
-    retained, poison = [], []
+    retained: list[torch.Tensor] = []
+    poison: list[torch.Tensor] = []
     origin = None
     first_clone = True
     original_clone = torch.Tensor.clone

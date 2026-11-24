@@ -235,6 +235,8 @@ def packed_broadcast_consumer(
         """Restore aligned, independent storage and order cross-slot loader reads."""
         nonlocal previous_load
         stream = torch.npu.current_stream()
+        # Upstream's wait_event covers receives, but our async clones run later.
+        # Chain callback completion to order cross-slot reads of those clones.
         if previous_load is not None:
             stream.wait_event(previous_load)
         restored = []
