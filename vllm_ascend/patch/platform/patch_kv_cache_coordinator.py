@@ -35,7 +35,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
 logger = logging.getLogger(__name__)
