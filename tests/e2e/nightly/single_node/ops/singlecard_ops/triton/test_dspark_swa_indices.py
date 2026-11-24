@@ -790,7 +790,10 @@ def test_logical_indices_triton_rejects_unsupported_output_views():
             qsl, seq_lens, num_tokens, index_width, window_size, indices_output=strided_indices
         )
 
-    strided_lengths = torch.empty((1, num_tokens), dtype=torch.int32, device=DEVICE).t()
+    # A (1, T).t() view is is_contiguous() == True (size-1 dims are stride
+    # indifferent), so slice a row pair instead to get a genuinely strided
+    # (T, 1) view the kernel's unit-stride stores would corrupt.
+    strided_lengths = torch.empty((num_tokens, 1, 2), dtype=torch.int32, device=DEVICE)[:, :, 0]
     assert strided_lengths.shape == (num_tokens, 1)
     assert not strided_lengths.is_contiguous()
     with pytest.raises(ValueError, match="contiguous"):
