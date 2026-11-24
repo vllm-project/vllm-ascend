@@ -1,0 +1,6 @@
+pr: 23119
+entries:
+  - category: bugfix
+    text: >-
+      Fixed incorrect expert weights in MoE inference when non-grouped
+      sigmoid top-k routing uses an expert correction bias.
