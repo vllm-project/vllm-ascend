@@ -16,7 +16,7 @@ MiniMax-M3.1-Flash is supported on the vLLM Ascend `main` branch and in `v0.32.0
 
 The features described below are those enabled by the deployment commands in this guide. Refer to [Supported Features](#2-supported-features) for the model support matrix.
 
-## 2 Supported Features
+## 2 Supported Features {: #2-supported-features }
 
 Refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md) page for the support matrix and the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration.
 
@@ -37,14 +37,14 @@ The Ascend-adapted W8A8 and W8A8-MXFP8 weights above are published on ModelScope
 
 Record the downloaded model directories, for example `/models/MiniMax-M3.1-Flash-W8A8` and `/models/MiniMax-M3.1-Flash-W8A8-MXFP8`, and ensure they are accessible inside the container. The commands in this guide use the placeholders `<MINIMAX_M31_FLASH_W8A8_PATH>` and `<MINIMAX_M31_FLASH_W8A8_MXFP8_PATH>` in Section 4.1, and the `MODEL_PATH` variable in Section 5. Replace them with the paths you recorded.
 
-### 3.2 Verify Multi-node Communication
+### 3.2 Verify Multi-node Communication {: #32-verify-multi-node-communication }
 
 Prepare the business network and the NPU interconnect by following
 [Verify inter-node connectivity](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 On each host, use `ip addr` or `ifconfig` to identify the host communication IP and the interface that owns it. Set `LOCAL_IP` to that IP and `NIC_NAME` to the interface name; for example, if the IP is assigned to `eth0`, set `NIC_NAME="eth0"`. The scripts use this interface for both `HCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME`. See [multi-node host configuration](../../developer_guide/contribution/multi_node_test.md#2-test-without-kubernetes) for selecting mutually reachable host IPs.
 
-## 4 Installation
+## 4 Installation {: #4-installation }
 
 ### 4.1 Docker Image Installation
 
@@ -192,7 +192,7 @@ If you prefer not to use the Docker image, build both packages from source. Mini
 
 When the service spans multiple nodes, install the same vLLM and vLLM Ascend revisions in every container so that the distributed group uses identical code.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 Use the container and model weights for your hardware from [Section 4](#4-installation).
 
@@ -537,7 +537,7 @@ There are two A2 nodes, DP4 × TP4 / EP16 in total. The following values match t
 
     Expected result: `200`. Send requests to port `11223` on node 0 with model name `minimax-m3.1-flash`.
 
-### 5.3 PD Disaggregation (1P1D)
+### 5.3 PD Disaggregation (1P1D) {: #53-pd-disaggregation-1p1d }
 
 Both platforms use a 1P1D topology: one Prefill service on one host and one distributed Decode service spanning two hosts. The two Decode hosts share one global data-parallel group; D1 and D2 identify physical hosts within that service. Multiple Decode API endpoints represent ranks or local rank groups within the same distributed service. Prefill processes the prompt, Decode generates tokens, and a proxy forwards requests between them while Mooncake transfers the KV cache. For the general workflow, refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md). Both platforms use DSpark speculative decoding with seven draft tokens. Configure the host-specific values at the beginning of each Prefill and Decode script before starting the service.
 
@@ -2310,7 +2310,7 @@ Proxy (:19080)
 5. Confirm Decode logs still show a normal Mooncake P→D KV transfer.
 6. Confirm SSD storage initializes under `ssd_offload_path` for each contributing worker. Use a working set larger than the memory pool to verify SSD offload and subsequent reads; a memory-pool hit alone does not exercise the SSD tier.
 
-### 5.5 1M-Token Context Deployment
+### 5.5 1M-Token Context Deployment {: #55-1m-token-context-deployment }
 
 Both platforms use a text-only 1P1D topology: one Prefill service on one host and one distributed Decode service spanning two hosts. Here, 1M means **1,048,576 input tokens**. Both profiles set `--max-model-len 1050624`, reserving 2048 positions for generation, and disable local prefix caching on all roles. Select the hardware tab for its topology, scripts, launch commands, and verification workload.
 
@@ -3242,7 +3242,7 @@ Complete the communication checks in [Section 3.2](#32-verify-multi-node-communi
 
     The recorded run completed three serial streaming curl requests with these token counts, all three retrieval values present, zero local prefix-cache hits, and no preemption. This validates the serving configuration with an eager DSpark draft; 1M draft graph execution and concurrent 1M requests were not tested. The responses contained a thinking block before the correct JSON and trailing newlines after it: `ignore_eos=true` forces 1024 generated tokens, so this is not a strict JSON-format or natural-stopping check.
 
-## 6 Functional Verification
+## 6 Functional Verification {: #6-functional-verification }
 
 Replace `{ip}` and `{port}` with the service endpoint. All examples use `minimax-m3.1-flash` as the served model name.
 
@@ -3367,7 +3367,7 @@ Expected result: HTTP 200 response with a JSON body containing non-empty `choice
 
 For detailed instructions, refer to [Using AISBench for accuracy evaluation](../../developer_guide/evaluation/using_ais_bench.md).
 
-### 7.2 Text Evaluation
+### 7.2 Text Evaluation {: #72-text-evaluation }
 
 | Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
 |---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
@@ -3438,7 +3438,7 @@ Use the commands in [Section 5](#5-online-service-deployment) as starting config
 
 ### 9.2 Tuning Guidelines
 
-#### 9.2.1 DSpark and KV Cache Configuration
+#### 9.2.1 DSpark and KV Cache Configuration {: #921-dspark-and-kv-cache-configuration }
 
 The single-node examples in Section 5.1 and Decode examples in Sections 5.3 and 5.4 use platform-specific DSpark draft execution modes:
 
@@ -3464,7 +3464,7 @@ The msmodeling tool (MindStudio-Modeling) optimizes serving and benchmark parame
 
 For the complete, step-by-step usage guide please refer to **[Optix-for-PD-disaggregation](https://gitcode.com/Ascend/msmodeling/blob/master/docs/en/quick_start/optix_agent_pd_disaggregation.md)**.
 
-## 10 FAQ
+## 10 FAQ {: #10-faq }
 
 For common environment, installation, and general parameter issues, refer to the [Public FAQs](../../faqs.md). This section covers MiniMax-M3.1-Flash-specific deployment issues.
 
@@ -3486,7 +3486,7 @@ For common environment, installation, and general parameter issues, refer to the
 
 The scripts in Section 5.3 already include this setting. It changes only the draft KV cache dtype; keep the draft execution mode appropriate to the deployment role, as described in [DSpark and KV Cache Configuration](#921-dspark-and-kv-cache-configuration).
 
-### 10.2 Model Loading Is Still in Progress or Startup Fails
+### 10.2 Model Loading Is Still in Progress or Startup Fails {: #102-model-loading-is-still-in-progress-or-startup-fails }
 
 **Symptom:** The API is not ready while loading the approximately 428B-parameter checkpoint or capturing graphs.
 
