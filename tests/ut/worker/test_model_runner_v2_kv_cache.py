@@ -62,7 +62,9 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
         assert registration_order[-1] == "model_state"
         return trackers
 
-    tracker_context = patch.object(upstream, "get_replayssm_block_copy_tensors", side_effect=collect_initialized_trackers)
+    tracker_context = patch.object(
+        upstream, "get_replayssm_block_copy_tensors", side_effect=collect_initialized_trackers
+    )
     with (
         patch.object(upstream, "init_attn_backend", return_value=([], MagicMock(), [])),
         patch.object(upstream, "maybe_create_adaptive_verification_manager", return_value=None),
