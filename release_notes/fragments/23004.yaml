@@ -1,0 +1,7 @@
+pr: 23004
+entries:
+  - category: bugfix
+    text: >-
+      Mooncake P/D now leaves the transfer QoS environment as configured when
+      `qos_priority` is omitted. The affected P/D connectors and the Mooncake and
+      Memcache KV pool backends accept integer priorities 0–7 and warn for 5–7.
