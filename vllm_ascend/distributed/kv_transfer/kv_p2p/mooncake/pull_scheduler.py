@@ -54,6 +54,14 @@ ACK_MSG = b"ACK"
 PRODUCER_LEASE_CACHE_TTL_SECONDS = 600
 PRODUCER_LEASE_CACHE_MAX_SIZE = 1024
 
+# Cadence of the sending thread's "Mooncake delayed-free status" debug line.
+# A heuristic tuned for the default 120s lease: 10s is half a heartbeat
+# interval (kv_lease_duration // 6 = 20s) and a twelfth of the lease, so a
+# stalled release queue is re-reported at most every 10s while the stall
+# persists. The interval only bounds debug-log volume when DEBUG logging is
+# enabled; it has no effect on bookkeeping.
+DELAYED_FREE_STATUS_INTERVAL_SECONDS = 10.0
+
 
 class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
     """Serve worker metadata and collect D-side completion messages."""
@@ -79,6 +87,17 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
         self.lease_extension = kv_lease_duration * 2 // 3
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.state_lock = threading.Lock()
+        # Clock of the stalled-drain status line; None means the next
+        # busy-loop iteration evaluates immediately. Only the sending thread
+        # touches it, so it needs no lock.
+        self._last_status_report_at: float | None = None
+        # Timestamp of the last successful drain (one or more entries taken),
+        # written by the scheduler hook thread and read lock-free by the
+        # status reporter: a single atomic write with no read-modify-write,
+        # so an update can never be lost. 0.0 means "never
+        # drained"; a monotonic clock is always >= 0, so the first evaluation
+        # simply sees an old drain instead of needing a separate flag.
+        self._last_drain_at = 0.0
 
     def add_delayed_request(self, request_id: str) -> None:
         with self.state_lock:
@@ -129,6 +148,14 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
             try:
                 finished.add(self.finished_requests.get_nowait())
             except queue.Empty:
+                if finished:
+                    # Single atomic write; the only reader
+                    # (_report_delayed_free_status) is lock-free and
+                    # read-only, and there is no other writer, so no
+                    # read-modify-write exists on either side and no lock
+                    # is needed. Revisit if the reporter ever writes this
+                    # value or a second writer appears.
+                    self._last_drain_at = time.monotonic()
                 return finished
 
     def shutdown(self) -> None:
@@ -157,6 +184,7 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
     def _run_busy_loop(self, sock: Any) -> None:
         decoder = msgspec.msgpack.Decoder(type=tuple)
         while not self.stop_event.is_set():
+            self._report_delayed_free_status()
             try:
                 frames = sock.recv_multipart()
             except zmq.Again:  # type: ignore[attr-defined]
@@ -239,6 +267,72 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
                 self._mark_finished_locked(request_id)
                 expired.append((request_id, now - expiry))
         return expired
+
+    def _report_delayed_free_status(self) -> None:
+        """Report a stalled release queue on a fixed evaluation cadence.
+
+        The only condition reported is a stalled drain: entries are waiting
+        in the release queue (`finished`) while no drain has completed for
+        a full interval - the exit of the release chain is blocked (engine
+        idle on 0-token steps / the connector gate closed). Every other
+        bookkeeping state is silent, so a stalled sequence in the DEBUG log
+        is always a real "queue not draining" observation, never healthy
+        in-flight traffic.
+
+        The line leads with the stalled depth, then carries the three raw
+        counts as context: entries waiting for DONE (`delayed_free`), under
+        active lease renewal (`renewed`), and waiting for drain
+        (`finished`) - so a reader can tell where entries currently sit.
+
+        Lock-free on purpose: `len()` on CPython is atomic under the GIL,
+        `SimpleQueue.qsize()` is internally locked, and `_last_drain_at` is
+        written as a single atomic value with no read-modify-write - none of
+        these can lose an update, so the reporter never contends on
+        `state_lock` with the scheduler thread. The counts are a diagnostic
+        snapshot; a momentarily inconsistent view across the two ledgers is
+        acceptable.
+
+        This is strictly observational: it never mutates the ledgers or the
+        release queue, and it carries no lease-expiry interpretation - expired
+        entries keep living in the ledgers until the scheduler hook reaps
+        them.
+        """
+        now = time.monotonic()
+        if (
+            self._last_status_report_at is not None
+            and now - self._last_status_report_at < DELAYED_FREE_STATUS_INTERVAL_SECONDS
+        ):
+            return
+        try:
+            delayed_free = len(self.delayed_free_requests)
+            renewed = len(self.renewed_requests)
+            finished = self.finished_requests.qsize()
+            stalled_for = now - self._last_drain_at
+            window = (
+                int(now - self._last_status_report_at)
+                if self._last_status_report_at is not None
+                else int(DELAYED_FREE_STATUS_INTERVAL_SECONDS)
+            )
+            self._last_status_report_at = now
+            # Strictly greater: a drain that happened exactly one interval ago
+            # still counts as covering this window, which keeps the reported
+            # windows aligned with the evaluation cadence.
+            if finished > 0 and stalled_for > DELAYED_FREE_STATUS_INTERVAL_SECONDS:
+                logger.debug(
+                    "Mooncake delayed-free status: engine_id=%s stalled: %d queued, "
+                    "no drain this window (last %ds: drained=0; now: delayed_free=%d "
+                    "renewed=%d finished=%d)",
+                    self.engine_id,
+                    finished,
+                    window,
+                    delayed_free,
+                    renewed,
+                    finished,
+                )
+        except Exception:
+            # The busy loop shares this thread with DONE and heartbeat
+            # handling; a failed status report must never kill the thread.
+            logger.exception("Mooncake delayed-free status report failed")
 
 
 class MooncakeSchedulerRecvingThread(threading.Thread):
