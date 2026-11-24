@@ -15,9 +15,11 @@ critical path onto the next verify.  The useful numbers are:
   * ``defer``  (deferred)   = critical path per step with deferral
   * ``flush``  (deferred)   = work moved to the next verify
 
-``--verify`` additionally times the stock ``flush + verify`` against the fused
-production path (``compact_conv`` + verify with in-kernel replay); the saving
-is fused vs stock, not vs immediate. ``--sweep`` runs that comparison over a
+``--verify`` additionally times three verify placements against each other:
+the stock ``flush + verify`` (the fold on the main stream), the fused path
+(``compact_conv`` + verify with the in-kernel replay), and the side-stream
+flush (per-layer fold chunks on a second stream; each layer joins its chunk
+before verify). ``--sweep`` runs that comparison over a
 range of batch sizes and reports where the fused path wins — with
 ``--heads`` set to the model's *local* heads (``num_heads / tp``), the
 ``heads*batch`` crossover is exactly the ``VLLM_ASCEND_RECOVERSSM_FUSED_ITEMS``
@@ -53,6 +55,16 @@ PRESETS = {
 
 def _sync() -> None:
     torch.npu.synchronize()
+
+
+_SIDE_STREAM: torch.npu.Stream | None = None
+
+
+def _side_stream() -> torch.npu.Stream:
+    global _SIDE_STREAM
+    if _SIDE_STREAM is None:
+        _SIDE_STREAM = torch.npu.Stream()
+    return _SIDE_STREAM
 
 
 def _time(fn, steps: int, warmup: int) -> float:
@@ -105,9 +117,9 @@ def _verify_section(
     blocks_override: int | None = None,
     records_override: int | None = None,
     pipeline_stages: int = 2,
-    merge_reductions: bool = False,
-) -> tuple[float, float]:
-    """Time the stock ``flush + verify`` against ``compact_conv + fused verify``."""
+) -> tuple[float, float, float]:
+    """Time three verify placements: stock ``flush + verify``, fused verify
+    (in-kernel replay), and the side-stream flush (per-layer fold chunks)."""
     blocks = batch + 1 if blocks_override is None else blocks_override
     total = batch * spec_q
     g = torch.Generator(device=DEVICE).manual_seed(11)
@@ -134,8 +146,26 @@ def _verify_section(
             max_reqs=batch, records=records_override, seed=300,
         )
 
-    ctx_stock, layers_stock = make_ctx()
-    ctx_fused, layers_fused = make_ctx()
+    def verify(layer, replay):
+        kda_recoverssm_verify(
+            q, k, v, raw_g, raw_beta,
+            layer.A_log.reshape(-1),
+            layer.dt_bias,
+            layer.gate_lower_bound,
+            layer.kv_cache[1],
+            layer.kv_cache[2],
+            layer.kv_cache[3],
+            query_start_loc,
+            state_indices,
+            spec_q,
+            record_indices=record_rows,
+            replay_commit_lens=replay[0],
+            replay_final_state_indices=replay[1],
+            replay_boundary_state_indices=replay[2],
+            replay_boundary_recovery_lens=replay[3],
+            records_pool_size=records_override,
+            pipeline_stages=pipeline_stages,
+        )
 
     def run(ctx, layers, fused: bool) -> None:
         if fused:
@@ -150,29 +180,22 @@ def _verify_section(
             ctx.flush(state_indices, record_rows, pending)
             replay = (None, None, None, None)
         for layer in layers:
-            kda_recoverssm_verify(
-                q, k, v, raw_g, raw_beta,
-                layer.A_log.reshape(-1),
-                layer.dt_bias,
-                layer.gate_lower_bound,
-                layer.kv_cache[1],
-                layer.kv_cache[2],
-                layer.kv_cache[3],
-                query_start_loc,
-                state_indices,
-                spec_q,
-                record_indices=record_rows,
-                replay_commit_lens=replay[0],
-                replay_final_state_indices=replay[1],
-                replay_boundary_state_indices=replay[2],
-                replay_boundary_recovery_lens=replay[3],
-                records_pool_size=records_override,
-                pipeline_stages=pipeline_stages,
-                merge_reductions=merge_reductions,
-            )
+            verify(layer, replay)
+
+    def run_side(ctx, layers) -> None:
+        events = ctx.flush_layers(state_indices, record_rows, pending, _side_stream())
+        for index, layer in enumerate(layers):
+            if index < len(events):
+                torch.npu.current_stream().wait_event(events[index])
+            verify(layer, (None, None, None, None))
+
+    ctx_stock, layers_stock = make_ctx()
+    ctx_fused, layers_fused = make_ctx()
+    ctx_side, layers_side = make_ctx()
 
     t_stock = _time(lambda: run(ctx_stock, layers_stock, False), steps, warmup)
     t_fused = _time(lambda: run(ctx_fused, layers_fused, True), steps, warmup)
+    t_side = _time(lambda: run_side(ctx_side, layers_side), steps, warmup)
     if accept_len is not None:
         accept = f"accept_len={accept_len}"
     elif accept_rate is not None:
@@ -180,16 +203,19 @@ def _verify_section(
     else:
         accept = "all accepted"
     print(f"verify section ({layers_count} layers, batch={batch}, spec_q={spec_q}, {accept}):")
-    print(f"  flush + verify        : {t_stock:8.3f} ms/step")
-    print(f"  compact + fused verify: {t_fused:8.3f} ms/step")
-    print(f"  saving                : {t_stock - t_fused:8.3f} ms/step "
+    print(f"  flush + verify             : {t_stock:8.3f} ms/step")
+    print(f"  compact + fused verify     : {t_fused:8.3f} ms/step")
+    print(f"  side-stream flush + verify : {t_side:8.3f} ms/step")
+    print(f"  fused vs stock saving      : {t_stock - t_fused:8.3f} ms/step "
           f"({(1 - t_fused / t_stock) * 100:5.1f}%)")
+    print(f"  side-stream vs stock saving : {t_stock - t_side:8.3f} ms/step "
+          f"({(1 - t_side / t_stock) * 100:5.1f}%)")
     print()
-    # Free both contexts before the next sweep point; large batches allocate
-    # two full checkpoint sets per call.
-    del ctx_stock, ctx_fused, layers_stock, layers_fused
+    # Free all contexts before the next sweep point; large batches allocate
+    # one full checkpoint set per configuration.
+    del ctx_stock, ctx_fused, ctx_side, layers_stock, layers_fused, layers_side
     torch.npu.empty_cache()
-    return t_stock, t_fused
+    return t_stock, t_fused, t_side
 
 
 def main() -> None:
@@ -223,8 +249,6 @@ def main() -> None:
                         help="fixed replay length for every request (overrides --accept-rate)")
     parser.add_argument("--pipeline-stages", type=int, default=2,
                         help="software-pipeline depth for the fused verify's hot loops")
-    parser.add_argument("--merge-reductions", action="store_true",
-                        help="fuse the two per-token state reductions into one [BV,BK,2] pass")
     args = parser.parse_args()
 
     cfg = dict(PRESETS[args.preset])
@@ -276,10 +300,10 @@ def main() -> None:
         batches = [int(x) for x in args.sweep.split(",")]
         rows = []
         for b in batches:
-            t_stock, t_fused = _verify_section(
+            t_stock, t_fused, _ = _verify_section(
                 layers, heads, key_dim, value_dim, spec_q, b, steps, args.warmup,
                 args.accept_rate, args.accept_len, args.blocks, records,
-                args.pipeline_stages, args.merge_reductions,
+                args.pipeline_stages,
             )
             rows.append((b, heads * b, t_stock, t_fused))
         print("sweep summary (fused wins when saving > 0)")
@@ -375,7 +399,7 @@ def main() -> None:
         _verify_section(
             layers, heads, key_dim, value_dim, spec_q, batch, steps, args.warmup,
             args.accept_rate, args.accept_len, args.blocks, records,
-            args.pipeline_stages, args.merge_reductions,
+            args.pipeline_stages,
         )
 
 

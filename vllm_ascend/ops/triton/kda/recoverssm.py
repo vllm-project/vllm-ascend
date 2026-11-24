@@ -175,7 +175,6 @@ def _kda_recoverssm_verify_kernel(
     SPEC_QUERY_LEN: tl.constexpr,
     UNROLL_REPLAY: tl.constexpr,
     PIPELINE_STAGES: tl.constexpr,
-    MERGE_REDUCTIONS: tl.constexpr,
 ):
     # Advance a register-held checkpoint and record each token's compact
     # correction/key/gate; persistent checkpoint pages remain read-only.
@@ -389,22 +388,8 @@ def _kda_recoverssm_verify_kernel(
         weighted_k = normalized_k * decay
         weighted_q = q * decay
         tl.static_assert(raw_beta.dtype == tl.float32)
-        if MERGE_REDUCTIONS:
-            # One [BV, BK, 2] reduction pass instead of two [BV, BK] passes:
-            # halving the per-token reduction count is the direct lever on
-            # triton-ascend, where reductions (not elementwise tile ops)
-            # dominate the vector engine time.
-            rk, rq = tl.split(
-                tl.sum(
-                    state[:, :, None] * tl.join(weighted_k, weighted_q)[None, :, :],
-                    axis=1,
-                )
-            )
-            correction = (v - rk) * tl.sigmoid(raw_beta)
-            out = rq + correction * tl.sum(normalized_k * q)
-        else:
-            correction = (v - tl.sum(state * weighted_k[None, :], axis=1)) * tl.sigmoid(raw_beta)
-            out = tl.sum(state * weighted_q[None, :], axis=1) + correction * tl.sum(normalized_k * q)
+        correction = (v - tl.sum(state * weighted_k[None, :], axis=1)) * tl.sigmoid(raw_beta)
+        out = tl.sum(state * weighted_q[None, :], axis=1) + correction * tl.sum(normalized_k * q)
         # The post-update state of the last token is never read (the loop
         # ends and the checkpoint was already stored by the replay), so
         # skip its rank-1 update.
@@ -1160,7 +1145,6 @@ def kda_recoverssm_verify(
     replay_align: bool = False,
     records_pool_size: int | None = None,
     pipeline_stages: int = RECOVERSSM_VERIFY_PIPELINE_STAGES,
-    merge_reductions: bool = False,
 ) -> torch.Tensor:
     """Verify a KDA speculative window.
 
@@ -1334,7 +1318,6 @@ def kda_recoverssm_verify(
         SPEC_QUERY_LEN=spec_query_len,
         UNROLL_REPLAY=is_a5,
         PIPELINE_STAGES=pipeline_stages,
-        MERGE_REDUCTIONS=merge_reductions,
         num_warps=4,
         num_stages=pipeline_stages,
     )
@@ -1704,6 +1687,36 @@ class KDARecoverSSMCommitContext:
         self._compact_conv(
             state_indices, self._flush_batch, False, layer_idx, layer_slice, fold_layers
         )
+
+    def flush_layers(
+        self,
+        state_indices: torch.Tensor,
+        record_rows: torch.Tensor,
+        pending: torch.Tensor,
+        stream: "torch.npu.Stream",
+    ) -> "list[torch.npu.Event]":
+        """Deferred RecoverSSM, side-stream flush: build the flush plan on the
+        current stream, then enqueue one fold chunk per KDA layer (conv
+        compaction + state commit) on ``stream``, recording an event after each
+        chunk.
+
+        Each layer waits its event before conv rewrites conv_state and verify
+        reads the checkpoint, so the chunks overlap the earlier layers' compute
+        on the main stream. The plan buffers are rewritten by the next step's
+        commit, which the last layer's wait already orders after every chunk.
+        """
+        batch = self.prepare_flush(state_indices, record_rows, pending)
+        if batch == 0:
+            return []
+        stream.wait_stream(torch.npu.current_stream())
+        events: list[torch.npu.Event] = []
+        with torch.npu.stream(stream):
+            for layer in range(len(self.checkpoints)):
+                self._fold(state_indices, batch, False, record_rows, layer, layer + 1)
+                event = torch.npu.Event()
+                event.record(stream)
+                events.append(event)
+        return events
 
     def _fold(
         self,

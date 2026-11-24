@@ -19,7 +19,6 @@ from typing import Any
 
 import torch
 
-from vllm.logger import logger
 from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadataBuilder
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -28,10 +27,19 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ops.triton.kda.recoverssm import (
     KDARecoverSSMCommitContext as AscendCommitContext,
-    recoverssm_replays,
 )
 
 FP32_DEFERRED = "fp32_deferred"
+
+_SIDE_FOLD_STREAM: torch.npu.Stream | None = None
+
+
+def _fold_stream() -> torch.npu.Stream:
+    """The stream carrying the deferred folds ahead of the forward."""
+    global _SIDE_FOLD_STREAM
+    if _SIDE_FOLD_STREAM is None:
+        _SIDE_FOLD_STREAM = torch.npu.Stream()
+    return _SIDE_FOLD_STREAM
 
 
 @dataclass
@@ -39,12 +47,14 @@ class KDARecoverSSMDeferred:
     """A step's deferred RecoverSSM (the KDA metadata's ``recoverssm_deferred``).
 
     After sampling, each request's accepted count becomes the pending replay of
-    its record slot instead of a commit; the next verify replays it.
-
-    Below the fusion threshold (``recoverssm_replays``), the step folds the
-    pending replays into the checkpoints first (``flush``, upstream's "flush +
-    core" path) and the verify runs without a replay: the fused pass loses to a
-    plain commit on small batches.
+    its record slot instead of a commit. The next step folds the pending
+    replays into the checkpoints on a side stream, one chunk per KDA layer
+    (conv compaction + state commit), so the folds overlap the earlier layers'
+    compute; each layer waits for its own chunk before conv rewrites
+    conv_state and verify reads the checkpoint, and the verify itself runs
+    without an in-kernel replay (the fused replay taxed every verify with the
+    fold's state traffic, which the side stream hides under other layers'
+    compute instead).
     """
 
     record_rows: torch.Tensor  # [>= spec rows] int32: record slot per row, -1: none
@@ -53,13 +63,10 @@ class KDARecoverSSMDeferred:
     context: "KDADeferredCommitContext" = field(repr=False, compare=False)
     state_indices: torch.Tensor = field(repr=False, compare=False)
     layer_names: list[str] = field(default_factory=list, repr=False, compare=False)
-    started: bool = False
     flushed: bool = False
-
-    def _fuse(self) -> bool:
-        """Whether this step's verify replays the previous commit in-kernel."""
-        num_heads = self.context.checkpoints[0].shape[1]
-        return recoverssm_replays(num_heads, self.state_indices.shape[0])
+    fold_events: list[torch.npu.Event] = field(
+        default_factory=list, repr=False, compare=False
+    )
 
     def flush(self) -> None:
         """Fold the step's pending replays into the checkpoints (every KDA
@@ -77,16 +84,15 @@ class KDARecoverSSMDeferred:
             return None
 
     def start_flush(self, prefix: str) -> None:
-        """Prepare the replay plan and compact the conv history once, at the
+        """Fold the step's pending replays on the side stream, once, at the
         first KDA layer.
 
-        The recurrent-state replay is fused into each layer's verify (it reuses
-        the state load the verify already performs), so only the conv history
-        has to be shifted before ``causal_conv1d``. Below the fusion threshold,
-        the whole step falls back to a full ``flush`` (compact + commit) and the
-        verify runs from committed checkpoints without a replay.
+        Each layer's chunk (conv compaction + state commit) runs ahead of the
+        forward, overlapping the earlier layers' compute; ``wait_layer`` makes
+        each layer wait for its own chunk. The verify kernel then runs without
+        an in-kernel replay.
         """
-        if self.started or self.flushed:
+        if self.flushed:
             return
         index = self._layer_index(prefix)
         if index is None:
@@ -94,33 +100,28 @@ class KDARecoverSSMDeferred:
             return
         rows = self.state_indices.shape[0]
         if rows == 0:
+            self.flushed = True
             return
-        if not self._fuse():
-            num_heads = self.context.checkpoints[0].shape[1]
-            logger.info_once(
-                f"KDA RecoverSSM {num_heads} heads x {rows} requests below the "
-                "fusion threshold; folding pending replays before verify"
-            )
-            self.flush()
-            return
-        self.started = True
-        self.context.compact_conv(self.state_indices, self.record_rows[:rows], self.pending)
+        self.fold_events = self.context.flush_layers(
+            self.state_indices,
+            self.record_rows[:rows],
+            self.pending,
+            _fold_stream(),
+        )
+        self.flushed = True
 
     def wait_layer(self, prefix: str) -> None:
-        """No-op: the fused verify replays the pending state in-kernel."""
-        if not self.started and not self.flushed:
+        """Make this layer's stream wait for its side-stream fold chunk."""
+        if not self.flushed:
             self.start_flush(prefix)
+        index = self._layer_index(prefix)
+        if index is not None and index < len(self.fold_events):
+            torch.npu.current_stream().wait_event(self.fold_events[index])
 
     def replay_plan(self):
-        """The prepared plan for ``kda_recoverssm_verify``'s fused replay."""
-        if not self.started:
-            return None
-        return (
-            self.context.commit_lens,
-            self.context.final_state_indices,
-            self.context.boundary_state_indices,
-            self.context.boundary_recovery_lens,
-        )
+        """Always None: the folds run on the side stream ahead of the verify,
+        so the verify kernel runs without an in-kernel replay."""
+        return None
 
 
 class KDADeferredCommitContext(AscendCommitContext):
