@@ -32,13 +32,16 @@
      register-held recurrence, writes outputs and compact records, and leaves the
      persistent checkpoint unchanged. Null-page rows produce zero output and do
      not write records.
-  2. `_prepare_commit_plan_kernel` maps speculative rows to sampler rows, clamps
-     accepted lengths to the query length and window capacity, and prepares final
-     and optional boundary destinations. Null pages and zero accepted lengths
-     become no-op plan entries.
-  3. `_compact_conv_state_kernel` copies the accepted convolution history to its
-     destination. For history length `W` and accepted length `c > 0`, the source
-     interval is `[c - 1, c - 1 + W)` and the destination interval is `[0, W)`.
+  2. The shared [`prepare_commit_plan()`](prepare_commit_plan.md) wrapper maps
+     speculative rows to sampler rows, clamps accepted lengths to the query
+     length and window capacity, and prepares final and optional boundary
+     destinations. Null pages and zero accepted lengths become no-op plan
+     entries.
+  3. The shared [`compact_conv_state()`](compact_conv_state.md) wrapper copies
+     the accepted convolution history to the final and optional boundary pages
+     selected by the plan. For history length `W` and accepted length `c > 0`,
+     the source interval is `[c - 1, c - 1 + W)` and the destination interval is
+     `[0, W)`.
   4. `_commit_kda_state_kernel` traverses the accepted records backwards,
      accumulates decay/products and correction outer products, and writes the
      reconstructed recurrent checkpoint. `_commit_kda_state_grouped_kernel`

@@ -27,11 +27,12 @@ from vllm.v1.attention.backends.gdn_attn import (
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     PAD_SLOT_ID,
+    mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
-from vllm_ascend.device.hardware_profile import get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
@@ -39,12 +40,10 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_final_chunk_indices,
     prepare_update_chunk_offsets,
 )
-from vllm_ascend.ops.triton.mamba.align_block_table import (
-    mamba_get_block_table_tensor,
-)
 from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
 
 _GDN_CHUNK_SIZE = 64
+_GDN_CHUNK32_SIZE = 32
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
 _GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE = 608 * 2
 _GDN_CUMSUM_WORKING_SET = 2**18
@@ -142,6 +141,8 @@ class GDNChunkedPrefillMetadata:
     cu_seqlens_kern: tuple[int, ...] | None = None
     keep_meta: torch.Tensor | None = None
     head_sharded_pcp: bool = False
+    # A5 chunk32 uses the compacted kernel sequence IDs; shared across layers.
+    chunk_indices_chunk32_host: tuple[int, ...] | None = None
 
 
 @dataclass
@@ -333,6 +334,18 @@ def _build_non_spec_chunked_prefill_metadata(
     else:
         cu_seqlens_kern = tuple(cu_seqlens_kern)
 
+    # Use the same index builder as chunk64, with the compacted sequence IDs
+    # passed to the A5 kernel. Every GDN layer reuses this metadata instance.
+    chunk_indices_chunk32_host = None
+    if get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32):
+        chunk_cu_seqlens_cpu = cu_seqlens_cpu if cu_seqlens_kern is None else cu_seqlens_cpu.new_tensor(cu_seqlens_kern)
+        if chunk_cu_seqlens_cpu.numel() > 1:
+            chunk_indices_chunk32 = prepare_chunk_indices(chunk_cu_seqlens_cpu, _GDN_CHUNK32_SIZE)
+            chunk_indices_chunk32_host = tuple(chunk_indices_chunk32.to(torch.int64).reshape(-1).tolist())
+        else:
+            # With no nonempty sequences, prepare_chunk_indices would call torch.cat([]).
+            chunk_indices_chunk32_host = ()
+
     if build_device_metadata:
         device_chunk_metadata = {
             "chunk_indices_chunk64": chunk_indices_chunk64.to(device=device, non_blocking=True),
@@ -355,6 +368,7 @@ def _build_non_spec_chunked_prefill_metadata(
     return GDNChunkedPrefillMetadata(
         cu_seqlens_host=cu_seqlens_host,
         chunk_indices_chunk64_host=tuple(chunk_indices_chunk64.to(torch.int64).reshape(-1).tolist()),
+        chunk_indices_chunk32_host=chunk_indices_chunk32_host,
         **device_chunk_metadata,
         cu_seqlens_kern=cu_seqlens_kern,
         keep_meta=keep_meta,
@@ -1441,7 +1455,7 @@ class AscendGDNFusedAttentionBackend(AscendGDNAttentionBackend):
     def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder]:
         # Import lazily to avoid the gdn <-> builder import cycle at module
         # initialization.  The probe result is cached by the attention class.
-        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+        from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 
         if get_pcp_group().world_size == 1 and AscendGatedDeltaNetAttention._supports_host_metadata_prefill():
             return AscendGDNHostMetadataBuilder

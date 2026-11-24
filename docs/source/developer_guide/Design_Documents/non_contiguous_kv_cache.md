@@ -11,7 +11,7 @@ incorrect stride.
 
 This feature keeps the logical block table and block IDs unchanged while
 constructing strided tensor views over the existing physical allocation. It is
-implemented during Ascend model runner cache construction and applies to hybrid
+implemented during Ascend Model Runner cache construction and applies to hybrid
 Attention + Mamba models and supported pure GQA Attention models.
 
 ## 2. Goals and Non-Goals
@@ -48,7 +48,7 @@ even when they share the same backing allocation.
 
 ### 3.1 Contiguous Compatibility Layout
 
-The following layout is the legacy compatibility path used when the
+The following layout is the contiguous compatibility path used when the
 implementation needs all state tensors to remain contiguous:
 
 ```text
@@ -222,7 +222,7 @@ removed after the layout implementation is considered stable.
 
 ## 8. Compatibility and Limitations
 
-- The feature is implemented during Ascend model runner cache construction.
+- The feature is implemented during Ascend Model Runner cache construction.
 - The logical block table and scheduler-visible block IDs remain unchanged.
 - The exact physical layout depends on the model's Attention and Mamba cache
   specifications and the selected kernel block sizes.
