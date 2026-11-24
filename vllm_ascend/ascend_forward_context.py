@@ -1,4 +1,5 @@
 import math
+import weakref
 from contextlib import contextmanager
 from contextvars import ContextVar
 from enum import Enum
@@ -152,6 +153,128 @@ def resolve_draft_moe_quant_type(
     if isinstance(explicit_quant_type, QuantType):
         return explicit_quant_type
     return QuantType.NONE
+
+
+@contextmanager
+def sync_draft_moe_comm_context(
+    vllm_config: VllmConfig | None = None,
+    *,
+    model_instance: torch.nn.Module | None = None,
+    is_draft_model_prefill: bool | None = None,
+):
+    """Synchronize forward-context MoE communication state for a draft forward."""
+    from vllm.config import get_current_vllm_config_or_none
+
+    from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
+
+    try:
+        get_forward_context()
+    except AssertionError:
+        yield
+        return
+
+    resolved_config = vllm_config if vllm_config is not None else get_current_vllm_config_or_none()
+    prev_prefill = _EXTRA_CTX.is_draft_model_prefill
+    prev_state = (
+        _EXTRA_CTX.is_draft_model,
+        prev_prefill,
+        _EXTRA_CTX.draft_moe_quant_type,
+        _EXTRA_CTX.moe_comm_type,
+        _EXTRA_CTX.moe_comm_method,
+        _EXTRA_CTX.use_mega_moe,
+    )
+    try:
+        _EXTRA_CTX.is_draft_model = True
+        _EXTRA_CTX.is_draft_model_prefill = (
+            bool(prev_prefill) if is_draft_model_prefill is None else is_draft_model_prefill
+        )
+        if (
+            _EXTRA_CTX.moe_comm_type is None
+            and not _EXTRA_CTX.use_mega_moe
+            and (resolved_config is None or not _is_moe_model_for_config(resolved_config))
+        ):
+            yield
+            return
+        draft_moe_quant_type = resolve_draft_moe_quant_type(
+            resolved_config,
+            is_draft_model=True,
+        )
+        _EXTRA_CTX.draft_moe_quant_type = draft_moe_quant_type
+        if resolved_config is not None:
+            max_num_tokens = _EXTRA_CTX.max_tokens_across_dp
+            if max_num_tokens is None:
+                max_num_tokens = _EXTRA_CTX.num_tokens
+            moe_comm_type = select_moe_comm_method(
+                max_num_tokens,
+                resolved_config,
+                is_draft_model=True,
+                draft_moe_quant_type=draft_moe_quant_type,
+            )
+            model_comm_methods = getattr(model_instance, "moe_comm_methods", None)
+            _EXTRA_CTX.moe_comm_type = moe_comm_type
+            _EXTRA_CTX.moe_comm_method = (
+                model_comm_methods.get(moe_comm_type)
+                if model_comm_methods is not None
+                else get_moe_comm_method(moe_comm_type)
+            )
+            _EXTRA_CTX.use_mega_moe = resolve_use_mega_moe(resolved_config, moe_comm_type)
+        yield
+    finally:
+        (
+            _EXTRA_CTX.is_draft_model,
+            _EXTRA_CTX.is_draft_model_prefill,
+            _EXTRA_CTX.draft_moe_quant_type,
+            _EXTRA_CTX.moe_comm_type,
+            _EXTRA_CTX.moe_comm_method,
+            _EXTRA_CTX.use_mega_moe,
+        ) = prev_state
+
+
+_DRAFT_BOUND_MODEL_CLASSES: weakref.WeakKeyDictionary[type, type] = weakref.WeakKeyDictionary()
+
+
+def bind_draft_moe_comm_context(
+    model: torch.nn.Module,
+    vllm_config: VllmConfig | None,
+) -> torch.nn.Module:
+    """Bind draft MoE communication isolation onto a loaded draft ``nn.Module``.
+
+    Upstream MRV2 eager (``enforce_eager=True``), ``PIECEWISE`` (``run_pw_graph``),
+    and prompt-context initialization call ``self.model(...)`` directly inside a
+    base ``set_forward_context(..., target_vllm_config)`` scope. Subclassing the
+    draft instance's ``__call__`` intercepts every eager/piecewise/capture call
+    before ``@support_torch_compile`` dispatches ``aot_compiled_fn`` while
+    preserving ``isinstance``, parameter/module names, and Dynamo inner tracing.
+    """
+    if getattr(model, "_ascend_draft_comm_bound", False):
+        model._ascend_draft_vllm_config = vllm_config  # type: ignore[attr-defined]
+        return model
+
+    base_cls = type(model)
+    bound_cls = _DRAFT_BOUND_MODEL_CLASSES.get(base_cls)
+    if bound_cls is None:
+
+        class _DraftContextBoundModel(base_cls):  # type: ignore[valid-type,misc]
+            _ascend_draft_comm_bound = True
+
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:
+                if torch.compiler.is_compiling():
+                    return super().__call__(*args, **kwargs)
+                with sync_draft_moe_comm_context(
+                    getattr(self, "_ascend_draft_vllm_config", None),
+                    model_instance=self,
+                ):
+                    return super().__call__(*args, **kwargs)
+
+        _DraftContextBoundModel.__name__ = base_cls.__name__
+        _DraftContextBoundModel.__qualname__ = base_cls.__qualname__
+        _DraftContextBoundModel.__module__ = base_cls.__module__
+        _DRAFT_BOUND_MODEL_CLASSES[base_cls] = _DraftContextBoundModel
+        bound_cls = _DraftContextBoundModel
+
+    model.__class__ = bound_cls
+    model._ascend_draft_vllm_config = vllm_config  # type: ignore[attr-defined]
+    return model
 
 
 @contextmanager

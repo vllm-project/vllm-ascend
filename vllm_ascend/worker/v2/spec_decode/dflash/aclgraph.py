@@ -30,6 +30,7 @@ from vllm_ascend.worker.v2.aclgraph_utils import (
     collect_sorted_captured_token_sizes,
     model_capture_wrapper,
 )
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import filter_draft_full_aclgraph_sizes
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -42,11 +43,16 @@ class DFlashAclGraphManager(AscendGraphManagerMixin, DFlashCudaGraphManager):
         decode_query_lens: Mapping[int, int],
         speculator: Any = None,
     ):
+        vllm_config, cudagraph_mode, decode_request_sizes = filter_draft_full_aclgraph_sizes(
+            vllm_config, cudagraph_mode, decode_query_lens
+        )
+        graph_kwargs = {} if decode_request_sizes is None else {"decode_request_sizes": decode_request_sizes}
         super().__init__(
             vllm_config,
             device,
             cudagraph_mode,
             decode_query_lens,
+            **graph_kwargs,
         )
 
         # It is set by AscendDFlashSpeculator.init_cudagraph_manager after creation,

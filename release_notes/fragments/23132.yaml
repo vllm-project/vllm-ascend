@@ -1,0 +1,9 @@
+pr: 23132
+entries:
+  - category: bugfix
+    text: >-
+      Isolated MRV2 speculative draft MoE communication contexts across
+      eager, PIECEWISE, and capture paths for all speculator types and
+      filtered draft ACLGraph capture sizes that would require ALLTOALL
+      without mutating target model capture grids.
+    hardware: [A3]
