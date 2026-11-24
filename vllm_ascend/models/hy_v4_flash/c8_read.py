@@ -72,7 +72,12 @@ def gather_c8_rows(cache, block_table, block_size, positions, *, output=None):
     shape = (*positions.shape, _LATENT + _ROPE)
     if output is None:
         output = torch.empty(shape, dtype=torch.float32, device=cache.device)
-    elif output.shape != shape or output.dtype != torch.float32 or output.device != cache.device or not output.is_contiguous():
+    elif (
+        output.shape != shape
+        or output.dtype != torch.float32
+        or output.device != cache.device
+        or not output.is_contiguous()
+    ):
         raise ValueError("C8 output must be contiguous FP32 with the requested shape and device")
     count = positions.numel()
     if count:
@@ -93,6 +98,71 @@ def gather_c8_rows(cache, block_table, block_size, positions, *, output=None):
             num_warps=1,
         )
     return output
+
+
+@triton.jit(do_not_specialize=["count"])
+def _read_c8_banded(
+    cache,
+    rope_cache,
+    scale_cache,
+    block_table,
+    key,
+    value,
+    count,
+    ROW_BYTES: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    ROWS: tl.constexpr,
+    LATENT: tl.constexpr,
+    ROPE: tl.constexpr,
+    SCALE_TILE: tl.constexpr,
+):
+    row = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
+    live = row < count
+    page = tl.load(block_table + row // PAGE_SIZE, live, 0).to(tl.int64)
+    slot = page * PAGE_SIZE + row % PAGE_SIZE
+    lane = tl.arange(0, LATENT)
+    group = tl.arange(0, LATENT // SCALE_TILE)
+    bits = tl.load(cache + slot[:, None] * ROW_BYTES + lane[None, :], live[:, None], 0)
+    scales = tl.load(
+        scale_cache + slot[:, None] * (ROW_BYTES // 4) + (LATENT + 2 * ROPE) // 4 + group[None, :],
+        live[:, None],
+        0.0,
+    )
+    decoded = _decode_e4m3fn(bits).reshape((ROWS, LATENT // SCALE_TILE, SCALE_TILE))
+    latent = (decoded * scales[:, :, None]).reshape((ROWS, LATENT)).to(tl.bfloat16)
+    key_row = key + row[:, None] * (LATENT + ROPE)
+    tl.store(key_row + lane[None, :], latent, live[:, None])
+    tl.store(value + row[:, None] * LATENT + lane[None, :], latent, live[:, None])
+    rope_lane = tl.arange(0, ROPE)
+    rope = tl.load(
+        rope_cache + slot[:, None] * (ROW_BYTES // 2) + LATENT // 2 + rope_lane[None, :],
+        live[:, None],
+        0.0,
+    )
+    tl.store(key_row + LATENT + rope_lane[None, :], rope, live[:, None])
+
+
+def read_c8_banded(cache, block_table, block_size, rows):
+    """Build contiguous BF16 K and V for the CANN banded attention path."""
+    key = torch.empty((rows, _LATENT + _ROPE), device=cache.device, dtype=torch.bfloat16)
+    value = torch.empty((rows, _LATENT), device=cache.device, dtype=torch.bfloat16)
+    _read_c8_banded[(triton.cdiv(rows, _ROWS_PER_PROGRAM),)](
+        cache,
+        cache.view(torch.bfloat16),
+        cache.view(torch.float32),
+        block_table,
+        key,
+        value,
+        rows,
+        cache.shape[-1],
+        block_size,
+        _ROWS_PER_PROGRAM,
+        _LATENT,
+        _ROPE,
+        SFA_QSFA_TILE_SIZE,
+        num_warps=1,
+    )
+    return key, value
 
 
 @triton.jit

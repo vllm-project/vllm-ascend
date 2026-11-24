@@ -179,22 +179,37 @@ class AscendHYV4FlashModel(HYV4FlashModel):
         if self.engram_hash is not None:
             self.engram_hash.use_fused_prefill = is_950() and uses_prefill_ops(vllm_config)
 
-    def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None,
-                lookback_token_ids=None, prepared_engram=None):
-        if (prepared_engram is None and self.engram_hash is not None
-                and self.engram_hash.use_fused_prefill and input_ids is not None
-                and lookback_token_ids is not None and input_ids.device.type == "npu"):
+    def forward(
+        self,
+        input_ids,
+        positions,
+        intermediate_tensors=None,
+        inputs_embeds=None,
+        lookback_token_ids=None,
+        prepared_engram=None,
+    ):
+        if (
+            prepared_engram is None
+            and self.engram_hash is not None
+            and self.engram_hash.use_fused_prefill
+            and input_ids is not None
+            and lookback_token_ids is not None
+            and input_ids.device.type == "npu"
+        ):
             metadata = get_forward_context().attn_metadata
             layer_name = self.layers[0].self_attn.layer_name
             batch = metadata.get(layer_name) if isinstance(metadata, dict) else None
             if batch is not None and batch.prefill_reqs and all(batch.prefill_reqs):
-                embeddings = [self.layers[i - 1].engram_layer.multi_head_embedding
-                              for i in self.config.engram_layer_ids]
+                embeddings = [
+                    self.layers[i - 1].engram_layer.multi_head_embedding for i in self.config.engram_layer_ids
+                ]
                 if all(embedding.map_host_weight for embedding in embeddings):
                     prepared_engram = self._prefetch_engram(
-                        input_ids, lookback_token_ids, layer_name, batch, embeddings)
-        return super().forward(input_ids, positions, intermediate_tensors, inputs_embeds,
-                               lookback_token_ids, prepared_engram)
+                        input_ids, lookback_token_ids, layer_name, batch, embeddings
+                    )
+        return super().forward(
+            input_ids, positions, intermediate_tensors, inputs_embeds, lookback_token_ids, prepared_engram
+        )
 
     def _prefetch_engram(self, input_ids, lookback, layer_name, batch, embeddings):
         if self._engram_prefetch_stream is None:
@@ -231,11 +246,19 @@ class AscendHYV4FlashForCausalLM(HYV4FlashForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         validate_runtime(vllm_config)
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self._pack_prefill_engram_weights = uses_prefill_ops(vllm_config)
         transfer = vllm_config.kv_transfer_config
         self.logits_processor.use_npu_fp32_head = (
-            transfer is not None and transfer.kv_role == "kv_consumer"
-            and is_950()
+            transfer is not None and transfer.kv_role == "kv_consumer" and is_950()
         )
+
+    def load_weights(self, weights):
+        loaded = super().load_weights(weights)
+        if self._pack_prefill_engram_weights:
+            for module in self.model.modules():
+                if isinstance(module, FlashEngram):
+                    module.pack_prefill_weights()
+        return loaded
 
     @staticmethod
     def get_model_state_cls():

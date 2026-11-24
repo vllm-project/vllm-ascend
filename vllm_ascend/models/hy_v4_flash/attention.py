@@ -173,14 +173,13 @@ def _indexpool_hadamard_basis(device, stream_handle):
     return basis.to(device)
 
 
-def _encode_prefill_indexpool_fp8(vectors):
+def _encode_prefill_indexpool_fp8(vectors, *, output_dtype=torch.float32):
+    from .prefill_ops.index_pool_fp8 import round_prefill_fp8_rows
+
     stream = torch.npu.current_stream(vectors.device)
     basis = _indexpool_hadamard_basis(vectors.device, stream.npu_stream)
-    values = torch.mm(vectors.view(-1, INDEX_DIM), basis, out_dtype=torch.float32)
-    values = values.reshape_as(vectors) * (INDEX_DIM**-0.5)
-    scale = torch.exp2(torch.ceil(torch.log2(values.abs().amax(-1, keepdim=True).clamp_min(1e-4) / 448)))
-    encoded = (values / scale).clamp(-448, 448).to(torch.float8_e4m3fn)
-    return encoded.float() * scale
+    transformed = torch.mm(vectors.view(-1, INDEX_DIM), basis, out_dtype=torch.float32)
+    return round_prefill_fp8_rows(transformed, output_dtype=output_dtype).view_as(vectors)
 
 
 class FlashIndexPool(nn.Module):
@@ -227,7 +226,50 @@ class FlashIndexPool(nn.Module):
         self.key_norm = nn.RMSNorm(INDEX_DIM, eps=self.eps, dtype=torch.float32)
         self.intra_group_ape = nn.Parameter(torch.empty(self.ratio, INDEX_DIM, dtype=torch.float32))
 
-    def rotate(self, vectors, positions):
+    def rotate(
+        self,
+        vectors,
+        positions,
+        *,
+        shared_positions=None,
+        position_start=0,
+        position_step=1,
+        eager_prefill=False,
+        group_map=None,
+    ):
+        if (
+            eager_prefill
+            and self.use_eager_fp8_encoding
+            and vectors.device.type == "npu"
+            and vectors.dtype == torch.bfloat16
+            and vectors.is_contiguous()
+            and vectors.shape[-1] == INDEX_DIM == 128
+            and self.rope_dim == 64
+            and 0 < vectors.shape[0] <= 4096
+            and positions.ndim in (1, 2)
+            and (positions.ndim == 1 or (positions.shape[0] == 3 and self.sections))
+        ):
+            from .prefill_ops.index_pool_rope import apply_factors, make_factors
+
+            stream = torch.npu.current_stream(vectors.device).npu_stream
+            sections = tuple(self.sections) if self.sections else None
+            if shared_positions is None:
+                factors = make_factors(positions, self.theta, self.rope_dim, sections, self.interleaved, stream)
+                return apply_factors(vectors, factors)
+            cache = get_forward_context().additional_kwargs.setdefault("hy4_index_pool_rope", {})
+            key = (id(shared_positions), self.theta, self.rope_dim, sections, self.interleaved, vectors.device, stream)
+            if key not in cache:
+                factors = make_factors(shared_positions, self.theta, self.rope_dim, sections, self.interleaved, stream)
+                cache[key] = (shared_positions, factors)
+            if group_map is not None:
+                history_factors = (
+                    make_factors(positions, self.theta, self.rope_dim, sections, self.interleaved, stream)
+                    if positions.shape[-1]
+                    else None
+                )
+                return apply_factors(vectors, cache[key][1], group_map=group_map, history_factors=history_factors)
+            return apply_factors(vectors, cache[key][1], position_start, position_step)
+
         inverse = self.theta ** (
             -torch.arange(0, self.rope_dim, 2, device=vectors.device, dtype=torch.float32) / self.rope_dim
         )
@@ -249,7 +291,7 @@ class FlashIndexPool(nn.Module):
             (nope, (even * cos - odd * sin).to(vectors.dtype), (odd * cos + even * sin).to(vectors.dtype)), dim=-1
         )
 
-    def _encode_fp8(self, vectors, *, full_graph):
+    def _encode_fp8(self, vectors, *, full_graph, output_dtype=torch.float32):
         if (
             self.use_eager_fp8_encoding
             and not full_graph
@@ -259,7 +301,7 @@ class FlashIndexPool(nn.Module):
             and vectors.shape[-1] == INDEX_DIM
             and 512 * INDEX_DIM <= vectors.numel() <= 65536 * INDEX_DIM
         ):
-            return _encode_prefill_indexpool_fp8(vectors)
+            return _encode_prefill_indexpool_fp8(vectors, output_dtype=output_dtype)
         if (
             full_graph
             and self.fuse_fp8_encoding
@@ -271,25 +313,51 @@ class FlashIndexPool(nn.Module):
             return self.fp8_encoder(vectors)
         return indexpool_fp8(vectors)
 
-    def encode_queries(self, hidden, q_c, positions, *, full_graph=False):
+    def encode_queries(
+        self, hidden, q_c, positions, *, full_graph=False, shared_positions=None, output_dtype=torch.float32
+    ):
         query = self.query_projection(q_c)[0].reshape(-1, self.num_heads, INDEX_DIM)
         weight = self.head_weight_projection(hidden)[0].float() * (self.num_heads * INDEX_DIM) ** -0.5
-        return self._encode_fp8(self.rotate(query, positions), full_graph=full_graph), weight
+        rotated = self.rotate(
+            query, positions, shared_positions=shared_positions, eager_prefill=shared_positions is not None
+        )
+        return self._encode_fp8(rotated, full_graph=full_graph, output_dtype=output_dtype), weight
 
-    def encode_keys(self, raw, positions, *, full_graph=False):
+    def encode_keys(
+        self,
+        raw,
+        positions,
+        *,
+        full_graph=False,
+        eager_prefill=False,
+        shared_positions=None,
+        position_start=0,
+        group_map=None,
+    ):
         groups = raw.shape[0] // self.ratio
         raw = raw[: groups * self.ratio].reshape(groups, self.ratio, INDEX_DIM)
         if not groups:
             return raw.new_empty((0, INDEX_DIM), dtype=torch.float32)
+        # Both projections consume the same FP32 input. Materialize it once in prefill.
         pooled = pooled_keys(
-            raw,
+            raw.float() if eager_prefill else raw,
             self.key_value_projection.weight,
             self.key_gate_projection.weight,
             self.intra_group_ape,
             self.key_norm.weight,
             self.eps,
+        ).to(torch.bfloat16 if group_map is not None else raw.dtype)
+        if group_map is None:
+            positions = positions[..., : groups * self.ratio : self.ratio]
+        pooled = self.rotate(
+            pooled,
+            positions,
+            eager_prefill=eager_prefill,
+            group_map=group_map,
+            shared_positions=shared_positions,
+            position_start=position_start,
+            position_step=self.ratio,
         )
-        pooled = self.rotate(pooled, positions[..., : groups * self.ratio : self.ratio])
         return self._encode_fp8(pooled, full_graph=full_graph)
 
 
@@ -435,6 +503,16 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             rope_parameters=rope_parameters,
             is_neox_style=False,
         )
+        self._mrope_channel_bits = None
+        if (
+            self.use_eager_prefill_rotary
+            and self.is_window_layer
+            and HAS_TRITON
+            and getattr(self.rotary_emb, "mrope_interleaved", False)
+        ):
+            from .prefill_ops.small_aiv import mrope_channel_bits
+
+            self._mrope_channel_bits = mrope_channel_bits(self.rotary_emb.mrope_section)
         self.indexer = (
             None
             if self.is_window_layer or reuse_target
@@ -533,8 +611,6 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             and 512 <= q_pe.shape[0] <= 4096
             and positions.shape[1] == q_pe.shape[0]
         ):
-            from vllm.model_executor.layers.rotary_embedding.mrope import apply_interleaved_rope
-
             context = get_forward_context()
             metadata = context.attn_metadata
             batch = metadata.get(self.layer_name) if isinstance(metadata, dict) else None
@@ -545,14 +621,25 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                 factors = cache.get(key)
                 rows = q_pe.shape[0]
                 if factors is None:
-                    cos, sin = rope._match_cos_sin_cache_dtype(q_pe)[positions].chunk(2, dim=-1)
-                    cos = apply_interleaved_rope(cos, rope.mrope_section)
-                    sin = apply_interleaved_rope(sin, rope.mrope_section)
-                    factors = (
-                        positions,
-                        cos.repeat_interleave(2, dim=-1).view(1, rows, 1, 64),
-                        sin.repeat_interleave(2, dim=-1).view(1, rows, 1, 64),
-                    )
+                    rotary_cache = rope._match_cos_sin_cache_dtype(q_pe)
+                    if (
+                        self._mrope_channel_bits is not None
+                        and rotary_cache.is_contiguous()
+                        and rotary_cache.shape[-1] == 64
+                        and positions.dtype == torch.int64
+                    ):
+                        from .prefill_ops.small_aiv import gather_mrope_factors
+
+                        cos, sin = gather_mrope_factors(rotary_cache, positions, self._mrope_channel_bits)
+                    else:
+                        from vllm.model_executor.layers.rotary_embedding.mrope import apply_interleaved_rope
+
+                        cos, sin = rotary_cache[positions].chunk(2, dim=-1)
+                        cos = apply_interleaved_rope(cos, rope.mrope_section)
+                        sin = apply_interleaved_rope(sin, rope.mrope_section)
+                        cos = cos.repeat_interleave(2, dim=-1).view(1, rows, 1, 64)
+                        sin = sin.repeat_interleave(2, dim=-1).view(1, rows, 1, 64)
+                    factors = (positions, cos, sin)
                     cache[key] = factors
                 q, k = torch_npu.npu_apply_rotary_pos_emb(
                     q_pe.view(1, rows, self.local_heads, 64),
@@ -598,9 +685,20 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             q_nope, q_pe = q.split((self.nope_dim, self.rope_dim), dim=-1)
         q_pe, k_pe = self._rotate_qk(positions, q_pe.reshape(q.shape[0], -1).contiguous(), k_pe.contiguous())
         q_pe = q_pe.reshape(-1, self.local_heads, self.rope_dim)
-        out = hidden_states.new_zeros((q.shape[0], self.local_heads * self.v_dim))
-        meta = get_flash_attention_metadata() if self.fuse_attn_output_gate or self.overlap_attn_output_gate else None
+        needs_meta = self.use_cann_prefill or self.fuse_attn_output_gate or self.overlap_attn_output_gate
+        meta = get_flash_attention_metadata() if needs_meta else None
         full_decode = meta is not None and meta.decode_seq_lens is not None
+        full_prefill = (
+            self.use_cann_prefill
+            and meta is not None
+            and not full_decode
+            and bool(meta.prefill_reqs)
+            and all(meta.prefill_reqs)
+            and meta.query_start_loc[0] == 0
+            and meta.query_start_loc[-1] == q.shape[0] > 0
+        )
+        out_shape = (q.shape[0], self.local_heads * self.v_dim)
+        out = hidden_states.new_empty(out_shape) if full_prefill else hidden_states.new_zeros(out_shape)
         fuse_gate = self.fuse_attn_output_gate and full_decode and self._can_fuse_output_gate(out)
         overlap_gate = self.overlap_attn_output_gate and full_decode and not self.sequence_parallel_output
         if overlap_gate:
@@ -702,9 +800,29 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             (length - 1) // self.indexer.ratio > self.indexer.budget for length in meta.seq_lens
         )
         if uses_indexpool:
-            index_query, index_weight = self.indexer.encode_queries(
-                hidden[:num_tokens], q_c[:num_tokens], positions[..., :num_tokens]
+            all_prefill = self.use_cann_prefill and bool(meta.prefill_reqs and all(meta.prefill_reqs))
+            # Whole indexer chunks can store the FP8 bins in the dtype consumed by LI.
+            can_store_bf16 = (
+                all_prefill
+                and self.fuse_c8_qk
+                and query.dtype == torch.bfloat16
+                and cache.dtype == torch.uint8
+                and all(
+                    (stop - start) % QUERY_CHUNK == 0
+                    and seq_len - (stop - start) >= (self.indexer.budget + 1) * self.indexer.ratio
+                    for seq_len, start, stop in zip(meta.seq_lens, meta.query_start_loc, meta.query_start_loc[1:])
+                    if stop > start
+                )
             )
+            index_inputs = (hidden[:num_tokens], q_c[:num_tokens], positions[..., :num_tokens])
+            if all_prefill:
+                index_query, index_weight = self.indexer.encode_queries(
+                    *index_inputs,
+                    shared_positions=positions,
+                    output_dtype=torch.bfloat16 if can_store_bf16 else torch.float32,
+                )
+            else:
+                index_query, index_weight = self.indexer.encode_queries(*index_inputs)
         for i, seq_len in enumerate(meta.seq_lens):
             start, stop = meta.query_start_loc[i : i + 2]
             if start == stop:
@@ -717,22 +835,33 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                 and num_queries <= BATCH_VERIFY_MAX_QUERIES
                 and query.device.type == "npu"
             )
-            may_score_groups = uses_indexpool and (seq_len - 1) // self.indexer.ratio > self.indexer.budget
-            pooled_history = None
-            if may_score_groups:
-                if self.incremental_index_pool:
-                    groups = seq_len // self.indexer.ratio
-                    pooled_history = torch.empty((groups, INDEX_DIM), dtype=torch.float32, device=hidden.device)
-                    self.ops.copy_pool_keys(
-                        cache, meta.block_table[i], pooled_history, 0, block_size, self.indexer.ratio, write=False
-                    )
-                else:
-                    history = torch.arange(seq_len, device=hidden.device)
-                    raw_keys, key_pos = self._read_index_rows(
-                        cache, meta.block_table[i], block_size, history, positions.ndim
-                    )
             is_prefill = not verify and bool(meta.prefill_reqs and meta.prefill_reqs[i])
             block_table = meta.block_table[i]
+            may_score_groups = uses_indexpool and (seq_len - 1) // self.indexer.ratio > self.indexer.budget
+            pooled_history = None
+            fallback_pool = None
+            if may_score_groups:
+                if self.incremental_index_pool:
+                    ratio = self.indexer.ratio
+                    groups = seq_len // ratio
+                    if (
+                        is_prefill
+                        and self.use_cann_prefill
+                        and cache.device.type == "npu"
+                        and cache.dtype == torch.uint8
+                        and cache.is_contiguous()
+                        and block_table.dtype in (torch.int32, torch.int64)
+                        and block_table.is_contiguous()
+                        and block_size == 64
+                        and ratio == 4
+                    ):
+                        pooled_history = self.ops.read_prefill_pool(cache, block_table, groups, block_size, ratio)
+                    else:
+                        pooled_history = torch.empty((groups, INDEX_DIM), dtype=torch.float32, device=hidden.device)
+                        self.ops.copy_pool_keys(cache, block_table, pooled_history, 0, block_size, ratio, write=False)
+                else:
+                    history = torch.arange(seq_len, device=hidden.device)
+                    raw_keys, key_pos = self._read_index_rows(cache, block_table, block_size, history, positions.ndim)
             loop_stop = stop
             if (
                 self.fuse_c8_prefill_window
@@ -884,10 +1013,21 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                                 tail=li_tail[lo - start : hi - start],
                             )
                         else:
-                            selected = sparse_candidates(
+                            score_pool = pool
+                            if pooled_history is not None and pooled_history.dtype == torch.bfloat16:
+                                if fallback_pool is None:
+                                    fallback_pool = pooled_history.float()
+                                score_pool = fallback_pool[:groups]
+                            select_candidates = sparse_candidates
+                            if use_cann_sparse:
+                                from .prefill_ops.index_pool_select import select_partial_prefill_pool
+
+                                select_candidates = select_partial_prefill_pool
+                                q_index = q_index.float()
+                            selected = select_candidates(
                                 q_index,
                                 w_index,
-                                pool,
+                                score_pool,
                                 logical,
                                 self.indexer.ratio,
                                 self.indexer.budget,
@@ -946,7 +1086,9 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
                     stop - loop_stop,
                 )
             if prefill_c8_v2_rows:
-                selected = torch.cat(prefill_c8_v2_rows, dim=0)
+                selected = (
+                    prefill_c8_v2_rows[0] if len(prefill_c8_v2_rows) == 1 else torch.cat(prefill_c8_v2_rows, dim=0)
+                )
                 context = attend_c8_v2(
                     query[start:stop],
                     cache,
@@ -1265,11 +1407,43 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         coords = rows[:, INDEX_DIM:].contiguous().view(torch.int64)
         return rows[:, :INDEX_DIM], coords[:, 0] if position_ndim == 1 else coords.T
 
+    def _read_partial_index_group(
+        self,
+        cache,
+        table,
+        block_size,
+        first_token,
+        end_token,
+        position_ndim,
+        *,
+        prefill,
+    ):
+        if (
+            prefill
+            and self.use_cann_prefill
+            and self.use_fp8_cache
+            and 0 <= first_token < end_token <= table.numel() * block_size
+        ):
+            from .prefill_ops.index_pool_history import read_index_history
+            from .prefill_ops.paged_cache_copy import supports_paged_cache_copy
+
+            if supports_paged_cache_copy(cache, table, block_size):
+                return read_index_history(
+                    cache,
+                    table,
+                    block_size,
+                    first_token,
+                    end_token - first_token,
+                    self.kv_storage_width,
+                    position_ndim,
+                )
+        logical = torch.arange(first_token, end_token, device=cache.device)
+        return self._read_index_rows(cache, table, block_size, logical, position_ndim)
+
     def _update_index_pool(self, cache, block_size, meta, keys, positions):
         ratio = self.indexer.ratio
-        updates = []
-        raw_keys = []
-        key_positions = []
+        segments = []
+        eager_prefill = self.use_cann_prefill and bool(meta.prefill_reqs and all(meta.prefill_reqs))
         for request, seq_len in enumerate(meta.seq_lens):
             start, stop = meta.query_start_loc[request : request + 2]
             if start == stop:
@@ -1278,37 +1452,111 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             first_group, end_group = context_len // ratio, seq_len // ratio
             if first_group == end_group:
                 continue
-            # Recompute the first group when it straddles a chunk or contains
-            # rejected draft tokens. Complete groups in the prefix stay valid.
+            # A partial group starts in the cache and ends in the current batch.
             first_token = first_group * ratio
-            end = start + end_group * ratio - context_len
+            past = max(0, context_len - first_token)
             first_new = start + max(0, first_token - context_len)
-            current_keys = keys[first_new:end]
-            current_positions = positions[..., first_new:end]
-            if first_token < context_len:
-                logical = torch.arange(first_token, context_len, device=keys.device)
-                previous_keys, previous_positions = self._read_index_rows(
-                    cache, meta.block_table[request], block_size, logical, positions.ndim
+            segments.append((request, first_token, past, first_new, (end_group - first_group) * ratio))
+        if not segments:
+            return
+
+        _, _, first_past, first_new, _ = segments[0]
+        shared = eager_prefill and len(segments) == 1 and first_past == 0
+        if (
+            # Limit the mapped path to partial groups. Computing a full shared
+            # factor table on a cache miss can add latency to a no-history batch.
+            eager_prefill
+            and any(past for _, _, past, _, _ in segments)
+            and self.indexer.use_eager_fp8_encoding
+            and self.use_fp8_cache
+            and ratio == 4
+            and self.indexer.rope_dim == 64
+            and keys.shape[1] == INDEX_DIM == 128
+            and keys.dtype is torch.bfloat16
+            and keys.is_contiguous()
+            and keys.device == cache.device == positions.device
+            and positions.dtype == torch.int64
+            and positions.ndim in (1, 2)
+            and (positions.ndim == 1 or (positions.shape[0] == 3 and self.indexer.sections))
+            and sum(count // ratio for _, _, _, _, count in segments) <= 4096
+            and self.kv_storage_width % 8 == 0
+            and cache.storage_offset() % 8 == 0
+            and all(
+                new + count - past <= min(keys.shape[0], positions.shape[-1])
+                and (not past or first + past <= meta.block_table.shape[-1] * block_size)
+                for _, first, past, new, count in segments
+            )
+        ):
+            from .prefill_ops.paged_cache_copy import supports_paged_cache_copy
+
+            assemble = supports_paged_cache_copy(cache, meta.block_table[segments[0][0]], block_size)
+        else:
+            assemble = False
+
+        if assemble:
+            from .prefill_ops.index_pool_assembly import assemble_index_pool_groups
+
+            raw, group_map, history_positions = assemble_index_pool_groups(
+                cache,
+                meta.block_table,
+                block_size,
+                self.kv_storage_width,
+                keys,
+                positions.ndim,
+                segments,
+            )
+            pooled = self.indexer.encode_keys(
+                raw,
+                history_positions,
+                eager_prefill=True,
+                shared_positions=positions,
+                group_map=group_map,
+            )
+        else:
+            raw_keys, key_positions = [], []
+            for request, first_token, past, new, rows in segments:
+                end = new + rows - past
+                current_keys, current_positions = keys[new:end], positions[..., new:end]
+                if past:
+                    previous_keys, previous_positions = self._read_partial_index_group(
+                        cache,
+                        meta.block_table[request],
+                        block_size,
+                        first_token,
+                        first_token + past,
+                        positions.ndim,
+                        prefill=eager_prefill,
+                    )
+                    current_keys = torch.cat((previous_keys, current_keys), dim=0)
+                    current_positions = torch.cat((previous_positions, current_positions), dim=-1)
+                raw_keys.append(current_keys)
+                key_positions.append(current_positions)
+            if eager_prefill:
+                raw = raw_keys[0] if len(raw_keys) == 1 else torch.cat(raw_keys)
+                key_pos = key_positions[0] if len(key_positions) == 1 else torch.cat(key_positions, dim=-1)
+                pooled = self.indexer.encode_keys(
+                    raw,
+                    key_pos,
+                    eager_prefill=True,
+                    shared_positions=positions if shared else None,
+                    position_start=first_new if shared else 0,
                 )
-                current_keys = torch.cat((previous_keys, current_keys), dim=0)
-                current_positions = torch.cat((previous_positions, current_positions), dim=-1)
-            raw_keys.append(current_keys)
-            key_positions.append(current_positions)
-            updates.append((request, first_group, end_group - first_group))
-        if updates:
-            pooled = self.indexer.encode_keys(torch.cat(raw_keys), torch.cat(key_positions, dim=-1))
-            offset = 0
-            for request, first_group, count in updates:
-                self.ops.copy_pool_keys(
-                    cache,
-                    meta.block_table[request],
-                    pooled[offset : offset + count],
-                    first_group,
-                    block_size,
-                    ratio,
-                    write=True,
-                )
-                offset += count
+            else:
+                pooled = self.indexer.encode_keys(torch.cat(raw_keys), torch.cat(key_positions, dim=-1))
+
+        offset = 0
+        for request, first_token, _, _, rows in segments:
+            count = rows // ratio
+            self.ops.copy_pool_keys(
+                cache,
+                meta.block_table[request],
+                pooled[offset : offset + count],
+                first_token // ratio,
+                block_size,
+                ratio,
+                write=True,
+            )
+            offset += count
 
     def _pack_kv(self, latent, rope):
         if not self.use_fp8_cache:
@@ -1341,14 +1589,14 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         )
 
     def process_weights_after_loading(self):
-        if not self.use_pd_decode or self.kv_b_proj.weight.device.type != "npu":
+        if not (self.use_pd_decode or self.use_cann_prefill) or self.kv_b_proj.weight.device.type != "npu":
             return
         wk, wv = self._kv_b_weights()
         wv = wv.transpose(1, 2)
         if self._decode_key_projection is None:
             self._decode_key_projection = wk.contiguous()
             self._decode_value_projection = wv.contiguous()
-            logger.info_once("HYV4 Flash prepacked Decode KV projection weights.")
+            logger.info_once("HYV4 Flash prepacked KV projection weights.")
         else:
             # Captured graphs retain these addresses across weight reloads.
             self._decode_key_projection.copy_(wk)

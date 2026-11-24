@@ -5,12 +5,20 @@ from functools import lru_cache
 
 import torch
 import torch_npu
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.device_config import is_950
 from vllm_ascend.hisparse.c8 import C8_ROW_BYTES, dequantize_c8_rows
 
 
 def _pack_c8_pages(cache, block_table, block_size, num_pages):
+    if HAS_TRITON and 0 < num_pages <= block_table.numel():
+        from .prefill_ops.paged_cache_copy import copy_paged_cache_lanes, supports_paged_cache_copy
+
+        if supports_paged_cache_copy(cache, block_table, block_size):
+            packed = copy_paged_cache_lanes(cache, block_table, num_pages * block_size, 0, C8_ROW_BYTES)
+            return packed.view(num_pages, block_size, C8_ROW_BYTES)
+
     pages = cache.view(-1, block_size, cache.size(-1))
     # Materialize only the requested pages before stripping indexer state.
     selected_pages = pages.index_select(0, block_table[:num_pages].long())
@@ -28,23 +36,37 @@ def attend_c8_v2(query, cache, block_table, block_size, selected, seq_len, sink,
         from .c8_prefill_early import attend_early
 
         early_kv_len = seq_len - query.size(0) + compact_prefix
-        context.append(attend_early(query[:compact_prefix], packed, selected[:compact_prefix],
-                                    early_kv_len, sink.contiguous(), scale))
+        context.append(
+            attend_early(
+                query[:compact_prefix], packed, selected[:compact_prefix], early_kv_len, sink.contiguous(), scale
+            )
+        )
     if compact_prefix < query.size(0):
         from cann_ops_transformer import kv_quant_sparse_flash_attention
 
         query = query[compact_prefix:].contiguous()
         indices = selected[compact_prefix:].to(torch.int32).unsqueeze(1).contiguous()
-        if (query.shape[0] >= 512 and query.shape[1:] == (8, 576)
-                and indices.shape[-1] == 2048):
+        if query.shape[0] >= 512 and query.shape[1:] == (8, 576) and indices.shape[-1] == 2048:
             # The page gather already placed every requested C8 row in logical
             # order. Truncate the last page and let the kernel index that view.
             dense_kv = packed.reshape(-1, 1, C8_ROW_BYTES)[:seq_len].unsqueeze(0)
             partial, _, _ = kv_quant_sparse_flash_attention(
-                query.unsqueeze(0), dense_kv, dense_kv, indices.unsqueeze(0),
-                scale, 2, 2, sparse_block_size=1, layout_query="BSND", layout_kv="BSND",
-                sparse_mode=0, attention_mode=2, quant_scale_repo_mode=1, tile_size=128,
-                rope_head_dim=64, sinks=sink.contiguous(),
+                query.unsqueeze(0),
+                dense_kv,
+                dense_kv,
+                indices.unsqueeze(0),
+                scale,
+                2,
+                2,
+                sparse_block_size=1,
+                layout_query="BSND",
+                layout_kv="BSND",
+                sparse_mode=0,
+                attention_mode=2,
+                quant_scale_repo_mode=1,
+                tile_size=128,
+                rope_head_dim=64,
+                sinks=sink.contiguous(),
             )
             context.append(partial.squeeze(0))
             return torch.cat(context, dim=0) if len(context) > 1 else context[0]
@@ -52,15 +74,28 @@ def attend_c8_v2(query, cache, block_table, block_size, selected, seq_len, sink,
         query_ends = torch.full((1,), query.size(0), dtype=torch.int32, device=query.device)
         kv_lengths = torch.full((1,), seq_len, dtype=torch.int32, device=query.device)
         partial, _, _ = kv_quant_sparse_flash_attention(
-            query, packed, packed, indices,
-            scale, 2, 2, block_table=compact_table, actual_seq_lengths_query=query_ends,
-            actual_seq_lengths_kv=kv_lengths, sparse_block_size=1, layout_query="TND",
-            layout_kv="PA_BSND", sparse_mode=0, attention_mode=2,
-            quant_scale_repo_mode=1, tile_size=128, rope_head_dim=64, sinks=sink.contiguous(),
+            query,
+            packed,
+            packed,
+            indices,
+            scale,
+            2,
+            2,
+            block_table=compact_table,
+            actual_seq_lengths_query=query_ends,
+            actual_seq_lengths_kv=kv_lengths,
+            sparse_block_size=1,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=0,
+            attention_mode=2,
+            quant_scale_repo_mode=1,
+            tile_size=128,
+            rope_head_dim=64,
+            sinks=sink.contiguous(),
         )
         context.append(partial)
     return torch.cat(context, dim=0) if len(context) > 1 else context[0]
-
 
 
 @lru_cache(maxsize=32)
@@ -69,16 +104,48 @@ def _band_mask(device, stream_id):
     return torch.ones((2048, 2048), device=device, dtype=torch.bool).triu_(1)
 
 
-def _attend_c8_banded(query, cache, block_table, block_size, seq_len, sink, scale, window):
+def _prepare_banded_c8(cache, block_table, block_size, seq_len):
     num_pages = (seq_len + block_size - 1) // block_size
+    if (
+        HAS_TRITON
+        and cache.device.type == "npu"
+        and cache.dtype == torch.uint8
+        and cache.is_contiguous()
+        and cache.shape[-1] >= C8_ROW_BYTES
+        and cache.shape[-1] % 4 == 0
+        and cache.storage_offset() % 4 == 0
+        and block_size == 64
+        and block_table.ndim == 1
+        and block_table.is_contiguous()
+        and block_table.device == cache.device
+        and block_table.dtype in (torch.int32, torch.int64)
+        and 0 < num_pages <= block_table.numel()
+    ):
+        from .c8_read import read_c8_banded
+
+        return read_c8_banded(cache, block_table, block_size, seq_len)
+
     packed = _pack_c8_pages(cache, block_table, block_size, num_pages).flatten(0, 1)[:seq_len]
-    kv = dequantize_c8_rows(packed).to(torch.bfloat16).view(1, seq_len, 1, 576)
-    value = kv[..., :512].contiguous()
+    key = dequantize_c8_rows(packed).to(torch.bfloat16)
+    return key, key[..., :512].contiguous()
+
+
+def _attend_c8_banded(query, cache, block_table, block_size, seq_len, sink, scale, window):
+    key, value = _prepare_banded_c8(cache, block_table, block_size, seq_len)
+    kv = key.view(1, seq_len, 1, 576)
+    value = value.view(1, seq_len, 1, 512)
     stream = torch.npu.current_stream(query.device)
     result, *_ = torch_npu.npu_fusion_attention(
-        query.unsqueeze(0), kv, value, query.shape[1], "BSND",
+        query.unsqueeze(0),
+        kv,
+        value,
+        query.shape[1],
+        "BSND",
         atten_mask=_band_mask(query.device, stream.npu_stream),
-        scale=scale, sparse_mode=4, pre_tockens=window - 1, next_tockens=0,
+        scale=scale,
+        sparse_mode=4,
+        pre_tockens=window - 1,
+        next_tockens=0,
         sink=sink.contiguous(),
     )
     return result.squeeze(0)
@@ -91,14 +158,29 @@ def attend_c8_window(query, cache, block_table, block_size, seq_len, sink, scale
     page_offset = first_page * block_size
     first_index = first_query - window + 1 - page_offset
     window_kv_len = seq_len - page_offset
-    if (query.device.type == "npu" and query.dtype == torch.bfloat16
-            and query.ndim == 3 and query.shape[-1] == 576
-            and 512 <= query.shape[0] <= 4096 and window == 512
-            and query.shape[1] == 16 and first_page >= 0
-            and sink.dtype == torch.float32 and sink.shape == (query.shape[1],)
-            and is_950() and hasattr(torch_npu, "npu_fusion_attention")):
+    if (
+        query.device.type == "npu"
+        and query.dtype == torch.bfloat16
+        and query.ndim == 3
+        and query.shape[-1] == 576
+        and 512 <= query.shape[0] <= 4096
+        and window == 512
+        and query.shape[1] == 16
+        and first_page >= 0
+        and sink.dtype == torch.float32
+        and sink.shape == (query.shape[1],)
+        and is_950()
+        and hasattr(torch_npu, "npu_fusion_attention")
+    ):
         return _attend_c8_banded(
-            query, cache, block_table[first_page:], block_size, window_kv_len, sink, scale, window,
+            query,
+            cache,
+            block_table[first_page:],
+            block_size,
+            window_kv_len,
+            sink,
+            scale,
+            window,
         )
     # Each row has exactly window valid entries. This avoids the unsupported
     # varying effective index width of the C8 kernel at the beginning of a sequence.
@@ -106,6 +188,13 @@ def attend_c8_window(query, cache, block_table, block_size, seq_len, sink, scale
     offsets = torch.arange(window, dtype=torch.int32, device=query.device)
     selected = starts[:, None] + offsets
     return attend_c8_v2(
-        query, cache, block_table[first_page:], block_size, selected, seq_len - page_offset,
-        sink, scale, compact_prefix=0,
+        query,
+        cache,
+        block_table[first_page:],
+        block_size,
+        selected,
+        seq_len - page_offset,
+        sink,
+        scale,
+        compact_prefix=0,
     )

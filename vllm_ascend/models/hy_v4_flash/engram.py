@@ -430,6 +430,10 @@ class FlashEngram(nn.Module):
             map_host_weight=storage.cpu_offload and HAS_TRITON and is_950() and uses_prefill_ops(vllm_config),
         )
         self.hidden_size, self.hc_mult = config.hidden_size, config.hc_mult
+        self._use_small_aiv = HAS_TRITON and is_950() and uses_prefill_ops(vllm_config)
+        self.register_buffer("_lookup_gamma", None, persistent=False)
+        self.register_buffer("_pre_gamma", None, persistent=False)
+        self.register_buffer("_residual_scales", None, persistent=False)
         local = self.multi_head_embedding.head_end - self.multi_head_embedding.head_start
         self.lookup_per_head_norms = nn.ModuleList([nn.RMSNorm(layout.head_dim) for _ in range(local)])
         self.value_proj = nn.Linear(local * layout.head_dim, self.hidden_size)
@@ -458,29 +462,80 @@ class FlashEngram(nn.Module):
     def _load_bias(self, parameter, value):
         default_weight_loader(parameter, value if self.rank == 0 else torch.zeros_like(value))
 
+    @torch.no_grad()
+    def pack_prefill_weights(self):
+        if self._use_small_aiv:
+            self._lookup_gamma = torch.stack([norm.weight for norm in self.lookup_per_head_norms]).float()
+            self._pre_gamma = self.unified_pre_gamma.float()
+            self._residual_scales = torch.stack(list(self.unified_per_hc_scales)).float()
+
     def forward(self, hidden, hashes, embedding_rows=None):
         rows = self.multi_head_embedding(hashes) if embedding_rows is None else embedding_rows
         eps = torch.finfo(torch.float32).eps
-        gamma = torch.stack([norm.weight for norm in self.lookup_per_head_norms]).float()
+        use_fused = (
+            self._use_small_aiv
+            and hidden.device.type == "npu"
+            and hidden.dtype == torch.bfloat16
+            and hidden.is_contiguous()
+            and hidden.shape[0] > 0
+            and self.hc_mult == 4
+            and self.hidden_size == 3072
+            and self._lookup_gamma is not None
+            and self._lookup_gamma.device == hidden.device
+        )
+        gamma = (
+            self._lookup_gamma
+            if use_fused
+            else torch.stack([norm.weight for norm in self.lookup_per_head_norms]).float()
+        )
         local = self.multi_head_embedding
         local_hashes = hashes[:, local.head_start : local.head_end]
         x = rows.masked_fill(local_hashes.unsqueeze(-1) < 0, 0)
         inverse = _engram_inverse_rms(x, gamma[0], eps, self.use_cann_inverse_rms)
         x = (x * inverse * gamma).to(hidden.dtype)
         x = x.flatten(1)
-        gates = []
+        if use_fused:
+            from .prefill_ops.small_aiv import engram_gate_epilogue, engram_residual
+
+            gate_output = hidden.new_empty((hidden.shape[0], self.hc_mult))
+        else:
+            gates = []
         for channel in range(self.hc_mult):
             key = self.key_projs[channel](x)
             if local.tp_size > 1:
                 key = tensor_model_parallel_all_reduce(key)
-            gate = (self.norm_key[channel](key) * self.norm_query[channel](hidden[:, channel])).sum(-1)
-            gate = gate * self.hidden_size**-0.5
-            gates.append((gate.abs().clamp_min(1e-6).sqrt() * gate.sign()).sigmoid())
-        gate = torch.stack(gates, dim=1)
+            query = hidden[:, channel]
+            key_norm = self.norm_key[channel]
+            query_norm = self.norm_query[channel]
+            if (
+                use_fused
+                and hidden.shape[0] >= 512
+                and key.dtype is torch.bfloat16
+                and key.is_contiguous()
+                and key_norm.eps is None
+                and query_norm.eps is None
+                and key_norm.weight.dtype == query_norm.weight.dtype == torch.bfloat16
+                and key_norm.weight.is_contiguous()
+                and query_norm.weight.is_contiguous()
+            ):
+                from .prefill_ops.engram_norm import engram_normalized_dot
+
+                gate = engram_normalized_dot(key, query, key_norm.weight, query_norm.weight)
+            else:
+                gate = (key_norm(key) * query_norm(query)).sum(-1)
+            if use_fused:
+                engram_gate_epilogue(gate, gate_output, channel, self.hidden_size**-0.5)
+            else:
+                gate = gate * self.hidden_size**-0.5
+                gates.append((gate.abs().clamp_min(1e-6).sqrt() * gate.sign()).sigmoid())
+        gate = gate_output if use_fused else torch.stack(gates, dim=1)
         value = self.value_proj(x)
         if local.tp_size > 1:
             value = tensor_model_parallel_all_reduce(value)
         value = value.float()
+        if use_fused:
+            signal = self._pre_gamma * value * (value.square().mean(-1, keepdim=True) + eps).rsqrt()
+            return engram_residual(hidden, hashes, gate, self._residual_scales, signal)
         gamma = self.unified_pre_gamma.float()
         inverse = _engram_inverse_rms(value, gamma, eps, self.use_cann_inverse_rms)
         signal = gamma * value * inverse

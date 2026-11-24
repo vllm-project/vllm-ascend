@@ -3,14 +3,28 @@
 
 import torch
 from torch.nn.functional import pad
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.hisparse.c8 import pack_c8_components
+
+if HAS_TRITON:
+    from ..c8_write import write_c8_rows as write_c8_rows_triton
 
 
 def write_c8_rows(cache, slots, latent, rope, scales, keys=None, positions=None):
     """Pack quantizer outputs and write them to their unique physical slots."""
     if not slots.numel():
         return
+    if HAS_TRITON and cache.device.type == "npu" and cache.is_contiguous():
+        if keys is not None:
+            assert positions is not None
+            positions = positions.to(torch.int64)
+            if positions.stride(-1) != 1:
+                # A singleton slice can report contiguous with a non-unit stride.
+                positions = positions.clone(memory_format=torch.contiguous_format)
+        write_c8_rows_triton(cache, slots, latent, rope, scales, keys, positions)
+        return
+
     payload = pack_c8_components(latent, rope.contiguous(), scales)
     if keys is not None:
         assert positions is not None
