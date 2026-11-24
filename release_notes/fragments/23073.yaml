@@ -1,0 +1,4 @@
+pr: 23073
+entries:
+  - category: bugfix
+    text: Fixed missing-cache and incomplete-KV failures caused by a cross-PCP publication race during chunked prefill KV offload with replicated MLA caches.

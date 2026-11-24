@@ -9,6 +9,7 @@ from typing import Any, cast
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import (
+    get_pcp_group,
     get_tp_group,
 )
 from vllm.logger import logger
@@ -650,8 +651,13 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         # The final-layer fence drains this rank only. Readers of replicated
         # KV must also wait for the writer before querying the previous step.
         # Use configuration, never local requests/tasks, to gate the collective.
-        if self.use_layerwise_transfer and self.layerwise_offload and self.tp_size > 1:
-            get_tp_group().barrier()
+        if self.use_layerwise_transfer and self.layerwise_offload:
+            if self.tp_size > 1:
+                get_tp_group().barrier()
+            # With unsharded MLA, only PCP rank 0 publishes replicated KV.
+            # Every PCP reader must see that publication before preparing loads.
+            if self.pcp_size > 1:
+                get_pcp_group().barrier()
         self.current_layer = 0
         self._dflash_save_pending = False
         self.layerwise_retrievers: list[Any] = []
