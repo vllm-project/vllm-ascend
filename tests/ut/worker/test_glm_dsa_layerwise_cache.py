@@ -10,8 +10,10 @@ from vllm.config import KVTransferConfig
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
@@ -119,13 +121,14 @@ def test_glm_dsa_reuses_mla_and_indexer_and_preserves_views(monkeypatch, dtype):
     for name in draft_entries:
         assert all(name not in tensor.layers or tensor.layers == [name] for tensor in layout.kv_cache_tensors)
 
-    def get_shape(blocks, tokens, heads, width, cache_dtype=None):
-        return blocks, tokens, heads, width
-
-    backend = SimpleNamespace(get_kv_cache_shape=get_shape)
     attn_groups = [
-        SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=specs[name], layer_names=[name], backend=backend)
-        for name in specs
+        AttentionGroup(
+            backend=AscendSFAIndexerBackend if isinstance(spec, AscendSFAIndexerCacheSpec) else AscendSFABackend,
+            layer_names=[name],
+            kv_cache_spec=spec,
+            kv_cache_group_id=0,
+        )
+        for name, spec in specs.items()
     ]
     caches = attn_utils._reshape_kv_cache_v2(attn_groups, raw, cache_dtype, [128], {}, worker_config)
     for entries, source_layer in ((main_entries, 6), (indexer_entries, 0)):

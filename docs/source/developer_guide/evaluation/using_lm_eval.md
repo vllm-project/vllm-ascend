@@ -6,7 +6,7 @@ This document guides you to conduct accuracy testing using [lm-eval][1].
 
 ### 1. Start the vLLM server
 
-You can run a docker container to start the vLLM server on a single NPU:
+You can run a Docker container to start the vLLM server on a single NPU:
 
 ```bash
 # Update DEVICE according to your device (/dev/davinci[0-7])
@@ -34,9 +34,9 @@ docker run --rm \
 vllm serve Qwen/Qwen2.5-0.5B-Instruct --max-model-len 4096 &
 ```
 
-The vLLM server is started successfully, if you see logs as below:
+The vLLM server is started successfully if you see logs as below:
 
-```shell
+```output
 INFO:     Started server process [9446]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -135,7 +135,7 @@ lm_eval \
   --output_path ./
 ```
 
-After 30 minutes, the output is as shown below:
+After 30 min, the output is as shown below:
 
 ```shell
 The results in Markdown format are as follows:
@@ -206,7 +206,7 @@ lm_eval \
   --batch_size auto
 ```
 
-After 1 to 2 minutes, the output is shown below:
+After 1 to 2 min, the output is shown below:
 
 ```shell
 The markdown format results are as below:

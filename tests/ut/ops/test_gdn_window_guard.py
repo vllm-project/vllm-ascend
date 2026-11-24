@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Keep the recurrent GDN dispatch in step with the installed fla_npu OPP.
 
-``vllm_ascend/ops/gdn.py`` carries a local per-sequence cap for the pre-V2
+``vllm_ascend/attention/gdn.py`` carries a local per-sequence cap for the pre-V2
 AscendC recurrent kernel: that kernel consumed a single eight-token window and
 returned without writing output above it. ``fla_npu`` #1070 replaced it with an
 architecture-split, window-loop implementation that has no per-sequence cap.
@@ -25,7 +25,7 @@ from pathlib import Path
 import regex as re
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-GDN_SOURCE = REPO_ROOT / "vllm_ascend" / "ops" / "gdn.py"
+GDN_SOURCE = REPO_ROOT / "vllm_ascend" / "attention" / "gdn.py"
 PROFILE_SOURCE = REPO_ROOT / "vllm_ascend" / "device" / "hardware_profile.py"
 OP_NAME = "recurrent_gated_delta_rule"
 
@@ -58,7 +58,7 @@ verify length. vllm_ascend still caps the dispatch {limit}, which keeps
 k >= {threshold} on the Triton path forever.
 
 Delete both:
-  - vllm_ascend/ops/gdn.py: _MAX_RECURRENT_GDN_TOKENS and the whole
+  - vllm_ascend/attention/gdn.py: _MAX_RECURRENT_GDN_TOKENS and the whole
     `spec_state_indices_tensor.shape[1] > ...` clause in
     AscendGatedDeltaNetAttention._forward_core (do not inline the number)
   - vllm_ascend/device/hardware_profile.py: the A2
@@ -76,7 +76,7 @@ the request produces garbage instead of an error.
 Either install the fla_npu release that ships the window-loop kernel, or
 restore both _MAX_RECURRENT_GDN_TOKENS = {window} and its
 `spec_state_indices_tensor.shape[1] > _MAX_RECURRENT_GDN_TOKENS` clause in
-vllm_ascend/ops/gdn.py, plus the A2
+vllm_ascend/attention/gdn.py, plus the A2
 gdn_fixed_spec_recurrent_fallback_min_query_len workaround.
 """
 
