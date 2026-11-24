@@ -523,10 +523,17 @@ sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export TASK_QUEUE_ENABLE=2
 
+# HCCL_OP_EXPANSION_MODE="AIV" is only used on the Decode side; unset any
+# value inherited from a previous Decode/co-located session in this terminal,
+# otherwise long-input Prefill slows down.
+unset HCCL_OP_EXPANSION_MODE
+
 # Single-host deployment; use the host service IP for multi-host deployment
 export HCCL_IF_IP="127.0.0.1"
 export HCCL_BUFFSIZE=512
 export ASCEND_BUFFER_POOL="0:0"
+# e.g. enp48s3u1u1; find the active NIC with "ip a" (do not use "lo",
+# or Mooncake transfer setup fails)
 export NETWORK_CARD_NAME="<SERVICE_NETWORK_INTERFACE>"
 export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
 
@@ -594,6 +601,8 @@ export HCCL_IF_IP="127.0.0.1"
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=512
 export ASCEND_BUFFER_POOL="0:0"
+# e.g. enp48s3u1u1; find the active NIC with "ip a" (do not use "lo",
+# or Mooncake transfer setup fails)
 export NETWORK_CARD_NAME="<SERVICE_NETWORK_INTERFACE>"
 export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
 
@@ -656,11 +665,13 @@ Send client requests to `http://<HOST_IP>:8199`.
 The P:D group ratio and the parameter values in the two scripts should be adapted to the workload:
 
 - The P:D group ratio follows the workload. Workloads dominated by long, uncached inputs (e.g., long-context summarization over unique documents) need more Prefill groups; workloads with a high prefix-cache hit rate spend most wall time in decode and shift capacity toward Decode (e.g., 1P2D).
-- On Prefill, `--max-num-batched-tokens` should be no smaller than the target input length, so a prompt is prefilled in a single chunk instead of being split into multiple rounds. The example uses `66000` for a 64K-token input budget; scale it accordingly.
+- On Prefill, `--max-num-batched-tokens` should be no smaller than the effective uncached input length (within the HBM activation budget), so a prompt is prefilled in a single chunk instead of being split into multiple rounds. The example uses `66000` for a 64K-token 0%-cache-hit input budget; scale it down when prefix caching absorbs most of the input, because a cold request of the full length can transiently exceed the activation budget and cause OOM.
 - `--max-num-seqs` on Prefill bounds concurrent prefill batches per group. Keep it small for long-input workloads so each chunk gets the full HBM activation budget; larger values are reasonable for short inputs.
 - Qwen3.8-27B is a hybrid-attention model: only 16 of 64 layers use full attention, and the other 48 Gated DeltaNet layers carry a recurrent state. Enabling prefix caching in PD mode therefore requires `--mamba-cache-mode align` so the recurrent state is aligned with the cached KV blocks; enable it on both P and D (replace `--no-enable-prefix-caching` in the two scripts).
 - For short-prompt or multimodal workloads, `"gdn_prefill_backend": "fla_npu"` in the Prefill `--additional-config` selects the FLA NPU prefill backend for the linear-attention layers and improves prefill throughput.
+- `HCCL_OP_EXPANSION_MODE="AIV"` is set only on Decode. Do not export it (directly or through a shared terminal) when launching Prefill; long-input prefill slows down with AIV.
 - Keep `--served-model-name`, the checkpoint, and the MTP `method`/`num_speculative_tokens` identical on P and D; change them only together.
+- On Decode, the `cudagraph_capture_sizes` are coupled to MTP: with `num_speculative_tokens = N`, each capture size must be a multiple of `N + 1` (the example uses `4`-multiples for `num_speculative_tokens = 3`). If you change `num_speculative_tokens` or disable MTP, regenerate the list accordingly (e.g., `N = 4` → `5, 10, 15, ...`); otherwise the actual decode batch size cannot hit a captured graph, aclgraph silently falls back to eager, and TPOT degrades.
 - `engine_id` must be unique across all services in the same PD cluster. Each service must also use its own HTTP port and Mooncake KV port.
 - If multiple PD deployments run on the same host, stagger their HTTP and Mooncake KV ports.
 
@@ -699,6 +710,8 @@ export HCCL_IF_IP="127.0.0.1"
 export HCCL_OP_EXPANSION_MODE="AI_CPU"
 export HCCL_BUFFSIZE=1024
 export ASCEND_BUFFER_POOL="0:0"
+# e.g. enp48s3u1u1; find the active NIC with "ip a" (do not use "lo",
+# or Mooncake transfer setup fails)
 export NETWORK_CARD_NAME="<SERVICE_NETWORK_INTERFACE>"
 
 vllm serve "${MODEL_PATH}" \
@@ -762,6 +775,8 @@ export HCCL_IF_IP="127.0.0.1"
 export HCCL_OP_EXPANSION_MODE="AI_CPU"
 export HCCL_BUFFSIZE=1024
 export ASCEND_BUFFER_POOL="0:0"
+# e.g. enp48s3u1u1; find the active NIC with "ip a" (do not use "lo",
+# or Mooncake transfer setup fails)
 export NETWORK_CARD_NAME="<SERVICE_NETWORK_INTERFACE>"
 
 vllm serve "${MODEL_PATH}" \
