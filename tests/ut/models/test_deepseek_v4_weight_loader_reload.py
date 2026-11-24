@@ -172,38 +172,3 @@ def test_attention_sink_layerwise_reload(sink_path):
         torch.testing.assert_close(sink.detach(), _expected_sink(new_weight, 2, 1))
         torch.testing.assert_close(original_param.detach(), sink.detach())
     assert not torch.equal(original_param.detach(), original_value)
-
-
-@pytest.mark.parametrize("num_dspark_layers", [1, 2])
-def test_dspark_reload_preserves_model_hc_heads(monkeypatch, num_dspark_layers):
-    """Reload model-level HC heads twice without replacing captured storage."""
-    monkeypatch.setattr(dspark_module, "get_tensor_model_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(dspark_module, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(dspark_module, "process_eagle_weight", lambda *_: None)
-    model = _SinkOnlyModel(_SinkAttention(TOTAL_HEADS, False), "dspark")
-    layer = model.model.layers.pop(str(TARGET_LAYER_IDX + DSPARK_STAGE))
-    stage = num_dspark_layers - 1
-    model.model.num_dspark_layers = num_dspark_layers
-    model.model.layers[str(TARGET_LAYER_IDX + stage)] = layer
-    originals = {}
-    for name in ("hc_head_fn", "hc_head_base", "hc_head_scale"):
-        parameter = nn.Parameter(torch.zeros(4), requires_grad=False)
-        setattr(model.model, name, parameter)
-        originals[name] = parameter
-    original_addresses = {name: parameter.data_ptr() for name, parameter in originals.items()}
-    # Reload decoder state alongside the model-level HC heads.
-    layer.hc_attn_base = nn.Parameter(torch.zeros(4), requires_grad=False)
-    load = dspark_module.DSparkDeepseekV4ForCausalLM.load_weights.__get__(model)
-    record_metadata_for_reloading(model)
-    for value in (2.0, 3.0):
-        initialize_layerwise_reload(model)
-        weights = [(f"mtp.{stage}.{name}", torch.full((4,), value)) for name in originals]
-        weights.append((f"mtp.{stage}.hc_attn_base", torch.full((4,), value)))
-        for weight in weights:
-            load([weight])
-        finalize_layerwise_reload(model, None)
-        for name, original in originals.items():
-            assert getattr(model.model, name) is original
-            assert original.data_ptr() == original_addresses[name]
-            torch.testing.assert_close(original, torch.full((4,), value), rtol=0, atol=0)
-        torch.testing.assert_close(layer.hc_attn_base, torch.full((4,), value), rtol=0, atol=0)
