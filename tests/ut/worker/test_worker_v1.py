@@ -2378,7 +2378,8 @@ class TestNPUWorkerWeightUpdate(TestBase):
                     worker.finish_weight_update()
 
                 refresh.assert_not_called()
-                if mode == "direct" and hasattr(gpu_worker, "direct_reload_enabled"):
+                # vLLM #68041 ends a failed update session in either reload mode.
+                if not vllm_version_is("0.33.0") or (mode == "direct" and hasattr(gpu_worker, "direct_reload_enabled")):
                     self.assertFalse(worker._weight_update_active)
                     self.assertTrue(worker.has_incomplete_weight_update())
                     worker.start_weight_update()
