@@ -18,6 +18,7 @@
 #
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Any
 
 import torch
@@ -108,11 +109,31 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         )
         self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
         self.model_runner = model_runner
+        compilation_config = model_runner.ascend_config.ascend_compilation_config
+        self._prefill_graph_padding_limits = dict(compilation_config.prefill_graph_padding_limits)
         self.update_stream = self.model_runner.update_stream
         expert_offload.prepare_graph_capture(self, super().needs_capture)
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
         if super().needs_capture():
             set_graph_params(self.capture_sizes)
+
+    def dispatch(self, num_reqs: int, num_tokens: int, *args: Any, **kwargs: Any) -> BatchExecutionDescriptor:
+        desc = super().dispatch(num_reqs, num_tokens, *args, **kwargs)
+        padding_limit = self._prefill_graph_padding_limits.get(desc.num_tokens)
+        if (
+            desc.cg_mode == CUDAGraphMode.PIECEWISE
+            and padding_limit is not None
+            and desc.num_tokens - num_tokens > padding_limit
+        ):
+            return replace(
+                desc,
+                cg_mode=CUDAGraphMode.NONE,
+                num_reqs=num_reqs,
+                num_tokens=num_tokens,
+                uniform_token_count=None,
+                max_query_len=None,
+            )
+        return desc
 
     def init_breakable_cg_runner(self, model: nn.Module) -> None:
         if self.breakable_cg_runner is None:

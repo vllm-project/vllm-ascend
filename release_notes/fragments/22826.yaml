@@ -1,0 +1,8 @@
+pr: 22826
+entries:
+  - category: performance
+    text: >-
+      Limit padded token work in Model Runner V2 PIECEWISE prefill steps
+      with the optional `prefill_graph_padding_limits` setting. A batch that
+      exceeds the selected capture size's padding limit runs eagerly at its
+      actual token count.

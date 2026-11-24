@@ -24,7 +24,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from statistics import NormalDist
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
@@ -133,6 +133,9 @@ class AscendCompilationConfig:
     fuse_norm_quant: bool = True
     fuse_qknorm_rope: bool = True
     fuse_muls_add: bool = True
+    prefill_graph_padding_limits: dict[Annotated[int, Field(gt=0)], Annotated[int, Field(ge=0, strict=True)]] = (
+        dataclasses.field(default_factory=dict)
+    )
 
     @model_validator(mode="before")
     @classmethod
