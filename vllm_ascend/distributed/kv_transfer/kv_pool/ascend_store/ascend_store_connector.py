@@ -47,6 +47,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_wor
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyServer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
@@ -380,6 +381,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """
         assert self.connector_worker is not None
         self.connector_worker.wait_for_previous_save()
+        preempted = cast(AscendConnectorMetadata, kv_connector_metadata).preempted_req_ids
+        if preempted:
+            self.connector_worker.discard_preempted_requests(preempted)
 
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         super().bind_connector_metadata(connector_metadata)

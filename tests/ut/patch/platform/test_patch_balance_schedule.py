@@ -823,6 +823,21 @@ def test_balance_schedule_waiting_and_running_paths():
     scheduler.schedule(throttle_prefills=True)
 
 
+def test_balance_reports_preemptions_from_between_steps():
+    scheduler = _make_balance_scheduler()
+    (request,) = _create_requests(1, num_tokens=32)
+    scheduler.add_request(request)
+    first = scheduler.schedule()
+    scheduler.update_from_output(first, _make_output(scheduler))
+
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    resumed = scheduler.schedule()
+    assert resumed.preempted_req_ids == {request.request_id}
+    assert request.request_id in resumed.num_scheduled_tokens
+    scheduler.update_from_output(resumed, _make_output(scheduler))
+    assert not scheduler.schedule().preempted_req_ids
+
+
 def test_balance_schedule_records_local_prefix_cache_stats():
     """A newly admitted request must be reported to the prefix-cache stats.
 

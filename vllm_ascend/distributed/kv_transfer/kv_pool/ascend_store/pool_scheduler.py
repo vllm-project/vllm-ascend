@@ -138,6 +138,7 @@ class BaseKVPoolScheduler(ABC):
             "discard_partial_chunks", True
         )
         self._unfinished_requests: dict[str, tuple[Request, list[list[int]]]] = {}
+        self._allocated_this_step: set[str] = set()
         self._async_loading_req_ids: set[str] = set()
 
         self._block_pool: BlockPool | None = None
@@ -358,6 +359,7 @@ class BaseKVPoolScheduler(ABC):
         if num_external_tokens > 0:
             local_block_ids = normalize_block_ids_by_group(blocks.get_block_ids())
 
+        self._allocated_this_step.add(request.request_id)
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
         if request.request_id not in self.load_specs:
             # No KV tokens from external KV cache, return
@@ -633,11 +635,15 @@ class BaseKVPoolScheduler(ABC):
             self._unfinished_requests.pop(finished_req_id, None)
             self._preempted_req_ids.discard(finished_req_id)
 
+        self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
         for req_id in scheduler_output.preempted_req_ids:
-            self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
             self._request_trackers.pop(req_id, None)
-            self._unfinished_requests.pop(req_id, None)
-            self._async_loading_req_ids.discard(req_id)
+            # A forced reset can be reported after update_state_after_alloc
+            # has already installed this ID's new allocation and receive.
+            if req_id not in self._allocated_this_step:
+                self._unfinished_requests.pop(req_id, None)
+                self._async_loading_req_ids.discard(req_id)
+        self._allocated_this_step.clear()
 
         meta = AscendConnectorMetadata(
             scheduler_output.preempted_req_ids,

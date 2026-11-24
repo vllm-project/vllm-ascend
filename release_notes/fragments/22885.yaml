@@ -1,0 +1,6 @@
+pr: 22885
+entries:
+  - category: bugfix
+    text: >-
+      Fixed AscendStore losing a request's newly allocated KV blocks or transfer completion when a
+      forced prefix-cache reset preempts and resumes the same request in one scheduling step.

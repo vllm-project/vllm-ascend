@@ -605,10 +605,18 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         # A deferred call must not reset state between target and MTP.
         return
 
-    def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
+    def _release_request_state(self, req_ids: set[str]) -> None:
         if self._snapshot_keys:
-            for req_id in finished_req_ids | meta.preempted_req_ids:
+            for req_id in req_ids:
                 self._snapshot_keys.pop(req_id, None)
+        if self.use_block_key_layerwise:
+            self._release_layerwise_requests_terminal(req_ids)
+
+    def discard_preempted_requests(self, req_ids: set[str]) -> None:
+        super().discard_preempted_requests(req_ids)
+        self._release_request_state(req_ids)
+
+    def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
         if self._step_load_keys:
             if self.kv_recv_thread is not None:
                 self._drain_attention_transfers(full=True)
@@ -616,8 +624,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             result = self.m_store.batch_remove_lease(keys)
             if result != 0:
                 logger.error("AscendStore lease cleanup returned %s; backend TTL will reclaim leases", result)
-        if self.use_block_key_layerwise:
-            self._release_layerwise_requests_terminal(finished_req_ids | meta.preempted_req_ids)
+        if finished_req_ids:
+            self._release_request_state(finished_req_ids)
         return super().get_finished(finished_req_ids, meta)
 
     def _build_lookup_keys(
