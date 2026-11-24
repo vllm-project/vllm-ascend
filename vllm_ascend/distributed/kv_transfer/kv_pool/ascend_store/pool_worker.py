@@ -395,17 +395,6 @@ class BaseKVPoolWorker(ABC):
         if kv_event_config and kv_event_config.enable_kv_cache_events:
             self.enable_kv_events = True
 
-    def _group_pp_byte_offset(self, group_id: int) -> int:
-        """Keep GVA allocation and transfer origins on the same PP layout."""
-        if getattr(self, "pp_size", 1) == 1 or getattr(self, "use_block_key_layerwise", False):
-            return 0
-        block_lens = self.group_block_len.get(group_id) or []
-        num_layers = int(self.group_num_layers.get(group_id, 0))
-        if not block_lens or num_layers <= 0:
-            return 0
-        per_layer = sum(block_lens) // num_layers
-        return int(getattr(self, "layerwise_key_layer_offset", 0)) * per_layer
-
     def shutdown(self) -> None:
         if self._closed:
             return
@@ -571,12 +560,6 @@ class BaseKVPoolWorker(ABC):
         return get_physical_layer_index(layer_name, base_layers)
 
     def _global_group_alloc_size(self, group_id: int) -> int:
-        # GLOBAL region size: per-layer bytes x TOTAL model layers.
-        # Under PP each stage sees a LOCAL group view (non-uniform splits make
-        # the per-stage layer counts differ) but all stages plus the decode
-        # side share ONE region per pool key, so the region must cover the
-        # union of all writers. vllm groups layers by identical cache spec,
-        # so per-layer bytes are uniform within a group.
         gbl = self.group_block_len.get(group_id) or []
         if not gbl:
             return self.page_size_bytes
@@ -588,18 +571,13 @@ class BaseKVPoolWorker(ABC):
         n_local = int(self.group_num_layers.get(group_id, 0))
         if n_local <= 0:
             return sum(gbl)
-        per_layer = (sum(gbl) + n_local - 1) // n_local
-        n_global = max(total_layers, int(self.num_layers), n_local)
-        # Physical cache layers (for example MTP) can extend past the target
-        # model's last layer. Preserve the existing byte origin, but cover the
-        # complete local payload instead of sizing from target layers alone.
-        shard_bytes = max(per_layer * n_global, self._group_pp_byte_offset(group_id) + sum(gbl))
+        shard_bytes = sum(gbl)
         # DCP shard-major layout: ranks sharing head_or_tp_rank (put_step>1,
         # e.g. MLA) hold different context shards of the same logical block
         # and share ONE region, so the region must cover all shards. The
-        # per-shard stride is the group byte total aligned up to the GVA
-        # hugepage size: hybrid DSA groups have non-uniform per-layer bytes,
-        # and an unaligned stride would yield misaligned GVA addresses that
+        # per-shard stride covers the stage-local group payload, aligned
+        # up to the GVA hugepage size. Hybrid DSA groups have non-uniform
+        # per-layer bytes, and an unaligned stride yields GVA addresses that
         # SDMA rejects. With put_step == 1 every rank owns a distinct region
         # key and no shard separation is needed.
         if self.put_step > 1 and self.dcp_size > 1:

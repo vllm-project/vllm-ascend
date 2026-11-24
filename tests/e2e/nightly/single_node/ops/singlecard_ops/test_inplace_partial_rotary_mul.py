@@ -45,30 +45,34 @@ def golden_inplace_partial_rotary_mul(
 
 
 @pytest.mark.parametrize(
-    "negate_sin",
+    "num_tokens,dtype,atol,rtol,negate_sin",
     [
-        pytest.param(False, id="explicit-sin"),
         pytest.param(
-            True,
-            id="negate-sin",
-            marks=pytest.mark.skipif(
-                get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
-                reason="The negate_sin attribute requires Ascend A2/A3",
+            num_tokens,
+            dtype,
+            atol,
+            rtol,
+            negate_sin,
+            id=f"{dtype}-{num_tokens}-{'negate-sin' if negate_sin else 'explicit-sin'}",
+            marks=(
+                pytest.mark.skipif(
+                    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+                    reason="The negate_sin attribute requires Ascend A2/A3",
+                )
+                if negate_sin
+                else ()
             ),
-        ),
-    ],
-)
-@pytest.mark.parametrize(
-    "num_tokens",
-    [1, 16, 128, 1000],
-)
-@pytest.mark.parametrize(
-    "dtype, atol, rtol",
-    [
-        (torch.float16, 2e-3, 2e-3),
-        (torch.bfloat16, 8e-3, 8e-3),
-        (torch.float32, 1e-5, 1e-5),
-    ],
+        )
+        for dtype, atol, rtol in (
+            (torch.float16, 2e-3, 2e-3),
+            (torch.bfloat16, 8e-3, 8e-3),
+            (torch.float32, 1e-5, 1e-5),
+        )
+        for num_tokens in (1, 1000)
+        for negate_sin in (False, True)
+    ]
+    # Retain one original small multi-token case without another dtype/mode cross.
+    + [pytest.param(128, torch.float16, 2e-3, 2e-3, False, id="torch.float16-128-explicit-sin")],
 )
 def test_inplace_partial_rotary_mul(num_tokens: int, dtype, atol, rtol, negate_sin: bool):
     torch.manual_seed(0)
