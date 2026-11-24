@@ -123,7 +123,7 @@ templates:
   - --max-num-batched-tokens
   - '8192'
   - --max-num-seqs
-  - '1'
+  - '60'
   - --enforce-eager
   - --trust-remote-code
   - --gpu-memory-utilization
@@ -195,7 +195,7 @@ templates:
   - --max-num-batched-tokens
   - '8192'
   - --max-num-seqs
-  - '1'
+  - '60'
   - --trust-remote-code
   - --gpu-memory-utilization
   - '0.80'
@@ -225,7 +225,7 @@ benchmarks:
     request_conf: vllm_api_general_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
     max_out_len: 4096
-    batch_size: 1
+    batch_size: 60
     thinking: true
     temperature: 0
     top_p: 0.95
