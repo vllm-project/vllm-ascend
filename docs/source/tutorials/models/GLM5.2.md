@@ -37,6 +37,16 @@ Download the checkpoint from ModelScope for the hardware shown below. A3 and 950
 |  `GLM-5.3-w4a4c8-mxfp4` | 1 950DT products (96GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w4a4c8-mxfp4) |
 |  `GLM-5.2-w4a4c8-mxfp4` | 1 950DT products (96GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a4c8-mxfp4) |
 
+<a id="glm53-w4a4c8-accuracy-notice"></a>
+
+!!! warning "GLM-5.3 W4A4C8/MXFP4 accuracy notice"
+
+    GLM-5.3 W4A4C8/MXFP4 currently does not meet accuracy acceptance criteria.
+    Generated answers may be inaccurate. Evaluate the exact checkpoint on your
+    target tasks before use, and do not deploy it in production until it meets
+    your accuracy requirements. Successful startup and the historical validation
+    results below do not establish that these accuracy requirements are met.
+
 - `GLM-5.2-w8a8c8`: The weights have been verified and are recommended for use on A3. For GLM-5.3, use its own checkpoint and the version-specific commands below; do not apply the GLM-5.2 accuracy or performance results to GLM-5.3.
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 - `GLM-5.2-w4a4c8-mxfp4` (950PR&950DT products, W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
@@ -238,6 +248,8 @@ variable in the selected script. Use the same checkpoint path on all nodes.
     `/root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a4c8-mxfp4`.
     Startup and short requests were validated; see
     [W4A4C8 Validation](#73-w4a4c8-950dt-products-validation-records) for details.
+    Before using GLM-5.3 W4A4C8/MXFP4, read the
+    [accuracy notice](#glm53-w4a4c8-accuracy-notice).
 
     ###### Start the Engine
 
@@ -4822,6 +4834,10 @@ settings when comparing results. Scores are specific to the model shown.
 | GPQA Diamond | GLM-5.3-w8a8c8 | A2 | PD disaggregation | accuracy | gen | 89.39 |
 
 ### 7.3 W4A4C8 950DT products Validation Records
+
+GLM-5.3 W4A4C8/MXFP4 has not met accuracy acceptance criteria; see the
+[usage notice](#glm53-w4a4c8-accuracy-notice). The historical results below
+must not be interpreted as accuracy acceptance.
 
 Both records below use one 950DT products (96GB × 8), a historical local
 950DT products image, TP8/DP1/EP, eager mode, a configured maximum
