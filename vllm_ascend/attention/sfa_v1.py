@@ -411,7 +411,19 @@ class AscendSFABackend(AttentionBackend):
         spec: KVCacheSpec,
         layer: MLAAttention,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Keep the native NoPE and RoPE views for non-packed MLA."""
+        """Expose the native NoPE and RoPE layout from a shared offload slot.
+
+        Without offload, allocation already provides separate NoPE and RoPE
+        tensors. Before the first KV write, slice the shared slot into two
+        contiguous views, each holding all N blocks of one component.
+
+            | NoPE B0 ... NoPE B(N-1) | RoPE B0 ... RoPE B(N-1) |
+            ^                         ^
+            0                         nope_bytes
+
+        Both views share the slot's storage. Packed and compressed MLA keep
+        the raw slot as a single view.
+        """
         if (
             not isinstance(spec, AscendMLAAttentionSpec)
             or spec.uses_packed_sfa_main_cache

@@ -338,7 +338,19 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         spec: AscendSFAIndexerCacheSpec,
         layer: AscendSFAIndexerCache,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Keep the native layout with all K blocks followed by all scale blocks."""
+        """Expose the native K and scale layout from a shared offload slot.
+
+        Without offload, allocation already provides separate K and scale
+        views. Before the first KV write, slice the shared slot into the same
+        two views, with all N K blocks followed by all N scale blocks.
+
+            | K B0 ... K B(N-1) | optional padding | scale B0 ... scale B(N-1) |
+            ^                   ^                  ^
+            0                   k_bytes            scale_offset
+
+        Padding aligns the start of the scale view to its dtype. Both views
+        share the slot's storage. Indexers without scales use one K view.
+        """
         if not spec.scale_dim:
             return raw_cache
         num_blocks, remainder = divmod(raw_cache.numel(), spec.page_size_bytes)
