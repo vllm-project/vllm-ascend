@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import torch
@@ -231,32 +232,66 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", return_value=False)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
-    def test_process_weights_pads_odd_tp_scale_groups(self, mock_npu, mock_use_cann_megamoe, mock_vllm):
-        # A TP shard can leave intermediate_size_per_partition // group_size odd
-        # (e.g. moe_intermediate_size=2304, group_size=32, tp_size=8 -> 9 groups).
-        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+    def test_odd_tp_mxfp4_pads_down_proj_and_restores_checkpoint(self, mock_npu, mock_megamoe, mock_vllm):
+        mock_npu.npu_format_cast.side_effect = lambda x, *args, **kwargs: x
         layer = nn.Module()
-        layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 256, 64), dtype=torch.uint8), requires_grad=False)
-        layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 144), dtype=torch.uint8), requires_grad=False)
-        layer.w13_weight_scale = nn.Parameter(
-            torch.randint(0, 255, (8, 256, 4), dtype=torch.uint8), requires_grad=False
-        )
-        layer.w2_weight_scale = nn.Parameter(torch.randint(1, 255, (8, 128, 9), dtype=torch.uint8), requires_grad=False)
-        original_scale = layer.w2_weight_scale.data.clone()
+        layer.activation = "silu"
+        originals = {
+            "w13_weight": torch.randint(0, 256, (2, 576, 64), dtype=torch.uint8),
+            "w13_weight_scale": torch.randint(0, 255, (2, 576, 4), dtype=torch.uint8),
+            "w2_weight": torch.randint(0, 256, (2, 128, 144), dtype=torch.uint8),
+            "w2_weight_scale": torch.randint(0, 255, (2, 128, 9), dtype=torch.uint8),
+        }
+        for name, data in originals.items():
+            setattr(layer, name, nn.Parameter(data.clone(), requires_grad=False))
 
         self.scheme.process_weights_after_loading(layer)
 
-        # (g, n, k // 2, 2) after padding k=9 -> 10, then transposed to (g, k // 2, n, 2).
-        self.assertEqual(layer.w2_weight_scale.shape, (8, 5, 128, 2))
-        restored = layer.w2_weight_scale.data.transpose(-3, -2).reshape(8, 128, 10)
-        torch.testing.assert_close(restored[..., :9], original_scale)
-        torch.testing.assert_close(restored[..., 9], torch.zeros(8, 128, dtype=torch.uint8))
+        self.assertEqual(layer._mxfp4_swiglu_padding, 32)
+        self.assertEqual(layer.w2_weight.shape, (2, 160, 128))
+        torch.testing.assert_close(layer.w2_weight[:, :144].transpose(1, 2), originals["w2_weight"])
+        self.assertEqual(layer.w2_weight[:, 144:].count_nonzero().item(), 0)
+        self.assertEqual(layer.w2_weight_scale.shape, (2, 5, 128, 2))
+        self.assertEqual(layer.w2_weight_scale[:, -1, :, 1].count_nonzero().item(), 0)
 
-        # restore_weights_for_rl_loading must drop the padding, not crash trying to
-        # reshape the padded (now even) tensor straight back to the odd original shape.
+        hidden = torch.zeros((2, 128), dtype=torch.bfloat16)
+        gate = torch.ones((2, 288), dtype=torch.bfloat16)
+        up = torch.full_like(gate, 2)
+        activation = torch.zeros((2, 320), dtype=torch.bfloat16)
+        scales = torch.ones((2, 5, 2), dtype=torch.uint8)
+        compute = SimpleNamespace(
+            hidden_states=hidden,
+            dynamic_scale=None,
+            layer=layer,
+            activation=MoEActivation.SILU,
+            group_list_type=0,
+            group_list=torch.tensor([1, 2]),
+            swiglu_limit=None,
+        )
+        mock_npu.npu_grouped_matmul.side_effect = [[torch.cat((gate, up), dim=-1)], [hidden]]
+        module = "vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4"
+        with (
+            patch.object(self.scheme, "_quant_hidden_states", return_value=(hidden, scales)),
+            patch(f"{module}.dispose_tensor"),
+            patch(f"{module}.maybe_normalize_mxfp_scale_layout", return_value=scales),
+            patch.object(
+                torch.ops._C_ascend, "npu_swiglu_group_quant", create=True, return_value=(activation, scales, None)
+            ) as swiglu,
+        ):
+            activations, act_scales = self.scheme.apply_gmm1_act_quant(compute)
+            self.assertIs(self.scheme.apply_gmm2(compute, activations, act_scales), hidden)
+
+        zeros = gate.new_zeros((2, 32))
+        torch.testing.assert_close(swiglu.call_args.args[0], torch.cat((gate, zeros, up, zeros), dim=-1))
+        gmm2 = mock_npu.npu_grouped_matmul.call_args.kwargs
+        self.assertEqual(gmm2["x"][0].shape, (2, 320))
+        self.assertEqual(gmm2["per_token_scale"][0].shape, (2, 5, 2))
+        self.assertEqual(gmm2["weight"][0].shape, (2, 160, 128))
+        self.assertEqual(gmm2["antiquant_scale"][0].shape, (2, 5, 128, 2))
+
         self.scheme.restore_weights_for_rl_loading(layer)
-        self.assertEqual(layer.w2_weight_scale.shape, (8, 128, 9))
-        torch.testing.assert_close(layer.w2_weight_scale.data, original_scale)
+        for name, data in originals.items():
+            torch.testing.assert_close(getattr(layer, name), data, rtol=0, atol=0)
 
     @staticmethod
     def _make_moe_layer():
