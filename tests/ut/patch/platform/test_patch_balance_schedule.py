@@ -764,7 +764,7 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_bl
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
             block_size=_BLOCK_SIZE,
-            log_stats=True,
+            **{"log_stats" if vllm_version_is("0.33.0") else "collect_stats": True},
             structured_output_manager=MagicMock(spec=StructuredOutputManager),
         )
     scheduler.structured_output_manager.should_advance = MagicMock(return_value=False)

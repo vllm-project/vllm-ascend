@@ -58,13 +58,13 @@ touch configs that don't use it, e.g. PD-disaggregated recompute).
 
 import time
 from collections import deque
+from functools import wraps
 from typing import Any
 
 import torch
 import torch.distributed as dist
 import vllm.v1.core.sched.scheduler as _sched_mod
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.interface import PauseState
@@ -73,9 +73,7 @@ from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.engine.core import DPEngineCoreProc
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
@@ -107,29 +105,10 @@ def _balance_scheduling_enabled(vllm_config) -> bool:
 
 
 class BalanceScheduler(Scheduler):
-    def __init__(
-        self,
-        vllm_config,
-        kv_cache_config: KVCacheConfig,
-        structured_output_manager: StructuredOutputManager,
-        block_size: int,
-        hash_block_size: int | None = None,
-        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-        include_finished_set: bool = False,
-        log_stats: bool = False,
-        *,
-        collect_stats: bool | None = None,
-    ) -> None:
-        super().__init__(
-            vllm_config,
-            kv_cache_config,
-            structured_output_manager,
-            block_size,
-            hash_block_size,
-            mm_registry,
-            include_finished_set,
-            log_stats if collect_stats is None else collect_stats,
-        )
+    @wraps(Scheduler.__init__)
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        vllm_config = self.vllm_config
         short_request_first_config = init_ascend_config(vllm_config).scheduler_config.short_request_first_config
         if short_request_first_config.enabled:
             from vllm_ascend.core.short_request_first_scheduler import install_short_request_first_waiting_queue
