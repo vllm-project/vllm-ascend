@@ -145,6 +145,13 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
 
         return x
 
+    def forward_fused(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        linear: AscendQKVParallelLinear,
+    ):
+
 
 class LayerNormFn(torch.autograd.Function):
     @staticmethod
