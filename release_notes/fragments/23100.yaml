@@ -1,0 +1,9 @@
+pr: 23100
+entries:
+  - category: performance
+    text: >-
+      Reduced repeated CPU preparation and unchanged index transfers during
+      uniform MiniMax-M3 DSpark decode with FULL graphs, resident KV caches,
+      PP/PCP/DCP equal to one, and adaptive verification disabled.
+      No new configuration is required.
+    model: minimax-m3
