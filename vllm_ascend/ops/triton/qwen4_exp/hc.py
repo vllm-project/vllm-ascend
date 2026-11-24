@@ -468,6 +468,68 @@ def _hc_combine_norm_kernel(
     )
 
 
+@triton.jit
+def _hc_combine_norm_four_rows(
+    residual_ptr,
+    block_output_ptr,
+    injection_ptr,
+    weight_ptr,
+    combined_ptr,
+    normalized_ptr,
+    stride_residual_row,
+    stride_block_row,
+    stride_injection_row,
+    stride_combined_row,
+    stride_normalized_row,
+    GROUP_DIM: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    HAS_INJECTION: tl.constexpr,
+    WEIGHT_SHARED: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    EPS: tl.constexpr,
+) -> None:
+    stream = tl.program_id(1)
+    for k in tl.static_range(4):
+        row = tl.program_id(0) * 4 + k
+        inner_offsets = tl.arange(0, BLOCK_SIZE)
+        mask = inner_offsets < GROUP_DIM
+        offsets = stream * GROUP_DIM + inner_offsets
+        weight_offsets = inner_offsets if WEIGHT_SHARED else offsets
+
+        residual = tl.load(
+            residual_ptr + row * stride_residual_row + offsets,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        block_output = tl.load(
+            block_output_ptr + row * stride_block_row + inner_offsets,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        if HAS_INJECTION:
+            injection = tl.load(injection_ptr + row * stride_injection_row + stream).to(tl.float32)
+            block_output *= 2.0 * tl.sigmoid(injection / HC_COUNT)
+
+        # Preserve the unfused combine -> BF16 materialization -> RMSNorm boundary.
+        combined = (residual + block_output).to(combined_ptr.dtype.element_ty)
+        tl.store(
+            combined_ptr + row * stride_combined_row + offsets,
+            combined,
+            mask=mask,
+        )
+        combined_fp32 = combined.to(tl.float32)
+        reciprocal_rms = tl.rsqrt(tl.sum(combined_fp32 * combined_fp32) / GROUP_DIM + EPS)
+        weights = tl.load(weight_ptr + weight_offsets, mask=mask, other=0.0)
+        normalized = combined_fp32 * reciprocal_rms
+        normalized += normalized * weights.to(tl.float32)
+        tl.store(
+            normalized_ptr + row * stride_normalized_row + offsets,
+            normalized,
+            mask=mask,
+        )
+
+
+
 def _hc_combine_norm(
     residual: torch.Tensor,
     block_output: torch.Tensor,
@@ -491,7 +553,10 @@ def _hc_combine_norm(
     if rows:
         injection_ptr = residual if injection_logits is None else injection_logits
         injection_stride = 0 if injection_logits is None else injection_logits.stride(0)
-        _hc_combine_norm_kernel[(rows * hc_count,)](
+        four_rows = rows == 4096 and group_dim == 2560 and hc_count == 4 and injection_logits is not None and norm_weight_numel == residual_dim and residual.dtype == torch.bfloat16
+        kernel = _hc_combine_norm_four_rows if four_rows else _hc_combine_norm_kernel
+        grid = (rows // 4, hc_count) if four_rows else (rows * hc_count,)
+        kernel[grid](
             residual,
             block_output,
             injection_ptr,

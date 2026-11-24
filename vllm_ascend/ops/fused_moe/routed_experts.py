@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import os
 from collections.abc import Iterable
 from copy import copy
 from types import SimpleNamespace
@@ -48,6 +49,7 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
 )
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
+from vllm_ascend.ops.fused_moe.router import AscendFusedMoERouter
 from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
@@ -438,6 +440,11 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
         self._use_v2_model_runner = bool(vllm_config.use_v2_model_runner)
+        self._local_ep_topk = (
+            os.getenv("QWEN_LOCAL_EP_TOPK") == "1"
+            and vllm_config.model_config.hf_text_config.model_type == "qwen4_exp_text"
+            and not ascend_config.enable_force_eplb
+        )
         self.dynamic_eplb = False
         self.multi_stage = False
         self.load_counter = None
@@ -654,6 +661,11 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             router_logits=router_logits,
             input_ids=input_ids,
         )
+        return self._map_selected_experts(topk_weights, topk_ids, enable_force_load_balance)
+
+    def _map_selected_experts(
+        self, topk_weights: torch.Tensor, topk_ids: torch.Tensor, enable_force_load_balance: bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.log2phy is not None:
             topk_ids = self.log2phy[topk_ids]
 
@@ -720,6 +732,28 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             sync_lora_context(self.quant_method, lora_context)
 
         num_source_tokens = hidden_states.shape[0]
+        local_ids = None
+        # All EP ranks must make the same decision, including a dummy DP rank.
+        # No condition may depend on the local number of tokens.
+        if (
+            self._local_ep_topk
+            and isinstance(moe_comm_method, AllGatherCommImpl)
+            and self.moe_config.is_sequence_parallel
+            and self.quant_type == QuantType.W4A8MXFP
+            and isinstance(self.router, AscendFusedMoERouter)
+            and self.router.scoring_func in ("softmax", "sigmoid")
+            and self.router.tid2eid is None
+            and self.router.bias_vl is None
+            and self.router.capture_fn is None
+            and self.router.eplb_state is None
+            and self.router.top_k == 10
+            and router_logits.shape[-1] == 512
+            and lora_context is None
+        ):
+            # Only token-local logical routing moves. Expert placement and
+            # forced load balancing still run on the original global rows.
+            router_logits, local_ids = self.router._select_experts(hidden_states, router_logits)
+            logger.info_once("Qwen EP AllGather uses local TopK")
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -734,12 +768,16 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         pertoken_scale = prepare_output.pertoken_scale
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
-        topk_weights, topk_ids = self._select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            enable_force_load_balance=enable_force_load_balance,
-            input_ids=input_ids,
-        )
+        if local_ids is None:
+            topk_weights, topk_ids = self._select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                enable_force_load_balance=enable_force_load_balance,
+                input_ids=input_ids,
+            )
+        else:
+            gathered_ids = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(local_ids)
+            topk_weights, topk_ids = self._map_selected_experts(router_logits, gathered_ids, enable_force_load_balance)
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
         try:
