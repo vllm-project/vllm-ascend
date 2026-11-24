@@ -105,7 +105,6 @@ def _verify_section(
     blocks_override: int | None = None,
     records_override: int | None = None,
     pipeline_stages: int = 2,
-    deferred_verify: bool = False,
     merge_reductions: bool = False,
 ) -> tuple[float, float]:
     """Time the stock ``flush + verify`` against ``compact_conv + fused verify``."""
@@ -169,7 +168,6 @@ def _verify_section(
                 replay_boundary_recovery_lens=replay[3],
                 records_pool_size=records_override,
                 pipeline_stages=pipeline_stages,
-                deferred_verify=deferred_verify,
                 merge_reductions=merge_reductions,
             )
 
@@ -225,9 +223,6 @@ def main() -> None:
                         help="fixed replay length for every request (overrides --accept-rate)")
     parser.add_argument("--pipeline-stages", type=int, default=2,
                         help="software-pipeline depth for the fused verify's hot loops")
-    parser.add_argument("--deferred-verify", action="store_true",
-                        help="history-slot verify loop (drops the rank-1 state update); "
-                             "experimental, alternates the two small reductions for dots")
     parser.add_argument("--merge-reductions", action="store_true",
                         help="fuse the two per-token state reductions into one [BV,BK,2] pass")
     args = parser.parse_args()
@@ -284,7 +279,7 @@ def main() -> None:
             t_stock, t_fused = _verify_section(
                 layers, heads, key_dim, value_dim, spec_q, b, steps, args.warmup,
                 args.accept_rate, args.accept_len, args.blocks, records,
-                args.pipeline_stages, args.deferred_verify, args.merge_reductions,
+                args.pipeline_stages, args.merge_reductions,
             )
             rows.append((b, heads * b, t_stock, t_fused))
         print("sweep summary (fused wins when saving > 0)")
@@ -380,7 +375,7 @@ def main() -> None:
         _verify_section(
             layers, heads, key_dim, value_dim, spec_q, batch, steps, args.warmup,
             args.accept_rate, args.accept_len, args.blocks, records,
-            args.pipeline_stages, args.deferred_verify, args.merge_reductions,
+            args.pipeline_stages, args.merge_reductions,
         )
 
 

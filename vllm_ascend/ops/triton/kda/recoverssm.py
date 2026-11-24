@@ -34,10 +34,6 @@ RECOVERSSM_LARGE_TILE_MIN_PROGRAMS = 96
 # replay and verify loops need an explicit tl.range(..., num_stages=N) request;
 # the launch-level num_stages default does not pipeline plain range() loops.
 RECOVERSSM_VERIFY_PIPELINE_STAGES = 2
-# Deferred verify keeps one history slot per prior token; a window longer than
-# slots + 1 would truncate the correction history, so the launch falls back to
-# the per-token state update above this bound.
-RECOVERSSM_MAX_HISTORY_SLOTS = 8
 RECOVERSSM_CONV_TILE = 4096
 RECOVERSSM_CONV_STRIDED_TILE = 256
 
@@ -120,18 +116,6 @@ def _kda_recurrent_step(
     return state + correction[:, None] * normalized_k[None, :], correction
 
 
-@triton.jit
-def _accumulate_verify_history_step(rk, rq, g_slot, corr_slot, h, wq):
-    # One prior token's contribution to the current token's state dot products,
-    # without materializing the rank-1 state update: g_slot carries that token's
-    # normalized key folded with its tail decay, so contracting it with the
-    # current token's h = nk * decay (resp. wq = q * decay) is a plain K-length
-    # dot, and the correction adds in as a [V]-length FMA per slot.
-    dot_k = tl.sum(g_slot * h)
-    dot_q = tl.sum(g_slot * wq)
-    return tl.fma(corr_slot, dot_k, rk), tl.fma(corr_slot, dot_q, rq)
-
-
 @triton.heuristics(
     {
         "HAS_RECORD_INDICES": lambda args: args["record_indices_ptr"] is not None,
@@ -191,7 +175,6 @@ def _kda_recoverssm_verify_kernel(
     SPEC_QUERY_LEN: tl.constexpr,
     UNROLL_REPLAY: tl.constexpr,
     PIPELINE_STAGES: tl.constexpr,
-    DEFERRED_VERIFY: tl.constexpr,
     MERGE_REDUCTIONS: tl.constexpr,
 ):
     # Advance a register-held checkpoint and record each token's compact
@@ -372,233 +355,90 @@ def _kda_recoverssm_verify_kernel(
                         boundary_state = initial_state * boundary_decay[None, :] + boundary_correction
                         tl.store(boundary_ptrs, boundary_state, mask=mask_state)
 
-    if DEFERRED_VERIFY:
-        # Deferred verify: the checkpoint stays read-only and each token's
-        # state dot products are rebuilt from a per-slot correction history
-        # (g_slot = normalized key folded with its tail decay) instead of
-        # materializing the rank-1 state update. The [BV, BK] reductions become
-        # independent across tokens, leaving only a cheap per-K/per-V slot chain
-        # serial, so the backend can overlap the next token's loads with the
-        # recurrence. Slots are pruned at compile time by SPEC_QUERY_LEN.
-        g_h0 = tl.zeros([BK], dtype=tl.float32)
-        g_h1 = tl.zeros([BK], dtype=tl.float32)
-        g_h2 = tl.zeros([BK], dtype=tl.float32)
-        g_h3 = tl.zeros([BK], dtype=tl.float32)
-        g_h4 = tl.zeros([BK], dtype=tl.float32)
-        g_h5 = tl.zeros([BK], dtype=tl.float32)
-        g_h6 = tl.zeros([BK], dtype=tl.float32)
-        g_h7 = tl.zeros([BK], dtype=tl.float32)
-        corr_h0 = tl.zeros([BV], dtype=tl.float32)
-        corr_h1 = tl.zeros([BV], dtype=tl.float32)
-        corr_h2 = tl.zeros([BV], dtype=tl.float32)
-        corr_h3 = tl.zeros([BV], dtype=tl.float32)
-        corr_h4 = tl.zeros([BV], dtype=tl.float32)
-        corr_h5 = tl.zeros([BV], dtype=tl.float32)
-        corr_h6 = tl.zeros([BV], dtype=tl.float32)
-        corr_h7 = tl.zeros([BV], dtype=tl.float32)
-        state_decay = tl.full([BK], 1.0, tl.float32)
-        for token_offset in tl.range(0, query_len, num_stages=PIPELINE_STAGES):
-            token = bos + token_offset
-            q = tl.load(
-                q_ptr + token * stride_q_token + pid_h * K + offs_k,
-                mask=mask_k,
-                other=0.0 if mask_k is not None else None,
-            ).to(tl.float32)
-            k = tl.load(
-                k_ptr + token * stride_k_token + pid_h * K + offs_k,
-                mask=mask_k,
-                other=0.0 if mask_k is not None else None,
-            ).to(tl.float32)
-            v = tl.load(
-                v_ptr + token * stride_v_token + pid_h * V + offs_v,
-                mask=mask_v,
-                other=0.0 if mask_v is not None else None,
-            ).to(tl.float32)
-            raw_g = tl.load(
-                raw_g_ptr + token * stride_g_token + pid_h * K + offs_k,
-                mask=mask_k,
-                other=0.0 if mask_k is not None else None,
-            ).to(tl.float32)
-            raw_beta = tl.load(
-                raw_beta_ptr + token * stride_beta_token + pid_h,
-            ).to(tl.float32)
+    for token_offset in tl.range(0, query_len, num_stages=PIPELINE_STAGES):
+        token = bos + token_offset
+        q = tl.load(
+            q_ptr + token * stride_q_token + pid_h * K + offs_k,
+            mask=mask_k,
+            other=0.0 if mask_k is not None else None,
+        ).to(tl.float32)
+        k = tl.load(
+            k_ptr + token * stride_k_token + pid_h * K + offs_k,
+            mask=mask_k,
+            other=0.0 if mask_k is not None else None,
+        ).to(tl.float32)
+        v = tl.load(
+            v_ptr + token * stride_v_token + pid_h * V + offs_v,
+            mask=mask_v,
+            other=0.0 if mask_v is not None else None,
+        ).to(tl.float32)
+        raw_g = tl.load(
+            raw_g_ptr + token * stride_g_token + pid_h * K + offs_k,
+            mask=mask_k,
+            other=0.0 if mask_k is not None else None,
+        ).to(tl.float32)
+        raw_beta = tl.load(
+            raw_beta_ptr + token * stride_beta_token + pid_h,
+        ).to(tl.float32)
 
-            q = _kda_l2_normalize(q) * (K**-0.5)
-            normalized_k = _kda_l2_normalize(k)
-            gate = _kda_gate(raw_g, dt_bias, A, lower_bound, USE_LOWER_BOUND)
-            tl.static_assert(gate.dtype == tl.float32)
-            decay = tl.exp(gate)
-            h = normalized_k * decay
-            wq = q * decay
-            rk = tl.sum(state * (state_decay * h)[None, :], axis=1)
-            rq = tl.sum(state * (state_decay * wq)[None, :], axis=1)
-            if token_offset > 0:
-                rk, rq = _accumulate_verify_history_step(rk, rq, g_h0, corr_h0, h, wq)
-            if SPEC_QUERY_LEN > 2:
-                if token_offset > 1:
-                    rk, rq = _accumulate_verify_history_step(rk, rq, g_h1, corr_h1, h, wq)
-            if SPEC_QUERY_LEN > 3:
-                if token_offset > 2:
-                    rk, rq = _accumulate_verify_history_step(rk, rq, g_h2, corr_h2, h, wq)
-            if SPEC_QUERY_LEN > 4:
-                if token_offset > 3:
-                    rk, rq = _accumulate_verify_history_step(rk, rq, g_h3, corr_h3, h, wq)
-            if SPEC_QUERY_LEN > 5:
-                if token_offset > 4:
-                    rk, rq = _accumulate_verify_history_step(rk, rq, g_h4, corr_h4, h, wq)
-            if SPEC_QUERY_LEN > 6:
-                if token_offset > 5:
-                    rk, rq = _accumulate_verify_history_step(rk, rq, g_h5, corr_h5, h, wq)
-            if SPEC_QUERY_LEN > 7:
-                if token_offset > 6:
-                    rk, rq = _accumulate_verify_history_step(rk, rq, g_h6, corr_h6, h, wq)
-            if SPEC_QUERY_LEN > 8:
-                if token_offset > 7:
-                    rk, rq = _accumulate_verify_history_step(rk, rq, g_h7, corr_h7, h, wq)
-            tl.static_assert(raw_beta.dtype == tl.float32)
+        q = _kda_l2_normalize(q) * (K**-0.5)
+        normalized_k = _kda_l2_normalize(k)
+        gate = _kda_gate(raw_g, dt_bias, A, lower_bound, USE_LOWER_BOUND)
+        tl.static_assert(gate.dtype == tl.float32)
+        decay = tl.exp(gate)
+        weighted_k = normalized_k * decay
+        weighted_q = q * decay
+        tl.static_assert(raw_beta.dtype == tl.float32)
+        if MERGE_REDUCTIONS:
+            # One [BV, BK, 2] reduction pass instead of two [BV, BK] passes:
+            # halving the per-token reduction count is the direct lever on
+            # triton-ascend, where reductions (not elementwise tile ops)
+            # dominate the vector engine time.
+            rk, rq = tl.split(
+                tl.sum(
+                    state[:, :, None] * tl.join(weighted_k, weighted_q)[None, :, :],
+                    axis=1,
+                )
+            )
             correction = (v - rk) * tl.sigmoid(raw_beta)
             out = rq + correction * tl.sum(normalized_k * q)
-            tl.store(
-                out_ptr + token * stride_out_token + pid_h * V + offs_v,
-                out,
-                mask=mask_v,
-            )
+        else:
+            correction = (v - tl.sum(state * weighted_k[None, :], axis=1)) * tl.sigmoid(raw_beta)
+            out = tl.sum(state * weighted_q[None, :], axis=1) + correction * tl.sum(normalized_k * q)
+        # The post-update state of the last token is never read (the loop
+        # ends and the checkpoint was already stored by the replay), so
+        # skip its rank-1 update.
+        if token_offset < query_len - 1:
+            state = state * decay[None, :] + correction[:, None] * normalized_k[None, :]
+        tl.store(
+            out_ptr + token * stride_out_token + pid_h * V + offs_v,
+            out,
+            mask=mask_v,
+        )
 
-            correction_ptr = (
-                correction_cache_ptr
-                + record_row * stride_correction_block
-                + pid_h * stride_correction_head
-                + token_offset * stride_correction_pos
+        correction_ptr = (
+            correction_cache_ptr
+            + record_row * stride_correction_block
+            + pid_h * stride_correction_head
+            + token_offset * stride_correction_pos
+        )
+        tl.store(
+            correction_ptr + offs_v * stride_correction_dim,
+            correction,
+            mask=mask_v,
+        )
+        if pid_v == 0:
+            kg_ptr = kg_cache_ptr + record_row * stride_kg_block + pid_h * stride_kg_head + token_offset * stride_kg_pos
+            tl.store(
+                kg_ptr + offs_k * stride_kg_dim,
+                k,
+                mask=mask_k,
             )
             tl.store(
-                correction_ptr + offs_v * stride_correction_dim,
-                correction,
-                mask=mask_v,
-            )
-            if pid_v == 0:
-                kg_ptr = kg_cache_ptr + record_row * stride_kg_block + pid_h * stride_kg_head + token_offset * stride_kg_pos
-                tl.store(
-                    kg_ptr + offs_k * stride_kg_dim,
-                    k,
-                    mask=mask_k,
-                )
-                tl.store(
-                    kg_ptr + (K + offs_k) * stride_kg_dim,
-                    raw_g,
-                    mask=mask_k,
-                )
-            # Every tail decay picks up this token's decay, slots shift down,
-            # and the current token enters slot 0 with tail decay 1.
-            state_decay *= decay
-            g_h0 *= decay
-            g_h1 *= decay
-            g_h2 *= decay
-            g_h3 *= decay
-            g_h4 *= decay
-            g_h5 *= decay
-            g_h6 *= decay
-            g_h7 *= decay
-            g_h7 = g_h6
-            g_h6 = g_h5
-            g_h5 = g_h4
-            g_h4 = g_h3
-            g_h3 = g_h2
-            g_h2 = g_h1
-            g_h1 = g_h0
-            g_h0 = normalized_k
-            corr_h7 = corr_h6
-            corr_h6 = corr_h5
-            corr_h5 = corr_h4
-            corr_h4 = corr_h3
-            corr_h3 = corr_h2
-            corr_h2 = corr_h1
-            corr_h1 = corr_h0
-            corr_h0 = correction
-    else:
-        for token_offset in tl.range(0, query_len, num_stages=PIPELINE_STAGES):
-            token = bos + token_offset
-            q = tl.load(
-                q_ptr + token * stride_q_token + pid_h * K + offs_k,
+                kg_ptr + (K + offs_k) * stride_kg_dim,
+                raw_g,
                 mask=mask_k,
-                other=0.0 if mask_k is not None else None,
-            ).to(tl.float32)
-            k = tl.load(
-                k_ptr + token * stride_k_token + pid_h * K + offs_k,
-                mask=mask_k,
-                other=0.0 if mask_k is not None else None,
-            ).to(tl.float32)
-            v = tl.load(
-                v_ptr + token * stride_v_token + pid_h * V + offs_v,
-                mask=mask_v,
-                other=0.0 if mask_v is not None else None,
-            ).to(tl.float32)
-            raw_g = tl.load(
-                raw_g_ptr + token * stride_g_token + pid_h * K + offs_k,
-                mask=mask_k,
-                other=0.0 if mask_k is not None else None,
-            ).to(tl.float32)
-            raw_beta = tl.load(
-                raw_beta_ptr + token * stride_beta_token + pid_h,
-            ).to(tl.float32)
-
-            q = _kda_l2_normalize(q) * (K**-0.5)
-            normalized_k = _kda_l2_normalize(k)
-            gate = _kda_gate(raw_g, dt_bias, A, lower_bound, USE_LOWER_BOUND)
-            tl.static_assert(gate.dtype == tl.float32)
-            decay = tl.exp(gate)
-            weighted_k = normalized_k * decay
-            weighted_q = q * decay
-            tl.static_assert(raw_beta.dtype == tl.float32)
-            if MERGE_REDUCTIONS:
-                # One [BV, BK, 2] reduction pass instead of two [BV, BK] passes:
-                # halving the per-token reduction count is the direct lever on
-                # triton-ascend, where reductions (not elementwise tile ops)
-                # dominate the vector engine time.
-                rk, rq = tl.split(
-                    tl.sum(
-                        state[:, :, None] * tl.join(weighted_k, weighted_q)[None, :, :],
-                        axis=1,
-                    )
-                )
-                correction = (v - rk) * tl.sigmoid(raw_beta)
-                out = rq + correction * tl.sum(normalized_k * q)
-            else:
-                correction = (v - tl.sum(state * weighted_k[None, :], axis=1)) * tl.sigmoid(raw_beta)
-                out = tl.sum(state * weighted_q[None, :], axis=1) + correction * tl.sum(normalized_k * q)
-            # The post-update state of the last token is never read (the loop
-            # ends and the checkpoint was already stored by the replay), so
-            # skip its rank-1 update.
-            if token_offset < query_len - 1:
-                state = state * decay[None, :] + correction[:, None] * normalized_k[None, :]
-            tl.store(
-                out_ptr + token * stride_out_token + pid_h * V + offs_v,
-                out,
-                mask=mask_v,
             )
-
-            correction_ptr = (
-                correction_cache_ptr
-                + record_row * stride_correction_block
-                + pid_h * stride_correction_head
-                + token_offset * stride_correction_pos
-            )
-            tl.store(
-                correction_ptr + offs_v * stride_correction_dim,
-                correction,
-                mask=mask_v,
-            )
-            if pid_v == 0:
-                kg_ptr = kg_cache_ptr + record_row * stride_kg_block + pid_h * stride_kg_head + token_offset * stride_kg_pos
-                tl.store(
-                    kg_ptr + offs_k * stride_kg_dim,
-                    k,
-                    mask=mask_k,
-                )
-                tl.store(
-                    kg_ptr + (K + offs_k) * stride_kg_dim,
-                    raw_g,
-                    mask=mask_k,
-                )
 
 
 @triton.heuristics(
@@ -1320,7 +1160,6 @@ def kda_recoverssm_verify(
     replay_align: bool = False,
     records_pool_size: int | None = None,
     pipeline_stages: int = RECOVERSSM_VERIFY_PIPELINE_STAGES,
-    deferred_verify: bool = False,
     merge_reductions: bool = False,
 ) -> torch.Tensor:
     """Verify a KDA speculative window.
@@ -1495,7 +1334,6 @@ def kda_recoverssm_verify(
         SPEC_QUERY_LEN=spec_query_len,
         UNROLL_REPLAY=is_a5,
         PIPELINE_STAGES=pipeline_stages,
-        DEFERRED_VERIFY=deferred_verify and spec_query_len <= RECOVERSSM_MAX_HISTORY_SLOTS + 1,
         MERGE_REDUCTIONS=merge_reductions,
         num_warps=4,
         num_stages=pipeline_stages,
