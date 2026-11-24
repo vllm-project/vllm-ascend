@@ -134,7 +134,10 @@ def worker(rank: int, mode: str, port: int, warmup: int, iterations: int, repeat
         expected_load[local_start : local_start + EXPERTS_PER_RANK] = expected * iterations
         assert torch.equal(actual_load, expected_load), f"rank {rank}: expert load mismatch"
         assert torch.equal(op_kwargs["expert_token_nums"].cpu(), expected), f"rank {rank}: count mismatch"
-        assert torch.count_nonzero(op_kwargs["out"].cpu()) > 0, f"rank {rank}: empty MoE output"
+        output = op_kwargs["out"].cpu()
+        assert torch.count_nonzero(output) > 0, f"rank {rank}: empty MoE output"
+        output_sha256 = hashlib.sha256(output.contiguous().view(torch.uint8).numpy().tobytes()).hexdigest()
+        print(f"OUTPUT mode={mode} rank={rank} sha256={output_sha256}", flush=True)
 
         if rank == 0:
             print(
