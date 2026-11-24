@@ -17,14 +17,6 @@ from vllm_ascend.ops.triton.kda.recoverssm import KDARecoverSSMCommitContext
 @pytest.mark.parametrize("graph_mode", [False, True])
 @pytest.mark.parametrize("use_pcp", [False, True])
 def test_align_indices_follow_sequence_position_and_refresh_each_step(monkeypatch, graph_mode, use_pcp):
-    # torch.npu signals are unreliable under tests/ut (the CPU conftest pins
-    # them, and suite neighbours patch or wholesale-replace torch.npu and can
-    # leave both truthy on the worker); allocation goes through torch's real
-    # device dispatch, which a faked torch.npu cannot fool.
-    try:
-        torch.zeros(1, device="npu")
-    except Exception:
-        pytest.skip("requires a real Ascend NPU")
     builder = AscendKDARecoverSSMMetadataBuilder.__new__(AscendKDARecoverSSMMetadataBuilder)
     builder.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="align"))
     builder.use_full_cuda_graph = graph_mode

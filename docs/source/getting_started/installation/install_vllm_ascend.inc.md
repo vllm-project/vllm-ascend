@@ -31,7 +31,7 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
 === "pip installation"
 
-    This installation method currently supports only **A2** builds and does not automatically support A3, Atlas 300I DUO, Atlas 200I Pro, or 950DT Products. For other hardware, use a prebuilt image, WheelNext, or a source installation.
+    This installation method currently supports only **A2** builds and does not automatically support A3, Atlas 300I Duo, Atlas 200I Pro, or 950DT Products. For other hardware, use a prebuilt image, the uv installation, or a source installation.
 
     <!-- doctest: installation-pip-install -->
     ```bash
@@ -72,15 +72,18 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     <!-- doctest: installation-uv-bootstrap -->
     ```bash
-    # install uv-wheelnext
+    # Install the WheelNext build of uv. This command patches the installer to skip its checksum verification, so run it only on a trusted network.
     curl -LsSf https://astral.sh/uv/install.sh | sed 's/verify_checksum "$_file"/true/' | INSTALLER_DOWNLOAD_URL=https://wheelnext.astral.sh sh
     source $HOME/.local/bin/env
     ```
 
     <!-- doctest: installation-uv-install -->
     ```bash
-    # Install vllm-project/vllm. The newest supported version is {{ vllm_version }}.
-    pip install "vllm=={{ release_vllm_version }}"
+    # Install vllm-project/vllm. The installed version is {{ release_vllm_version }}.
+    VLLM_TARGET_DEVICE=empty \
+    VLLM_VERSION_OVERRIDE={{ release_vllm_version }} \
+    pip install -v --no-binary vllm "vllm=={{ release_vllm_version }}" \
+        --extra-index-url https://download.pytorch.org/whl/cpu/
 
     # Install vllm-project/vllm-ascend from wheelnext index.
     uv pip install --system \
@@ -196,11 +199,11 @@ After completing any of the three installation methods, install the kernel packa
 
     When installing another version of `vllm-ascend`, check the repository's `requirements.txt` for the corresponding `triton-ascend` version.
 
-=== "Atlas 300I DUO / Atlas 200I Pro"
+=== "Atlas 300I Duo / Atlas 200I Pro"
 
     FLA NPU is not required for these devices.
 
-    Atlas 300I DUO and Atlas 200I Pro do not support `triton` or `triton-ascend`. If either package is already installed in the environment, uninstall it and do not reinstall `triton-ascend`:
+    Atlas 300I Duo and Atlas 200I Pro do not support `triton` or `triton-ascend`. If either package is already installed in the environment, uninstall it and do not reinstall `triton-ascend`:
 
     ```bash
     pip uninstall -y triton triton-ascend
