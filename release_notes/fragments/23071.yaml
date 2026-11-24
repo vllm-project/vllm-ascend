@@ -1,0 +1,4 @@
+pr: 23071
+entries:
+  - category: bugfix
+    text: Fixed GLM-5 prefill KV offload cache-view bounds failures with multi-head MLA metadata, including BF16 and C8 cache layouts.

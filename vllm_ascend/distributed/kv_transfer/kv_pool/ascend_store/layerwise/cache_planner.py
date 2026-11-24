@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, KVCacheTensor
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import get_backend_class
+from vllm_ascend.models.glm_moe_dsa_cache_layout import normalize_offload_descriptors
 
 from .layerwise_cache_layout import (
     LayerwiseCacheConfig,
@@ -282,6 +283,10 @@ def plan_layerwise_cache_reuse(
     # An empty device pool has no byte views to reuse.
     if not kv_cache_config.kv_cache_tensors or kv_cache_config.num_blocks == 0 or not kv_cache_config.kv_cache_groups:
         return None
+    # Physical native views must be valid independently of reuse eligibility.
+    text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+    if getattr(text_config, "model_type", None) == "glm_moe_dsa":
+        normalize_offload_descriptors(vllm_config, kv_cache_config, get_layerwise_kv_cache_specs(kv_cache_config))
     rules = get_spec_reuse_rules(vllm_config)
     if rules is None:
         return None
