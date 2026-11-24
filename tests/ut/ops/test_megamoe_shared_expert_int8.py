@@ -72,7 +72,7 @@ def cann_mega_moe_abi(monkeypatch, mixed_int_abi):
         pass
 
     ops = ModuleType("cann_ops_transformer.ops")
-    ops.mega_moe = mixed_mega_moe if mixed_int_abi else legacy_mega_moe
+    monkeypatch.setattr(ops, "mega_moe", mixed_mega_moe if mixed_int_abi else legacy_mega_moe, raising=False)
     monkeypatch.setitem(sys.modules, ops.__name__, ops)
     detect_abi = moe_utils.supports_cann_mega_moe_mixed_int_shared
     detect_abi.cache_clear()
