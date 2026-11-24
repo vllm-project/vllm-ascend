@@ -129,9 +129,38 @@ class TestAscendDSAPCPGraphPadding:
         assert scatter.call_args.args[2] is slot_mapping
 
 
+@pytest.mark.parametrize("overlap_enabled", [False, True])
+def test_pcp_query_overlap_honors_config(overlap_enabled):
+    def init_base(impl):
+        impl.multistream_dsv4_dsa_overlap = overlap_enabled
+        impl.n_local_heads = 1
+        impl.head_dim = 1
+        impl.n_local_groups = 1
+        impl.wo_a = MagicMock()
+        impl.wo_b = MagicMock()
+        impl.vllm_config = MagicMock()
+
+    with (
+        patch.object(dsa_cp.dsa_v1.AscendDSAImpl, "__init__", init_base),
+        patch.object(dsa_cp, "enable_pcp_o_proj_weight_sharding", return_value=False),
+        patch.object(dsa_cp, "ParallelOProjection"),
+        patch.object(dsa_cp, "WeightSwitchConfig"),
+        patch.object(dsa_cp, "get_pcp_group"),
+        patch.object(dsa_cp, "get_tp_group"),
+        patch.object(dsa_cp, "is_pcp_decode_sharding_enabled", return_value=False),
+    ):
+        impl = AscendDSAPCPImpl()
+
+    assert impl.pcp_q_projection_overlap is overlap_enabled
+    # PCP has already prepared caches before local attention, so the base
+    # attention path must not enable a second cache-update overlap.
+    assert impl.multistream_dsv4_dsa_overlap is False
+
+
 @pytest.fixture
 def cache_query_case():
     impl = AscendDSAPCPImpl.__new__(AscendDSAPCPImpl)
+    impl.pcp_q_projection_overlap = True
     impl.compress_ratio = 4
     metadata = MagicMock(spec=dsa_cp.AscendDSAPCPMetadata)
     metadata.pcp_has_global_prefill = True
@@ -156,9 +185,13 @@ def cache_query_case():
     hidden_states = MagicMock()
     caches = tuple(object() for _ in range(6))
     with ExitStack() as stack:
-        stack.enter_context(patch.object(dsa_cp.torch.npu, "current_stream", return_value=current_stream))
-        stack.enter_context(patch.object(dsa_cp.torch.npu, "stream"))
-        stack.enter_context(patch.object(dsa_cp.dsa_v1, "dsv4_dsa_overlap_stream", return_value=query_stream))
+        get_current_stream = stack.enter_context(
+            patch.object(dsa_cp.torch.npu, "current_stream", return_value=current_stream)
+        )
+        stream_context = stack.enter_context(patch.object(dsa_cp.torch.npu, "stream"))
+        get_query_stream = stack.enter_context(
+            patch.object(dsa_cp.dsa_v1, "dsv4_dsa_overlap_stream", return_value=query_stream)
+        )
         stack.enter_context(patch.object(dsa_cp.dsa_v1, "_require_req_metadata", return_value=MagicMock()))
         stack.enter_context(patch.object(dsa_cp.DeviceOperator, "unpack_dsa_forward_kv_cache", return_value=caches))
         yield SimpleNamespace(
@@ -169,18 +202,25 @@ def cache_query_case():
             prepared_query=prepared_query,
             current_stream=current_stream,
             query_stream=query_stream,
+            get_current_stream=get_current_stream,
+            get_query_stream=get_query_stream,
+            stream_context=stream_context,
             args=("layer", hidden_states, caches, {"layer": metadata}, layer_metadata),
         )
 
 
 @pytest.mark.parametrize("global_prefill,local_tokens", [(True, 2), (True, 0), (False, 2)])
 @pytest.mark.parametrize("compress_ratio", [1, 4, 128])
-def test_cache_query_preparation_preserves_collectives(cache_query_case, global_prefill, local_tokens, compress_ratio):
+@pytest.mark.parametrize("overlap_enabled", [False, True])
+def test_cache_query_preparation_preserves_collectives(
+    cache_query_case, global_prefill, local_tokens, compress_ratio, overlap_enabled
+):
     case = cache_query_case
     case.metadata.pcp_has_global_prefill = global_prefill
     case.common.num_actual_tokens = local_tokens
     case.impl.compress_ratio = compress_ratio
-    overlap = global_prefill and local_tokens > 0
+    case.impl.pcp_q_projection_overlap = overlap_enabled
+    overlap = overlap_enabled and global_prefill and local_tokens > 0
     expected = ["gather", "swa"]
     if compress_ratio > 1:
         expected.append("compressor")
@@ -198,9 +238,13 @@ def test_cache_query_preparation_preserves_collectives(cache_query_case, global_
             case.query_stream.wait_stream.assert_called_once_with(case.current_stream)
             case.current_stream.wait_stream.assert_called_once_with(case.query_stream)
             assert case.operations.query.call_args.kwargs == {"write_swa_cache": False}
+        else:
+            case.get_current_stream.assert_not_called()
+            case.get_query_stream.assert_not_called()
+            case.stream_context.assert_not_called()
 
 
-@pytest.mark.parametrize("failure_stage", ["query", "gather", "swa", "compressor", "indexer", "weights"])
+@pytest.mark.parametrize("failure_stage", ["query_wait", "query", "gather", "swa", "compressor", "indexer", "weights"])
 def test_cache_query_preparation_joins_stream_on_failure(cache_query_case, failure_stage):
     case = cache_query_case
     getattr(case.operations, failure_stage).side_effect = RuntimeError("injected failure")
