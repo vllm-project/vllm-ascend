@@ -122,6 +122,9 @@ from vllm_ascend.utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.config.profiler import ProfilerConfig
+    from vllm.distributed.parallel_state import Handle
+    from vllm.distributed.weight_transfer import WeightTransferEngine
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
 
@@ -256,6 +259,7 @@ class NPUWorker(GPUWorker):
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
+        self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
         self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
