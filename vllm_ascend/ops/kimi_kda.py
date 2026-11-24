@@ -78,6 +78,22 @@ _F_PROJ_SHARD_ID = 1
 _KDA_BFG_STREAM: torch.npu.Stream | None = None
 
 
+def _configure_mega_qkv(layer: nn.Module, backend: str) -> int:
+    """Select the QKV loader and return the FLA activation scale algorithm."""
+    quant = getattr(layer.quant_method, "quant_method", layer.quant_method)
+    if backend == "mega_recurrent_kda_int8":
+        if not isinstance(quant, AscendW8A8DynamicLinearMethod) or quant.act_quant_type != torch.int8:
+            raise ValueError("INT8 MegaKDA requires dynamic W8A8 QKV weights with per-channel scales")
+        layer._mega_kda_int8_qkv = True
+        return 0
+    if not isinstance(quant, AscendW8A8MXFP8DynamicLinearMethod):
+        raise ValueError("MXFP8 MegaKDA requires E4M3FN MXFP8 QKV weights")
+    if quant.group_size != 32 or int(quant.dynamic_mx_quant_scale_alg) not in (0, 1):
+        raise ValueError("MegaRecurrentKda requires MXFP8 group size 32 and scale algorithm 0 or 1")
+    layer._mega_kda_mx_qkv = True
+    return int(quant.dynamic_mx_quant_scale_alg)
+
+
 def _kda_bfg_stream() -> torch.npu.Stream:
     global _KDA_BFG_STREAM
     if _KDA_BFG_STREAM is None:
@@ -352,14 +368,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 prefix=f"{prefix}.in_proj_qkv",
             )
             if self._mega_kda_op is not None:
-                quant = self.in_proj_qkvgfab.quant_method
-                inner = getattr(quant, "quant_method", quant)
-                if not isinstance(inner, AscendW8A8MXFP8DynamicLinearMethod):
-                    raise ValueError("The mixed MegaKDA kernel requires E4M3FN MXFP8 QKV weights")
-                if inner.group_size != 32 or int(inner.dynamic_mx_quant_scale_alg) not in (0, 1):
-                    raise ValueError("MegaRecurrentKda requires MXFP8 group size 32 and scale algorithm 0 or 1")
-                self.in_proj_qkvgfab._mega_kda_mx_qkv = True
-                self._mega_kda_scale_alg = int(inner.dynamic_mx_quant_scale_alg)
+                self._mega_kda_scale_alg = _configure_mega_qkv(self.in_proj_qkvgfab, mega_config.backend)
             del self.f_b_proj
             self.fused_bfg_proj = _KDAFusedBFGLinear(
                 hidden_size=self.hidden_size,
@@ -564,7 +573,13 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             prefill_meta.num_spec_decodes = prefill_meta.num_spec_decode_tokens = 0
             prefill_meta.spec_sequence_masks = None
         qkv = self.in_proj_qkvgfab
-        if not getattr(qkv, "_mxfp8_transformed", False):
+        if getattr(qkv, "_mega_kda_int8_qkv", False):
+            ready = (
+                qkv.weight.shape == (self.hidden_size, 3 * self.local_projection_size) and qkv.weight_scale.ndim == 1
+            )
+        else:
+            ready = getattr(qkv, "_mxfp8_transformed", False)
+        if not ready:
             raise RuntimeError("MegaRecurrentKda QKV weight post-processing has not completed")
         bfg = self.fused_bfg_proj
         beta_weight, _, gate_weight = bfg.weight.split(self._fused_bfg_output_sizes)

@@ -148,6 +148,8 @@ class HardwareCapability(Enum):
     INDEXER_QUANT_CACHE = auto()
     # Prepare per-token INT8 KDA projection inputs before the BFG stream wait.
     KDA_INT8_QUANT_OVERLAP = auto()
+    # FLA MegaRecurrentKda consumes per-channel INT8 NZ QKV weights on Arch22.
+    MEGA_KDA_INT8 = auto()
     # Native sparse indexer ABI with INT8 Q/K, FP16 scales and FP32 scores.
     NATIVE_INT8_SPARSE = auto()
     # Reserve host CPUs for interrupt handling when constructing worker CPU pools.
@@ -436,6 +438,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             native_weight_formats=_INT4_WEIGHT_FORMATS,
             capabilities=_STANDARD_CAPABILITIES
             | {
+                HardwareCapability.MEGA_KDA_INT8,
                 HardwareCapability.FLASH_ATTN_NPU_3,
                 HardwareCapability.MM_REDUCE_SCATTER_BF16,
                 HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
@@ -464,6 +467,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             native_weight_formats=_INT4_WEIGHT_FORMATS,
             capabilities=_A3_CAPABILITIES
             | {
+                HardwareCapability.MEGA_KDA_INT8,
                 HardwareCapability.CANN_MEGAMOE,
                 HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
                 HardwareCapability.FLASH_ATTN_NPU_3,

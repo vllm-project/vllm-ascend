@@ -412,22 +412,31 @@ Validate correctness, quality and performance on the deployment hardware before 
 
 ### MegaKDA backend
 
-Kimi K3.1 decode workers on Ascend 950 can select a KDA backend with
-`kda_backend_config`. Use Model Runner V2, prefill context parallel size 1,
-BF16 hidden states and the model's MXFP8 QKV weights. Set the option on the
-KV consumer and leave `--use-replayssm` disabled. The default is `native`.
+Kimi K3.1 disaggregated decode workers can select a KDA backend with
+`kda_backend_config`. Select the backend for the checkpoint's QKV weights:
 
-Build the Ascend 950 wheel from the pinned revision of
+| Device | Backend | Rank-local QKV weight and scale | Wheel build target |
+| --- | --- | --- | --- |
+| Atlas A2 | `mega_recurrent_kda_int8` | Dynamic W8A8, INT8 NZ and one BF16 scale per output channel | `ascend910b` |
+| Atlas A3 | `mega_recurrent_kda_int8` | Dynamic W8A8, INT8 NZ and one BF16 scale per output channel | `ascend910_93` |
+| Ascend 950 | `mega_recurrent_kda_mx` | E4M3FN NZ and block E8M0 scales | `ascend950` |
+
+Use Model Runner V2, prefill context parallel size 1 and BF16 hidden states.
+Set the option on the KV consumer and leave `--use-replayssm` disabled.
+The default is `native`.
+
+Build the device-specific wheel from the pinned revision of
 [FLA PR #1375](https://github.com/flashserve/flash-linear-attention-npu/pull/1375).
 From a checkout of `flashserve/flash-linear-attention-npu`:
 
 ```bash
 git fetch origin refs/pull/1375/head
-git checkout --detach d73d060670de11a3f234e854150373408c01c713
-FLA_NPU_SOC=ascend950 FLA_NPU_BUILD_OFFLINE_BUNDLE=1 python scripts/build_wheel.py
+git checkout --detach 02763b4fec6d44ed0e1c5a2bf35aade1d16dd76f
+# Atlas A2 example. Select the build target from the table above.
+FLA_NPU_SOC=ascend910b FLA_NPU_BUILD_OFFLINE_BUNDLE=1 python scripts/build_wheel.py
 ```
 
-See the [operator integration guide for this revision](https://github.com/flashserve/flash-linear-attention-npu/blob/d73d060670de11a3f234e854150373408c01c713/fla/ops/ascendc/kda/mega_recurrent_kda/docs/model_integration.md).
+See the [operator integration guide for this revision](https://github.com/flashserve/flash-linear-attention-npu/blob/02763b4fec6d44ed0e1c5a2bf35aade1d16dd76f/fla/ops/ascendc/kda/mega_recurrent_kda/docs/model_integration.md).
 Install the wheel and expose its OPP before starting workers:
 
 ```bash
@@ -442,15 +451,17 @@ their matching launcher from the configured directory in a separate namespace.
 ```json
 {
   "kda_backend_config": {
-    "backend": "mega_recurrent_kda_mx",
+    "backend": "mega_recurrent_kda_int8",
     "operator_package_dir": "/opt/mega-kda-runtime"
   }
 }
 ```
 
-The public `npu_mega_recurrent_kda` operator consumes the rank's E4M3FN QKV weights in FRACTAL_NZ
-layout, their E8M0 scales, and the original BF16 decay, beta and output gate
-weights. It computes the convolution, recurrence, gated RMSNorm and output
+The public `npu_mega_recurrent_kda` operator consumes BF16 hidden states and
+quantizes them internally. The loader packs this rank's QKV weights into NZ
+once. On A2/A3, a rank with six 128-dimensional heads passes logical INT8
+weights `[7168,2304]` and BF16 scales `[2304]`. Both backends use the original
+BF16 decay, beta and output gate weights. It computes the convolution, recurrence, gated RMSNorm and output
 projection inside the same invocation. vLLM applies the original TP collective.
 Ordinary decode uses BSH. Speculative decode uses TH with one device plan per
 metadata group per forward. Padding is isolated from live cache pages.

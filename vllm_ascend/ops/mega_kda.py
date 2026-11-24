@@ -44,7 +44,7 @@ def load_upstream_mega_kda(package_dir: str) -> UpstreamMegaKDA:
     vendor = package / "opp/vendors/fla_npu_transformer"
     opapi = vendor / "op_api/lib/libcust_opapi.so"
     if not (package / "libfla_npu_stable.so").is_file() or not opapi.is_file():
-        raise RuntimeError("Install the Ascend 950 MegaRecurrentKda operator wheel in operator_package_dir")
+        raise RuntimeError("Install the MegaRecurrentKda wheel built for this device in operator_package_dir")
     opp_paths = os.environ.get("ASCEND_CUSTOM_OPP_PATH", "").split(os.pathsep)
     if not any(entry and Path(entry).resolve() == vendor for entry in opp_paths):
         raise RuntimeError("Add the configured operator wheel's vendor to ASCEND_CUSTOM_OPP_PATH before startup")
@@ -66,11 +66,11 @@ def load_upstream_mega_kda(package_dir: str) -> UpstreamMegaKDA:
         forward = ascendc.npu_mega_recurrent_kda
         metadata = ascendc.npu_mega_recurrent_kda_metadata
     except AttributeError as exc:
-        raise RuntimeError("Install the Ascend 950 MegaRecurrentKda wheel with MXFP8 and metadata support") from exc
+        raise RuntimeError("Install a MegaRecurrentKda wheel with quantized QKV and metadata support") from exc
     if not all(Path(inspect.getfile(fn)).resolve().is_relative_to(package) for fn in (forward, metadata)):
         raise RuntimeError("The imported MegaRecurrentKda wrappers do not belong to operator_package_dir")
     if "qkv_projection_weight_scale" not in inspect.signature(forward).parameters:
-        raise RuntimeError("The MegaRecurrentKda wheel does not provide the MXFP8 weight interface")
+        raise RuntimeError("The MegaRecurrentKda wheel does not provide the quantized QKV weight interface")
     return UpstreamMegaKDA(forward, metadata)
 
 

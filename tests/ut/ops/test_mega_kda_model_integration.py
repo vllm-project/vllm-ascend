@@ -10,7 +10,72 @@ from torch import nn
 
 from vllm_ascend.attention.gdn_attn_builder import GDNCausalConv1dMetadata, GDNPrefillMetadata
 from vllm_ascend.ops import kimi_kda
-from vllm_ascend.quantization.methods.w8a8 import w8a8_mxfp8
+from vllm_ascend.quantization.methods.w8a8 import w8a8_dynamic, w8a8_mxfp8
+
+
+@pytest.mark.parametrize("chip", ["A2", "A3", "A5", "_310P"])
+@pytest.mark.parametrize("backend", ["mega_recurrent_kda_int8", "mega_recurrent_kda_mx"])
+def test_mega_backend_device_pair(monkeypatch, tmp_path, chip, backend):
+    from vllm_ascend import ascend_config
+    from vllm_ascend.device.hardware import AscendDeviceType
+    from vllm_ascend.device.hardware_profile import get_hardware_profile
+
+    monkeypatch.setattr(ascend_config, "is_950", lambda: chip == "A5")
+    monkeypatch.setattr(
+        ascend_config, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType[chip])
+    )
+    config = ascend_config.KDABackendConfig(backend=backend, operator_package_dir=str(tmp_path))
+    allowed = chip in ("A2", "A3") if backend == "mega_recurrent_kda_int8" else chip == "A5"
+    if allowed:
+        config.validate_device()
+    else:
+        with pytest.raises(ValueError, match="MegaKDA backend requires"):
+            config.validate_device()
+
+
+def test_int8_qkv_loader_and_native_prefill(monkeypatch):
+    from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiK3DeltaAttention
+
+    method = w8a8_dynamic.AscendW8A8DynamicLinearMethod()
+    layer = nn.Module()
+    layer.quant_method = method
+    weights = torch.randint(-127, 128, (384, 7168), dtype=torch.int8)
+    scale = torch.arange(384, dtype=torch.bfloat16).reshape(-1, 1)
+    layer.weight = nn.Parameter(weights.clone(), requires_grad=False)
+    layer.weight_scale = nn.Parameter(scale.clone(), requires_grad=False)
+    layer.weight_offset = nn.Parameter(torch.zeros_like(scale), requires_grad=False)
+    assert kimi_kda._configure_mega_qkv(layer, "mega_recurrent_kda_int8") == 0
+    cast = MagicMock(side_effect=lambda weight, fmt: weight)
+    monkeypatch.setattr(w8a8_dynamic.torch_npu, "npu_format_cast", cast)
+    method.process_weights_after_loading(layer)
+    assert cast.call_count == 1 and cast.call_args.args[1] == 29
+    torch.testing.assert_close(layer.weight, weights.T)
+    torch.testing.assert_close(layer.weight_scale, scale.flatten())
+
+    x = torch.zeros((3, 7168), dtype=torch.bfloat16)
+    codes = torch.zeros_like(x, dtype=torch.int8)
+    token_scale = torch.ones(3)
+    quant = MagicMock(return_value=(codes, token_scale))
+    expected = torch.zeros((3, 384), dtype=torch.bfloat16)
+    mm = MagicMock(return_value=expected)
+    monkeypatch.setattr(w8a8_dynamic.torch_npu, "npu_dynamic_quant", quant, raising=False)
+    monkeypatch.setattr(w8a8_dynamic.torch_npu, "npu_quant_matmul", mm, raising=False)
+    assert AscendKimiK3DeltaAttention._matmul_fused_qkv(SimpleNamespace(in_proj_qkvgfab=layer), x) is expected
+    assert mm.call_args.args[1] is layer.weight and mm.call_args.args[2] is layer.weight_scale
+    assert mm.call_args.kwargs["pertoken_scale"] is token_scale
+
+
+@pytest.mark.parametrize(
+    "backend,method_cls",
+    [
+        ("mega_recurrent_kda_int8", w8a8_mxfp8.AscendW8A8MXFP8DynamicLinearMethod),
+        ("mega_recurrent_kda_mx", w8a8_dynamic.AscendW8A8DynamicLinearMethod),
+    ],
+)
+def test_mega_rejects_wrong_checkpoint(backend, method_cls):
+    layer = SimpleNamespace(quant_method=SimpleNamespace(quant_method=method_cls.__new__(method_cls)))
+    with pytest.raises(ValueError, match="MegaKDA requires"):
+        kimi_kda._configure_mega_qkv(layer, backend)
 
 
 def test_mega_qkv_layout_and_reload(monkeypatch):
@@ -41,8 +106,9 @@ def test_mega_qkv_layout_and_reload(monkeypatch):
     torch.testing.assert_close(layer.weight_scale, scales.bitwise_xor(1).view(rows, -1, 2).transpose(0, 1).unsqueeze(0))
 
 
+@pytest.mark.parametrize("int8", [False, True], ids=["mx", "int8"])
 @pytest.mark.parametrize("mode", ["dummy", "decode", "first_token", "long_prefill", "mixed", "decode_prefill"])
-def test_mega_kda_model_dispatch(monkeypatch, mode):
+def test_mega_kda_model_dispatch(monkeypatch, mode, int8):
     x = torch.arange(20, dtype=torch.bfloat16).reshape(5, 4)
     indices = torch.tensor([0, 2, 3], dtype=torch.int32)
     metadata = SimpleNamespace(
@@ -103,10 +169,16 @@ def test_mega_kda_model_dispatch(monkeypatch, mode):
     layer = SimpleNamespace(
         prefix="layer",
         _mega_kda_op=object(),
-        _mega_kda_scale_alg=1,
+        _mega_kda_scale_alg=0 if int8 else 1,
         _fused_bfg_output_sizes=(1, 4, 4),
         _mega_output_norm_weight=MagicMock(),
-        in_proj_qkvgfab=SimpleNamespace(_mxfp8_transformed=True, weight=MagicMock(), weight_scale=MagicMock()),
+        hidden_size=4,
+        in_proj_qkvgfab=SimpleNamespace(
+            _mega_kda_int8_qkv=int8,
+            _mxfp8_transformed=not int8,
+            weight=torch.zeros((4, 12), dtype=torch.int8) if int8 else MagicMock(),
+            weight_scale=torch.ones(12, dtype=torch.bfloat16) if int8 else MagicMock(),
+        ),
         fused_bfg_proj=SimpleNamespace(
             weight=torch.arange(36).view(9, 4), f_a_weight=MagicMock(), f_b_weight=MagicMock()
         ),
@@ -147,7 +219,9 @@ def test_mega_kda_model_dispatch(monkeypatch, mode):
         assert upstream.call_args.kwargs["output"].data_ptr() == result.data_ptr()
         assert upstream.call_args.kwargs["only_spec"] == (mode == "mixed")
         weights = upstream.call_args.args[4]
-        assert weights["qkv_scale_alg"] == 1
+        assert weights["qkv_scale_alg"] == (0 if int8 else 1)
+        assert weights["qkv_projection_weight"] is layer.in_proj_qkvgfab.weight
+        assert weights["qkv_projection_weight_scale"] is layer.in_proj_qkvgfab.weight_scale
         assert weights["decay_projection_a_weight"] is layer.fused_bfg_proj.f_a_weight
         assert weights["decay_projection_b_weight"] is layer.fused_bfg_proj.f_b_weight
         torch.testing.assert_close(weights["beta_projection_weight"], layer.fused_bfg_proj.weight[:1])

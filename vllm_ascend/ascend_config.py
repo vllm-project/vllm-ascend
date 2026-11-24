@@ -350,7 +350,7 @@ class EplbConfig:
 class KDABackendConfig:
     """Select an optional kernel backend for KDA layers."""
 
-    backend: Literal["native", "mega_recurrent_kda_mx"] = "native"
+    backend: Literal["native", "mega_recurrent_kda_mx", "mega_recurrent_kda_int8"] = "native"
     operator_package_dir: str | None = None
 
     @model_validator(mode="after")
@@ -361,6 +361,14 @@ class KDABackendConfig:
         elif self.operator_package_dir is not None:
             raise ValueError("kda_backend_config.operator_package_dir requires a MegaKDA backend")
         return self
+
+    def validate_device(self) -> None:
+        if self.backend == "mega_recurrent_kda_mx" and not is_950():
+            raise ValueError("The MXFP8 MegaKDA backend requires Ascend 950")
+        if self.backend == "mega_recurrent_kda_int8" and not get_current_hardware_profile().supports(
+            HardwareCapability.MEGA_KDA_INT8
+        ):
+            raise ValueError("The INT8 MegaKDA backend requires Atlas A2 or A3")
 
 
 @config
@@ -848,8 +856,7 @@ class AscendConfig:
         vc = vllm_config
         validate_expert_offload_config(self.expert_offload_config, vc, self)
         if self.kda_backend_config.backend != "native":
-            if not is_950():
-                raise ValueError("The MegaKDA backend requires Ascend 950")
+            self.kda_backend_config.validate_device()
             hf_config = getattr(vc.model_config, "hf_config", None)
             if getattr(hf_config, "model_type", None) != "kimi_k31" or not vc.use_v2_model_runner:
                 raise ValueError("The MegaKDA backend requires Kimi K3.1 and Model Runner V2")
