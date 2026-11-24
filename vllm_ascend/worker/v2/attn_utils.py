@@ -1548,6 +1548,18 @@ def allocate_kv_cache_main(
 
     attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers, kernel_block_sizes)
 
+    # Different KV groups can share a slot by using separate block pages.
+    # Splitting the whole slot by component can put data in another group's page.
+    if len(kv_cache_config.kv_cache_groups) == 1 and get_layerwise_reuse_layout(kv_cache_config) is not None:
+        for group in attn_groups:
+            prepare_view = getattr(group.backend, "prepare_layerwise_cache_view", None)
+            if prepare_view is None:
+                continue
+            for layer_name in group.layer_names:
+                raw_cache = raw_tensors[layer_name]
+                if isinstance(raw_cache, torch.Tensor):
+                    raw_tensors[layer_name] = prepare_view(raw_cache, group.kv_cache_spec, attn_layers[layer_name])
+
     return _reshape_kv_cache_v2(
         attn_groups=attn_groups,
         kv_cache_raw_tensors=raw_tensors,
