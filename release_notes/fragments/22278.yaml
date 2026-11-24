@@ -12,3 +12,9 @@ entries:
       Qwen3.8-Flash-Next C8 prefill on Ascend 910B reuses paged INT8 KV within
       eligible single-request chunks. In a 10,240-token prompt measured on
       Ascend 910B3, the cumulative prefill GBSA kernel time fell by 50%.
+  - category: bugfix
+    model: Qwen3.8-Flash-Next
+    hardware: [A2]
+    text: >-
+      Fixed a graph warmup failure when serving Qwen3.8-Flash-Next with a BF16
+      sparse indexer on Ascend A2.

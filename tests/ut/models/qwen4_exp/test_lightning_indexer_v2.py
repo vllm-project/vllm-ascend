@@ -68,6 +68,70 @@ def _inputs():
     )
 
 
+@pytest.mark.parametrize("heads,padded_heads", [(4, 8), (8, 8), (12, 16), (64, 64)])
+@pytest.mark.parametrize("provided_output", [False, True])
+def test_bf16_v1_uses_per_row_causal_lengths(selector, monkeypatch, heads, padded_heads, provided_output):
+    module, bindings, packing, _ = selector
+    inputs = _inputs()
+    inputs["query"] = torch.ones((6, heads, 128), dtype=torch.bfloat16)
+    inputs["attn_metadata"].logical_positions[0] = 3
+    if not provided_output:
+        inputs["out"] = None
+    op = Mock(return_value=(torch.zeros((6, 1, 512), dtype=torch.int32), torch.empty(0)))
+    monkeypatch.setattr(torch.ops.npu, "npu_lightning_indexer", SimpleNamespace(default=op), raising=False)
+
+    result = module.qsa_select_paged_tokens_lightning_v1(**inputs)
+
+    assert result.shape == (6, 2051)
+    assert result.dtype == torch.int32
+    if provided_output:
+        assert result is inputs["out"]
+    assert torch.all(result[:4, :515] == 7)
+    assert torch.all(result[:4, 515:] == -1)
+    assert torch.all(result[4:] == -1)
+    op.assert_called_once()
+    (query, keys, weights), kwargs = op.call_args
+    assert keys is inputs["compressed_key_cache"]
+    assert query.shape == (6, padded_heads, 128)
+    torch.testing.assert_close(query[:, :heads], inputs["query"])
+    assert torch.all(query[:, heads:] == 0)
+    expected_weights = torch.full((6, heads), 1 / 128**0.5, dtype=torch.bfloat16)
+    torch.testing.assert_close(weights[:, :heads], expected_weights)
+    assert torch.all(weights[:, heads:] == 0)
+    torch.testing.assert_close(kwargs["actual_seq_lengths_query"], torch.arange(1, 7, dtype=torch.int32))
+    torch.testing.assert_close(kwargs["actual_seq_lengths_key"], torch.tensor([1, 8, 8, 8, 0, 0], dtype=torch.int32))
+    metadata = inputs["attn_metadata"]
+    torch.testing.assert_close(kwargs["block_table"], metadata.block_table[metadata.token_to_req])
+    assert (kwargs["layout_query"], kwargs["layout_key"], kwargs["sparse_mode"]) == ("TND", "PA_BSND", 0)
+    assert kwargs["sparse_count"] == 512
+    assert kwargs["return_value"] is False
+    packing.pack_qsa_group_indices_npu.assert_called_once()
+    bindings.lightning_indexer_v2.assert_not_called()
+    bindings.lightning_indexer_v2_metadata.assert_not_called()
+
+
+def test_bf16_v1_empty_query_skips_operator(selector, monkeypatch):
+    module, _, packing, _ = selector
+    inputs = _inputs()
+    inputs["query"] = inputs["query"][:0]
+    inputs["out"] = None
+    op = Mock()
+    monkeypatch.setattr(torch.ops.npu, "npu_lightning_indexer", SimpleNamespace(default=op), raising=False)
+
+    assert module.qsa_select_paged_tokens_lightning_v1(**inputs).shape == (0, 2051)
+    op.assert_not_called()
+    packing.pack_qsa_group_indices_npu.assert_not_called()
+
+
+def test_bf16_v1_rejects_non_bf16_query(selector):
+    module, _, _, _ = selector
+    inputs = _inputs()
+    inputs["query"] = inputs["query"].float()
+
+    with pytest.raises(ValueError, match="BF16 LightningIndexer V1"):
+        module.qsa_select_paged_tokens_lightning_v1(**inputs)
+
+
 @pytest.mark.parametrize("prepared", [False, True])
 @pytest.mark.parametrize(
     "rows,starts,expected_starts",

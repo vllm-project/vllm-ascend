@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Synthetic QSA C8 tests; run only on a reserved Ascend 910B/A3 device."""
+"""Synthetic QSA tests; run only on a reserved Ascend 910B/A3 device."""
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
 import torch_npu  # noqa: F401
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import bootstrap_custom_op_env, enable_custom_op
 
 bootstrap_custom_op_env(include_vendor_lib=True)
@@ -15,7 +17,10 @@ import vllm_ascend.vllm_ascend_C  # noqa: E402,F401
 enable_custom_op()
 
 from vllm_ascend.models.qwen4_exp.c8_attention import qsa_c8_attention  # noqa: E402
-from vllm_ascend.models.qwen4_exp.lightning_indexer import qsa_select_paged_tokens_quantized  # noqa: E402
+from vllm_ascend.models.qwen4_exp.lightning_indexer import (  # noqa: E402
+    qsa_select_paged_tokens_lightning_v1,
+    qsa_select_paged_tokens_quantized,
+)
 from vllm_ascend.models.qwen4_exp.quantization import (  # noqa: E402
     qsa_c8_indexer_cache_views,
     quantize_qsa_rows,
@@ -33,6 +38,54 @@ from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton  #
 @pytest.fixture(scope="module", autouse=True)
 def _initialize_triton():
     init_device_properties_triton()
+
+
+@pytest.mark.skipif(
+    not get_current_hardware_profile().supports(HardwareCapability.QWEN4EXP_BF16_INDEXER_V1),
+    reason="Requires the BF16 LightningIndexer V1 compatibility path",
+)
+@torch.inference_mode()
+def test_bf16_lightning_v1_mixed_requests_graph_replay():
+    torch.manual_seed(3)
+    query = torch.randn(7, 4, 128, dtype=torch.bfloat16, device="npu")
+    key = torch.randn(12, 128, 1, 128, dtype=torch.bfloat16, device="npu")[::2]
+    positions = [3, 4, 510, 511, 876, 877, -1]
+    requests = [0, 0, 1, 1, 2, 2, 3]
+    lengths = [5, 512, 878, 0]
+    metadata = SimpleNamespace(
+        block_table=torch.tensor([[2, 1], [0, 3], [4, 1], [0, 0]], dtype=torch.int32, device="npu"),
+        token_to_req=torch.tensor(requests, dtype=torch.int32, device="npu"),
+        logical_positions=torch.tensor(positions, dtype=torch.int64, device="npu"),
+        seq_lens=torch.tensor(lengths, dtype=torch.int32, device="npu"),
+    )
+    output = torch.empty(7, 2051, dtype=torch.int32, device="npu")
+
+    def check(packed, positions, lengths):
+        for row, (position, request) in enumerate(zip(positions, requests)):
+            group_count = min((position + 1) // 4, lengths[request] // 4)
+            groups = packed[row, :512]
+            torch.testing.assert_close(groups[groups >= 0].sort().values, torch.arange(group_count, dtype=torch.int32))
+            tail_start = ((position + 1) // 4) * 4
+            tail = torch.arange(tail_start, position + 1, dtype=torch.int32)
+            torch.testing.assert_close(packed[row, 512 : 512 + len(tail)], tail)
+            assert (packed[row, 512 + len(tail) :] == -1).all()
+
+    def run(out):
+        return qsa_select_paged_tokens_lightning_v1(query, key, metadata, 2048, 4, out)
+
+    check(run(output).cpu(), positions, lengths)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        run(output)
+
+    positions = [0, 1, 510, 511, 872, 873, -1]
+    lengths = [2, 512, 874, 0]
+    metadata.logical_positions.copy_(torch.tensor(positions, device="npu"))
+    metadata.seq_lens.copy_(torch.tensor(lengths, device="npu"))
+    graph.replay()
+    torch.npu.synchronize()
+    check(output.cpu(), positions, lengths)
+    torch.testing.assert_close(output, run(None), rtol=0, atol=0)
 
 
 @torch.inference_mode()

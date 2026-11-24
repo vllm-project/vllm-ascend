@@ -3,7 +3,7 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 #
-"""BF16 and dynamic INT8 LightningIndexerV2 adapters for Qwen3.8 QSA."""
+"""BF16 and dynamic INT8 LightningIndexer adapters for Qwen3.8 QSA."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import math
 from typing import Protocol
 
 import torch
+import torch.nn.functional as F
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
@@ -23,6 +24,7 @@ from .quantization import qsa_c8_indexer_cache_views
 _HEAD_DIM = 128
 _COMPRESS_RATIO = 4
 _TOKEN_TOPK = 2048
+_LI_V1_HEAD_COUNTS = (8, 16, 24, 32, 64)
 # BF16 spacing at the old weight 1/sqrt(128) is 2**-11.
 _LI_V2_WEIGHT_FRACTION_BITS = 11
 _QLI_METADATA_CACHE_KEY = "qsa_c8_indexer_metadata"
@@ -38,6 +40,65 @@ class QSAIndexerMetadataProtocol(Protocol):
     logical_positions: torch.Tensor
     query_start_loc: torch.Tensor
     seq_lens: torch.Tensor
+
+
+def qsa_select_paged_tokens_lightning_v1(
+    query: torch.Tensor,
+    compressed_key_cache: torch.Tensor,
+    attn_metadata: QSAIndexerMetadataProtocol,
+    token_topk: int,
+    compress_ratio: int,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Select QSA groups using explicit per-query causal lengths on A2."""
+    rows, heads, head_dim = query.shape
+    if query.dtype != torch.bfloat16 or head_dim != _HEAD_DIM or not 0 < heads <= _LI_V1_HEAD_COUNTS[-1]:
+        raise ValueError("QSA BF16 LightningIndexer V1 requires 1..64 heads of width 128")
+    if out is None:
+        out = torch.empty((rows, token_topk + compress_ratio - 1), dtype=torch.int32, device=query.device)
+    out.fill_(-1)
+    if not rows:
+        return out
+
+    positions = attn_metadata.logical_positions[:rows]
+    token_to_req = attn_metadata.token_to_req[:rows]
+    lengths = attn_metadata.seq_lens
+    cu_query, visible_groups, row_table = prepare_qli_metadata_inputs(
+        attn_metadata.block_table, token_to_req, positions, lengths, compress_ratio
+    )
+    # V1 needs a supported head count. Zero-weight heads preserve the score;
+    # per-row visibility preserves causality in mixed prefill and MTP batches.
+    padded_heads = next(count for count in _LI_V1_HEAD_COUNTS if count >= heads)
+    weights = torch.full((rows, heads), 1.0 / math.sqrt(head_dim), dtype=query.dtype, device=query.device)
+    if padded_heads > heads:
+        query = F.pad(query, (0, 0, 0, padded_heads - heads))
+        weights = F.pad(weights, (0, padded_heads - heads))
+    block_topk = token_topk // compress_ratio
+    groups, _ = torch.ops.npu.npu_lightning_indexer.default(
+        query,
+        compressed_key_cache,
+        weights,
+        actual_seq_lengths_query=cu_query[1:],
+        actual_seq_lengths_key=visible_groups,
+        block_table=row_table,
+        layout_query="TND",
+        layout_key="PA_BSND",
+        sparse_count=block_topk,
+        sparse_mode=0,
+        pre_tokens=torch.iinfo(torch.int64).max,
+        next_tokens=torch.iinfo(torch.int64).max,
+        return_value=False,
+    )
+    pack_qsa_group_indices_npu(
+        groups.squeeze(1),
+        positions,
+        lengths,
+        token_to_req,
+        compress_ratio,
+        token_topk,
+        out[:rows, : block_topk + compress_ratio - 1],
+    )
+    return out
 
 
 def qsa_select_paged_tokens_lightning_v2(
