@@ -418,33 +418,35 @@ projection, Model Runner V2, and prefill context parallel size 1. Use
 `FULL_DECODE_ONLY` for decode graph replay. Keep ReplaySSM and
 `gdn_internal_prefill_checkpoints` disabled on the decode engine.
 
-Install an A5 `fla_npu` wheel that exports the projected
-`npu_mega_kda_projected` Stable ABI operator into a separate package directory.
-The [upstream MegaKDA draft](https://github.com/flashserve/flash-linear-attention-npu/pull/1375)
-provides the recurrence implementation. The projected operator is an additional
-wheel build requirement.
+Install an Ascend 950 `fla_npu` operator wheel into a separate package directory.
+Select the backend that matches its Stable ABI entry point.
 
-Include the wheel's
-`fla_npu/opp/vendors/fla_npu_transformer` directory in
-`ASCEND_CUSTOM_OPP_PATH` before launching workers. Add the following to the
-decode engine's existing additional configuration.
+| Backend | Required wheel entry point | QKV projection |
+| --- | --- | --- |
+| `mega_kda` | `npu_mega_kda_projected` | vLLM projects QKV and passes BF16 activations to the Vector kernel. |
+| `mega_recurrent_kda_mx` | `npu_mega_recurrent_kda_mx` | Cube projects MXFP8 QKV in the same launch as the Vector convolution, recurrence, and paged state updates. |
+
+The mixed backend keeps E4M3FN weights and E8M0 scales in checkpoint layout.
+Its operator wheel must synchronize the Cube with **both** Vector subcores on
+Ascend 950. The wheel used for A5 validation uses Mode 2 for the ready, QKV,
+and completion signals. The recurrence derives from the
+[upstream MegaKDA operator](https://github.com/flashserve/flash-linear-attention-npu/pull/1375).
+
+Include the wheel's `fla_npu/opp/vendors/fla_npu_transformer` directory in
+`ASCEND_CUSTOM_OPP_PATH` before launching workers. For mixed MXFP8 decode,
+add the following to the engine's existing additional configuration.
 
 ```json
 {
   "kda_backend_config": {
-    "backend": "mega_kda",
+    "backend": "mega_recurrent_kda_mx",
     "operator_package_dir": "/opt/mega-kda-runtime"
   }
 }
 ```
 
-
-For the experimental Cube/Vector variant, use
-`"backend": "mega_recurrent_kda_mx"` and a wheel exporting
-`npu_mega_recurrent_kda_mx`. This variant retains E4M3FN QKV weight bytes and
-E8M0 scales in the checkpoint layout. It moves the QKV GEMM into the same A5
-launch as the convolution and recurrence. The backend receives dynamically
-quantized activations from the existing vLLM path. Beta and gate projection,
-gated norm, and output projection run through the existing vLLM layers.
+vLLM handles activation quantization, beta and gate projections, gated norm,
+and the output projection. A device profile of the mixed path records one
+`MegaRecurrentKdaMx` task with core type `MIX_AIC` per executed KDA layer.
 
 The default `native` backend continues to use the existing KDA kernels.

@@ -82,6 +82,47 @@ def test_mega_kda_reads_device_metadata_and_merges_token_order(monkeypatch, mixe
     assert norm.call_args.kwargs["out"] is result
 
 
+def test_mixed_decode_uses_existing_state_and_single_token_scale(monkeypatch):
+    dim = mega_kda.MEGA_KDA_HEAD_DIM
+    qkv = torch.zeros(2, dim, dtype=torch.uint8)
+    scales = torch.arange(8, dtype=torch.uint8).reshape(2, 2, 2)
+    weights = torch.empty(3 * dim, dim, dtype=torch.uint8)
+    mx = mega_kda.MxQkvProjection(scales, weights, torch.empty(3 * dim, dim // 32, dtype=torch.uint8))
+    gate = torch.zeros(1, 2, 1, dim, dtype=torch.bfloat16)
+    beta = torch.zeros(1, 2, 1, dtype=torch.bfloat16)
+    slots = torch.tensor([7], dtype=torch.int32)
+    conv_slots = torch.tensor([3], dtype=torch.int32)
+    prefix = torch.tensor([0, 1], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        num_actual_tokens=1,
+        num_spec_decodes=0,
+        num_prefills=0,
+        num_decodes=1,
+        non_spec_state_indices_tensor=slots,
+        non_spec_decode_metadata=SimpleNamespace(
+            causal_conv1d=SimpleNamespace(query_start_loc=prefix, cache_indices=conv_slots)
+        ),
+    )
+    layer = SimpleNamespace(local_num_heads=1, o_norm=MagicMock())
+    launch = MagicMock(return_value=torch.ones(1, dim, dtype=torch.bfloat16))
+    monkeypatch.setattr(mega_kda, "_run_projected", launch)
+    result = torch.empty_like(gate[:, :1])
+    conv_weight = torch.empty(4, 3 * dim, dtype=torch.bfloat16)
+
+    mega_kda.run_mega_kda(layer, MagicMock(), metadata, qkv, gate, gate[0], beta, result, conv_weight, mx)
+
+    launch.assert_called_once()
+    args, kwargs = launch.call_args
+    torch.testing.assert_close(args[2], qkv[:1])
+    torch.testing.assert_close(kwargs["mx_input_scale"], scales[:1])
+    assert args[6] is prefix
+    assert args[7] is slots
+    assert args[8] is conv_slots
+    torch.testing.assert_close(args[9], torch.ones_like(slots))
+    torch.testing.assert_close(args[10], torch.ones_like(slots))
+    assert layer.o_norm.forward_oot.call_args.kwargs["out"] is result
+
+
 def test_mega_kda_clears_idle_graph_output(monkeypatch):
     launch = MagicMock()
     monkeypatch.setattr(mega_kda, "_run_projected", launch)
