@@ -6,7 +6,7 @@ import pytest
 import torch
 from vllm.config import KVTransferConfig
 from vllm.model_executor.models import ModelRegistry
-from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
+from vllm.v1.core import kv_cache_planning as planning
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
     HIDDEN,
@@ -30,9 +31,6 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_kv_cache_groups,
     get_qwen4_exp_pool_bytes_per_block,
     make_slab_view,
-)
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _ascend_max_memory_usage_bytes_from_groups,
 )
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import vllm_version_is
@@ -156,8 +154,9 @@ def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
         specs[f"{source}.indexer.compressed_key_cache"] = compressed
         specs[f"{source}.indexer.raw_key_cache"] = raw
         specs[f"{source}.attn"] = main
-    for index in range(36):
-        specs[f"model.layers.{index}.linear_attn"] = gdn
+    for index in range(48):
+        if index % 4 != 3:
+            specs[f"model.layers.{index}.linear_attn"] = gdn
     specs["model.ple"] = ple
     assert len(specs) == 76
     return specs
@@ -336,7 +335,11 @@ def _allocate_mrv2_kv_cache(
     )
     monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
-    backend = SimpleNamespace(full_cls_name=lambda: "qwen-cache-test")
+    block_sizes = kernel_block_sizes or [128] * len(config.kv_cache_groups)
+    backend = SimpleNamespace(
+        full_cls_name=lambda: "qwen-cache-test",
+        get_supported_kernel_block_sizes=lambda _spec: block_sizes,
+    )
     layers = {
         name: SimpleNamespace(get_attn_backend=lambda: backend, num_heads=1)
         for group in config.kv_cache_groups
@@ -348,7 +351,6 @@ def _allocate_mrv2_kv_cache(
         lambda *_: layers,
     )
     raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
-    block_sizes = kernel_block_sizes or [128] * len(config.kv_cache_groups)
     if use_main:
         monkeypatch.setattr(attn_utils_v2, "_allocate_kv_cache", lambda *_, **__: raw)
         caches = attn_utils_v2.allocate_kv_cache_main(
@@ -360,6 +362,7 @@ def _allocate_mrv2_kv_cache(
     else:
         groups = [
             SimpleNamespace(
+                kernel_block_size=None,
                 kv_cache_group_id=i,
                 kv_cache_spec=group.kv_cache_spec,
                 layer_names=group.layer_names,
@@ -542,9 +545,10 @@ def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
             prefix_cache_retention_interval=None,
         ),
         max_in_flight_tokens=4096,
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
-    required_bytes = _ascend_max_memory_usage_bytes_from_groups(
-        DefaultKVCacheConfigBuilder(),
+    required_bytes = planning._max_memory_usage_bytes_from_groups(
+        AscendKVCacheConfigBuilder(),
         vllm_config,
         groups,
     )
@@ -591,6 +595,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
             prefix_cache_retention_interval=None,
         ),
         max_in_flight_tokens=4096,
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
 
     def is_gdn_group(group) -> bool:
@@ -611,12 +616,14 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
     gdn_blocks_each = required_blocks(gdn_groups[:1])
 
     blocks_before = required_blocks(groups)
-    bytes_before = _ascend_max_memory_usage_bytes_from_groups(DefaultKVCacheConfigBuilder(), vllm_config, groups)
+    bytes_before = planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), vllm_config, groups)
 
     merged = _merge_mamba_state_groups(groups, 13)
 
     gdn_merged = [g for g in merged if is_gdn_group(g)]
-    assert [len(group.layer_names) for group in gdn_merged] == [13, 13, 10]
+    assert [group.layer_names for group in gdn_merged] == [
+        [f"model.layers.{index}.linear_attn" for index in range(offset, 48, 4)] for offset in range(3)
+    ]
     # PLE (single-shape MambaSpec) keeps its own group.
     ple_groups = [g for g in merged if isinstance(g.kv_cache_spec, MambaSpec) and len(g.kv_cache_spec.shapes) == 1]
     assert len(ple_groups) == 1
@@ -632,7 +639,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
         owner.spec.real_page_size_bytes for owner in probe.owners if owner.role == PLE
     )
 
-    bytes_after = _ascend_max_memory_usage_bytes_from_groups(DefaultKVCacheConfigBuilder(), vllm_config, merged)
+    bytes_after = planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), vllm_config, merged)
     assert bytes_after == blocks_after * pool_block_bytes
     assert bytes_before - bytes_after == 33 * gdn_blocks_each * pool_block_bytes
 
@@ -671,7 +678,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
     assert config is not None
     gdn_names = {name for group in gdn_merged for name in group.layer_names}
     descriptors = [tensor for tensor in config.kv_cache_tensors if set(tensor.layers) & gdn_names]
-    assert [len(tensor.layers) for tensor in descriptors] == [13, 13, 10]
+    assert [tensor.layers for tensor in descriptors] == [group.layer_names for group in gdn_merged]
     for tensor in descriptors:
         assert tensor.offset + (len(tensor.layers) - 1) * tensor.layer_stride + region.size <= tensor.size
 

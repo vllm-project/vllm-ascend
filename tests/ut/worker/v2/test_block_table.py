@@ -43,7 +43,6 @@ def test_encoder_only_zero_cache_groups_initialize_and_compute(monkeypatch) -> N
         max_num_batched_tokens=8,
         max_num_blocks_per_group=[],
         device=torch.device("cpu"),
-        kernel_block_sizes=[],
     )
 
     slot_mappings = block_tables.compute_slot_mappings(

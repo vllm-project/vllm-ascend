@@ -1,4 +1,5 @@
 import importlib
+import logging
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -12,22 +13,23 @@ from vllm.platforms import PlatformEnum
 from vllm.platforms.interface import Platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
-from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
 from tests.ut.base import TestBase
+from tests.ut.graph_dispatch_fixture import CudagraphDispatcher
 from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import (
     NPUPlatform,
+    _normalize_sleep_backend,
     _setup_compile_backend,
     _validate_deepseek_v4_tp_config,
+    _validate_deepseek_v41_adaptive_config,
     _validate_draft_decode_context_parallel_config,
     _validate_eplb_config,
-    _validate_glm5next_dflash2_pp_config,
     _validate_parallel_config,
-    _validate_pcp_dcp_config,
     _validate_sfa_dcp_kv_sp,
+    _validate_target_dcp_config,
 )
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
@@ -70,36 +72,6 @@ def test_kimi_hybrid_pd_rejects_sub_kernel_interleave(connector, interleave):
         pytest.raises(ValueError, match="interleave.*kernel block size"),
     ):
         _validate_sfa_dcp_kv_sp(config)
-
-
-@pytest.mark.parametrize(
-    ("pp_size", "method", "architecture", "model_type", "should_raise"),
-    [
-        (2, "dflash", "DFlash2DraftModel", "glm5_next_text", True),
-        (2, "dflash", "DFlash2DraftModel", "glm5_next", True),
-        (1, "dflash", "DFlash2DraftModel", "glm5_next_text", False),
-        (2, "dflash", "DFlashDraftModel", "glm5_next_text", False),
-        (2, "dspark", "DFlash2DraftModel", "glm5_next_text", False),
-        (2, "dflash", "DFlash2DraftModel", "qwen3", False),
-    ],
-)
-def test_glm5next_dflash2_rejects_pipeline_parallel_size_above_one(
-    pp_size, method, architecture, model_type, should_raise
-):
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=model_type)),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
-        speculative_config=SimpleNamespace(
-            method=method,
-            draft_model_config=SimpleNamespace(architectures=[architecture]),
-        ),
-    )
-
-    if should_raise:
-        with pytest.raises(ValueError, match="requires pipeline_parallel_size=1"):
-            _validate_glm5next_dflash2_pp_config(config)
-    else:
-        _validate_glm5next_dflash2_pp_config(config)
 
 
 @pytest.mark.parametrize(
@@ -195,20 +167,45 @@ def test_ascend_sequence_parallel_moe_supports_dp1(dp_size, tp_size, enable_ep, 
     assert config.use_sequence_parallel_moe is expected
 
 
+@pytest.mark.parametrize("method", ["dspark", "mtp"])
+@pytest.mark.parametrize("pcp_size,dcp_size", [(2, 1), (1, 2), (2, 2)])
+def test_validate_v41_adaptive_rejects_cp(method, pcp_size, dcp_size):
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(method=method, enable_adaptive_verification=True),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v41")),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size, decode_context_parallel_size=dcp_size),
+    )
+    with pytest.raises(ValueError, match=rf"V4.1 adaptive verification.*PCP={pcp_size}, DCP={dcp_size}") as exc:
+        _validate_deepseek_v41_adaptive_config(config)
+    assert "enable_adaptive_verification=false" in str(exc.value)
+    assert "--prefill-context-parallel-size 1" in str(exc.value)
+    assert "--decode-context-parallel-size 1" in str(exc.value)
+
+
+@pytest.mark.parametrize("mode", ["plain", "fixed", "other_model", "cp_disabled"])
+def test_validate_v41_adaptive_preserves_other_configs(mode):
+    config = SimpleNamespace(
+        speculative_config=None if mode == "plain" else SimpleNamespace(enable_adaptive_verification=mode != "fixed"),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="qwen3" if mode == "other_model" else "deepseek_v41")
+        ),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1 if mode == "cp_disabled" else 2,
+            decode_context_parallel_size=1 if mode == "cp_disabled" else 2,
+        ),
+    )
+    _validate_deepseek_v41_adaptive_config(config)
+
+
 @pytest.mark.parametrize(
     "use_mla,pcp_size,dcp_size",
     [
         pytest.param(True, 2, 2, id="mla-equal"),
-        pytest.param(True, 2, 16, id="mla-full-tp-pcp"),
-        pytest.param(False, 2, 2, id="gqa-equal-2"),
-        pytest.param(False, 4, 4, id="gqa-equal-4"),
-        pytest.param(False, 1, 2, id="dcp-only"),
         pytest.param(False, 2, 1, id="pcp-only"),
         pytest.param(False, 1, 1, id="tp-only"),
     ],
 )
-def test_validate_pcp_dcp_config_accepts_supported_sizes(use_mla, pcp_size, dcp_size):
-    # This guard owns PCP/DCP equality; Q/KV head geometry is validated elsewhere.
+def test_validate_target_dcp_config_accepts_supported_configs(use_mla, pcp_size, dcp_size):
     config = SimpleNamespace(
         model_config=SimpleNamespace(use_mla=use_mla),
         parallel_config=SimpleNamespace(
@@ -216,27 +213,20 @@ def test_validate_pcp_dcp_config_accepts_supported_sizes(use_mla, pcp_size, dcp_
             decode_context_parallel_size=dcp_size,
         ),
     )
-    _validate_pcp_dcp_config(config)
+    _validate_target_dcp_config(config)
 
 
-@pytest.mark.parametrize(
-    "pcp_size,dcp_size",
-    [
-        pytest.param(2, 4, id="dcp-larger"),
-        pytest.param(4, 2, id="pcp-larger"),
-        pytest.param(2, 16, id="full-tp-pcp-rejected-for-gqa"),
-    ],
-)
-def test_validate_pcp_dcp_config_rejects_unsupported_sizes(pcp_size, dcp_size):
+@pytest.mark.parametrize("pcp_size", [1, 2])
+def test_validate_target_dcp_config_rejects_gqa_dcp(pcp_size):
     config = SimpleNamespace(
         model_config=SimpleNamespace(use_mla=False),
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=pcp_size,
-            decode_context_parallel_size=dcp_size,
+            decode_context_parallel_size=2,
         ),
     )
-    with pytest.raises(ValueError, match=rf"PCP\+DCP.*PCP={pcp_size}, DCP={dcp_size}"):
-        _validate_pcp_dcp_config(config)
+    with pytest.raises(ValueError, match="DCP.*not supported for GQA/MQA"):
+        _validate_target_dcp_config(config)
 
 
 @pytest.mark.parametrize("dcp_size", [2, 16])
@@ -263,61 +253,6 @@ def test_parallel_config_rejects_partial_tp_pcp_groups(dcp_size):
             prefill_context_parallel_size=2,
             decode_context_parallel_size=dcp_size,
         )
-
-
-def test_pcp_dcp_rejects_unequal_sizes_for_gqa_draft():
-    config = SimpleNamespace(
-        use_v2_model_runner=False,
-        parallel_config=SimpleNamespace(
-            tensor_parallel_size=8,
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=16,
-        ),
-        model_config=SimpleNamespace(
-            use_mla=True,
-            model_arch_config=SimpleNamespace(total_num_attention_heads=32),
-            get_total_num_kv_heads=lambda: 4,
-        ),
-        speculative_config=SimpleNamespace(
-            num_speculative_tokens_per_batch_size=None,
-            draft_model_config=SimpleNamespace(
-                use_mla=False,
-                model_arch_config=SimpleNamespace(total_num_attention_heads=32),
-                get_total_num_kv_heads=lambda: 8,
-            ),
-            draft_parallel_config=None,
-            draft_tensor_parallel_size=None,
-        ),
-    )
-    # MLA target validation is unchanged; its GQA draft must obey equal sizes.
-    _validate_pcp_dcp_config(config)
-    with pytest.raises(ValueError, match="to equal decode_context_parallel_size"):
-        _validate_draft_decode_context_parallel_config(config)
-
-
-def test_eagle3_gqa_pcp_dcp_skips_tp_only_head_limit():
-    draft_model_config = SimpleNamespace(
-        use_mla=False,
-        model_arch_config=SimpleNamespace(total_num_attention_heads=32),
-        get_total_num_kv_heads=lambda: 4,
-    )
-    speculative_config = SimpleNamespace(
-        num_speculative_tokens_per_batch_size=None,
-        draft_model_config=draft_model_config,
-        draft_parallel_config=None,
-        draft_tensor_parallel_size=None,
-    )
-    vllm_config = SimpleNamespace(
-        use_v2_model_runner=False,
-        speculative_config=speculative_config,
-        parallel_config=SimpleNamespace(
-            tensor_parallel_size=4,
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=2,
-        ),
-    )
-
-    _validate_draft_decode_context_parallel_config(vllm_config)
 
 
 @pytest.mark.parametrize("model_role", ["target", "draft", "alias", "non_speculative"])
@@ -422,6 +357,114 @@ def test_setup_compile_backend_scopes_kda_splitting_to_piecewise(mode):
         assert compilation_config.splitting_ops == []
 
 
+@pytest.mark.parametrize(
+    "mode",
+    [
+        CUDAGraphMode.PIECEWISE,
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+    ],
+)
+def test_setup_compile_backend_keeps_static_kernel_flags_under_piecewise(mode):
+    """Under PIECEWISE, npugraph_ex compiles each piece (force_eager) and can
+    carry the static/super kernel passes, so the user's flags must survive."""
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=mode,
+        splitting_ops=["vllm::mla_forward"],
+        cudagraph_capture_sizes=[8, 16],
+    )
+    config = SimpleNamespace(
+        compilation_config=compilation_config,
+        additional_config={
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": True,
+                "enable_static_kernel": True,
+                "enable_super_kernel": True,
+            }
+        },
+        model_config=SimpleNamespace(enforce_eager=False),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+            all2all_backend="allgather_reducescatter",
+            use_sequence_parallel_moe=False,
+        ),
+        _set_cudagraph_sizes=lambda: None,
+    )
+
+    _setup_compile_backend(config, compile_backend="test_backend")
+
+    ascend_cfg = config.additional_config["ascend_compilation_config"]
+    assert ascend_cfg["enable_npugraph_ex"] is True
+    assert ascend_cfg["enable_static_kernel"] is True
+    assert ascend_cfg["enable_super_kernel"] is True
+
+
+def test_setup_compile_backend_disables_static_kernel_flags_without_cudagraph():
+    """Without cudagraphs there is no capture context, so the static/super
+    kernel flags must be force-disabled."""
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=CUDAGraphMode.NONE,
+        splitting_ops=["vllm::mla_forward"],
+        cudagraph_capture_sizes=[8, 16],
+    )
+    config = SimpleNamespace(
+        compilation_config=compilation_config,
+        additional_config={
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": True,
+                "enable_static_kernel": True,
+                "enable_super_kernel": True,
+            }
+        },
+        model_config=SimpleNamespace(enforce_eager=False),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+            all2all_backend="allgather_reducescatter",
+            use_sequence_parallel_moe=False,
+        ),
+        _set_cudagraph_sizes=lambda: None,
+    )
+
+    _setup_compile_backend(config, compile_backend="test_backend")
+
+    ascend_cfg = config.additional_config["ascend_compilation_config"]
+    assert ascend_cfg["enable_npugraph_ex"] is False
+    assert ascend_cfg["enable_static_kernel"] is False
+    assert ascend_cfg["enable_super_kernel"] is False
+
+
+@pytest.mark.parametrize("use_custom_path", [True, False])
+def test_platform_startup_log_directory(tmp_path, monkeypatch, use_custom_path):
+    import vllm_ascend.ascend_config as ascend_config
+    import vllm_ascend.logger as ascend_logger
+
+    default_dir = tmp_path / "default"
+    custom_dir = tmp_path / "custom"
+    config = TestNPUPlatform.mock_vllm_config()
+    config.additional_config = {"ascend_log_path": str(custom_dir)} if use_custom_path else {}
+    config.model_config = None  # The platform logs a startup warning before full config initialization.
+
+    monkeypatch.setattr(ascend_config, "_ASCEND_CONFIG", None)
+    monkeypatch.setattr(ascend_logger, "_LOG_DIR", str(default_dir))
+    monkeypatch.setattr(ascend_logger, "_file_logging_configured", False)
+    monkeypatch.setattr(ascend_logger, "_file_handler", None)
+    for name in ("vllm", "vllm_ascend"):
+        monkeypatch.setattr(logging.getLogger(name), "handlers", [])
+    try:
+        NPUPlatform.check_and_update_config(config)
+        expected_dir = custom_dir if use_custom_path else default_dir
+        (log_file,) = expected_dir.glob("vllm_ascend_*.log")
+        assert "Model config is missing" in log_file.read_text(encoding="utf-8")
+        if use_custom_path:
+            assert not default_dir.exists()
+    finally:
+        if ascend_logger._file_handler is not None:
+            ascend_logger._file_handler.close()
+
+
 class TestNPUPlatform(TestBase):
     @staticmethod
     def mock_vllm_config():
@@ -436,6 +479,8 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.model_config = MagicMock()
         mock_vllm_config.model_config.is_hybrid = False
         mock_vllm_config.model_config.is_encoder_decoder = False
+        mock_vllm_config.model_config.enable_sleep_mode = False
+        mock_vllm_config.model_config.sleep_mode_backend = "cumem"
         mock_vllm_config.device_config = MagicMock()
         mock_vllm_config.device_config.device_type = "npu"
         mock_vllm_config.parallel_config = MagicMock()
@@ -2848,3 +2893,33 @@ class TestNPUPlatform(TestBase):
             self.platform.get_static_graph_wrapper_cls(),
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
+
+
+@pytest.mark.parametrize(
+    "enable_sleep_mode, backend, expected",
+    [
+        (True, "cumem", "camem"),
+        (True, "camem", "camem"),
+        (False, "cumem", "cumem"),
+        (False, "third_party", "third_party"),
+    ],
+)
+def test_normalize_sleep_backend(enable_sleep_mode, backend, expected):
+    model_config = SimpleNamespace(
+        enable_sleep_mode=enable_sleep_mode,
+        sleep_mode_backend=backend,
+    )
+
+    _normalize_sleep_backend(model_config)
+
+    assert model_config.sleep_mode_backend == expected
+
+
+def test_normalize_sleep_backend_rejects_third_party():
+    model_config = SimpleNamespace(
+        enable_sleep_mode=True,
+        sleep_mode_backend="third_party",
+    )
+
+    with pytest.raises(ValueError, match="Only the in-tree camem backend"):
+        _normalize_sleep_backend(model_config)

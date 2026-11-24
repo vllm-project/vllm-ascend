@@ -155,7 +155,6 @@ def test_memory_budget_sources_preserve_physical_capacity(
     monkeypatch.setattr(worker_module.envs, "VLLM_RANDOMIZE_DP_DUMMY_INPUTS", False)
     monkeypatch.setattr(worker_module.torch.npu, "memory_stats", lambda _: {"allocated_bytes.all.peak": 1})
     monkeypatch.setattr(worker_module, "get_kv_cache_groups", lambda *_: cache.kv_cache_groups)
-    monkeypatch.setattr(worker_module, "get_layerwise_reuse_config", lambda _, *, vllm_config: None)
 
     result = worker.determine_available_memory()
 
@@ -178,6 +177,7 @@ def test_v2_shares_storage_and_keeps_distinct_blocks_isolated(monkeypatch, dtype
     )
     groups = [
         SimpleNamespace(
+            kernel_block_size=None,
             kv_cache_group_id=index,
             kv_cache_spec=group.kv_cache_spec,
             layer_names=group.layer_names,

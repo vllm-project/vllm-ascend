@@ -1,5 +1,4 @@
 import math
-from copy import copy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal, get_args
@@ -10,7 +9,7 @@ from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 
-from vllm_ascend.utils import is_deepseek_v41, is_gqa_pcp_dcp_config
+from vllm_ascend.utils import is_deepseek_v41
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
@@ -124,6 +123,18 @@ def _normalize_legacy_qwen3_dspark_config(
     legacy_qwen3_dspark = hf_config.model_type == "qwen3" and "DSparkDraftModel" in (hf_config.architectures or ())
     hf_config = _orig_hf_config_override(hf_config)
     _normalize_kimi_dflash_rope(hf_config)
+    # Plain glm5_next MTP remapping is handled natively by upstream
+    # SpeculativeConfig.hf_config_override since v0.32.0; the VL
+    # glm5_next_text wrapper is not.
+    if hf_config.model_type == "glm5_next_text":
+        n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+        hf_config.model_type = "glm5_next_mtp"
+        hf_config.update(
+            {
+                "n_predict": n_predict,
+                "architectures": ["Glm5NextMTPModel"],
+            }
+        )
     if legacy_qwen3_dspark:
         dflash_config = hf_config.dflash_config
         hf_config.update(
@@ -131,15 +142,6 @@ def _normalize_legacy_qwen3_dspark_config(
                 "architectures": ["Qwen3DSparkModel"],
                 "mask_token_id": dflash_config["mask_token_id"],
                 "target_layer_ids": dflash_config["target_layer_ids"],
-            }
-        )
-    if hf_config.model_type in ("glm5_next", "glm5_next_text"):
-        n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
-        hf_config.model_type = "glm5_next_mtp"
-        hf_config.update(
-            {
-                "n_predict": n_predict,
-                "architectures": ["Glm5NextMTPModel"],
             }
         )
     return hf_config
@@ -333,12 +335,6 @@ _orig_verify_with_parallel_config = ModelConfig.verify_with_parallel_config
 def _ascend_verify_with_parallel_config(self, parallel_config):
     if parallel_config.enable_expert_parallel and not self.is_moe and getattr(self, "runner_type", None) == "draft":
         return
-    # TODO: Remove this guard once upstream GQA/MQA DCP validation supports
-    # PCP-based KV-head replica groups.
-    if is_gqa_pcp_dcp_config(self, parallel_config):
-        guard_parallel_config = copy(parallel_config)
-        guard_parallel_config.decode_context_parallel_size = 1
-        return _orig_verify_with_parallel_config(self, guard_parallel_config)
     return _orig_verify_with_parallel_config(self, parallel_config)
 
 

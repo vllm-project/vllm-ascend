@@ -67,8 +67,8 @@ ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
     OMP_NUM_THREADS=1
 COPY . /vllm-workspace/vllm-ascend/
-ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi \
-    https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly"
+ARG ASCEND_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi \
+    https://repo.huaweicloud.com/ascend/repos/pypi/nightly"
 ARG COMPILE_CUSTOM_KERNELS=1
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
@@ -80,7 +80,7 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
 # ===== Install FLA and flash_attn_npu =====
 ARG FLA_VERSION="26.10.0+feature"
 ARG FLASH_ATTN_NPU_VERSION="0.5.0"
-ARG MOONCAKE_VERSION="0.3.14rc3"
+ARG MOONCAKE_VERSION="0.3.14"
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     source /usr/local/Ascend/cann/set_env.sh && \

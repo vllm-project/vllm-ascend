@@ -426,6 +426,7 @@ def test_model_construction_rolls_back_first_layer_when_second_attach_fails(pool
         engram_weight_root="unused",
         engram_dp_shared_memory=False,
         layers=[layer, layer],
+        local_engram_layer_ids=(0, 1),
     )
     config = types.SimpleNamespace(engram_layer_ids=[0, 1], engram_num_embeddings=[32, 32], engram_head_dim=256)
     vc = types.SimpleNamespace(load_config=types.SimpleNamespace(load_format="real"), quant_config=object())
@@ -444,6 +445,7 @@ def test_model_construction_rolls_back_first_layer_when_second_attach_fails(pool
         get_current_hardware_profile=lambda: types.SimpleNamespace(supports=lambda _: False),
         HardwareCapability=types.SimpleNamespace(ENGRAM_MXFP8=object()),
         remote_reader=None,
+        EngramSharedInitError=type("EngramSharedInitError", (RuntimeError,), {}),
         rollback_shared_engram=pool_module.rollback_shared_engram,
     )
     with pytest.raises(RuntimeError, match="second attach failed"):
@@ -477,6 +479,7 @@ def test_merged_model_initializes_rotation_and_registers_replay():
         engram_root="unused",
         engram_dp_shared_memory=False,
         layers=[layer],
+        local_engram_layer_ids=(0,),
         has_engram=True,
         device="cpu",
         end_layer=1,
@@ -518,6 +521,7 @@ def test_merged_model_initializes_rotation_and_registers_replay():
         HardwareCapability=types.SimpleNamespace(ENGRAM_MXFP8=object()),
         remote_reader=None,
         get_ascend_config=lambda: types.SimpleNamespace(multistream_engram_overlap=False),
+        EngramSharedInitError=type("EngramSharedInitError", (RuntimeError,), {}),
         get_rotation_path=lambda _: "rotation",
         load_engram_rotation_block=lambda *args: rotation,
         create_engram_hash_state=lambda *args: "hash",

@@ -14,6 +14,8 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
+from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -32,6 +34,7 @@ def make_attention(impl):
     inner.kv_b_proj.quant_method = UnquantizedLinearMethod()
     inner.is_amx_bmm_enabled = False
     inner.dcp_q_replicate = False
+    inner.dcp_manager = None
     inner.is_aiter_triton_fp4_bmm_enabled = False
     inner.is_aiter_triton_fp8_bmm_enabled = False
     inner.quant_config = None
@@ -97,8 +100,11 @@ def test_mlapo_post_load_does_not_reprocess_released_weights(is_kv_consumer):
     impl.use_dcp = False
     impl._mlapo_uses_native_weights = False
     impl.q_lora_rank = 4
-    impl.fused_qkv_a_proj = SimpleNamespace(weight=torch.ones(8, 10), weight_scale=torch.ones(10))
-    impl.q_proj = SimpleNamespace(weight=torch.ones(4, 8), weight_scale=torch.ones(8))
+    quant_method = AscendLinearMethod(object.__new__(AscendW8A8LinearMethod))
+    impl.fused_qkv_a_proj = SimpleNamespace(
+        weight=torch.ones(8, 10), weight_scale=torch.ones(10), quant_method=quant_method
+    )
+    impl.q_proj = SimpleNamespace(weight=torch.ones(4, 8), weight_scale=torch.ones(8), quant_method=quant_method)
     impl.vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(is_kv_consumer=is_kv_consumer),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=256),

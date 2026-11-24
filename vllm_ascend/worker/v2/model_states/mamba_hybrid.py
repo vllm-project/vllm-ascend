@@ -225,14 +225,15 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             # vLLM #55688 counts state tensors from each layer's bindings.
             # v0.33 still uses the constructor without forward_context.
             context_kwargs: dict[str, Any] = {}
-            if not vllm_version_is("0.33.0"):
+            if vllm_version_is("0.33.0"):
+                context_kwargs["make_buffer"] = lambda n, dtype: CpuGpuBuffer(n, dtype=dtype, device=self.device)
+            else:
                 context_kwargs["forward_context"] = self.vllm_config.compilation_config.static_forward_context
             self._mamba_ctx = MambaSpecDecodeGPUContext.create(
                 max_num_reqs=self.max_num_reqs,
                 kv_cache_config=kv_cache_config,
                 copy_funcs=self._mamba_state_copy_funcs,
                 device=self.device,
-                make_buffer=lambda n, dtype: CpuGpuBuffer(n, dtype=dtype, device=self.device),
                 **context_kwargs,
             )
         ctx = self._mamba_ctx
@@ -266,10 +267,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         if not self._align_mode:
             return
         pcp_manager = getattr(self, "pcp_manager", None)
-        if pcp_manager is not None and (
-            model_uses_kpool_indexer(self.vllm_config.model_config)
-            or model_uses_kimi_kda(self.vllm_config.model_config)
-        ):
+        if pcp_manager is not None and self._uses_global_mamba_pcp():
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables)
             input_batch = pcp_context.global_batch
             block_tables = pcp_context.global_block_tables
@@ -336,6 +334,10 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             self._pending_bulk_copy = None
         super().finish_execution(failed=failed)
 
+    def _uses_global_mamba_pcp(self) -> bool:
+        model_config = self.vllm_config.model_config
+        return model_uses_kpool_indexer(model_config) or model_uses_kimi_kda(model_config)
+
     def prepare_attn(
         self,
         input_batch: AscendInputBatch,
@@ -352,19 +354,23 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
         pcp_manager = getattr(self, "pcp_manager", None)
         pcp_context = None
-        if (
-            pcp_manager is not None
-            and (
-                model_uses_kpool_indexer(self.vllm_config.model_config)
-                or model_uses_kimi_kda(self.vllm_config.model_config)
-            )
-            and pcp_manager.is_target_attn_groups(attn_groups)
-        ):
+        if pcp_manager is not None and self._uses_global_mamba_pcp() and pcp_manager.is_target_attn_groups(attn_groups):
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
 
         def build_metadata(**kwargs):
-            if pcp_context is not None and not getattr(input_batch, "is_dummy", False):
+            if pcp_context is not None and (
+                not getattr(input_batch, "is_dummy", False)
+                or getattr(input_batch, "is_cpp_profile", False)
+                or pcp_context.global_batch is not input_batch
+                or (
+                    pcp_manager is not None
+                    and model_uses_kpool_indexer(self.vllm_config.model_config)
+                    and pcp_manager.is_decode_sharded
+                )
+            ):
                 # Recurrent state uses global request order; SFA keeps local queries.
+                # Sharded GLM decode capture must use the same global KDA
+                # extent as replay, even on a rank with no live requests.
                 local_groups = [
                     [group for group in groups if not isinstance(group.kv_cache_spec, MambaSpec)]
                     for groups in attn_groups

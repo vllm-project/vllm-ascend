@@ -3,10 +3,11 @@
 """Bind Kimi's request-indexed RecoverSSM records to Ascend commit kernels."""
 
 from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
+from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin
 from vllm_ascend.ops.triton.kda.recoverssm import KDARecoverSSMCommitContext
 
 
-class AscendKimiKDARecoverSSMMetadataBuilder(AscendKDARecoverSSMMetadataBuilder):
+class AscendKimiKDARecoverSSMMetadataBuilder(PCPRecurrentMetadataBuilderMixin, AscendKDARecoverSSMMetadataBuilder):
     recoverssm_context: KDARecoverSSMCommitContext | None
 
     def _get_recoverssm_context(self) -> KDARecoverSSMCommitContext:

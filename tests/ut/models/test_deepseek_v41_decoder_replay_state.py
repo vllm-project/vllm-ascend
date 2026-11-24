@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -123,6 +124,79 @@ def test_sp_replay_plan_aligns_execution_and_preserves_row_ownership(state, monk
     assert state.original_padding is None
 
 
+@pytest.mark.parametrize("uses_pcp_replay", [False, True])
+def test_only_pcp_compaction_waits_for_batch_producer(state, monkeypatch, uses_pcp_replay):
+    producer = object()
+    calls = Mock()
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: calls.stream)
+    monkeypatch.setattr(state, "_prepare_compact_replay", calls.prepare_compact_replay)
+    replay_inputs = replace(inputs(), metadata_producer_stream=producer)
+    plan = replace(state._build_replay_plan(replay_inputs), uses_pcp_replay=uses_pcp_replay)
+    monkeypatch.setattr(state, "_build_replay_plan", lambda _: plan)
+
+    state.prepare(replay_inputs, CUDAGraphMode.NONE)
+
+    calls.prepare_compact_replay.assert_called_once()
+    if uses_pcp_replay:
+        calls.stream.wait_stream.assert_called_once_with(producer)
+        assert calls.mock_calls[0][0] == "stream.wait_stream"
+    else:
+        calls.stream.wait_stream.assert_not_called()
+
+
+@pytest.mark.parametrize("has_tasks", [False, True])
+@pytest.mark.parametrize("task_fails", [False, True])
+def test_compact_metadata_orders_production_and_first_consumption(state, monkeypatch, has_tasks, task_fails):
+    calls = Mock()
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: calls.main)
+
+    @contextmanager
+    def producer_scope(stream):
+        assert stream is calls.producer
+        calls.enter_producer()
+        yield
+
+    monkeypatch.setattr(torch.npu, "stream", producer_scope)
+    metadata = {"swa": object()}
+
+    def run():
+        calls.run()
+        if task_fails:
+            raise RuntimeError("planner failed")
+
+    def build(*args, tasks):
+        if has_tasks:
+            tasks.append(SimpleNamespace(run=run))
+        return metadata
+
+    monkeypatch.setattr(state, "_build_metadata", build)
+    if has_tasks and task_fails:
+        with pytest.raises(RuntimeError, match="planner failed"):
+            state._submit_compact_metadata(inputs(), np.array([0, 1]), calls.producer)
+        calls.main.wait_stream.assert_called_once_with(calls.producer)
+        calls.producer.record_event.assert_not_called()
+        assert state.metadata_ready is None
+        return
+
+    state._submit_compact_metadata(inputs(), np.array([0, 1]), calls.producer)
+    assert state.metadata is metadata
+    if has_tasks:
+        assert [call[0] for call in calls.mock_calls] == [
+            "producer.wait_stream",
+            "enter_producer",
+            "run",
+            "producer.record_event",
+        ]
+        calls.producer.wait_stream.assert_called_once_with(calls.main)
+        calls.main.wait_event.assert_not_called()
+        state.wait_for_metadata()
+        state.wait_for_metadata()
+        calls.main.wait_event.assert_called_once_with(calls.producer.record_event.return_value)
+    else:
+        assert not calls.mock_calls
+    assert state.metadata_ready is None
+
+
 @pytest.mark.parametrize(
     ("local_end", "expected_kept"),
     [(4, 0), (8, 2)],
@@ -224,15 +298,18 @@ def test_decoder_replay_builder_prepares_pcp_rope(state, monkeypatch):
 
 
 @pytest.mark.parametrize("world", [1, 2, 16])
-@pytest.mark.parametrize("actual_tokens", [0, 2])
-def test_replay_metadata_preserves_pcp_layout_contract(state, monkeypatch, actual_tokens, world):
+@pytest.mark.parametrize("num_reqs,actual_tokens", [(0, 0), (1, 0), (1, 2)])
+@pytest.mark.parametrize("batch_max_query_len", [0, 4])
+def test_replay_metadata_preserves_pcp_layout_contract(
+    state, monkeypatch, actual_tokens, world, num_reqs, batch_max_query_len
+):
     state.num_tokens = 2
     state.num_actual_tokens = actual_tokens
     state.config.model_config = SimpleNamespace(max_model_len=16)
     state.slots = torch.arange(64).reshape(2, 32)
     state.replay_pcp_context = SimpleNamespace(global_batch=object()) if world > 1 else None
-    offsets = np.array([0, actual_tokens], dtype=np.int32)
-    state.offsets[:2] = torch.from_numpy(offsets)
+    offsets = np.array([0, actual_tokens][: num_reqs + 1], dtype=np.int32)
+    state.offsets[: num_reqs + 1] = torch.from_numpy(offsets)
     monkeypatch.setattr(replay_mod, "get_cos_and_sin_dsa", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         replay_mod,
@@ -253,14 +330,16 @@ def test_replay_metadata_preserves_pcp_layout_contract(state, monkeypatch, actua
             assert common.slot_mapping.data_ptr() == state.slots[1].data_ptr()
         assert common.num_actual_tokens == actual_tokens
         assert common.num_input_tokens == 2
+        assert common.num_reqs == num_reqs
+        assert common.max_query_len == max(actual_tokens, batch_max_query_len)
         return metadata
 
     state.builders = [(1, ["decoder.swa_cache"], SimpleNamespace(build=build, take_device_metadata_tasks=lambda: []))]
     batch = SimpleNamespace(
-        num_reqs=1,
+        num_reqs=num_reqs,
         seq_lens=torch.tensor([8], dtype=torch.int32),
         seq_lens_np=np.array([8], dtype=np.int32),
-        max_query_len=4,
+        max_query_len=batch_max_query_len,
         attn_state=None,
         is_prefilling_np=np.array([True]),
     )
@@ -410,7 +489,7 @@ def test_compacted_pcp_rank_uses_padded_dp_count(synchronized_dp, monkeypatch, a
 @pytest.mark.parametrize("fail", [False, True])
 @pytest.mark.parametrize("sequence_parallel", [False, True])
 @pytest.mark.parametrize("skip_padding", [False, True])
-def test_replay_context_preserves_layout_masks_and_restores_mc2(
+def test_replay_context_preserves_layout_masks_moe_cursor_and_restores_mc2(
     state, monkeypatch, compact, fail, sequence_parallel, skip_padding
 ):
     original_padding = torch.tensor([False, True, False, True])
@@ -429,6 +508,7 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(
         slot_mapping={"original": torch.arange(4)},
         is_padding=original_padding[:2] if sharded_padding else original_padding,
         additional_kwargs={"eplb_heat_collection_status": True},
+        moe_layer_index=21,
     )
     state.num_tokens = 4
     state.num_actual_tokens = 2 if compact else 3
@@ -438,7 +518,7 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(
     state.metadata = {"compacted": object()}
     mask = torch.tensor([False, True, False, True, True, False])
     saved_mask = mask.clone()
-    inner = SimpleNamespace(additional_kwargs={"mc2_mask": mask})
+    inner = SimpleNamespace(additional_kwargs={"mc2_mask": mask}, moe_layer_index=0)
     current = [outer]
     monkeypatch.setattr(replay_mod, "get_forward_context", lambda: current[0])
     monkeypatch.setattr(replay_mod, "get_mc2_mask", lambda: mask)
@@ -464,10 +544,13 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(
                 [True, True, False, False, False, False] if compact else [True, False, True, False, False, False]
             )
             assert inner.additional_kwargs["eplb_heat_collection_status"] is True
+            assert inner.moe_layer_index == 21
+            inner.moe_layer_index += 19
             if fail:
                 raise RuntimeError("decoder failure")
     except RuntimeError:
         assert fail
+    assert current[0] is outer and outer.moe_layer_index == 21
     assert torch.equal(mask, saved_mask)
     assert torch.equal(original_padding, torch.tensor([False, True, False, True]))
     gather_padding.assert_not_called()
@@ -480,7 +563,11 @@ def test_untrimmed_sp_peer_keeps_full_mask_before_tp_padding(state, monkeypatch)
     state.dp_tokens = torch.tensor([4, 3])
     # Rank 1 owns original row 2 and one synthetic SP padding row.
     outer = SimpleNamespace(
-        is_padding=torch.tensor([False, True]), attn_metadata={}, slot_mapping={}, additional_kwargs={}
+        is_padding=torch.tensor([False, True]),
+        attn_metadata={},
+        slot_mapping={},
+        additional_kwargs={},
+        moe_layer_index=0,
     )
     mask = torch.tensor([False, True, False, True])
     saved_mask = mask.clone()

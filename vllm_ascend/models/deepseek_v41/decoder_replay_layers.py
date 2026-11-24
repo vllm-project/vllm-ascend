@@ -32,6 +32,8 @@ class AscendDecoderReplayLayers:
         self.window = window
         self.run_layers = run_layers
         self.row_buffers = row_buffers
+        # PP exports these states in the original, query-local token layout.
+        self.output_row_buffers: list[torch.Tensor] = []
         self.write_batch_kv = write_batch_kv
         self.first_swa_prefix = first_swa_prefix
         self.rows: torch.Tensor | None = None
@@ -41,6 +43,8 @@ class AscendDecoderReplayLayers:
         self.sequence_parallel = False
         self.sp_plan: SPReplayPlan | None = None
         self.sp_replay_input_ids: torch.Tensor | None = None
+        self.smla_plan_ratios: tuple[int, ...] | None = None
+        self.first_swa_plan_ratios: tuple[int, ...] | None = None
 
     def __call__(self, *states: torch.Tensor | None) -> tuple[torch.Tensor, ...]:
         if self.rows is None:
@@ -81,6 +85,11 @@ class AscendDecoderReplayLayers:
                         state = torch.cat((state, state.new_zeros((padding, *state.shape[1:]))))
                     replay_states.append(state)
             row_outputs = self.run_layers(*replay_states)
+            for buffer in self.output_row_buffers:
+                # Clone before clearing: packed values may overlap their final rows.
+                values = buffer[: self.num_actual_rows].clone()
+                buffer[: positions.shape[0]].zero_()
+                buffer.index_copy_(0, rows[: self.num_actual_rows], values)
             outputs: list[torch.Tensor] = []
             if self.sequence_parallel:
                 outputs.extend(
@@ -157,10 +166,22 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
     draft_window = getattr(draft_hf_config, "sliding_window", None)
     draft_layer_types = getattr(draft_hf_config, "layer_types", None) or ()
     cut = max(model.config.kv_source_layer_ids)
-    if cut >= model.end_layer - 1:
+    start = getattr(model, "start_layer", 0)
+    # Only the stage owning the last source can run its full-batch KV writer.
+    trim_cut_layer = (
+        start <= cut < model.end_layer
+        and hasattr(model, "layers")
+        and parallel.prefill_context_parallel_size == 1
+        and not model.use_sequence_parallel
+        and cut not in getattr(model.config, "engram_layer_ids", ())
+    )
+    replay_start = max(start, cut if trim_cut_layer else cut + 1)
+    if replay_start >= model.end_layer:
         return None
-    if parallel.pipeline_parallel_size > 1 or parallel.decode_context_parallel_size > 1 or parallel.use_ubatching:
-        reason = "PP, DCP and microbatching need a separate replay layout"
+    if parallel.decode_context_parallel_size > 1 or parallel.use_ubatching:
+        reason = "DCP and microbatching need a separate replay layout"
+    elif model.use_sequence_parallel and parallel.pipeline_parallel_size > 1:
+        reason = "SP replay requires a single pipeline stage"
     elif model.use_sequence_parallel and (not config.use_v2_model_runner or parallel.prefill_context_parallel_size > 1):
         reason = "SP replay requires MRV2 without PCP"
     elif model.use_sequence_parallel and speculative is not None and speculative.enable_adaptive_verification:
@@ -185,16 +206,6 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
     elif config.lora_config is not None:
         reason = "LoRA token mappings need to follow the replay batch"
     else:
-        # Recompute the cut layer on the retained rows only after its shared KV
-        # caches have been written for the full batch. Keep the older boundary
-        # for layouts where that cache-only write has not been validated.
-        trim_cut_layer = (
-            hasattr(model, "layers")
-            and parallel.prefill_context_parallel_size == 1
-            and not model.use_sequence_parallel
-            and cut not in getattr(model.config, "engram_layer_ids", ())
-        )
-        replay_start = cut if trim_cut_layer else cut + 1
         model.decoder_replay_start = replay_start
         row_buffers = []
         cut_writes_index_outputs = trim_cut_layer and cut in getattr(model.config, "index_source_layer_ids", ())
@@ -223,6 +234,21 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
             first_swa_prefix=first_swa_prefix,
         )
         replay.sequence_parallel = model.use_sequence_parallel
+        ratios = getattr(model.config, "compress_ratios", None)
+        if ratios is not None and parallel.prefill_context_parallel_size == 1:
+            # The cut layer has its own replay floor. Its original full
+            # batch cache writes use the target metadata before compaction.
+            first_regular_layer = replay_start + int(first_swa_prefix is not None)
+            replay.smla_plan_ratios = tuple(dict.fromkeys(ratios[first_regular_layer : model.end_layer]))
+            if first_swa_prefix is not None:
+                replay.first_swa_plan_ratios = (ratios[replay_start],)
+        if parallel.pipeline_parallel_size > 1:
+            replay.output_row_buffers = [
+                model.topk_indices_buffer,
+                model.topk_lengths_buffer,
+                model.candidate_indices_buffer,
+                model.candidate_lengths_buffer,
+            ]
         return replay
     logger.warning_once("Ascend decoder bounded replay is disabled: %s.", reason)
     return None

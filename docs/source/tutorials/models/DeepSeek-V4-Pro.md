@@ -34,7 +34,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 | `DeepSeek-V4-Pro-w4a8-mtp`  | 2 Atlas 800I A3 (128GB × 8) nodes or 4 Atlas 800I A2 (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp) |
 | `DeepSeek-V4-Pro-0813-w4a8` | 2 Atlas 800I A3 (128GB × 8) nodes or 4 Atlas 800I A2 (64GB × 8) nodes | [ModelScope](https://modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-0813-w4a8)    |
 | `DeepSeek-V4-Pro-0813-w4a4c8` | 950PR&950DT products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_pro_w4a4c8.yaml) |
-| `DeepSeek-V4-Pro-0813` | 950DT products | [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4-Pro-0813) \| [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813)|
+| `DeepSeek-V4-Pro-0813` | 950DT products | [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4-Pro-0813) \| [DeepSeek-V4-Pro-0813](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813)|
 
 - `DeepSeek-V4-Pro-0813-w4a8` (Official release with DSpark after quantization): This checkpoint includes the DSpark draft weights, so no separate draft-model path is required.
 
@@ -676,7 +676,7 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 ### 5.2 Multi-Node PD Separation Deployment
 
-We recommend using Mooncake for deployment: [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md).
+We recommend using Mooncake for deployment: [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md).
 
 In the standard deployment mode, Prefill (prompt processing) and Decode (token generation) tasks run on the same set of NPUs. PD (Prefill-Decode) separation addresses this by running Prefill and Decode on dedicated node groups, each configured independently. This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
 
@@ -875,28 +875,28 @@ Select the tab that matches the deployment hardware.
             bash run_p_node3.sh 8000
             ```
 
-        5. Decode node 0
+        5. Decode node 0:
 
             ```shell
             # change ip to your own
             python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
             ```
 
-        6. Decode node 1
+        6. Decode node 1:
 
             ```shell
             # change ip to your own
             python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 8 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
             ```
 
-        7. Decode node 2
+        7. Decode node 2:
 
             ```shell
             # change ip to your own
             python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 16 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
             ```
 
-        8. Decode node 3
+        8. Decode node 3:
 
             ```shell
             # change ip to your own
@@ -905,7 +905,7 @@ Select the tab that matches the deployment hardware.
 
     5. Deploy the P-D disaggregation proxy.
 
-        Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) and register all Prefill and Decode engine endpoints started above. Each Prefill instance exposed one API server on port `8000` of its master node, and each Decode node exposes ports `8000` through `8007`. Use the DP master address (`--dp-address` above, e.g. `xx.xx.xx.5`) as the IP of Decode node 0.
+        Refer to [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md) and register all Prefill and Decode engine endpoints started above. Each Prefill instance exposed one API server on port `8000` of its master node, and each Decode node exposes ports `8000` through `8007`. Use the DP master address (`--dp-address` above, e.g. `xx.xx.xx.5`) as the IP of Decode node 0.
 
     Key Parameter Descriptions:
 
@@ -1105,7 +1105,7 @@ Select the tab that matches the deployment hardware.
 
     5. Deploy the P-D disaggregation proxy.
 
-        Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
+        Refer to [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
 
     Key Parameter Descriptions:
 
@@ -1336,7 +1336,7 @@ Select the tab that matches the deployment hardware.
 
     4. Deploy the P-D disaggregation proxy.
 
-        Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
+        Refer to [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
 
     Key Parameter Descriptions:
 
@@ -1354,7 +1354,7 @@ Select the tab that matches the deployment hardware.
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual parallel layout on the prefill and decode sides.
 - `scheduler_config.recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the Decode node is insufficient, requests are sent to Prefill for KV Cache recomputation. Enable it only on PD Decode nodes; the legacy top-level key is deprecated.
 - `--speculative-config`: Prefill and Decode must use the same DSpark `num_speculative_tokens` value. Use the value declared by the checkpoint; the 950DT and A3 examples use `5`, while the A2 example uses `7`. The nested `enforce_eager` applies to DSpark draft execution, while the top-level `--enforce-eager` keeps the Prefill target model in eager mode.
-- `ascend_compilation_config.enable_npugraph_ex: true` enables the extended NPU graph mode on Decode for graph compilation (Prefill runs eager mode instead); `enable_static_kernel: false` keeps dynamic-shape kernels instead of static-shape kernels for aclgraph execution.
+- `ascend_compilation_config.enable_npugraph_ex: true` enables the extended NPU graph mode on Decode for graph compilation (Prefill runs eager mode instead); `enable_static_kernel: false` keeps dynamic-shape kernels instead of static-shape kernels for ACL graph execution.
 - `--prefill-context-parallel-size` configures prefill context parallelism (PCP) on Model Runner V2 (MRv2), replacing the DSA-CP configuration used on MRv1. Besides speeding up long-context prefill, enabling PCP also shards the o_proj weights across the PCP group, providing partial tensor parallelism even when `--tensor-parallel-size` is `1` and relieving memory pressure. Each hardware tab configures PCP differently; see the tab-specific descriptions.
 - `--quantization ascend` enables Ascend quantization for the W4A8 model used in the A2 and A3 configurations. The original DeepSeek-V4-Pro-0813 weights used on 950DT products do not require this option.
 
@@ -1497,7 +1497,7 @@ Parameter descriptions of `launch_online_dp.py`:
 
 Deployment Verification:
 
-After the PD separation service is fully started and every engine reports `Application startup complete`, send a request through the proxy port on the prefill master node to verify that Prefill and Decode nodes are working correctly together. Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) for the proxy verification method.
+After the PD separation service is fully started and every engine reports `Application startup complete`, send a request through the proxy port on the prefill master node to verify that Prefill and Decode nodes are working correctly together. Refer to [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md) for the proxy verification method.
 
 Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
@@ -1763,7 +1763,7 @@ Select the tab that matches the deployment hardware.
 
     Start the Memcache MetaService first, because every embedded LocalService connects to it during engine startup. Prefill and Decode have no required startup order relative to each other; wait until every engine reports `Application startup complete` before deploying the proxy.
 
-    1. Start MetaService on the node containing `mmc-meta.conf`. Wait until its logs show that the Meta Service has launched.
+    1. Start MetaService on the node containing `mmc-meta.conf`. Wait until its logs show that the MetaService has launched.
 
     2. Prefill nodes. For each Prefill instance, start the master node (`--node-rank 0`) before its worker node. The first argument is the engine port passed to `--port $1`.
 
@@ -1821,11 +1821,11 @@ Select the tab that matches the deployment hardware.
             python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 24 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
             ```
 
-    4. Deploy the P-D disaggregation proxy. Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) and register all Prefill and Decode engine endpoints started above, the same way as [Section 5.2](#dsv4pro-5-2-950dt).
+    4. Deploy the P-D disaggregation proxy. Refer to [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md) and register all Prefill and Decode engine endpoints started above, the same way as [Section 5.2](#dsv4pro-5-2-950dt).
 
     Deployment Verification:
 
-    After the PD separation service is fully started, send a request through the proxy to verify that Prefill and Decode nodes are working correctly together. Then send the same request again to verify the KV Cache Pool: check the Prefill logs for Memcache lookup, get, put, and cache-hit activity, and confirm that Decode logs still show normal Prefill-to-Decode KV transfer. An HTTP 200 response alone does not confirm pool reuse. For details, refer to the [KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+    After the PD separation service is fully started, send a request through the proxy to verify that Prefill and Decode nodes are working correctly together. Then send the same request again to verify the KV Cache Pool: check the Prefill logs for Memcache lookup, get, put, and cache-hit activity, and confirm that Decode logs still show normal Prefill-to-Decode KV transfer. An HTTP 200 response alone does not confirm pool reuse. For details, refer to the [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
 
 === "A3 series"
 
@@ -2227,7 +2227,7 @@ Select the tab that matches the deployment hardware.
     2. Standalone Memcache processes on all four nodes. Wait for successful initialization.
     3. Decode engines. Wait until every engine reports `Application startup complete`.
     4. Both Prefill nodes. Wait until the Prefill service is ready.
-    5. Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
+    5. Refer to [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
 
     Send the same request twice with a reusable prefix. Confirm that Prefill logs
     show Memcache lookup, get, put, and hit activity, and that Decode logs still
@@ -2240,7 +2240,7 @@ Select the tab that matches the deployment hardware.
     - Prefill uses `use_layerwise: true` with `layerwise_prefetch_layers: 3`. Decode keeps `use_layerwise: false`.
 
     For Memcache configuration, capacity tuning, and troubleshooting, refer to the
-    [KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+    [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
 
 === "A2 series"
 
@@ -2540,7 +2540,7 @@ Select the tab that matches the deployment hardware.
     1. `mooncake_master` on the master node. Wait until it is listening on `<MASTER_IP>:50099` before starting the engines.
     2. The Prefill engines on the four Prefill nodes.
     3. The Decode engines on the four Decode nodes.
-    4. Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
+    4. Refer to [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
 
     Send the same request twice with a reusable prefix. Confirm that the vLLM logs
     show Mooncake pool and tiered-storage activity, and that Decode logs still show
@@ -2607,7 +2607,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### 8.2 Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ## 9 Performance Tuning
 
@@ -2644,7 +2644,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 >
 > `--max-model-len 1048576` is the total context budget for prompt and generated tokens, not an additional output budget on top of a 1M-token prompt. Reduce `--max-num-seqs` or the actual input length if memory is insufficient.
 >
-> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment).
 
 ### 9.2 Tuning Guidelines
 

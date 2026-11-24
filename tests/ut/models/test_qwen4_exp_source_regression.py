@@ -76,13 +76,13 @@ def test_qsa_metadata_ignores_full_graph_dummy_request_boundaries() -> None:
     branch = attn_utils[branch_start:branch_end]
 
     assert "num_reqs > num_actual_reqs" in branch
-    assert "query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu[" in branch
+    assert "query_start_loc_cpu=layer_common.query_start_loc_cpu[" in branch
     assert ": num_actual_reqs + 1" in branch
 
 
 def test_qsa_uses_fused_sparse_backends_and_upstream_qkv_projection() -> None:
     qsa = _source("vllm_ascend/models/qwen4_exp/qsa.py")
-    assert "return qsa_select_paged_tokens_lightning(" in qsa
+    assert "return qsa_select_paged_tokens_lightning_v2(" in qsa
     assert "return dispatch_qsa_attention(" in qsa
     assert "torch.ops.vllm.triton_qsa_rmsnorm_mrope(" in qsa
     assert "torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(" not in qsa

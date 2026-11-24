@@ -345,6 +345,7 @@ def _sp_dp_replay_worker(rank, init_method):
                         attn_metadata={},
                         slot_mapping={},
                         additional_kwargs={},
+                        moe_layer_index=0,
                     )
                     current = [outer]
                     mask = torch.arange(32) % 2 == 0

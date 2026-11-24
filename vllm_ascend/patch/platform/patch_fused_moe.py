@@ -43,6 +43,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops.fused_moe.eplb import use_allgather_eplb
 from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
+from vllm_ascend.utils import vllm_version_is
 
 _EPLB_ROUTER_ADAPTED = "_vllm_ascend_eplb_router_adapted"
 
@@ -73,6 +74,9 @@ def _adapt_routed_experts_cls(routed_experts_cls: Any | None) -> Any | None:
 
 
 def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
+    # Preserve BaseRouter's selection flow when TopK already returned physical IDs.
+    if getattr(self, "_use_gating_top_k_with_map", False):
+        return topk_ids
     eplb_state = self.eplb_state
     if eplb_state is None:
         return topk_ids
@@ -124,6 +128,8 @@ def _ascend_FusedMoE(
     num_redundant_experts: int = 0,
     n_shared_experts: int | None = None,
     apply_routed_scale_to_output: bool = False,
+    divide_shared_output_in_fp16: bool = False,
+    routed_scale_mode: Any | None = None,
     hash_indices_table: torch.Tensor | None = None,
     runner_cls: Any | None = None,
     runner_args: dict[str, Any] | None = None,
@@ -134,6 +140,36 @@ def _ascend_FusedMoE(
     image_sentinel_lo: int = 129257,
     **kwargs,
 ):
+    # vLLM 0.33.0's Ling model passes activation="silu" even for a routed layer
+    # with a configured swiglu_limit, which must clamp after SiLU (vllm#65088).
+    # Ling calls this factory directly from its module, which identifies it.
+    if (
+        kwargs.get("activation") == "silu"
+        and kwargs.get("swiglu_limit") is not None
+        and vllm_version_is("0.33.0")
+        and sys._getframe(1).f_globals.get("__name__") == "vllm.model_executor.models.bailing_moe_v3"
+    ):
+        kwargs["activation"] = "swiglustep"
+
+    # Ascend-owned model callers retain the release booleans; native main
+    # callers pass the enum introduced by vLLM #66859. Normalize before
+    # constructing either the router or the native factory to scale once.
+    scaling_kwargs: dict[str, Any]
+    if vllm_version_is("0.33.0"):
+        scaling_kwargs = {"apply_routed_scale_to_output": apply_routed_scale_to_output}
+    else:
+        from vllm.model_executor.layers.fused_moe.config import RoutedScaleMode
+
+        if routed_scale_mode is None:
+            routed_scale_mode = (
+                RoutedScaleMode.OUTPUT_FP16_GUARD
+                if apply_routed_scale_to_output and divide_shared_output_in_fp16
+                else RoutedScaleMode.OUTPUT
+                if apply_routed_scale_to_output
+                else RoutedScaleMode.ROUTER
+            )
+        apply_routed_scale_to_output = routed_scale_mode.scales_output
+        scaling_kwargs = {"routed_scale_mode": routed_scale_mode}
     # RoutedExperts allocates its parameters before AscendMoERunner is
     # constructed. Propagate Ascend EPLB capacity into the upstream factory so
     # redundant expert slots are present when weights are created and loaded.
@@ -185,7 +221,7 @@ def _ascend_FusedMoE(
         enable_eplb=enable_eplb,
         num_redundant_experts=num_redundant_experts,
         n_shared_experts=n_shared_experts,
-        apply_routed_scale_to_output=apply_routed_scale_to_output,
+        **scaling_kwargs,
         hash_indices_table=hash_indices_table,
         runner_cls=runner_cls,
         runner_args=runner_args,
@@ -194,6 +230,11 @@ def _ascend_FusedMoE(
         **kwargs,
     )
     _adapt_eplb_router(runner.router, enable_router_eplb)
+    if enable_router_eplb:
+        from vllm_ascend.ops.triton.eplb import _EPLB_MAP_KERNEL
+
+        # The model runner holds its JIT registry window during construction.
+        _EPLB_MAP_KERNEL.register_warmup(num_experts, top_k)
     return runner
 
 
