@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from importlib.metadata import EntryPoint
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -80,12 +81,13 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert provider.config_paths == tuple(sorted(provider.config_paths))
     assert [Path(path).name for path in provider.config_paths] == [
         "base_metrics.yaml",
+        "eplb_metrics.yaml",
         "runtime_guard_metrics.yaml",
         "schedule_execute_metrics.yaml",
     ]
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
-    assert len(config) == 8
+    assert len(config) == 14
     assert all(item["symbol"].startswith("vllm_ascend.") for item in config)
     assert all("id" not in item for item in config)
     assert all(
@@ -149,6 +151,7 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
         "vllm_ascend.observability.ms_metrics.provider",
         "vllm_ascend.observability.ms_metrics.handlers",
         "vllm_ascend.observability.ms_metrics.handlers.common",
+        "vllm_ascend.observability.ms_metrics.handlers.eplb",
         "vllm_ascend.observability.ms_metrics.handlers.runtime_guard",
         "vllm_ascend.observability.ms_metrics.handlers.schedule_execute",
     ):
@@ -166,7 +169,7 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
 
 def test_provider_yaml_symbols_exist_in_current_vllm_ascend_source():
     config_paths = sorted((_PACKAGE_ROOT / "config").glob("*.yaml"))
-    assert len(config_paths) == 3
+    assert len(config_paths) == 4
     config = _load_all_provider_configs(config_paths)
 
     for item in config:
@@ -284,87 +287,170 @@ def test_custom_handlers_are_not_factory_created_from_yaml_metrics():
             pass
 
 
-def test_runtime_guard_handler_counts_alerts_by_incident_type(monkeypatch):
-    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+# ---------------------------------------------------------------------------
+# EPLB V2 load balance (AscendEplbState.step)
+# ---------------------------------------------------------------------------
+
+
+def _install_ep_group(monkeypatch, ep_group):
+    package: Any = ModuleType("vllm")
+    distributed: Any = ModuleType("vllm.distributed")
+    parallel_state: Any = ModuleType("vllm.distributed.parallel_state")
+    parallel_state.get_ep_group = lambda: type("Group", (), {"device_group": ep_group})()
+    package.distributed = distributed
+    distributed.parallel_state = parallel_state
+    monkeypatch.setitem(sys.modules, "vllm", package)
+    monkeypatch.setitem(sys.modules, "vllm.distributed", distributed)
+    monkeypatch.setitem(sys.modules, "vllm.distributed.parallel_state", parallel_state)
+
+
+def _load_balance_state(torch, *, load=None):
+    """State shaped like ``AscendEplbState`` for the sync-load hook."""
+    if load is None:
+        load = torch.tensor([[1.0, 3.0], [2.0, 2.0]])
+    return type(
+        "State",
+        (),
+        {
+            "model_states": {
+                "main": type(
+                    "ModelState",
+                    (),
+                    {
+                        "model_name": "main",
+                        "expert_load_pass": load,
+                    },
+                )()
+            }
+        },
+    )()
+
+
+def _sync_load_pass(state, *args, **kwargs):
+    """Mirror upstream: return the globally reduced load pass."""
+    return [model_state.expert_load_pass.clone() for model_state in state.model_states.values()]
+
+
+def test_eplb_sync_load_handler_records_reduced_load(monkeypatch):
+    torch = pytest.importorskip("torch")
     metrics = Mock()
     _install_provider_api(
         monkeypatch,
-        MetricType=metric_type,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
         get_metric_recorder=lambda: metrics,
     )
-    handlers = _load_feature_handlers(
-        monkeypatch,
-        "test_vllm_ascend_metric_handlers_runtime_guard",
-        "runtime_guard",
-    )
-    alert = type("Alert", (), {"incident_type": "token_repeat"})()
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_load_balance", "eplb")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
 
-    result = handlers.runtime_guard_handle_alert_handler(
-        lambda *_a, **_k: "armed",
-        object(),
-        alert,
-    )
+    result = handlers.eplb_sync_load_handler(_sync_load_pass, _load_balance_state(torch))
 
-    assert result == "armed"
-    metrics.get_or_create_metric.assert_called_once_with(
-        metric_name="runtime_guard:anomaly:count",
-        metric_type="counter",
-        label_names=["incident_type"],
-    )
-    metrics.record_metric.assert_called_once_with(
-        "runtime_guard:anomaly:count",
-        value=1.0,
-        labels={"incident_type": "token_repeat"},
-    )
+    assert isinstance(result, list)
+    assert metrics.record_metric.call_count == 2
+    recorded = {call.args[0]: call.kwargs for call in metrics.record_metric.call_args_list}
+    # The load is already reduced upstream. With two EP ranks, [[1, 3], [2, 2]]
+    # gives rank means [2, 2] (avg 4) and rank maxima [3, 2] (max 5).
+    assert recorded["eplb:load_balance:avg_tokens"]["value"] == 4.0
+    assert recorded["eplb:load_balance:max_tokens"]["value"] == 5.0
+    assert recorded["eplb:load_balance:avg_tokens"]["labels"] == {"rank": "0", "model": "main"}
 
 
-def test_runtime_guard_handler_skips_noop_early_return(monkeypatch):
-    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+def test_eplb_sync_load_handler_does_not_reduce_again(monkeypatch):
+    """The hook reuses upstream's reduction instead of repeating the collective."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("torch.distributed")
+
     metrics = Mock()
     _install_provider_api(
         monkeypatch,
-        MetricType=metric_type,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
         get_metric_recorder=lambda: metrics,
     )
-    handlers = _load_feature_handlers(
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_lb_no_reduce", "eplb")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
+
+    calls = []
+    monkeypatch.setattr("torch.distributed.all_reduce", lambda *args, **kwargs: calls.append(args))
+
+    handlers.eplb_sync_load_handler(_sync_load_pass, _load_balance_state(torch))
+
+    assert calls == []
+    assert metrics.record_metric.call_count == 2
+
+
+def test_eplb_sync_load_handler_without_recorder_records_nothing(monkeypatch):
+    torch = pytest.importorskip("torch")
+    _install_provider_api(
         monkeypatch,
-        "test_vllm_ascend_metric_handlers_runtime_guard_noop",
-        "runtime_guard",
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: None,
     )
-    alert = type("Alert", (), {"incident_type": "logits_finite"})()
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_lb_no_recorder", "eplb")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
 
-    result = handlers.runtime_guard_handle_alert_handler(
-        lambda *_a, **_k: None,
-        object(),
-        alert,
-        write_report=False,
+    assert isinstance(handlers.eplb_sync_load_handler(_sync_load_pass, _load_balance_state(torch)), list)
+
+
+def test_eplb_sync_load_handler_records_only_on_rank_zero(monkeypatch):
+    torch = pytest.importorskip("torch")
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: metrics,
     )
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_lb_rank", "eplb")
+    ep_group = Mock()
+    ep_group.rank.return_value = 1
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
 
-    assert result is None
+    handlers.eplb_sync_load_handler(_sync_load_pass, _load_balance_state(torch))
     metrics.record_metric.assert_not_called()
 
 
-def test_runtime_guard_handler_preserves_result_when_recording_fails(monkeypatch):
-    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+def test_eplb_sync_load_handler_drops_zero_load_steps(monkeypatch):
+    """Idle or dummy logging steps still reach the hook but record nothing."""
+    torch = pytest.importorskip("torch")
     metrics = Mock()
-    metrics.get_or_create_metric.side_effect = RuntimeError("registry unavailable")
     _install_provider_api(
         monkeypatch,
-        MetricType=metric_type,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
         get_metric_recorder=lambda: metrics,
     )
-    handlers = _load_feature_handlers(
-        monkeypatch,
-        "test_vllm_ascend_metric_handlers_runtime_guard_fail",
-        "runtime_guard",
-    )
-    alert = type("Alert", (), {"incident_type": "rare_chars"})()
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_lb_zero", "eplb")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
 
-    assert (
-        handlers.runtime_guard_handle_alert_handler(
-            lambda *_a, **_k: "armed",
-            object(),
-            alert,
-        )
-        == "armed"
+    handlers.eplb_sync_load_handler(_sync_load_pass, _load_balance_state(torch, load=torch.zeros(2, 2)))
+    metrics.record_metric.assert_not_called()
+
+
+def test_eplb_sync_load_handler_passes_empty_result_through(monkeypatch):
+    """A state without models yields an empty list and records nothing."""
+    pytest.importorskip("torch")
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: metrics,
     )
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_lb_empty", "eplb")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
+    empty = type("State", (), {"model_states": {}})()
+
+    assert handlers.eplb_sync_load_handler(_sync_load_pass, empty) == []
+    metrics.record_metric.assert_not_called()
