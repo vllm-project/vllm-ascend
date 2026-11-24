@@ -214,6 +214,9 @@ def initialize_kv_cache(
         for tensor in (cache if isinstance(cache, (tuple, list)) else (cache,))
         if tensor is not None and tensor.device == self.device
     ]
+    self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
+    # Model-state initialization may allocate ReplaySSM trackers. Collect the
+    # final tensors after that binding so scheduler copies keep live references.
     # #55688 adds the collector on main; v0.33.0 shares trackers during binding.
     if not vllm_version_is("0.33.0"):
         self.replayssm_block_copy_tensors = upstream.get_replayssm_block_copy_tensors(
