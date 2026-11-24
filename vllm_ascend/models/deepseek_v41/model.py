@@ -64,7 +64,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import MOE_PRE_SP_PADDING_MASK, MoECommType, select_moe_comm_method
+from vllm_ascend.ascend_forward_context import MoECommType, select_moe_comm_method
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
@@ -2192,7 +2192,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             # AllGather routing needs the runner's row order. Keep the reference
             # before the compiled backbone shards the public mask with hidden_states.
             context = get_forward_context()
-            context.additional_kwargs[MOE_PRE_SP_PADDING_MASK] = context.is_padding
+            context.additional_kwargs["moe_pre_sp_padding_mask"] = context.is_padding
         if engram_query_start_loc is not None:
             with self.model.captured_engram_inputs(
                 input_ids, positions, lookback_token_ids, engram_query_start_loc, engram_valid_token_count

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm_ascend.ascend_forward_context import MOE_PRE_SP_PADDING_MASK, MoECommType
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.models.deepseek_v41 import model as model_module
 
 
@@ -88,9 +88,9 @@ def test_sp_mask_seen_by_first_layer(monkeypatch, skip):
             assert hidden.shape[0] == 2
             torch.testing.assert_close(context.is_padding, padding[14:])
             if skip:
-                assert context.additional_kwargs[MOE_PRE_SP_PADDING_MASK] is padding
+                assert context.additional_kwargs["moe_pre_sp_padding_mask"] is padding
             else:
-                assert MOE_PRE_SP_PADDING_MASK not in context.additional_kwargs
+                assert "moe_pre_sp_padding_mask" not in context.additional_kwargs
             return hidden, pre_mix
 
         @staticmethod
@@ -100,7 +100,7 @@ def test_sp_mask_seen_by_first_layer(monkeypatch, skip):
     class Backbone(SimpleNamespace):
         def __call__(self, *args, **kwargs):
             if skip:
-                assert context.additional_kwargs[MOE_PRE_SP_PADDING_MASK] is context.is_padding
+                assert context.additional_kwargs["moe_pre_sp_padding_mask"] is context.is_padding
             return model_module.DeepseekV41Model.forward(self, *args, **kwargs)
 
     model = Backbone(

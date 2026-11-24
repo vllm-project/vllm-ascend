@@ -115,7 +115,7 @@ def test_tp_only_sp_routes_with_the_full_padding_mask(monkeypatch):
 
     full_padding = torch.tensor([False, True, True, False])
     local_padding = full_padding[2:]
-    context = SimpleNamespace(is_padding=local_padding, additional_kwargs={afc.MOE_PRE_SP_PADDING_MASK: full_padding})
+    context = SimpleNamespace(is_padding=local_padding, additional_kwargs={"moe_pre_sp_padding_mask": full_padding})
     monkeypatch.setattr(prepare_module, "get_forward_context", lambda: context)
     monkeypatch.setattr(prepare_module, "dbo_current_ubatch_id", lambda: 0)
     monkeypatch.setattr(prepare_module, "get_dynamic_mx_quant_scale_alg", lambda: None)
@@ -164,7 +164,7 @@ def test_sp_mask_gather_contributes_own_tp_rows(monkeypatch, rank):
     monkeypatch.setattr(torch.ops.vllm, "ascend_sp_padding_mask_impl", sp_module._ascend_sp_padding_mask_impl)
     monkeypatch.setattr(prepare_module, "get_dynamic_mx_quant_scale_alg", lambda: None)
     shard = sp_module._ascend_sp_padding_mask_impl(full)
-    context = SimpleNamespace(is_padding=shard, additional_kwargs={afc.MOE_PRE_SP_PADDING_MASK: full})
+    context = SimpleNamespace(is_padding=shard, additional_kwargs={"moe_pre_sp_padding_mask": full})
     prepare = PrepareAndFinalizeWithAllGather(SimpleNamespace(is_sequence_parallel=True, dp_size=2, pcp_size=1))
     gather = MagicMock(return_value=torch.tensor([1, 1, 0, 0] * 2, dtype=torch.int32))
     monkeypatch.setattr(torch.ops.vllm, "maybe_all_gather_and_maybe_unpad", gather)
@@ -181,7 +181,7 @@ def test_tp_only_mask_matches_router_rows_without_collective(monkeypatch, rows, 
     from vllm_ascend.ops.fused_moe import prepare_finalize as prepare_module
 
     mask = torch.arange(rows) >= valid
-    context = SimpleNamespace(is_padding=mask[:2], additional_kwargs={afc.MOE_PRE_SP_PADDING_MASK: mask})
+    context = SimpleNamespace(is_padding=mask[:2], additional_kwargs={"moe_pre_sp_padding_mask": mask})
     monkeypatch.setattr(prepare_module, "get_forward_context", lambda: context)
     monkeypatch.setattr(prepare_module, "dbo_current_ubatch_id", lambda: 0)
     monkeypatch.setattr(prepare_module, "get_dynamic_mx_quant_scale_alg", lambda: None)
