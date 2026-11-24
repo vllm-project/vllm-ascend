@@ -2009,6 +2009,26 @@ def test_prepare_inputs_covers_draft_full_dcp_pp_and_rswa():
     assert runner.req_states.num_computed_tokens_cpu[0] == 3
 
 
+@pytest.mark.parametrize("skip_sync", [False, True])
+def test_prepare_inputs_submits_mtp_inputs_before_host_length_sync(skip_sync):
+    runner, output, state, desc = _prepare_inputs_runner(draft=True, full_cg=True, speculator=True)
+    output.scheduled_spec_decode_tokens = {"r0": [9]}
+    runner.model_state.can_skip_spec_cpu_length_sync = lambda: skip_sync
+    runner.req_states.num_computed_tokens_cpu[:2] = torch.tensor([10, 7])
+    runner.req_states.num_computed_tokens_np = runner.req_states.num_computed_tokens_cpu.numpy()
+    # Only the cached row has a snapshot from the previous step.
+    runner.num_computed_tokens_cpu[:2] = torch.tensor([7, 3])
+    wait = runner.num_computed_tokens_event.synchronize
+
+    def combine_tokens(*_args):
+        wait.assert_not_called()
+        return torch.tensor([0, 1], dtype=torch.int32)
+
+    _run_prepare_inputs(runner, output, state, desc, combine_tokens=combine_tokens)
+    assert wait.call_count == int(not skip_sync)
+    assert runner.input_buffers.seq_lens_cpu[:2].tolist() == [12 if skip_sync else 9, 9]
+
+
 def test_postprocess_sampled_copies_only_with_speculator():
     runner = _make_runner()
     runner.speculator = object()
