@@ -61,7 +61,11 @@ def make_model(monkeypatch, enabled):
 
     def init_upstream(self, *, vllm_config, prefix):
         torch.nn.Module.__init__(self)
-        self.model_config = SimpleNamespace(multimodal_config=SimpleNamespace(mm_device_do_normalize=enabled))
+        self.multimodal_config = SimpleNamespace(
+            mm_device_do_normalize=enabled,
+            get_video_pruning_spec=lambda: None,
+        )
+        self.model_config = SimpleNamespace(multimodal_config=self.multimodal_config)
         self.config = SimpleNamespace(
             vision_config=SimpleNamespace(
                 in_channels=3, patch_size=PATCH_SIZE, temporal_patch_size=2, spatial_merge_size=2
