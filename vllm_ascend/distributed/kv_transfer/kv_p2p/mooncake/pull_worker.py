@@ -211,11 +211,19 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 return
 
             for selection_index, (request_id, request) in enumerate(requests.items()):
-                futures, error = self._submit_transfer_group(
-                    remote_engine_id, remote_metadata, {request_id: request}, selection_index
-                )
-                # Partial submission failures must drain already submitted READs too.
-                self._track_request(request_id, request, futures, error)
+                try:
+                    futures, error = self._submit_transfer_group(
+                        remote_engine_id, remote_metadata, {request_id: request}, selection_index
+                    )
+                    # Partial submission failures must drain already submitted READs too.
+                    self._track_request(request_id, request, futures, error)
+                except Exception:
+                    # Retain this request's unknown in-flight blocks, but continue the group.
+                    logger.exception(
+                        "Unexpected Mooncake processing failure for request %s from remote engine %s",
+                        request_id,
+                        remote_engine_id,
+                    )
         except Exception:
             # Retain unknown in-flight blocks rather than publish unsafe completion.
             logger.exception("Unexpected Mooncake request processing failure for remote engine %s", remote_engine_id)

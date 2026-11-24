@@ -2669,8 +2669,8 @@ def test_pull_fallback_drains_before_finish_and_keeps_other_engines(mode, monkey
     healthy.set_result(None)
     thread._get_remote_metadata = MagicMock()
     thread._submit_transfer_group = MagicMock(
-        side_effect=lambda engine, _metadata, _requests, *_args: (
-            {pending if engine == "bad" else healthy: (0, 0, 0, {engine})},
+        side_effect=lambda _engine, _metadata, requests, *_args: (
+            {pending if request_id == "bad" else healthy: (0, 0, 0, {request_id}) for request_id in requests},
             None,
         )
     )
@@ -2697,27 +2697,31 @@ def test_pull_fallback_drains_before_finish_and_keeps_other_engines(mode, monkey
         monkeypatch.setattr(pull_worker, "as_completed", fail_aggregation)
     thread.request_queue = MagicMock()
     thread.request_queue.get.side_effect = [
-        (engine, {engine: make_req_meta(local=([block],))}) for engine, block in [("bad", 10), ("good", 20)]
-    ] + [_StopWorkerLoop()]
+        ("bad", {"bad": make_req_meta(local=([10],)), "same-engine": make_req_meta(local=([30],))}),
+        ("good", {"good": make_req_meta(local=([20],))}),
+        _StopWorkerLoop(),
+    ]
     monkeypatch.setattr(torch.npu, "set_device", MagicMock())
     with ThreadPoolExecutor(max_workers=1) as executor:
         running = executor.submit(thread.run)
         try:
             assert entered.wait(5)
             if mode == "request":
-                # No batch barrier: the other engine completes with the first READ pending.
+                # Both healthy requests complete while the first READ is still pending.
                 with pytest.raises(_StopWorkerLoop):
                     running.result(timeout=5)
-                assert thread.finished_requests.get_nowait() == ("good", False)
+                assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(
+                    finished_recving={"same-engine", "good"}
+                )
             assert thread.finished_requests.empty()
             assert not thread.invalid_block_ids
             pending.set_result(None)
             with pytest.raises(_StopWorkerLoop):
                 running.result(timeout=5)
             results = thread.get_and_clear_finished_requests()
-            assert results.finished_recving == ({"bad"} if mode == "request" else {"bad", "good"})
-            assert results.failed_recving == (set() if mode == "request" else {"bad"})
-            assert thread.invalid_block_ids == (set() if mode == "request" else {10})
+            assert results.finished_recving == ({"bad"} if mode == "request" else {"bad", "same-engine", "good"})
+            assert results.failed_recving == (set() if mode == "request" else {"bad", "same-engine"})
+            assert thread.invalid_block_ids == (set() if mode == "request" else {10, 30})
             assert thread.finished_requests.empty()
             assert thread.request_queue.task_done.call_count == 2
         finally:
