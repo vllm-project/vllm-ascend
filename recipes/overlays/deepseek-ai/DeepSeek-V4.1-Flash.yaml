@@ -104,6 +104,7 @@ variants:
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
       HCCL_OP_EXPANSION_MODE: AIV
       HCCL_CONNECT_TIMEOUT: '1200'
+      VLLM_USE_V2_MODEL_RUNNER: '1'
       VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
       VLLM_ENGINE_READY_TIMEOUT_S: '360000'
       OMP_NUM_THREADS: '1'
@@ -143,6 +144,7 @@ variants:
           - '{"cpu_offload":true,"dp_shared_memory":true}'
           - '--trust-remote-code'
         extra_env:
+          VLLM_USE_V2_MODEL_RUNNER: '1'
           HCCL_OP_EXPANSION_MODE: CCU_SCHED
           HCCL_BUFFSIZE: '1600'
           HCCL_CONNECT_TIMEOUT: '1200'

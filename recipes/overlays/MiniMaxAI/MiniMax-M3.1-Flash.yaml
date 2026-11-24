@@ -53,6 +53,7 @@ hardware_overrides:
       - mp
     extra_env:
       VLLM_USE_MODELSCOPE: 'True'
+      VLLM_USE_V2_MODEL_RUNNER: '1'
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
 variants:
   ascend_w8a8:
