@@ -64,7 +64,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import MoECommType, select_moe_comm_method
+from vllm_ascend.ascend_forward_context import MOE_PRE_SP_PADDING_MASK, MoECommType, select_moe_comm_method
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
@@ -1952,8 +1952,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         token_mask = token_mask[:full_num_tokens]
         lookups = {layer_idx: lookup[:full_num_tokens] for layer_idx, lookup in lookups.items()}
         if use_sequence_parallel:
-            # AllGather routing reads the full runner mask and shards it at the consumer.
-            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available() and not self.skip_padding_tokens_in_moe:
+            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
                 forward_context.is_padding = sp_padding_mask(
                     forward_context.is_padding,
@@ -2189,6 +2188,11 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         engram_query_start_loc=None,
         engram_valid_token_count=None,
     ):
+        if self.model.use_sequence_parallel and self.model.skip_padding_tokens_in_moe:
+            # AllGather routing needs the runner's row order. Keep the reference
+            # before the compiled backbone shards the public mask with hidden_states.
+            context = get_forward_context()
+            context.additional_kwargs[MOE_PRE_SP_PADDING_MASK] = context.is_padding
         if engram_query_start_loc is not None:
             with self.model.captured_engram_inputs(
                 input_ids, positions, lookback_token_ids, engram_query_start_loc, engram_valid_token_count

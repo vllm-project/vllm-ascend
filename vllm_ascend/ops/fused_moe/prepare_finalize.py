@@ -34,7 +34,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 # Registers torch.ops.vllm.ascend_sp_padding_mask_impl.
 import vllm_ascend.models.common.ops.sequence_parallel  # noqa: F401
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MOE_PRE_SP_PADDING_MASK
 from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_and_split_tokens, _pad_tokens_with_cat
@@ -603,7 +603,11 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         masks = context.additional_kwargs.setdefault(_ALLGATHER_ROUTING_PADDING_MASKS_KEY, {})
         ubatch = dbo_current_ubatch_id()
         if ubatch not in masks:
-            padding = context.is_padding
+            padding = (
+                context.additional_kwargs[MOE_PRE_SP_PADDING_MASK]
+                if self._use_ep_sequence_parallel()
+                else context.is_padding
+            )
             assert padding is not None
             if self.moe_config.dp_size > 1:
                 if self._use_ep_sequence_parallel():

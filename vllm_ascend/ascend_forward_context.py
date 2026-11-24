@@ -25,6 +25,8 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 
+MOE_PRE_SP_PADDING_MASK = "moe_pre_sp_padding_mask"
+
 # Dynamo constant-folds this like VLLM_USE_V2_MODEL_RUNNER. Sync from eager
 # setup so compiled FIA/MoE never traces use_v2_model_runner (warning_once).
 _USE_V2_EXTRA_KWARGS = False

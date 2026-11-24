@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ascend_forward_context import MOE_PRE_SP_PADDING_MASK, MoECommType
 from vllm_ascend.models.deepseek_v41 import model as model_module
 
 
@@ -68,15 +68,17 @@ def test_skip_moe_padding_requires_supported_layout(
 
 @pytest.mark.parametrize("skip", [False, True])
 def test_sp_mask_seen_by_first_layer(monkeypatch, skip):
-    padding = torch.tensor([False, False, True, True])
-    context = SimpleNamespace(is_padding=padding)
+    from vllm_ascend.models.common.ops import sequence_parallel as sp_module
+
+    monkeypatch.setattr(sp_module, "get_tensor_model_parallel_world_size", lambda: 8)
+    monkeypatch.setattr(sp_module, "get_tensor_model_parallel_rank", lambda: 7)
+    monkeypatch.setattr(torch.ops.vllm, "ascend_sp_padding_mask_impl", sp_module._ascend_sp_padding_mask_impl)
     monkeypatch.setattr(model_module, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True))
     monkeypatch.setattr(model_module, "get_forward_context", lambda: context)
     monkeypatch.setattr(model_module, "is_forward_context_available", lambda: True)
     monkeypatch.setattr(model_module.envs, "VLLM_MOE_SKIP_PADDING", True)
-    monkeypatch.setattr(model_module, "sp_padding_mask", lambda mask, hidden: mask[2:])
-    monkeypatch.setattr(model_module, "sp_shard", lambda rows: rows[2:])
-    monkeypatch.setattr(model_module, "sp_all_gather", lambda rows: torch.cat([rows, rows]))
+    monkeypatch.setattr(model_module, "sp_shard", lambda rows: rows.chunk(8)[7])
+    monkeypatch.setattr(model_module, "sp_all_gather", lambda rows: torch.cat([rows] * 8))
 
     class Layer:
         layer_idx = 0
@@ -84,17 +86,24 @@ def test_sp_mask_seen_by_first_layer(monkeypatch, skip):
 
         def __call__(self, positions, hidden, pre_mix, unused, input_ids):
             assert hidden.shape[0] == 2
+            torch.testing.assert_close(context.is_padding, padding[14:])
             if skip:
-                assert context.is_padding is padding
+                assert context.additional_kwargs[MOE_PRE_SP_PADDING_MASK] is padding
             else:
-                torch.testing.assert_close(context.is_padding, padding[2:])
+                assert MOE_PRE_SP_PADDING_MASK not in context.additional_kwargs
             return hidden, pre_mix
 
         @staticmethod
         def hc_collapse(hidden, pre_mix):
             return hidden.mean(dim=1)
 
-    model = SimpleNamespace(
+    class Backbone(SimpleNamespace):
+        def __call__(self, *args, **kwargs):
+            if skip:
+                assert context.additional_kwargs[MOE_PRE_SP_PADDING_MASK] is context.is_padding
+            return model_module.DeepseekV41Model.forward(self, *args, **kwargs)
+
+    model = Backbone(
         use_sequence_parallel=True,
         skip_padding_tokens_in_moe=skip,
         layers=[Layer()],
@@ -107,7 +116,11 @@ def test_sp_mask_seen_by_first_layer(monkeypatch, skip):
         _mtp_hidden_buffer=None,
         norm=lambda x: x,
     )
-    rows = torch.arange(4)
-    model_module.DeepseekV41Model.forward(
-        model, rows, rows, None, inputs_embeds=rows[:, None].float(), engram_lookups={}, engram_mask=padding
-    )
+    wrapper = SimpleNamespace(model=model)
+    rows = torch.arange(16)
+    for valid in (15, 6):
+        padding = rows >= valid
+        context = SimpleNamespace(is_padding=padding, additional_kwargs={})
+        model_module.AscendDeepseekV41LLMForCausalLM.forward(
+            wrapper, rows, rows, inputs_embeds=rows[:, None].float(), engram_lookups={}, engram_mask=padding
+        )

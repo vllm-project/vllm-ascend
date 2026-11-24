@@ -113,8 +113,9 @@ def test_sp_mask_tracks_padding_and_source_phase(tp_size):
 def test_tp_only_sp_routes_with_the_full_padding_mask(monkeypatch):
     from vllm_ascend.ops.fused_moe import prepare_finalize as prepare_module
 
-    local_padding = torch.tensor([False, True, True, False])
-    context = SimpleNamespace(is_padding=local_padding, additional_kwargs={})
+    full_padding = torch.tensor([False, True, True, False])
+    local_padding = full_padding[2:]
+    context = SimpleNamespace(is_padding=local_padding, additional_kwargs={afc.MOE_PRE_SP_PADDING_MASK: full_padding})
     monkeypatch.setattr(prepare_module, "get_forward_context", lambda: context)
     monkeypatch.setattr(prepare_module, "dbo_current_ubatch_id", lambda: 0)
     monkeypatch.setattr(prepare_module, "get_dynamic_mx_quant_scale_alg", lambda: None)
@@ -126,7 +127,7 @@ def test_tp_only_sp_routes_with_the_full_padding_mask(monkeypatch):
     monkeypatch.setattr(torch.ops.vllm, "maybe_all_gather_and_maybe_unpad", gather)
     config = SimpleNamespace(num_experts=4, is_sequence_parallel=True, dp_size=1, pcp_size=1)
     prepare = PrepareAndFinalizeWithAllGather(config)
-    prepare.num_tokens = local_padding.numel()
+    prepare.num_tokens = full_padding.numel()
     monkeypatch.setattr(
         routed_module, "_EXTRA_CTX", SimpleNamespace(moe_comm_method=SimpleNamespace(prepare_finalize=prepare))
     )
@@ -146,7 +147,7 @@ def test_tp_only_sp_routes_with_the_full_padding_mask(monkeypatch):
         assert actual_weights is weights
         torch.testing.assert_close(ids, torch.tensor([[0, 1], [2, 2], [2, 2], [0, 1]]))
     gather.assert_not_called()
-    assert prepare.get_routing_padding_mask() is local_padding
+    assert prepare.get_routing_padding_mask() is full_padding
     assert context.is_padding is local_padding
 
 
@@ -156,13 +157,14 @@ def test_sp_mask_gather_contributes_own_tp_rows(monkeypatch, rank):
     from vllm_ascend.ops.fused_moe import prepare_finalize as prepare_module
 
     full = torch.tensor([False, False, True])
-    context = SimpleNamespace(is_padding=full, additional_kwargs={})
     monkeypatch.setattr(prepare_module, "get_forward_context", lambda: context)
     monkeypatch.setattr(prepare_module, "dbo_current_ubatch_id", lambda: 0)
     monkeypatch.setattr(sp_module, "get_tensor_model_parallel_world_size", lambda: 2)
     monkeypatch.setattr(sp_module, "get_tensor_model_parallel_rank", lambda: rank)
     monkeypatch.setattr(torch.ops.vllm, "ascend_sp_padding_mask_impl", sp_module._ascend_sp_padding_mask_impl)
     monkeypatch.setattr(prepare_module, "get_dynamic_mx_quant_scale_alg", lambda: None)
+    shard = sp_module._ascend_sp_padding_mask_impl(full)
+    context = SimpleNamespace(is_padding=shard, additional_kwargs={afc.MOE_PRE_SP_PADDING_MASK: full})
     prepare = PrepareAndFinalizeWithAllGather(SimpleNamespace(is_sequence_parallel=True, dp_size=2, pcp_size=1))
     gather = MagicMock(return_value=torch.tensor([1, 1, 0, 0] * 2, dtype=torch.int32))
     monkeypatch.setattr(torch.ops.vllm, "maybe_all_gather_and_maybe_unpad", gather)
@@ -171,7 +173,7 @@ def test_sp_mask_gather_contributes_own_tp_rows(monkeypatch, rank):
     assert prepare.get_routing_padding_mask() is mask
     gather.assert_called_once()
     torch.testing.assert_close(gather.call_args.args[0], torch.full((2,), 1 - rank, dtype=torch.int32))
-    assert context.is_padding is full
+    assert context.is_padding is shard
 
 
 @pytest.mark.parametrize("rows,valid,gathered", [(8, 6, 8), (16, 15, 16), (13, 11, 16)])
@@ -179,7 +181,7 @@ def test_tp_only_mask_matches_router_rows_without_collective(monkeypatch, rows, 
     from vllm_ascend.ops.fused_moe import prepare_finalize as prepare_module
 
     mask = torch.arange(rows) >= valid
-    context = SimpleNamespace(is_padding=mask, additional_kwargs={})
+    context = SimpleNamespace(is_padding=mask[:2], additional_kwargs={afc.MOE_PRE_SP_PADDING_MASK: mask})
     monkeypatch.setattr(prepare_module, "get_forward_context", lambda: context)
     monkeypatch.setattr(prepare_module, "dbo_current_ubatch_id", lambda: 0)
     monkeypatch.setattr(prepare_module, "get_dynamic_mx_quant_scale_alg", lambda: None)
