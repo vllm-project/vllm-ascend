@@ -1,0 +1,9 @@
+pr: 23128
+entries:
+  - category: feature
+    text: >-
+      On A5, BF16 multimodal encoder self-attention can opt into MXFP8
+      QuantFlashAttn with `mm_encoder_quant_flash_attn: true` in
+      `--additional-config`. The option defaults to false, so existing
+      deployments continue using FusedInferAttentionScore. When enabled,
+      encoder attention runs eagerly instead of using encoder graph capture.
