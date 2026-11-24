@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 
 FP8_E4M3_MAX = 448.0
@@ -19,6 +21,10 @@ def dequantize_static_fp8(x: torch.Tensor, scale: torch.Tensor | float, dtype=to
     s = torch.as_tensor(scale, device=x.device, dtype=torch.float32)
     if s.numel() != 1 or not bool(torch.isfinite(s).all()) or bool((s <= 0).any()):
         raise ValueError("static scale must be one finite positive scalar")
+    return _dequantize_static_fp8(x, s, dtype)
+
+
+def _dequantize_static_fp8(x: torch.Tensor, s: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     return x.view(torch.float8_e4m3fn).float().mul(s).to(dtype)
 
 
@@ -143,22 +149,96 @@ def read_static_fp8_cache(
     if host_bounds and bool(((lengths > 0) & (offsets + lengths > kernel_block_table.shape[1] * block_size)).any()):
         raise ValueError("C8 history block table does not cover requested positions")
     total = int(lengths.sum().item())
-    lengths = lengths.to(device=cache.device)
-    offsets = offsets.to(device=cache.device)
     if total == 0:
         return torch.empty((0, 1, K3_MLA_CACHE_WIDTH), dtype=dtype, device=cache.device)
+    rows = _gather_static_fp8_rows(
+        cache,
+        kernel_block_table.to(cache.device),
+        lengths.to(cache.device),
+        offsets.to(cache.device),
+        total,
+        check_columns=not host_bounds,
+        check_blocks=True,
+    )
+    return dequantize_static_fp8(rows, scale, dtype).unsqueeze(1)
+
+
+def _gather_static_fp8_rows(
+    cache: torch.Tensor,
+    table: torch.Tensor,
+    lengths: torch.Tensor,
+    offsets: torch.Tensor,
+    total: int,
+    *,
+    check_columns: bool = False,
+    check_blocks: bool = False,
+) -> torch.Tensor:
+    block_size = cache.shape[3]
     requests = torch.repeat_interleave(torch.arange(lengths.numel(), device=cache.device), lengths, output_size=total)
     positions = torch.arange(total, device=cache.device) - (lengths.cumsum(0) - lengths)[requests] + offsets[requests]
     columns = positions // block_size
-    if not host_bounds and bool((columns >= kernel_block_table.shape[1]).any()):
+    if check_columns and bool((columns >= table.shape[1]).any()):
         raise ValueError("C8 history block table does not cover requested positions")
-    table = kernel_block_table.to(device=cache.device)
     block_ids = table[requests, columns].long()
-    if bool(((block_ids < 0) | (block_ids >= cache.shape[0])).any()):
+    if check_blocks and bool(((block_ids < 0) | (block_ids >= cache.shape[0])).any()):
         raise ValueError("C8 history active block table entry is outside cache bounds")
     tiles = cache.view(torch.uint8)[block_ids, 0, :, positions % block_size, :]
-    rows = tiles.reshape(total, K3_MLA_CACHE_WIDTH)
-    return dequantize_static_fp8(rows, scale, dtype).unsqueeze(1)
+    return tiles.reshape(total, K3_MLA_CACHE_WIDTH)
+
+
+@dataclass(frozen=True)
+class C8PrefillHistory:
+    """One prefill step's validated page table and compact per-chunk read metadata."""
+
+    block_table: torch.Tensor
+    lengths: torch.Tensor
+    starts: torch.Tensor
+    totals: list[int]
+
+    @classmethod
+    def prepare(
+        cls, cache: torch.Tensor, block_table: torch.Tensor, lengths: torch.Tensor, starts: torch.Tensor
+    ) -> C8PrefillHistory:
+        pa_nz_prolog_view(cache)
+        if block_table.ndim != 2 or block_table.dtype not in (torch.int32, torch.int64):
+            raise ValueError("C8 history block table must be a rank-2 integer tensor")
+        if lengths.ndim != 2 or starts.shape != lengths.shape or lengths.shape[1] != block_table.shape[0]:
+            raise ValueError("C8 history lengths/starts must match block table requests")
+        lengths = lengths.to(device="cpu", dtype=torch.int64)
+        starts = starts.to(device="cpu", dtype=torch.int64)
+        if bool(((lengths < 0) | (starts < 0)).any()):
+            raise ValueError("C8 history lengths/starts must be non-negative")
+        totals = lengths.sum(dim=1).tolist()
+        block_table = block_table.to(cache.device)
+        if any(totals):
+            block_size, columns = cache.shape[3], block_table.shape[1]
+            active = lengths > 0
+            ends = starts + lengths
+            if bool((active & (ends > columns * block_size)).any()):
+                raise ValueError("C8 history block table does not cover requested positions")
+            # Mark the union of active page intervals without a chunk-by-page
+            # tensor. Empty chunks and gaps may contain unmapped pages.
+            first = torch.where(active, starts // block_size, 0)
+            last = torch.where(active, (ends - 1) // block_size + 1, 0)
+            changes = torch.zeros((block_table.shape[0], columns + 1), dtype=torch.int32)
+            counts = active.T.to(torch.int32)
+            changes.scatter_add_(1, first.T, counts)
+            changes.scatter_add_(1, last.T, -counts)
+            used = (changes[:, :-1].cumsum(dim=1) > 0).to(cache.device)
+            invalid = (block_table < 0) | (block_table >= cache.shape[0])
+            if bool((used & invalid).any()):
+                raise ValueError("C8 history active block table entry is outside cache bounds")
+        return cls(block_table, lengths.to(cache.device), starts.to(cache.device), totals)
+
+    def read(
+        self, cache: torch.Tensor, chunk: int, validated_scale: torch.Tensor, *, dtype: torch.dtype
+    ) -> torch.Tensor:
+        """Read from a cache with the geometry validated by prepare."""
+        total = self.totals[chunk]
+        if total == 0:
+            return torch.empty((0, 1, K3_MLA_CACHE_WIDTH), dtype=dtype, device=cache.device)
+        rows = _gather_static_fp8_rows(cache, self.block_table, self.lengths[chunk], self.starts[chunk], total)
+        return _dequantize_static_fp8(rows, validated_scale, dtype).unsqueeze(1)
 
 
 def validate_pa_nz_page_stride(block_size: int, page_stride_bytes: int, width: int = K3_MLA_CACHE_WIDTH) -> None:

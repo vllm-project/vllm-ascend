@@ -45,13 +45,14 @@ def _scatter_pa_nz_bytes(
     cache: torch.Tensor, payload: torch.Tensor, slots: torch.Tensor, *, source_block_size=0
 ) -> None:
     count, width = slots.numel(), 576
-    _scatter_pa_nz_bytes_kernel[(triton.cdiv(count * width, 256),)](
+    tile = 1024 if count >= 128 else 256
+    _scatter_pa_nz_bytes_kernel[(triton.cdiv(count * width, tile),)](
         cache,
         payload,
         slots,
         NUM_BYTES=count * width,
         WIDTH=width,
-        TILE=256,
+        TILE=tile,
         BLOCK_SIZE=cache.shape[3],
         PAGE_STRIDE=cache.stride(0),
         SOURCE_BLOCK_SIZE=source_block_size,

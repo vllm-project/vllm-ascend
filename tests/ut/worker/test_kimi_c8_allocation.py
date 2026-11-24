@@ -180,6 +180,43 @@ def test_active_history_addresses_are_validated_without_reading_stale_tail():
         write_static_fp8_cache(torch.zeros(1, 576), cache, torch.tensor([128]), 1.0)
 
 
+def test_prefill_history_plan_reads_only_active_pages(monkeypatch):
+    from vllm_ascend.attention import kimi_c8_static as c8
+
+    page = 1664
+    stride = (page + 128) * 576
+    raw = torch.full((3 * stride,), 0x3C, dtype=torch.uint8)
+    cache = c8.pa_nz_cache_view(raw, 3, page, page_stride_bytes=stride)
+    cache[0].fill_(0x40)
+    cache[2].fill_(0x38)
+    table = torch.tensor([[2, 0, -1], [0, -1, 2], [-1, -1, -1]], dtype=torch.int32)
+    lengths = torch.tensor([[2, 0, 0], [0, 3, 0], [0, 0, 0]])
+    starts = torch.tensor([[page - 1, 4 * page, 0], [0, 2 * page + 1, 0], [0, 0, 0]])
+    scale = torch.tensor([2.0])
+    expected = [
+        c8.read_static_fp8_cache(cache, table, lens, scale, starts=offsets) for lens, offsets in zip(lengths, starts)
+    ]
+    plan = c8.C8PrefillHistory.prepare(cache, table, lengths, starts)
+
+    def unexpected_scalar_read(*args, **kwargs):
+        pytest.fail("a prepared history read must not perform host scalar reads")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.Tensor, "__bool__", unexpected_scalar_read)
+        patch.setattr(torch.Tensor, "item", unexpected_scalar_read)
+        actual = [plan.read(cache, i, scale, dtype=torch.bfloat16) for i in range(len(expected))]
+
+    for result, reference in zip(actual, expected):
+        torch.testing.assert_close(result, reference, rtol=0, atol=0)
+    for bad_id in (-1, cache.shape[0]):
+        invalid = table.clone()
+        invalid[0, 1] = bad_id  # The first chunk crosses into this page.
+        with pytest.raises(ValueError, match="cache bounds"):
+            c8.C8PrefillHistory.prepare(cache, invalid, lengths, starts)
+    with pytest.raises(ValueError, match="cover requested positions"):
+        c8.C8PrefillHistory.prepare(cache, table, lengths + 1, starts)
+
+
 @pytest.mark.parametrize("mode,expected", [("C8", True), (" c8 ", True), ("C16", False), (None, False)])
 def test_native_c8_page_selection_uses_only_mode(monkeypatch, mode, expected):
     from vllm_ascend.patch.platform.patch_mamba_config import _using_kimi_c8

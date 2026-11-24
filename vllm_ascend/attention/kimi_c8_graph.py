@@ -74,6 +74,7 @@ class C8MetadataEvents:
     def __init__(self, device: torch.device | str, *, npu_runtime=None, stream=None):
         self.device = torch.device(device)
         self._metadata: torch.Tensor | None = None
+        self._waited_streams: set[int] = set()
         self._runtime = npu_runtime
         if self._runtime is None and self.device.type in ("npu", "privateuseone"):
             self._runtime = torch.npu
@@ -86,6 +87,7 @@ class C8MetadataEvents:
 
     def start(self, plan: KimiC8GraphQueryPlan, metadata_op: Callable, *, num_heads_q: int) -> torch.Tensor:
         self._metadata = None
+        self._waited_streams.clear()
         if self._runtime is None:
             self._metadata = prepare_c8_graph_metadata(plan, metadata_op, num_heads_q=num_heads_q)
             return self._metadata
@@ -108,6 +110,9 @@ class C8MetadataEvents:
             current = self._runtime.current_stream(device=self.device)
             # A newer start may have advanced the event; waiting for it also
             # covers earlier work on the same stream, but must still return A.
-            current.wait_event(self.output_ready)
+            stream_id = current.npu_stream
+            if stream_id not in self._waited_streams:
+                current.wait_event(self.output_ready)
+                self._waited_streams.add(stream_id)
             metadata.record_stream(current)
         return metadata

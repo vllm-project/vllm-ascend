@@ -1150,43 +1150,44 @@ class MooncakePullRecvingThread(threading.Thread):
             dst_list.append(remote_base_addr + remote_block_group[0] * remote_block_stride + remote_inner_offset)
             length_list.append(transfer_len * len(local_block_group))
 
-    def _append_c8_transfer_addresses(
-        self,
-        local_ids,
-        remote_ids,
-        local_base,
-        remote_base,
-        local_stride,
-        remote_stride,
-        local_size,
-        remote_size,
-        src_list,
-        dst_list,
-        length_list,
-    ) -> None:
-        """Copy native NZ pages, or feature-tile spans for partial pages."""
+    @staticmethod
+    def _plan_c8_transfer_spans(
+        block_groups: tuple[list[list[int]], list[list[int]]],
+        local_stride: int,
+        remote_stride: int,
+        local_size: int,
+        remote_size: int,
+    ) -> list[tuple[int, int, int]]:
+        """Plan relative byte offsets for native NZ pages and partial feature tiles."""
         local_units, remote_units = local_size // 128, remote_size // 128
-        local_groups, remote_groups = group_concurrent_contiguous(local_ids, remote_ids)
+        payload = local_size * 576
+        spans = []
+        local_groups, remote_groups = block_groups
         for local_group, remote_group in zip(local_groups, remote_groups):
             local_id, remote_id, remaining = local_group[0], remote_group[0], len(local_group)
             while remaining:
                 local_page, local_offset = divmod(local_id, local_units)
                 remote_page, remote_offset = divmod(remote_id, remote_units)
                 count = min(remaining, local_units - local_offset, remote_units - remote_offset)
-                local_start = local_base + local_page * local_stride
-                remote_start = remote_base + remote_page * remote_stride
+                local_start = local_page * local_stride
+                remote_start = remote_page * remote_stride
                 if count == local_units == remote_units:
-                    src_list.append(local_start)
-                    dst_list.append(remote_start)
-                    length_list.append(local_size * 576)
+                    pages = remaining // local_units if local_stride == remote_stride == payload else 1
+                    spans.append((local_start, remote_start, pages * payload))
+                    count *= pages
                 else:
                     for tile in range(18):
-                        src_list.append(local_start + (tile * local_size + local_offset * 128) * 32)
-                        dst_list.append(remote_start + (tile * remote_size + remote_offset * 128) * 32)
-                        length_list.append(count * 128 * 32)
+                        spans.append(
+                            (
+                                local_start + (tile * local_size + local_offset * 128) * 32,
+                                remote_start + (tile * remote_size + remote_offset * 128) * 32,
+                                count * 128 * 32,
+                            )
+                        )
                 local_id += count
                 remote_id += count
                 remaining -= count
+        return spans
 
     def _append_spec_transfer_addresses(
         self,
@@ -1247,13 +1248,17 @@ class MooncakePullRecvingThread(threading.Thread):
         if not any(local_block_ids for local_block_ids, _ in block_ids_by_request.values()):
             return
 
-        single_block_ids_by_request = {
-            request_id: (
-                [[block_id] for block_id in local_block_ids],
-                [[block_id] for block_id in remote_block_ids],
-            )
-            for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
-        }
+        single_block_ids_by_request = (
+            {}
+            if is_c8
+            else {
+                request_id: (
+                    [[block_id] for block_id in local_block_ids],
+                    [[block_id] for block_id in remote_block_ids],
+                )
+                for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
+            }
+        )
         contiguous_block_ids_by_request = {
             request_id: group_concurrent_contiguous(local_block_ids, remote_block_ids)
             for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
@@ -1264,6 +1269,7 @@ class MooncakePullRecvingThread(threading.Thread):
             (MLAAttentionSpec, SlidingWindowMLASpec, AscendSFAIndexerCacheSpec),
         )
         if transfer_whole_block:
+            c8_spans_by_request_geometry: dict[tuple[str, int, int, int, int], list[tuple[int, int, int]]] = {}
             for (local_layer_index, remote_layer_index), transfer_entries in transfer_entries_by_layer.items():
                 local_base_addrs = self.kv_caches_base_addr[local_layer_index]
                 remote_base_addrs = remote_tp_metadata.kv_caches_base_addr[remote_layer_index]
@@ -1295,20 +1301,30 @@ class MooncakePullRecvingThread(threading.Thread):
                             f"local={local_block_len}, remote={remote_block_len}"
                         )
                     if is_c8:
-                        for _, local_ids, remote_ids in transfer_entries:
-                            self._append_c8_transfer_addresses(
-                                local_ids,
-                                remote_ids,
-                                local_base_addr,
-                                remote_base_addr,
+                        local_size = self.layer_block_sizes[local_layer_index]
+                        remote_size = remote_metadata.layer_block_sizes[remote_layer_index]
+                        for request_id, _, _ in transfer_entries:
+                            key = (
+                                request_id,
                                 local_block_stride,
                                 remote_block_stride,
-                                self.layer_block_sizes[local_layer_index],
-                                remote_metadata.layer_block_sizes[remote_layer_index],
-                                src_list,
-                                dst_list,
-                                length_list,
+                                local_size,
+                                remote_size,
                             )
+                            spans = c8_spans_by_request_geometry.get(key)
+                            if spans is None:
+                                spans = self._plan_c8_transfer_spans(
+                                    contiguous_block_ids_by_request[request_id],
+                                    local_block_stride,
+                                    remote_block_stride,
+                                    local_size,
+                                    remote_size,
+                                )
+                                c8_spans_by_request_geometry[key] = spans
+                            for local_offset, remote_offset, length in spans:
+                                src_list.append(local_base_addr + local_offset)
+                                dst_list.append(remote_base_addr + remote_offset)
+                                length_list.append(length)
                         continue
                     block_ids_to_transfer = (
                         contiguous_block_ids_by_request
@@ -1479,6 +1495,7 @@ class MooncakePullRecvingThread(threading.Thread):
         src_list: list[int] = []
         dst_list: list[int] = []
         length_list: list[int] = []
+        plan_start_time = time.perf_counter()
         for spec_index, transfer_entries_by_layer in transfer_entries_by_spec.items():
             self._append_spec_transfer_addresses(
                 spec_index=spec_index,
@@ -1496,6 +1513,7 @@ class MooncakePullRecvingThread(threading.Thread):
 
         if not src_list:
             return
+        plan_elapsed_ms = (time.perf_counter() - plan_start_time) * 1000
         tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
         session_id = f"{tp_metadata.local_ip}:{tp_metadata.te_rpc_port}"
         request_ids = sorted(
@@ -1516,7 +1534,7 @@ class MooncakePullRecvingThread(threading.Thread):
         transfer_elapsed_ms = (time.perf_counter() - transfer_start_time) * 1000
         logger.info(
             "KV cache transfer for requests %s took %.2f ms (%d ranges, %d bytes). "
-            "local_ip %s local_device_id %s remote_session_id %s",
+            "local_ip %s local_device_id %s remote_session_id %s. Address preparation %.2f ms",
             request_ids,
             transfer_elapsed_ms,
             len(length_list),
@@ -1524,6 +1542,7 @@ class MooncakePullRecvingThread(threading.Thread):
             self.local_metadata.local_ip,
             self.tp_rank,
             session_id,
+            plan_elapsed_ms,
         )
 
     @staticmethod

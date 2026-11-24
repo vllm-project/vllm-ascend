@@ -928,6 +928,13 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
 
         self.dispatcher = TokenDispatcherWithAll2AllV(top_k=2, num_experts=4, num_local_experts=2, with_quant=False)
 
+    def test_preprocess_sizes_expert_indices_from_receive_splits(self):
+        self.mock_gather_from_sequence_parallel_region.return_value = torch.tensor([[0, 3, 1, 0], [2, 0, 4, 0]])
+        _, _, output_splits, _, _ = self.dispatcher._preprocess(torch.zeros(2, 2, dtype=torch.int32))
+
+        assert list(output_splits) == [3, 2]
+        assert self.mock_repeat_interleave.call_args.kwargs["output_size"] == 5
+
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_token_dispatch(self):
         hidden_states = torch.randn(8, 16)

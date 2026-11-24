@@ -3,7 +3,7 @@ import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace as Ns
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -11,7 +11,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
 
 from vllm_ascend.attention.kimi_c8_static import pa_nz_cache_view
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, pull_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import MooncakeSchedulerSendingThread
 
@@ -137,6 +137,65 @@ def test_real_transfer_addresses_payload_and_padding(world, rank, group, remote_
         )
     assert local[0].eq(165).all() and local[2:].eq(165).all()
     assert local[1, local_size * 576 :].eq(165).all()
+
+
+@pytest.mark.parametrize("padding", [(0, 0), (PAYLOAD, 0), (0, PAYLOAD)])
+def test_c8_reuses_request_spans_and_coalesces_only_dense_pages(padding):
+    page = 1664
+    payload = page * 576
+    local_stride, remote_stride = (payload + amount for amount in padding)
+    layer_names = ["mla.0", "mla.1"]
+    local_bases, remote_bases = [[10_000_000], [20_000_000]], [[30_000_000], [40_000_000]]
+    thread = make_thread(
+        kv_cache_specs=[replace(spec(), block_size=page)],
+        layer_names=layer_names,
+        layer_block_sizes=[page] * 2,
+        local_metadata=replace(make_transfer_metadata(layer_names=layer_names), kimi_c8_contracts=[CONTRACT] * 2),
+        kv_caches_base_addr=local_bases,
+        block_strides=[[local_stride]] * 2,
+        block_lens=[[payload]] * 2,
+    )
+    peer = replace(
+        make_pp_metadata(
+            layer_names=layer_names,
+            layer_block_sizes=[page] * 2,
+            block_strides=[[remote_stride]] * 2,
+            block_lens=[[payload]] * 2,
+            tp_base_addrs={0: remote_bases},
+        ),
+        kimi_c8_contracts=[CONTRACT] * 2,
+    )
+    thread.engine = MagicMock()
+    thread.engine.batch_transfer_sync_read.return_value = 0
+    # Two complete pages followed by one 128-token slice of the next page.
+    entries = [("r", list(range(27)), list(range(13, 40)))]
+    with patch.object(
+        pull_worker, "group_concurrent_contiguous", wraps=pull_worker.group_concurrent_contiguous
+    ) as group:
+        execute(thread, peer, {0: {(0, 0): entries, (1, 1): entries}})
+
+    _, local, remote, sizes = thread.engine.batch_transfer_sync_read.call_args.args
+    for (local_base,), (remote_base,) in zip(local_bases, remote_bases):
+        full = (
+            [(local_base, remote_base + remote_stride, 2 * payload)]
+            if not any(padding)
+            else [
+                (local_base, remote_base + remote_stride, payload),
+                (local_base + local_stride, remote_base + 2 * remote_stride, payload),
+            ]
+        )
+        tail = [
+            (
+                local_base + 2 * local_stride + tile * page * 32,
+                remote_base + 3 * remote_stride + tile * page * 32,
+                128 * 32,
+            )
+            for tile in range(18)
+        ]
+        count = len(full) + len(tail)
+        assert list(zip(local[:count], remote[:count], sizes[:count])) == full + tail
+        local, remote, sizes = local[count:], remote[count:], sizes[count:]
+    assert not sizes and group.call_count == 1
 
 
 @pytest.mark.parametrize(

@@ -107,6 +107,18 @@ def test_metadata_producers_share_model_stream_but_keep_private_events(monkeypat
     assert first.item() == 3 and second.item() == 7
     backend.current_stream.return_value.wait_event.assert_any_call(producers[0].output_ready)
     backend.current_stream.return_value.wait_event.assert_any_call(producers[1].output_ready)
+    main_stream = backend.current_stream.return_value
+    assert producers[0].wait(first) is first
+    assert main_stream.wait_event.call_count == 2
+
+    backend.current_stream.return_value = MagicMock()
+    assert producers[0].wait(first) is first
+    backend.current_stream.return_value.wait_event.assert_called_once_with(producers[0].output_ready)
+
+    backend.current_stream.return_value = main_stream
+    refreshed = producers[0].start(plan, lambda: torch.tensor([11]), num_heads_q=96)
+    assert producers[0].wait(refreshed) is refreshed
+    assert main_stream.wait_event.call_count == 3
 
 
 @pytest.mark.parametrize("graph", [False, True])
@@ -498,17 +510,29 @@ def test_prefill_reads_full_precision_history_exactly_once(monkeypatch, padding)
         chunked_context=chunk,
         block_table=torch.arange(13, 26, dtype=torch.int32).reshape(1, 13),
         actual_seq_lengths_q=[1],
+        c8_history_plans={},
     )
-    output, _ = impl._compute_prefill_context(
-        torch.ones(1, 1, 1, dtype=torch.bfloat16),
-        torch.ones(1, 1, 64, dtype=torch.bfloat16),
-        (cache,),
-        64,
-        Ns(prefill=prefill),
-        torch.zeros(1, 1, 1),
-        torch.zeros(1, 1),
-    )
-    torch.testing.assert_close(output, torch.full((1, 1, 1), 2.5))
+    impl._kimi_c8_physical_table = MagicMock(wraps=impl._kimi_c8_physical_table)
+
+    def run(metadata):
+        output, _ = impl._compute_prefill_context(
+            torch.ones(1, 1, 1, dtype=torch.bfloat16),
+            torch.ones(1, 1, 64, dtype=torch.bfloat16),
+            (cache,),
+            64,
+            Ns(prefill=metadata),
+            torch.zeros(1, 1, 1),
+            torch.zeros(1, 1),
+        )
+        torch.testing.assert_close(output, torch.full((1, 1, 1), 2.5))
+
+    run(prefill)
+    run(prefill)
+    assert impl._kimi_c8_physical_table.call_count == 1
+    # Each new prefill metadata owns its own mapping even if the runner
+    # reuses its block-table buffer.
+    run(Ns(**{**vars(prefill), "c8_history_plans": {}}))
+    assert impl._kimi_c8_physical_table.call_count == 2
 
 
 @pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY])
