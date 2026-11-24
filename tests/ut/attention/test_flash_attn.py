@@ -536,6 +536,7 @@ def test_only_undersized_draft_swa_pages_drop_inherited_padding(
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         attention_config=AttentionConfig(),
         cache_config=SimpleNamespace(cache_dtype="fp8", block_size=128, skip_page_size_padded=padding),
+        speculative_config=None,
     )
     release = vllm_version_is("0.34.0")
     getter_name = "get_kv_cache_spec" if release else "get_kv_cache_config"
