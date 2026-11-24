@@ -27,7 +27,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     set_scheduler_device,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    get_cache_prefix,
+    get_sharded_mamba_group_ids,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
@@ -319,6 +322,9 @@ class MooncakeBackend(Backend):
         use_hybrid: bool,
         grouped_block_size: list[int],
     ) -> LayerwiseKeyBuilder:
+        transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        extra_config = transfer_config.kv_connector_extra_config if transfer_config is not None else {}
+        cache_prefix = get_cache_prefix(extra_config)
         parallel = vllm_config.parallel_config
         cache_config = getattr(vllm_config, "cache_config", None)
 
@@ -387,12 +393,16 @@ class MooncakeBackend(Backend):
                     pp_rank=stage if pp_size > 1 else None,
                 )
 
-            return LayerwiseKeyBuilder(make_key, pp_size, pcp_size, pcp_sharded_group_ids, dcp_size)
+            return LayerwiseKeyBuilder(
+                make_key, pp_size, pcp_size, pcp_sharded_group_ids, dcp_size, cache_prefix=cache_prefix
+            )
 
         def make_single_group_key(group: int, block_hash: str, head: int, stage: int) -> str:
             return mooncake_layerwise.make_block_key(model_name, block_hash, head, namespace=namespace, pp_rank=stage)
 
-        return LayerwiseKeyBuilder(make_single_group_key, pp_size, pcp_size, pcp_sharded_group_ids, dcp_size)
+        return LayerwiseKeyBuilder(
+            make_single_group_key, pp_size, pcp_size, pcp_sharded_group_ids, dcp_size, cache_prefix=cache_prefix
+        )
 
     @classmethod
     def send_fence_backlog(cls) -> int:
