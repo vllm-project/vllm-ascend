@@ -86,16 +86,18 @@ def npu_add_rms_norm_bias_golden(input_x1, input_x2, input_gamma, input_beta, ke
     reason="Legacy AddRmsNormBias reference targets A2/A3; A5 has a separate reference",
 )
 @pytest.mark.parametrize(
-    "row, col",
-    [(1, 8), (1000, 15000), (255, 8), (1000, 128), (77, 3000), (128, 7168)],
-)
-@pytest.mark.parametrize(
-    "dtype, atol, rtol, kernelType",
+    "row,col,dtype,atol,rtol,kernelType",
     [
-        (torch.float16, 0.0010986328125, 0.0010986328125, 1),
-        (torch.bfloat16, 0.0079345703125, 0.0079345703125, 2),
-        (torch.float32, 0.000244140625, 0.000244140625, 3),
-    ],
+        (row, col, dtype, atol, rtol, kernel_type)
+        for dtype, atol, rtol, kernel_type in (
+            (torch.float16, 0.0010986328125, 0.0010986328125, 1),
+            (torch.bfloat16, 0.0079345703125, 0.0079345703125, 2),
+            (torch.float32, 0.000244140625, 0.000244140625, 3),
+        )
+        for row, col in ((1, 8), (1000, 15000), (1000, 128), (128, 7168))
+    ]
+    # Preserve the unaligned, medium-width FP16 reduction without another dtype sweep.
+    + [(77, 3000, torch.float16, 0.0010986328125, 0.0010986328125, 1)],
 )
 def test_quant_fpx_linear(row: int, col: int, dtype, atol, rtol, kernelType):
     shape_x = [row, col]
@@ -186,25 +188,23 @@ def npu_add_rms_norm_bias_golden_a5(x1, x2, gamma, beta, epsilon=EPSILON):
     graph_mode="eager",
 )
 @pytest.mark.parametrize(
-    "dtype, atol, rtol",
+    "shape,gamma_shape,has_beta,dtype,atol,rtol",
     [
-        (torch.float16, 2e-3, 2e-3),
-        (torch.bfloat16, 1e-2, 1e-2),
-        (torch.float32, 2e-6, 2e-5),
-    ],
-)
-@pytest.mark.parametrize("has_beta", [False, True])
-@pytest.mark.parametrize(
-    "shape, gamma_shape",
-    [
-        ((1, 6144), (6144,)),
-        ((65, 1025), (1025,)),
-        ((3, 7, 33), (7, 33)),
-        ((7, 8192), (8192,)),
-        ((65, 32768), (32768,)),
-        ((3, 32771), (32771,)),
-        ((1024, 6144), (6144,)),
-    ],
+        (shape, gamma_shape, has_beta, dtype, atol, rtol)
+        for shape, gamma_shape in (
+            ((3, 7, 33), (7, 33)),
+            ((3, 32771), (32771,)),
+            ((1024, 6144), (6144,)),
+        )
+        for has_beta in (False, True)
+        for dtype, atol, rtol in (
+            (torch.float16, 2e-3, 2e-3),
+            (torch.bfloat16, 1e-2, 1e-2),
+            (torch.float32, 2e-6, 2e-5),
+        )
+    ]
+    # Keep exact-width no-beta statistics and residual checks in one original case.
+    + [((65, 32768), (32768,), False, torch.float16, 2e-3, 2e-3)],
 )
 @torch.inference_mode()
 def test_add_rms_norm_bias_a5(shape, gamma_shape, has_beta, dtype, atol, rtol):

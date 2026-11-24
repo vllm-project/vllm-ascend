@@ -78,6 +78,8 @@ ROUTE_STATE_SCENARIOS = tuple(
     for q, offload_len, cache_tokens in ALL_ROUTE_SCENARIOS
     if q in (1, 4, 5, 7, 8, 9, 14)
     for state in (REQUEST_STATE_NON_OFFLOAD, REQUEST_STATE_FIRST_DECODE, REQUEST_STATE_STEADY)
+    # These BF16 32-head inputs are already exercised by DTYPE_HEAD_ROUTE_SCENARIOS.
+    if (q, state) not in ((1, REQUEST_STATE_NON_OFFLOAD), (14, REQUEST_STATE_STEADY))
 )
 
 DTYPE_HEAD_ROUTE_SCENARIOS = tuple(
