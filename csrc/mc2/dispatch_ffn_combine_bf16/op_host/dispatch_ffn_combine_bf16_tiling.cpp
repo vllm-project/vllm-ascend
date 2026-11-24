@@ -32,6 +32,7 @@ namespace {
     constexpr uint32_t ATTR_IS_TRANS_B = 2;
     constexpr uint32_t ATTR_WEIGHT_NZ = 3;
     constexpr uint32_t ATTR_WORLD_SIZE_INDEX = 4;
+    constexpr uint32_t ATTR_CCL_BUFFER_SIZE_INDEX = 5;
     constexpr int64_t MAX_WORLD_SIZE = 768;
     constexpr uint64_t INIT_TILINGKEY = 1000000;
     constexpr uint64_t TILINGKEY_TRANS_B = 1U;
@@ -82,6 +83,12 @@ static ge::graphStatus DispatchFFNCombineBF16CheckAttrAndSetTiling(gert::TilingC
             static_cast<long long>(MAX_WORLD_SIZE),
             worldSizePtr == nullptr ? 0L : static_cast<long long>(*worldSizePtr)), return ge::GRAPH_FAILED);
     info.worldSize = static_cast<uint32_t>(*worldSizePtr);
+
+    // A2 KFC path: size of the registered CCL buffer (epHcclBuffer_).
+    auto cclBufferSizePtr = attrs->GetAttrPointer<int64_t>(static_cast<int>(ATTR_CCL_BUFFER_SIZE_INDEX));
+    info.cclBufferSize = (cclBufferSizePtr != nullptr && *cclBufferSizePtr > 0)
+                             ? static_cast<uint64_t>(*cclBufferSizePtr)
+                             : 0ULL;
 
     OP_LOGD(K_INNER_DEBUG, "maxOutputSize=%d ", info.maxOutputSize);
     OP_LOGD(K_INNER_DEBUG, "rankSize=%d ", info.worldSize);
