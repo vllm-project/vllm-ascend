@@ -537,6 +537,27 @@ class FlashMLAMetadataBuilder:
             raise ValueError("QuantFlashMLA requires a positive per-request decode query capacity")
         self.buffers: dict[tuple, FlashMLADecode] = {}
         self.attn_mask = attn_mask
+        self.uniform_graph_tokens: set[int] = set()
+
+    def configure_graph_rows(self, descriptors) -> None:
+        """Keep the original row capacity only for exclusively uniform FULL buckets."""
+        widths: dict[int, set[int | None]] = {}
+        for desc in descriptors:
+            width = desc.uniform_token_count
+            if (
+                width is None
+                or not 0 < width <= self.quant_max_query_len
+                or desc.num_reqs is None
+                or desc.num_reqs > self.max_num_reqs
+                or desc.num_tokens != desc.num_reqs * width
+            ):
+                width = None
+            widths.setdefault(desc.num_tokens, set()).add(width)
+        # The upstream capture callback exposes the token bucket but not its
+        # descriptor. If different descriptors can alias it, use the larger buffer.
+        self.uniform_graph_tokens = {
+            tokens for tokens, values in widths.items() if len(values) == 1 and None not in values
+        }
 
     def _metadata_bounds(self, *, current: bool = False) -> dict[str, int]:
         max_cache_len = self.quant_max_cache_len
@@ -654,13 +675,16 @@ class FlashMLAMetadataBuilder:
         if max_query_len is not None and num_decodes + padding_rows > FLASHMLA_MAX_BATCH_SIZE:
             raise ValueError("QuantFlashMLA decode and padding rows exceed the metadata batch limit")
         columns = common.block_table_tensor.shape[1]
-        key = tokens, rows, columns, common.causal
+        # An eager build at the same token count can have more live rows
+        # than a uniform graph. It must not overwrite the smaller capture.
+        uniform_graph = tokens in self.uniform_graph_tokens and num_decodes + padding_rows <= rows
+        key = tokens, rows, columns, common.causal, uniform_graph
         if has_prefill and retain_for_graph:
             raise ValueError("FlashMLA graph buffers require a decode-only batch")
         flash = None if has_prefill else self.buffers.get(key)
         if flash is None:
             if not has_prefill and max_query_len is not None:
-                if retain_for_graph:
+                if retain_for_graph and not uniform_graph:
                     # Replay can have fewer live tokens than capture, even an empty rank.
                     rows += max(0, ceil(tokens / max_query_len) - 1)
                 rows = min(FLASHMLA_MAX_BATCH_SIZE, max(rows, num_decodes + padding_rows))

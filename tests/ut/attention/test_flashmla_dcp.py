@@ -1183,3 +1183,25 @@ def test_quant_adapter_class_constraints_and_native_abi(runtime, heads):
     assert output.shape == (heads, 2, 512) and lse.shape == (heads, 2)
     assert operation.call_args.args[6] == 1
     assert operation.call_args.kwargs["return_softmax_lse"]
+
+
+@pytest.mark.parametrize("causal", [False, True])
+def test_quant_graph_row_budget_from_descriptors(runtime, causal):
+    builder = runtime.builder(size=8, quantized=True, query_capacity=8, max_requests=4)
+    fixed = SimpleNamespace(num_tokens=28, num_reqs=4, uniform_token_count=7)
+    variable = SimpleNamespace(num_tokens=28, num_reqs=4, uniform_token_count=None)
+
+    def build(queries, capture=False):
+        inputs = common([32] * len(queries), queries, tokens=28, causal=causal)
+        return builder.build(inputs, len(queries), sum(queries), False, retain_for_graph=capture)
+
+    builder.configure_graph_rows([fixed])
+    compact = build([7] * 4, True)
+    assert compact.used_q.numel() == 5
+    assert build([7]) is compact
+    assert compact.cu.tolist() == [0, 7, 14, 21, 28, 28]
+    assert build([1] * 4) is not compact  # A variable eager request with the same token count.
+    builder.configure_graph_rows([variable, fixed])
+    large = build([7] * 4, True)
+    assert large.used_q.numel() == 8 and large.cu.data_ptr() != compact.cu.data_ptr()
+    assert build([1] * 4) is large and large.cu.diff().max() <= 8
