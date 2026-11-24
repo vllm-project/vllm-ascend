@@ -901,6 +901,7 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
     runner = _make_runner(need_timing=False)
     runner.device = torch.device("cpu")
     runner.load_config = SimpleNamespace(load_format="auto")
+    runner.pp_handler = None
     runner.vllm_config.load_config = runner.load_config
     runner.model_config.dtype = torch.bfloat16
     runner.model_config.logits_processors = None

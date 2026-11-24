@@ -175,6 +175,10 @@ def test_sfa_k31_identity_in_registered_inner_model_context(tmp_path, monkeypatc
         # An instance field must not impersonate the dedicated config class.
         inner_hf.is_kimi_k31 = True
     elif inner_kind == "llama":
+        from vllm.model_executor.models import llama
+
+        # Main can select native Llama directly, before registry resolution.
+        monkeypatch.setattr(llama, "LlamaForCausalLM", CaptureInnerModel)
         inner_hf = LlamaConfig(architectures=["LlamaForCausalLM"])
         architectures = ["LlamaForCausalLM"]
 

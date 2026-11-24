@@ -156,7 +156,8 @@ def test_dcp8_prefix_reuses_checkpoint_and_copies_partial_attention_tail():
     hits, length, *_ = coordinator.find_longest_cache_hit(request.block_hashes, 1536)
     assert length == 1536
     assert all(len(blocks) == 1 for blocks in hits)
-    coordinator.allocate_new_computed_blocks("reuse", hits, 1536, 0)
+    allocation_kwargs = {} if vllm_version_is("0.33.0") else {"num_tokens_main_model": 1537}
+    coordinator.allocate_new_computed_blocks("reuse", hits, 1536, 0, **allocation_kwargs)
     coordinator.allocate_new_blocks("reuse", 1537, 1537)
     attention = coordinator.single_type_managers[0]
     assert attention.req_to_blocks["reuse"][0] is not attention.req_to_blocks["seed"][0]

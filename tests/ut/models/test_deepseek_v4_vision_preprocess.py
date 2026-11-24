@@ -60,7 +60,11 @@ def vision_info():
         vision_min_pixels=147456,
         vision_max_wh_ratio=8,
     )
-    ctx = SimpleNamespace(get_hf_config=lambda *args, **kwargs: config)
+    mm_config = MultiModalConfig()
+    ctx = SimpleNamespace(
+        get_hf_config=lambda *args, **kwargs: config,
+        get_mm_config=lambda: mm_config,
+    )
     return prep.DeepseekV4VLProcessingInfo(ctx)
 
 
