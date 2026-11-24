@@ -1,0 +1,8 @@
+pr: 23032
+entries:
+  - category: performance
+    text: >-
+      DeepSeek V4.1 with layerwise KV pooling now starts future-layer KV
+      prefetch at the attention boundary, aligning transfers with attention
+      execution instead of earlier layer preparation. No configuration
+      changes are required.
