@@ -87,35 +87,6 @@ def _kda_gate(
     return -A * softplus_gate
 
 
-@triton.jit
-def _kda_recurrent_step(
-    state,
-    k,
-    v,
-    raw_g,
-    raw_beta,
-    dt_bias,
-    A,
-    lower_bound,
-    USE_LOWER_BOUND: tl.constexpr,
-):
-    normalized_k = _kda_l2_normalize(k)
-    gate = _kda_gate(
-        raw_g,
-        dt_bias,
-        A,
-        lower_bound,
-        USE_LOWER_BOUND,
-    )
-
-    tl.static_assert(gate.dtype == tl.float32)
-    state *= tl.exp(gate)[None, :]
-    correction = v - tl.sum(state * normalized_k[None, :], axis=1)
-    tl.static_assert(raw_beta.dtype == tl.float32)
-    correction *= tl.sigmoid(raw_beta)
-    return state + correction[:, None] * normalized_k[None, :], correction
-
-
 @triton.heuristics(
     {
         "HAS_RECORD_INDICES": lambda args: args["record_indices_ptr"] is not None,
@@ -199,8 +170,8 @@ def _kda_recoverssm_verify_kernel(
         if record_row < 0:
             return
 
-    offs_k = tl.max_contiguous(tl.multiple_of(tl.arange(0, BK), BK), BK)
-    offs_v = pid_v * BV + tl.max_contiguous(tl.multiple_of(tl.arange(0, BV), BV), BV)
+    offs_k = tl.arange(0, BK)
+    offs_v = pid_v * BV + tl.arange(0, BV)
     # Provably-full tiles (K a power of two, BV dividing V) drop their
     # predication masks entirely; ragged shapes keep the original masks.
     if K == BK:
@@ -809,8 +780,8 @@ def _commit_kda_state_kernel(
     kg_cache_ptr = kg_cache_base_addr.to(tl.pointer_type(kg_cache_ref_ptr.dtype.element_ty))
     kg_cache_ptr += record_row * kg_cache_block_stride + pid_h * stride_kg_cache_head
 
-    offs_k = tl.max_contiguous(tl.multiple_of(tl.arange(0, BK), BK), BK)
-    offs_v = pid_v * BV + tl.max_contiguous(tl.multiple_of(tl.arange(0, BV), BV), BV)
+    offs_k = tl.arange(0, BK)
+    offs_v = pid_v * BV + tl.arange(0, BV)
     mask_k = None if K == BK else offs_k < K
     mask_v = None if V % BV == 0 else offs_v < V
     if K == BK and V % BV == 0:
@@ -1023,8 +994,8 @@ def _commit_kda_state_grouped_kernel(
     kg_cache_block_stride = tl.load(kg_cache_block_strides_ptr + pid_l)
     kg_cache_ptr = kg_cache_base_addr.to(tl.pointer_type(kg_cache_ref_ptr.dtype.element_ty))
     kg_cache_ptr += record_row * kg_cache_block_stride + pid_h * stride_kg_cache_head
-    offs_k = tl.max_contiguous(tl.multiple_of(tl.arange(0, BK), BK), BK)
-    offs_v = pid_v * BV + tl.max_contiguous(tl.multiple_of(tl.arange(0, BV), BV), BV)
+    offs_k = tl.arange(0, BK)
+    offs_v = pid_v * BV + tl.arange(0, BV)
     mask_k = None if K == BK else offs_k < K
     mask_v = None if V % BV == 0 else offs_v < V
     if K == BK and V % BV == 0:
