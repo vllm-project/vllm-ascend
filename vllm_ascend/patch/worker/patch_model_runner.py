@@ -212,6 +212,7 @@ def initialize_kv_cache(
             self.block_tables,
             self.input_buffers,
             self.attn_groups,
+            **({} if release_lane else {"kernel_block_sizes": self.kernel_block_sizes}),
         )
     if self.speculator is not None:
         # After set_attn, so the speculator can size its cudagraph mode

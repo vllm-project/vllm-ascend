@@ -862,6 +862,7 @@ class NPUModelRunner310V2(NPUModelRunner):
                 self.block_tables,
                 self.input_buffers,
                 self.attn_groups,
+                **({} if vllm_version_is("0.33.0") else {"kernel_block_sizes": self.kernel_block_sizes}),
             )
             metadata_groups.extend(self.speculator.attn_groups)
 
