@@ -360,13 +360,13 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
     The fixed timeout below applies to `MooncakeConnectorV1`. For
     `MooncakeConnectorV2`, use the renewable KV leases described below.
 
-    For long sequences or high concurrency, the default KV-cache release timeout of 480 seconds may be insufficient. Increase it as needed in the prefiller startup script. For versions that use `VLLM_MOONCAKE_CONNECTOR_TIMEOUT` for this timeout, add:
+    For long sequences or high concurrency, the default KV-cache release timeout of 480 seconds may be insufficient. Increase it as needed by setting `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT` in the prefiller startup script:
 
     ```shell
-    export VLLM_MOONCAKE_CONNECTOR_TIMEOUT=1800
+    export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800
     ```
 
-    The value is in seconds: `1800` allows 30 minutes before timeout. In current versions, this setting is named `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`; use `export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=1800` instead. Check the variable name supported by your installed version.
+    The value is in seconds: `1800` allows 30 minutes before timeout.
 
     Increasing this timeout generally does not affect inference accuracy or performance during normal operation. If a decoder (D) node fails while requests still have KV caches on the prefiller (P) node that the decoder has not received, a longer timeout delays releasing those caches. They continue to occupy HBM, reducing the memory available for other requests on the P node until they are released.
 
@@ -1398,7 +1398,7 @@ models = [
         type=VLLMCustomAPIChatStream,
         abbr='vllm-api-stream-chat',
         path="/root/.cache/ds_r1",
-        model="dsr1",
+        model="ds_r1",
         request_rate = 14,
         retry = 2,
         host_ip = "192.0.0.1", # Proxy service host IP
@@ -1434,7 +1434,7 @@ Since the computation of some NPU operators requires several rounds of warm-up t
 Check service health using the proxy server endpoint.
 
 ```shell
-curl http://192.0.0.1:8080/v1/completions \
+curl http://192.0.0.1:1999/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "ds_r1",
