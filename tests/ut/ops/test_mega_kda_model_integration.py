@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from torch import nn
-
+from vllm_ascend.attention.gdn_attn_builder import GDNCausalConv1dMetadata, GDNPrefillMetadata
 from vllm_ascend.ops import kimi_kda
 from vllm_ascend.quantization.methods.w8a8 import w8a8_mxfp8
 
@@ -40,13 +40,15 @@ def test_mega_qkv_layout_and_reload(monkeypatch):
     torch.testing.assert_close(layer.weight_scale, scales.bitwise_xor(1).view(rows, -1, 2).transpose(0, 1).unsqueeze(0))
 
 
-@pytest.mark.parametrize("mode", ["dummy", "decode", "first_token", "long_prefill", "mixed"])
+@pytest.mark.parametrize("mode", ["dummy", "decode", "first_token", "long_prefill", "mixed", "decode_prefill"])
 def test_mega_kda_model_dispatch(monkeypatch, mode):
     x = torch.arange(20, dtype=torch.bfloat16).reshape(5, 4)
     indices = torch.tensor([0, 2, 3], dtype=torch.int32)
     metadata = SimpleNamespace(
-        num_prefills=int(mode in ("first_token", "long_prefill", "mixed")),
-        num_prefill_tokens={"first_token": 1, "long_prefill": 5, "mixed": 3}.get(mode, 0),
+        num_prefills=int(mode in ("first_token", "long_prefill", "mixed", "decode_prefill")),
+        num_prefill_tokens={"first_token": 1, "long_prefill": 5, "mixed": 3, "decode_prefill": 3}.get(mode, 0),
+        num_decodes=2 if mode == "decode_prefill" else 0,
+        num_decode_tokens=2 if mode == "decode_prefill" else 0,
         num_spec_decodes=int(mode == "mixed"),
         num_spec_decode_tokens=2 if mode == "mixed" else 0,
         num_actual_tokens=5,
@@ -54,7 +56,20 @@ def test_mega_kda_model_dispatch(monkeypatch, mode):
         spec_token_indx=torch.tensor([1, 4], dtype=torch.int32) if mode == "mixed" else None,
         spec_sequence_masks=object() if mode == "mixed" else None,
     )
-    context = SimpleNamespace(attn_metadata=None if mode == "dummy" else {"layer": metadata})
+    if mode == "decode_prefill":
+        prefix = torch.tensor([0, 1, 2, 5], dtype=torch.int32)
+        state_slots = torch.tensor([2, 5, 7], dtype=torch.int32)
+        conv_slots = torch.tensor([3, 1, 9], dtype=torch.int32)
+        initial = torch.tensor([True, True, False])
+        metadata.non_spec_query_start_loc = prefix
+        metadata.non_spec_state_indices_tensor = state_slots
+        metadata.prefill_query_start_loc = prefix[2:] - 2
+        metadata.prefill_state_indices = state_slots[2:]
+        metadata.prefill_has_initial_state = initial[2:]
+        metadata.non_spec_prefill_metadata = GDNPrefillMetadata(
+            causal_conv1d=GDNCausalConv1dMetadata(prefix, conv_slots, initial), chunk=object()
+        )
+    context = SimpleNamespace(attn_metadata=None if mode == "dummy" else {"layer": metadata}, additional_kwargs={})
     monkeypatch.setattr(kimi_kda, "get_forward_context", lambda: context)
     for hook in (
         "wait_for_kv_layer_from_connector",
@@ -62,7 +77,7 @@ def test_mega_kda_model_dispatch(monkeypatch, mode):
         "maybe_save_kv_layer_to_connector",
     ):
         monkeypatch.setattr(kimi_kda, hook, MagicMock())
-    upstream = MagicMock(return_value=x + 1)
+    upstream = MagicMock(side_effect=lambda layer, op, meta, hidden, weights, *, only_spec: hidden + 1)
     monkeypatch.setattr(kimi_kda, "run_upstream_mega_kda", upstream)
     proj = MagicMock(side_effect=lambda hidden: (hidden, None, None, None))
 
@@ -70,6 +85,15 @@ def test_mega_kda_model_dispatch(monkeypatch, mode):
         assert native_prefill_metadata.num_spec_decodes == 0
         assert native_prefill_metadata.num_actual_tokens == hidden.size(0)
         assert native_prefill_metadata.spec_sequence_masks is None
+        if mode == "decode_prefill":
+            assert native_prefill_metadata.num_decodes == 0
+            phase = native_prefill_metadata.non_spec_prefill_metadata
+            assert phase.chunk is metadata.non_spec_prefill_metadata.chunk
+            assert phase.causal_conv1d.query_start_loc.tolist() == [0, 3]
+            assert phase.causal_conv1d.cache_indices.tolist() == [9]
+            assert phase.causal_conv1d.initial_state_mode.tolist() == [False]
+            assert native_prefill_metadata.non_spec_state_indices_tensor.tolist() == [7]
+            torch.testing.assert_close(hidden, x[2:])
         out.copy_((hidden + 2).reshape_as(out))
 
     layer = SimpleNamespace(
@@ -102,9 +126,19 @@ def test_mega_kda_model_dispatch(monkeypatch, mode):
     elif mode == "mixed":
         expected[indices.long()] += 1
         assert metadata.num_spec_decodes == 1
+    elif mode == "decode_prefill":
+        expected[2:] += 1
+        decode = upstream.call_args.args[2]
+        assert decode.num_prefills == 0 and decode.num_decodes == 2 and decode.num_actual_tokens == 2
+        assert decode.non_spec_decode_metadata.causal_conv1d.query_start_loc.tolist() == [0, 1, 2]
+        assert decode.non_spec_decode_metadata.causal_conv1d.cache_indices.tolist() == [3, 1]
+        assert decode.non_spec_state_indices_tensor.tolist() == [2, 5]
+        assert metadata.non_spec_prefill_metadata.causal_conv1d.query_start_loc.tolist() == [0, 1, 2, 5]
+        assert metadata.num_prefills == 1 and metadata.num_decodes == 2
+        torch.testing.assert_close(upstream.call_args.args[3], x[:2])
     torch.testing.assert_close(result, expected)
-    assert proj.call_count == int(mode in ("long_prefill", "mixed"))
-    assert upstream.call_count == int(mode in ("decode", "first_token", "mixed"))
+    assert proj.call_count == int(mode in ("long_prefill", "mixed", "decode_prefill"))
+    assert upstream.call_count == int(mode in ("decode", "first_token", "mixed", "decode_prefill"))
     if upstream.called:
         assert upstream.call_args.kwargs["only_spec"] == (mode == "mixed")
         weights = upstream.call_args.args[4]

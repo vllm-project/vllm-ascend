@@ -453,6 +453,10 @@ metadata group per forward. Padding is isolated from live cache pages.
 The checkpoint is read-only during the call. vLLM commits the returned
 correction, normalized key and decay to the corresponding pages. With
 ReplaySSM enabled, speculative updates commit after sampling according to the
-accepted token count. Multi-token prefill uses the native prefill path.
+accepted token count. In a mixed batch, requests classified as ordinary or
+speculative decode still use the full operator while multi-token prefill
+uses native KDA. With ReplaySSM disabled and draft requests present, the
+metadata builder places non-draft rows in a single prefill group. That group
+uses native KDA if any of its rows contains multiple tokens.
 Disable internal GDN prefill checkpoints and use `FULL_DECODE_ONLY` for decode
 graph replay.

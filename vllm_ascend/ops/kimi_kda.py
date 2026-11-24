@@ -30,9 +30,13 @@ from vllm.models.kimi_k3.nvidia.kda import (
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendGDNHostMetadataBuilder
+from vllm_ascend.attention.gdn_attn_builder import (
+    AscendGDNHostMetadataBackend,
+    AscendGDNHostMetadataBuilder,
+    GDNDecodeMetadata,
+    _build_actual_seq_lengths,
+)
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -80,6 +84,48 @@ def _kda_bfg_stream() -> torch.npu.Stream:
     if _KDA_BFG_STREAM is None:
         _KDA_BFG_STREAM = torch_npu.npu.Stream()
     return _KDA_BFG_STREAM
+
+
+def _split_mega_decode_prefill(metadata):
+    """Separate leading ordinary decodes from the builder's prepared prefill chunk."""
+    rows, tokens = metadata.num_decodes, metadata.num_decode_tokens
+    if rows != tokens or metadata.num_spec_decodes:
+        raise ValueError("The KDA metadata builder must place one-token ordinary decodes before long prefills")
+    phase = metadata.non_spec_prefill_metadata
+    conv = phase.causal_conv1d
+    decode = copy(metadata)
+    decode.num_prefills = decode.num_prefill_tokens = 0
+    decode.num_actual_tokens = tokens
+    decode.non_spec_state_indices_tensor = metadata.non_spec_state_indices_tensor[:rows]
+    decode.non_spec_query_start_loc = conv.query_start_loc[: rows + 1]
+    decode.non_spec_decode_metadata = GDNDecodeMetadata(
+        causal_conv1d=replace(
+            conv,
+            query_start_loc=decode.non_spec_query_start_loc,
+            cache_indices=conv.cache_indices[:rows],
+            initial_state_mode=None,
+            output_buffer=None,
+        ),
+        actual_seq_lengths=_build_actual_seq_lengths(decode.non_spec_query_start_loc, rows),
+    )
+
+    prefill = copy(metadata)
+    prefill.num_decodes = prefill.num_decode_tokens = 0
+    prefill.num_actual_tokens = metadata.num_actual_tokens - tokens
+    prefill.non_spec_state_indices_tensor = metadata.prefill_state_indices
+    prefill.non_spec_query_start_loc = metadata.prefill_query_start_loc
+    prefill.has_initial_state = metadata.prefill_has_initial_state
+    prefill.non_spec_prefill_metadata = replace(
+        phase,
+        causal_conv1d=replace(
+            conv,
+            query_start_loc=metadata.prefill_query_start_loc,
+            cache_indices=conv.cache_indices[rows:],
+            initial_state_mode=metadata.prefill_has_initial_state,
+            output_buffer=None,
+        ),
+    )
+    return decode, prefill
 
 
 class KimiKDAInputParallelLinear(_KimiGDNMergedColumnParallelLinear, HeadParallelMergedColumnLinear):
@@ -502,15 +548,27 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
     @eager_break_during_capture
     def _forward_upstream_mega_kda(self, hidden_states: torch.Tensor, out: torch.Tensor) -> None:
-        metadata = get_forward_context().attn_metadata
+        context = get_forward_context()
+        metadata = context.attn_metadata
         if metadata is None:
             out.zero_()
             return
         attn_metadata = metadata[self.prefix]
         long_prefill = attn_metadata.num_prefill_tokens > attn_metadata.num_prefills
+        decode_meta = attn_metadata
         prefill_meta = attn_metadata
         prefill_indices = None
-        if long_prefill and attn_metadata.num_spec_decodes:
+        decode_tokens = 0
+        if long_prefill and attn_metadata.num_decodes:
+            # All KDA layers in this forward reuse the same metadata and
+            # device plan. Its lifetime is tied to this batch context.
+            views = context.additional_kwargs.setdefault("mega_kda_decode_prefill_views", {})
+            key = id(attn_metadata)
+            if key not in views:
+                views[key] = _split_mega_decode_prefill(attn_metadata)
+            decode_meta, prefill_meta = views[key]
+            decode_tokens = attn_metadata.num_decode_tokens
+        elif long_prefill and attn_metadata.num_spec_decodes:
             prefill_indices = attn_metadata.non_spec_token_indx
             if prefill_indices is None or attn_metadata.spec_token_indx is None:
                 raise ValueError("Mixed MegaRecurrentKda batches require speculative and non-speculative token indices")
@@ -542,20 +600,31 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         )
         wait_for_kv_layer_from_connector(self.prefix)
         record_attention_compute_start()
-        if not long_prefill or attn_metadata.num_spec_decodes:
-            out.copy_(
+        if not long_prefill or attn_metadata.num_spec_decodes or decode_tokens:
+            decode_input = hidden_states[:decode_tokens] if decode_tokens else hidden_states
+            decode_out = out[:decode_tokens] if decode_tokens else out
+            decode_out.copy_(
                 run_upstream_mega_kda(
-                    self, self._mega_kda_op, attn_metadata, hidden_states, weights, only_spec=long_prefill
+                    self,
+                    self._mega_kda_op,
+                    decode_meta,
+                    decode_input,
+                    weights,
+                    only_spec=long_prefill and bool(attn_metadata.num_spec_decodes),
                 )
             )
         if long_prefill:
-            prefill = hidden_states if prefill_indices is None else hidden_states.index_select(0, prefill_indices)
+            prefill = (
+                hidden_states[decode_tokens:]
+                if prefill_indices is None
+                else hidden_states.index_select(0, prefill_indices)
+            )
             mixed_qkv, beta, g1, g2 = self._run_overlapped_qkv_bfg(prefill)
             core = prefill.new_empty((1, prefill.size(0), self.local_num_heads, self.head_dim))
             self._forward(mixed_qkv, g1, g2, beta, core, native_prefill_metadata=prefill_meta)
             partial = self.o_proj.quant_method.apply(self.o_proj, core.reshape(-1, self.local_projection_size), None)
             if prefill_indices is None:
-                out.copy_(partial)
+                out[decode_tokens:].copy_(partial)
             else:
                 out.index_copy_(0, prefill_indices, partial)
         maybe_save_kv_layer_to_connector("", [])
